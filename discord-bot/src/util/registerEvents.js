@@ -1,10 +1,14 @@
-import { Events, type Client } from 'discord.js';
-import type { Command } from '../commands/index';
-import type { Event } from '../events/index';
+import { Events } from 'discord.js';
 
-export function registerEvents(commands: Map<string, Command>, events: Event[], client: Client): void {
+/**
+ * @param {Map<string, import('../commands/index.js').Command>} commands
+ * @param {import('../events/index.js').Event[]} events
+ * @param {import('discord.js').Client} client
+ */
+export function registerEvents(commands, events, client) {
 	// Create an event to handle command interactions
-	const interactionCreateEvent: Event<Events.InteractionCreate> = {
+	/** @type {import('../events/index.js').Event<Events.InteractionCreate>} */
+	const interactionCreateEvent = {
 		name: Events.InteractionCreate,
 		async execute(interaction) {
 			if (interaction.isCommand()) {

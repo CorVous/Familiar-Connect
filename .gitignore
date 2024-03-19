@@ -1,6 +1,6 @@
-/node_modules
+*/node_modules
 .env
 .prettierrc.json
 .vscode
 bun.lockb
-/dist
+.eslintrc.json

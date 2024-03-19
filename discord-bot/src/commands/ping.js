@@ -1,5 +1,4 @@
-import type { Command } from './index';
-
+/** @type {import('./index.js').Command} */
 export default {
 	data: {
 		name: 'ping',
@@ -8,4 +7,4 @@ export default {
 	async execute(interaction) {
 		await interaction.reply('Pong!');
 	},
-} satisfies Command;
+};

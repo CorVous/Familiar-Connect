@@ -1,29 +1,25 @@
-import type { PathLike } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { URL } from 'node:url';
-import type { Command } from '../commands/index';
-import { predicate as commandPredicate } from '../commands/index';
-import type { Event } from '../events/index';
-import { predicate as eventPredicate } from '../events/index';
+import { predicate as commandPredicate } from '../commands/index.js';
+import { predicate as eventPredicate } from '../events/index.js';
 
 /**
- * A predicate to check if the structure is valid
- */
-export type StructurePredicate<T> = (structure: unknown) => structure is T;
-
-/**
- * Loads all the structures in the provided directory
+ * A predicate to check if the structure is valid.
  *
- * @param dir - The directory to load the structures from
- * @param predicate - The predicate to check if the structure is valid
- * @param recursive - Whether to recursively load the structures in the directory
- * @returns
+ * @template T
+ * @typedef {(structure: unknown) => structure is T} StructurePredicate
  */
-export async function loadStructures<T>(
-	dir: PathLike,
-	predicate: StructurePredicate<T>,
-	recursive = true,
-): Promise<T[]> {
+
+/**
+ * Loads all the structures in the provided directory.
+ *
+ * @template T
+ * @param {import('node:fs').PathLike} dir - The directory to load the structures from
+ * @param {StructurePredicate<T>} predicate - The predicate to check if the structure is valid
+ * @param {boolean} recursive - Whether to recursively load the structures in the directory
+ * @returns {Promise<T[]>}
+ */
+export async function loadStructures(dir, predicate, recursive = true) {
 	// Get the stats of the directory
 	const statDir = await stat(dir);
 
@@ -36,12 +32,13 @@ export async function loadStructures<T>(
 	const files = await readdir(dir);
 
 	// Create an empty array to store the structures
-	const structures: T[] = [];
+	/** @type {T[]} */
+	const structures = [];
 
 	// Loop through all the files in the directory
 	for (const file of files) {
-		// If the file is index.ts or the file does not end with .ts, skip the file
-		if (file === 'index.ts' || !file.endsWith('.ts')) {
+		// If the file is index.js or the file does not end with .js, skip the file
+		if (file === 'index.js' || !file.endsWith('.js')) {
 			continue;
 		}
 
@@ -64,13 +61,23 @@ export async function loadStructures<T>(
 	return structures;
 }
 
-export async function loadCommands(dir: PathLike, recursive = true): Promise<Map<string, Command>> {
+/**
+ * @param {import('node:fs').PathLike} dir
+ * @param {boolean} [recursive]
+ * @returns {Promise<Map<string,import('../commands/index.js').Command>>}
+ */
+export async function loadCommands(dir, recursive = true) {
 	return (await loadStructures(dir, commandPredicate, recursive)).reduce(
 		(acc, cur) => acc.set(cur.data.name, cur),
-		new Map<string, Command>(),
+		new Map(),
 	);
 }
 
-export async function loadEvents(dir: PathLike, recursive = true): Promise<Event[]> {
+/**
+ * @param {import('node:fs').PathLike} dir
+ * @param {boolean} [recursive]
+ * @returns {Promise<import('../events/index.js').Event[]>}
+ */
+export async function loadEvents(dir, recursive = true) {
 	return loadStructures(dir, eventPredicate, recursive);
 }

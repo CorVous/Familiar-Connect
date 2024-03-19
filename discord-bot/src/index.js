@@ -1,13 +1,12 @@
 import process from 'node:process';
 import { URL } from 'node:url';
+import { Client, GatewayIntentBits, VoiceChannel, Events } from 'discord.js';
 import { joinVoiceChannel } from '@discordjs/voice'
-import { Client, GatewayIntentBits } from 'discord.js';
-import { VoiceChannel, Events } from 'discord.js';
-import { loadCommands, loadEvents } from './util/loaders';
-import { registerEvents } from './util/registerEvents';
+import { loadCommands, loadEvents } from './util/loaders.js';
+import { registerEvents } from './util/registerEvents.js';
 
 // Initialize the client
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // Load the events and commands
 const events = await loadEvents(new URL('events/', import.meta.url));
@@ -30,7 +29,9 @@ client.once(Events.ClientReady, async (c) => {
       adapterCreator: channel.guild.voiceAdapterCreator,
     });
     console.log('Connected to channel ' + channel.name)
-    connection.destroy()
-    console.log('Disconnected from channel')
+    await setTimeout(()=>{
+        connection.destroy()
+        console.log('Disconnected from channel')
+    }, 5000)
   }
 });
