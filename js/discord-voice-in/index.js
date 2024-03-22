@@ -7,6 +7,7 @@ import * as amqp from "amqplib";
 import { Client, Events, GatewayIntentBits, VoiceChannel } from "discord.js";
 import { loadCommands, loadEvents } from "./util/loaders.js";
 import { registerEvents } from "./util/registerEvents.js";
+import protobuf from "protobufjs";
 
 const { OpusEncoder } = pkg;
 const encoder = new OpusEncoder(48_000, 2);
@@ -15,6 +16,7 @@ const encoder = new OpusEncoder(48_000, 2);
 const rabbitConnection = await amqp.connect("amqp://localhost");
 const rabbitChannel = await rabbitConnection.createChannel();
 const rabbitExchange = "voice_buffer";
+const CURRENT_TRANSCRIBER = 'owhisper'
 
 // Initialize the client
 const client = new Client({
@@ -68,7 +70,7 @@ client.once(Events.ClientReady, async (cli) => {
       voiceSubs[uid].destroy()
       const user = client.users.cache.get(uid);
       const audioBuffer = Buffer.Buffer.concat(audioBuffers[uid]);
-      const key = channel.guild.id + "." + user.username;
+      const key = CURRENT_TRANSCRIBER + "." + channel.guild.id + "." + user.username.split('.').join('');
       rabbitChannel.assertExchange(rabbitExchange, "topic", {
         durable: false,
       });
