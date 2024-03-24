@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/product.schema.json",
+  "title": "MessageInput",
+  "description": "Message for sending to the message processor",
+  "type": "object",
+  "properties": {
+    "guildId": {
+      "description": "The discord server id",
+      "type": "string"
+    },
+    "text": {
+      "description": "The message body",
+      "type": "string"
+    },
+    "img": {
+      "description": "The message image",
+      "type": "string"
+    },
+    "priority": {
+      "description": "The priority level of the message",
+      "enum": ["soft", "normal", "immediate"]
+    },
+    "timestamp": {
+      "description": "Time message was sent in UTC ISO 8601",
+      "type": "string"
+    }
+  },
+  "required": [ "guildId", "priority"]
+}

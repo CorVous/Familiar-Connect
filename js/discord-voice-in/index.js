@@ -1,22 +1,31 @@
 import Buffer from "node:buffer";
 import process from "node:process";
 import { URL } from "node:url";
-import pkg from "@discordjs/opus";
-import { joinVoiceChannel } from "@discordjs/voice";
+import pkg from "@discordjs/opus"
+const { OpusEncoder } = pkg;
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, StreamType, AudioPlayerStatus } from "@discordjs/voice";
 import * as amqp from "amqplib";
 import { Client, Events, GatewayIntentBits, VoiceChannel } from "discord.js";
 import { loadCommands, loadEvents } from "./util/loaders.js";
 import { registerEvents } from "./util/registerEvents.js";
-import protobuf from "protobufjs";
+import { Readable } from "stream"
 
-const { OpusEncoder } = pkg;
 const encoder = new OpusEncoder(48_000, 2);
+const voiceEncoder = new OpusEncoder(16_000, 1)
 
 // Connect to rabbitmq
 const rabbitConnection = await amqp.connect("amqp://localhost");
 const rabbitChannel = await rabbitConnection.createChannel();
-const rabbitExchange = "voice_buffer";
-const CURRENT_TRANSCRIBER = 'owhisper'
+const voiceInExchange = "voice_buffer";
+const voiceOutExchange = "audio_output";
+const CURRENT_TRANSCRIBER = 'deepgram';
+rabbitChannel.assertExchange(voiceInExchange, "topic", {
+  durable: true,
+});
+rabbitChannel.assertExchange(voiceOutExchange, "topic", {
+  durable: false,
+})
+const voiceOutQueue = await rabbitChannel.assertQueue('', { exclusive:true})
 
 // Initialize the client
 const client = new Client({
@@ -53,7 +62,6 @@ client.once(Events.ClientReady, async (cli) => {
     console.log("Connected to channel " + channel.name);
     connection.receiver.speaking.on("start", (uid) => {
       const user = client.users.cache.get(uid);
-      console.log(user.username + " is speaking");
       voiceSubs[uid] = connection.receiver.subscribe(uid);
       voiceSubs[uid].on("data", (chunk) => {
         const audioChunk = encoder.decode(chunk);
@@ -71,18 +79,34 @@ client.once(Events.ClientReady, async (cli) => {
       const user = client.users.cache.get(uid);
       const audioBuffer = Buffer.Buffer.concat(audioBuffers[uid]);
       const key = CURRENT_TRANSCRIBER + "." + channel.guild.id + "." + user.username.split('.').join('');
-      rabbitChannel.assertExchange(rabbitExchange, "topic", {
-        durable: false,
-      });
-      rabbitChannel.publish(rabbitExchange, key, audioBuffer);
-
+      rabbitChannel.publish(voiceInExchange, key, audioBuffer, {persistent: true});
       audioBuffers[uid] = [];
-      console.log(user.username + " has stopped speaking");
+      console.log('Sent audio from ' + user.username);
     });
     setTimeout(() => {
       connection.destroy();
       rabbitConnection.close();
       console.log("Disconnected from channel");
     }, 600_000);
+    
+    // Send back audio! 
+    const player = createAudioPlayer()
+    connection.subscribe(player)
+    player.on(AudioPlayerStatus.Idle, () => {
+      console.log('idle...')
+    })
+
+    rabbitChannel.bindQueue(voiceOutQueue.queue, voiceOutExchange, '#')
+    rabbitChannel.consume(voiceOutQueue.queue, function(msg){
+      console.log("Voice line received for " + msg.fields.routingKey)
+      
+      const voiceLine = new Readable()
+      voiceLine._read = () => {}
+      voiceLine.push(msg.content)
+      const audio_resource = createAudioResource(voiceLine, { inputType: StreamType.Raw })
+      player.play(audio_resource)
+      
+      // player.stop()
+    }, { noAck: true })
   }
 });
