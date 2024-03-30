@@ -4,3 +4,4 @@
 .vscode
 bun.lockb
 .eslintrc.json
+*/__pycache__

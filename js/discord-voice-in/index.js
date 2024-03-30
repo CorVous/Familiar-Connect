@@ -59,8 +59,15 @@ client.once(Events.ClientReady, async (cli) => {
       adapterCreator: channel.guild.voiceAdapterCreator,
       selfDeaf: false,
     });
+    const player = createAudioPlayer()
+    connection.subscribe(player)
+    let speaking = new Set()
     console.log("Connected to channel " + channel.name);
     connection.receiver.speaking.on("start", (uid) => {
+      if (speaking.size == 0) {
+        player.pause()
+      }
+      speaking.add(uid)
       const user = client.users.cache.get(uid);
       voiceSubs[uid] = connection.receiver.subscribe(uid);
       voiceSubs[uid].on("data", (chunk) => {
@@ -75,6 +82,12 @@ client.once(Events.ClientReady, async (cli) => {
       });
     });
     connection.receiver.speaking.on("end", (uid) => {
+      speaking.delete(uid)
+      if (speaking.size == 0) {
+        if (player.state.status == 'paused') {
+          player.unpause()
+        }
+      }
       voiceSubs[uid].destroy()
       const user = client.users.cache.get(uid);
       const audioBuffer = Buffer.Buffer.concat(audioBuffers[uid]);
@@ -83,19 +96,17 @@ client.once(Events.ClientReady, async (cli) => {
       audioBuffers[uid] = [];
       console.log('Sent audio from ' + user.username);
     });
-    setTimeout(() => {
-      connection.destroy();
-      rabbitConnection.close();
-      console.log("Disconnected from channel");
-    }, 600_000);
     
     // Send back audio! 
-    const player = createAudioPlayer()
-    connection.subscribe(player)
+    let voiceLines = []
     player.on(AudioPlayerStatus.Idle, () => {
       console.log('idle...')
+      if (voiceLines.length > 0) {
+        console.log('playing next voice line')
+        player.play(voiceLines.shift())
+      }
     })
-
+    
     rabbitChannel.bindQueue(voiceOutQueue.queue, voiceOutExchange, '#')
     rabbitChannel.consume(voiceOutQueue.queue, function(msg){
       console.log("Voice line received for " + msg.fields.routingKey)
@@ -104,9 +115,19 @@ client.once(Events.ClientReady, async (cli) => {
       voiceLine._read = () => {}
       voiceLine.push(msg.content)
       const audio_resource = createAudioResource(voiceLine, { inputType: StreamType.Raw })
-      player.play(audio_resource)
       
-      // player.stop()
+      if (player.state.status == 'idle') {
+        player.play(audio_resource)
+      } else {
+        voiceLines.push(audio_resource)
+      }
+      
     }, { noAck: true })
+
+    process.on('SIGINT', function(){
+      connection.destroy();
+      rabbitConnection.close();
+      setTimeout(() => { process.exit(0) }, 1000)
+    })
   }
 });
