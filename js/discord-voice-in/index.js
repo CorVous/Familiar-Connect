@@ -1,4 +1,4 @@
-import Buffer from "node:buffer";
+import { Buffer } from "node:buffer";
 import process from "node:process";
 import { URL } from "node:url";
 import pkg from "@discordjs/opus"
@@ -17,14 +17,18 @@ const voiceEncoder = new OpusEncoder(16_000, 1)
 const rabbitConnection = await amqp.connect("amqp://localhost");
 const rabbitChannel = await rabbitConnection.createChannel();
 const voiceInExchange = "voice_buffer";
+const speakingExchange = "user_speaking";
 const voiceOutExchange = "audio_output";
 const CURRENT_TRANSCRIBER = 'deepgram';
+rabbitChannel.assertExchange(speakingExchange, "topic", {
+  durable: true,
+});
 rabbitChannel.assertExchange(voiceInExchange, "topic", {
   durable: true,
 });
 rabbitChannel.assertExchange(voiceOutExchange, "topic", {
   durable: false,
-})
+});
 const voiceOutQueue = await rabbitChannel.assertQueue('', { exclusive:true})
 
 // Initialize the client
@@ -62,15 +66,28 @@ client.once(Events.ClientReady, async (cli) => {
     const player = createAudioPlayer()
     connection.subscribe(player)
     let speaking = new Set()
+    let pausing
+    let unpausing
+    let lastPaused = 0
     console.log("Connected to channel " + channel.name);
     connection.receiver.speaking.on("start", (uid) => {
       if (speaking.size == 0) {
-        player.pause()
+        if (unpausing) {
+          clearTimeout(unpausing)
+        }
+        pausing = setTimeout(() => {
+          lastPaused = new Date()
+          player.pause()
+        }, 3000)
       }
       speaking.add(uid)
+      const speaking_key = channel.guild.id + ".discord-" + uid;
+      rabbitChannel.publish(speakingExchange, speaking_key, Buffer.from([true]), { persistent: true })
+
       const user = client.users.cache.get(uid);
       voiceSubs[uid] = connection.receiver.subscribe(uid);
       voiceSubs[uid].on("data", (chunk) => {
+
         const audioChunk = encoder.decode(chunk);
         if (Array.isArray(audioBuffers[uid])) {
           audioBuffers[uid].push(audioChunk);
@@ -84,16 +101,37 @@ client.once(Events.ClientReady, async (cli) => {
     connection.receiver.speaking.on("end", (uid) => {
       speaking.delete(uid)
       if (speaking.size == 0) {
-        if (player.state.status == 'paused') {
-          player.unpause()
+        if (pausing) {
+          clearTimeout(pausing)
         }
+        unpausing = setTimeout(() => {
+          if (player.state.status == AudioPlayerStatus.Paused) {
+            const currentTime = new Date()
+            if (lastPaused != 0) {
+              const delta = (currentTime.getTime() - lastPaused.getTime()) / 1000
+              lastPaused = 0
+              if (delta > 15) {
+                console.log('Talking for too long, discarding voicelines')
+                voiceLines = []
+                player.stop()
+              }
+            } else {
+              player.unpause()
+            }
+          }
+        }, 2000)
       }
       voiceSubs[uid].destroy()
+      
+      const speaking_key = channel.guild.id + ".discord-" + uid;
+      rabbitChannel.publish(speakingExchange, speaking_key, Buffer.from([false]), { persistent: true })
+      
       const user = client.users.cache.get(uid);
-      const audioBuffer = Buffer.Buffer.concat(audioBuffers[uid]);
+      const audioBuffer = Buffer.concat(audioBuffers[uid]);
       const key = CURRENT_TRANSCRIBER + "." + channel.guild.id + "." + user.username.split('.').join('');
       rabbitChannel.publish(voiceInExchange, key, audioBuffer, {persistent: true});
       audioBuffers[uid] = [];
+      
       console.log('Sent audio from ' + user.username);
     });
     
@@ -104,6 +142,9 @@ client.once(Events.ClientReady, async (cli) => {
       if (voiceLines.length > 0) {
         console.log('playing next voice line')
         player.play(voiceLines.shift())
+      } else if (voiceLines.length == 0) { 
+        const speaking_key = channel.guild.id + ".discord-familiar";
+        rabbitChannel.publish(speakingExchange, speaking_key, Buffer.from([false]), { persistent: true })
       }
     })
     
@@ -118,10 +159,14 @@ client.once(Events.ClientReady, async (cli) => {
       
       if (player.state.status == 'idle') {
         player.play(audio_resource)
+        const speaking_key = channel.guild.id + ".discord-familiar";
+        rabbitChannel.publish(speakingExchange, speaking_key, Buffer.from([true]), { persistent: true })
       } else {
         voiceLines.push(audio_resource)
       }
-      
+      if (speaking.size > 0) {
+        player.pause()
+      }
     }, { noAck: true })
 
     process.on('SIGINT', function(){

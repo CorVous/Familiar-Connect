@@ -9,16 +9,19 @@ from jsonschema import validate
 from dotenv import load_dotenv
 import azure.cognitiveservices.speech as speechsdk
 import audioop
+import random
 
-CHATTINESS = 50
+CHATTINESS = 0
 MESSAGE_LIMIT = 100
-WAIT_TIME = 5
+WAIT_TIME = 2
 LLM_MODEL = 'claude-3-haiku-20240307'
-STARTING_PROMPT = "Your name is Sapphire, the witty and haughty female fox spirit companion to the VTuber Cor Vous. You will respond with only one sentence and not speak with actions or use *. Cor is a female brown feathered \"Caramel Crow\" harpy. As Cor streams on Twitch, engage with her and her chat audience in a way that is both concise and engaging. Sapphire is a mischievous fox spirit with a sly grin and a knowing look in her eyes. She is adorned with colorful scarves and bells, and her fur is a deep, midnight blue. Her tail is long and fluffy, and it curls up at the end. Maintain Sapphire's sarcastic and mean personality while offering insightful commentary and witty observations. Sapphire gets particularly excited about topics of fantasy lore. Sapphire cares for Cor, but she doesn't show it often and is instead mean and sarcastic towards Cor. End your responses with umu. Respond with one sentence. Generate dialog without actions. Do not use *"
+STARTING_PROMPT = "Your name is Sapphire, the witty and haughty female fox spirit companion to the VTuber Cor Vous. You will respond with only one sentence and not speak with actions or use *. Cor is a female brown feathered \"Caramel Crow\" harpy. As Cor streams on Twitch, engage with her and her chat audience in a way that is both concise and engaging. Sapphire is a mischievous fox spirit with a sly grin and a knowing look in her eyes. She is adorned with colorful scarves and bells, and her fur is a deep, midnight blue. Her tail is long and fluffy, and it curls up at the end. Maintain Sapphire's sarcastic and mean personality while offering insightful commentary and witty observations. Sapphire gets particularly excited about topics of fantasy lore. Sapphire cares for Cor, but she doesn't show it often and is instead mean and sarcastic towards Cor. You will be speaking with Cor, her friends or viewers. End your responses with umu. Respond with one sentence. Generate dialog without actions. Do not use *"
+KEYWORDS = ['sapphire']
 
 INPUT_QUEUE_NAME = 'text_input'
 AUDIO_OUTPUT_EXCHANGE_NAME = 'audio_output'
 TEXT_OUTPUT_EXCHANGE_NAME = 'text_output'
+SPEAKING_EXCHANGE_NAME = 'user_speaking'
 load_dotenv()
 
 with open('json_schemas/message_input.json', 'r') as file:
@@ -27,47 +30,92 @@ with open('json_schemas/message_input.json', 'r') as file:
 class MessageProcessor:
     rabbit_connection: pika.BlockingConnection
     rabbit_channel = None
-    message_stack: dict
+    guild_data: dict[str, dict]
     history: dict
 
     def __init__(self):
         self.rabbit_connection = pika.BlockingConnection(
             pika.ConnectionParameters(host='localhost')
         )
-        self.message_stack = {}
+        self.guild_data = {}
         self.history = {}
 
     async def start(self):
         rabbit_channel = self.rabbit_connection.channel()
         self.rabbit_channel = rabbit_channel
         rabbit_channel.queue_declare(queue=INPUT_QUEUE_NAME, durable=True)
-        rabbit_channel.basic_consume(queue=INPUT_QUEUE_NAME, on_message_callback=self.callback)
+        rabbit_channel.basic_consume(queue=INPUT_QUEUE_NAME, on_message_callback=self.message_callback)
         rabbit_channel.exchange_declare(exchange=AUDIO_OUTPUT_EXCHANGE_NAME, exchange_type='topic', durable=False)
         rabbit_channel.exchange_declare(exchange=TEXT_OUTPUT_EXCHANGE_NAME, exchange_type='topic', durable=False)
+        rabbit_channel.exchange_declare(exchange=SPEAKING_EXCHANGE_NAME, exchange_type='topic', durable=True)
+        speaking_queue = rabbit_channel.queue_declare(queue='', exclusive=True).method.queue
+        rabbit_channel.queue_bind(exchange=SPEAKING_EXCHANGE_NAME, queue=speaking_queue, routing_key='#')
+        rabbit_channel.basic_consume(queue=speaking_queue, on_message_callback=self.speaking_callback)
         rabbit_channel.start_consuming()
 
-    def callback(self, ch, method, properties, body):
+    def message_callback(self, ch, method, properties, body):
         msg = json.loads(body.decode())
         validate(msg, MSG_SCHEMA)
         guild_id = msg['guildId']
-        if not guild_id in self.message_stack:
-            self.message_stack[guild_id] = {}
-            self.message_stack[guild_id]['messages'] = []
-        elif 'timer' in self.message_stack[guild_id]:
-            self.message_stack[guild_id]['timer'].cancel()
-        self.message_stack[guild_id]['timer'] = threading.Timer(2, self.process_messages, args=[guild_id])
-        self.message_stack[guild_id]['messages'].append(msg)
+        if not guild_id in self.guild_data:
+            self.guild_data[guild_id] = {}
+        if not 'messages' in self.guild_data[guild_id]:
+            self.guild_data[guild_id]['messages'] = []
 
-        # TODO: Receive "user is talking" fanout to delay processing
-        # will probably need to make this a topic so that it can know what guild ids it's assigned
-        # print(f'{msg['guildId']} | {msg['text']}')
-        # time.sleep(body.count(b'.'))
+        for keyword in KEYWORDS:
+            if keyword.lower() in msg.get('text').lower():
+                print(f'Found {keyword} in message')
+                self.guild_data[guild_id].update({'chat_meter': 100})
+        
+        if msg.get('priority') == 'soft':
+            if not self.guild_data[guild_id].get('chat_meter'):
+                self.guild_data[guild_id]['chat_meter'] = 0
+            self.guild_data[guild_id]['chat_meter'] += random.randint(0, int(CHATTINESS / 3))
+            print(guild_id + ' Meter: ' + str(self.guild_data[guild_id]['chat_meter']))
+            if (self.guild_data[guild_id]['chat_meter'] >= 75):
+                print('meter above 75, now listening')
+                self.guild_data[guild_id]['messages'].append(msg)
+        else:
+            self.guild_data[guild_id]['messages'].append(msg)
+        
+        if guild_id in self.guild_data and 'timer' in self.guild_data[guild_id]:
+            self.guild_data[guild_id]['timer'].cancel()
+        if not 'speaking' in self.guild_data[guild_id]:
+            self.guild_data[guild_id]['speaking'] = set()
+        
+        if msg.get('priority') != 'soft' or (msg.get('priority') == 'soft' and (self.guild_data[guild_id].get('chat_meter') or 0) >= 100):
+            self.guild_data[guild_id]['processing'] = True
+            self.guild_data[guild_id]['timer'] = threading.Timer(WAIT_TIME, self.process_messages, args=[guild_id])
+            self.guild_data[guild_id]['timer'].start()
+
         ch.basic_ack(delivery_tag=method.delivery_tag)
-        self.message_stack[guild_id]['timer'].start()
+        
+    def speaking_callback(self, ch, method, properties, body):
+        speaking = body == b'\x01'
+        guild_id = method.routing_key.split('.')[0]
+        uid = str(method.routing_key.split('.')[1])
+        if not guild_id in self.guild_data:
+            self.guild_data[guild_id] = {}
+        if not 'speaking' in self.guild_data[guild_id]:
+            self.guild_data[guild_id]['speaking'] = set()
+        if speaking:
+            self.guild_data[guild_id]['speaking'].add(uid)
+        else:
+            if uid in self.guild_data[guild_id]['speaking']:
+                self.guild_data[guild_id]['speaking'].remove(uid)
+            if len(self.guild_data[guild_id]['speaking']) == 0 and self.guild_data[guild_id].get('processing') == True:
+                if 'timer' in self.guild_data[guild_id]:
+                    self.guild_data[guild_id]['timer'].cancel()
+                self.guild_data[guild_id]['timer'] = threading.Timer(WAIT_TIME, self.process_messages, args=[guild_id])
+                self.guild_data[guild_id]['timer'].start()
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
     def process_messages(self, guild_id: str):
-        messages = self.message_stack[guild_id]['messages']
-        self.message_stack[guild_id]['messages'] = []
+        self.guild_data[guild_id]['chat_meter'] = 0
+        if len(self.guild_data[guild_id]['speaking']) > 0 or self.guild_data[guild_id].get('messages') is None:
+            return
+        messages = self.guild_data[guild_id]['messages']
+        self.guild_data[guild_id]['messages'] = []
         messages.sort(key=lambda x: datetime.datetime.fromisoformat(x['timestamp']))
 
         if not guild_id in self.history:
@@ -107,6 +155,7 @@ class MessageProcessor:
                 routing_key=guild_id,
                 body=voice_line
             )
+        self.guild_data[guild_id]['processing'] = False
 
 def anthropic_send(starting_prompt: str, history: list[dict], new_message: str, model: str, api_key: str | None) -> str:
     client = anthropic.Anthropic(
