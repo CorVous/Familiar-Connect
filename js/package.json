@@ -9,7 +9,7 @@
 		"format": "prettier --write . && eslint --ext .js,.mjs,.cjs --fix --format=pretty src",
 		"deepgram": "node --require dotenv/config deepgram-stt/index.js",
 		"discord-voice": "node --require dotenv/config discord-voice-in/index.js",
-		"discord-deploy": "node --require dotenv/config src/util/deploy.js"
+		"discord-deploy": "node --require dotenv/config discord-voice-in/util/deploy.js"
 	},
 	"dependencies": {
 		"@discordjs/core": "^1.1.0",
