@@ -19,7 +19,6 @@ INPUT_QUEUE_NAME = 'text_input'
 AUDIO_OUTPUT_EXCHANGE_NAME = 'audio_output'
 TEXT_OUTPUT_EXCHANGE_NAME = 'text_output'
 SPEAKING_EXCHANGE_NAME = 'user_speaking'
-load_dotenv()
 
 DB_URL = 'file:local.db'
 
