@@ -10,19 +10,18 @@ from dotenv import load_dotenv
 import azure.cognitiveservices.speech as speechsdk
 import audioop
 import random
+import libsql_client
 
-CHATTINESS = 0
 MESSAGE_LIMIT = 100
 WAIT_TIME = 2
-LLM_MODEL = 'claude-3-haiku-20240307'
-STARTING_PROMPT = "Your name is Sapphire, the witty and haughty female fox spirit companion to the VTuber Cor Vous. You will respond with only one sentence and not speak with actions or use *. Cor is a female brown feathered \"Caramel Crow\" harpy. As Cor streams on Twitch, engage with her and her chat audience in a way that is both concise and engaging. Sapphire is a mischievous fox spirit with a sly grin and a knowing look in her eyes. She is adorned with colorful scarves and bells, and her fur is a deep, midnight blue. Her tail is long and fluffy, and it curls up at the end. Maintain Sapphire's sarcastic and mean personality while offering insightful commentary and witty observations. Sapphire gets particularly excited about topics of fantasy lore. Sapphire cares for Cor, but she doesn't show it often and is instead mean and sarcastic towards Cor. You will be speaking with Cor, her friends or viewers. End your responses with umu. Respond with one sentence. Generate dialog without actions. Do not use *"
-KEYWORDS = ['sapphire']
 
 INPUT_QUEUE_NAME = 'text_input'
 AUDIO_OUTPUT_EXCHANGE_NAME = 'audio_output'
 TEXT_OUTPUT_EXCHANGE_NAME = 'text_output'
 SPEAKING_EXCHANGE_NAME = 'user_speaking'
 load_dotenv()
+
+DB_URL = 'file:local.db'
 
 with open('json_schemas/message_input.json', 'r') as file:
     MSG_SCHEMA = json.loads(file.read())
@@ -62,15 +61,27 @@ class MessageProcessor:
         if not 'messages' in self.guild_data[guild_id]:
             self.guild_data[guild_id]['messages'] = []
 
-        for keyword in KEYWORDS:
-            if keyword.lower() in msg.get('text').lower():
+        familiar = []
+        with libsql_client.create_client_sync(DB_URL) as client:
+            familiar = client.execute("SELECT * FROM familiars WHERE guildId=?", [guild_id]).rows[0]
+        familiarName = str(familiar[1])
+        staring_prompt = str(familiar[2])
+        chattiness = int(str(familiar[3]))
+        keywords = str(familiar[4]).split(',')
+        llm = str(familiar[6])
+        tts = str(familiar[7])
+        
+        for keyword in keywords:
+            if keyword.strip().lower() in msg.get('text').lower():
                 print(f'Found {keyword} in message')
                 self.guild_data[guild_id].update({'chat_meter': 100})
-        
+        if chattiness == 100:
+            self.guild_data[guild_id].update({'chat_meter': 100})
+
         if msg.get('priority') == 'soft':
             if not self.guild_data[guild_id].get('chat_meter'):
                 self.guild_data[guild_id]['chat_meter'] = 0
-            self.guild_data[guild_id]['chat_meter'] += random.randint(0, int(CHATTINESS / 3))
+            self.guild_data[guild_id]['chat_meter'] += random.randint(0, int(chattiness / 3))
             print(guild_id + ' Meter: ' + str(self.guild_data[guild_id]['chat_meter']))
             if (self.guild_data[guild_id]['chat_meter'] >= 75):
                 print('meter above 75, now listening')
@@ -111,6 +122,17 @@ class MessageProcessor:
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
     def process_messages(self, guild_id: str):
+        familiar = []
+        llm = []
+        tts = []
+        with libsql_client.create_client_sync(DB_URL) as client:
+            familiar = client.execute("SELECT * FROM familiars WHERE guildId=?", [guild_id]).rows[0]
+            llm = client.execute("SELECT * FROM "+ str(familiar[6]) +" WHERE guildId=?", [guild_id]).rows[0]
+            tts = client.execute("SELECT * FROM "+ str(familiar[7]) +" WHERE guildId=?", [guild_id]).rows[0]
+        starting_prompt = str(familiar[2])
+        llm_type = str(familiar[6])
+        tts_type = str(familiar[7])
+
         self.guild_data[guild_id]['chat_meter'] = 0
         if len(self.guild_data[guild_id]['speaking']) > 0 or self.guild_data[guild_id].get('messages') is None:
             return
@@ -129,16 +151,31 @@ class MessageProcessor:
                 new_message += msg['text']
         if new_message.strip() == '':
             return
+        llm_key = str(llm[1])
+        llm_model = str(llm[2])
+        llm_tempurature = float(str(llm[3]))
+        
+        if (llm_type == 'anthropic'):
+            response = anthropic_send(starting_prompt, self.history[guild_id], new_message, llm_model, llm_key, llm_tempurature)
+        else:
+            response = 'ummm, not implemented yet, teehee?'
 
-        response = anthropic_send(STARTING_PROMPT, self.history[guild_id], new_message, LLM_MODEL, os.getenv('ANTHROPIC_API_KEY'))
         if response == '':
             print('[xx] Empty respnose')
             return
         print('[o] Response ----')
         print(response)
         voice_response = response.replace("Cor", "Core") # Take this out later. Add a "replace for pronunciation"
-        voice_line = azure_tts(voice_response, 'en-US-AmberNeural', os.getenv('AZURE_KEY'), os.getenv('AZURE_REGION'))
-        voice_line, _ = audioop.ratecv(voice_line, 2, 1, 16000, 96000, None)
+        
+
+        tts_key = str(tts[1])
+        if tts_type == 'azure':
+            azure_region = str(tts[2])
+            azure_voice = str(tts[3])
+            voice_line = azure_tts(voice_response, azure_voice, tts_key, azure_region)
+            voice_line, _ = audioop.ratecv(voice_line, 2, 1, 16000, 96000, None)
+        else:
+            voice_line = bytes(0)
 
         self.history[guild_id].append({'role': 'user', 'content': new_message})
         self.history[guild_id].append({'role': 'assistant', 'content': response})
@@ -157,7 +194,7 @@ class MessageProcessor:
             )
         self.guild_data[guild_id]['processing'] = False
 
-def anthropic_send(starting_prompt: str, history: list[dict], new_message: str, model: str, api_key: str | None) -> str:
+def anthropic_send(starting_prompt: str, history: list[dict], new_message: str, model: str, api_key: str | None, tempurature: float) -> str:
     client = anthropic.Anthropic(
         api_key=api_key
     )
@@ -177,7 +214,7 @@ def anthropic_send(starting_prompt: str, history: list[dict], new_message: str, 
     response = client.messages.create(
         model = model,
         max_tokens=200,
-        temperature=0.8,
+        temperature=tempurature,
         system=starting_prompt,
         messages=new_prompt
     )

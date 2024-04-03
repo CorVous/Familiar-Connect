@@ -5,7 +5,7 @@ import pkg from "@discordjs/opus"
 const { OpusEncoder } = pkg;
 import { joinVoiceChannel, createAudioPlayer, createAudioResource, StreamType, AudioPlayerStatus, VoiceConnectionStatus, getVoiceConnection } from "@discordjs/voice";
 import * as amqp from "amqplib";
-import { ChannelType, VoiceChannel } from "discord.js";
+import { ChannelType, PermissionFlagsBits, SlashCommandBuilder, VoiceChannel } from "discord.js";
 import { Readable } from "stream"
 
 const encoder = new OpusEncoder(48_000, 2);
@@ -26,10 +26,11 @@ rabbitChannel.assertExchange(voiceOutExchange, "topic", {
 });
 
 export default {
-	data: {
-		name: 'awaken',
-		description: 'Direct your familiar to join the voice chat you are in.',
-	},
+	data: new SlashCommandBuilder()
+		.setName('awaken')
+		.setDescription('Direct your familiar to join the voice chat you are in.')
+		.setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+	,
 	async execute(interaction) {
 		const prelim_connection = getVoiceConnection(interaction.guild.id)
 		if (prelim_connection) {
@@ -67,7 +68,7 @@ export default {
 			let pausing
 			let unpausing
 			let lastPaused = 0
-			console.log("Connected to channel " + channel.name);
+			console.log("Connected to channel " + channel.name + ' in ' + interaction.guild.name);
 			connection.receiver.speaking.on("start", (uid) => {
 				if (speaking.size == 0) {
 					if (unpausing) {
@@ -173,6 +174,7 @@ export default {
 				rabbitChannel.cancel(consumer.consumerTag)
 				connection.receiver.speaking.removeAllListeners('start')
 				connection.receiver.speaking.removeAllListeners('end')
+				// Todo: Send a "guildId.discord-disconnect" message or "guildId.discord-userID" for all talking users in case disconnected when someone is talking
 				playerSub.unsubscribe()
 				player.removeAllListeners(AudioPlayerStatus.Idle);
 				player.stop();

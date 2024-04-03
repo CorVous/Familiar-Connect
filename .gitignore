@@ -5,3 +5,4 @@
 bun.lockb
 .eslintrc.json
 */__pycache__
+backup.db
