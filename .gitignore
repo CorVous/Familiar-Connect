@@ -6,3 +6,4 @@ bun.lockb
 .eslintrc.json
 */__pycache__
 backup.db
+user_token.json

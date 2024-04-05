@@ -1,12 +1,11 @@
+from typing import List, Sequence
 import pika
 import json
 import asyncio
 import threading
 import datetime
 import anthropic
-import os
 from jsonschema import validate
-from dotenv import load_dotenv
 import azure.cognitiveservices.speech as speechsdk
 import audioop
 import random
@@ -29,14 +28,12 @@ class MessageProcessor:
     rabbit_connection: pika.BlockingConnection
     rabbit_channel = None
     guild_data: dict[str, dict]
-    history: dict
 
     def __init__(self):
         self.rabbit_connection = pika.BlockingConnection(
             pika.ConnectionParameters(host='localhost')
         )
         self.guild_data = {}
-        self.history = {}
 
     async def start(self):
         rabbit_channel = self.rabbit_connection.channel()
@@ -81,7 +78,7 @@ class MessageProcessor:
             if not self.guild_data[guild_id].get('chat_meter'):
                 self.guild_data[guild_id]['chat_meter'] = 0
             self.guild_data[guild_id]['chat_meter'] += random.randint(0, int(chattiness / 3))
-            print(guild_id + ' Meter: ' + str(self.guild_data[guild_id]['chat_meter']))
+            # print(guild_id + ' Meter: ' + str(self.guild_data[guild_id]['chat_meter']))
             if (self.guild_data[guild_id]['chat_meter'] >= 75):
                 print('meter above 75, now listening')
                 self.guild_data[guild_id]['messages'].append(msg)
@@ -128,6 +125,7 @@ class MessageProcessor:
             familiar = client.execute("SELECT * FROM familiars WHERE guildId=?", [guild_id]).rows[0]
             llm = client.execute("SELECT * FROM "+ str(familiar[6]) +" WHERE guildId=?", [guild_id]).rows[0]
             tts = client.execute("SELECT * FROM "+ str(familiar[7]) +" WHERE guildId=?", [guild_id]).rows[0]
+            history = client.execute("SELECT * FROM history WHERE guildId=? ORDER BY timestamp DESC LIMIT ?", [guild_id, MESSAGE_LIMIT]).rows
         starting_prompt = str(familiar[2])
         llm_type = str(familiar[6])
         tts_type = str(familiar[7])
@@ -138,9 +136,6 @@ class MessageProcessor:
         messages = self.guild_data[guild_id]['messages']
         self.guild_data[guild_id]['messages'] = []
         messages.sort(key=lambda x: datetime.datetime.fromisoformat(x['timestamp']))
-
-        if not guild_id in self.history:
-            self.history[guild_id] = []
 
         new_message = ''
         for i, msg in enumerate(messages):
@@ -155,7 +150,7 @@ class MessageProcessor:
         llm_tempurature = float(str(llm[3]))
         
         if (llm_type == 'anthropic'):
-            response = anthropic_send(starting_prompt, self.history[guild_id], new_message, llm_model, llm_key, llm_tempurature)
+            response = anthropic_send(starting_prompt, history, new_message, llm_model, llm_key, llm_tempurature)
         else:
             response = 'ummm, not implemented yet, teehee?'
 
@@ -176,9 +171,9 @@ class MessageProcessor:
         else:
             voice_line = bytes(0)
 
-        self.history[guild_id].append({'role': 'user', 'content': new_message})
-        self.history[guild_id].append({'role': 'assistant', 'content': response})
-        #TODO: Save history in file/db
+        with libsql_client.create_client_sync(DB_URL) as client:
+            client.execute("INSERT INTO history (guildId, msg, role, timestamp) VALUES (?,?,?,?)", [guild_id, new_message, 'user', datetime.datetime.now().isoformat()])
+            client.execute("INSERT INTO history (guildId, msg, role, timestamp) VALUES (?,?,?,?)", [guild_id, response, 'assistant', datetime.datetime.now().isoformat()])
 
         if self.rabbit_channel:
             self.rabbit_channel.basic_publish(
@@ -193,7 +188,7 @@ class MessageProcessor:
             )
         self.guild_data[guild_id]['processing'] = False
 
-def anthropic_send(starting_prompt: str, history: list[dict], new_message: str, model: str, api_key: str | None, tempurature: float) -> str:
+def anthropic_send(starting_prompt: str, history: list, new_message: str, model: str, api_key: str | None, tempurature: float) -> str:
     client = anthropic.Anthropic(
         api_key=api_key
     )
@@ -202,11 +197,10 @@ def anthropic_send(starting_prompt: str, history: list[dict], new_message: str, 
     print(new_message)
 
     new_prompt = []
-
-    sliced_history = history[-MESSAGE_LIMIT:]
-    for msg in sliced_history:
-        role = msg['role']
-        new_prompt.append({'role': role, 'content': msg['content']})
+    
+    for entry in list(reversed(history)):
+        guild_id, msg, img, role, timestamp = str(entry[0]), str(entry[1]), str(entry[2]), str(entry[3]), str(entry[4])
+        new_prompt.append({'role': role, 'content': msg})
 
     new_prompt.append({'role': 'user', 'content': new_message})
 

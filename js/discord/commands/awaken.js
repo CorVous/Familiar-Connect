@@ -14,7 +14,6 @@ const rabbitChannel = await rabbitConnection.createChannel();
 const voiceInExchange = "voice_buffer";
 const speakingExchange = "user_speaking";
 const voiceOutExchange = "audio_output";
-const CURRENT_TRANSCRIBER = 'deepgram';
 rabbitChannel.assertExchange(speakingExchange, "topic", {
   durable: true,
 });
@@ -126,7 +125,7 @@ export default {
 				
 				const user = client.users.cache.get(uid);
 				const audioBuffer = Buffer.concat(audioBuffers[uid]);
-				const key = CURRENT_TRANSCRIBER + "." + channel.guild.id + "." + user.username.split('.').join('');
+				const key = channel.guild.id + "." + user.username.split('.').join('');
 				rabbitChannel.publish(voiceInExchange, key, audioBuffer, {persistent: true});
 				audioBuffers[uid] = [];
 				

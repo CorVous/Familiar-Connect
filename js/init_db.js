@@ -9,3 +9,6 @@ db.execute('CREATE TABLE deepgram (guildId TEXT PRIMARY KEY, apikey TEXT DEFAULT
 db.execute('CREATE TABLE anthropic (guildId TEXT PRIMARY KEY, apikey TEXT DEFAULT "", model TEXT DEFAULT "", tempurature TEXT DEFAULT "")')
 db.execute('CREATE TABLE openai (guildId TEXT PRIMARY KEY, apikey TEXT DEFAULT "", model TEXT DEFAULT "", tempurature TEXT DEFAULT "")')
 db.execute('CREATE TABLE azure (guildId TEXT PRIMARY KEY, apikey TEXT DEFAULT "", region TEXT DEFAULT "", voice TEXT DEFAULT "")')
+db.execute('CREATE TABLE history (guildId TEXT, msg TEXT DEFAULT "", image TEXT DEFAULT "", role TEXT DEFAULT "user", timestamp TEXT DEFAULT "")')
+db.execute('CREATE TABLE message_queue (guildId TEXT, msg TEXT DEFAULT "", image TEXT DEFAULT "", role TEXT DEFAULT "user", timestamp TEXT DEFAULT "")')
+db.execute('CREATE TABLE users_speaking (guildId TEXT, user TEXT)')
