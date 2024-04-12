@@ -154,12 +154,9 @@ class MessageProcessor:
         llm_tempurature = float(str(llm[3]))
         
         if (llm_type == 'anthropic'):
-            anthropic_response = anthropic_send(starting_prompt, history, new_message, llm_model, llm_key, llm_tempurature)
-            response = anthropic_response[0]
-            emotion = anthropic_response[1]
+            response = anthropic_send(starting_prompt, history, new_message, llm_model, llm_key, llm_tempurature)
         else:
             response = 'ummm, not implemented yet, teehee?'
-            emotion = ''
 
         if response == '':
             print('[xx] Empty respnose')
@@ -173,7 +170,7 @@ class MessageProcessor:
         if tts_type == 'azure':
             azure_region = str(tts[2])
             azure_voice = str(tts[3])
-            voice_line = azure_tts(voice_response, azure_voice, emotion, tts_key, azure_region)
+            voice_line = azure_tts(voice_response, azure_voice, tts_key, azure_region)
             voice_line, _ = audioop.ratecv(voice_line, 2, 1, 16000, 96000, None)
         else:
             voice_line = bytes(0)
@@ -195,7 +192,7 @@ class MessageProcessor:
             )
         self.guild_data[guild_id]['processing'] = False
 
-def anthropic_send(starting_prompt: str, history: list, new_message: str, model: str, api_key: str | None, tempurature: float) -> list[str]:
+def anthropic_send(starting_prompt: str, history: list, new_message: str, model: str, api_key: str | None, tempurature: float) -> str:
     client = anthropic.Anthropic(
         api_key=api_key
     )
@@ -209,64 +206,24 @@ def anthropic_send(starting_prompt: str, history: list, new_message: str, model:
         guild_id, msg, img, role, timestamp = str(entry[0]), str(entry[1]), str(entry[2]), str(entry[3]), str(entry[4])
         new_prompt.append({'role': role, 'content': msg})
 
-    new_prompt.append({'role': 'user', 'content': new_message + '\\nfamiliar_response.'})
+    new_prompt.append({'role': 'user', 'content': new_message})
 
-    response = client.beta.tools.messages.create(
+    response = client.messages.create(
         model = model,
         max_tokens=200,
         temperature=tempurature,
-        tools=[{
-            "name": "familiar_response",
-            "description": "Message block responding to the user.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "responding": {
-                        "type": "boolean",
-                        "description": "Respond with True if you hear your name. If you do not hear your name, respond with false.",
-                    },
-                    "emotion": {
-                        "type": "string",
-                        "description": "Give the emotion of the message you're trying to portray. You can use affectionate, angry, calm, cheerful, depressed, disgruntled, embarrassed, empathetic, envious, fearful, friendly, gentle, hopeful, lyrical, sad, serious, shouting, whispering, terrified, unfriendly."
-                    },
-                    "response": {
-                        "type": "string",
-                        "description": "Response to the user's message."
-                    }
-                },
-                "required": ["responding", "emotion", "response"], # type: ignore
-            },
-        }],
         system=starting_prompt,
         messages=new_prompt
     )
     client.close()
-    responding = False
-    text = ''
-    emotion = ''
-    for content in response.content:
-        if content.type == 'tool_use':
-            print(content.input.get('responding'))
-            responding = bool(content.input.get('responding'))
-            emotion = str(content.input.get('emotion'))
-            if responding:
-                text = str(content.input.get('response'))
-    return [text, emotion]
+    return response.content[0].text
 
-def azure_tts(text: str, voice_name: str, emotion: str, api_key: str | None, region: str | None) -> bytes:
+def azure_tts(text: str, voice_name: str, api_key: str | None, region: str | None) -> bytes:
     speech_config = speechsdk.SpeechConfig(subscription=api_key, region=region)
     speech_config.speech_synthesis_voice_name = voice_name
     audio_config = speechsdk.audio.PullAudioOutputStream()
     speech_synthesizer = speechsdk.SpeechSynthesizer(audio_config=audio_config,speech_config=speech_config) # type: ignore
-    ssml_text = f'''
-    <speak version="1.0" xmlns="https://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xmlns:emo="http://www.w3.org/2009/10/emotionml" xml:lang="en-US">
-        <voice name="{voice_name}">
-            <mstts:express-as style="{emotion}">
-                {text}
-            </mstts:express-as>
-        </voice>
-    </speak>'''
-    result: speechsdk.SpeechSynthesisResult = speech_synthesizer.speak_ssml(ssml_text)
+    result: speechsdk.SpeechSynthesisResult = speech_synthesizer.speak_text(text)
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
         stream = result.audio_data
         return stream[44:]
