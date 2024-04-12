@@ -7,6 +7,11 @@ import { joinVoiceChannel, createAudioPlayer, createAudioResource, StreamType, A
 import * as amqp from "amqplib";
 import { ChannelType, PermissionFlagsBits, SlashCommandBuilder, VoiceChannel } from "discord.js";
 import { Readable } from "stream"
+import { createClient } from '@libsql/client'
+
+const db = new createClient({
+	url: "file:../local.db",
+})
 
 const encoder = new OpusEncoder(48_000, 2);
 const rabbitConnection = await amqp.connect("amqp://localhost");
@@ -167,8 +172,9 @@ export default {
 				}
 			}, { noAck: true })
 
-			connection.on(VoiceConnectionStatus.Disconnected, () => {
+			connection.on(VoiceConnectionStatus.Disconnected, async () => {
 				console.log('Disconnected from ' + channel.guild.name);
+				await db.execute({sql: "DELETE FROM history WHERE guildId=?", args: [channel.guildId]})
 				rabbitChannel.unbindQueue(voiceOutQueue.queue, voiceOutExchange, channel.guild.id)
 				rabbitChannel.cancel(consumer.consumerTag)
 				connection.receiver.speaking.removeAllListeners('start')

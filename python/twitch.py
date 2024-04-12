@@ -1,3 +1,4 @@
+import time
 from twitchAPI.helper import first
 from twitchAPI.twitch import Twitch, TwitchUser
 from twitchAPI.oauth import UserAuthenticationStorageHelper
@@ -124,25 +125,41 @@ class TwitchWorker:
             )
         )
     
-    def start(self):
-        self.user = asyncio.run(first(self.twitch.get_users()))
+    async def start(self):
+        self.user = await first(self.twitch.get_users())
         if self.eventsub is None and self.user is not None:
             self.eventsub = EventSubWebsocket(self.twitch)
             self.eventsub.start()
-            asyncio.run(self.eventsub.listen_channel_points_custom_reward_redemption_add(self.user.id, self.channel_redemptions_cb))
-            asyncio.run(self.eventsub.listen_channel_subscribe(self.user.id, self.subscriptions_cb))
-            asyncio.run(self.eventsub.listen_channel_subscription_gift(self.user.id, self.gift_subscriptions_cb))
-            asyncio.run(self.eventsub.listen_channel_subscription_message(self.user.id, self.resubscriptions_cb))
-            asyncio.run(self.eventsub.listen_channel_cheer(self.user.id, self.cheers_cb))
-            asyncio.run(self.eventsub.listen_channel_follow_v2(self.user.id, self.user.id, self.follows_cb))
-            asyncio.run(self.eventsub.listen_channel_ad_break_begin(self.user.id, self.ads_cb))
+            await self.eventsub.listen_channel_points_custom_reward_redemption_add(self.user.id, self.channel_redemptions_cb)
+            await self.eventsub.listen_channel_subscribe(self.user.id, self.subscriptions_cb)
+            await self.eventsub.listen_channel_subscription_gift(self.user.id, self.gift_subscriptions_cb)
+            await self.eventsub.listen_channel_subscription_message(self.user.id, self.resubscriptions_cb)
+            await self.eventsub.listen_channel_cheer(self.user.id, self.cheers_cb)
+            await self.eventsub.listen_channel_follow_v2(self.user.id, self.user.id, self.follows_cb)
+            await self.eventsub.listen_channel_ad_break_begin(self.user.id, self.ads_cb)
+            try:
+                while True:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                print('asdf')
+                await self.eventsub.stop()
+                quit()
 
-if __name__ == "__main__":
-    worker = TwitchWorker("324917760578682880", os.getenv("TWITCH_ID") or '', os.getenv("TWITCH_SECRET") or '')
-    worker.ads = True
-    worker.ads_immediate = True
-    worker.subscriptions = True
-    worker.redemption_list = ['Talk to Sapphire']
-    worker.start()
-    # TODO: make this able to be closed down with keyboard interrupt
+if (__name__ == "__main__"):
+    owo = TwitchWorker("324917760578682880", os.getenv("TWITCH_ID") or '', os.getenv("TWITCH_SECRET") or '')
+    owo.ads = True
+    owo.ads_immediate = True
+    owo.subscriptions = True
+    owo.redemption_list = ['Talk to Sapphire']
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    tasks = asyncio.gather(owo.start())
+    try:
+        print('starting...')
+        loop.run_until_complete(tasks)
+    except KeyboardInterrupt as e:
+        print('closing...')
+        tasks.cancel()
+    finally:
+        loop.close()
     # TODO: Make it so that when a familiar with twitch enabled joins, spin up a new thread. going to have to verify on twitch to get uesr_token.json through discord.js slash commands
