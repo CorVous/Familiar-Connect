@@ -151,7 +151,6 @@ export default {
 
 			const voiceOutQueue = await rabbitChannel.assertQueue('', { exclusive:true})
 			rabbitChannel.bindQueue(voiceOutQueue.queue, voiceOutExchange, channel.guild.id)
-			// Make it so that the consumer is only defined and started in one place.
 			const consumer = await rabbitChannel.consume(voiceOutQueue.queue, function(msg){
 				console.log("Voice line received for " + channel.guild.name)
 				
@@ -175,11 +174,12 @@ export default {
 			connection.on(VoiceConnectionStatus.Disconnected, async () => {
 				console.log('Disconnected from ' + channel.guild.name);
 				await db.execute({sql: "DELETE FROM history WHERE guildId=?", args: [channel.guildId]})
+				const speaking_key = channel.guild.id + ".disonnect";
+				rabbitChannel.publish(speakingExchange, speaking_key, Buffer.from([false]), { persistent: true })
 				rabbitChannel.unbindQueue(voiceOutQueue.queue, voiceOutExchange, channel.guild.id)
 				rabbitChannel.cancel(consumer.consumerTag)
 				connection.receiver.speaking.removeAllListeners('start')
 				connection.receiver.speaking.removeAllListeners('end')
-				// Todo: Send a "guildId.discord-disconnect" message or "guildId.discord-userID" for all talking users in case disconnected when someone is talking
 				playerSub.unsubscribe()
 				player.removeAllListeners(AudioPlayerStatus.Idle);
 				player.stop();

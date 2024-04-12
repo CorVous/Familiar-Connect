@@ -78,10 +78,9 @@ class MessageProcessor:
             if not self.guild_data[guild_id].get('chat_meter'):
                 self.guild_data[guild_id]['chat_meter'] = 0
             self.guild_data[guild_id]['chat_meter'] += random.randint(0, int(chattiness / 3))
-            # print(guild_id + ' Meter: ' + str(self.guild_data[guild_id]['chat_meter']))
             if (self.guild_data[guild_id]['chat_meter'] >= 75):
                 print('meter above 75, now listening')
-                print(self.guild_data[guild_id]['chat_meter'])
+                print(self.guild_data[guild_id].get('speaking'))
                 self.guild_data[guild_id]['messages'].append(msg)
         else:
             self.guild_data[guild_id]['messages'].append(msg)
@@ -112,6 +111,8 @@ class MessageProcessor:
         if speaking:
             self.guild_data[guild_id]['speaking'].add(uid)
         else:
+            if uid == 'disconnect':
+                self.guild_data[guild_id]['speaking'].clear()
             if uid in self.guild_data[guild_id]['speaking']:
                 self.guild_data[guild_id]['speaking'].remove(uid)
             if len(self.guild_data[guild_id]['speaking']) == 0 and self.guild_data[guild_id].get('processing') == True:

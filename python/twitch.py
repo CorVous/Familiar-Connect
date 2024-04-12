@@ -20,12 +20,7 @@ TARGET_SCOPES = [AuthScope.CHANNEL_READ_REDEMPTIONS, AuthScope.CHANNEL_READ_SUBS
 with open('json_schemas/message_input.json', 'r') as file:
     msg_schema = json.loads(file.read())
 
-rabbit_connection = pika.BlockingConnection(
-    pika.ConnectionParameters(host='localhost'))
-rabbit_channel = rabbit_connection.channel()
-
 input_queue_name = 'text_input'
-input_queue_declare = rabbit_channel.queue_declare(input_queue_name, durable=True)
 
 class TwitchWorker:
     guild_id: str
@@ -106,6 +101,10 @@ class TwitchWorker:
             timer.start()
             
     def send_message(self, message: str, immediate: bool = False):
+        rabbit_connection = pika.BlockingConnection(
+            pika.ConnectionParameters(host='localhost'))
+        rabbit_channel = rabbit_connection.channel()
+        input_queue_declare = rabbit_channel.queue_declare(input_queue_name, durable=True)
         priority = "normal"
         if immediate:
             priority = "immediate"
@@ -124,6 +123,7 @@ class TwitchWorker:
                 delivery_mode=pika.DeliveryMode.Persistent
             )
         )
+        rabbit_connection.close()
     
     async def start(self):
         self.user = await first(self.twitch.get_users())
