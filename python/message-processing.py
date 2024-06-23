@@ -10,6 +10,7 @@ import azure.cognitiveservices.speech as speechsdk
 import audioop
 import random
 import libsql_client
+import pytz
 
 MESSAGE_LIMIT = 100
 WAIT_TIME = 2
@@ -75,12 +76,11 @@ class MessageProcessor:
             self.guild_data[guild_id].update({'chat_meter': 100})
 
         if msg.get('priority') == 'soft':
-            if not self.guild_data[guild_id].get('chat_meter'):
+            if 'chat_meter' not in self.guild_data[guild_id].keys():
                 self.guild_data[guild_id]['chat_meter'] = 0
             self.guild_data[guild_id]['chat_meter'] += random.randint(0, int(chattiness / 3))
             if (self.guild_data[guild_id]['chat_meter'] >= 75):
                 print('meter above 75, now listening')
-                print(self.guild_data[guild_id].get('speaking'))
                 self.guild_data[guild_id]['messages'].append(msg)
         else:
             self.guild_data[guild_id]['messages'].append(msg)
@@ -90,10 +90,12 @@ class MessageProcessor:
         if not 'speaking' in self.guild_data[guild_id]:
             self.guild_data[guild_id]['speaking'] = set()
         
+        
+        print('chat meter: ' + str(self.guild_data[guild_id].get('chat_meter') or 0))
         if msg.get('priority') == 'immediate':
             self.guild_data[guild_id]['processing'] = True
             self.process_messages(guild_id)
-        elif msg.get('priority') != 'soft' or (msg.get('priority') == 'soft' and (self.guild_data[guild_id].get('chat_meter') or 0) >= 100):
+        elif msg.get('priority') != 'soft' or ((self.guild_data[guild_id].get('chat_meter') or 0) >= 100):
             self.guild_data[guild_id]['processing'] = True
             self.guild_data[guild_id]['timer'] = threading.Timer(WAIT_TIME, self.process_messages, args=[guild_id])
             self.guild_data[guild_id]['timer'].start()
@@ -213,7 +215,7 @@ def anthropic_send(starting_prompt: str, history: list, new_message: str, model:
         model = model,
         max_tokens=200,
         temperature=tempurature,
-        system=starting_prompt,
+        system=starting_prompt + "\n\nThe date and time is " + datetime.datetime.now(pytz.timezone("US/Pacific")).strftime("%d/%m/%Y, %H:%M:%S"),
         messages=new_prompt
     )
     client.close()

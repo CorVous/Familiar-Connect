@@ -40,6 +40,12 @@ class TwitchWorker:
         self.guild_id = guild_id
         self.twitch = Twitch(twitch_id or '', twitch_secret)
         self.helper = UserAuthenticationStorageHelper(self.twitch, TARGET_SCOPES)
+        self.redemption_list = []
+        self.subscriptions = False
+        self.cheers = False
+        self.ads = False
+        self.ads_immediate = False
+        self.follows = False
         try:
             asyncio.run(self.helper.bind())
             self.connected = True
@@ -90,7 +96,7 @@ class TwitchWorker:
             self.send_message(message)
 
     async def follows_cb(self, data: ChannelFollowEvent):
-        if self.cheers:
+        if self.follows:
             message = f'{data.event.user_name} has followed the channel'
             self.send_message(message)
 

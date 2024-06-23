@@ -173,7 +173,7 @@ export default {
 
 			connection.on(VoiceConnectionStatus.Disconnected, async () => {
 				console.log('Disconnected from ' + channel.guild.name);
-				await db.execute({sql: "DELETE FROM history WHERE guildId=?", args: [channel.guildId]})
+				// await db.execute({sql: "DELETE FROM history WHERE guildId=?", args: [channel.guildId]})
 				const speaking_key = channel.guild.id + ".disonnect";
 				rabbitChannel.publish(speakingExchange, speaking_key, Buffer.from([false]), { persistent: true })
 				rabbitChannel.unbindQueue(voiceOutQueue.queue, voiceOutExchange, channel.guild.id)
