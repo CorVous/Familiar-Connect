@@ -11,6 +11,7 @@ import audioop
 import random
 import libsql_client
 import pytz
+import time
 
 MESSAGE_LIMIT = 100
 WAIT_TIME = 2
@@ -41,8 +42,6 @@ class MessageProcessor:
         self.rabbit_channel = rabbit_channel
         rabbit_channel.queue_declare(queue=INPUT_QUEUE_NAME, durable=True)
         rabbit_channel.basic_consume(queue=INPUT_QUEUE_NAME, on_message_callback=self.message_callback)
-        rabbit_channel.exchange_declare(exchange=AUDIO_OUTPUT_EXCHANGE_NAME, exchange_type='topic', durable=False)
-        rabbit_channel.exchange_declare(exchange=TEXT_OUTPUT_EXCHANGE_NAME, exchange_type='topic', durable=False)
         rabbit_channel.exchange_declare(exchange=SPEAKING_EXCHANGE_NAME, exchange_type='topic', durable=True)
         speaking_queue = rabbit_channel.queue_declare(queue='', exclusive=True).method.queue
         rabbit_channel.queue_bind(exchange=SPEAKING_EXCHANGE_NAME, queue=speaking_queue, routing_key='#')
@@ -182,17 +181,24 @@ class MessageProcessor:
             client.execute("INSERT INTO history (guildId, msg, role, timestamp) VALUES (?,?,?,?)", [guild_id, new_message, 'user', datetime.datetime.now().isoformat()])
             client.execute("INSERT INTO history (guildId, msg, role, timestamp) VALUES (?,?,?,?)", [guild_id, response, 'assistant', datetime.datetime.now().isoformat()])
 
-        if self.rabbit_channel:
-            self.rabbit_channel.basic_publish(
+        rabbit_output_connection = pika.BlockingConnection(
+            pika.ConnectionParameters(host='localhost')
+        )
+        rabbit_channel = rabbit_output_connection.channel()
+        rabbit_channel.exchange_declare(exchange=AUDIO_OUTPUT_EXCHANGE_NAME, exchange_type='topic', durable=False)
+        rabbit_channel.exchange_declare(exchange=TEXT_OUTPUT_EXCHANGE_NAME, exchange_type='topic', durable=False)
+        if rabbit_channel:
+            rabbit_channel.basic_publish(
                 exchange=TEXT_OUTPUT_EXCHANGE_NAME,
                 routing_key=guild_id,
                 body=response
             )
-            self.rabbit_channel.basic_publish(
+            rabbit_channel.basic_publish(
                 exchange=AUDIO_OUTPUT_EXCHANGE_NAME,
                 routing_key=guild_id,
                 body=voice_line
             )
+        rabbit_output_connection.close()
         self.guild_data[guild_id]['processing'] = False
 
 def anthropic_send(starting_prompt: str, history: list, new_message: str, model: str, api_key: str | None, tempurature: float) -> str:

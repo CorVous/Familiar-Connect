@@ -14,7 +14,7 @@ import os
 from dotenv import load_dotenv
 import datetime
 
-load_dotenv('../.env')
+load_dotenv('.env')
 TARGET_SCOPES = [AuthScope.CHANNEL_READ_REDEMPTIONS, AuthScope.CHANNEL_READ_SUBSCRIPTIONS,  AuthScope.BITS_READ, AuthScope.MODERATOR_READ_FOLLOWERS, AuthScope.CHANNEL_READ_ADS]
 
 with open('json_schemas/message_input.json', 'r') as file:

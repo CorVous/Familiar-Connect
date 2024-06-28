@@ -7,3 +7,4 @@ bun.lockb
 */__pycache__
 backup.db
 user_token.json
+local.db
