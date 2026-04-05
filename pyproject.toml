@@ -50,6 +50,9 @@ ruff = "2d"
 ty = "1d"
 davey = "1d"
 
+[tool.ruff]
+extend-exclude = ["src/familiar_connect/_version.py"]
+
 [tool.ruff.lint]
 preview = true # I'm not a coward!
 
