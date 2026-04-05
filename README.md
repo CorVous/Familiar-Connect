@@ -6,9 +6,9 @@ An AI "familiar" that joins Discord voice channels, listens to users, understand
 
 ## Goals
 
-- **Single runtime**: The entire backend runs as one Python process using `asyncio`. No separate worker scripts, no external message broker.
-- **No RabbitMQ**: Internal async queues (`asyncio.Queue`) replace RabbitMQ for all inter-component communication.
-- **Unified entry point**: One `python main.py` starts everything — Discord gateway, voice capture, transcription, LLM, TTS, and Twitch listener all run as concurrent async tasks.
+- **Single runtime**: The entire backend runs as one Python process using `trio`. No separate worker scripts, no external message broker.
+- **No RabbitMQ**: Internal async channels (`trio.MemoryChannel`) replace RabbitMQ for all inter-component communication.
+- **Unified entry point**: One `python main.py` starts everything — Discord gateway, voice capture, transcription, LLM, TTS, and Twitch listener all run as concurrent tasks in a `trio.Nursery`.
 
 ---
 
@@ -17,11 +17,11 @@ An AI "familiar" that joins Discord voice channels, listens to users, understand
 All components run as coroutines within a single `asyncio` event loop:
 
 ```
-Discord Voice → audio capture → asyncio.Queue
+Discord Voice → audio capture → trio.MemoryChannel
                                       ↓
                             Transcription (Deepgram/Whisper)
                                       ↓
-                     asyncio.Queue (text) ← Twitch Events
+                  trio.MemoryChannel (text) ← Twitch Events
                                       ↓
                           Message Processor + Chattiness
                                       ↓
@@ -29,7 +29,7 @@ Discord Voice → audio capture → asyncio.Queue
                                       ↓
                               Azure TTS → Audio
                                       ↓
-                         asyncio.Queue → Discord Voice Playback
+                    trio.MemoryChannel → Discord Voice Playback
 ```
 
 ---
@@ -46,7 +46,7 @@ Discord Voice → audio capture → asyncio.Queue
 
 ### Transcription
 - **API-based**: Deepgram ("nova-2") or OpenAI Whisper API
-- **Local**: Whisper running in a thread pool executor to avoid blocking the event loop, with GPU (CUDA) or CPU fallback
+- **Local**: Whisper running via `trio.to_thread.run_sync` to avoid blocking the event loop, with GPU (CUDA) or CPU fallback
 - Converts Discord's 48kHz Opus audio → 16kHz WAV for transcription
 
 ### Message Processing
@@ -64,7 +64,7 @@ Discord Voice → audio capture → asyncio.Queue
 - Resamples audio from 16kHz → 96kHz for Discord playback
 
 ### Twitch Integration
-- Connects to Twitch EventSub WebSocket as an async task
+- Connects to Twitch EventSub WebSocket as a task in the root nursery
 - Feeds channel events directly into the internal text queue:
   - Channel point redemptions, subscriptions, gift subs, cheers (bits), follows, ad breaks
 
