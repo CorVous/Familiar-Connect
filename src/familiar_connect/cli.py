@@ -9,6 +9,8 @@ import importlib.metadata
 import logging
 import sys
 
+from dotenv import load_dotenv
+
 from familiar_connect import __version__
 from familiar_connect.commands import version_cmd
 
@@ -97,6 +99,7 @@ def main() -> int:
 
     :return: Exit code (0 for success, non-zero for error)
     """
+    load_dotenv()
     parser = create_parser()
     args = parser.parse_args()
 

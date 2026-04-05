@@ -47,6 +47,8 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
   - Which transcription/LLM/TTS provider to use
   - API keys per provider, model selection, temperature
 
+Bot token in `.env` as `DISCORD_BOT`.
+
 ### Transcription
 
 **Primary: Deepgram (Nova-2, streaming)**
