@@ -23,14 +23,7 @@ These commands already exist for voice; they should work the same way in text ch
 
 ## Chat Frequency
 
-The same chattiness system from the voice channel applies here. The familiar evaluates each message against the same decision pipeline:
-
-1. **Direct address** (name mention, @mention): Always respond
-2. **Direct question to nobody specific**: Roll against chattiness threshold
-3. **Silence detection**: If nobody sends a message for N seconds (scaled by chattiness), the bot may interject
-4. **Topic relevance**: If the conversation touches the familiar's domain knowledge, increase response probability
-
-The chattiness slider (0–100) maps to the same behavior ranges as voice. Rate limiting also applies — minimum gap between unprompted responses, hard cap on unprompted responses per minute, and a raised threshold when multiple people are actively typing.
+The same chattiness system described in `plan.md` (Message Processing & Chattiness) applies here. "Silence" is measured by message inactivity rather than audio silence.
 
 ## One Location at a Time
 
