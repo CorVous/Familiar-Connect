@@ -68,24 +68,22 @@ Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz → stream 
 
 The bot evaluates each incoming event (transcription, text message, Twitch event) against a decision pipeline to determine whether to respond.
 
-> **Future consideration:** Using a smaller/cheaper model to make response-worthiness decisions may be a better strategy than hardcoded heuristics, but is deferred for now due to implementation complexity.
+> **Note:** Meaningfully differentiating most chattiness levels requires a model that understands the conversation — e.g. detecting questions aimed at nobody, topic relevance, or general conversation flow. Until a smaller LLM is used for this (see `future-features/chattiness-personality.md`), only the behaviours below are reliably implementable with heuristics.
 
-**Response decision heuristics (evaluated in priority order):**
+**What is implementable without an LLM:**
 1. **Direct address** (name mention, @mention, "hey familiar-name"): Always respond.
-2. **Direct question to nobody specific** ("does anyone know..."): Roll against chattiness threshold.
-3. **Silence detection**: If nobody speaks for N seconds (scaled by chattiness), the bot may interject.
-4. **Topic relevance**: If the conversation touches the familiar's domain knowledge, increase response probability by ~20-30%.
-5. **Twitch events**: Always acknowledge subs/bits/raids. Follows only at Moderate or above.
+2. **Silence detection**: If nobody speaks for N seconds, the bot may interject.
+3. **Twitch events**: Always acknowledge subs/bits/raids.
 
 **Chattiness presets:**
 
 | Preset | Behavior |
 |--------|----------|
 | **Quiet** | Only respond when directly addressed by name |
-| **Reserved** | + Respond to direct questions aimed at nobody specific |
 | **Moderate** | + Interject after prolonged silence. React to Twitch events. |
-| **Talkative** | + Probabilistic response to general conversation |
-| **Very Talkative** | + Comment on most topics, shorter silence threshold, react to almost everything |
+| **Very Talkative** | + Shorter silence threshold |
+
+The intermediate presets (Reserved, Talkative) are deferred until LLM-based chattiness is implemented.
 
 **Turn-taking rules:**
 - Wait 1.5–2s after the last speaker finishes (VAD silence) before starting a response
