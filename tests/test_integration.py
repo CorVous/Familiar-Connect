@@ -7,9 +7,9 @@ import sys
 import pytest
 
 # Get package name dynamically - import from the actual package
-import python_template
+import familiar_connect
 
-_PACKAGE_NAME: str = python_template.__package__ or "python_template"
+_PACKAGE_NAME: str = familiar_connect.__package__ or "familiar_connect"
 
 
 def test_cli_help() -> None:
@@ -128,7 +128,7 @@ sys.stdout = io.StringIO()
 sys.stderr = io.StringIO()
 
 # Import package
-from python_template import __version__
+from familiar_connect import __version__
 
 # Get captured output
 stdout_value = sys.stdout.getvalue()

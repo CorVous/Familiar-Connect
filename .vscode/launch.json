@@ -5,7 +5,7 @@
             "name": "Python: CLI - Version (INFO)",
             "type": "debugpy",
             "request": "launch",
-            "module": "python_template",
+            "module": "familiar_connect",
             "args": [
                 "-v",
                 "version"
@@ -18,7 +18,7 @@
             "name": "Python: CLI - Example Command (INFO)",
             "type": "debugpy",
             "request": "launch",
-            "module": "python_template",
+            "module": "familiar_connect",
             "args": [
                 "-v",
                 "example",

@@ -3,7 +3,7 @@
 import argparse
 import logging
 
-from python_template import __version__
+from familiar_connect import __version__
 
 _logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def add_parser(
         "version",
         parents=[common_parser],
         help="Display package version",
-        description="Display the installed version of python-template",
+        description="Display the installed version of familiar-connect",
     )
     parser.set_defaults(func=run)
     return parser
@@ -35,5 +35,5 @@ def run(_args: argparse.Namespace) -> int:
     :return: Exit code (0 for success)
     """
     _logger.info("Displaying version information")
-    print(f"python-template {__version__}")  # noqa: T201
+    print(f"familiar-connect {__version__}")  # noqa: T201
     return 0

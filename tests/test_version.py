@@ -4,8 +4,8 @@ import re
 import subprocess  # noqa: S404
 import sys
 
-import python_template
-from python_template import __version__
+import familiar_connect
+from familiar_connect import __version__
 
 
 def test_version_import() -> None:
@@ -29,7 +29,7 @@ def test_version_format() -> None:
 
 def test_version_subcommand() -> None:
     """Test version subcommand displays version."""
-    package_name = python_template.__package__ or "python_template"
+    package_name = familiar_connect.__package__ or "familiar_connect"
     result = subprocess.run(  # noqa: S603
         [sys.executable, "-m", package_name, "version"],
         capture_output=True,
@@ -42,7 +42,7 @@ def test_version_subcommand() -> None:
 
 def test_version_flag() -> None:
     """Test --version flag displays version."""
-    package_name = python_template.__package__ or "python_template"
+    package_name = familiar_connect.__package__ or "familiar_connect"
     result = subprocess.run(  # noqa: S603
         [sys.executable, "-m", package_name, "--version"],
         capture_output=True,
