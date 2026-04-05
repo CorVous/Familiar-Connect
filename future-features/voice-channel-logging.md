@@ -1,10 +1,45 @@
-# Voice Channel Conversation Logging
+# Voice Channel Text & Media Input + Logging
 
-## Problem
+## Overview
 
-Logging conversation activity (transcripts, LLM responses, session status) to a Discord voice text channel without creating a flood of new messages.
+While the bot is active in a voice channel, the associated text channel serves two purposes:
+1. **Input** — text messages and images sent there are ingested as conversation input alongside speech
+2. **Output** — the bot logs session activity there without spamming new messages
 
-## Approaches
+## Text & Image Input
+
+### Text Messages
+
+While the bot is awake in a voice channel, it listens for messages posted in the associated text channel and feeds them into the same conversation pipeline as transcribed speech.
+
+- Messages are attributed to the sender's username (linked to their people entry in the lorebook)
+- Text input and voice input are interleaved in the conversation history so the LLM sees a unified stream
+- The bot's response goes out over voice (TTS) as normal; the transcript thread also logs the text message as input
+- Messages posted by the bot itself (status embeds, thread entries) are ignored as input
+
+### Image Input
+
+Images attached to messages in the voice text channel are passed to the LLM as vision input.
+
+- Supported: images attached directly to a message or posted as Discord image links
+- The image is downloaded and passed alongside any text in that message
+- The LLM should be a vision-capable model (Claude supports this natively)
+- If the model cannot handle vision, log a warning and describe the attachment by filename/type only
+- Multiple images in one message are all passed in order
+- Images are not stored persistently by default — they are used for the current turn only. If persistence is desired, the lorebook session summarizer should describe notable images in its summary.
+
+### Input Priority & Attribution
+
+When voice and text arrive close together, they are processed in arrival order. The conversation history entry should make the input type clear:
+
+```
+[12:34] 🎙 Username: "hey can you look at this"
+[12:34] 💬 Username: "what do you think of this image?" [image: screenshot.png]
+```
+
+---
+
+## Logging Approaches (Output)
 
 ### 1. Live-Edited Status Message (Recommended for session state)
 
@@ -72,5 +107,6 @@ Use the **combination approach** (option 3):
 
 - py-cord's `VoiceChannel.text_channel` property gives the associated text channel in a stage/voice channel (Discord feature); for regular voice channels, a configured text channel ID will be needed
 - Edits should be debounced — buffer updates for ~2 seconds before editing to avoid rate limits
-- Thread messages can be short: `[12:34] User: "can you tell me a story"` / `[12:34] Bot: "Once upon a time..."`
+- Thread messages can be short: `[12:34] 🎙 User: "can you tell me a story"` / `[12:34] 💬 User: "what do you think?" [image]` / `[12:34] Bot: "Once upon a time..."`
+- Text messages and images from the voice text channel are logged in the thread alongside voice transcript entries so the full session history is unified
 - Sensitive content (e.g. private conversations) should respect a configurable opt-out so logging can be disabled per-familiar or per-server
