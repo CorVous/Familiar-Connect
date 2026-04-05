@@ -43,7 +43,7 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
 - **`/awaken`** — Joins your voice channel, captures audio in real-time from all speakers
 - **`/sleep`** — Gracefully disconnects
 - **`/setup`** — Configuration wizard (UI-driven via Discord modals) to set:
-  - Familiar name, personality prompt, chattiness preset (Quiet / Reserved / Moderate / Talkative / Very Talkative)
+  - Familiar name, personality prompt, chattiness level (0–100)
   - Which transcription/LLM/TTS provider to use
   - Model selection, temperature
 
@@ -68,22 +68,22 @@ Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz → stream 
 
 The bot evaluates each incoming event (transcription, text message, Twitch event) against a decision pipeline to determine whether to respond.
 
-> **Note:** Meaningfully differentiating most chattiness levels requires a model that understands the conversation — e.g. detecting questions aimed at nobody, topic relevance, or general conversation flow. Until a smaller LLM is used for this (see `future-features/chattiness-personality.md`), only the behaviours below are reliably implementable with heuristics.
-
-**What is implementable without an LLM:**
+**Response decision heuristics (evaluated in priority order):**
 1. **Direct address** (name mention, @mention, "hey familiar-name"): Always respond.
-2. **Silence detection**: If nobody speaks for N seconds, the bot may interject.
-3. **Twitch events**: Always acknowledge subs/bits/raids.
+2. **Direct question to nobody specific** ("does anyone know..."): Roll against chattiness threshold.
+3. **Silence detection**: If nobody speaks for N seconds (scaled by chattiness), the bot may interject.
+4. **Topic relevance**: If the conversation touches the familiar's domain knowledge, increase response probability by ~20-30%.
+5. **Twitch events**: Always acknowledge subs/bits/raids. Follows only at chattiness > 50.
 
-**Chattiness presets:**
+**Chattiness slider mapping (0-100):**
 
-| Preset | Behavior |
-|--------|----------|
-| **Quiet** | Only respond when directly addressed by name |
-| **Moderate** | + Interject after prolonged silence. React to Twitch events. |
-| **Very Talkative** | + Shorter silence threshold |
-
-The intermediate presets (Reserved, Talkative) are deferred until LLM-based chattiness is implemented.
+| Range | Behavior |
+|-------|----------|
+| 0–10 | Only respond when directly addressed by name |
+| 11–30 | + Respond to direct questions aimed at nobody specific |
+| 31–60 | + Interject after prolonged silence (threshold = `12 - (chattiness * 0.1)` seconds). React to Twitch events. |
+| 61–85 | + Probabilistic response to general conversation (`(chattiness - 60) / 100` chance per utterance) |
+| 86–100 | + Comment on most topics, shorter silence threshold, react to almost everything |
 
 **Turn-taking rules:**
 - Wait 1.5–2s after the last speaker finishes (VAD silence) before starting a response
@@ -92,7 +92,7 @@ The intermediate presets (Reserved, Talkative) are deferred until LLM-based chat
 - If interrupted twice in 60s, double the silence threshold temporarily
 
 **Rate limiting:**
-- Minimum 15–30s between unprompted responses (shorter for chattier presets)
+- Minimum 15–30s between unprompted responses (scales inversely with chattiness)
 - Hard cap: max 3 unprompted responses per minute
 - If 3+ humans are actively talking (multiple speakers in last 10s), raise the response threshold — talk less in fast-moving conversations, not more
 
