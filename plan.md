@@ -18,7 +18,7 @@ All components run as coroutines within a single `trio` event loop:
 ```
 Discord Voice → audio capture → trio.MemoryChannel
                                       ↓
-                            Transcription
+                            Transcription (Deepgram streaming)
                                       ↓
                   trio.MemoryChannel (text) ← Twitch Events
                                       ↓
@@ -26,7 +26,7 @@ Discord Voice → audio capture → trio.MemoryChannel
                                       ↓
                            Claude LLM + Conversation History
                                       ↓
-                              Azure TTS → Audio
+                              TTS (Cartesia / Azure) → Audio
                                       ↓
                     trio.MemoryChannel → Discord Voice Playback
 ```
@@ -46,39 +46,160 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
   - API keys per provider, model selection, temperature
 
 ### Transcription
-- Pick a reliable cheap provider. Maybe avoid relying on free services to avoid getting rate-limited or blocked?
-- Converts Discord's 48kHz Opus audio → 16kHz WAV for transcription (or whatever the API needs)
 
-### Message Processing
-- Research the best way to figure out when the AI should speak in the conversation. Inputs will involve voice call data, but also text messages and twitch events and chat.
-- Use SQLite or equivalent for vectorization, storage, etc. as needed.
+**Primary: Deepgram (Nova-2, streaming)**
+- Native WebSocket streaming API, ~300ms latency, strong accuracy
+- ~$0.0043/min pay-as-you-go, $200 free credit on signup
+- Handles raw PCM streams directly — maps well to Discord's audio pipeline
+- Good Python SDK (`deepgram-sdk`)
 
-### AI Response
-- Research the best strategy for the conversational chatbot
-- Leverage lessons learned by the SillyTavern community- terms like "connection profile", etc. might be ok to use, or maybe we could plug into a running silly-tavern instance somehow?
-- Configurable model, temperature, max 200 tokens
-- Full conversation history with timestamps
-- System prompt from the familiar's configured personality
-- Combine retrieval-augmented generation (RAG) with some budgeted trigger or vectorized activations to fill out the context.
+**Fallback: faster-whisper (local)**
+- Zero cost, no rate limits, no external dependency
+- Requires a GPU for real-time performance (large-v3 model, ~1-2s per 5s chunk on RTX 3060+)
+- Good offline / privacy-preserving option
+
+Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz → stream to Deepgram WebSocket (or feed chunks to faster-whisper).
+
+### Message Processing & Chattiness
+
+The bot evaluates each incoming event (transcription, text message, Twitch event) against a decision pipeline to determine whether to respond.
+
+**Response decision heuristics (evaluated in priority order):**
+1. **Direct address** (name mention, @mention, "hey familiar-name"): Always respond.
+2. **Direct question to nobody specific** ("does anyone know..."): Roll against chattiness threshold.
+3. **Silence detection**: If nobody speaks for N seconds (scaled by chattiness), the bot may interject.
+4. **Topic relevance**: If the conversation touches the familiar's domain knowledge, increase response probability by ~20-30%.
+5. **Twitch events**: Always acknowledge subs/bits/raids. Follows only at chattiness > 50.
+
+**Chattiness slider mapping (0-100):**
+
+| Range | Behavior |
+|-------|----------|
+| 0–10 | Only respond when directly addressed by name |
+| 11–30 | + Respond to direct questions aimed at nobody specific |
+| 31–60 | + Interject after prolonged silence (threshold = `12 - (chattiness * 0.1)` seconds). React to Twitch events. |
+| 61–85 | + Probabilistic response to general conversation (`(chattiness - 60) / 100` chance per utterance) |
+| 86–100 | + Comment on most topics, shorter silence threshold, react to almost everything |
+
+**Turn-taking rules:**
+- Wait 1.5–2s after the last speaker finishes (VAD silence) before starting a response
+- If someone starts speaking while the bot is generating but hasn't started outputting audio, abort
+- If already speaking, finish the current sentence then yield
+- If interrupted twice in 60s, double the silence threshold temporarily
+
+**Rate limiting:**
+- Minimum 15–30s between unprompted responses (scales inversely with chattiness)
+- Hard cap: max 3 unprompted responses per minute
+- If 3+ humans are actively talking (multiple speakers in last 10s), raise the response threshold — talk less in fast-moving conversations, not more
+
+### AI Response (Claude LLM)
+
+**Context management:** Hybrid sliding-window + summarization.
+- Keep the last ~20 exchanges verbatim in context
+- When messages age out, compress them into a rolling conversation summary (~10:1 ratio)
+- Store all raw messages in SQLite with timestamps for RAG retrieval
+
+**RAG with sqlite-vec:**
+- Use `sqlite-vec` for cosine similarity search over embeddings
+- Embed message chunks and persona-relevant facts using `text-embedding-3-small`
+- Store embeddings alongside message metadata (timestamp, user, channel) for filtered retrieval
+- Lightweight, no external vector DB needed for single-server use
+
+**Character system (borrowing from SillyTavern):**
+- Adopt the TavernAI Character Card V2 JSON schema as config format
+- Separate fields: description, personality summary, example dialogues, scenario
+- Per-user "persona" notes so the familiar remembers facts about each user
+- No direct SillyTavern integration (it's a UI-focused Node.js app, not a library)
+
+**System prompt layering:**
+1. Core instructions and safety rails
+2. Character card (personality, speech patterns, backstory)
+3. Retrieved RAG context
+4. Conversation summary
+5. Recent message history
+
+**Token budget (~30k per call for Sonnet, ~8k for Haiku):**
+- System prompt + character card: ~2k tokens
+- RAG retrieved chunks: ~3k tokens
+- Conversation summary: ~1k tokens
+- Recent history: ~20k tokens (Sonnet) / ~4k tokens (Haiku)
+- Response headroom: ~4k tokens (capped at 200 tokens for voice output)
+
+Configurable model, temperature. Max 200 output tokens for voice responses to keep latency low.
 
 ### Text-to-Speech
-- Research popular, reliable, cheap voice providers
-- Also keep the 9 selectable Azure voices for nostalgia
-- Resamples audio to 96kHz as neeed for Discord playback
+
+**Primary: Cartesia Sonic**
+- Purpose-built for real-time conversational AI
+- Sub-100ms time-to-first-byte — best-in-class latency
+- Native WebSocket streaming, quality rivaling ElevenLabs at lower cost
+- Outputs 44.1kHz PCM natively
+- Voice cloning support
+
+**Secondary: Azure Speech (Neural)**
+- Keep the 9 original Azure voices for nostalgia
+- ~$16/M chars, ~100-200ms latency, rock-solid reliability
+- Mature Python SDK, good fallback if Cartesia has downtime
+
+**Budget fallback: Fish Audio**
+- Generous free tier for development/testing
+- Community voice models for variety
+
+Pipeline: LLM text → stream to Cartesia/Azure WebSocket → receive PCM audio → resample to 48kHz Opus → feed to Discord voice playback.
 
 ### Twitch Integration
 - Connects to Twitch EventSub WebSocket as a task in the root nursery
 - Feeds channel events directly into the internal text queue:
   - Channel point redemptions, subscriptions, gift subs, cheers (bits), follows, ad breaks
 
-### Monitoring UI
+### Monitoring Dashboard
 
-- View health of all glued-together services
-- See recent event log
-- Consider a fancy terminal animation? Simple web dashboard? Desktop app?
-- Keep options for a control dashboard open
-- Keep SillyTavern integration in mind
-- Is this the kind of thing nemoclaw would be helpful for? Probably not...
+**Starlette + Hypercorn** (trio-native web dashboard):
+- Hypercorn natively supports trio via `hypercorn.trio.serve` — runs as a nursery task alongside the bot
+- Starlette is ASGI-compatible, lightweight
+- Routes:
+  - `/health` — JSON status of each service (Discord, Twitch, transcription, TTS, LLM)
+  - `/events` — Recent event log via SSE or WebSocket
+  - Simple HTML page consuming these endpoints
+- Controls can be added as POST endpoints
+- Dependencies: `hypercorn`, `starlette`
+
+---
+
+## Security Guidelines
+
+This project handles user-provided API keys and tokens (Discord bot token, Twitch OAuth, Deepgram, Cartesia, Azure, OpenAI). Treat all credentials as secrets.
+
+### Credential Storage
+- **Never hardcode tokens or API keys** in source code, config files checked into git, or log output
+- Store secrets in environment variables or a `.env` file that is **gitignored**
+- If persisting user-configured keys (e.g. from `/setup`), encrypt at rest using a machine-local key (e.g. via `cryptography.Fernet` with a key derived from a master secret in an env var)
+- SQLite database files containing user data should not be committed to the repo
+
+### Transport & Network
+- All external API calls (Deepgram, Cartesia, Azure, Claude, Twitch) must use TLS (HTTPS / WSS) — never downgrade to plaintext
+- The monitoring dashboard should bind to `127.0.0.1` by default, not `0.0.0.0`, to avoid exposing it to the network
+- If the dashboard is exposed externally, require authentication (even a simple shared secret or token header)
+
+### Logging & Error Handling
+- **Never log secrets** — sanitize tokens, API keys, and auth headers from log output and error messages
+- Avoid logging full request/response bodies from API calls that may contain keys
+- Use structured logging so sensitive fields can be filtered consistently
+
+### Input Validation
+- Sanitize user input from Discord commands and Twitch events before passing to the LLM or storing in the database
+- Treat all text from external sources (transcription output, Twitch chat, Discord messages) as untrusted
+- Apply length limits on user-provided configuration values (personality prompts, familiar names) to prevent abuse
+
+### Dependency Hygiene
+- Pin dependency versions in `requirements.txt` to avoid supply-chain surprises
+- Review new dependencies before adding them — prefer well-maintained packages with active security response
+- Keep dependencies updated for security patches
+
+### Principle of Least Privilege
+- Discord bot should only request the permissions it actually needs (voice connect, send messages, use slash commands)
+- Twitch token scopes should be minimal — only what EventSub subscriptions require
+- API keys for third-party services should use the most restrictive tier/role available
 
 ---
 
@@ -87,9 +208,4 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
 ### Prerequisites
 - Python 3.11+
 - SQLite (bundled with Python)
-
-### Run
-```bash
-pip install -r requirements.txt
-python main.py
-```
+- GPU recommended for local Whisper fallback
