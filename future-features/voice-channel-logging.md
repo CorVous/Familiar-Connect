@@ -28,14 +28,9 @@ Images attached to messages in the voice text channel are passed to the LLM as v
 - Multiple images in one message are all passed in order
 - Images are not stored persistently by default — they are used for the current turn only. If persistence is desired, the lorebook session summarizer should describe notable images in its summary.
 
-### Input Priority & Attribution
+### Input Attribution
 
-When voice and text arrive close together, they are processed in arrival order. The conversation history entry should make the input type clear:
-
-```
-[12:34] 🎙 Username: "hey can you look at this"
-[12:34] 💬 Username: "what do you think of this image?" [image: screenshot.png]
-```
+All input — whether spoken or typed — is treated identically by the LLM. It is attributed to the sender's username and processed in arrival order. The input method is not surfaced in the conversation history.
 
 ---
 
@@ -107,6 +102,6 @@ Use the **combination approach** (option 3):
 
 - py-cord's `VoiceChannel.text_channel` property gives the associated text channel in a stage/voice channel (Discord feature); for regular voice channels, a configured text channel ID will be needed
 - Edits should be debounced — buffer updates for ~2 seconds before editing to avoid rate limits
-- Thread messages can be short: `[12:34] 🎙 User: "can you tell me a story"` / `[12:34] 💬 User: "what do you think?" [image]` / `[12:34] Bot: "Once upon a time..."`
-- Text messages and images from the voice text channel are logged in the thread alongside voice transcript entries so the full session history is unified
+- Thread messages can be short: `[12:34] User: "can you tell me a story"` / `[12:34] Bot: "Once upon a time..."` — no distinction between voice and text input
+- Images are noted inline: `[12:34] User: "what do you think of this?" [image: screenshot.png]`
 - Sensitive content (e.g. private conversations) should respect a configurable opt-out so logging can be disabled per-familiar or per-server
