@@ -31,6 +31,8 @@ Discord Voice → audio capture → trio.MemoryChannel
                     trio.MemoryChannel → Discord Voice Playback
 ```
 
+Use red/green A/B TDD.
+
 ---
 
 ## Core Features
