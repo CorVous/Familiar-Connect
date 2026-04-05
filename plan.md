@@ -45,7 +45,7 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
 - **`/setup`** — Configuration wizard (UI-driven via Discord modals) to set:
   - Familiar name, personality prompt, chattiness level (0–100)
   - Which transcription/LLM/TTS provider to use
-  - API keys per provider, model selection, temperature
+  - Model selection, temperature
 
 Bot token in `.env` as `DISCORD_BOT`.
 
