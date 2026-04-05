@@ -71,6 +71,15 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
 - Feeds channel events directly into the internal text queue:
   - Channel point redemptions, subscriptions, gift subs, cheers (bits), follows, ad breaks
 
+### Monitoring UI
+
+- View health of all glued-together services
+- See recent event log
+- Consider a fancy terminal animation? Simple web dashboard? Desktop app?
+- Keep options for a control dashboard open
+- Keep SillyTavern integration in mind
+- Is this the kind of thing nemoclaw would be helpful for? Probably not...
+
 ---
 
 ## Getting Started
