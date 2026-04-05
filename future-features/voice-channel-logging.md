@@ -26,7 +26,7 @@ Images attached to messages in the voice text channel are passed to the LLM as v
 - The LLM should be a vision-capable model (Claude supports this natively)
 - If the model cannot handle vision, log a warning and describe the attachment by filename/type only
 - Multiple images in one message are all passed in order
-- Images are not stored persistently by default — they are used for the current turn only. If persistence is desired, the lorebook session summarizer should describe notable images in its summary.
+- Images are ephemeral by default — used for the current turn only. Persistence strategy to be decided later.
 
 ### Input Attribution
 
