@@ -9,5 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Secrets
+.env
+.env.*
+
 # Auto-generated version file
 src/*/_version.py

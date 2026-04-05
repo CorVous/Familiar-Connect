@@ -12,6 +12,7 @@ dependencies = [
     "py-cord >= 2.7.0, < 3",
     "davey >= 0.1.5, < 1",
     "twitchAPI >= 4.2.0, < 5",
+    "python-dotenv >= 1.0.0, < 2",
 ]
 
 [project.scripts]
