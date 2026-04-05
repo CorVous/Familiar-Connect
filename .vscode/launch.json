@@ -1,0 +1,34 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: CLI - Version (INFO)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "python_template",
+            "args": [
+                "-v",
+                "version"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: CLI - Example Command (INFO)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "python_template",
+            "args": [
+                "-v",
+                "example",
+                "World",
+                "--greeting",
+                "Hello"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

@@ -1,10 +1,13 @@
-*/node_modules
-.env
-.prettierrc.json
-.vscode
-bun.lockb
-.eslintrc.json
-*/__pycache__
-backup.db
-user_token.json
-local.db
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Auto-generated version file
+src/*/_version.py
