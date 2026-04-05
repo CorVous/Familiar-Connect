@@ -21,6 +21,17 @@ These commands already exist for voice; they should work the same way in text ch
   - When dismissed, the anchor message is updated to "Session ended" and the thread is archived
 - Images sent in the channel are ingested as vision input, same as in voice text channels
 
+## Chat Frequency
+
+The same chattiness system from the voice channel applies here. The familiar evaluates each message against the same decision pipeline:
+
+1. **Direct address** (name mention, @mention): Always respond
+2. **Direct question to nobody specific**: Roll against chattiness threshold
+3. **Silence detection**: If nobody sends a message for N seconds (scaled by chattiness), the bot may interject
+4. **Topic relevance**: If the conversation touches the familiar's domain knowledge, increase response probability
+
+The chattiness slider (0–100) maps to the same behavior ranges as voice. Rate limiting also applies — minimum gap between unprompted responses, hard cap on unprompted responses per minute, and a raised threshold when multiple people are actively typing.
+
 ## One Location at a Time
 
 A familiar may only be awake in one channel at a time — voice or text. If a `/awaken` command is issued while the familiar is already active elsewhere:
