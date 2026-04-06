@@ -9,6 +9,8 @@ requires-python = ">=3.13, < 3.14"
 dependencies = [
     "defusedxml >= 0.7.1, < 1",
     "trio >= 0.33.0, < 1",
+    "trio-asyncio >= 0.15.0, < 1",
+    "PyNaCl >= 1.5.0, < 2",
     "py-cord >= 2.7.0, < 3",
     "davey >= 0.1.5, < 1",
     "twitchAPI >= 4.2.0, < 5",
@@ -139,6 +141,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
     "S101", # Allow assert in tests
+    "S105", # Hardcoded fake tokens in tests are fine
+    "S106",
+    "SLF001", # Tests often poke at private members
+    "FBT003", # Boolean positional args common in mock assertions
+    "ANN202", # Private helper annotations not critical in tests
 ]
 
 [tool.ruff.format]

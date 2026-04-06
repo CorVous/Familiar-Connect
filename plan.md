@@ -49,6 +49,8 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
 
 Bot token in `.env` as `DISCORD_BOT`.
 
+Bot token in `.env` as `DISCORD_BOT`.
+
 ### Transcription
 
 **Primary: Deepgram (Nova-2, streaming)**

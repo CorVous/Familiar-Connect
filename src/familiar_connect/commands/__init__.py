@@ -5,6 +5,7 @@ Each subcommand is defined in its own module and exports:
 - run(args): Execute the subcommand logic
 """
 
+from familiar_connect.commands import run as run_cmd
 from familiar_connect.commands import version as version_cmd
 
-__all__ = ["version_cmd"]
+__all__ = ["run_cmd", "version_cmd"]
