@@ -11,19 +11,24 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from typing import Protocol
 
-    class _EventWrapper(Protocol):
-        """Common structural type of all twitchAPI EventSub event wrappers.
-
-        Every wrapper class (ChannelFollowEvent, ChannelSubscribeEvent, …) has
-        a typed .event attribute holding the actual event data.  We can't use
-        a concrete base class because twitchAPI's TwitchObject has no .event
-        member — it's added per-subclass.  A Protocol lets ty verify the
-        attribute access without importing every event class at runtime.
-        """
-
-        event: object
+    from twitchAPI.eventsub.websocket import EventSubWebsocket
+    from twitchAPI.object.eventsub import (
+        ChannelAdBreakBeginData,
+        ChannelAdBreakBeginEvent,
+        ChannelCheerData,
+        ChannelCheerEvent,
+        ChannelFollowData,
+        ChannelFollowEvent,
+        ChannelPointsCustomRewardRedemptionAddEvent,
+        ChannelPointsCustomRewardRedemptionData,
+        ChannelSubscribeData,
+        ChannelSubscribeEvent,
+        ChannelSubscriptionGiftData,
+        ChannelSubscriptionGiftEvent,
+        ChannelSubscriptionMessageData,
+        ChannelSubscriptionMessageEvent,
+    )
 
 
 import trio
@@ -39,19 +44,6 @@ from familiar_connect.twitch import (
     build_resubscription_event,
     build_subscription_event,
 )
-
-if TYPE_CHECKING:
-    from twitchAPI.eventsub.websocket import EventSubWebsocket
-    from twitchAPI.object.eventsub import (
-        ChannelAdBreakBeginData,
-        ChannelCheerData,
-        ChannelFollowData,
-        ChannelPointsCustomRewardRedemptionData,
-        ChannelSubscribeData,
-        ChannelSubscriptionGiftData,
-        ChannelSubscriptionMessageData,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Tier mapping
@@ -127,12 +119,21 @@ class TwitchWatcher:
     def handle_resubscription(
         self, data: ChannelSubscriptionMessageData
     ) -> TwitchEvent | None:
-        """Convert a ChannelSubscriptionMessageData into a TwitchEvent."""
+        """Convert a ChannelSubscriptionMessageData into a TwitchEvent.
+
+        cumulative_months is Optional on the Twitch side; fall back to
+        duration_months (always present) when it is absent.
+        """
+        months = (
+            data.cumulative_months
+            if data.cumulative_months is not None
+            else data.duration_months
+        )
         return build_resubscription_event(
             config=self.config,
             channel=self.channel,
             viewer=data.user_name,
-            months=data.cumulative_months,
+            months=months,
             tier=_tier(data.tier),
             message=data.message.text,
         )
@@ -170,7 +171,7 @@ class TwitchWatcher:
     # Listener registration
     # ------------------------------------------------------------------
 
-    def register_listeners(
+    async def register_listeners(
         self,
         eventsub: EventSubWebsocket,
         send: trio.MemorySendChannel[TwitchEvent] | None = None,
@@ -183,62 +184,106 @@ class TwitchWatcher:
         only check which listen_* methods are invoked.
         """
         if self.config.follows_enabled:
-            eventsub.listen_channel_follow_v2(
+            await eventsub.listen_channel_follow_v2(
                 self.broadcaster_id,
                 self.moderator_id,
-                self._make_callback(self.handle_follow, send),
+                self._follow_callback(send),
             )
 
         if self.config.subscriptions_enabled:
-            eventsub.listen_channel_subscribe(
+            await eventsub.listen_channel_subscribe(
                 self.broadcaster_id,
-                self._make_callback(self.handle_subscription, send),
+                self._subscription_callback(send),
             )
-            eventsub.listen_channel_subscription_gift(
+            await eventsub.listen_channel_subscription_gift(
                 self.broadcaster_id,
-                self._make_callback(self.handle_gift_subscription, send),
+                self._gift_subscription_callback(send),
             )
-            eventsub.listen_channel_subscription_message(
+            await eventsub.listen_channel_subscription_message(
                 self.broadcaster_id,
-                self._make_callback(self.handle_resubscription, send),
+                self._resubscription_callback(send),
             )
 
         if self.config.cheers_enabled:
-            eventsub.listen_channel_cheer(
+            await eventsub.listen_channel_cheer(
                 self.broadcaster_id,
-                self._make_callback(self.handle_cheer, send),
+                self._cheer_callback(send),
             )
 
         if self.config.ads_enabled:
-            eventsub.listen_channel_ad_break_begin(
+            await eventsub.listen_channel_ad_break_begin(
                 self.broadcaster_id,
-                self._make_callback(self.handle_ad_break_begin, send),
+                self._ad_break_begin_callback(send),
             )
 
         if self.config.redemption_names:
-            eventsub.listen_channel_points_custom_reward_redemption_add(
+            await eventsub.listen_channel_points_custom_reward_redemption_add(
                 self.broadcaster_id,
-                self._make_callback(self.handle_channel_point_redemption, send),
+                self._channel_point_redemption_callback(send),
             )
 
-    @staticmethod
-    def _make_callback(
-        handler: Callable[[object], TwitchEvent | None],
-        send: trio.MemorySendChannel[TwitchEvent] | None,
-    ) -> Callable[[_EventWrapper], Awaitable[None]]:
-        """Wrap a synchronous handler as an async EventSub callback.
+    # ------------------------------------------------------------------
+    # Typed callback factories — one per event type so ty can verify the
+    # callback signatures match what each listen_* method expects.
+    # ------------------------------------------------------------------
 
-        The returned coroutine accepts a twitchAPI event wrapper, extracts
-        .event, calls the handler, and sends any resulting TwitchEvent to
-        the captured *send* channel.
-        """
+    def _follow_callback(
+        self, send: trio.MemorySendChannel[TwitchEvent] | None
+    ) -> Callable[[ChannelFollowEvent], Awaitable[None]]:
+        async def cb(event: ChannelFollowEvent) -> None:
+            await _send_if_present(self.handle_follow(event.event), send)
 
-        async def callback(event: _EventWrapper) -> None:
-            result = handler(event.event)
-            if result is not None and send is not None:
-                await send.send(result)
+        return cb
 
-        return callback
+    def _subscription_callback(
+        self, send: trio.MemorySendChannel[TwitchEvent] | None
+    ) -> Callable[[ChannelSubscribeEvent], Awaitable[None]]:
+        async def cb(event: ChannelSubscribeEvent) -> None:
+            await _send_if_present(self.handle_subscription(event.event), send)
+
+        return cb
+
+    def _gift_subscription_callback(
+        self, send: trio.MemorySendChannel[TwitchEvent] | None
+    ) -> Callable[[ChannelSubscriptionGiftEvent], Awaitable[None]]:
+        async def cb(event: ChannelSubscriptionGiftEvent) -> None:
+            await _send_if_present(self.handle_gift_subscription(event.event), send)
+
+        return cb
+
+    def _resubscription_callback(
+        self, send: trio.MemorySendChannel[TwitchEvent] | None
+    ) -> Callable[[ChannelSubscriptionMessageEvent], Awaitable[None]]:
+        async def cb(event: ChannelSubscriptionMessageEvent) -> None:
+            await _send_if_present(self.handle_resubscription(event.event), send)
+
+        return cb
+
+    def _cheer_callback(
+        self, send: trio.MemorySendChannel[TwitchEvent] | None
+    ) -> Callable[[ChannelCheerEvent], Awaitable[None]]:
+        async def cb(event: ChannelCheerEvent) -> None:
+            await _send_if_present(self.handle_cheer(event.event), send)
+
+        return cb
+
+    def _channel_point_redemption_callback(
+        self, send: trio.MemorySendChannel[TwitchEvent] | None
+    ) -> Callable[[ChannelPointsCustomRewardRedemptionAddEvent], Awaitable[None]]:
+        async def cb(event: ChannelPointsCustomRewardRedemptionAddEvent) -> None:
+            await _send_if_present(
+                self.handle_channel_point_redemption(event.event), send
+            )
+
+        return cb
+
+    def _ad_break_begin_callback(
+        self, send: trio.MemorySendChannel[TwitchEvent] | None
+    ) -> Callable[[ChannelAdBreakBeginEvent], Awaitable[None]]:
+        async def cb(event: ChannelAdBreakBeginEvent) -> None:
+            await _send_if_present(self.handle_ad_break_begin(event.event), send)
+
+        return cb
 
     # ------------------------------------------------------------------
     # Trio task
@@ -254,9 +299,18 @@ class TwitchWatcher:
         Registers all listeners, starts the EventSub connection, then
         sleeps until cancelled — at which point it stops the connection.
         """
-        self.register_listeners(eventsub, send)
+        await self.register_listeners(eventsub, send)
         try:
             await eventsub.start()
             await trio.sleep_forever()
         finally:
             await eventsub.stop()
+
+
+async def _send_if_present(
+    event: TwitchEvent | None,
+    send: trio.MemorySendChannel[TwitchEvent] | None,
+) -> None:
+    """Send *event* to *send* if both are non-None."""
+    if event is not None and send is not None:
+        await send.send(event)

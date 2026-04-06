@@ -593,22 +593,23 @@ class TestHandleAdBreakBegin:
 
 class TestRegisterListeners:
     def _mock_eventsub(self) -> MagicMock:
-        """Return a mock EventSubWebsocket with all listen_* methods as MagicMocks."""
+        """Return a mock EventSubWebsocket with all listen_* as AsyncMocks."""
         mock = MagicMock()
-        mock.listen_channel_follow_v2 = MagicMock(return_value="sub-id-follow")
-        mock.listen_channel_subscribe = MagicMock(return_value="sub-id-sub")
-        mock.listen_channel_subscription_gift = MagicMock(return_value="sub-id-gift")
-        mock.listen_channel_subscription_message = MagicMock(
+        mock.listen_channel_follow_v2 = AsyncMock(return_value="sub-id-follow")
+        mock.listen_channel_subscribe = AsyncMock(return_value="sub-id-sub")
+        mock.listen_channel_subscription_gift = AsyncMock(return_value="sub-id-gift")
+        mock.listen_channel_subscription_message = AsyncMock(
             return_value="sub-id-resub"
         )
-        mock.listen_channel_cheer = MagicMock(return_value="sub-id-cheer")
-        mock.listen_channel_points_custom_reward_redemption_add = MagicMock(
+        mock.listen_channel_cheer = AsyncMock(return_value="sub-id-cheer")
+        mock.listen_channel_points_custom_reward_redemption_add = AsyncMock(
             return_value="sub-id-redeem"
         )
-        mock.listen_channel_ad_break_begin = MagicMock(return_value="sub-id-ad")
+        mock.listen_channel_ad_break_begin = AsyncMock(return_value="sub-id-ad")
         return mock
 
-    def test_follow_listener_registered_when_enabled(self) -> None:
+    @pytest.mark.trio
+    async def test_follow_listener_registered_when_enabled(self) -> None:
         """listen_channel_follow_v2 is called when follows_enabled=True."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -616,10 +617,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_follow_v2.assert_called_once()
 
-    def test_follow_listener_not_registered_when_disabled(self) -> None:
+    @pytest.mark.trio
+    async def test_follow_listener_not_registered_when_disabled(self) -> None:
         """listen_channel_follow_v2 is NOT called when follows_enabled=False."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -627,10 +629,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_follow_v2.assert_not_called()
 
-    def test_follow_listener_uses_broadcaster_and_moderator_ids(self) -> None:
+    @pytest.mark.trio
+    async def test_follow_listener_uses_broadcaster_and_moderator_ids(self) -> None:
         """Follow listener is called with broadcaster_id and moderator_id."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -639,12 +642,13 @@ class TestRegisterListeners:
             channel="ch",
             moderator_id="456",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         args = eventsub.listen_channel_follow_v2.call_args
         assert args[0][0] == "123"
         assert args[0][1] == "456"
 
-    def test_subscription_listeners_registered_when_enabled(self) -> None:
+    @pytest.mark.trio
+    async def test_subscription_listeners_registered_when_enabled(self) -> None:
         """All three sub listeners are registered when subscriptions_enabled=True."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -652,12 +656,13 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_subscribe.assert_called_once()
         eventsub.listen_channel_subscription_gift.assert_called_once()
         eventsub.listen_channel_subscription_message.assert_called_once()
 
-    def test_subscription_listeners_not_registered_when_disabled(self) -> None:
+    @pytest.mark.trio
+    async def test_subscription_listeners_not_registered_when_disabled(self) -> None:
         """Sub listeners are NOT called when subscriptions_enabled=False."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -665,12 +670,13 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_subscribe.assert_not_called()
         eventsub.listen_channel_subscription_gift.assert_not_called()
         eventsub.listen_channel_subscription_message.assert_not_called()
 
-    def test_cheer_listener_registered_when_enabled(self) -> None:
+    @pytest.mark.trio
+    async def test_cheer_listener_registered_when_enabled(self) -> None:
         """listen_channel_cheer is called when cheers_enabled=True."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -678,10 +684,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_cheer.assert_called_once()
 
-    def test_cheer_listener_not_registered_when_disabled(self) -> None:
+    @pytest.mark.trio
+    async def test_cheer_listener_not_registered_when_disabled(self) -> None:
         """listen_channel_cheer is NOT called when cheers_enabled=False."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -689,10 +696,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_cheer.assert_not_called()
 
-    def test_ad_listener_registered_when_enabled(self) -> None:
+    @pytest.mark.trio
+    async def test_ad_listener_registered_when_enabled(self) -> None:
         """listen_channel_ad_break_begin is called when ads_enabled=True."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -700,10 +708,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_ad_break_begin.assert_called_once()
 
-    def test_ad_listener_not_registered_when_disabled(self) -> None:
+    @pytest.mark.trio
+    async def test_ad_listener_not_registered_when_disabled(self) -> None:
         """listen_channel_ad_break_begin is NOT called when ads_enabled=False."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -711,10 +720,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_ad_break_begin.assert_not_called()
 
-    def test_redemption_listener_registered_when_list_nonempty(self) -> None:
+    @pytest.mark.trio
+    async def test_redemption_listener_registered_when_list_nonempty(self) -> None:
         """Redemption listener is registered when redemption_names is non-empty."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -722,10 +732,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_points_custom_reward_redemption_add.assert_called_once()
 
-    def test_redemption_listener_not_registered_when_list_empty(self) -> None:
+    @pytest.mark.trio
+    async def test_redemption_listener_not_registered_when_list_empty(self) -> None:
         """Redemption listener is NOT registered when redemption_names is empty."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -733,10 +744,11 @@ class TestRegisterListeners:
             broadcaster_id="123",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         eventsub.listen_channel_points_custom_reward_redemption_add.assert_not_called()
 
-    def test_all_listeners_use_broadcaster_id(self) -> None:
+    @pytest.mark.trio
+    async def test_all_listeners_use_broadcaster_id(self) -> None:
         """Every registered listener is called with the broadcaster_id as first arg."""
         eventsub = self._mock_eventsub()
         watcher = TwitchWatcher(
@@ -749,7 +761,7 @@ class TestRegisterListeners:
             broadcaster_id="999",
             channel="ch",
         )
-        watcher.register_listeners(eventsub)
+        await watcher.register_listeners(eventsub)
         for mock_method in [
             eventsub.listen_channel_subscribe,
             eventsub.listen_channel_subscription_gift,
@@ -771,17 +783,17 @@ class TestRegisterListeners:
 
 class TestRun:
     def _make_eventsub(self) -> MagicMock:
-        """Mock EventSubWebsocket with async start/stop."""
+        """Mock EventSubWebsocket with async listen_*, start, and stop."""
         mock = MagicMock()
-        mock.listen_channel_follow_v2 = MagicMock(return_value="id")
-        mock.listen_channel_subscribe = MagicMock(return_value="id")
-        mock.listen_channel_subscription_gift = MagicMock(return_value="id")
-        mock.listen_channel_subscription_message = MagicMock(return_value="id")
-        mock.listen_channel_cheer = MagicMock(return_value="id")
-        mock.listen_channel_points_custom_reward_redemption_add = MagicMock(
+        mock.listen_channel_follow_v2 = AsyncMock(return_value="id")
+        mock.listen_channel_subscribe = AsyncMock(return_value="id")
+        mock.listen_channel_subscription_gift = AsyncMock(return_value="id")
+        mock.listen_channel_subscription_message = AsyncMock(return_value="id")
+        mock.listen_channel_cheer = AsyncMock(return_value="id")
+        mock.listen_channel_points_custom_reward_redemption_add = AsyncMock(
             return_value="id"
         )
-        mock.listen_channel_ad_break_begin = MagicMock(return_value="id")
+        mock.listen_channel_ad_break_begin = AsyncMock(return_value="id")
         mock.start = AsyncMock()
         mock.stop = AsyncMock()
         return mock
