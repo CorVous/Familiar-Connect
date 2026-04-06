@@ -91,6 +91,27 @@ class TestTwitchEvent:
         assert event.timestamp.tzinfo is not None
         assert event.timestamp == ts
 
+    def test_viewer_field_present_when_set(self) -> None:
+        """TwitchEvent optionally carries the name of the associated viewer."""
+        event = TwitchEvent(
+            channel="ch",
+            text="Alice has followed the channel",
+            priority="normal",
+            timestamp=datetime.now(UTC),
+            viewer="Alice",
+        )
+        assert event.viewer == "Alice"
+
+    def test_viewer_field_defaults_to_none(self) -> None:
+        """viewer defaults to None for events with no associated person."""
+        event = TwitchEvent(
+            channel="ch",
+            text="An ad has begun on the channel",
+            priority="immediate",
+            timestamp=datetime.now(UTC),
+        )
+        assert event.viewer is None
+
 
 # ---------------------------------------------------------------------------
 # Event text formatters
@@ -388,6 +409,18 @@ class TestBuildChannelPointEvent:
         assert event is not None
         assert event.priority == "normal"
 
+    def test_event_viewer_is_set(self) -> None:
+        """Channel point redemption event carries the viewer's name."""
+        config = TwitchWatcherConfig(redemption_names=["Talk to Sapphire"])
+        event = build_channel_point_event(
+            config=config,
+            channel="ch",
+            viewer="Alice",
+            redemption_name="Talk to Sapphire",
+        )
+        assert event is not None
+        assert event.viewer == "Alice"
+
     def test_event_channel_set_correctly(self) -> None:
         """The channel field reflects the provided channel."""
         config = TwitchWatcherConfig(redemption_names=["Test"])
@@ -443,6 +476,15 @@ class TestBuildSubscriptionEvent:
         assert event is not None
         assert event.priority == "normal"
 
+    def test_event_viewer_is_set(self) -> None:
+        """Subscription event carries the viewer's name."""
+        config = TwitchWatcherConfig(subscriptions_enabled=True)
+        event = build_subscription_event(
+            config=config, channel="ch", viewer="Alice", tier=1
+        )
+        assert event is not None
+        assert event.viewer == "Alice"
+
 
 class TestBuildGiftSubscriptionEvent:
     def test_produces_event_when_enabled(self) -> None:
@@ -478,6 +520,24 @@ class TestBuildGiftSubscriptionEvent:
         )
         assert event is not None
         assert event.text == format_gift_subscription("Bob", 5, 1)
+
+    def test_named_gifter_viewer_is_set(self) -> None:
+        """Gift sub event carries the gifter's name when not anonymous."""
+        config = TwitchWatcherConfig(subscriptions_enabled=True)
+        event = build_gift_subscription_event(
+            config=config, channel="ch", gifter="Bob", count=5, tier=1
+        )
+        assert event is not None
+        assert event.viewer == "Bob"
+
+    def test_anonymous_gifter_viewer_is_none(self) -> None:
+        """Gift sub event has no viewer when the gifter is anonymous."""
+        config = TwitchWatcherConfig(subscriptions_enabled=True)
+        event = build_gift_subscription_event(
+            config=config, channel="ch", gifter=None, count=3, tier=1
+        )
+        assert event is not None
+        assert event.viewer is None
 
 
 class TestBuildResubscriptionEvent:
@@ -535,6 +595,20 @@ class TestBuildResubscriptionEvent:
         assert event is not None
         assert event.priority == "normal"
 
+    def test_event_viewer_is_set(self) -> None:
+        """Resubscription event carries the viewer's name."""
+        config = TwitchWatcherConfig(subscriptions_enabled=True)
+        event = build_resubscription_event(
+            config=config,
+            channel="ch",
+            viewer="Alice",
+            months=6,
+            tier=2,
+            message="love this stream",
+        )
+        assert event is not None
+        assert event.viewer == "Alice"
+
 
 class TestBuildCheerEvent:
     def test_produces_event_when_enabled(self) -> None:
@@ -580,6 +654,24 @@ class TestBuildCheerEvent:
         assert event is not None
         assert event.priority == "normal"
 
+    def test_named_viewer_is_set(self) -> None:
+        """Cheer event carries the viewer's name when not anonymous."""
+        config = TwitchWatcherConfig(cheers_enabled=True)
+        event = build_cheer_event(
+            config=config, channel="ch", viewer="Bob", bits=100, message="poggers"
+        )
+        assert event is not None
+        assert event.viewer == "Bob"
+
+    def test_anonymous_viewer_is_none(self) -> None:
+        """Cheer event has no viewer when the cheerer is anonymous."""
+        config = TwitchWatcherConfig(cheers_enabled=True)
+        event = build_cheer_event(
+            config=config, channel="ch", viewer=None, bits=500, message="hype"
+        )
+        assert event is not None
+        assert event.viewer is None
+
 
 class TestBuildFollowEvent:
     def test_produces_event_when_enabled(self) -> None:
@@ -607,6 +699,13 @@ class TestBuildFollowEvent:
         event = build_follow_event(config=config, channel="ch", viewer="Alice")
         assert event is not None
         assert event.priority == "normal"
+
+    def test_event_viewer_is_set(self) -> None:
+        """Follow event carries the viewer's name."""
+        config = TwitchWatcherConfig(follows_enabled=True)
+        event = build_follow_event(config=config, channel="ch", viewer="Alice")
+        assert event is not None
+        assert event.viewer == "Alice"
 
 
 class TestBuildAdStartEvent:
@@ -643,6 +742,13 @@ class TestBuildAdStartEvent:
         assert event is not None
         assert event.priority == "normal"
 
+    def test_event_viewer_is_none(self) -> None:
+        """Ad start events have no associated person."""
+        config = TwitchWatcherConfig(ads_enabled=True)
+        event = build_ad_start_event(config=config, channel="ch")
+        assert event is not None
+        assert event.viewer is None
+
 
 class TestBuildAdEndEvent:
     def test_produces_event_when_enabled(self) -> None:
@@ -677,6 +783,13 @@ class TestBuildAdEndEvent:
         event = build_ad_end_event(config=config, channel="ch")
         assert event is not None
         assert event.priority == "normal"
+
+    def test_event_viewer_is_none(self) -> None:
+        """Ad end events have no associated person."""
+        config = TwitchWatcherConfig(ads_enabled=True)
+        event = build_ad_end_event(config=config, channel="ch")
+        assert event is not None
+        assert event.viewer is None
 
 
 # ---------------------------------------------------------------------------
@@ -716,28 +829,57 @@ class TestTwitchEventToMessage:
         )
         assert event.to_message().content == "Alice has subscribed at tier 1"
 
-    def test_to_message_name_is_twitch(self) -> None:
-        """The message name is 'Twitch' so the LLM can identify the source."""
-        event = TwitchEvent(
-            channel="ch",
-            text="An ad has begun on the channel",
-            priority="immediate",
-            timestamp=datetime.now(UTC),
-        )
-        assert event.to_message().name == "Twitch"
-
-    def test_to_message_is_serialisable(self) -> None:
-        """The resulting Message can be serialised to a dict for the API."""
+    def test_to_message_name_is_viewer_when_present(self) -> None:
+        """Events with a viewer use the viewer's name as the message name."""
         event = TwitchEvent(
             channel="ch",
             text="Alice has followed the channel",
             priority="normal",
             timestamp=datetime.now(UTC),
+            viewer="Alice",
+        )
+        assert event.to_message().name == "Alice"
+
+    def test_to_message_name_falls_back_to_twitch_when_no_viewer(self) -> None:
+        """Events without a viewer (ads, anonymous) fall back to 'Twitch'."""
+        event = TwitchEvent(
+            channel="ch",
+            text="An ad has begun on the channel",
+            priority="immediate",
+            timestamp=datetime.now(UTC),
+            viewer=None,
+        )
+        assert event.to_message().name == "Twitch"
+
+    def test_to_message_is_serialisable_with_viewer(self) -> None:
+        """Viewer-named messages serialise correctly for the API."""
+        event = TwitchEvent(
+            channel="ch",
+            text="Alice has followed the channel",
+            priority="normal",
+            timestamp=datetime.now(UTC),
+            viewer="Alice",
         )
         d = event.to_message().to_dict()
         assert d == {
             "role": "user",
             "content": "Alice has followed the channel",
+            "name": "Alice",
+        }
+
+    def test_to_message_is_serialisable_without_viewer(self) -> None:
+        """No-viewer messages serialise with 'Twitch' as the name."""
+        event = TwitchEvent(
+            channel="ch",
+            text="An ad has begun on the channel",
+            priority="immediate",
+            timestamp=datetime.now(UTC),
+            viewer=None,
+        )
+        d = event.to_message().to_dict()
+        assert d == {
+            "role": "user",
+            "content": "An ad has begun on the channel",
             "name": "Twitch",
         }
 
@@ -783,9 +925,43 @@ class TestTwitchEventToMessage:
         assert len(messages) == 3
         assert all(isinstance(m, Message) for m in messages)
         assert all(m.role == "user" for m in messages)
-        assert all(m.name == "Twitch" for m in messages)
+        # Each viewer-associated event carries that viewer's name
+        names = [m.name for m in messages]
+        assert names == ["Alice", "Bob", "Carol"]
         # Content is the event text, not a generic placeholder
         contents = [m.content for m in messages]
         assert any("Alice" in c for c in contents)
         assert any("Bob" in c for c in contents)
         assert any("Carol" in c and "hello!" in c for c in contents)
+
+    def test_anonymous_cheer_falls_back_to_twitch(self) -> None:
+        """An anonymous cheer has no viewer name so it uses 'Twitch'."""
+        config = TwitchWatcherConfig(cheers_enabled=True)
+        event = build_cheer_event(
+            config=config, channel="ch", viewer=None, bits=500, message="hype"
+        )
+        assert event is not None
+        assert event.to_message().name == "Twitch"
+
+    def test_anonymous_gift_sub_falls_back_to_twitch(self) -> None:
+        """An anonymous gift sub has no viewer name so it uses 'Twitch'."""
+        config = TwitchWatcherConfig(subscriptions_enabled=True)
+        event = build_gift_subscription_event(
+            config=config, channel="ch", gifter=None, count=3, tier=1
+        )
+        assert event is not None
+        assert event.to_message().name == "Twitch"
+
+    def test_ad_start_uses_twitch_as_name(self) -> None:
+        """Ad start events have no person; they use 'Twitch' as the name."""
+        config = TwitchWatcherConfig(ads_enabled=True)
+        event = build_ad_start_event(config=config, channel="ch")
+        assert event is not None
+        assert event.to_message().name == "Twitch"
+
+    def test_ad_end_uses_twitch_as_name(self) -> None:
+        """Ad end events have no person; they use 'Twitch' as the name."""
+        config = TwitchWatcherConfig(ads_enabled=True)
+        event = build_ad_end_event(config=config, channel="ch")
+        assert event is not None
+        assert event.to_message().name == "Twitch"
