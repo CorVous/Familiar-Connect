@@ -14,7 +14,6 @@ from familiar_connect.llm import (
     create_client_from_env,
 )
 
-
 # --- Message dataclass ---
 
 
@@ -352,9 +351,11 @@ class TestCreateClientFromEnv:
 
     def test_raises_when_api_key_missing(self) -> None:
         """Factory raises a clear error when OPENROUTER_API_KEY is not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(ValueError, match=r"OPENROUTER_API_KEY"):
-                create_client_from_env()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            pytest.raises(ValueError, match=r"OPENROUTER_API_KEY"),
+        ):
+            create_client_from_env()
 
 
 # --- Integration-style test with full prompt assembly ---
