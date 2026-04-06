@@ -11,6 +11,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from typing import Protocol
+
+    class _EventWrapper(Protocol):
+        """Common structural type of all twitchAPI EventSub event wrappers.
+
+        Every wrapper class (ChannelFollowEvent, ChannelSubscribeEvent, …) has
+        a typed .event attribute holding the actual event data.  We can't use
+        a concrete base class because twitchAPI's TwitchObject has no .event
+        member — it's added per-subclass.  A Protocol lets ty verify the
+        attribute access without importing every event class at runtime.
+        """
+
+        event: object
 
 import trio
 
@@ -211,7 +224,7 @@ class TwitchWatcher:
     def _make_callback(
         handler: Callable[[object], TwitchEvent | None],
         send: trio.MemorySendChannel[TwitchEvent] | None,
-    ) -> Callable[[object], Awaitable[None]]:
+    ) -> Callable[[_EventWrapper], Awaitable[None]]:
         """Wrap a synchronous handler as an async EventSub callback.
 
         The returned coroutine accepts a twitchAPI event wrapper, extracts
@@ -219,8 +232,8 @@ class TwitchWatcher:
         the captured *send* channel.
         """
 
-        async def callback(event: object) -> None:
-            result = handler(event.event)  # type: ignore[union-attr]
+        async def callback(event: _EventWrapper) -> None:
+            result = handler(event.event)
             if result is not None and send is not None:
                 await send.send(result)
 
