@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
         event: object
 
+
 import trio
 
 from familiar_connect.twitch import (
