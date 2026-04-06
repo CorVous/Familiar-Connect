@@ -147,6 +147,25 @@ Pipeline: LLM text → stream to Cartesia/Azure WebSocket → receive PCM audio 
 - Feeds channel events directly into the internal text queue:
   - Channel point redemptions, subscriptions, gift subs, cheers (bits), follows, ad breaks
 
+#### Slash Commands
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `/twitch connect` | `channel` (string) | Connect the familiar to a Twitch channel and begin watching for events |
+| `/twitch disconnect` | — | Stop watching the current Twitch channel |
+| `/twitch status` | — | Show the currently connected channel and which event types are enabled |
+| `/twitch events` | `subscriptions` (bool) `cheers` (bool) `follows` (bool) `ads` (bool) | Toggle which event categories produce messages; omitted options are unchanged |
+| `/twitch ads-immediate` | `enabled` (bool) | Toggle whether ad break events are sent to the LLM immediately rather than batched with the normal cycle |
+| `/twitch redemptions add` | `name` (string) | Add a channel point redemption name to the allow-list |
+| `/twitch redemptions remove` | `name` (string) | Remove a channel point redemption name from the allow-list |
+| `/twitch redemptions list` | — | Show all redemption names currently on the allow-list |
+| `/twitch redemptions clear` | — | Remove all redemption names from the allow-list |
+
+**Notes:**
+- All `/twitch` commands require a role that has the "Manage Server" permission or a configured admin role
+- Twitch credentials (OAuth token, client ID) are set via `/setup` or in `.env` as `TWITCH_CLIENT_ID` and `TWITCH_ACCESS_TOKEN`; they are never accepted as slash command arguments
+- Settings are persisted per Discord guild so they survive bot restarts
+
 ### Monitoring Dashboard
 
 **Starlette + Hypercorn** (trio-native web dashboard):
