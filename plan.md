@@ -24,7 +24,7 @@ Discord Voice → audio capture → trio.MemoryChannel
                                       ↓
                           Message Processor + Chattiness
                                       ↓
-                           Claude LLM + Conversation History
+                           OpenRouter + Conversation History
                                       ↓
                               TTS (Cartesia / Azure) → Audio
                                       ↓
@@ -96,7 +96,7 @@ The bot evaluates each incoming event (transcription, text message, Twitch event
 - Hard cap: max 3 unprompted responses per minute
 - If 3+ humans are actively talking (multiple speakers in last 10s), raise the response threshold — talk less in fast-moving conversations, not more
 
-### AI Response (Claude LLM)
+### AI Response (OpenRouter)
 
 **Context management:** Hybrid sliding-window + summarization.
 - Keep the last ~20 exchanges verbatim in context
@@ -121,15 +121,6 @@ The bot evaluates each incoming event (transcription, text message, Twitch event
 3. Retrieved RAG context
 4. Conversation summary
 5. Recent message history
-
-**Token budget (~30k per call for Sonnet, ~8k for Haiku):**
-- System prompt + character card: ~2k tokens
-- RAG retrieved chunks: ~3k tokens
-- Conversation summary: ~1k tokens
-- Recent history: ~20k tokens (Sonnet) / ~4k tokens (Haiku)
-- Response headroom: ~4k tokens (capped at 200 tokens for voice output)
-
-Configurable model, temperature. Max 200 output tokens for voice responses to keep latency low.
 
 ### Text-to-Speech
 
