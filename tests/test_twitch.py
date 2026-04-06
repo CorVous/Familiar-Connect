@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from familiar_connect.llm import Message
 from familiar_connect.twitch import (
     TwitchEvent,
     TwitchWatcherConfig,
@@ -676,3 +677,115 @@ class TestBuildAdEndEvent:
         event = build_ad_end_event(config=config, channel="ch")
         assert event is not None
         assert event.priority == "normal"
+
+
+# ---------------------------------------------------------------------------
+# TwitchEvent → LLM Message conversion
+# ---------------------------------------------------------------------------
+
+
+class TestTwitchEventToMessage:
+    def test_to_message_returns_message_instance(self) -> None:
+        """to_message() returns a Message compatible with the LLM client."""
+        event = TwitchEvent(
+            channel="ch",
+            text="Alice has followed the channel",
+            priority="normal",
+            timestamp=datetime.now(UTC),
+        )
+        msg = event.to_message()
+        assert isinstance(msg, Message)
+
+    def test_to_message_role_is_user(self) -> None:
+        """Twitch events enter the conversation as user-role messages."""
+        event = TwitchEvent(
+            channel="ch",
+            text="Bob has cheered with 100 bits and says: poggers",
+            priority="normal",
+            timestamp=datetime.now(UTC),
+        )
+        assert event.to_message().role == "user"
+
+    def test_to_message_content_is_event_text(self) -> None:
+        """The message content is the plain-text event description."""
+        event = TwitchEvent(
+            channel="ch",
+            text="Alice has subscribed at tier 1",
+            priority="normal",
+            timestamp=datetime.now(UTC),
+        )
+        assert event.to_message().content == "Alice has subscribed at tier 1"
+
+    def test_to_message_name_is_twitch(self) -> None:
+        """The message name is 'Twitch' so the LLM can identify the source."""
+        event = TwitchEvent(
+            channel="ch",
+            text="An ad has begun on the channel",
+            priority="immediate",
+            timestamp=datetime.now(UTC),
+        )
+        assert event.to_message().name == "Twitch"
+
+    def test_to_message_is_serialisable(self) -> None:
+        """The resulting Message can be serialised to a dict for the API."""
+        event = TwitchEvent(
+            channel="ch",
+            text="Alice has followed the channel",
+            priority="normal",
+            timestamp=datetime.now(UTC),
+        )
+        d = event.to_message().to_dict()
+        assert d == {
+            "role": "user",
+            "content": "Alice has followed the channel",
+            "name": "Twitch",
+        }
+
+    def test_to_message_priority_not_leaked_into_message(self) -> None:
+        """Priority stays on the event; Message has no priority field."""
+        event = TwitchEvent(
+            channel="ch",
+            text="An ad has begun on the channel",
+            priority="immediate",
+            timestamp=datetime.now(UTC),
+        )
+        msg = event.to_message()
+        assert not hasattr(msg, "priority")
+
+    def test_immediate_event_priority_readable_before_conversion(self) -> None:
+        """Callers can inspect priority on the event before calling to_message()."""
+        config = TwitchWatcherConfig(ads_enabled=True, ads_immediate=True)
+        event = build_ad_start_event(config=config, channel="ch")
+        assert event is not None
+        assert event.priority == "immediate"
+        # Conversion still works regardless of priority
+        assert isinstance(event.to_message(), Message)
+
+    def test_normal_event_round_trips_through_llm_message_list(self) -> None:
+        """A batch of Twitch events can be converted and included in an LLM call."""
+        config = TwitchWatcherConfig(
+            subscriptions_enabled=True,
+            follows_enabled=True,
+            redemption_names=["Talk to Sapphire"],
+        )
+        raw_events = [
+            build_follow_event(config=config, channel="ch", viewer="Alice"),
+            build_subscription_event(config=config, channel="ch", viewer="Bob", tier=1),
+            build_channel_point_event(
+                config=config,
+                channel="ch",
+                viewer="Carol",
+                redemption_name="Talk to Sapphire",
+                user_input="hello!",
+            ),
+        ]
+        messages = [e.to_message() for e in raw_events if e is not None]
+        assert len(messages) == 3
+        assert all(isinstance(m, Message) for m in messages)
+        assert all(m.role == "user" for m in messages)
+        assert all(m.name == "Twitch" for m in messages)
+        # Content is the event text, not a generic placeholder
+        contents = [m.content for m in messages]
+        assert any("Alice" in c for c in contents)
+        assert any("Bob" in c for c in contents)
+        assert any("Carol" in c and "hello!" in c for c in contents)
