@@ -11,6 +11,7 @@ synchronous — all IO lives in run().
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -24,7 +25,7 @@ from familiar_connect.twitch_watcher import TwitchWatcher
 # ---------------------------------------------------------------------------
 
 
-def follow_data(user_name: str = "Alice") -> SimpleNamespace:
+def follow_data(user_name: str = "Alice") -> Any:
     return SimpleNamespace(user_name=user_name)
 
 
@@ -33,7 +34,7 @@ def subscribe_data(
     tier: str = "1000",
     *,
     is_gift: bool = False,
-) -> SimpleNamespace:
+) -> Any:
     return SimpleNamespace(user_name=user_name, tier=tier, is_gift=is_gift)
 
 
@@ -43,7 +44,7 @@ def gift_sub_data(
     tier: str = "1000",
     *,
     is_anonymous: bool = False,
-) -> SimpleNamespace:
+) -> Any:
     return SimpleNamespace(
         user_name=user_name, total=total, tier=tier, is_anonymous=is_anonymous
     )
@@ -54,7 +55,7 @@ def resub_data(
     cumulative_months: int = 6,
     tier: str = "2000",
     message_text: str = "love this stream",
-) -> SimpleNamespace:
+) -> Any:
     msg = SimpleNamespace(text=message_text)
     return SimpleNamespace(
         user_name=user_name,
@@ -70,7 +71,7 @@ def cheer_data(
     message: str = "poggers",
     *,
     is_anonymous: bool = False,
-) -> SimpleNamespace:
+) -> Any:
     return SimpleNamespace(
         user_name=user_name, bits=bits, message=message, is_anonymous=is_anonymous
     )
@@ -80,12 +81,12 @@ def redemption_data(
     user_name: str = "Alice",
     reward_title: str = "Talk to Sapphire",
     user_input: str = "",
-) -> SimpleNamespace:
+) -> Any:
     reward = SimpleNamespace(title=reward_title)
     return SimpleNamespace(user_name=user_name, reward=reward, user_input=user_input)
 
 
-def ad_break_data(duration_seconds: int = 60) -> SimpleNamespace:
+def ad_break_data(duration_seconds: int = 60) -> Any:
     return SimpleNamespace(duration_seconds=duration_seconds)
 
 
@@ -141,8 +142,8 @@ class TestTwitchWatcherConstruction:
 
 
 class TestHandleFollow:
-    def _watcher(self, **kw: object) -> TwitchWatcher:
-        config = TwitchWatcherConfig(**kw)  # type: ignore[arg-type]
+    def _watcher(self, **kw: Any) -> TwitchWatcher:
+        config = TwitchWatcherConfig(**kw)
         return TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
     def test_returns_event_when_enabled(self) -> None:
@@ -197,8 +198,8 @@ class TestHandleFollow:
 
 
 class TestHandleSubscription:
-    def _watcher(self, **kw: object) -> TwitchWatcher:
-        config = TwitchWatcherConfig(**kw)  # type: ignore[arg-type]
+    def _watcher(self, **kw: Any) -> TwitchWatcher:
+        config = TwitchWatcherConfig(**kw)
         return TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
     def test_returns_event_when_enabled(self) -> None:
@@ -277,8 +278,8 @@ class TestHandleSubscription:
 
 
 class TestHandleGiftSubscription:
-    def _watcher(self, **kw: object) -> TwitchWatcher:
-        config = TwitchWatcherConfig(**kw)  # type: ignore[arg-type]
+    def _watcher(self, **kw: Any) -> TwitchWatcher:
+        config = TwitchWatcherConfig(**kw)
         return TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
     def test_returns_event_when_enabled(self) -> None:
@@ -342,8 +343,8 @@ class TestHandleGiftSubscription:
 
 
 class TestHandleResubscription:
-    def _watcher(self, **kw: object) -> TwitchWatcher:
-        config = TwitchWatcherConfig(**kw)  # type: ignore[arg-type]
+    def _watcher(self, **kw: Any) -> TwitchWatcher:
+        config = TwitchWatcherConfig(**kw)
         return TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
     def test_returns_event_when_enabled(self) -> None:
@@ -407,8 +408,8 @@ class TestHandleResubscription:
 
 
 class TestHandleCheer:
-    def _watcher(self, **kw: object) -> TwitchWatcher:
-        config = TwitchWatcherConfig(**kw)  # type: ignore[arg-type]
+    def _watcher(self, **kw: Any) -> TwitchWatcher:
+        config = TwitchWatcherConfig(**kw)
         return TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
     def test_returns_event_when_enabled(self) -> None:
@@ -537,8 +538,8 @@ class TestHandleChannelPointRedemption:
 
 
 class TestHandleAdBreakBegin:
-    def _watcher(self, **kw: object) -> TwitchWatcher:
-        config = TwitchWatcherConfig(**kw)  # type: ignore[arg-type]
+    def _watcher(self, **kw: Any) -> TwitchWatcher:
+        config = TwitchWatcherConfig(**kw)
         return TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
     def test_returns_event_when_enabled(self) -> None:
