@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
 import trio
 
 from familiar_connect.twitch import (
@@ -24,7 +27,16 @@ from familiar_connect.twitch import (
 )
 
 if TYPE_CHECKING:
-    from typing import Any
+    from twitchAPI.eventsub.websocket import EventSubWebsocket
+    from twitchAPI.object.eventsub import (
+        ChannelAdBreakBeginData,
+        ChannelCheerData,
+        ChannelFollowData,
+        ChannelPointsCustomRewardRedemptionData,
+        ChannelSubscribeData,
+        ChannelSubscriptionGiftData,
+        ChannelSubscriptionMessageData,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +75,7 @@ class TwitchWatcher:
     # Synchronous handlers — accept the .event data object from twitchAPI
     # ------------------------------------------------------------------
 
-    def handle_follow(self, data: Any) -> TwitchEvent | None:
+    def handle_follow(self, data: ChannelFollowData) -> TwitchEvent | None:
         """Convert a ChannelFollowData into a TwitchEvent."""
         return build_follow_event(
             config=self.config,
@@ -71,7 +83,7 @@ class TwitchWatcher:
             viewer=data.user_name,
         )
 
-    def handle_subscription(self, data: Any) -> TwitchEvent | None:
+    def handle_subscription(self, data: ChannelSubscribeData) -> TwitchEvent | None:
         """Convert a ChannelSubscribeData into a TwitchEvent.
 
         Gift subs arrive via handle_gift_subscription; is_gift=True is ignored here.
@@ -85,7 +97,9 @@ class TwitchWatcher:
             tier=_tier(data.tier),
         )
 
-    def handle_gift_subscription(self, data: Any) -> TwitchEvent | None:
+    def handle_gift_subscription(
+        self, data: ChannelSubscriptionGiftData
+    ) -> TwitchEvent | None:
         """Convert a ChannelSubscriptionGiftData into a TwitchEvent."""
         gifter = None if data.is_anonymous else data.user_name
         return build_gift_subscription_event(
@@ -96,7 +110,9 @@ class TwitchWatcher:
             tier=_tier(data.tier),
         )
 
-    def handle_resubscription(self, data: Any) -> TwitchEvent | None:
+    def handle_resubscription(
+        self, data: ChannelSubscriptionMessageData
+    ) -> TwitchEvent | None:
         """Convert a ChannelSubscriptionMessageData into a TwitchEvent."""
         return build_resubscription_event(
             config=self.config,
@@ -107,7 +123,7 @@ class TwitchWatcher:
             message=data.message.text,
         )
 
-    def handle_cheer(self, data: Any) -> TwitchEvent | None:
+    def handle_cheer(self, data: ChannelCheerData) -> TwitchEvent | None:
         """Convert a ChannelCheerData into a TwitchEvent."""
         viewer = None if data.is_anonymous else data.user_name
         return build_cheer_event(
@@ -118,7 +134,9 @@ class TwitchWatcher:
             message=data.message,
         )
 
-    def handle_channel_point_redemption(self, data: Any) -> TwitchEvent | None:
+    def handle_channel_point_redemption(
+        self, data: ChannelPointsCustomRewardRedemptionData
+    ) -> TwitchEvent | None:
         """Convert a ChannelPointsCustomRewardRedemptionData into a TwitchEvent."""
         return build_channel_point_event(
             config=self.config,
@@ -128,7 +146,9 @@ class TwitchWatcher:
             user_input=data.user_input or None,
         )
 
-    def handle_ad_break_begin(self, data: Any) -> TwitchEvent | None:
+    def handle_ad_break_begin(
+        self, _data: ChannelAdBreakBeginData
+    ) -> TwitchEvent | None:
         """Convert a ChannelAdBreakBeginData into a TwitchEvent."""
         return build_ad_start_event(config=self.config, channel=self.channel)
 
@@ -136,7 +156,11 @@ class TwitchWatcher:
     # Listener registration
     # ------------------------------------------------------------------
 
-    def register_listeners(self, eventsub: Any, send: trio.MemorySendChannel | None = None) -> None:  # type: ignore[type-arg]
+    def register_listeners(
+        self,
+        eventsub: EventSubWebsocket,
+        send: trio.MemorySendChannel[TwitchEvent] | None = None,
+    ) -> None:
         """Register EventSub callbacks on *eventsub* for all enabled event types.
 
         *send* is the trio channel that callbacks will forward events to.
@@ -185,9 +209,9 @@ class TwitchWatcher:
 
     @staticmethod
     def _make_callback(
-        handler: Any,
-        send: trio.MemorySendChannel | None,  # type: ignore[type-arg]
-    ) -> Any:
+        handler: Callable[[object], TwitchEvent | None],
+        send: trio.MemorySendChannel[TwitchEvent] | None,
+    ) -> Callable[[object], Awaitable[None]]:
         """Wrap a synchronous handler as an async EventSub callback.
 
         The returned coroutine accepts a twitchAPI event wrapper, extracts
@@ -195,8 +219,8 @@ class TwitchWatcher:
         the captured *send* channel.
         """
 
-        async def callback(event: Any) -> None:
-            result = handler(event.event)
+        async def callback(event: object) -> None:
+            result = handler(event.event)  # type: ignore[union-attr]
             if result is not None and send is not None:
                 await send.send(result)
 
@@ -208,8 +232,8 @@ class TwitchWatcher:
 
     async def run(
         self,
-        send: trio.MemorySendChannel,  # type: ignore[type-arg]
-        eventsub: Any,
+        send: trio.MemorySendChannel[TwitchEvent],
+        eventsub: EventSubWebsocket,
     ) -> None:
         """Run the watcher as a trio task.
 

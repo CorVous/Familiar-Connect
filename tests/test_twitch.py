@@ -8,30 +8,27 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from familiar_connect.llm import Message
 from familiar_connect.twitch import (
     TwitchEvent,
     TwitchWatcherConfig,
+    build_ad_end_event,
+    build_ad_start_event,
+    build_channel_point_event,
+    build_cheer_event,
+    build_follow_event,
+    build_gift_subscription_event,
+    build_resubscription_event,
+    build_subscription_event,
     format_ad_end,
     format_ad_start,
+    format_channel_point_redemption,
     format_cheer,
     format_follow,
     format_gift_subscription,
-    format_channel_point_redemption,
     format_resubscription,
     format_subscription,
-    build_channel_point_event,
-    build_subscription_event,
-    build_gift_subscription_event,
-    build_resubscription_event,
-    build_cheer_event,
-    build_follow_event,
-    build_ad_start_event,
-    build_ad_end_event,
 )
-
 
 # ---------------------------------------------------------------------------
 # TwitchEvent shape
@@ -103,7 +100,7 @@ class TestTwitchEvent:
         assert event.viewer == "Alice"
 
     def test_viewer_field_defaults_to_none(self) -> None:
-        """viewer defaults to None for events with no associated person."""
+        """Viewer defaults to None for events with no associated person."""
         event = TwitchEvent(
             channel="ch",
             text="An ad has begun on the channel",
@@ -198,7 +195,10 @@ class TestFormatResubscription:
     def test_basic_resub(self) -> None:
         """Resub with all fields formats correctly."""
         text = format_resubscription("Alice", 6, 2, "love this stream")
-        assert text == "Alice has subscribed for 6 months at tier 2 and says: love this stream"
+        assert (
+            text
+            == "Alice has subscribed for 6 months at tier 2 and says: love this stream"
+        )
 
     def test_one_month(self) -> None:
         """Singular month phrasing for 1 month."""

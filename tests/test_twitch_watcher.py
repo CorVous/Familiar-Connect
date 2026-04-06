@@ -11,14 +11,13 @@ synchronous — all IO lives in run().
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import trio
 import pytest
+import trio
 
 from familiar_connect.twitch import TwitchEvent, TwitchWatcherConfig
 from familiar_connect.twitch_watcher import TwitchWatcher
-
 
 # ---------------------------------------------------------------------------
 # Helpers — duck-typed stand-ins for twitchAPI event data objects
@@ -32,6 +31,7 @@ def follow_data(user_name: str = "Alice") -> SimpleNamespace:
 def subscribe_data(
     user_name: str = "Alice",
     tier: str = "1000",
+    *,
     is_gift: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(user_name=user_name, tier=tier, is_gift=is_gift)
@@ -41,6 +41,7 @@ def gift_sub_data(
     user_name: str | None = "Bob",
     total: int = 5,
     tier: str = "1000",
+    *,
     is_anonymous: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -67,6 +68,7 @@ def cheer_data(
     user_name: str | None = "Bob",
     bits: int = 100,
     message: str = "poggers",
+    *,
     is_anonymous: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -109,7 +111,9 @@ class TestTwitchWatcherConstruction:
     def test_stores_channel(self) -> None:
         """Watcher stores the channel name stamped on every TwitchEvent."""
         watcher = TwitchWatcher(
-            config=TwitchWatcherConfig(), broadcaster_id="123", channel="sapphire-stream"
+            config=TwitchWatcherConfig(),
+            broadcaster_id="123",
+            channel="sapphire-stream",
         )
         assert watcher.channel == "sapphire-stream"
 
@@ -367,7 +371,10 @@ class TestHandleResubscription:
             )
         )
         assert event is not None
-        assert event.text == "Alice has subscribed for 6 months at tier 2 and says: love this stream"
+        assert (
+            event.text
+            == "Alice has subscribed for 6 months at tier 2 and says: love this stream"
+        )
 
     def test_viewer_is_set(self) -> None:
         """Resub event carries the viewer's name."""
@@ -428,7 +435,10 @@ class TestHandleCheer:
             cheer_data(user_name=None, bits=500, message="hype", is_anonymous=True)
         )
         assert event is not None
-        assert event.text == "An anonymous cheerer has cheered with 500 bits and says: hype"
+        assert (
+            event.text
+            == "An anonymous cheerer has cheered with 500 bits and says: hype"
+        )
 
     def test_named_viewer_is_set(self) -> None:
         """Named cheer event carries the viewer's name."""
@@ -522,7 +532,7 @@ class TestHandleChannelPointRedemption:
 
 
 # ---------------------------------------------------------------------------
-# handle_ad_break_begin
+# Ad break begin handling
 # ---------------------------------------------------------------------------
 
 
@@ -549,17 +559,17 @@ class TestHandleAdBreakBegin:
 
     def test_priority_immediate_when_ads_immediate_enabled(self) -> None:
         """Ad start event is immediate when ads_immediate=True."""
-        event = self._watcher(ads_enabled=True, ads_immediate=True).handle_ad_break_begin(
-            ad_break_data()
-        )
+        event = self._watcher(
+            ads_enabled=True, ads_immediate=True
+        ).handle_ad_break_begin(ad_break_data())
         assert event is not None
         assert event.priority == "immediate"
 
     def test_priority_normal_when_ads_immediate_disabled(self) -> None:
         """Ad start event is normal priority when ads_immediate=False."""
-        event = self._watcher(ads_enabled=True, ads_immediate=False).handle_ad_break_begin(
-            ad_break_data()
-        )
+        event = self._watcher(
+            ads_enabled=True, ads_immediate=False
+        ).handle_ad_break_begin(ad_break_data())
         assert event is not None
         assert event.priority == "normal"
 
@@ -572,7 +582,6 @@ class TestHandleAdBreakBegin:
     def test_duration_seconds_available(self) -> None:
         """The ad duration is accessible so the caller can schedule the end event."""
         data = ad_break_data(duration_seconds=90)
-        watcher = self._watcher(ads_enabled=True)
         # The data object's duration is passed through; the watcher does not discard it
         assert data.duration_seconds == 90
 
@@ -589,7 +598,9 @@ class TestRegisterListeners:
         mock.listen_channel_follow_v2 = MagicMock(return_value="sub-id-follow")
         mock.listen_channel_subscribe = MagicMock(return_value="sub-id-sub")
         mock.listen_channel_subscription_gift = MagicMock(return_value="sub-id-gift")
-        mock.listen_channel_subscription_message = MagicMock(return_value="sub-id-resub")
+        mock.listen_channel_subscription_message = MagicMock(
+            return_value="sub-id-resub"
+        )
         mock.listen_channel_cheer = MagicMock(return_value="sub-id-cheer")
         mock.listen_channel_points_custom_reward_redemption_add = MagicMock(
             return_value="sub-id-redeem"
@@ -829,7 +840,9 @@ class TestRun:
         # Capture the callback registered for follows
         captured_callback: list = []
 
-        def capture_follow_cb(broadcaster_id: str, moderator_id: str, cb: object) -> str:
+        def capture_follow_cb(
+            _broadcaster_id: str, _moderator_id: str, cb: object
+        ) -> str:
             captured_callback.append(cb)
             return "sub-id"
 
@@ -853,11 +866,10 @@ class TestRun:
     @pytest.mark.trio
     async def test_callback_for_disabled_event_does_not_send(self) -> None:
         """A callback that returns None (disabled config) sends nothing."""
-        eventsub = self._make_eventsub()
         config = TwitchWatcherConfig(follows_enabled=False)
         watcher = TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
-        send, recv = trio.open_memory_channel(16)
+        _send, recv = trio.open_memory_channel(16)
 
         # Manually invoke the follow handler (disabled) and verify channel is empty
         result = watcher.handle_follow(follow_data("Alice"))
