@@ -24,7 +24,7 @@ Discord Voice → audio capture → trio.MemoryChannel
                                       ↓
                           Message Processor + Chattiness
                                       ↓
-                           Claude LLM + Conversation History
+                           OpenRouter + Conversation History
                                       ↓
                               TTS (Cartesia / Azure) → Audio
                                       ↓
@@ -45,7 +45,9 @@ Built with **py-cord**. Voice send/receive uses **davey** to handle Discord's DA
 - **`/setup`** — Configuration wizard (UI-driven via Discord modals) to set:
   - Familiar name, personality prompt, chattiness level (0–100)
   - Which transcription/LLM/TTS provider to use
-  - API keys per provider, model selection, temperature
+  - Model selection, temperature
+
+Bot token in `.env` as `DISCORD_BOT`.
 
 Bot token in `.env` as `DISCORD_BOT`.
 
@@ -96,7 +98,7 @@ The bot evaluates each incoming event (transcription, text message, Twitch event
 - Hard cap: max 3 unprompted responses per minute
 - If 3+ humans are actively talking (multiple speakers in last 10s), raise the response threshold — talk less in fast-moving conversations, not more
 
-### AI Response (Claude LLM)
+### AI Response (OpenRouter)
 
 **Context management:** Hybrid sliding-window + summarization.
 - Keep the last ~20 exchanges verbatim in context
@@ -122,15 +124,6 @@ The bot evaluates each incoming event (transcription, text message, Twitch event
 4. Conversation summary
 5. Recent message history
 
-**Token budget (~30k per call for Sonnet, ~8k for Haiku):**
-- System prompt + character card: ~2k tokens
-- RAG retrieved chunks: ~3k tokens
-- Conversation summary: ~1k tokens
-- Recent history: ~20k tokens (Sonnet) / ~4k tokens (Haiku)
-- Response headroom: ~4k tokens (capped at 200 tokens for voice output)
-
-Configurable model, temperature. Max 200 output tokens for voice responses to keep latency low.
-
 ### Text-to-Speech
 
 **Primary: Cartesia Sonic**
@@ -155,6 +148,25 @@ Pipeline: LLM text → stream to Cartesia/Azure WebSocket → receive PCM audio 
 - Connects to Twitch EventSub WebSocket as a task in the root nursery
 - Feeds channel events directly into the internal text queue:
   - Channel point redemptions, subscriptions, gift subs, cheers (bits), follows, ad breaks
+
+#### Slash Commands
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `/twitch connect` | `channel` (string) | Connect the familiar to a Twitch channel and begin watching for events |
+| `/twitch disconnect` | — | Stop watching the current Twitch channel |
+| `/twitch status` | — | Show the currently connected channel and which event types are enabled |
+| `/twitch events` | `subscriptions` (bool) `cheers` (bool) `follows` (bool) `ads` (bool) | Toggle which event categories produce messages; omitted options are unchanged |
+| `/twitch ads-immediate` | `enabled` (bool) | Toggle whether ad break events are sent to the LLM immediately rather than batched with the normal cycle |
+| `/twitch redemptions add` | `name` (string) | Add a channel point redemption name to the allow-list |
+| `/twitch redemptions remove` | `name` (string) | Remove a channel point redemption name from the allow-list |
+| `/twitch redemptions list` | — | Show all redemption names currently on the allow-list |
+| `/twitch redemptions clear` | — | Remove all redemption names from the allow-list |
+
+**Notes:**
+- All `/twitch` commands require a role that has the "Manage Server" permission or a configured admin role
+- Twitch credentials (OAuth token, client ID) are set via `/setup` or in `.env` as `TWITCH_CLIENT_ID` and `TWITCH_ACCESS_TOKEN`; they are never accepted as slash command arguments
+- Settings are persisted per Discord guild so they survive bot restarts
 
 ### Monitoring Dashboard
 
