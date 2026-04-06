@@ -819,15 +819,15 @@ class TestTwitchEventToMessage:
         )
         assert event.to_message().role == "user"
 
-    def test_to_message_content_is_event_text(self) -> None:
-        """The message content is the plain-text event description."""
+    def test_to_message_content_has_twitch_prefix(self) -> None:
+        """Content is prefixed with '[Twitch] ' so the LLM knows the source."""
         event = TwitchEvent(
             channel="ch",
             text="Alice has subscribed at tier 1",
             priority="normal",
             timestamp=datetime.now(UTC),
         )
-        assert event.to_message().content == "Alice has subscribed at tier 1"
+        assert event.to_message().content == "[Twitch] Alice has subscribed at tier 1"
 
     def test_to_message_name_is_viewer_when_present(self) -> None:
         """Events with a viewer use the viewer's name as the message name."""
@@ -863,7 +863,7 @@ class TestTwitchEventToMessage:
         d = event.to_message().to_dict()
         assert d == {
             "role": "user",
-            "content": "Alice has followed the channel",
+            "content": "[Twitch] Alice has followed the channel",
             "name": "Alice",
         }
 
@@ -879,7 +879,7 @@ class TestTwitchEventToMessage:
         d = event.to_message().to_dict()
         assert d == {
             "role": "user",
-            "content": "An ad has begun on the channel",
+            "content": "[Twitch] An ad has begun on the channel",
             "name": "Twitch",
         }
 
@@ -928,8 +928,9 @@ class TestTwitchEventToMessage:
         # Each viewer-associated event carries that viewer's name
         names = [m.name for m in messages]
         assert names == ["Alice", "Bob", "Carol"]
-        # Content is the event text, not a generic placeholder
+        # Every content line is prefixed to identify the Twitch source
         contents = [m.content for m in messages]
+        assert all(c.startswith("[Twitch] ") for c in contents)
         assert any("Alice" in c for c in contents)
         assert any("Bob" in c for c in contents)
         assert any("Carol" in c and "hello!" in c for c in contents)
