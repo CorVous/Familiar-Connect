@@ -79,7 +79,9 @@ def test_connect_websocket_reinits_when_dave_negotiated(
             new=AsyncMock(return_value=fake_ws),
         ),
         patch.object(
-            client, "_reinit_dave_session", new=AsyncMock(),
+            client,
+            "_reinit_dave_session",
+            new=AsyncMock(),
         ) as reinit,
     ):
         asyncio.new_event_loop().run_until_complete(client.connect_websocket())
