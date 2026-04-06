@@ -12,6 +12,7 @@ wheels/
 # Secrets
 .env
 .env.*
+!.env.example
 
 # Auto-generated version file
 src/*/_version.py
