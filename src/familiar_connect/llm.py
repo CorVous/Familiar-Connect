@@ -106,7 +106,7 @@ class LLMClient:
         headers: dict[str, str],
         payload: dict[str, Any],
     ) -> httpx.Response:
-        async with httpx.AsyncClient() as http:
+        async with httpx.AsyncClient(timeout=120.0) as http:
             return await http.post(url, headers=headers, json=payload)
 
     async def chat(self: Self, messages: list[Message]) -> Message:
