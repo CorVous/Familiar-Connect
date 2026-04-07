@@ -7,6 +7,7 @@ import discord
 import pytest
 
 from familiar_connect.bot import awaken, create_bot, sleep_cmd
+from familiar_connect.text_session import clear_session, get_session
 
 
 @pytest.fixture(autouse=True)
@@ -87,24 +88,27 @@ def test_create_bot_has_sleep_command() -> None:
 # --- /awaken handler tests ---
 
 
-def test_awaken_user_not_in_voice_channel() -> None:
-    """When the user is not in a voice channel, respond with an error."""
+def test_awaken_user_not_in_voice_channel_binds_text_channel() -> None:
+    """When the user is not in a voice channel, /awaken binds to the text channel."""
+    clear_session()
     ctx = _make_ctx(in_voice=False)
 
     asyncio.run(awaken(ctx))
 
+    # Should succeed and create a text session
     ctx.respond.assert_called_once()
-    call_kwargs = ctx.respond.call_args
-    assert call_kwargs.kwargs.get("ephemeral") is True
+    assert get_session() is not None
+    clear_session()
 
 
 def test_awaken_already_connected() -> None:
-    """When the bot is already in a voice channel, respond with a message."""
+    """When the bot is already in a voice channel, refuse with an ephemeral message."""
     ctx = _make_ctx(in_voice=True, bot_connected=True)
 
     asyncio.run(awaken(ctx))
 
     ctx.respond.assert_called_once()
+    assert ctx.respond.call_args.kwargs.get("ephemeral") is True
     ctx.author.voice.channel.connect.assert_not_called()
 
 
