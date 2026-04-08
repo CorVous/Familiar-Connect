@@ -3,14 +3,14 @@ revision = 3
 requires-python = "==3.13.*"
 
 [options]
-exclude-newer = "2026-04-01T18:53:50.56020249Z"
+exclude-newer = "2026-04-01T19:02:44.281115869Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-defusedxml = { timestamp = "2026-04-07T18:53:50.560237816Z", span = "P1D" }
-ty = { timestamp = "2026-04-07T18:53:50.560267374Z", span = "P1D" }
-ruff = { timestamp = "2026-04-06T18:53:50.560265941Z", span = "P2D" }
-davey = { timestamp = "2026-04-07T18:53:50.560268267Z", span = "P1D" }
+defusedxml = { timestamp = "2026-04-07T19:02:44.281244717Z", span = "P1D" }
+ty = { timestamp = "2026-04-07T19:02:44.281326534Z", span = "P1D" }
+ruff = { timestamp = "2026-04-06T19:02:44.281325346Z", span = "P2D" }
+davey = { timestamp = "2026-04-07T19:02:44.281327205Z", span = "P1D" }
 
 [[package]]
 name = "aiohappyeyeballs"
