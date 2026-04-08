@@ -23,7 +23,7 @@ class GuildTwitchState:
     broadcaster_id: str
     config: TwitchWatcherConfig
     watcher: TwitchWatcher
-    cancel_scope: Any  # trio.CancelScope at runtime; Any for testability
+    task: Any  # asyncio.Task[None] at runtime; Any for testability
 
 
 _registry: dict[int, GuildTwitchState] = {}

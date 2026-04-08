@@ -17,7 +17,6 @@ from familiar_connect.text_session import (
     set_session,
 )
 from familiar_connect.twitch_commands import (
-    _NurseryProto,
     ads_immediate_cmd,
     connect_cmd,
     disconnect_cmd,
@@ -225,7 +224,6 @@ def create_bot(
     llm_client: LLMClient | None = None,
     system_prompt: str = "",
     tts_client: CartesiaTTSClient | None = None,
-    nursery: _NurseryProto | None = None,
 ) -> discord.Bot:
     """Create and configure the Discord bot with slash commands.
 
@@ -235,8 +233,6 @@ def create_bot(
     :param system_prompt: Pre-assembled system prompt passed to /awaken.
     :param tts_client: Optional TTS client for voice output. When provided
         and the bot is in a voice channel, LLM replies are also spoken aloud.
-    :param nursery: Trio nursery used to spawn Twitch watcher tasks. When None,
-        /twitch connect will still register the state but cannot spawn the task.
     :return: A configured discord.Bot.
     """
     intents = discord.Intents.default()
@@ -260,15 +256,12 @@ def create_bot(
     )
     bot.add_listener(_on_message, name="on_message")
 
-    _register_twitch_commands(bot, nursery)
+    _register_twitch_commands(bot)
 
     return bot
 
 
-def _register_twitch_commands(
-    bot: discord.Bot,
-    nursery: _NurseryProto | None,
-) -> None:
+def _register_twitch_commands(bot: discord.Bot) -> None:
     """Register the /twitch slash command group on *bot*."""
     twitch = discord.SlashCommandGroup("twitch", "Twitch channel event watcher")
 
@@ -276,7 +269,7 @@ def _register_twitch_commands(
     @twitch.command(name="connect", description="Connect to a Twitch channel")
     @discord.option("channel", description="Twitch channel name", required=True)
     async def _connect(ctx: discord.ApplicationContext, channel: str) -> None:
-        await connect_cmd(ctx, channel=channel, nursery=nursery)
+        await connect_cmd(ctx, channel=channel)
 
     # /twitch disconnect
     @twitch.command(name="disconnect", description="Stop watching the Twitch channel")

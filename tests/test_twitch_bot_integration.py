@@ -43,7 +43,7 @@ def _respond_text(ctx: MagicMock) -> str:
 
 def test_create_bot_has_twitch_command_group() -> None:
     """create_bot registers a /twitch slash command group."""
-    bot = create_bot(nursery=MagicMock())
+    bot = create_bot()
     names = [cmd.name for cmd in bot.pending_application_commands]
     assert "twitch" in names
 
@@ -71,9 +71,6 @@ class TestTwitchLifecycle:
         return _make_ctx(guild_id=self.GUILD)
 
     def test_full_lifecycle(self) -> None:
-        nursery = MagicMock()
-        nursery.start_soon = MagicMock()
-
         # 1. connect
         ctx = self._ctx()
         with (
@@ -88,7 +85,7 @@ class TestTwitchLifecycle:
                 new=AsyncMock(return_value="77"),
             ),
         ):
-            self._run(connect_cmd(ctx, channel="coolstreamer", nursery=nursery))
+            self._run(connect_cmd(ctx, channel="coolstreamer"))
         assert "coolstreamer" in _respond_text(ctx)
         assert get_guild_twitch(self.GUILD) is not None
 

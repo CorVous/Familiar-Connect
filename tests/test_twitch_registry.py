@@ -24,14 +24,14 @@ def _make_state(guild_id: int = 1) -> GuildTwitchState:
         broadcaster_id="123",
         channel="coolstreamer",
     )
-    cancel_scope = MagicMock()
+    task = MagicMock()
     return GuildTwitchState(
         guild_id=guild_id,
         channel="coolstreamer",
         broadcaster_id="123",
         config=config,
         watcher=watcher,
-        cancel_scope=cancel_scope,
+        task=task,
     )
 
 
@@ -59,7 +59,7 @@ class TestGuildTwitchState:
         assert state.broadcaster_id == "123"
         assert isinstance(state.config, TwitchWatcherConfig)
         assert isinstance(state.watcher, TwitchWatcher)
-        assert state.cancel_scope is not None
+        assert state.task is not None
 
 
 # ---------------------------------------------------------------------------

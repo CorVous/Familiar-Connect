@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
-import trio
 from twitchAPI.twitch import Twitch
 
 from familiar_connect.twitch import TwitchWatcherConfig
@@ -19,12 +19,6 @@ from familiar_connect.twitch_watcher import TwitchWatcher
 
 if TYPE_CHECKING:
     import discord
-
-
-class _NurseryProto(Protocol):
-    """Minimal nursery interface needed by the command layer."""
-
-    def start_soon(self, async_fn: object, /, *args: object) -> None: ...
 
 
 async def _resolve_broadcaster_id(channel: str, client_id: str, token: str) -> str:
@@ -47,7 +41,6 @@ async def _resolve_broadcaster_id(channel: str, client_id: str, token: str) -> s
 async def connect_cmd(
     ctx: discord.ApplicationContext,
     channel: str,
-    nursery: _NurseryProto | None,
 ) -> None:
     """Handle /twitch connect <channel>."""
     guild_id = ctx.guild_id
@@ -80,7 +73,7 @@ async def connect_cmd(
         channel=channel,
     )
 
-    cancel_scope = trio.CancelScope()
+    task = asyncio.create_task(_run_watcher(watcher), name=f"twitch-watcher-{guild_id}")
 
     state = GuildTwitchState(
         guild_id=guild_id,
@@ -88,27 +81,20 @@ async def connect_cmd(
         broadcaster_id=broadcaster_id,
         config=config,
         watcher=watcher,
-        cancel_scope=cancel_scope,
+        task=task,
     )
     set_guild_twitch(guild_id, state)
-
-    if nursery is not None:
-        nursery.start_soon(_run_watcher, watcher, cancel_scope)
 
     await ctx.respond(f"Connected to **{channel}**. Watching for Twitch events.")
 
 
-async def _run_watcher(
-    _watcher: TwitchWatcher,
-    cancel_scope: trio.CancelScope,
-) -> None:
-    """Trio task: run *_watcher* inside *cancel_scope*.
+async def _run_watcher(_watcher: TwitchWatcher) -> None:
+    """Background task: placeholder for the EventSub watcher loop.
 
-    Full Twitch EventSub setup (authenticated Twitch client + EventSubWebsocket)
-    will be wired in a later pass. For now the task holds the cancel scope open.
+    Full Twitch EventSub setup (authenticated client + EventSubWebsocket)
+    will be wired in a later pass. For now the task suspends until cancelled.
     """
-    with cancel_scope:
-        await trio.sleep_forever()
+    await asyncio.Event().wait()
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +114,7 @@ async def disconnect_cmd(ctx: discord.ApplicationContext) -> None:
         await ctx.respond("Not connected to any Twitch channel.")
         return
 
-    state.cancel_scope.cancel()
+    state.task.cancel()
     clear_guild_twitch(guild_id)
     await ctx.respond(f"Disconnected from **{state.channel}**.")
 

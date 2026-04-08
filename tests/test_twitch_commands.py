@@ -46,14 +46,14 @@ def _make_state(
 ) -> GuildTwitchState:
     cfg = config or TwitchWatcherConfig()
     watcher = TwitchWatcher(config=cfg, broadcaster_id="999", channel=channel)
-    cancel_scope = MagicMock()
+    task = MagicMock()
     return GuildTwitchState(
         guild_id=guild_id,
         channel=channel,
         broadcaster_id="999",
         config=cfg,
         watcher=watcher,
-        cancel_scope=cancel_scope,
+        task=task,
     )
 
 
@@ -82,8 +82,6 @@ def _clear():
 class TestConnectCmd:
     def test_connect_registers_guild(self) -> None:
         ctx = _make_ctx(guild_id=100)
-        nursery = MagicMock()
-        nursery.start_soon = MagicMock()
 
         with (
             patch(
@@ -97,7 +95,7 @@ class TestConnectCmd:
                 new=AsyncMock(return_value="42"),
             ),
         ):
-            asyncio.run(connect_cmd(ctx, channel="coolstreamer", nursery=nursery))
+            asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
 
         state = get_guild_twitch(100)
         assert state is not None
@@ -105,7 +103,6 @@ class TestConnectCmd:
 
     def test_connect_response_includes_channel_name(self) -> None:
         ctx = _make_ctx(guild_id=100)
-        nursery = MagicMock()
 
         with (
             patch(
@@ -119,14 +116,13 @@ class TestConnectCmd:
                 new=AsyncMock(return_value="42"),
             ),
         ):
-            asyncio.run(connect_cmd(ctx, channel="coolstreamer", nursery=nursery))
+            asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
 
         assert "coolstreamer" in _respond_text(ctx)
 
     def test_connect_already_connected_returns_error(self) -> None:
         set_guild_twitch(100, _make_state(guild_id=100, channel="oldchan"))
         ctx = _make_ctx(guild_id=100)
-        nursery = MagicMock()
 
         with patch(
             "familiar_connect.twitch_commands.os.environ.get",
@@ -134,30 +130,27 @@ class TestConnectCmd:
                 "dummy" if k in {"TWITCH_CLIENT_ID", "TWITCH_ACCESS_TOKEN"} else d
             ),
         ):
-            asyncio.run(connect_cmd(ctx, channel="newchan", nursery=nursery))
+            asyncio.run(connect_cmd(ctx, channel="newchan"))
 
         text = _respond_text(ctx).lower()
         assert "already" in text or "oldchan" in text
 
     def test_connect_missing_credentials_returns_error(self) -> None:
         ctx = _make_ctx(guild_id=100)
-        nursery = MagicMock()
 
         with patch(
             "familiar_connect.twitch_commands.os.environ.get",
             return_value=None,
         ):
-            asyncio.run(connect_cmd(ctx, channel="coolstreamer", nursery=nursery))
+            asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
 
         text = _respond_text(ctx).lower()
         cred_words = {"credential", "token", "client", "env", "missing"}
         assert any(word in text for word in cred_words)
         assert get_guild_twitch(100) is None
 
-    def test_connect_spawns_watcher_task(self) -> None:
+    def test_connect_creates_background_task(self) -> None:
         ctx = _make_ctx(guild_id=100)
-        nursery = MagicMock()
-        nursery.start_soon = MagicMock()
 
         with (
             patch(
@@ -171,9 +164,11 @@ class TestConnectCmd:
                 new=AsyncMock(return_value="42"),
             ),
         ):
-            asyncio.run(connect_cmd(ctx, channel="coolstreamer", nursery=nursery))
+            asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
 
-        nursery.start_soon.assert_called_once()
+        state = get_guild_twitch(100)
+        assert state is not None
+        assert isinstance(state.task, asyncio.Task)
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +186,14 @@ class TestDisconnectCmd:
 
         assert get_guild_twitch(100) is None
 
-    def test_disconnect_cancels_scope(self) -> None:
+    def test_disconnect_cancels_task(self) -> None:
         state = _make_state(guild_id=100)
         set_guild_twitch(100, state)
         ctx = _make_ctx(guild_id=100)
 
         asyncio.run(disconnect_cmd(ctx))
 
-        state.cancel_scope.cancel.assert_called_once()
+        state.task.cancel.assert_called_once()
 
     def test_disconnect_responds_disconnected(self) -> None:
         state = _make_state(guild_id=100)
