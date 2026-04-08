@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import discord
+import httpx
 import pytest
 
 from familiar_connect.bot import awaken, create_bot, sleep_cmd
@@ -11,15 +12,18 @@ from familiar_connect.text_session import clear_session, get_session
 
 
 @pytest.fixture(autouse=True)
-def _fresh_event_loop() -> None:
-    """Ensure each test gets a fresh asyncio event loop.
+def _fresh_loop_and_session():
+    """Fresh asyncio event loop and cleared session registry per test.
 
-    py-cord's Bot constructor calls asyncio.get_event_loop(), and
-    asyncio.run() closes the loop when it finishes. Without this
-    fixture, later tests fail with 'no current event loop'.
+    Yields:
+        None
+
     """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    clear_session()
+    yield
+    clear_session()
 
 
 def _make_ctx(
@@ -45,7 +49,11 @@ def _make_ctx(
     if in_voice:
         voice_state = MagicMock()
         channel = MagicMock(spec=discord.VoiceChannel)
-        channel.connect = AsyncMock(return_value=MagicMock())
+        # connect() returns a mock voice client; give it play() so greeting tests work
+        mock_vc = MagicMock(spec=discord.VoiceClient)
+        mock_vc.play = MagicMock()
+        mock_vc.is_playing = MagicMock(return_value=False)
+        channel.connect = AsyncMock(return_value=mock_vc)
         channel.name = "General"
         voice_state.channel = channel
         type(author).voice = PropertyMock(return_value=voice_state)
@@ -60,6 +68,13 @@ def _make_ctx(
         type(ctx).voice_client = PropertyMock(return_value=None)
 
     return ctx
+
+
+def _make_tts_client(pcm: bytes = b"\x00\x01\x02\x03") -> MagicMock:
+    """Fake CartesiaTTSClient that returns *pcm* from synthesize()."""
+    client = MagicMock()
+    client.synthesize = AsyncMock(return_value=pcm)
+    return client
 
 
 # --- Bot factory tests ---
@@ -145,3 +160,61 @@ def test_sleep_disconnects() -> None:
 
     ctx.voice_client.disconnect.assert_called_once()
     ctx.respond.assert_called_once()
+
+
+# --- Opening greeting via TTS ---
+
+
+class TestAwakenVoiceGreeting:
+    def test_greeting_synthesized_after_joining(self) -> None:
+        """After joining a voice channel, TTS synthesizes a greeting."""
+        ctx = _make_ctx(in_voice=True)
+        tts = _make_tts_client()
+
+        asyncio.run(awaken(ctx, tts_client=tts))
+
+        tts.synthesize.assert_awaited_once()
+
+    def test_greeting_text_is_hello(self) -> None:
+        """The greeting text passed to TTS is 'Hello!'."""
+        ctx = _make_ctx(in_voice=True)
+        tts = _make_tts_client()
+
+        asyncio.run(awaken(ctx, tts_client=tts))
+
+        tts.synthesize.assert_awaited_once_with("Hello!")
+
+    def test_greeting_played_in_voice_channel(self) -> None:
+        """The greeting audio is played on the voice client returned by connect()."""
+        ctx = _make_ctx(in_voice=True)
+        tts = _make_tts_client(pcm=bytes(8))
+
+        asyncio.run(awaken(ctx, tts_client=tts))
+
+        joined_vc = ctx.author.voice.channel.connect.return_value
+        joined_vc.play.assert_called_once()
+
+    def test_greeting_skipped_when_no_tts_client(self) -> None:
+        """No TTS client means no greeting — bot still joins silently."""
+        ctx = _make_ctx(in_voice=True)
+
+        asyncio.run(awaken(ctx))  # tts_client defaults to None
+
+        joined_vc = ctx.author.voice.channel.connect.return_value
+        joined_vc.play.assert_not_called()
+
+    def test_greeting_error_does_not_prevent_followup(self) -> None:
+        """A TTS failure during the greeting doesn't block the join confirmation."""
+        ctx = _make_ctx(in_voice=True)
+        tts = _make_tts_client()
+        tts.synthesize = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "server error",
+                request=httpx.Request("POST", "https://api.cartesia.ai/tts/bytes"),
+                response=httpx.Response(500),
+            )
+        )
+
+        asyncio.run(awaken(ctx, tts_client=tts))
+
+        ctx.followup.send.assert_called_once()

@@ -9,6 +9,7 @@ state and drives session (re)initialization.
 from __future__ import annotations
 
 import logging
+import struct
 from typing import TYPE_CHECKING
 
 import davey
@@ -86,3 +87,24 @@ class DaveVoiceClient(VoiceClient):
             DaveVoiceWebSocket.MLS_KEY_PACKAGE,
             key_package,
         )
+
+    def _get_voice_packet(self, data: bytes) -> bytes:
+        """Build an RTP packet, applying DAVE encryption before SRTP.
+
+        DAVE encrypts the raw opus frame *before* it is placed into the
+        RTP packet and SRTP-encrypted. The layering is:
+        opus frame → DAVE encrypt → RTP + SRTP.
+        """
+        payload = data
+        if self.dave_session is not None and self.dave_session.ready:
+            payload = self.dave_session.encrypt_opus(bytes(data))
+
+        header = bytearray(12)
+        header[0] = 0x80
+        header[1] = 0x78
+        struct.pack_into(">H", header, 2, self.sequence)
+        struct.pack_into(">I", header, 4, self.timestamp)
+        struct.pack_into(">I", header, 8, self.ssrc)
+
+        encrypt_packet = getattr(self, f"_encrypt_{self.mode}")
+        return encrypt_packet(header, payload)
