@@ -44,9 +44,10 @@ from familiar_connect.context.types import (
 
 def _make_request(**overrides: object) -> ContextRequest:
     defaults: dict[str, object] = {
-        "guild_id": 1,
+        "owner_user_id": 42,
         "familiar_id": "aria",
         "channel_id": 100,
+        "guild_id": 1,
         "speaker": "Alice",
         "utterance": "hello",
         "modality": Modality.text,

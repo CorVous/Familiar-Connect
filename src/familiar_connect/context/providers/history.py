@@ -1,19 +1,22 @@
 """HistoryProvider — sliding window of recent turns + rolling summary.
 
 Step 6 of future-features/context-management.md. Reads turns from the
-:class:`HistoryStore` for the request's ``(guild_id, familiar_id,
-channel_id)`` triple and emits up to two contributions:
+:class:`HistoryStore` for the request's
+``(owner_user_id, familiar_id, channel_id)`` and emits up to two
+contributions:
 
 - A ``recent_history`` Contribution containing the most recent N
-  turns rendered as a single block of text. Always present whenever
-  there is at least one turn.
+  turns *in this channel* rendered as a single block of text. The
+  recent window is partitioned per channel so two simultaneous
+  conversations don't bleed into each other.
 - A ``history_summary`` Contribution containing a rolling summary of
-  every turn that has aged out of the window, built by a cheap
+  every turn the familiar has heard *globally* (across all channels)
+  except the most recent ``summary_lag`` turns, built by a cheap
   :class:`SideModel` and cached in the store under
-  ``(guild_id, familiar_id, channel_id)``. The cache is keyed by
-  ``last_summarised_id`` so the summariser is only re-invoked when
-  new turns have actually aged out — repeat calls with no new
-  history pay nothing.
+  ``(owner_user_id, familiar_id)``. The cache is keyed by
+  ``last_summarised_id``; the summariser is only re-invoked when
+  enough new turns have arrived globally that the cached watermark
+  has fallen behind.
 
 The provider has its own internal soft deadline for the summariser,
 shorter than the pipeline's per-provider deadline, so a slow side-
@@ -22,6 +25,12 @@ exceeds the soft deadline (or raises) and there is a stale cached
 summary, the stale value is returned. If neither path produces text,
 the provider returns just the recent layer and lets the pipeline
 move on.
+
+The familiar-ownership model lives in
+``future-features/configuration-levels.md``. The split between
+per-channel recent window and per-familiar global summary is the
+"hybrid" option from that doc, picked specifically because it forces
+multi-channel scalability to be a first-class concern from day one.
 """
 
 from __future__ import annotations
@@ -86,6 +95,22 @@ class HistoryProvider:
 
     Conforms to the ContextProvider Protocol structurally — no
     inheritance required.
+
+    :param store: The :class:`HistoryStore` to read turns from and
+        cache summaries in.
+    :param side_model: The :class:`SideModel` used to build new
+        summaries when the cache is stale.
+    :param window_size: Number of recent turns *per channel* to
+        surface verbatim. Defaults to ``DEFAULT_WINDOW_SIZE``.
+    :param summary_lag: Number of most-recent-globally turns to
+        exclude from the summary content. Defaults to ``window_size``,
+        which means the summary covers everything older than the
+        global rolling window. Setting it equal to ``window_size``
+        also means single-channel scenarios produce zero overlap
+        between the recent layer and the summary layer.
+    :param summary_timeout_s: Soft cap on the summariser sub-call.
+    :param max_summary_tokens: Approximate target length for the
+        summariser's output.
     """
 
     id = "history"
@@ -97,6 +122,7 @@ class HistoryProvider:
         store: HistoryStore,
         side_model: SideModel,
         window_size: int = DEFAULT_WINDOW_SIZE,
+        summary_lag: int | None = None,
         summary_timeout_s: float = DEFAULT_SUMMARY_TIMEOUT_S,
         max_summary_tokens: int = DEFAULT_MAX_SUMMARY_TOKENS,
     ) -> None:
@@ -106,6 +132,7 @@ class HistoryProvider:
         self._store = store
         self._side_model = side_model
         self._window_size = window_size
+        self._summary_lag = summary_lag if summary_lag is not None else window_size
         self._summary_timeout_s = summary_timeout_s
         self._max_summary_tokens = max_summary_tokens
 
@@ -115,29 +142,37 @@ class HistoryProvider:
     ) -> list[Contribution]:
         """Return up to two Contributions for *request*.
 
-        - Empty history → empty list (the budgeter handles it).
-        - History fits in the window → only recent.
-        - History overflows the window → recent + summary (cached
-          when possible, regenerated when stale, falls back to the
-          stale cache or to nothing if the summariser fails).
+        - No global history → empty list (the budgeter handles it).
+        - Global history fits in ``window_size`` → only recent.
+        - Global history overflows → recent + summary (cached when
+          possible, regenerated when stale, falls back to the stale
+          cache or to nothing if the summariser fails).
         """
         recent = self._store.recent(
-            guild_id=request.guild_id,
-            channel_id=request.channel_id,
+            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
             limit=self._window_size,
         )
-        if not recent:
+
+        latest = self._store.latest_id(
+            owner_user_id=request.owner_user_id,
+            familiar_id=request.familiar_id,
+        )
+        if latest is None:
+            # No global history at all — nothing to surface, anywhere.
             return []
 
-        contributions: list[Contribution] = [self._recent_contribution(recent)]
+        contributions: list[Contribution] = []
+        if recent:
+            contributions.append(self._recent_contribution(recent))
 
-        # If anything has aged out of the window, try to surface a summary.
-        oldest_in_window_id = recent[0].id
-        if oldest_in_window_id <= 1:
+        # Only build a summary if there's enough global history that
+        # at least one turn lives outside the rolling-window region.
+        if latest <= self._summary_lag:
             return contributions
 
-        target_max_id = oldest_in_window_id - 1
+        target_max_id = latest - self._summary_lag
         summary_text = await self._fetch_or_build_summary(request, target_max_id)
         if summary_text:
             contributions.append(self._summary_contribution(summary_text))
@@ -154,11 +189,10 @@ class HistoryProvider:
         target_max_id: int,
     ) -> str:
         cached = self._store.get_summary(
-            guild_id=request.guild_id,
-            channel_id=request.channel_id,
+            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
         )
-        if cached is not None and cached.last_summarised_id == target_max_id:
+        if cached is not None and cached.last_summarised_id >= target_max_id:
             return cached.summary_text
 
         # Cache is missing or stale: try to (re)build it under the soft
@@ -169,10 +203,10 @@ class HistoryProvider:
                 return await self._build_summary(request, target_max_id)
         except TimeoutError:
             _logger.warning(
-                "history summariser timed out after %.3fs for guild=%s familiar=%s "
-                "channel=%s; falling back to cache",
+                "history summariser timed out after %.3fs for owner=%s "
+                "familiar=%s channel=%s; falling back to cache",
                 self._summary_timeout_s,
-                request.guild_id,
+                request.owner_user_id,
                 request.familiar_id,
                 request.channel_id,
             )
@@ -191,8 +225,7 @@ class HistoryProvider:
         target_max_id: int,
     ) -> str:
         older = self._store.older_than(
-            guild_id=request.guild_id,
-            channel_id=request.channel_id,
+            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
             max_id=target_max_id,
         )
@@ -212,8 +245,7 @@ class HistoryProvider:
 
         # Update the cache so future calls reuse this work.
         self._store.put_summary(
-            guild_id=request.guild_id,
-            channel_id=request.channel_id,
+            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
             last_summarised_id=target_max_id,
             summary_text=summary,

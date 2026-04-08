@@ -1,14 +1,20 @@
 """Red-first tests for the HistoryProvider.
 
 Step 6 of future-features/context-management.md. Reads turns from the
-HistoryStore for the request's (guild, familiar, channel), emits one
-recent_history Contribution containing the most recent N turns, and
-— when there are turns older than the window — emits a second
-history_summary Contribution from a cheap SideModel, cached in the
-store so we don't pay for the same prefix twice.
+HistoryStore for the request's
+``(owner_user_id, familiar_id, channel_id)`` and emits one
+recent_history Contribution containing the most recent N turns *in
+this channel*, and — when there are enough older turns *globally* —
+emits a second history_summary Contribution from a cheap SideModel,
+cached in the store under ``(owner_user_id, familiar_id)`` so we
+don't pay for the same prefix twice.
 
-Covers familiar_connect.context.providers.history, which doesn't
-exist yet.
+Familiars are owned by Discord users, not guilds — see
+``future-features/configuration-levels.md`` for the ownership model.
+The recent window is partitioned per channel; the rolling summary is
+global per familiar.
+
+Covers familiar_connect.context.providers.history.
 """
 
 from __future__ import annotations
@@ -41,32 +47,36 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-_GUILD = 1
+_OWNER = 42
 _CHANNEL = 100
 _FAMILIAR = "aria"
+_GUILD = 1  # observability only
 
 
-def _request() -> ContextRequest:
-    return ContextRequest(
-        guild_id=_GUILD,
-        familiar_id=_FAMILIAR,
-        channel_id=_CHANNEL,
-        speaker="Alice",
-        utterance="hello",
-        modality=Modality.text,
-        budget_tokens=2048,
-        deadline_s=10.0,
-    )
+def _request(**overrides: object) -> ContextRequest:
+    defaults: dict[str, object] = {
+        "owner_user_id": _OWNER,
+        "familiar_id": _FAMILIAR,
+        "channel_id": _CHANNEL,
+        "guild_id": _GUILD,
+        "speaker": "Alice",
+        "utterance": "hello",
+        "modality": Modality.text,
+        "budget_tokens": 2048,
+        "deadline_s": 10.0,
+    }
+    defaults.update(overrides)
+    return ContextRequest(**defaults)  # type: ignore[arg-type]
 
 
-def _seed(store: HistoryStore, n: int) -> None:
-    """Append *n* alternating user/assistant turns to the test triple."""
+def _seed(store: HistoryStore, n: int, *, channel_id: int = _CHANNEL) -> None:
+    """Append *n* alternating user/assistant turns to the test channel."""
     for i in range(n):
         role = "user" if i % 2 == 0 else "assistant"
         speaker = "Alice" if role == "user" else None
         store.append_turn(
-            guild_id=_GUILD,
-            channel_id=_CHANNEL,
+            owner_user_id=_OWNER,
+            channel_id=channel_id,
             familiar_id=_FAMILIAR,
             role=role,
             content=f"turn {i}",
@@ -221,12 +231,12 @@ class TestSummaryPath:
         await provider.contribute(_request())  # caches "first"
         assert len(side.calls) == 1
 
-        # Add more turns so the window slides forward and older turns age
-        # out past what the cache covers.
+        # Add more turns so the global watermark advances past what the
+        # cache covers.
         seed_more = 5
         for i in range(seed_more):
             store.append_turn(
-                guild_id=_GUILD,
+                owner_user_id=_OWNER,
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
                 role="user",
@@ -300,7 +310,7 @@ class TestSummariserFailures:
         # Add more turns and switch to a slow side-model.
         for i in range(5):
             store.append_turn(
-                guild_id=_GUILD,
+                owner_user_id=_OWNER,
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
                 role="user",

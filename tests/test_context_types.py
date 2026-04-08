@@ -100,9 +100,10 @@ class TestContribution:
 class TestContextRequest:
     def _make(self, **overrides: object) -> ContextRequest:
         defaults: dict[str, object] = {
-            "guild_id": 1,
+            "owner_user_id": 42,
             "familiar_id": "aria",
             "channel_id": 100,
+            "guild_id": 1,
             "speaker": "Alice",
             "utterance": "hello",
             "modality": Modality.text,
@@ -114,9 +115,10 @@ class TestContextRequest:
 
     def test_construct_with_all_fields(self) -> None:
         req = self._make()
-        assert req.guild_id == 1
+        assert req.owner_user_id == 42
         assert req.familiar_id == "aria"
         assert req.channel_id == 100
+        assert req.guild_id == 1
         assert req.speaker == "Alice"
         assert req.utterance == "hello"
         assert req.modality is Modality.text
@@ -127,6 +129,19 @@ class TestContextRequest:
         """A Twitch event or system-generated turn may not have a speaker."""
         req = self._make(speaker=None)
         assert req.speaker is None
+
+    def test_guild_id_is_optional(self) -> None:
+        """Non-Discord events (Twitch, scheduled tasks) have no guild."""
+        req = self._make(guild_id=None)
+        assert req.guild_id is None
+
+    def test_owner_user_id_partitions_familiars(self) -> None:
+        """Two different owners can each have a familiar with the same id."""
+        a = self._make(owner_user_id=1, familiar_id="aria")
+        b = self._make(owner_user_id=2, familiar_id="aria")
+        assert a != b
+        assert a.owner_user_id != b.owner_user_id
+        assert a.familiar_id == b.familiar_id
 
     def test_modality_can_be_voice(self) -> None:
         req = self._make(modality=Modality.voice)

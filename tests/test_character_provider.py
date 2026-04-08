@@ -38,9 +38,10 @@ def store(tmp_path: Path) -> MemoryStore:
 
 def _make_request() -> ContextRequest:
     return ContextRequest(
-        guild_id=1,
+        owner_user_id=42,
         familiar_id="aria",
         channel_id=100,
+        guild_id=1,
         speaker="Alice",
         utterance="hello",
         modality=Modality.text,

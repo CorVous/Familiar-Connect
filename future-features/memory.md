@@ -2,7 +2,7 @@
 
 ## Overview
 
-A familiar's long-term memory is a directory of plain-text files on disk, one tree per familiar per guild. This document covers *what goes in that directory* — the content conventions. The *pipeline that reads and writes it* lives in `context-management.md`, and the architectural principles live in `plan.md` § Context Management.
+A familiar's long-term memory is a directory of plain-text files on disk, one tree per familiar, rooted under the familiar's owner. This document covers *what goes in that directory* — the content conventions. The *pipeline that reads and writes it* lives in `context-management.md`, the architectural principles live in `plan.md` § Context Management, and the ownership and configuration model lives in `future-features/configuration-levels.md`.
 
 This document replaces an earlier "lorebook" spec that described structured, tagged entries with triggered retrieval. The new design deliberately drops structured formats in favour of freeform Markdown that a cheap tool-using model can `grep` / `glob` / `read_file` at reply time. Old rationale is preserved in VCS history; see the commit that replaced `lorebook.md` with this file if you need the context.
 
@@ -19,7 +19,7 @@ This document replaces an earlier "lorebook" spec that described structured, tag
 Default path:
 
 ```
-data/guilds/<guild_id>/familiars/<familiar_id>/memory/
+data/users/<owner_user_id>/familiars/<familiar_id>/memory/
 ```
 
 Conventional (not enforced) subdirectories:
@@ -120,7 +120,7 @@ Suggested sections:
 Two patterns, in descending order of preference:
 
 1. **Post-session writer pass (preferred).** After a session ends (via `/sleep`, text-session timeout, or an idle window in voice), a cheap side-model reads the session transcript, produces a session summary file, and proposes updates to relevant `people/` and `topics/` files. The writer pass is the *only* code path that mutates memory under normal operation.
-2. **In-conversation writer tool (not first pass).** In principle, the main LLM or the content search agent could be given a `write_file` tool during a reply and edit memory live. This is strictly more powerful than the writer pass but also strictly more dangerous (the bot rewriting its own memory in real time, during latency-sensitive voice turns). We do not build this in the first cut. If we build it later, it should be heavily audited via the `MemoryStore`'s audit log and probably feature-flagged per guild.
+2. **In-conversation writer tool (not first pass).** In principle, the main LLM or the content search agent could be given a `write_file` tool during a reply and edit memory live. This is strictly more powerful than the writer pass but also strictly more dangerous (the bot rewriting its own memory in real time, during latency-sensitive voice turns). We do not build this in the first cut. If we build it later, it should be heavily audited via the `MemoryStore`'s audit log and probably feature-flagged per character.
 
 ## Reading from memory
 

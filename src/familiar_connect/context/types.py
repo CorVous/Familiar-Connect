@@ -81,10 +81,27 @@ class ContextRequest:
     each read it, produce a list of ``Contribution``s, and the budgeter
     merges everything into the final ``SystemPromptLayers``.
 
-    :param guild_id: Discord guild (server) id.
-    :param familiar_id: Which familiar is replying. Distinct familiars
-        in the same guild have distinct memory directories.
-    :param channel_id: Discord channel id (text or voice).
+    Familiars are owned by Discord users, not guilds — see
+    ``future-features/configuration-levels.md`` for the ownership
+    model. ``owner_user_id`` + ``familiar_id`` is the partition key
+    for memory and the rolling history summary; ``channel_id``
+    additionally partitions the per-conversation recent window so two
+    simultaneous conversations don't bleed into each other;
+    ``guild_id`` is observability only.
+
+    :param owner_user_id: Discord user id of the familiar's owner.
+        The primary partition key for ``memory/`` and the long-term
+        rolling summary in ``HistoryStore``.
+    :param familiar_id: Which familiar is replying. Scoped to a single
+        owner, so ``("alice", "aria")`` and ``("bob", "aria")`` are
+        distinct familiars with disjoint memory.
+    :param channel_id: Discord channel id (text or voice). Used as
+        the partition key for the per-conversation recent history
+        window.
+    :param guild_id: Discord guild (server) id where this turn
+        happened. Observability and routing only — never used as a
+        partition key for memory or history. ``None`` is permitted
+        for non-Discord events (e.g. Twitch).
     :param speaker: Display name of whoever triggered this turn, or
         ``None`` for system-generated turns like Twitch events.
     :param utterance: The triggering text. For voice this is the final
@@ -96,9 +113,10 @@ class ContextRequest:
         in seconds. Providers that miss it are dropped, not awaited.
     """
 
-    guild_id: int
+    owner_user_id: int
     familiar_id: str
     channel_id: int
+    guild_id: int | None
     speaker: str | None
     utterance: str
     modality: Modality

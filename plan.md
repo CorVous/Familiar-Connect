@@ -106,7 +106,7 @@ The bot evaluates each incoming event (transcription, text message, Twitch event
 
 The LLM call is the core of the bot's reply path. Its inputs — system prompt, retrieved knowledge, conversation history, per-user notes — are assembled by the Context Management pipeline described in the next section, *not* inline in the bot loop. The LLM client (`familiar_connect.llm`) only speaks to OpenRouter; it is deliberately unaware of where its messages came from so the pipeline can be tested and extended in isolation.
 
-- **Provider:** OpenRouter. Default model `openai/gpt-4o`, overridable per guild via `/setup` and via `OPENROUTER_MODEL`.
+- **Provider:** OpenRouter. Default model `openai/gpt-4o`, overridable per familiar via `/setup` and via `OPENROUTER_MODEL`.
 - **Streaming:** Responses are streamed so the TTS path can start speaking before the full reply arrives.
 - **Cheap side-model slot:** A smaller, faster model (e.g. `openai/gpt-4o-mini`) is made available to providers and processors for focused sub-tasks — summarisation, lorebook management, stepped thinking, recast-style cleanup — without inflating the main call.
 
@@ -118,18 +118,19 @@ Everything upstream of the OpenRouter call — character cards, system prompt as
 
 1. **The source of truth is a directory of plain-text files, per familiar.** Everything else is an optimisation on top. No special file formats, no schemas, no required fields. Markdown preferred but not enforced. A human can read the whole memory with `grep -r` or a text editor; a model can read it with the same tools plus `glob` / `read`. *See § Memory Directory below.*
 2. **Local-first.** The context layer makes no calls to third-party state stores. All context state lives in-process, in the filesystem next to the bot, or in the bot's own SQLite. The only network calls in the context layer are to the LLM endpoints we're already using for generation. No mem0, no Zep, no hosted vector DB, no MCP daemon for our own memory. (MCP stays on the table as a way to later *expose* Familiar-Connect's memory to other tools — not as the way Familiar-Connect consumes its own.)
-3. **Swappable content, stable frame.** Character cards, preset harnesses, content sources, and pre/post-processors all conform to a small set of protocols. Swapping any of them is a config change, never a refactor.
-4. **Per-guild, per-modality toggles.** Every provider and processor is individually toggleable. The enabled set can differ for voice and text because the latency budgets differ — voice will often disable slow providers that text can happily use. See § Modality Profiles.
-5. **Explicit token budgets.** Every section the pipeline assembles has a declared priority and token budget. Nothing is dropped by accident; nothing bloats by accident.
-6. **No giant framework as runtime.** We do not build this layer inside LangChain, LlamaIndex, mem0, Zep, or Haystack. Importing a *specific utility* from one of them (e.g. a chunker, a token counter, a document loader) is allowed when it's a net simplification. Adopting any of them as the orchestration layer is not. See *Design Decisions Considered and Rejected*.
-7. **Format-level SillyTavern interop, runtime independence.** SillyTavern Character Cards (V3), presets, lorebooks, and world info can be *imported*. On import they are unpacked into plain-text files in the memory directory and never touched by a special runtime again. Familiar-Connect does not embed, bridge, or RPC into a running SillyTavern instance.
+3. **Familiars are owned by users, not guilds.** A familiar belongs to a Discord user (`owner_user_id`) and travels with them. The same familiar can be summoned in any guild or channel where its owner has access. Memory and the rolling history summary are global per familiar; only the *recent conversation window* is partitioned per channel so two simultaneous conversations don't bleed into each other. See `future-features/configuration-levels.md` for the full configuration model and `§ Memory Directory` for the on-disk layout.
+4. **Swappable content, stable frame.** Character cards, preset harnesses, content sources, and pre/post-processors all conform to a small set of protocols. Swapping any of them is a config change, never a refactor.
+5. **Per-character, per-modality toggles.** Every provider and processor is individually toggleable. The enabled set can differ for voice and text because the latency budgets differ — voice will often disable slow providers that text can happily use. See § Modality Profiles.
+6. **Explicit token budgets.** Every section the pipeline assembles has a declared priority and token budget. Nothing is dropped by accident; nothing bloats by accident.
+7. **No giant framework as runtime.** We do not build this layer inside LangChain, LlamaIndex, mem0, Zep, or Haystack. Importing a *specific utility* from one of them (e.g. a chunker, a token counter, a document loader) is allowed when it's a net simplification. Adopting any of them as the orchestration layer is not. See *Design Decisions Considered and Rejected*.
+8. **Format-level SillyTavern interop, runtime independence.** SillyTavern Character Cards (V3), presets, lorebooks, and world info can be *imported*. On import they are unpacked into plain-text files in the memory directory and never touched by a special runtime again. Familiar-Connect does not embed, bridge, or RPC into a running SillyTavern instance.
 
 #### Memory directory
 
-Every familiar owns a directory of plain-text files. Default layout:
+Every familiar owns a directory of plain-text files, rooted under the owner's user directory. Default layout:
 
 ```
-data/guilds/<guild_id>/familiars/<familiar_id>/memory/
+data/users/<owner_user_id>/familiars/<familiar_id>/memory/
     self/
         description.md        # unpacked from character card on init
         personality.md
@@ -156,7 +157,7 @@ Everything about this layout is conventional, not enforced. Subdirectories are j
 **Rules of the directory:**
 
 - **Plain text (Markdown preferred).** No JSON, no YAML frontmatter requirements, no proprietary formats.
-- **Per-familiar isolation.** A single Discord guild can host multiple familiars; their memories never share a directory. The familiar id is part of the path.
+- **Per-familiar isolation, scoped to one owner.** A familiar lives under its owner's user directory; one user can own multiple familiars and their memories never share a directory. See `future-features/configuration-levels.md` for the full ownership model.
 - **Markdown cross-links encouraged.** Files can reference each other with relative links like `[alice](../people/alice.md)`. This is free today (a reader just sees the link text) and sets up graph-style traversal tools later without changing the storage format.
 - **Character cards are unpacked into `self/` on familiar creation.** Each field of a loaded Character Card V3 becomes a file. Editing the character is then just editing those files, and the search agent finds them the same way it finds everything else.
 - **SillyTavern lorebook / world-info JSON imports are flattened to Markdown** in the appropriate subdirectory at import time. We never maintain a runtime keyword walker over ST's trigger format.
@@ -187,7 +188,7 @@ incoming event → [pre-processors] → ContextRequest
 
 All in a new `familiar_connect.context` package.
 
-- **`ContextRequest`** — the triggering event, recent turns, the active `Familiar` handle (which knows its memory directory), per-guild config, target token budget, deadline, and modality (`"voice"` or `"text"`).
+- **`ContextRequest`** — the triggering event, recent turns, the active `Familiar` handle (which knows its memory directory), the familiar's `owner_user_id` and `familiar_id`, the originating `channel_id`, the originating `guild_id` (observability only), per-character config, target token budget, deadline, and modality (`"voice"` or `"text"`).
 - **`Contribution`** — a typed bundle of `layer`, `priority`, `text`, `estimated_tokens`, and `source`. Providers return lists of these.
 - **`ContextProvider`** — `Protocol` with one method, `async def contribute(request) -> list[Contribution]`.
 - **`PreProcessor` / `PostProcessor`** — `Protocol`s with `async def process(...)`. Pre-processors mutate the outgoing request (e.g. inject a hidden chain-of-thought). Post-processors mutate the reply before it reaches TTS (e.g. tone cleanup, rewriting for speech).
@@ -201,7 +202,7 @@ All in a new `familiar_connect.context` package.
 | `CharacterProvider` | Reads `self/*.md` (unpacked character card) and injects it at high priority. Always on. | Filesystem | Instant |
 | `HistoryProvider` | Sliding window of recent turns in the current conversation + rolling summary of older turns | SQLite + cheap side-model | Instant for window; cheap call for summary (cached) |
 | `ContentSearchProvider` | The memory search agent. A cheap tool-using model with `grep` / `glob` / `read_file` tools scoped to the familiar's memory directory, run under a hard deadline, returning a bundle of relevant snippets. | Filesystem + cheap side-model | 1–3 cheap-model round trips; parallelisable with transcription (see § Modality profiles) |
-| `AuthorsNoteProvider` | Per-guild or per-familiar text injected at a configurable message depth | Config | Instant |
+| `AuthorsNoteProvider` | Per-familiar text injected at a configurable message depth | Config | Instant |
 
 **Not in the initial catalogue (explicitly deferred):**
 
@@ -236,7 +237,7 @@ Voice and text have different latency budgets; the same familiar may want differ
 - **Text profile.** Default includes `CharacterProvider`, `HistoryProvider`, `ContentSearchProvider`, optional `SteppedThinkingPreProcessor` and `RecastPostProcessor`. Higher deadlines, more side-model calls, more tokens.
 - **Voice profile.** Default includes `CharacterProvider`, `HistoryProvider`, and a stricter-deadline `ContentSearchProvider`. Pre/post processors are off by default because they cost TTFB. The voice profile can also run `ContentSearchProvider` **speculatively during transcription**: the moment Deepgram emits a stable partial transcript, the search agent starts; if the final transcript diverges too far, the speculative result is discarded.
 
-Every provider and processor has an `enabled_for: {"text", "voice"}` field in per-guild config, plus per-modality token-budget overrides. The dashboard (see § Monitoring Dashboard) surfaces per-turn latency breakdowns per provider so we can *measure* which components are worth their deadline cost in each modality.
+Every provider and processor has an `enabled_for: {"text", "voice"}` field in per-character config, plus per-modality token-budget overrides. The dashboard (see § Monitoring Dashboard) surfaces per-turn latency breakdowns per provider so we can *measure* which components are worth their deadline cost in each modality.
 
 #### Long-run voice strategy (not first pass)
 

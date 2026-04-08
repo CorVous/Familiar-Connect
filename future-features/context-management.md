@@ -33,7 +33,7 @@ Files:
 
 Shapes:
 
-- `ContextRequest` — triggering event, recent turns, the `Familiar` handle (which knows its memory directory path), per-guild config, `Modality` (`"voice"` or `"text"`), target token budget, and a deadline (as an `asyncio.timeout` handle or a monotonic deadline).
+- `ContextRequest` — triggering event, recent turns, the familiar's `owner_user_id` and `familiar_id`, originating `channel_id`, originating `guild_id` (observability only), per-character config, `Modality` (`"voice"` or `"text"`), target token budget, and a deadline (as an `asyncio.timeout` handle or a monotonic deadline). See `future-features/configuration-levels.md` for the ownership model.
 - `Contribution` — `layer: Layer`, `priority: int`, `text: str`, `estimated_tokens: int`, `source: str`.
 - `Layer` enum — `core`, `character`, `content`, `history_summary`, `recent_history`, `author_note`, `depth_inject`.
 - `ContextProvider` — `Protocol` with `async def contribute(request: ContextRequest) -> list[Contribution]`.
@@ -71,7 +71,7 @@ Shapes:
 
 This is the single piece of new infrastructure the agentic-search design adds. Everything else is pipeline glue.
 
-- `MemoryStore` owns a per-familiar directory, scoped by `(guild_id, familiar_id)`. Default path: `data/guilds/<guild_id>/familiars/<familiar_id>/memory/`.
+- `MemoryStore` owns a per-familiar directory, scoped by `(owner_user_id, familiar_id)`. Default path: `data/users/<owner_user_id>/familiars/<familiar_id>/memory/`.
 - API (all synchronous file I/O — these are small text files on local disk):
   - `list_dir(rel_path: str = "") -> list[MemoryEntry]`
   - `read_file(rel_path: str) -> str`
@@ -132,7 +132,7 @@ This is the single piece of new infrastructure the agentic-search design adds. E
 **New module:** `familiar_connect.context.providers.history`.
 
 - Reads from the existing text/voice history store and emits two contributions per call: the last N turns verbatim (`Layer.recent_history`, high priority), and a `Layer.history_summary` contribution built from older turns via a cheap side-model.
-- Summaries are cached in SQLite keyed by `(guild_id, familiar_id, channel_id, last_summarised_message_id)` so they are only regenerated when new turns age out of the sliding window. Compression target is roughly 10:1.
+- Summaries are cached in SQLite keyed by `(owner_user_id, familiar_id, last_summarised_id)` — global per familiar, regardless of which channel each older turn happened in — so they are only regenerated when new turns have actually been added to the familiar's history. The recent rolling window is partitioned per channel; the rolling summary is global per familiar (see `plan.md` § Context Management for the rationale). Compression target is roughly 10:1.
 - Respects the deadline: if the summariser hasn't returned in time, the provider emits only the verbatim window and flags the cached summary as stale for the next run.
 
 **Tests** — `tests/test_history_provider.py`:
@@ -142,22 +142,23 @@ This is the single piece of new infrastructure the agentic-search design adds. E
 - Cached summary is reused when no new turns have aged out (assert no extra LLM calls).
 - Summariser timeout falls back gracefully (recent layer present, summary contribution absent, log entry written).
 
-### 7. Per-guild, per-modality config and wiring
+### 7. Per-character, per-modality config and wiring
 
-- Extend the guild settings store with a `context` section:
+- Add a per-character config loader that reads `data/users/<owner_user_id>/familiars/<familiar_id>/character.toml` (see `future-features/configuration-levels.md`) and produces a `ContextConfig` object with:
   - `providers[provider_id].enabled_for: set[Modality]`
   - `providers[provider_id].deadline_ms: int`
   - `providers[provider_id].budget_tokens: int`
   - `processors[processor_id].enabled_for: set[Modality]`
   - Per-layer budget overrides.
-- Wire `ContextPipeline` into `bot.py` and `text_session.py` so every reply goes through it. Replace the ad-hoc history construction currently in `text_session.py` (and remove its TODO referring to `plan.md`'s context-management design).
+  - Tuning parameters (temperature, model, side-model, chattiness, voice id, etc.).
+- Wire `ContextPipeline` into `bot.py` and `text_session.py` so every reply goes through it. Replace the ad-hoc history construction currently in `text_session.py` (and remove its TODO referring to `plan.md`'s context-management design). Every turn must write to `HistoryStore.append_turn` so the next turn's `HistoryProvider` can find it.
 - Voice replies use the same pipeline, constructed with `Modality.voice`. Streaming still happens at the LLM → TTS boundary; the pipeline runs to completion before the LLM call starts.
 - The monitoring dashboard gains per-turn, per-provider latency and token metrics so modality tuning is empirical, not guessed.
 
 **Tests** — extend `tests/test_text_session.py` and add a voice-path equivalent using a stub LLM client:
 
 - A reply request with no providers enabled still produces a working call (defaults to core instructions only).
-- Toggling a provider via guild config changes the request body the stub LLM receives.
+- Toggling a provider in `character.toml` changes the request body the stub LLM receives.
 - Toggling for voice but not text (or vice versa) is respected.
 
 ### 8. `ContentSearchProvider` — the memory search agent
@@ -224,7 +225,8 @@ Tracked here so they don't sneak back in mid-implementation.
 - **Vector retrieval of any kind.** No `sqlite-vec`, no embedding API calls, no chunking strategy. Vector search becomes a *tool* the same `ContentSearchProvider` agent can call, added later, only if measurements show `grep` getting too slow.
 - **Any SillyTavern keyword/World Info runtime.** Imports flatten to Markdown; there is no keyword walker.
 - **Plugin discovery / dynamic loading.** Providers and processors are registered in code at startup. No entry points, no folder scans.
-- **Cross-guild or cross-familiar shared memory.** Each familiar's memory directory is isolated.
+- **Cross-familiar shared memory.** Each familiar's memory directory is isolated under its owner's user directory. Two familiars (even owned by the same user) never see each other's memories.
+- **Per-guild config or per-guild familiar overrides.** A familiar's behaviour is identical regardless of which guild it's invoked in. `guild_id` is carried on `ContextRequest` as observability only; per-guild scaling is a future extension noted in `future-features/configuration-levels.md`.
 - **LLM-driven memory housekeeping** (duplicate detection, conflict reconciliation, stale-entry flagging). Planned as a future add-on; not first-cut.
 - **The voice "fast path + elaboration path"** parallel-generation strategy. The pipeline shape doesn't preclude it, but we don't build it now.
 - **Any third-party state service.** See `plan.md` § Design Decisions Considered and Rejected.
@@ -236,7 +238,7 @@ Tracked here so they don't sneak back in mid-implementation.
 
 - `ContextPipeline` is the **only** path from "something happened" to "call the LLM" in both the text and voice code paths.
 - The memory directory exists, character cards are unpacked into it on familiar creation, and `ContentSearchProvider` can search it via a cheap tool-using model with a deterministic-mode test harness.
-- `CharacterProvider`, `HistoryProvider`, `ContentSearchProvider`, and both processors exist, are individually toggleable per guild *and* per modality, and have tests.
+- `CharacterProvider`, `HistoryProvider`, `ContentSearchProvider`, and both processors exist, are individually toggleable per character *and* per modality, and have tests.
 - A SillyTavern lorebook importer exists and is documented.
 - The monitoring dashboard shows per-provider, per-turn latency and token usage.
 - `plan.md`, `future-features/context-management.md`, and `future-features/memory.md` stay in sync.

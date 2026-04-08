@@ -3,14 +3,19 @@
 The HistoryStore owns one SQLite database with two tables:
 
 - ``turns`` — every conversational turn the bot has seen, scoped by
-  ``(guild_id, familiar_id, channel_id)``. Each turn carries a
-  monotonically increasing primary key, a role (user/assistant/
-  system), an optional speaker name, the textual content, and a UTC
+  ``(owner_user_id, familiar_id, channel_id)``. Each turn carries a
+  monotonically increasing primary key, a role
+  (user/assistant/system), an optional speaker name, the textual
+  content, an optional ``guild_id`` (observability only), and a UTC
   timestamp.
-- ``summaries`` — at most one rolling summary per ``(guild_id,
-  familiar_id, channel_id)`` triple, with a ``last_summarised_id``
-  marker so the :class:`HistoryProvider` can tell whether the cache
-  still covers everything that has aged out of the recent-window.
+- ``summaries`` — at most one rolling summary per
+  ``(owner_user_id, familiar_id)`` pair, with a
+  ``last_summarised_id`` watermark so the
+  :class:`HistoryProvider` can tell whether the cache still covers
+  every turn the familiar has heard. The summary is *global per
+  familiar* — see ``plan.md`` § Context Management for the rationale.
+  The recent rolling window is partitioned per channel; the rolling
+  summary is not.
 
 The store deliberately exposes a small, synchronous API. SQLite is
 fast enough for the volumes a per-host bot will see, and keeping the
@@ -44,7 +49,7 @@ class HistoryTurn:
 
 @dataclass(frozen=True)
 class SummaryEntry:
-    """A cached rolling summary for one (guild, familiar, channel)."""
+    """A cached rolling summary for one (owner_user_id, familiar_id)."""
 
     last_summarised_id: int
     summary_text: str
@@ -53,27 +58,30 @@ class SummaryEntry:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id      INTEGER NOT NULL,
-    channel_id    INTEGER NOT NULL,
-    familiar_id   TEXT    NOT NULL,
-    role          TEXT    NOT NULL,
-    speaker       TEXT,
-    content       TEXT    NOT NULL,
-    timestamp     TEXT    NOT NULL
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id  INTEGER NOT NULL,
+    familiar_id    TEXT    NOT NULL,
+    channel_id     INTEGER NOT NULL,
+    guild_id       INTEGER,
+    role           TEXT    NOT NULL,
+    speaker        TEXT,
+    content        TEXT    NOT NULL,
+    timestamp      TEXT    NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_turns_lookup
-    ON turns (guild_id, familiar_id, channel_id, id);
+CREATE INDEX IF NOT EXISTS idx_turns_channel
+    ON turns (owner_user_id, familiar_id, channel_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_turns_global
+    ON turns (owner_user_id, familiar_id, id);
 
 CREATE TABLE IF NOT EXISTS summaries (
-    guild_id            INTEGER NOT NULL,
+    owner_user_id       INTEGER NOT NULL,
     familiar_id         TEXT    NOT NULL,
-    channel_id          INTEGER NOT NULL,
     last_summarised_id  INTEGER NOT NULL,
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
-    PRIMARY KEY (guild_id, familiar_id, channel_id)
+    PRIMARY KEY (owner_user_id, familiar_id)
 );
 """
 
@@ -114,25 +122,28 @@ class HistoryStore:
     def append_turn(
         self,
         *,
-        guild_id: int,
-        channel_id: int,
+        owner_user_id: int,
         familiar_id: str,
+        channel_id: int,
         role: str,
         content: str,
         speaker: str | None = None,
+        guild_id: int | None = None,
     ) -> HistoryTurn:
         """Append a single turn and return its persisted form."""
         timestamp = datetime.now(tz=UTC)
         cur = self._conn.execute(
             """
             INSERT INTO turns
-                (guild_id, channel_id, familiar_id, role, speaker, content, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (owner_user_id, familiar_id, channel_id, guild_id,
+                 role, speaker, content, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                guild_id,
-                channel_id,
+                owner_user_id,
                 familiar_id,
+                channel_id,
+                guild_id,
                 role,
                 speaker,
                 content,
@@ -151,16 +162,17 @@ class HistoryStore:
     def recent(
         self,
         *,
-        guild_id: int,
-        channel_id: int,
+        owner_user_id: int,
         familiar_id: str,
+        channel_id: int,
         limit: int,
     ) -> list[HistoryTurn]:
-        """Return up to *limit* most recent turns in chronological order.
+        """Return up to *limit* most recent turns *in this channel*.
 
-        "Most recent" means highest ``id`` first when selecting, but
-        the returned list is sorted oldest-first so callers can render
-        it without re-reversing.
+        The recent window is partitioned per channel so two
+        simultaneous conversations don't bleed into each other.
+        Results are sorted oldest-first so callers can render them
+        without re-reversing.
         """
         if limit <= 0:
             return []
@@ -168,55 +180,100 @@ class HistoryStore:
             """
             SELECT id, timestamp, role, speaker, content
               FROM turns
-             WHERE guild_id = ? AND channel_id = ? AND familiar_id = ?
+             WHERE owner_user_id = ? AND familiar_id = ? AND channel_id = ?
              ORDER BY id DESC
              LIMIT ?
             """,
-            (guild_id, channel_id, familiar_id, limit),
+            (owner_user_id, familiar_id, channel_id, limit),
         ).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
 
     def older_than(
         self,
         *,
-        guild_id: int,
-        channel_id: int,
+        owner_user_id: int,
         familiar_id: str,
         max_id: int,
         limit: int = 10_000,
     ) -> list[HistoryTurn]:
-        """Return turns whose ``id`` is *<= max_id*, oldest first."""
+        """Return turns whose ``id`` is *<= max_id*, oldest first.
+
+        Globally per ``(owner_user_id, familiar_id)`` — *not*
+        partitioned by channel. The HistoryProvider's rolling summary
+        covers everything the familiar has ever heard, regardless of
+        which channel each turn happened in.
+        """
         rows = self._conn.execute(
             """
             SELECT id, timestamp, role, speaker, content
               FROM turns
-             WHERE guild_id = ?
-               AND channel_id = ?
+             WHERE owner_user_id = ?
                AND familiar_id = ?
                AND id <= ?
              ORDER BY id ASC
              LIMIT ?
             """,
-            (guild_id, channel_id, familiar_id, max_id, limit),
+            (owner_user_id, familiar_id, max_id, limit),
         ).fetchall()
         return [_row_to_turn(r) for r in rows]
+
+    def latest_id(
+        self,
+        *,
+        owner_user_id: int,
+        familiar_id: str,
+    ) -> int | None:
+        """Return the highest turn id for the familiar across all channels.
+
+        Used by :class:`HistoryProvider` as the watermark for cache
+        freshness — if the cached summary's ``last_summarised_id``
+        matches this, the cache is fresh; otherwise it needs
+        regenerating.
+        """
+        row = self._conn.execute(
+            """
+            SELECT MAX(id) AS max_id
+              FROM turns
+             WHERE owner_user_id = ? AND familiar_id = ?
+            """,
+            (owner_user_id, familiar_id),
+        ).fetchone()
+        if row is None or row["max_id"] is None:
+            return None
+        return int(row["max_id"])
 
     def count(
         self,
         *,
-        guild_id: int,
-        channel_id: int,
+        owner_user_id: int,
         familiar_id: str,
+        channel_id: int | None = None,
     ) -> int:
-        """Return the total number of stored turns for the triple."""
-        row = self._conn.execute(
-            """
-            SELECT COUNT(*) AS n
-              FROM turns
-             WHERE guild_id = ? AND channel_id = ? AND familiar_id = ?
-            """,
-            (guild_id, channel_id, familiar_id),
-        ).fetchone()
+        """Return the number of stored turns.
+
+        With ``channel_id`` set, scoped to that channel; without it,
+        scoped to the whole familiar.
+        """
+        if channel_id is None:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM turns
+                 WHERE owner_user_id = ? AND familiar_id = ?
+                """,
+                (owner_user_id, familiar_id),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM turns
+                 WHERE owner_user_id = ?
+                   AND familiar_id = ?
+                   AND channel_id = ?
+                """,
+                (owner_user_id, familiar_id, channel_id),
+            ).fetchone()
         return int(row["n"])
 
     # ------------------------------------------------------------------
@@ -226,18 +283,17 @@ class HistoryStore:
     def get_summary(
         self,
         *,
-        guild_id: int,
-        channel_id: int,
+        owner_user_id: int,
         familiar_id: str,
     ) -> SummaryEntry | None:
-        """Return the cached summary for the triple, or ``None``."""
+        """Return the cached summary for the familiar, or ``None``."""
         row = self._conn.execute(
             """
             SELECT last_summarised_id, summary_text, created_at
               FROM summaries
-             WHERE guild_id = ? AND channel_id = ? AND familiar_id = ?
+             WHERE owner_user_id = ? AND familiar_id = ?
             """,
-            (guild_id, channel_id, familiar_id),
+            (owner_user_id, familiar_id),
         ).fetchone()
         if row is None:
             return None
@@ -250,29 +306,27 @@ class HistoryStore:
     def put_summary(
         self,
         *,
-        guild_id: int,
-        channel_id: int,
+        owner_user_id: int,
         familiar_id: str,
         last_summarised_id: int,
         summary_text: str,
     ) -> None:
-        """Insert or replace the summary for the triple."""
+        """Insert or replace the summary for the familiar."""
         timestamp = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
             """
             INSERT INTO summaries
-                (guild_id, channel_id, familiar_id,
+                (owner_user_id, familiar_id,
                  last_summarised_id, summary_text, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (guild_id, familiar_id, channel_id)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (owner_user_id, familiar_id)
             DO UPDATE SET
                 last_summarised_id = excluded.last_summarised_id,
                 summary_text       = excluded.summary_text,
                 created_at         = excluded.created_at
             """,
             (
-                guild_id,
-                channel_id,
+                owner_user_id,
                 familiar_id,
                 last_summarised_id,
                 summary_text,
