@@ -180,32 +180,174 @@ Use py-cord's `@commands.has_permissions(manage_guild=True)` decorator, or a cus
 
 ---
 
-## Implementation Order (TDD)
+## Implementation Order (Red/Green TDD)
 
-Each step follows red/green TDD per CLAUDE.md.
+Every step follows the red/green TDD workflow from CLAUDE.md:
+
+1. **Red** — Write a failing test that describes the desired behavior. The test must fail for the *right reason* (an assertion failure, not an `ImportError`). This means the module/function/class under test must exist as a stub before the test can count as a valid red test.
+2. **Green** — Write the minimum code to make the test pass. No more.
+3. **Refactor** — Clean up if needed, re-run tests to confirm they still pass.
+
+Import errors do not count as red. If a test fails because the module doesn't exist yet, create the empty module/stub first, then confirm the test fails on an assertion.
+
+---
 
 ### Phase 1: Guild Registry
-1. `GuildTwitchState` dataclass and in-memory registry
-2. Tests for set/get/clear per guild, error on double-connect
+
+#### Step 1 — `GuildTwitchState` dataclass
+
+**Red:** Create `tests/test_twitch_registry.py`. Write a test that imports `GuildTwitchState` from `familiar_connect.twitch_registry` and instantiates it with all required fields (`guild_id`, `channel`, `broadcaster_id`, `config`, `watcher`, `cancel_scope`). Assert the fields are stored correctly.
+
+*Before running:* Create an empty `src/familiar_connect/twitch_registry.py` so the import doesn't fail — the test should fail on `AttributeError` or similar, not `ImportError`.
+
+**Green:** Define the `GuildTwitchState` dataclass in `twitch_registry.py` with the required fields.
+
+#### Step 2 — Registry set/get/clear
+
+**Red:** Write tests for three functions:
+- `set_guild_twitch(guild_id, state)` — stores state; raises `RegistryError` if already set for that guild
+- `get_guild_twitch(guild_id)` → `GuildTwitchState | None`
+- `clear_guild_twitch(guild_id)` — removes entry, no-op if absent
+
+Test cases:
+- `get` returns `None` for unknown guild
+- `set` then `get` returns the state
+- `set` twice for the same guild raises `RegistryError`
+- `clear` then `get` returns `None`
+
+**Green:** Implement registry as a module-level `dict[int, GuildTwitchState]` with the three functions.
+
+---
 
 ### Phase 2: Core Commands
-3. `/twitch connect` — resolve channel, create watcher, register in guild state
-4. `/twitch disconnect` — cancel scope, remove from registry
-5. `/twitch status` — read config and format response
+
+#### Step 3 — `/twitch connect`
+
+**Red:** Write a test that simulates the `/twitch connect` slash command with a mock `ApplicationContext`. Assert:
+- The guild registry has an entry after the command runs
+- The response message includes the channel name
+- A second connect in the same guild responds with an "already connected" error
+
+*Stub:* Create the command function signature in a new module (e.g. `twitch_commands.py`) so the import works.
+
+**Green:** Implement the connect handler:
+- Look up broadcaster ID via Twitch API (mock in tests)
+- Create `TwitchWatcherConfig` with defaults
+- Create `TwitchWatcher`
+- Register in guild state
+- Respond with confirmation
+
+**Red (error case):** Test that missing Twitch credentials (no env vars) responds with a clear error.
+
+**Green:** Add the env var check.
+
+#### Step 4 — `/twitch disconnect`
+
+**Red:** Write tests:
+- Disconnect when connected → clears registry, responds "Disconnected"
+- Disconnect when not connected → responds "Not connected"
+
+**Green:** Implement: look up guild state, cancel the scope, clear registry, respond.
+
+#### Step 5 — `/twitch status`
+
+**Red:** Write tests:
+- Status when connected → response includes channel name and all toggle states
+- Status when not connected → responds "Not connected"
+
+**Green:** Implement: read config from registry, format as a readable string/embed.
+
+**Red (formatting):** Test that the status output correctly shows "enabled"/"disabled" for each toggle and lists redemption names.
+
+**Green:** Build the formatter.
+
+---
 
 ### Phase 3: Event Toggle Commands
-6. `/twitch events` — mutate config flags
-7. `/twitch ads-immediate` — mutate `ads_immediate` flag
+
+#### Step 6 — `/twitch events`
+
+**Red:** Write tests:
+- Set `subscriptions=False` → config updated, response confirms new state
+- Set multiple flags at once → all updated
+- Omit a flag → that flag unchanged
+- Not connected → error response
+
+**Green:** Implement: read guild state, update only the provided flags on `TwitchWatcherConfig`, respond with new state.
+
+#### Step 7 — `/twitch ads-immediate`
+
+**Red:** Write tests:
+- Set `enabled=True` → `config.ads_immediate` is `True`, response confirms
+- Set `enabled=False` → `config.ads_immediate` is `False`
+- Not connected → error response
+
+**Green:** Implement: one-field update on config.
+
+---
 
 ### Phase 4: Redemption Commands
-8. `/twitch redemptions add`
-9. `/twitch redemptions remove`
-10. `/twitch redemptions list`
-11. `/twitch redemptions clear`
+
+#### Step 8 — `/twitch redemptions add`
+
+**Red:** Write tests:
+- Add "Hydrate" → appears in `config.redemption_names`, response confirms
+- Add duplicate → response says "already in list", list unchanged
+- Not connected → error response
+
+**Green:** Implement: append to list if not present.
+
+#### Step 9 — `/twitch redemptions remove`
+
+**Red:** Write tests:
+- Remove existing name → removed from list, response confirms
+- Remove non-existent name → response says "not found", list unchanged
+- Not connected → error response
+
+**Green:** Implement: remove from list if present.
+
+#### Step 10 — `/twitch redemptions list`
+
+**Red:** Write tests:
+- With items → response lists all names
+- Empty list → response says "No redemptions configured"
+- Not connected → error response
+
+**Green:** Implement: format list or empty message.
+
+#### Step 11 — `/twitch redemptions clear`
+
+**Red:** Write tests:
+- Clear populated list → list is empty, response confirms
+- Clear already-empty list → response still confirms (idempotent)
+- Not connected → error response
+
+**Green:** Implement: `config.redemption_names.clear()`.
+
+---
 
 ### Phase 5: Integration
-12. Wire command group into `create_bot` / `commands/run.py`
-13. Integration test: connect → toggle events → disconnect lifecycle
+
+#### Step 12 — Wire into bot
+
+**Red:** Write a test that `create_bot` returns a bot with the `/twitch` command group registered (check `bot.pending_application_commands` or similar).
+
+**Green:** Register the `SlashCommandGroup` and all subcommands in `create_bot` or a dedicated setup function called from `commands/run.py`.
+
+#### Step 13 — End-to-end lifecycle test
+
+**Red:** Write an integration test that exercises the full lifecycle:
+1. `/twitch connect coolstreamer` → success
+2. `/twitch status` → shows "coolstreamer" with default config
+3. `/twitch events subscriptions:false` → subscriptions disabled
+4. `/twitch redemptions add "Hydrate"` → added
+5. `/twitch redemptions list` → shows "Hydrate"
+6. `/twitch disconnect` → success
+7. `/twitch status` → "Not connected"
+
+Mock the Twitch API and EventSub WebSocket. Assert each response message and the final registry state.
+
+**Green:** Fix any issues discovered during integration.
 
 ---
 
