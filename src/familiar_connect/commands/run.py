@@ -1,4 +1,4 @@
-"""Run subcommand — start the Discord bot under trio."""
+"""Run subcommand — start the Discord bot under asyncio."""
 
 from __future__ import annotations
 
@@ -6,15 +6,13 @@ import asyncio
 import ctypes.util
 import logging
 import os
+import pathlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import argparse
 
-import pathlib
-
 import discord
-import trio
 
 from familiar_connect.bot import create_bot
 from familiar_connect.character import CharacterCardError, load_card
@@ -101,52 +99,30 @@ def build_system_prompt(args: argparse.Namespace) -> str:
     return prompt
 
 
-def _run_bot(token: str, system_prompt: str) -> None:
-    """Run the Discord bot in a dedicated asyncio event loop.
-
-    Called from a trio worker thread via trio.to_thread.run_sync, so
-    py-cord gets an uncontested asyncio event loop while trio remains the
-    top-level runtime on the main thread. Future pipeline tasks (transcription,
-    TTS) will communicate with this thread via trio.from_thread / asyncio
-    futures.
-
-    create_bot() is called inside asyncio.run() because discord.Bot.__init__
-    calls asyncio.get_event_loop(), which requires a running loop to exist.
+async def _async_main(token: str, system_prompt: str) -> None:
+    """Asyncio entry point: build the bot and start it.
 
     :param token: Discord bot token.
     :param system_prompt: Pre-assembled system prompt for the familiar.
     """
+    try:
+        llm_client = create_client_from_env()
+    except ValueError as exc:
+        _logger.warning("LLM client unavailable: %s", exc)
+        llm_client = None
 
-    async def _start() -> None:
-        try:
-            llm_client = create_client_from_env()
-        except ValueError as exc:
-            _logger.warning("LLM client unavailable: %s", exc)
-            llm_client = None
+    try:
+        tts_client = create_tts_client_from_env()
+    except ValueError as exc:
+        _logger.warning("TTS client unavailable: %s", exc)
+        tts_client = None
 
-        try:
-            tts_client = create_tts_client_from_env()
-        except ValueError as exc:
-            _logger.warning("TTS client unavailable: %s", exc)
-            tts_client = None
-
-        bot = create_bot(
-            llm_client=llm_client,
-            system_prompt=system_prompt,
-            tts_client=tts_client,
-        )
-        await bot.start(token)
-
-    asyncio.run(_start())
-
-
-async def _trio_main(token: str, system_prompt: str) -> None:
-    """Trio entry point: run the bot in a dedicated asyncio worker thread.
-
-    :param token: Discord bot token.
-    :param system_prompt: Pre-assembled system prompt for the familiar.
-    """
-    await trio.to_thread.run_sync(_run_bot, token, system_prompt)
+    bot = create_bot(
+        llm_client=llm_client,
+        system_prompt=system_prompt,
+        tts_client=tts_client,
+    )
+    await bot.start(token)
 
 
 _OPUS_FALLBACK_PATHS = [
@@ -193,8 +169,8 @@ def run(args: argparse.Namespace) -> int:
     """Start the Discord bot.
 
     Reads the bot token from the DISCORD_BOT environment variable, loads the
-    character card and preset (if configured), then launches the bot in a
-    worker thread under the trio runtime.
+    character card and preset (if configured), then launches the bot under
+    asyncio.
 
     :param args: Parsed command-line arguments.
     :return: Exit code (0 for success, 1 for missing token).
@@ -206,5 +182,5 @@ def run(args: argparse.Namespace) -> int:
 
     load_opus()
     system_prompt = build_system_prompt(args)
-    trio.run(_trio_main, token, system_prompt)
+    asyncio.run(_async_main(token, system_prompt))
     return 0

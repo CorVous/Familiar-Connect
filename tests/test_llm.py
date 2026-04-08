@@ -236,7 +236,7 @@ class TestLLMClientChat:
             mock_response.raise_for_status.side_effect = raise_error
         return mock_response
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_chat_returns_assistant_message(
         self,
         client: LLMClient,
@@ -252,7 +252,7 @@ class TestLLMClientChat:
         assert result.content == "Greetings, Alice and Bob!"
         assert result.role == "assistant"
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_chat_sends_all_messages(
         self,
         client: LLMClient,
@@ -280,7 +280,7 @@ class TestLLMClientChat:
         assert sent_messages[1]["name"] == "Alice"
         assert sent_messages[2]["name"] == "Bob"
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_chat_raises_on_http_error(
         self,
         client: LLMClient,
@@ -302,7 +302,7 @@ class TestLLMClientChat:
         ):
             await client.chat(sample_messages)
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_chat_raises_on_empty_choices(
         self,
         client: LLMClient,
@@ -402,7 +402,7 @@ _has_api_key = bool(os.environ.get("OPENROUTER_API_KEY"))
 
 @pytest.mark.skipif(not _has_api_key, reason="OPENROUTER_API_KEY not set")
 class TestOpenRouterLive:
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_live_chat_returns_response(self) -> None:
         """Send a real request to OpenRouter and verify the response shape."""
         client = create_client_from_env()
@@ -415,7 +415,7 @@ class TestOpenRouterLive:
         assert result.role == "assistant"
         assert len(result.content) > 0
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_live_multi_user_chat(self) -> None:
         """Send a multi-user conversation to OpenRouter and get a reply."""
         client = create_client_from_env()
