@@ -167,7 +167,7 @@ _OPUS_FALLBACK_PATHS = [
 ]
 
 
-def _load_opus() -> None:
+def load_opus() -> None:
     """Load the system Opus shared library for Discord voice."""
     if discord.opus.is_loaded():
         return
@@ -204,7 +204,7 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("DISCORD_BOT environment variable is not set")
         return 1
 
-    _load_opus()
+    load_opus()
     system_prompt = build_system_prompt(args)
     trio.run(_trio_main, token, system_prompt)
     return 0

@@ -88,7 +88,7 @@ class DaveVoiceClient(VoiceClient):
             key_package,
         )
 
-    def _get_voice_packet(self, data):
+    def _get_voice_packet(self, data: bytes) -> bytes:
         """Build an RTP packet, applying DAVE encryption before SRTP.
 
         DAVE encrypts the raw opus frame *before* it is placed into the

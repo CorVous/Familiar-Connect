@@ -168,7 +168,8 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         pending = conn._dave_pending_transitions.pop(transition_id, None)  # noqa: SLF001 — see _handle_prepare_transition; DaveVoiceWebSocket manages this dict on behalf of DaveVoiceClient
         if pending is None:
             _logger.debug(
-                "DAVE EXECUTE_TRANSITION for unknown transition_id %d (likely initial handshake)",
+                "DAVE EXECUTE_TRANSITION for unknown transition_id %d"
+                " (likely initial handshake)",
                 transition_id,
             )
             return

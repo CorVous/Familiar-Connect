@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 from familiar_connect.character import CharacterCardError
 from familiar_connect.cli import create_parser
-from familiar_connect.commands.run import _load_opus, build_system_prompt, run
+from familiar_connect.commands.run import (
+    build_system_prompt,
+    load_opus,
+    run,
+)
 from familiar_connect.preset import PresetError
 
 
@@ -169,13 +173,13 @@ class TestBuildSystemPrompt:
 
 
 # ---------------------------------------------------------------------------
-# _load_opus
+# load_opus
 # ---------------------------------------------------------------------------
 
 
 class TestLoadOpus:
     def test_skips_if_already_loaded(self) -> None:
-        """_load_opus returns immediately when opus is already loaded."""
+        """load_opus returns immediately when opus is already loaded."""
         with (
             patch(
                 "familiar_connect.commands.run.discord.opus.is_loaded",
@@ -186,13 +190,13 @@ class TestLoadOpus:
                 "familiar_connect.commands.run.ctypes.util.find_library"
             ) as mock_find,
         ):
-            _load_opus()
+            load_opus()
 
         mock_find.assert_not_called()
         mock_load.assert_not_called()
 
     def test_loads_from_find_library(self) -> None:
-        """_load_opus uses ctypes.util.find_library result when available."""
+        """load_opus uses ctypes.util.find_library result when available."""
         with (
             patch(
                 "familiar_connect.commands.run.discord.opus.is_loaded",
@@ -204,12 +208,12 @@ class TestLoadOpus:
             ),
             patch("familiar_connect.commands.run.discord.opus.load_opus") as mock_load,
         ):
-            _load_opus()
+            load_opus()
 
         mock_load.assert_called_once_with("libopus.so")
 
     def test_falls_back_to_known_paths(self) -> None:
-        """_load_opus tries fallback paths when find_library returns None."""
+        """load_opus tries fallback paths when find_library returns None."""
         with (
             patch(
                 "familiar_connect.commands.run.discord.opus.is_loaded",
@@ -220,17 +224,18 @@ class TestLoadOpus:
                 return_value=None,
             ),
             patch(
-                "familiar_connect.commands.run.os.path.exists",
-                side_effect=lambda p: p == "/usr/lib/libopus.so.0",
+                "familiar_connect.commands.run.pathlib.Path.exists",
+                autospec=True,
+                side_effect=lambda self: str(self) == "/usr/lib/libopus.so.0",
             ),
             patch("familiar_connect.commands.run.discord.opus.load_opus") as mock_load,
         ):
-            _load_opus()
+            load_opus()
 
         mock_load.assert_called_once_with("/usr/lib/libopus.so.0")
 
-    def test_warns_when_not_found(self, caplog: object) -> None:
-        """_load_opus logs a warning when no opus library is found."""
+    def test_warns_when_not_found(self) -> None:
+        """load_opus logs a warning when no opus library is found."""
         with (
             patch(
                 "familiar_connect.commands.run.discord.opus.is_loaded",
@@ -240,11 +245,14 @@ class TestLoadOpus:
                 "familiar_connect.commands.run.ctypes.util.find_library",
                 return_value=None,
             ),
-            patch("familiar_connect.commands.run.os.path.exists", return_value=False),
+            patch(
+                "familiar_connect.commands.run.pathlib.Path.exists",
+                return_value=False,
+            ),
             patch("familiar_connect.commands.run.discord.opus.load_opus") as mock_load,
             patch("familiar_connect.commands.run._logger") as mock_logger,
         ):
-            _load_opus()
+            load_opus()
 
         mock_load.assert_not_called()
         mock_logger.warning.assert_called_once()
