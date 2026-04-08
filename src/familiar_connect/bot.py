@@ -50,13 +50,21 @@ async def awaken(
     in_voice = isinstance(author, discord.Member) and author.voice is not None
 
     if in_voice:
-        await _awaken_voice(ctx)
+        await _awaken_voice(ctx, system_prompt)
     else:
         await _awaken_text(ctx, system_prompt)
 
 
-async def _awaken_voice(ctx: discord.ApplicationContext) -> None:
-    """Join the invoking user's voice channel."""
+async def _awaken_voice(
+    ctx: discord.ApplicationContext,
+    system_prompt: str,
+) -> None:
+    """Join the invoking user's voice channel.
+
+    Also creates a :class:`TextSession` bound to the voice channel's ID so
+    that text typed in the channel's text chat is handled by :func:`on_message`
+    and spoken back via TTS.
+    """
     author = ctx.author
 
     # Refuse if any session (voice or text) is already active.
@@ -79,6 +87,12 @@ async def _awaken_voice(ctx: discord.ApplicationContext) -> None:
     await ctx.defer()
     await channel.connect(cls=DaveVoiceClient)
     _logger.info("Joined voice channel: %s", channel.name)
+
+    # Bind a text session to the voice channel so messages typed there are
+    # processed by on_message and played back through TTS.
+    session = TextSession(channel_id=channel.id, system_prompt=system_prompt)
+    set_session(session)
+
     await ctx.followup.send(f"Joined **{channel.name}**.")
 
 
@@ -120,6 +134,7 @@ async def sleep_cmd(ctx: discord.ApplicationContext) -> None:
     """
     if ctx.voice_client is not None:
         await ctx.voice_client.disconnect()
+        clear_session()
         _logger.info("Left voice channel")
         await ctx.respond("Goodnight.")
         return
