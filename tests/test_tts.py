@@ -122,7 +122,7 @@ class TestCartesiaTTSClientSynthesize:
             mock_resp.raise_for_status.side_effect = raise_error
         return mock_resp
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_synthesize_returns_bytes(self, client: CartesiaTTSClient) -> None:
         """synthesize() returns the raw bytes from the API response."""
         pcm_bytes = b"\x10\x20\x30\x40"
@@ -133,7 +133,7 @@ class TestCartesiaTTSClientSynthesize:
 
         assert result == pcm_bytes
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_synthesize_calls_correct_endpoint(
         self, client: CartesiaTTSClient
     ) -> None:
@@ -151,7 +151,7 @@ class TestCartesiaTTSClientSynthesize:
         assert len(captured_url) == 1
         assert captured_url[0] == f"{CARTESIA_BASE_URL}/tts/bytes"
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_synthesize_raises_on_http_error_with_body(
         self, client: CartesiaTTSClient
     ) -> None:

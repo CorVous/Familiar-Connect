@@ -2,11 +2,12 @@
 
 Connects to Twitch's EventSub WebSocket (via twitchAPI), registers
 listeners for the event types enabled in TwitchWatcherConfig, and
-forwards resulting TwitchEvent objects to a trio MemorySendChannel.
+forwards resulting TwitchEvent objects to an asyncio.Queue.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,8 +31,6 @@ if TYPE_CHECKING:
         ChannelSubscriptionMessageEvent,
     )
 
-
-import trio
 
 from familiar_connect.twitch import (
     TwitchEvent,
@@ -174,11 +173,11 @@ class TwitchWatcher:
     async def register_listeners(
         self,
         eventsub: EventSubWebsocket,
-        send: trio.MemorySendChannel[TwitchEvent] | None = None,
+        send: asyncio.Queue[TwitchEvent] | None = None,
     ) -> None:
         """Register EventSub callbacks on *eventsub* for all enabled event types.
 
-        *send* is the trio channel that callbacks will forward events to.
+        *send* is the asyncio.Queue that callbacks will forward events to.
         When called from run() this is always provided; the parameter is
         optional only so the method can be called standalone in tests that
         only check which listen_* methods are invoked.
@@ -228,7 +227,7 @@ class TwitchWatcher:
     # ------------------------------------------------------------------
 
     def _follow_callback(
-        self, send: trio.MemorySendChannel[TwitchEvent] | None
+        self, send: asyncio.Queue[TwitchEvent] | None
     ) -> Callable[[ChannelFollowEvent], Awaitable[None]]:
         async def cb(event: ChannelFollowEvent) -> None:
             await _send_if_present(self.handle_follow(event.event), send)
@@ -236,7 +235,7 @@ class TwitchWatcher:
         return cb
 
     def _subscription_callback(
-        self, send: trio.MemorySendChannel[TwitchEvent] | None
+        self, send: asyncio.Queue[TwitchEvent] | None
     ) -> Callable[[ChannelSubscribeEvent], Awaitable[None]]:
         async def cb(event: ChannelSubscribeEvent) -> None:
             await _send_if_present(self.handle_subscription(event.event), send)
@@ -244,7 +243,7 @@ class TwitchWatcher:
         return cb
 
     def _gift_subscription_callback(
-        self, send: trio.MemorySendChannel[TwitchEvent] | None
+        self, send: asyncio.Queue[TwitchEvent] | None
     ) -> Callable[[ChannelSubscriptionGiftEvent], Awaitable[None]]:
         async def cb(event: ChannelSubscriptionGiftEvent) -> None:
             await _send_if_present(self.handle_gift_subscription(event.event), send)
@@ -252,7 +251,7 @@ class TwitchWatcher:
         return cb
 
     def _resubscription_callback(
-        self, send: trio.MemorySendChannel[TwitchEvent] | None
+        self, send: asyncio.Queue[TwitchEvent] | None
     ) -> Callable[[ChannelSubscriptionMessageEvent], Awaitable[None]]:
         async def cb(event: ChannelSubscriptionMessageEvent) -> None:
             await _send_if_present(self.handle_resubscription(event.event), send)
@@ -260,7 +259,7 @@ class TwitchWatcher:
         return cb
 
     def _cheer_callback(
-        self, send: trio.MemorySendChannel[TwitchEvent] | None
+        self, send: asyncio.Queue[TwitchEvent] | None
     ) -> Callable[[ChannelCheerEvent], Awaitable[None]]:
         async def cb(event: ChannelCheerEvent) -> None:
             await _send_if_present(self.handle_cheer(event.event), send)
@@ -268,7 +267,7 @@ class TwitchWatcher:
         return cb
 
     def _channel_point_redemption_callback(
-        self, send: trio.MemorySendChannel[TwitchEvent] | None
+        self, send: asyncio.Queue[TwitchEvent] | None
     ) -> Callable[[ChannelPointsCustomRewardRedemptionAddEvent], Awaitable[None]]:
         async def cb(event: ChannelPointsCustomRewardRedemptionAddEvent) -> None:
             await _send_if_present(
@@ -278,7 +277,7 @@ class TwitchWatcher:
         return cb
 
     def _ad_break_begin_callback(
-        self, send: trio.MemorySendChannel[TwitchEvent] | None
+        self, send: asyncio.Queue[TwitchEvent] | None
     ) -> Callable[[ChannelAdBreakBeginEvent], Awaitable[None]]:
         async def cb(event: ChannelAdBreakBeginEvent) -> None:
             await _send_if_present(self.handle_ad_break_begin(event.event), send)
@@ -286,15 +285,15 @@ class TwitchWatcher:
         return cb
 
     # ------------------------------------------------------------------
-    # Trio task
+    # Event loop task
     # ------------------------------------------------------------------
 
     async def run(
         self,
-        send: trio.MemorySendChannel[TwitchEvent],
+        send: asyncio.Queue[TwitchEvent],
         eventsub: EventSubWebsocket,
     ) -> None:
-        """Run the watcher as a trio task.
+        """Run the watcher as an asyncio task.
 
         Registers all listeners, starts the EventSub connection, then
         sleeps until cancelled — at which point it stops the connection.
@@ -302,15 +301,16 @@ class TwitchWatcher:
         await self.register_listeners(eventsub, send)
         try:
             await eventsub.start()
-            await trio.sleep_forever()
+            # Sleep forever; cancellation from the parent TaskGroup ends this.
+            await asyncio.Event().wait()
         finally:
             await eventsub.stop()
 
 
 async def _send_if_present(
     event: TwitchEvent | None,
-    send: trio.MemorySendChannel[TwitchEvent] | None,
+    send: asyncio.Queue[TwitchEvent] | None,
 ) -> None:
     """Send *event* to *send* if both are non-None."""
     if event is not None and send is not None:
-        await send.send(event)
+        await send.put(event)

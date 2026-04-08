@@ -10,12 +10,13 @@ synchronous — all IO lives in run().
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import trio
 
 from familiar_connect.twitch import TwitchEvent, TwitchWatcherConfig
 from familiar_connect.twitch_watcher import TwitchWatcher
@@ -672,7 +673,7 @@ class TestRegisterListeners:
         mock.listen_channel_ad_break_begin = AsyncMock(return_value="sub-id-ad")
         return mock
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_follow_listener_registered_when_enabled(self) -> None:
         """listen_channel_follow_v2 is called when follows_enabled=True."""
         eventsub = self._mock_eventsub()
@@ -684,7 +685,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_follow_v2.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_follow_listener_not_registered_when_disabled(self) -> None:
         """listen_channel_follow_v2 is NOT called when follows_enabled=False."""
         eventsub = self._mock_eventsub()
@@ -696,7 +697,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_follow_v2.assert_not_called()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_follow_listener_uses_broadcaster_and_moderator_ids(self) -> None:
         """Follow listener is called with broadcaster_id and moderator_id."""
         eventsub = self._mock_eventsub()
@@ -711,7 +712,7 @@ class TestRegisterListeners:
         assert args[0][0] == "123"
         assert args[0][1] == "456"
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_subscription_listeners_registered_when_enabled(self) -> None:
         """All three sub listeners are registered when subscriptions_enabled=True."""
         eventsub = self._mock_eventsub()
@@ -725,7 +726,7 @@ class TestRegisterListeners:
         eventsub.listen_channel_subscription_gift.assert_called_once()
         eventsub.listen_channel_subscription_message.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_subscription_listeners_not_registered_when_disabled(self) -> None:
         """Sub listeners are NOT called when subscriptions_enabled=False."""
         eventsub = self._mock_eventsub()
@@ -739,7 +740,7 @@ class TestRegisterListeners:
         eventsub.listen_channel_subscription_gift.assert_not_called()
         eventsub.listen_channel_subscription_message.assert_not_called()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_cheer_listener_registered_when_enabled(self) -> None:
         """listen_channel_cheer is called when cheers_enabled=True."""
         eventsub = self._mock_eventsub()
@@ -751,7 +752,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_cheer.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_cheer_listener_not_registered_when_disabled(self) -> None:
         """listen_channel_cheer is NOT called when cheers_enabled=False."""
         eventsub = self._mock_eventsub()
@@ -763,7 +764,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_cheer.assert_not_called()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_ad_listener_registered_when_enabled(self) -> None:
         """listen_channel_ad_break_begin is called when ads_enabled=True."""
         eventsub = self._mock_eventsub()
@@ -775,7 +776,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_ad_break_begin.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_ad_listener_not_registered_when_disabled(self) -> None:
         """listen_channel_ad_break_begin is NOT called when ads_enabled=False."""
         eventsub = self._mock_eventsub()
@@ -787,7 +788,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_ad_break_begin.assert_not_called()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_redemption_listener_registered_when_list_nonempty(self) -> None:
         """Redemption listener is registered when redemption_names is non-empty."""
         eventsub = self._mock_eventsub()
@@ -799,7 +800,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_points_custom_reward_redemption_add.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_redemption_listener_not_registered_when_list_empty(self) -> None:
         """Redemption listener is NOT registered when redemption_names is empty."""
         eventsub = self._mock_eventsub()
@@ -811,7 +812,7 @@ class TestRegisterListeners:
         await watcher.register_listeners(eventsub)
         eventsub.listen_channel_points_custom_reward_redemption_add.assert_not_called()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_all_listeners_use_broadcaster_id(self) -> None:
         """Every registered listener is called with the broadcaster_id as first arg."""
         eventsub = self._mock_eventsub()
@@ -840,9 +841,32 @@ class TestRegisterListeners:
 
 
 # ---------------------------------------------------------------------------
-# run() — starts eventsub, forwards events to the trio send channel,
+# run() — starts eventsub, forwards events to the asyncio.Queue,
 #          stops cleanly on cancellation
 # ---------------------------------------------------------------------------
+
+
+# Deadline used by _run_briefly — long enough for the AsyncMock listeners +
+# start() to resolve and for the watcher to reach Event().wait(), short enough
+# to keep the test fast. Tune up if tests flake on very slow runners.
+_BRIEF_RUN_DEADLINE_S = 0.05
+
+
+async def _run_briefly(
+    watcher: TwitchWatcher,
+    send: asyncio.Queue[TwitchEvent],
+    eventsub: MagicMock,
+) -> None:
+    """Run watcher.run() long enough to register listeners, then cancel.
+
+    Replaces the earlier ``with trio.move_on_after(0)`` pattern. The
+    AsyncMock listeners + start() return immediately, so the watcher
+    reaches its ``Event().wait()`` sleep well within the deadline; the
+    deadline then triggers the ``finally: await eventsub.stop()`` path.
+    """
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(_BRIEF_RUN_DEADLINE_S):
+            await watcher.run(send, eventsub)
 
 
 class TestRun:
@@ -862,7 +886,7 @@ class TestRun:
         mock.stop = AsyncMock()
         return mock
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_run_calls_eventsub_start(self) -> None:
         """run() calls eventsub.start() to begin receiving events."""
         eventsub = self._make_eventsub()
@@ -871,12 +895,11 @@ class TestRun:
             broadcaster_id="1",
             channel="ch",
         )
-        send, _ = trio.open_memory_channel(16)
-        with trio.move_on_after(0):
-            await watcher.run(send, eventsub)
+        send: asyncio.Queue[TwitchEvent] = asyncio.Queue(maxsize=16)
+        await _run_briefly(watcher, send, eventsub)
         eventsub.start.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_run_calls_eventsub_stop_on_cancel(self) -> None:
         """run() calls eventsub.stop() when cancelled."""
         eventsub = self._make_eventsub()
@@ -885,12 +908,11 @@ class TestRun:
             broadcaster_id="1",
             channel="ch",
         )
-        send, _ = trio.open_memory_channel(16)
-        with trio.move_on_after(0):
-            await watcher.run(send, eventsub)
+        send: asyncio.Queue[TwitchEvent] = asyncio.Queue(maxsize=16)
+        await _run_briefly(watcher, send, eventsub)
         eventsub.stop.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_run_registers_listeners(self) -> None:
         """run() calls register_listeners before starting."""
         eventsub = self._make_eventsub()
@@ -899,19 +921,18 @@ class TestRun:
             broadcaster_id="1",
             channel="ch",
         )
-        send, _ = trio.open_memory_channel(16)
-        with trio.move_on_after(0):
-            await watcher.run(send, eventsub)
+        send: asyncio.Queue[TwitchEvent] = asyncio.Queue(maxsize=16)
+        await _run_briefly(watcher, send, eventsub)
         eventsub.listen_channel_follow_v2.assert_called_once()
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_callback_sends_event_to_channel(self) -> None:
-        """When a registered callback fires, its event reaches the send channel."""
+        """When a registered callback fires, its event reaches the queue."""
         eventsub = self._make_eventsub()
         config = TwitchWatcherConfig(follows_enabled=True)
         watcher = TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
-        send, recv = trio.open_memory_channel(16)
+        send: asyncio.Queue[TwitchEvent] = asyncio.Queue(maxsize=16)
 
         # Capture the callback registered for follows
         captured_callback: list = []
@@ -925,8 +946,7 @@ class TestRun:
         eventsub.listen_channel_follow_v2.side_effect = capture_follow_cb
 
         # Start the watcher and immediately cancel it; callbacks are captured first
-        with trio.move_on_after(0):
-            await watcher.run(send, eventsub)
+        await _run_briefly(watcher, send, eventsub)
 
         assert captured_callback, "no follow callback was registered"
 
@@ -934,22 +954,22 @@ class TestRun:
         mock_event = SimpleNamespace(event=follow_data("Alice"))
         await captured_callback[0](mock_event)
 
-        result = recv.receive_nowait()
+        result = send.get_nowait()
         assert isinstance(result, TwitchEvent)
         assert result.viewer == "Alice"
         assert result.text == "Alice has followed the channel"
 
-    @pytest.mark.trio
+    @pytest.mark.asyncio
     async def test_callback_for_disabled_event_does_not_send(self) -> None:
         """A callback that returns None (disabled config) sends nothing."""
         config = TwitchWatcherConfig(follows_enabled=False)
         watcher = TwitchWatcher(config=config, broadcaster_id="1", channel="ch")
 
-        _send, recv = trio.open_memory_channel(16)
+        send: asyncio.Queue[TwitchEvent] = asyncio.Queue(maxsize=16)
 
-        # Manually invoke the follow handler (disabled) and verify channel is empty
+        # Manually invoke the follow handler (disabled) and verify the queue is empty
         result = watcher.handle_follow(follow_data("Alice"))
         assert result is None
 
-        with pytest.raises(trio.WouldBlock):
-            recv.receive_nowait()
+        with pytest.raises(asyncio.QueueEmpty):
+            send.get_nowait()

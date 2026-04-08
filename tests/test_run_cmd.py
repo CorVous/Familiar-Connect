@@ -42,25 +42,25 @@ def test_run_missing_token_returns_error() -> None:
     assert result == 1
 
 
-def test_run_starts_trio_with_token() -> None:
-    """run() launches trio.run with the token from the environment."""
+def test_run_starts_asyncio_with_token() -> None:
+    """run() launches asyncio.run with the token from the environment."""
     args = argparse.Namespace(character=None, preset=None)
-    captured: list[tuple[object, ...]] = []
-
-    def fake_trio_run(async_fn: object, *call_args: object) -> None:
-        captured.append((async_fn, call_args))
+    sentinel_coro = MagicMock(name="coroutine")
 
     with (
         patch.dict("os.environ", {"DISCORD_BOT": "fake-token"}),
-        patch("familiar_connect.commands.run.trio") as mock_trio,
+        patch(
+            "familiar_connect.commands.run._async_main",
+            new_callable=MagicMock,
+        ) as mock_async_main,
+        patch("familiar_connect.commands.run.asyncio.run") as mock_run,
     ):
-        mock_trio.run.side_effect = fake_trio_run
+        mock_async_main.return_value = sentinel_coro
         result = run(args)
 
     assert result == 0
-    mock_trio.run.assert_called_once()
-    _, call_args, _ = mock_trio.run.mock_calls[0]
-    assert call_args[1] == "fake-token"
+    mock_async_main.assert_called_once_with("fake-token", "")
+    mock_run.assert_called_once_with(sentinel_coro)
 
 
 # ---------------------------------------------------------------------------
