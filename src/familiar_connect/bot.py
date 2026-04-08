@@ -28,6 +28,7 @@ _logger = logging.getLogger(__name__)
 async def awaken(
     ctx: discord.ApplicationContext,
     system_prompt: str = "",
+    tts_client: CartesiaTTSClient | None = None,
 ) -> None:
     """Handle the /awaken slash command.
 
@@ -35,14 +36,15 @@ async def awaken(
 
     - **Text channel** (user not in voice): binds the bot to the text channel
       and begins listening for messages there.
-    - **Voice channel** (user in voice): joins the user's voice channel (same
-      behaviour as before).
+    - **Voice channel** (user in voice): joins the user's voice channel and
+      speaks a greeting if a TTS client is available.
 
     The bot can only be in one active session at a time (text *or* voice).
 
     :param ctx: The application context for the slash command invocation.
     :param system_prompt: Pre-assembled system prompt string (injected by the
         run command; empty string disables LLM responses).
+    :param tts_client: Optional TTS client used to speak a greeting on join.
     """
     author = ctx.author
 
@@ -50,13 +52,20 @@ async def awaken(
     in_voice = isinstance(author, discord.Member) and author.voice is not None
 
     if in_voice:
-        await _awaken_voice(ctx)
+        await _awaken_voice(ctx, tts_client=tts_client)
     else:
         await _awaken_text(ctx, system_prompt)
 
 
-async def _awaken_voice(ctx: discord.ApplicationContext) -> None:
-    """Join the invoking user's voice channel."""
+async def _awaken_voice(
+    ctx: discord.ApplicationContext,
+    tts_client: CartesiaTTSClient | None = None,
+) -> None:
+    """Join the invoking user's voice channel.
+
+    If *tts_client* is provided, speaks a brief greeting immediately after
+    connecting so the TTS audio pipeline can be verified end-to-end.
+    """
     author = ctx.author
 
     # Refuse if any session (voice or text) is already active.
@@ -77,8 +86,17 @@ async def _awaken_voice(ctx: discord.ApplicationContext) -> None:
 
     # Voice connection + DAVE handshake takes >3s, so defer the interaction.
     await ctx.defer()
-    await channel.connect(cls=DaveVoiceClient)
+    vc = await channel.connect(cls=DaveVoiceClient)
     _logger.info("Joined voice channel: %s", channel.name)
+
+    if tts_client is not None:
+        try:
+            pcm_mono = await tts_client.synthesize("Hello!")
+            stereo = mono_to_stereo(pcm_mono)
+            vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+        except Exception:
+            _logger.exception("Opening greeting TTS failed")
+
     await ctx.followup.send(f"Joined **{channel.name}**.")
 
 
@@ -213,7 +231,7 @@ def create_bot(
     bot = discord.Bot(intents=intents)
 
     async def _awaken_cmd(ctx: discord.ApplicationContext) -> None:
-        await awaken(ctx, system_prompt=system_prompt)
+        await awaken(ctx, system_prompt=system_prompt, tts_client=tts_client)
 
     async def _on_message(message: discord.Message) -> None:
         if llm_client is not None:
