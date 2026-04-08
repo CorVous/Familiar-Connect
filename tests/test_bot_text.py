@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import discord
+import httpx
 import pytest
 
 from familiar_connect.bot import awaken, create_bot, on_message, sleep_cmd
@@ -70,8 +71,15 @@ def _make_message(
     *,
     author_bot: bool = False,
     channel_id: int = 12345,
+    guild_voice_client: MagicMock | None = None,
+    in_guild: bool = True,
 ) -> MagicMock:
-    """Fake discord.Message for on_message tests."""
+    """Fake discord.Message for on_message tests.
+
+    :param guild_voice_client: If provided, the message's guild will have this
+        as its voice_client (simulating the bot being in a voice channel).
+    :param in_guild: If False, msg.guild is None (simulates a DM).
+    """
     msg = MagicMock(spec=discord.Message)
     msg.content = content
     msg.channel = MagicMock(spec=discord.TextChannel)
@@ -88,7 +96,29 @@ def _make_message(
     author.display_name = "Alice"
     msg.author = author
 
+    if in_guild:
+        guild = MagicMock(spec=discord.Guild)
+        guild.voice_client = guild_voice_client
+        msg.guild = guild
+    else:
+        msg.guild = None
+
     return msg
+
+
+def _make_tts_client(pcm: bytes = b"\x00\x01\x02\x03") -> MagicMock:
+    """Fake CartesiaTTSClient that returns *pcm* bytes from synthesize()."""
+    client = MagicMock()
+    client.synthesize = AsyncMock(return_value=pcm)
+    return client
+
+
+def _make_voice_client(*, is_playing: bool = False) -> MagicMock:
+    """Fake discord.VoiceClient."""
+    vc = MagicMock(spec=discord.VoiceClient)
+    vc.is_playing = MagicMock(return_value=is_playing)
+    vc.play = MagicMock()
+    return vc
 
 
 def _make_llm_client(reply: str = "I am here.") -> MagicMock:
@@ -241,3 +271,112 @@ class TestCreateBotWithLLM:
         llm = _make_llm_client()
         bot = create_bot(llm_client=llm, system_prompt="You are Aria.")
         assert isinstance(bot, discord.Bot)
+
+    def test_create_bot_accepts_tts_client(self) -> None:
+        """create_bot accepts an optional tts_client parameter."""
+        llm = _make_llm_client()
+        tts = _make_tts_client()
+        bot = create_bot(llm_client=llm, system_prompt="You are Aria.", tts_client=tts)
+        assert isinstance(bot, discord.Bot)
+
+
+# ---------------------------------------------------------------------------
+# on_message with TTS integration
+# ---------------------------------------------------------------------------
+
+
+class TestOnMessageWithTTS:
+    def test_synthesize_called_when_in_voice_channel(self) -> None:
+        """TTS is invoked with the LLM reply when a voice client is present."""
+        session = TextSession(channel_id=12345, system_prompt="sys")
+        set_session(session)
+        llm = _make_llm_client(reply="Hello!")
+        tts = _make_tts_client()
+        vc = _make_voice_client()
+        msg = _make_message(guild_voice_client=vc)
+
+        asyncio.run(on_message(msg, llm, tts_client=tts))
+
+        tts.synthesize.assert_awaited_once_with("Hello!")
+
+    def test_voice_client_plays_audio_after_synthesis(self) -> None:
+        """voice_client.play() is called once after TTS synthesis."""
+        session = TextSession(channel_id=12345, system_prompt="sys")
+        set_session(session)
+        llm = _make_llm_client(reply="Hello!")
+        vc = _make_voice_client()
+        tts = _make_tts_client(pcm=bytes(8))  # 4 mono samples
+        msg = _make_message(guild_voice_client=vc)
+
+        asyncio.run(on_message(msg, llm, tts_client=tts))
+
+        vc.play.assert_called_once()
+
+    def test_tts_not_called_when_no_voice_client(self) -> None:
+        """TTS is skipped when the guild has no voice client."""
+        session = TextSession(channel_id=12345, system_prompt="sys")
+        set_session(session)
+        llm = _make_llm_client()
+        tts = _make_tts_client()
+        msg = _make_message(guild_voice_client=None)  # no voice client
+
+        asyncio.run(on_message(msg, llm, tts_client=tts))
+
+        tts.synthesize.assert_not_awaited()
+
+    def test_tts_not_called_when_no_tts_client(self) -> None:
+        """TTS is skipped when tts_client=None (default)."""
+        session = TextSession(channel_id=12345, system_prompt="sys")
+        set_session(session)
+        llm = _make_llm_client()
+        vc = _make_voice_client()
+        msg = _make_message(guild_voice_client=vc)
+
+        asyncio.run(on_message(msg, llm))  # no tts_client
+
+        vc.play.assert_not_called()
+
+    def test_tts_skipped_when_already_playing(self) -> None:
+        """TTS is skipped if the voice client is already playing audio."""
+        session = TextSession(channel_id=12345, system_prompt="sys")
+        set_session(session)
+        llm = _make_llm_client()
+        tts = _make_tts_client()
+        vc = _make_voice_client(is_playing=True)
+        msg = _make_message(guild_voice_client=vc)
+
+        asyncio.run(on_message(msg, llm, tts_client=tts))
+
+        tts.synthesize.assert_not_awaited()
+
+    def test_dm_message_skips_tts(self) -> None:
+        """TTS is skipped for DMs (message.guild is None)."""
+        session = TextSession(channel_id=12345, system_prompt="sys")
+        set_session(session)
+        llm = _make_llm_client()
+        tts = _make_tts_client()
+        msg = _make_message(in_guild=False)
+
+        asyncio.run(on_message(msg, llm, tts_client=tts))
+
+        tts.synthesize.assert_not_awaited()
+
+    def test_tts_error_does_not_break_text_reply(self) -> None:
+        """A TTS failure is swallowed; the text reply is still sent."""
+        session = TextSession(channel_id=12345, system_prompt="sys")
+        set_session(session)
+        llm = _make_llm_client(reply="Still here.")
+        tts = _make_tts_client()
+        tts.synthesize = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "server error",
+                request=httpx.Request("POST", "https://api.cartesia.ai/tts/bytes"),
+                response=httpx.Response(500),
+            )
+        )
+        vc = _make_voice_client()
+        msg = _make_message(guild_voice_client=vc)
+
+        asyncio.run(on_message(msg, llm, tts_client=tts))
+
+        msg.channel.send.assert_called_once_with("Still here.")

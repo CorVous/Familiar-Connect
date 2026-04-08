@@ -16,6 +16,7 @@ from familiar_connect.bot import create_bot
 from familiar_connect.character import CharacterCardError, load_card
 from familiar_connect.llm import create_client_from_env
 from familiar_connect.preset import PresetError, assemble_prompt, load_preset
+from familiar_connect.tts import create_tts_client_from_env
 
 _logger = logging.getLogger(__name__)
 
@@ -119,7 +120,17 @@ def _run_bot(token: str, system_prompt: str) -> None:
             _logger.warning("LLM client unavailable: %s", exc)
             llm_client = None
 
-        bot = create_bot(llm_client=llm_client, system_prompt=system_prompt)
+        try:
+            tts_client = create_tts_client_from_env()
+        except ValueError as exc:
+            _logger.warning("TTS client unavailable: %s", exc)
+            tts_client = None
+
+        bot = create_bot(
+            llm_client=llm_client,
+            system_prompt=system_prompt,
+            tts_client=tts_client,
+        )
         await bot.start(token)
 
     asyncio.run(_start())
