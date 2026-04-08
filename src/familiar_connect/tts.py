@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 
 CARTESIA_BASE_URL = "https://api.cartesia.ai"
 CARTESIA_API_VERSION = "2024-06-10"
-DEFAULT_MODEL = "sonic-2"
-DEFAULT_VOICE_ID = "694f9389-aac1-45b6-b726-9d9369183238"
+DEFAULT_MODEL = "sonic-3"
+DEFAULT_VOICE_ID = "999df508-4de5-40a7-8bd3-8c12f678c284"
 DEFAULT_SAMPLE_RATE = 48000  # Hz — matches Discord's native rate
 
 
@@ -89,7 +89,10 @@ class CartesiaTTSClient:
         payload = self.build_payload(text)
 
         response = await self._post(url, headers, payload)
-        response.raise_for_status()
+        if not response.is_success:
+            body = response.text
+            msg = f"Cartesia TTS request failed ({response.status_code}): {body}"
+            raise httpx.HTTPStatusError(msg, request=response.request, response=response)
         return response.content
 
 
@@ -106,7 +109,7 @@ def create_tts_client_from_env() -> CartesiaTTSClient:
         msg = "CARTESIA_API_KEY environment variable is required"
         raise ValueError(msg)
 
-    voice_id = os.environ.get("CARTESIA_VOICE_ID", DEFAULT_VOICE_ID)
-    model = os.environ.get("CARTESIA_MODEL", DEFAULT_MODEL)
+    voice_id = os.environ.get("CARTESIA_VOICE_ID") or DEFAULT_VOICE_ID
+    model = os.environ.get("CARTESIA_MODEL") or DEFAULT_MODEL
 
     return CartesiaTTSClient(api_key=api_key, voice_id=voice_id, model=model)
