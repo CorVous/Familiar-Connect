@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,18 @@ import httpx
 
 if TYPE_CHECKING:
     from typing import Any, Self
+
+_NAME_ALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def sanitize_name(name: str) -> str | None:
+    """Return a name safe for the OpenAI name field, or None if empty after sanitizing.
+
+    The API requires names matching ^[a-zA-Z0-9_-]{1,64}$.
+    Spaces and unsupported chars are replaced with underscores.
+    """
+    sanitized = _NAME_ALLOWED.sub("_", name)[:64].strip("_")
+    return sanitized or None
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

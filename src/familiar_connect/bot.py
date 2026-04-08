@@ -6,7 +6,7 @@ import logging
 
 import discord
 
-from familiar_connect.llm import LLMClient, Message
+from familiar_connect.llm import LLMClient, Message, sanitize_name
 from familiar_connect.text_session import (
     SessionError,
     TextSession,
@@ -153,7 +153,7 @@ async def on_message(
     user_msg = Message(
         role="user",
         content=message.content,
-        name=message.author.display_name,
+        name=sanitize_name(message.author.display_name),
     )
     session.history.append(user_msg)
 
