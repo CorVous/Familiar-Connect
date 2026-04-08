@@ -48,6 +48,17 @@ def test_create_bot_has_twitch_command_group() -> None:
     assert "twitch" in names
 
 
+def test_twitch_group_requires_manage_guild() -> None:
+    """The /twitch command group enforces Manage Server permission."""
+    bot = create_bot()
+    twitch_cmd = next(
+        cmd for cmd in bot.pending_application_commands if cmd.name == "twitch"
+    )
+    perms = twitch_cmd.default_member_permissions
+    assert perms is not None
+    assert perms.manage_guild
+
+
 # ---------------------------------------------------------------------------
 # Step 13 — End-to-end lifecycle
 # ---------------------------------------------------------------------------
@@ -83,6 +94,10 @@ class TestTwitchLifecycle:
             patch(
                 "familiar_connect.twitch_commands._resolve_broadcaster_id",
                 new=AsyncMock(return_value="77"),
+            ),
+            patch(
+                "familiar_connect.twitch_commands._run_watcher",
+                new=AsyncMock(),
             ),
         ):
             self._run(connect_cmd(ctx, channel="coolstreamer"))

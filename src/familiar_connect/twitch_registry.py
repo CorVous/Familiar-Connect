@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from familiar_connect.twitch import TwitchWatcherConfig
+    import asyncio
+
+    from familiar_connect.twitch import TwitchEvent, TwitchWatcherConfig
     from familiar_connect.twitch_watcher import TwitchWatcher
 
 
@@ -24,6 +26,7 @@ class GuildTwitchState:
     config: TwitchWatcherConfig
     watcher: TwitchWatcher
     task: Any  # asyncio.Task[None] at runtime; Any for testability
+    queue: asyncio.Queue[TwitchEvent]
 
 
 _registry: dict[int, GuildTwitchState] = {}

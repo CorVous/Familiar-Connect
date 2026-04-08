@@ -145,6 +145,7 @@ ignore = [
     "S105", # Hardcoded fake tokens in tests are fine
     "S106",
     "SLF001", # Tests often poke at private members
+    "PLC2701", # Tests may import private implementation details to test them
     "FBT003", # Boolean positional args common in mock assertions
     "ANN202", # Private helper annotations not critical in tests
 ]

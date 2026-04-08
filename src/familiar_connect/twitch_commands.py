@@ -6,6 +6,7 @@ import asyncio
 import os
 from typing import TYPE_CHECKING
 
+from twitchAPI.eventsub.websocket import EventSubWebsocket
 from twitchAPI.twitch import Twitch
 
 from familiar_connect.twitch import TwitchWatcherConfig
@@ -19,6 +20,8 @@ from familiar_connect.twitch_watcher import TwitchWatcher
 
 if TYPE_CHECKING:
     import discord
+
+    from familiar_connect.twitch import TwitchEvent
 
 
 async def _resolve_broadcaster_id(channel: str, client_id: str, token: str) -> str:
@@ -72,8 +75,11 @@ async def connect_cmd(
         broadcaster_id=broadcaster_id,
         channel=channel,
     )
-
-    task = asyncio.create_task(_run_watcher(watcher), name=f"twitch-watcher-{guild_id}")
+    queue: asyncio.Queue[TwitchEvent] = asyncio.Queue()
+    task = asyncio.create_task(
+        _run_watcher(watcher, client_id, token, queue),
+        name=f"twitch-watcher-{guild_id}",
+    )
 
     state = GuildTwitchState(
         guild_id=guild_id,
@@ -82,19 +88,28 @@ async def connect_cmd(
         config=config,
         watcher=watcher,
         task=task,
+        queue=queue,
     )
     set_guild_twitch(guild_id, state)
 
     await ctx.respond(f"Connected to **{channel}**. Watching for Twitch events.")
 
 
-async def _run_watcher(_watcher: TwitchWatcher) -> None:
-    """Background task: placeholder for the EventSub watcher loop.
+async def _run_watcher(
+    watcher: TwitchWatcher,
+    client_id: str,
+    token: str,
+    send: asyncio.Queue[TwitchEvent],
+) -> None:
+    """Background task: run the EventSub watcher loop.
 
-    Full Twitch EventSub setup (authenticated client + EventSubWebsocket)
-    will be wired in a later pass. For now the task suspends until cancelled.
+    Creates an authenticated Twitch client, wires up an EventSubWebsocket,
+    and delegates to TwitchWatcher.run() which registers all listeners and
+    suspends until cancelled.
     """
-    await asyncio.Event().wait()
+    async with await Twitch(client_id, token) as api:
+        eventsub = EventSubWebsocket(api)
+        await watcher.run(send, eventsub)
 
 
 # ---------------------------------------------------------------------------

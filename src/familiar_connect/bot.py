@@ -263,7 +263,11 @@ def create_bot(
 
 def _register_twitch_commands(bot: discord.Bot) -> None:
     """Register the /twitch slash command group on *bot*."""
-    twitch = discord.SlashCommandGroup("twitch", "Twitch channel event watcher")
+    twitch = discord.SlashCommandGroup(
+        "twitch",
+        "Twitch channel event watcher",
+        default_member_permissions=discord.Permissions(manage_guild=True),
+    )
 
     # /twitch connect
     @twitch.command(name="connect", description="Connect to a Twitch channel")

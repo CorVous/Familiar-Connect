@@ -25,6 +25,7 @@ def _make_state(guild_id: int = 1) -> GuildTwitchState:
         channel="coolstreamer",
     )
     task = MagicMock()
+    queue = MagicMock()
     return GuildTwitchState(
         guild_id=guild_id,
         channel="coolstreamer",
@@ -32,6 +33,7 @@ def _make_state(guild_id: int = 1) -> GuildTwitchState:
         config=config,
         watcher=watcher,
         task=task,
+        queue=queue,
     )
 
 
@@ -60,6 +62,7 @@ class TestGuildTwitchState:
         assert isinstance(state.config, TwitchWatcherConfig)
         assert isinstance(state.watcher, TwitchWatcher)
         assert state.task is not None
+        assert state.queue is not None
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import pytest
 
 from familiar_connect.twitch import TwitchWatcherConfig
 from familiar_connect.twitch_commands import (
+    _run_watcher,
     ads_immediate_cmd,
     connect_cmd,
     disconnect_cmd,
@@ -47,6 +48,7 @@ def _make_state(
     cfg = config or TwitchWatcherConfig()
     watcher = TwitchWatcher(config=cfg, broadcaster_id="999", channel=channel)
     task = MagicMock()
+    queue = MagicMock()
     return GuildTwitchState(
         guild_id=guild_id,
         channel=channel,
@@ -54,6 +56,7 @@ def _make_state(
         config=cfg,
         watcher=watcher,
         task=task,
+        queue=queue,
     )
 
 
@@ -94,6 +97,10 @@ class TestConnectCmd:
                 "familiar_connect.twitch_commands._resolve_broadcaster_id",
                 new=AsyncMock(return_value="42"),
             ),
+            patch(
+                "familiar_connect.twitch_commands._run_watcher",
+                new=AsyncMock(),
+            ),
         ):
             asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
 
@@ -114,6 +121,10 @@ class TestConnectCmd:
             patch(
                 "familiar_connect.twitch_commands._resolve_broadcaster_id",
                 new=AsyncMock(return_value="42"),
+            ),
+            patch(
+                "familiar_connect.twitch_commands._run_watcher",
+                new=AsyncMock(),
             ),
         ):
             asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
@@ -163,12 +174,78 @@ class TestConnectCmd:
                 "familiar_connect.twitch_commands._resolve_broadcaster_id",
                 new=AsyncMock(return_value="42"),
             ),
+            patch(
+                "familiar_connect.twitch_commands._run_watcher",
+                new=AsyncMock(),
+            ),
         ):
             asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
 
         state = get_guild_twitch(100)
         assert state is not None
         assert isinstance(state.task, asyncio.Task)
+
+    def test_connect_stores_queue_in_state(self) -> None:
+        ctx = _make_ctx(guild_id=100)
+
+        with (
+            patch(
+                "familiar_connect.twitch_commands.os.environ.get",
+                side_effect=lambda k, d=None: (
+                    "dummy" if k in {"TWITCH_CLIENT_ID", "TWITCH_ACCESS_TOKEN"} else d
+                ),
+            ),
+            patch(
+                "familiar_connect.twitch_commands._resolve_broadcaster_id",
+                new=AsyncMock(return_value="42"),
+            ),
+            patch(
+                "familiar_connect.twitch_commands._run_watcher",
+                new=AsyncMock(),
+            ),
+        ):
+            asyncio.run(connect_cmd(ctx, channel="coolstreamer"))
+
+        state = get_guild_twitch(100)
+        assert state is not None
+        assert isinstance(state.queue, asyncio.Queue)
+
+
+# ---------------------------------------------------------------------------
+# _run_watcher
+# ---------------------------------------------------------------------------
+
+
+class TestRunWatcher:
+    def test_run_watcher_calls_watcher_run(self) -> None:
+        """_run_watcher wires a Twitch client + EventSubWebsocket into watcher.run."""
+        watcher = MagicMock()
+        watcher.run = AsyncMock()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        mock_api = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_api)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_eventsub = MagicMock()
+
+        # Twitch(id, token) returns a coroutine; await → mock_ctx (the ctx manager)
+        async def _fake_twitch(*_args: object, **_kwargs: object) -> object:
+            return mock_ctx
+
+        with (
+            patch(
+                "familiar_connect.twitch_commands.Twitch",
+                side_effect=_fake_twitch,
+            ),
+            patch(
+                "familiar_connect.twitch_commands.EventSubWebsocket",
+                return_value=mock_eventsub,
+            ),
+        ):
+            asyncio.run(_run_watcher(watcher, "client_id", "token", queue))
+
+        watcher.run.assert_called_once_with(queue, mock_eventsub)
 
 
 # ---------------------------------------------------------------------------
