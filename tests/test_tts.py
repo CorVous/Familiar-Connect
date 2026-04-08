@@ -26,10 +26,10 @@ class TestCartesiaTTSClient:
         assert client.api_key == "test-key"
 
     def test_init_default_model(self) -> None:
-        """Client defaults to sonic-2."""
+        """Client defaults to sonic-3."""
         client = CartesiaTTSClient(api_key="test-key")
         assert client.model == DEFAULT_MODEL
-        assert client.model == "sonic-2"
+        assert client.model == "sonic-3"
 
     def test_init_default_voice_id(self) -> None:
         """Client has a known default voice ID."""
@@ -152,20 +152,19 @@ class TestCartesiaTTSClientSynthesize:
         assert captured_url[0] == f"{CARTESIA_BASE_URL}/tts/bytes"
 
     @pytest.mark.trio
-    async def test_synthesize_raises_on_http_error(
+    async def test_synthesize_raises_on_http_error_with_body(
         self, client: CartesiaTTSClient
     ) -> None:
-        """synthesize() propagates HTTPStatusError from the API."""
-        error = httpx.HTTPStatusError(
-            "Payment Required",
-            request=httpx.Request("POST", f"{CARTESIA_BASE_URL}/tts/bytes"),
-            response=httpx.Response(402),
-        )
-        mock_resp = self._make_mock_response(raise_error=error)
+        """synthesize() raises HTTPStatusError including the response body."""
+        mock_resp = Mock(spec=httpx.Response)
+        mock_resp.status_code = 400
+        mock_resp.is_success = False
+        mock_resp.text = "Invalid request: voice ID must not be empty"
+        mock_resp.request = httpx.Request("POST", f"{CARTESIA_BASE_URL}/tts/bytes")
 
         with (
             patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)),
-            pytest.raises(httpx.HTTPStatusError),
+            pytest.raises(httpx.HTTPStatusError, match=r"voice ID must not be empty"),
         ):
             await client.synthesize("Hello")
 
@@ -195,6 +194,24 @@ class TestCreateTTSClientFromEnv:
 
         assert client.api_key == "sk-cart-test-abc"
         assert client.voice_id == DEFAULT_VOICE_ID
+        assert client.model == DEFAULT_MODEL
+
+    def test_empty_voice_id_falls_back_to_default(self) -> None:
+        """Factory uses default voice ID when env var is set but empty."""
+        env = {"CARTESIA_API_KEY": "sk-cart-test-abc", "CARTESIA_VOICE_ID": ""}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("CARTESIA_MODEL", None)
+            client = create_tts_client_from_env()
+
+        assert client.voice_id == DEFAULT_VOICE_ID
+
+    def test_empty_model_falls_back_to_default(self) -> None:
+        """Factory uses default model when env var is set but empty."""
+        env = {"CARTESIA_API_KEY": "sk-cart-test-abc", "CARTESIA_MODEL": ""}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("CARTESIA_VOICE_ID", None)
+            client = create_tts_client_from_env()
+
         assert client.model == DEFAULT_MODEL
 
     def test_raises_when_api_key_missing(self) -> None:

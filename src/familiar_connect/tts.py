@@ -92,7 +92,9 @@ class CartesiaTTSClient:
         if not response.is_success:
             body = response.text
             msg = f"Cartesia TTS request failed ({response.status_code}): {body}"
-            raise httpx.HTTPStatusError(msg, request=response.request, response=response)
+            raise httpx.HTTPStatusError(
+                msg, request=response.request, response=response
+            )
         return response.content
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes.util
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -10,6 +11,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import argparse
 
+import pathlib
+
+import discord
 import trio
 
 from familiar_connect.bot import create_bot
@@ -145,6 +149,46 @@ async def _trio_main(token: str, system_prompt: str) -> None:
     await trio.to_thread.run_sync(_run_bot, token, system_prompt)
 
 
+_OPUS_FALLBACK_PATHS = [
+    # macOS — Homebrew
+    "/opt/homebrew/lib/libopus.dylib",  # Apple Silicon
+    "/usr/local/lib/libopus.dylib",  # Intel
+    # macOS — MacPorts
+    "/opt/local/lib/libopus.dylib",
+    # Linux — common distro paths
+    "/usr/lib/x86_64-linux-gnu/libopus.so.0",  # Debian/Ubuntu amd64
+    "/usr/lib/aarch64-linux-gnu/libopus.so.0",  # Debian/Ubuntu arm64
+    "/usr/lib64/libopus.so.0",  # Fedora/RHEL/CentOS
+    "/usr/lib/libopus.so.0",  # Arch/Alpine
+    "/usr/lib/libopus.so",
+    # Windows — common install locations
+    "C:\\Windows\\System32\\opus.dll",
+    "C:\\Tools\\opus\\opus.dll",
+]
+
+
+def _load_opus() -> None:
+    """Load the system Opus shared library for Discord voice."""
+    if discord.opus.is_loaded():
+        return
+    lib = ctypes.util.find_library("opus")
+    if not lib:
+        for path in _OPUS_FALLBACK_PATHS:
+            if pathlib.Path(path).exists():
+                lib = path
+                break
+    if lib:
+        discord.opus.load_opus(lib)
+        _logger.debug("Loaded Opus from: %s", lib)
+    else:
+        _logger.warning(
+            "Opus library not found — voice playback will not work. "
+            "Install it with: brew install opus (macOS), "
+            "apt install libopus0 (Debian/Ubuntu), "
+            "dnf install opus (Fedora), or pacman -S opus (Arch)"
+        )
+
+
 def run(args: argparse.Namespace) -> int:
     """Start the Discord bot.
 
@@ -160,6 +204,7 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("DISCORD_BOT environment variable is not set")
         return 1
 
+    _load_opus()
     system_prompt = build_system_prompt(args)
     trio.run(_trio_main, token, system_prompt)
     return 0

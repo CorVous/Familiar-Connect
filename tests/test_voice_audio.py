@@ -50,7 +50,7 @@ class TestMonoToStereo:
         stereo = mono_to_stereo(mono)
         stereo_samples = struct.unpack(f"<{len(samples) * 2}h", stereo)
         for i, original in enumerate(samples):
-            assert stereo_samples[i * 2] == original      # left
+            assert stereo_samples[i * 2] == original  # left
             assert stereo_samples[i * 2 + 1] == original  # right
 
 

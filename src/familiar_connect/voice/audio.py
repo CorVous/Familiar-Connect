@@ -26,6 +26,6 @@ def mono_to_stereo(data: bytes) -> bytes:
     for i in range(0, len(data), 2):
         sample = data[i : i + 2]
         out_off = i * 2
-        result[out_off : out_off + 2] = sample      # left
+        result[out_off : out_off + 2] = sample  # left
         result[out_off + 2 : out_off + 4] = sample  # right
     return bytes(result)
