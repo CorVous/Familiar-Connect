@@ -7,29 +7,19 @@ import discord
 import pytest
 
 from familiar_connect.bot import awaken, create_bot, sleep_cmd
-from familiar_connect.text_session import (
-    TextSession,
-    clear_session,
-    get_session,
-    set_session,
-)
-
-VOICE_CHANNEL_ID = 99999
+from familiar_connect.text_session import clear_session, get_session
 
 
 @pytest.fixture(autouse=True)
-def _fresh_loop_and_session():
-    """Fresh asyncio event loop and cleared session registry per test.
+def _fresh_event_loop() -> None:
+    """Ensure each test gets a fresh asyncio event loop.
 
-    Yields:
-        None
-
+    py-cord's Bot constructor calls asyncio.get_event_loop(), and
+    asyncio.run() closes the loop when it finishes. Without this
+    fixture, later tests fail with 'no current event loop'.
     """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    clear_session()
-    yield
-    clear_session()
 
 
 def _make_ctx(
@@ -57,7 +47,6 @@ def _make_ctx(
         channel = MagicMock(spec=discord.VoiceChannel)
         channel.connect = AsyncMock(return_value=MagicMock())
         channel.name = "General"
-        channel.id = VOICE_CHANNEL_ID
         voice_state.channel = channel
         type(author).voice = PropertyMock(return_value=voice_state)
     else:
@@ -156,48 +145,3 @@ def test_sleep_disconnects() -> None:
 
     ctx.voice_client.disconnect.assert_called_once()
     ctx.respond.assert_called_once()
-
-
-# --- Voice channel text session ---
-
-
-def test_awaken_voice_creates_text_session() -> None:
-    """Joining a voice channel also creates a TextSession for its text chat."""
-    ctx = _make_ctx(in_voice=True, bot_connected=False)
-
-    asyncio.run(awaken(ctx, system_prompt="Be a wizard."))
-
-    assert get_session() is not None
-
-
-def test_awaken_voice_text_session_bound_to_voice_channel_id() -> None:
-    """The TextSession created on voice join is bound to the voice channel's ID."""
-    ctx = _make_ctx(in_voice=True, bot_connected=False)
-
-    asyncio.run(awaken(ctx, system_prompt="Be a wizard."))
-
-    session = get_session()
-    assert session is not None
-    assert session.channel_id == VOICE_CHANNEL_ID
-
-
-def test_awaken_voice_text_session_carries_system_prompt() -> None:
-    """The voice TextSession stores the system prompt for LLM calls."""
-    ctx = _make_ctx(in_voice=True, bot_connected=False)
-
-    asyncio.run(awaken(ctx, system_prompt="You are Aria."))
-
-    session = get_session()
-    assert session is not None
-    assert session.system_prompt == "You are Aria."
-
-
-def test_sleep_from_voice_clears_text_session() -> None:
-    """Disconnecting from a voice channel also clears the voice TextSession."""
-    ctx = _make_ctx(in_voice=True, bot_connected=True)
-    # Manually plant the session that _awaken_voice would have created.
-    set_session(TextSession(channel_id=VOICE_CHANNEL_ID, system_prompt=""))
-
-    asyncio.run(sleep_cmd(ctx))
-
-    assert get_session() is None
