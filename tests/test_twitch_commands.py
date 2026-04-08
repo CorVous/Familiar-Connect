@@ -231,6 +231,7 @@ class TestRunWatcher:
 
         # Twitch(id, token) returns a coroutine; await → mock_ctx (the ctx manager)
         async def _fake_twitch(*_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(0)
             return mock_ctx
 
         with (
