@@ -16,6 +16,18 @@ from familiar_connect.text_session import (
     get_session,
     set_session,
 )
+from familiar_connect.twitch_commands import (
+    _NurseryProto,
+    ads_immediate_cmd,
+    connect_cmd,
+    disconnect_cmd,
+    events_cmd,
+    redemptions_add_cmd,
+    redemptions_clear_cmd,
+    redemptions_list_cmd,
+    redemptions_remove_cmd,
+    status_cmd,
+)
 from familiar_connect.voice import DaveVoiceClient
 from familiar_connect.voice.audio import mono_to_stereo
 
@@ -213,6 +225,7 @@ def create_bot(
     llm_client: LLMClient | None = None,
     system_prompt: str = "",
     tts_client: CartesiaTTSClient | None = None,
+    nursery: _NurseryProto | None = None,
 ) -> discord.Bot:
     """Create and configure the Discord bot with slash commands.
 
@@ -222,6 +235,8 @@ def create_bot(
     :param system_prompt: Pre-assembled system prompt passed to /awaken.
     :param tts_client: Optional TTS client for voice output. When provided
         and the bot is in a voice channel, LLM replies are also spoken aloud.
+    :param nursery: Trio nursery used to spawn Twitch watcher tasks. When None,
+        /twitch connect will still register the state but cannot spawn the task.
     :return: A configured discord.Bot.
     """
     intents = discord.Intents.default()
@@ -245,4 +260,106 @@ def create_bot(
     )
     bot.add_listener(_on_message, name="on_message")
 
+    _register_twitch_commands(bot, nursery)
+
     return bot
+
+
+def _register_twitch_commands(
+    bot: discord.Bot,
+    nursery: _NurseryProto | None,
+) -> None:
+    """Register the /twitch slash command group on *bot*."""
+    twitch = discord.SlashCommandGroup("twitch", "Twitch channel event watcher")
+
+    # /twitch connect
+    @twitch.command(name="connect", description="Connect to a Twitch channel")
+    @discord.option("channel", description="Twitch channel name", required=True)
+    async def _connect(ctx: discord.ApplicationContext, channel: str) -> None:
+        await connect_cmd(ctx, channel=channel, nursery=nursery)
+
+    # /twitch disconnect
+    @twitch.command(name="disconnect", description="Stop watching the Twitch channel")
+    async def _disconnect(ctx: discord.ApplicationContext) -> None:
+        await disconnect_cmd(ctx)
+
+    # /twitch status
+    @twitch.command(
+        name="status",
+        description="Show connected channel and event settings",
+    )
+    async def _status(ctx: discord.ApplicationContext) -> None:
+        await status_cmd(ctx)
+
+    # /twitch events
+    @twitch.command(
+        name="events",
+        description="Toggle which event types produce messages",
+    )
+    @discord.option(
+        "subscriptions",
+        description="Enable subscription events",
+        required=False,
+    )
+    @discord.option("cheers", description="Enable cheer (bits) events", required=False)
+    @discord.option("follows", description="Enable follow events", required=False)
+    @discord.option("ads", description="Enable ad break events", required=False)
+    async def _events(
+        ctx: discord.ApplicationContext,
+        *,
+        subscriptions: bool | None = None,
+        cheers: bool | None = None,
+        follows: bool | None = None,
+        ads: bool | None = None,
+    ) -> None:
+        await events_cmd(
+            ctx,
+            subscriptions=subscriptions,
+            cheers=cheers,
+            follows=follows,
+            ads=ads,
+        )
+
+    # /twitch ads-immediate
+    @twitch.command(
+        name="ads-immediate",
+        description="Toggle immediate ad break notifications",
+    )
+    @discord.option("enabled", description="Enable immediate ads mode", required=True)
+    async def _ads_immediate(ctx: discord.ApplicationContext, *, enabled: bool) -> None:
+        await ads_immediate_cmd(ctx, enabled=enabled)
+
+    # /twitch redemptions subgroup
+    redemptions = twitch.create_subgroup(
+        "redemptions",
+        "Manage channel point redemption allow-list",
+    )
+
+    @redemptions.command(name="add", description="Add a redemption to the allow-list")
+    @discord.option("name", description="Redemption title", required=True)
+    async def _redemptions_add(ctx: discord.ApplicationContext, name: str) -> None:
+        await redemptions_add_cmd(ctx, name=name)
+
+    @redemptions.command(
+        name="remove",
+        description="Remove a redemption from the allow-list",
+    )
+    @discord.option("name", description="Redemption title", required=True)
+    async def _redemptions_remove(ctx: discord.ApplicationContext, name: str) -> None:
+        await redemptions_remove_cmd(ctx, name=name)
+
+    @redemptions.command(
+        name="list",
+        description="List all redemptions in the allow-list",
+    )
+    async def _redemptions_list(ctx: discord.ApplicationContext) -> None:
+        await redemptions_list_cmd(ctx)
+
+    @redemptions.command(
+        name="clear",
+        description="Clear the entire redemption allow-list",
+    )
+    async def _redemptions_clear(ctx: discord.ApplicationContext) -> None:
+        await redemptions_clear_cmd(ctx)
+
+    bot.add_application_command(twitch)
