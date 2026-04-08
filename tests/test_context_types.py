@@ -7,6 +7,7 @@ familiar_connect.context.types, which does not exist yet.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 # These imports are expected to fail until the module exists — that's the "red".
 from familiar_connect.context.types import (
@@ -99,7 +100,7 @@ class TestContribution:
 
 class TestContextRequest:
     def _make(self, **overrides: object) -> ContextRequest:
-        defaults: dict[str, object] = {
+        defaults: dict[str, Any] = {
             "owner_user_id": 42,
             "familiar_id": "aria",
             "channel_id": 100,

@@ -111,8 +111,12 @@ class ContextPipeline:
         # 2. Providers fan out concurrently under a single TaskGroup.
         outcomes = await self._run_providers(processed)
 
-        # 3. Everything that came back goes to the budgeter.
-        all_contributions: list[Contribution] = []
+        # 3. Everything that came back goes to the budgeter — both
+        # provider outputs and any contributions pre-processors stashed
+        # on the request via dataclasses.replace().
+        all_contributions: list[Contribution] = list(
+            processed.preprocessor_contributions
+        )
         for outcome in outcomes:
             all_contributions.extend(outcome.contributions)
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -43,7 +44,7 @@ from familiar_connect.context.types import (
 
 
 def _make_request(**overrides: object) -> ContextRequest:
-    defaults: dict[str, object] = {
+    defaults: dict[str, Any] = {
         "owner_user_id": 42,
         "familiar_id": "aria",
         "channel_id": 100,
@@ -106,6 +107,23 @@ class _StubPreProcessor:
 
     async def process(self, request: ContextRequest) -> ContextRequest:
         return replace(request, utterance=self._new_utterance)
+
+
+class _ContributingPreProcessor:
+    """Pre-processor that stashes a Contribution on preprocessor_contributions."""
+
+    def __init__(self, processor_id: str, contribution: Contribution) -> None:
+        self.id = processor_id
+        self._contribution = contribution
+
+    async def process(self, request: ContextRequest) -> ContextRequest:
+        return replace(
+            request,
+            preprocessor_contributions=(
+                *request.preprocessor_contributions,
+                self._contribution,
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -350,3 +368,38 @@ class TestPreProcessors:
         result = await pipeline.assemble(_make_request(), budget_by_layer={})
         # second ran after first, so it wins
         assert result.request.utterance == "pass-2"
+
+    @pytest.mark.asyncio
+    async def test_preprocessor_contributions_reach_budgeter(self) -> None:
+        """Pre-processor contributions are merged into the budgeter input.
+
+        A Contribution stashed on the request via the
+        ``preprocessor_contributions`` field rides through alongside
+        provider contributions on the way to the budgeter.
+        """
+        pre_contribution = Contribution(
+            layer=Layer.depth_inject,
+            priority=50,
+            text="hidden chain of thought",
+            estimated_tokens=4,
+            source="stepped_thinking",
+        )
+        provider_contribution = Contribution(
+            layer=Layer.character,
+            priority=100,
+            text="A calm spirit.",
+            estimated_tokens=4,
+            source="char",
+        )
+        pipeline = ContextPipeline(
+            providers=[_StubProvider("p", [provider_contribution])],
+            pre_processors=[_ContributingPreProcessor("pre", pre_contribution)],
+        )
+        result = await pipeline.assemble(
+            _make_request(),
+            budget_by_layer={Layer.character: 100, Layer.depth_inject: 100},
+        )
+
+        # Both layers populated.
+        assert result.budget.by_layer[Layer.character] == "A calm spirit."
+        assert result.budget.by_layer[Layer.depth_inject] == "hidden chain of thought"

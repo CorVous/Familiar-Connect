@@ -20,7 +20,7 @@ Covers familiar_connect.context.providers.history.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -54,7 +54,7 @@ _GUILD = 1  # observability only
 
 
 def _request(**overrides: object) -> ContextRequest:
-    defaults: dict[str, object] = {
+    defaults: dict[str, Any] = {
         "owner_user_id": _OWNER,
         "familiar_id": _FAMILIAR,
         "channel_id": _CHANNEL,

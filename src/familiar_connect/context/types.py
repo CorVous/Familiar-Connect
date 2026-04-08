@@ -111,6 +111,13 @@ class ContextRequest:
     :param budget_tokens: Total budget for the assembled system prompt.
     :param deadline_s: Hard wall-clock deadline for the whole pipeline,
         in seconds. Providers that miss it are dropped, not awaited.
+    :param preprocessor_contributions: Tuple of :class:`Contribution`
+        objects accumulated by pre-processors as they run. The
+        pipeline merges these into the budgeter input alongside
+        provider contributions, so a pre-processor can carry its own
+        output forward without becoming a provider. Defaults to the
+        empty tuple; pre-processors append by constructing a fresh
+        request via :func:`dataclasses.replace`.
     """
 
     owner_user_id: int
@@ -122,3 +129,4 @@ class ContextRequest:
     modality: Modality
     budget_tokens: int
     deadline_s: float
+    preprocessor_contributions: tuple[Contribution, ...] = ()
