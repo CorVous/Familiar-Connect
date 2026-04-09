@@ -35,7 +35,7 @@ The secrets and global knobs the host machine needs to run the bot at all. Set b
 
 Per-familiar configuration. The persona, behaviour knobs, and pluggable component selection for the single familiar this install runs.
 
-- Persona — character card fields, unpacked into `memory/self/*.md` (by the `unpack_character` module).
+- Persona — character card fields, unpacked into `memory/self/*.md` (by the `familiar_connect.bootstrap.unpack_character` module — see [`bootstrapping.md`](../bootstrapping.md)).
 - Memory directory — `memory/`, owned by `MemoryStore`.
 - Tuning parameters — history window size, depth-inject position and role, default channel mode.
 - Per-channel overrides — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`.

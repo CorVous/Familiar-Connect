@@ -63,7 +63,7 @@ data/familiars/aria/
 
 Everything else (`memory/`, `history.db`, `subscriptions.toml`, `channels/`, `modes/`) is created on first launch. Multiple character folders can sit side-by-side under `data/familiars/`; only the one you point `FAMILIAR_ID` at is loaded per process.
 
-To give the familiar a persona, drop Markdown files into `data/familiars/<id>/memory/self/` (e.g. `description.md`, `personality.md`, `scenario.md`) — the `CharacterProvider` concatenates whatever is present. A character-card unpacker exists at `familiar_connect.memory.unpack_character.unpack_character` if you want to bootstrap from a V3 PNG programmatically.
+To give the familiar a persona, drop Markdown files into `data/familiars/<id>/memory/self/` (e.g. `description.md`, `personality.md`, `scenario.md`) — the `CharacterProvider` concatenates whatever is present. If you want to seed a familiar from a V3 character-card PNG or a SillyTavern lorebook export, see [`bootstrapping.md`](./bootstrapping.md) for the operator recipes.
 
 **Per-mode instructions.** To tune *how* the familiar writes in a given channel mode (e.g. "keep it short, reply like a chat-room message"), drop a Markdown file into `data/familiars/<id>/modes/<mode>.md`. The filename must match the mode value: `text_conversation_rp.md`, `full_rp.md`, or `imitate_voice.md`. Missing file = no per-mode instruction; empty file = no-op. The text lands in `Layer.author_note` of the system prompt on every turn whose channel is in that mode.
 
