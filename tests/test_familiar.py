@@ -19,6 +19,7 @@ from familiar_connect.config import (
     CharacterConfig,
     channel_config_for_mode,
 )
+from familiar_connect.context.side_model import LLMSideModel
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient
 
@@ -115,6 +116,43 @@ class TestLoadFromDisk:
         familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
         cfg = familiar.channel_configs.get(channel_id=42)
         assert cfg.mode is ChannelMode.imitate_voice
+
+    def test_side_model_falls_back_to_main_llm_when_no_side_client(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Without a side_llm_client, LLMSideModel wraps the main client.
+
+        This is the current production default — no
+        ``OPENROUTER_SIDE_MODEL`` env var means every side-model
+        call reuses the main (expensive) model.
+        """
+        root = tmp_path / "aria"
+        root.mkdir()
+        main = _StubLLMClient()
+        familiar = Familiar.load_from_disk(root, llm_client=main)
+        assert isinstance(familiar.side_model, LLMSideModel)
+        # The adapter's internal client is the main one.
+        assert familiar.side_model._llm_client is main
+
+    def test_side_model_uses_side_client_when_provided(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A separate side_llm_client is preferred for side-model work."""
+        root = tmp_path / "aria"
+        root.mkdir()
+        main = _StubLLMClient()
+        side = _StubLLMClient()
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_client=main,
+            side_llm_client=side,
+        )
+        assert isinstance(familiar.side_model, LLMSideModel)
+        assert familiar.side_model._llm_client is side
+        # The main LLMClient for the reply path is still the main one.
+        assert familiar.llm_client is main
 
 
 # ---------------------------------------------------------------------------

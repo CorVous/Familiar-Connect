@@ -24,15 +24,33 @@ OPENROUTER_API_KEY=<openrouter key>
 # pick the familiar to load (or pass --familiar on the CLI)
 FAMILIAR_ID=aria
 
-# optional overrides
+# optional overrides for the main reply-path model
 OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
 OPENROUTER_TEMPERATURE=0.8
+
+# optional — cheaper model used for side-model work.
+# Stepped thinking, recast, history summary, and content search all
+# run through the side model slot. If you leave this unset, those
+# calls reuse OPENROUTER_MODEL — which works but can be slow and
+# expensive, especially because the content-search agent runs up to
+# 5 side-model calls per turn. Set it to a fast, cheap model to blunt
+# the cost hit.
+OPENROUTER_SIDE_MODEL=openai/gpt-4o-mini
+OPENROUTER_SIDE_TEMPERATURE=0.5
 
 # optional — voice output
 CARTESIA_API_KEY=<cartesia key>
 CARTESIA_VOICE_ID=<voice id>
 CARTESIA_MODEL=sonic-english
 ```
+
+**Picking a side model.** The side model is used for focused sub-tasks where accuracy matters less than latency and cost. Good starting points:
+
+- `openai/gpt-4o-mini` — cheapest OpenAI, fast, honours the `name` field (see below), strong structured-output for the content-search TOOL/ANSWER protocol.
+- `anthropic/claude-3.5-haiku` — similar tier / price on the Anthropic side.
+- `meta-llama/llama-3.1-8b-instruct` — very cheap via OpenRouter, decent for simple summarisation.
+
+The startup log prints which side model is in use on every launch, or warns if you left it unset.
 
 ### Minimum on-disk layout
 

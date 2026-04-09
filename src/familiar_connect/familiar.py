@@ -118,6 +118,7 @@ class Familiar:
         *,
         llm_client: LLMClient,
         tts_client: CartesiaTTSClient | None = None,
+        side_llm_client: LLMClient | None = None,
     ) -> Familiar:
         """Build a Familiar bundle from the on-disk ``data/familiars/<id>/`` layout.
 
@@ -126,6 +127,18 @@ class Familiar:
         - ``history.db`` is opened (and created if missing).
         - ``subscriptions.toml`` is loaded if present.
         - ``channels/`` is created if missing.
+
+        :param llm_client: The main reply-path :class:`LLMClient`.
+        :param tts_client: Optional Cartesia TTS client for voice
+            output.
+        :param side_llm_client: Optional cheap :class:`LLMClient` used
+            exclusively for side-model work (stepped thinking, recast,
+            history summary, content search). When ``None`` (the
+            default), side-model calls reuse the main ``llm_client`` —
+            which works but pays main-model price for every sub-task.
+            Set ``OPENROUTER_SIDE_MODEL`` and pass the result of
+            :func:`familiar_connect.llm.create_side_client_from_env`
+            to use a cheaper model.
         """
         familiar_id = root.name
         character_config = load_character_config(root / "character.toml")
@@ -136,7 +149,7 @@ class Familiar:
 
         history_store = HistoryStore(root / "history.db")
 
-        side_model: SideModel = LLMSideModel(llm_client)
+        side_model: SideModel = LLMSideModel(side_llm_client or llm_client)
 
         providers: dict[str, ContextProvider] = {
             "character": CharacterProvider(memory_store),

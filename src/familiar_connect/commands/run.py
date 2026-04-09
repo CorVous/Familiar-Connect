@@ -18,7 +18,7 @@ import discord
 from familiar_connect.bot import create_bot
 from familiar_connect.config import ConfigError
 from familiar_connect.familiar import Familiar
-from familiar_connect.llm import create_client_from_env
+from familiar_connect.llm import create_client_from_env, create_side_client_from_env
 from familiar_connect.tts import create_tts_client_from_env
 
 _logger = logging.getLogger(__name__)
@@ -155,6 +155,22 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("LLM client unavailable: %s", exc)
         return 1
 
+    side_llm_client = create_side_client_from_env()
+    if side_llm_client is None:
+        _logger.info(
+            "No OPENROUTER_SIDE_MODEL set — side-model work (stepped "
+            "thinking, recast, history summary, content search) will "
+            "reuse the main model. Set OPENROUTER_SIDE_MODEL to a "
+            "cheaper/faster model to avoid paying main-model price "
+            "for sub-tasks.",
+        )
+    else:
+        _logger.info(
+            "Side-model calls will use %s (separate from main model %s).",
+            side_llm_client.model,
+            llm_client.model,
+        )
+
     try:
         tts_client = create_tts_client_from_env()
     except ValueError as exc:
@@ -166,6 +182,7 @@ def run(args: argparse.Namespace) -> int:
             familiar_root,
             llm_client=llm_client,
             tts_client=tts_client,
+            side_llm_client=side_llm_client,
         )
     except ConfigError as exc:
         _logger.error("Failed to load familiar config: %s", exc)
