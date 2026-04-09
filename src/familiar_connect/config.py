@@ -152,9 +152,11 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
                 Layer.history_summary: 1000,
                 Layer.recent_history: 2000,
                 Layer.depth_inject: 400,
-                Layer.author_note: 200,
+                Layer.author_note: 400,
             },
-            providers_enabled=frozenset({"character", "history", "content_search"}),
+            providers_enabled=frozenset(
+                {"character", "history", "content_search", "mode_instructions"},
+            ),
             preprocessors_enabled=frozenset({"stepped_thinking"}),
             postprocessors_enabled=frozenset({"recast"}),
         )
@@ -168,9 +170,10 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
                 Layer.character: 1200,
                 Layer.history_summary: 600,
                 Layer.recent_history: 1400,
+                Layer.author_note: 300,
                 Layer.depth_inject: 400,
             },
-            providers_enabled=frozenset({"character", "history"}),
+            providers_enabled=frozenset({"character", "history", "mode_instructions"}),
             preprocessors_enabled=frozenset({"stepped_thinking"}),
             postprocessors_enabled=frozenset(),
         )
@@ -183,9 +186,10 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
                 Layer.core: 300,
                 Layer.character: 700,
                 Layer.recent_history: 900,
+                Layer.author_note: 150,
                 Layer.depth_inject: 100,
             },
-            providers_enabled=frozenset({"character", "history"}),
+            providers_enabled=frozenset({"character", "history", "mode_instructions"}),
             preprocessors_enabled=frozenset(),
             postprocessors_enabled=frozenset({"recast"}),
         )

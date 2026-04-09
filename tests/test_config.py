@@ -24,6 +24,7 @@ from familiar_connect.config import (
     load_channel_config,
     load_character_config,
 )
+from familiar_connect.context.types import Layer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -84,6 +85,27 @@ class TestModeDefaults:
         full = channel_config_for_mode(ChannelMode.full_rp)
         assert voice.budget_tokens < full.budget_tokens
         assert voice.deadline_s <= full.deadline_s
+
+    def test_every_mode_enables_mode_instructions_provider(self) -> None:
+        """Every built-in mode ships the per-mode instruction knob."""
+        for mode in ChannelMode:
+            cfg = channel_config_for_mode(mode)
+            assert "mode_instructions" in cfg.providers_enabled, (
+                f"{mode.value} must enable mode_instructions"
+            )
+
+    def test_every_mode_budgets_the_author_note_layer(self) -> None:
+        """Guard against a mode that forgets its own instruction budget.
+
+        ``author_note`` is where :class:`ModeInstructionProvider`
+        lands — a mode that doesn't budget for the layer would
+        silently drop its own instruction file.
+        """
+        for mode in ChannelMode:
+            cfg = channel_config_for_mode(mode)
+            assert cfg.budget_by_layer.get(Layer.author_note, 0) > 0, (
+                f"{mode.value} must allocate budget for Layer.author_note"
+            )
 
 
 # ---------------------------------------------------------------------------

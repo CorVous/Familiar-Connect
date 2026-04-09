@@ -39,6 +39,9 @@ from familiar_connect.context.processors.stepped_thinking import (
 from familiar_connect.context.providers.character import CharacterProvider
 from familiar_connect.context.providers.content_search import ContentSearchProvider
 from familiar_connect.context.providers.history import HistoryProvider
+from familiar_connect.context.providers.mode_instructions import (
+    ModeInstructionProvider,
+)
 from familiar_connect.context.side_model import LLMSideModel
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.memory.store import MemoryStore
@@ -162,6 +165,13 @@ class Familiar:
             character=character_config,
         )
 
+        # modes/ holds per-mode static instruction files; it's created
+        # on first boot so users can drop <mode>.md files into it
+        # without having to mkdir themselves. ModeInstructionProvider
+        # resolves files relative to this directory per turn.
+        modes_root = root / "modes"
+        modes_root.mkdir(parents=True, exist_ok=True)
+
         return cls(
             id=familiar_id,
             root=root,
@@ -185,15 +195,27 @@ class Familiar:
     def build_pipeline(self, channel_config: ChannelConfig) -> ContextPipeline:
         """Return a :class:`ContextPipeline` filtered for the given channel.
 
-        The same set of providers / processors is registered on the
-        Familiar at startup; per-turn filtering is how channel modes
-        influence which components actually run.
+        Most providers are registered once on the Familiar at
+        startup and filtered per turn by id. A small set of providers
+        depends on the channel's :class:`ChannelMode` and is
+        constructed fresh per turn with the mode baked in —
+        :class:`ModeInstructionProvider` is the only one today, but
+        the branch here is the sanctioned place to add future
+        mode-scoped providers without leaking ``ChannelMode`` into
+        :class:`ContextRequest`.
         """
-        active_providers = [
+        active_providers: list[ContextProvider] = [
             self.providers[pid]
             for pid in channel_config.providers_enabled
             if pid in self.providers
         ]
+        if "mode_instructions" in channel_config.providers_enabled:
+            active_providers.append(
+                ModeInstructionProvider(
+                    modes_root=self.root / "modes",
+                    mode=channel_config.mode,
+                ),
+            )
         active_pre = [
             self.pre_processors[pid]
             for pid in channel_config.preprocessors_enabled

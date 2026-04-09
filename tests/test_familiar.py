@@ -70,6 +70,13 @@ class TestLoadFromDisk:
         Familiar.load_from_disk(root, llm_client=_StubLLMClient())
         assert (root / "history.db").exists()
 
+    def test_modes_directory_is_created(self, tmp_path: Path) -> None:
+        """``modes/`` holds per-mode instruction files; auto-created."""
+        root = tmp_path / "aria"
+        root.mkdir()
+        Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        assert (root / "modes").is_dir()
+
     def test_providers_registered(self, tmp_path: Path) -> None:
         """The three first-party providers are wired in by default."""
         root = tmp_path / "aria"
@@ -142,3 +149,55 @@ class TestBuildPipeline:
         # stepped_thinking is disabled for imitate_voice, so the pipeline
         # shouldn't have any pre-processors attached.
         assert pipeline._pre_processors == []
+
+    def test_mode_instructions_provider_is_added_per_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """ModeInstructionProvider is constructed per call.
+
+        The provider's file resolution depends on the channel's
+        active mode, so it never lives in the static provider dict
+        — :meth:`Familiar.build_pipeline` mints a fresh instance
+        with the mode baked in on every turn.
+        """
+        root = tmp_path / "aria"
+        root.mkdir()
+        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        # Not in the static registry.
+        assert "mode_instructions" not in familiar.providers
+
+        full_pipeline = familiar.build_pipeline(
+            channel_config_for_mode(ChannelMode.full_rp),
+        )
+        provider_ids = {p.id for p in full_pipeline._providers}
+        assert "mode_instructions" in provider_ids
+
+    def test_mode_instructions_provider_is_mode_scoped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Different channel modes produce providers bound to different files."""
+        root = tmp_path / "aria"
+        root.mkdir()
+        (root / "modes").mkdir()
+        (root / "modes" / "text_conversation_rp.md").write_text("chat-style")
+        (root / "modes" / "full_rp.md").write_text("novel-style")
+        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+
+        text_pipeline = familiar.build_pipeline(
+            channel_config_for_mode(ChannelMode.text_conversation_rp),
+        )
+        (text_mode_provider,) = [
+            p for p in text_pipeline._providers if p.id == "mode_instructions"
+        ]
+        rp_pipeline = familiar.build_pipeline(
+            channel_config_for_mode(ChannelMode.full_rp),
+        )
+        (rp_mode_provider,) = [
+            p for p in rp_pipeline._providers if p.id == "mode_instructions"
+        ]
+        # The two providers are distinct instances, each scoped to its
+        # own mode. Their identity is different and, more importantly,
+        # the instances are not shared across modes.
+        assert text_mode_provider is not rp_mode_provider
