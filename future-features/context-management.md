@@ -15,7 +15,7 @@ This document and `plan.md` are expected to stay in sync. When a design choice c
 - **No third-party state services** (no mem0, no Zep, no hosted vector DB, no OpenAI embeddings in the first pass).
 - **Memory source of truth is the per-familiar plain-text directory described in `plan.md` § Memory Directory.**
 - **Providers and processors are registered in code.** No plugin discovery, no dynamic loading.
-- **One familiar per install.** Per `future-features/configuration-levels.md`, each checkout runs exactly one character. Multi-character setups spin up multiple checkouts. `owner_user_id` has been removed from the data model.
+- **Single operator, one active familiar per process.** Per `future-features/configuration-levels.md`, Familiar-Connect targets a single admin running the bot on their own machine. Multiple character folders may coexist under `data/familiars/<id>/`, but exactly one is active at a time (selected by `FAMILIAR_ID`). `owner_user_id` has been removed from the data model accordingly.
 
 ---
 

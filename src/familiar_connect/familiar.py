@@ -1,11 +1,14 @@
 """Runtime bundle for the single active character.
 
 Per ``future-features/configuration-levels.md``, a Familiar-Connect
-install runs exactly one character. The :class:`Familiar` dataclass
-is the runtime singleton that carries every concern tied to that
-character: its config, its memory store, its history store, its
-registered providers / processors, its subscription registry, and
-its per-channel config store.
+process runs exactly one character at a time. Multiple character
+folders may coexist under ``data/familiars/``; ``FAMILIAR_ID`` at
+startup selects which one this process actually loads. The
+:class:`Familiar` dataclass is the runtime singleton that carries
+every concern tied to that active character: its config, its
+memory store, its history store, its registered providers /
+processors, its subscription registry, and its per-channel config
+store.
 
 :meth:`Familiar.load_from_disk` walks a character's folder under
 ``data/familiars/<id>/`` and builds the whole bundle in one pass.

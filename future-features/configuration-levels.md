@@ -4,6 +4,16 @@ The bot's configuration surface is split into two levels. Step 7 of
 `future-features/context-management.md` has implemented this spec
 and pinned it in code.
 
+**Who runs this bot.** Familiar-Connect targets a single admin
+running the bot on their own machine. Earlier drafts of this spec
+envisioned multiple Discord users each managing their own familiars
+through slash commands; that ambition has been dropped. "Single
+operator" does *not* mean "single character" — the same install can
+hold multiple character folders under `data/familiars/<id>/`, and
+the operator flips between them by changing `FAMILIAR_ID` and
+restarting (or by running multiple processes in parallel, each with
+its own `FAMILIAR_ID`).
+
 ## The two levels
 
 ### 1. Bot instance config
@@ -33,15 +43,20 @@ Per-familiar configuration. The persona, behaviour knobs, and pluggable componen
 
 **Where it lives:** `data/familiars/<familiar_id>/`. One folder per character. Only one runs at a time in any given process.
 
-## One character per install
+## One active familiar per process
 
-A Familiar-Connect install runs exactly one familiar. Users who want to run a second character spin up a second checkout (or a second data directory) and point `FAMILIAR_ID` at it. The single-character constraint is enforced by:
+A Familiar-Connect process runs exactly one familiar at a time, selected by `FAMILIAR_ID` at startup. That's a *process*-level constraint, not a *data*-level one: `data/familiars/` is free to hold any number of character folders, and nothing stops the operator from running a second process against a different `FAMILIAR_ID` in parallel. The per-process single-active-character rule exists because:
 
-- `FAMILIAR_ID` (env var) or `--familiar` (CLI flag) selecting one folder.
-- `Familiar.load_from_disk` returning a single runtime singleton.
-- `HistoryStore` partitioning by `familiar_id`, but the bot only ever uses the active character's id.
+- Discord's voice API only lets a bot hold one voice connection per gateway session, so multi-character in one process would need per-character gateways anyway.
+- The bot's runtime state (subscriptions, channel configs, TTS output queue) is simpler to reason about when it's scoped to one persona at a time.
 
-If the single-character limit ever lifts, the data model already carries `familiar_id` through every store call — the refactor would be confined to the entry-point and subscription registry.
+The single-active constraint is enforced by:
+
+- `FAMILIAR_ID` (env var) or `--familiar` (CLI flag) selecting exactly one folder.
+- `Familiar.load_from_disk` returning a single runtime bundle the bot holds for its lifetime.
+- `HistoryStore` partitioning by `familiar_id`, so a shared database (if one ever ends up shared across processes) still keeps turns separated.
+
+If two-character-per-process ever becomes desirable, the data model already carries `familiar_id` through every store call — the refactor would be confined to the entry-point and subscription registry.
 
 ## On-disk layout
 

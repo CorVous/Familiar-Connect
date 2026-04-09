@@ -2,7 +2,7 @@
 
 ## Overview
 
-A familiar's long-term memory is a directory of plain-text files on disk, one tree per familiar, rooted under `data/familiars/<familiar_id>/`. This document covers *what goes in that directory* — the content conventions. The *pipeline that reads and writes it* lives in `context-management.md`, the architectural principles live in `plan.md` § Context Management, and the configuration model lives in `future-features/configuration-levels.md`.
+A familiar's long-term memory is a directory of plain-text files on disk, one tree per familiar, rooted under `data/familiars/<familiar_id>/memory/`. Multiple character folders can coexist on one install; the bot process picks one via `FAMILIAR_ID` at startup. This document covers *what goes in that directory* — the content conventions. The *pipeline that reads and writes it* lives in `context-management.md`, the architectural principles live in `plan.md` § Context Management, and the configuration model lives in `future-features/configuration-levels.md`.
 
 This document replaces an earlier "lorebook" spec that described structured, tagged entries with triggered retrieval. The new design deliberately drops structured formats in favour of freeform Markdown that a cheap tool-using model can `grep` / `glob` / `read_file` at reply time. Old rationale is preserved in VCS history; see the commit that replaced `lorebook.md` with this file if you need the context.
 
