@@ -45,14 +45,12 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-_OWNER = 42
 _CHANNEL = 100
 _FAMILIAR = "aria"
 
 
 def _request(utterance: str = "what do you know about Alice?") -> ContextRequest:
     return ContextRequest(
-        owner_user_id=_OWNER,
         familiar_id=_FAMILIAR,
         channel_id=_CHANNEL,
         guild_id=1,

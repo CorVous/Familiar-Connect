@@ -2,8 +2,7 @@
 
 Step 6 of future-features/context-management.md. Reads turns from the
 :class:`HistoryStore` for the request's
-``(owner_user_id, familiar_id, channel_id)`` and emits up to two
-contributions:
+``(familiar_id, channel_id)`` and emits up to two contributions:
 
 - A ``recent_history`` Contribution containing the most recent N
   turns *in this channel* rendered as a single block of text. The
@@ -12,11 +11,10 @@ contributions:
 - A ``history_summary`` Contribution containing a rolling summary of
   every turn the familiar has heard *globally* (across all channels)
   except the most recent ``summary_lag`` turns, built by a cheap
-  :class:`SideModel` and cached in the store under
-  ``(owner_user_id, familiar_id)``. The cache is keyed by
-  ``last_summarised_id``; the summariser is only re-invoked when
-  enough new turns have arrived globally that the cached watermark
-  has fallen behind.
+  :class:`SideModel` and cached in the store under ``familiar_id``.
+  The cache is keyed by ``last_summarised_id``; the summariser is
+  only re-invoked when enough new turns have arrived globally that
+  the cached watermark has fallen behind.
 
 The provider has its own internal soft deadline for the summariser,
 shorter than the pipeline's per-provider deadline, so a slow side-
@@ -26,11 +24,11 @@ summary, the stale value is returned. If neither path produces text,
 the provider returns just the recent layer and lets the pipeline
 move on.
 
-The familiar-ownership model lives in
-``future-features/configuration-levels.md``. The split between
-per-channel recent window and per-familiar global summary is the
-"hybrid" option from that doc, picked specifically because it forces
-multi-channel scalability to be a first-class concern from day one.
+The split between per-channel recent window and per-familiar global
+summary is the "hybrid" option from
+``future-features/configuration-levels.md``, picked specifically
+because it forces multi-channel scalability to be a first-class
+concern from day one.
 """
 
 from __future__ import annotations
@@ -149,14 +147,12 @@ class HistoryProvider:
           cache or to nothing if the summariser fails).
         """
         recent = self._store.recent(
-            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
             channel_id=request.channel_id,
             limit=self._window_size,
         )
 
         latest = self._store.latest_id(
-            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
         )
         if latest is None:
@@ -189,7 +185,6 @@ class HistoryProvider:
         target_max_id: int,
     ) -> str:
         cached = self._store.get_summary(
-            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
         )
         if cached is not None and cached.last_summarised_id >= target_max_id:
@@ -203,10 +198,9 @@ class HistoryProvider:
                 return await self._build_summary(request, target_max_id)
         except TimeoutError:
             _logger.warning(
-                "history summariser timed out after %.3fs for owner=%s "
+                "history summariser timed out after %.3fs for "
                 "familiar=%s channel=%s; falling back to cache",
                 self._summary_timeout_s,
-                request.owner_user_id,
                 request.familiar_id,
                 request.channel_id,
             )
@@ -225,7 +219,6 @@ class HistoryProvider:
         target_max_id: int,
     ) -> str:
         older = self._store.older_than(
-            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
             max_id=target_max_id,
         )
@@ -245,7 +238,6 @@ class HistoryProvider:
 
         # Update the cache so future calls reuse this work.
         self._store.put_summary(
-            owner_user_id=request.owner_user_id,
             familiar_id=request.familiar_id,
             last_summarised_id=target_max_id,
             summary_text=summary,

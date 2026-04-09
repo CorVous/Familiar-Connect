@@ -37,7 +37,6 @@ from familiar_connect.context.types import (
 
 def _request(**overrides: object) -> ContextRequest:
     defaults: dict[str, Any] = {
-        "owner_user_id": 42,
         "familiar_id": "aria",
         "channel_id": 100,
         "guild_id": 1,
@@ -124,7 +123,6 @@ class TestHappyPath:
         original = _request()
         result = await proc.process(original)
 
-        assert result.owner_user_id == original.owner_user_id
         assert result.familiar_id == original.familiar_id
         assert result.channel_id == original.channel_id
         assert result.utterance == original.utterance
@@ -140,7 +138,6 @@ class TestHappyPath:
         )
         original = _request()
         seeded = ContextRequest(
-            owner_user_id=original.owner_user_id,
             familiar_id=original.familiar_id,
             channel_id=original.channel_id,
             guild_id=original.guild_id,

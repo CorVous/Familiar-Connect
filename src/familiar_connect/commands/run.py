@@ -7,6 +7,7 @@ import ctypes.util
 import logging
 import os
 import pathlib
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,12 +16,14 @@ if TYPE_CHECKING:
 import discord
 
 from familiar_connect.bot import create_bot
-from familiar_connect.character import CharacterCardError, load_card
+from familiar_connect.config import ConfigError
+from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_client_from_env
-from familiar_connect.preset import PresetError, assemble_prompt, load_preset
 from familiar_connect.tts import create_tts_client_from_env
 
 _logger = logging.getLogger(__name__)
+
+_DEFAULT_FAMILIARS_ROOT = Path("data") / "familiars"
 
 
 def add_parser(
@@ -40,88 +43,47 @@ def add_parser(
         description="Start the familiar and connect to Discord",
     )
     parser.add_argument(
-        "--character",
-        metavar="PATH",
+        "--familiar",
+        metavar="ID",
         default=None,
         help=(
-            "Path to a Character Card V3 PNG file. "
-            "Overrides the FAMILIAR_CHARACTER environment variable."
-        ),
-    )
-    parser.add_argument(
-        "--preset",
-        metavar="PATH",
-        default=None,
-        help=(
-            "Path to a SillyTavern preset JSON file. "
-            "Overrides the FAMILIAR_PRESET environment variable."
+            "Folder name of the character to run "
+            "(under data/familiars/). Overrides FAMILIAR_ID."
         ),
     )
     parser.set_defaults(func=run)
     return parser
 
 
-def build_system_prompt(args: argparse.Namespace) -> str:
-    """Load the character card and preset, then assemble a system prompt.
+def _resolve_familiar_root(args: argparse.Namespace) -> Path:
+    """Return the root directory of the active familiar.
 
-    Falls back gracefully: if no card or preset is configured, returns "".
-
-    :param args: Parsed command-line arguments.
-    :return: Assembled system prompt string (may be empty).
+    Resolution order: ``--familiar`` CLI flag → ``FAMILIAR_ID``
+    environment variable. Raises :class:`ValueError` if neither is
+    set or the resulting directory is missing.
     """
-    card_path = args.character or os.environ.get("FAMILIAR_CHARACTER")
-    preset_path = args.preset or os.environ.get("FAMILIAR_PRESET")
+    familiar_id = args.familiar or os.environ.get("FAMILIAR_ID")
+    if not familiar_id:
+        msg = (
+            "No familiar selected. Set FAMILIAR_ID, pass --familiar, "
+            "or create data/familiars/<id>/."
+        )
+        raise ValueError(msg)
 
-    if not card_path:
-        _logger.info("No character card configured — running without persona.")
-        return ""
-
-    try:
-        card = load_card(card_path)
-    except CharacterCardError as exc:
-        _logger.error("Failed to load character card: %s", exc)
-        return ""
-
-    _logger.info("Loaded character card: %s", card.name)
-
-    if not preset_path:
-        _logger.info("No preset configured — using card description as system prompt.")
-        return card.description
-
-    try:
-        preset = load_preset(preset_path)
-    except PresetError as exc:
-        _logger.error("Failed to load preset: %s", exc)
-        return card.description
-
-    prompt = assemble_prompt(preset, card)
-    _logger.info("Assembled system prompt (%d chars).", len(prompt))
-    return prompt
+    root = _DEFAULT_FAMILIARS_ROOT / familiar_id
+    if not root.exists():
+        msg = f"Familiar folder does not exist: {root}"
+        raise ValueError(msg)
+    return root
 
 
-async def _async_main(token: str, system_prompt: str) -> None:
+async def _async_main(token: str, familiar: Familiar) -> None:
     """Asyncio entry point: build the bot and start it.
 
     :param token: Discord bot token.
-    :param system_prompt: Pre-assembled system prompt for the familiar.
+    :param familiar: The loaded :class:`Familiar` bundle.
     """
-    try:
-        llm_client = create_client_from_env()
-    except ValueError as exc:
-        _logger.warning("LLM client unavailable: %s", exc)
-        llm_client = None
-
-    try:
-        tts_client = create_tts_client_from_env()
-    except ValueError as exc:
-        _logger.warning("TTS client unavailable: %s", exc)
-        tts_client = None
-
-    bot = create_bot(
-        llm_client=llm_client,
-        system_prompt=system_prompt,
-        tts_client=tts_client,
-    )
+    bot = create_bot(familiar)
     await bot.start(token)
 
 
@@ -168,19 +130,54 @@ def load_opus() -> None:
 def run(args: argparse.Namespace) -> int:
     """Start the Discord bot.
 
-    Reads the bot token from the DISCORD_BOT environment variable, loads the
-    character card and preset (if configured), then launches the bot under
+    Reads the bot token from the DISCORD_BOT environment variable,
+    selects the active familiar via ``--familiar`` / ``FAMILIAR_ID``,
+    builds the :class:`Familiar` bundle, then launches the bot under
     asyncio.
 
     :param args: Parsed command-line arguments.
-    :return: Exit code (0 for success, 1 for missing token).
+    :return: Exit code (0 for success, 1 for missing token or config).
     """
     token = os.environ.get("DISCORD_BOT")
     if not token:
         _logger.error("DISCORD_BOT environment variable is not set")
         return 1
 
+    try:
+        familiar_root = _resolve_familiar_root(args)
+    except ValueError as exc:
+        _logger.error("%s", exc)
+        return 1
+
+    try:
+        llm_client = create_client_from_env()
+    except ValueError as exc:
+        _logger.error("LLM client unavailable: %s", exc)
+        return 1
+
+    try:
+        tts_client = create_tts_client_from_env()
+    except ValueError as exc:
+        _logger.warning("TTS client unavailable: %s", exc)
+        tts_client = None
+
+    try:
+        familiar = Familiar.load_from_disk(
+            familiar_root,
+            llm_client=llm_client,
+            tts_client=tts_client,
+        )
+    except ConfigError as exc:
+        _logger.error("Failed to load familiar config: %s", exc)
+        return 1
+
+    _logger.info(
+        "Loaded familiar %s from %s (default_mode=%s)",
+        familiar.id,
+        familiar_root,
+        familiar.config.default_mode.value,
+    )
+
     load_opus()
-    system_prompt = build_system_prompt(args)
-    asyncio.run(_async_main(token, system_prompt))
+    asyncio.run(_async_main(token, familiar))
     return 0

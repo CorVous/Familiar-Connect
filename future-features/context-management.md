@@ -10,11 +10,12 @@ This document and `plan.md` are expected to stay in sync. When a design choice c
 
 ## Working assumptions
 
-- **Concurrency stack: `asyncio` + `asyncio.TaskGroup`.** The concurrency migration off `trio` is tracked as a separate work item; new code on this branch is written asyncio-native so it doesn't need to be rewritten after the migration. If the migration slips, the context pipeline can still be wired up through a `trio_asyncio` adapter at the call site.
+- **Concurrency stack: `asyncio` + `asyncio.TaskGroup`.** The concurrency migration off `trio` has landed — the codebase is now asyncio-native top to bottom.
 - **No new long-running dependencies** (no vector DB, no memory daemon, no MCP sidecar for our own memory).
 - **No third-party state services** (no mem0, no Zep, no hosted vector DB, no OpenAI embeddings in the first pass).
 - **Memory source of truth is the per-familiar plain-text directory described in `plan.md` § Memory Directory.**
 - **Providers and processors are registered in code.** No plugin discovery, no dynamic loading.
+- **One familiar per install.** Per `future-features/configuration-levels.md`, each checkout runs exactly one character. Multi-character setups spin up multiple checkouts. `owner_user_id` has been removed from the data model.
 
 ---
 
@@ -33,7 +34,7 @@ Files:
 
 Shapes:
 
-- `ContextRequest` — triggering event, recent turns, the familiar's `owner_user_id` and `familiar_id`, originating `channel_id`, originating `guild_id` (observability only), per-character config, `Modality` (`"voice"` or `"text"`), target token budget, and a deadline (as an `asyncio.timeout` handle or a monotonic deadline). See `future-features/configuration-levels.md` for the ownership model.
+- `ContextRequest` — triggering event, `familiar_id`, originating `channel_id`, originating `guild_id` (observability only), speaker, utterance, `Modality` (`"voice"` or `"text"`), target token budget, and a deadline. See `future-features/configuration-levels.md` for the ownership model (one familiar per install).
 - `Contribution` — `layer: Layer`, `priority: int`, `text: str`, `estimated_tokens: int`, `source: str`.
 - `Layer` enum — `core`, `character`, `content`, `history_summary`, `recent_history`, `author_note`, `depth_inject`.
 - `ContextProvider` — `Protocol` with `async def contribute(request: ContextRequest) -> list[Contribution]`.
@@ -71,7 +72,7 @@ Shapes:
 
 This is the single piece of new infrastructure the agentic-search design adds. Everything else is pipeline glue.
 
-- `MemoryStore` owns a per-familiar directory, scoped by `(owner_user_id, familiar_id)`. Default path: `data/users/<owner_user_id>/familiars/<familiar_id>/memory/`.
+- `MemoryStore` owns a per-familiar directory, scoped by `familiar_id`. Default path: `data/familiars/<familiar_id>/memory/`.
 - API (all synchronous file I/O — these are small text files on local disk):
   - `list_dir(rel_path: str = "") -> list[MemoryEntry]`
   - `read_file(rel_path: str) -> str`
@@ -132,7 +133,7 @@ This is the single piece of new infrastructure the agentic-search design adds. E
 **New module:** `familiar_connect.context.providers.history`.
 
 - Reads from the existing text/voice history store and emits two contributions per call: the last N turns verbatim (`Layer.recent_history`, high priority), and a `Layer.history_summary` contribution built from older turns via a cheap side-model.
-- Summaries are cached in SQLite keyed by `(owner_user_id, familiar_id, last_summarised_id)` — global per familiar, regardless of which channel each older turn happened in — so they are only regenerated when new turns have actually been added to the familiar's history. The recent rolling window is partitioned per channel; the rolling summary is global per familiar (see `plan.md` § Context Management for the rationale). Compression target is roughly 10:1.
+- Summaries are cached in SQLite keyed by `(familiar_id, last_summarised_id)` — global per familiar, regardless of which channel each older turn happened in — so they are only regenerated when new turns have actually been added to the familiar's history. The recent rolling window is partitioned per channel; the rolling summary is global per familiar (see `plan.md` § Context Management for the rationale). Compression target is roughly 10:1.
 - Respects the deadline: if the summariser hasn't returned in time, the provider emits only the verbatim window and flags the cached summary as stale for the next run.
 
 **Tests** — `tests/test_history_provider.py`:
@@ -142,24 +143,29 @@ This is the single piece of new infrastructure the agentic-search design adds. E
 - Cached summary is reused when no new turns have aged out (assert no extra LLM calls).
 - Summariser timeout falls back gracefully (recent layer present, summary contribution absent, log entry written).
 
-### 7. Per-character, per-modality config and wiring
+### 7. Wiring, single-character install, subscriptions, channel configs ✅
 
-- Add a per-character config loader that reads `data/users/<owner_user_id>/familiars/<familiar_id>/character.toml` (see `future-features/configuration-levels.md`) and produces a `ContextConfig` object with:
-  - `providers[provider_id].enabled_for: set[Modality]`
-  - `providers[provider_id].deadline_ms: int`
-  - `providers[provider_id].budget_tokens: int`
-  - `processors[processor_id].enabled_for: set[Modality]`
-  - Per-layer budget overrides.
-  - Tuning parameters (temperature, model, side-model, chattiness, voice id, etc.).
-- Wire `ContextPipeline` into `bot.py` and `text_session.py` so every reply goes through it. Replace the ad-hoc history construction currently in `text_session.py` (and remove its TODO referring to `plan.md`'s context-management design). Every turn must write to `HistoryStore.append_turn` so the next turn's `HistoryProvider` can find it.
-- Voice replies use the same pipeline, constructed with `Modality.voice`. Streaming still happens at the LLM → TTS boundary; the pipeline runs to completion before the LLM call starts.
-- The monitoring dashboard gains per-turn, per-provider latency and token metrics so modality tuning is empirical, not guessed.
+**Done.** Delivered in one commit on top of step 10.
 
-**Tests** — extend `tests/test_text_session.py` and add a voice-path equivalent using a stub LLM client:
+- New module `familiar_connect.config` — `CharacterConfig`, `ChannelConfig`, `ChannelMode` enum, `channel_config_for_mode` defaults table, and TOML loaders via stdlib `tomllib`.
+- New module `familiar_connect.subscriptions` — `SubscriptionRegistry` persisted to `data/familiars/<id>/subscriptions.toml`. Replaces the single-slot `text_session` registry.
+- New module `familiar_connect.channel_config` — `ChannelConfigStore` with lazy per-channel TOML sidecars under `data/familiars/<id>/channels/`.
+- New module `familiar_connect.context.render` — `assemble_chat_messages` owns the SillyTavern-accurate `Layer.depth_inject` placement (insert at position-from-end of the full chat list, clamped to after the system prompt).
+- New module `familiar_connect.familiar` — `Familiar` dataclass bundles config, memory store, history store, side model, providers, processors, subscriptions, and channel configs. `Familiar.load_from_disk` is the sole constructor. `Familiar.build_pipeline(channel_config)` filters registered providers/processors per channel mode.
+- Rewrote `bot.py`: deleted `/awaken` and `/sleep`, added `/subscribe-text`, `/unsubscribe-text`, `/subscribe-my-voice`, `/unsubscribe-voice`, `/channel-full-rp`, `/channel-text-conversation-rp`, `/channel-imitate-voice`. `on_message` routes every subscribed message through the pipeline, runs post-processors, persists both turns to `HistoryStore`, and fans out to TTS when a voice subscription exists in the same guild.
+- Rewrote `commands/run.py`: selects the active familiar via `FAMILIAR_ID` env var (or `--familiar` flag), builds the `Familiar` bundle from disk, and hands it to `create_bot`.
+- `ContextPipeline` gained a `post_processors` parameter and a `run_post_processors` method; the bot calls it on the main LLM reply before TTS/history. Processors run in reverse registration order so later-registered processors wrap earlier ones symmetrically; a processor that raises is caught and its stage is skipped.
+- Dropped `owner_user_id` from `ContextRequest`, `HistoryStore`, and every call site. Schema break — existing `history.db` files need to be deleted before running this branch.
+- Deleted `text_session.py`; history lives in `HistoryStore`, session state lives in `SubscriptionRegistry`.
 
-- A reply request with no providers enabled still produces a working call (defaults to core instructions only).
-- Toggling a provider in `character.toml` changes the request body the stub LLM receives.
-- Toggling for voice but not text (or vice versa) is respected.
+**Tests** — `tests/test_config.py`, `tests/test_subscriptions.py`, `tests/test_channel_config_store.py`, `tests/test_render.py`, `tests/test_familiar.py`, `tests/test_bot_message_loop.py` (replacing the old `test_text_session.py` / `test_bot_text.py` pair). Every first-party provider/processor/renderer wire path is exercised end-to-end with a stub `LLMClient` subclass.
+
+**Deferred to later:**
+
+- Per-turn provider / processor latency dashboard — the `PipelineOutput.outcomes` already carries the data, and `bot.py` logs a structured line per outcome; the actual web dashboard is a separate work item.
+- A `/context` slash command showing the assembled context for the last reply.
+- Voice-side input: the STT-to-pipeline path still isn't wired. `/subscribe-my-voice` joins the channel and keeps the PCM sink open for TTS replies, but incoming audio is a later roadmap step.
+- A `familiar init --from-card` subcommand that unpacks a Character Card V3 PNG into the `data/familiars/<id>/` layout. For this branch users run the existing `unpack_character` module manually.
 
 ### 8. `ContentSearchProvider` — the memory search agent
 

@@ -1,16 +1,13 @@
 """Red-first tests for the HistoryProvider.
 
 Step 6 of future-features/context-management.md. Reads turns from the
-HistoryStore for the request's
-``(owner_user_id, familiar_id, channel_id)`` and emits one
-recent_history Contribution containing the most recent N turns *in
-this channel*, and — when there are enough older turns *globally* —
-emits a second history_summary Contribution from a cheap SideModel,
-cached in the store under ``(owner_user_id, familiar_id)`` so we
+HistoryStore for the request's ``(familiar_id, channel_id)`` and
+emits one recent_history Contribution containing the most recent N
+turns *in this channel*, and — when there are enough older turns
+*globally* — emits a second history_summary Contribution from a
+cheap SideModel, cached in the store under ``familiar_id`` so we
 don't pay for the same prefix twice.
 
-Familiars are owned by Discord users, not guilds — see
-``future-features/configuration-levels.md`` for the ownership model.
 The recent window is partitioned per channel; the rolling summary is
 global per familiar.
 
@@ -47,7 +44,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-_OWNER = 42
 _CHANNEL = 100
 _FAMILIAR = "aria"
 _GUILD = 1  # observability only
@@ -55,7 +51,6 @@ _GUILD = 1  # observability only
 
 def _request(**overrides: object) -> ContextRequest:
     defaults: dict[str, Any] = {
-        "owner_user_id": _OWNER,
         "familiar_id": _FAMILIAR,
         "channel_id": _CHANNEL,
         "guild_id": _GUILD,
@@ -75,7 +70,6 @@ def _seed(store: HistoryStore, n: int, *, channel_id: int = _CHANNEL) -> None:
         role = "user" if i % 2 == 0 else "assistant"
         speaker = "Alice" if role == "user" else None
         store.append_turn(
-            owner_user_id=_OWNER,
             channel_id=channel_id,
             familiar_id=_FAMILIAR,
             role=role,
@@ -236,7 +230,6 @@ class TestSummaryPath:
         seed_more = 5
         for i in range(seed_more):
             store.append_turn(
-                owner_user_id=_OWNER,
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
                 role="user",
@@ -310,7 +303,6 @@ class TestSummariserFailures:
         # Add more turns and switch to a slow side-model.
         for i in range(5):
             store.append_turn(
-                owner_user_id=_OWNER,
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
                 role="user",

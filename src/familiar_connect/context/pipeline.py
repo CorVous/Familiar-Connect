@@ -6,8 +6,13 @@ their Contributions, and hands everything to the Budgeter. Individual
 provider failures and deadline misses are isolated so one misbehaving
 provider never poisons the rest of the pipeline.
 
-This module does not call the main LLM or run post-processors yet —
-those land in later roadmap steps.
+The pipeline deliberately does **not** call the main LLM itself. The
+bot layer owns the LLM call so that TTS fan-out and history
+persistence stay clustered together; the pipeline's
+:meth:`ContextPipeline.run_post_processors` hook lets the bot fire
+post-processors against the resulting reply without having to
+re-implement the reverse-order, per-stage failure isolation every
+call site would otherwise need.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ if TYPE_CHECKING:
 
     from familiar_connect.context.protocols import (
         ContextProvider,
+        PostProcessor,
         PreProcessor,
     )
     from familiar_connect.context.types import (
@@ -86,10 +92,12 @@ class ContextPipeline:
         self,
         providers: Sequence[ContextProvider],
         pre_processors: Sequence[PreProcessor] = (),
+        post_processors: Sequence[PostProcessor] = (),
         budgeter: Budgeter | None = None,
     ) -> None:
         self._providers = list(providers)
         self._pre_processors = list(pre_processors)
+        self._post_processors = list(post_processors)
         self._budgeter = budgeter or Budgeter()
 
     async def assemble(
@@ -127,6 +135,33 @@ class ContextPipeline:
             budget=budget_result,
             outcomes=outcomes,
         )
+
+    async def run_post_processors(
+        self,
+        reply_text: str,
+        request: ContextRequest,
+    ) -> str:
+        """Run every registered post-processor against *reply_text*.
+
+        Processors run in **reverse** registration order so the
+        most-recently-registered processor is the outermost wrapper
+        and sees every earlier transformation. A processor that
+        raises is caught, logged, and skipped — its input is passed
+        through to the next stage unchanged so one buggy processor
+        never eats a reply entirely.
+        """
+        current = reply_text
+        for post in reversed(self._post_processors):
+            try:
+                current = await post.process(current, request)
+            except Exception as exc:  # noqa: BLE001 — isolation by design
+                _logger.warning(
+                    "post-processor %s raised %s: %s; passing input through",
+                    post.id,
+                    type(exc).__name__,
+                    exc,
+                )
+        return current
 
     async def _run_providers(
         self,

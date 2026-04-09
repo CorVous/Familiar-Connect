@@ -118,7 +118,7 @@ Everything upstream of the OpenRouter call — character cards, system prompt as
 
 1. **The source of truth is a directory of plain-text files, per familiar.** Everything else is an optimisation on top. No special file formats, no schemas, no required fields. Markdown preferred but not enforced. A human can read the whole memory with `grep -r` or a text editor; a model can read it with the same tools plus `glob` / `read`. *See § Memory Directory below.*
 2. **Local-first.** The context layer makes no calls to third-party state stores. All context state lives in-process, in the filesystem next to the bot, or in the bot's own SQLite. The only network calls in the context layer are to the LLM endpoints we're already using for generation. No mem0, no Zep, no hosted vector DB, no MCP daemon for our own memory. (MCP stays on the table as a way to later *expose* Familiar-Connect's memory to other tools — not as the way Familiar-Connect consumes its own.)
-3. **Familiars are owned by users, not guilds.** A familiar belongs to a Discord user (`owner_user_id`) and travels with them. The same familiar can be summoned in any guild or channel where its owner has access. Memory and the rolling history summary are global per familiar; only the *recent conversation window* is partitioned per channel so two simultaneous conversations don't bleed into each other. See `future-features/configuration-levels.md` for the full configuration model and `§ Memory Directory` for the on-disk layout.
+3. **One familiar per install.** Each Familiar-Connect checkout runs exactly one character, selected at startup via `FAMILIAR_ID`. Memory and the rolling history summary are global per familiar; only the *recent conversation window* is partitioned per channel so two simultaneous conversations don't bleed into each other. Users who want multiple familiars spin up multiple checkouts. See `future-features/configuration-levels.md` for the full configuration model and `§ Memory Directory` for the on-disk layout.
 4. **Swappable content, stable frame.** Character cards, preset harnesses, content sources, and pre/post-processors all conform to a small set of protocols. Swapping any of them is a config change, never a refactor.
 5. **Per-character, per-modality toggles.** Every provider and processor is individually toggleable. The enabled set can differ for voice and text because the latency budgets differ — voice will often disable slow providers that text can happily use. See § Modality Profiles.
 6. **Explicit token budgets.** Every section the pipeline assembles has a declared priority and token budget. Nothing is dropped by accident; nothing bloats by accident.
@@ -127,10 +127,10 @@ Everything upstream of the OpenRouter call — character cards, system prompt as
 
 #### Memory directory
 
-Every familiar owns a directory of plain-text files, rooted under the owner's user directory. Default layout:
+Every familiar owns a directory of plain-text files, rooted in the character folder. Default layout:
 
 ```
-data/users/<owner_user_id>/familiars/<familiar_id>/memory/
+data/familiars/<familiar_id>/memory/
     self/
         description.md        # unpacked from character card on init
         personality.md
@@ -157,7 +157,7 @@ Everything about this layout is conventional, not enforced. Subdirectories are j
 **Rules of the directory:**
 
 - **Plain text (Markdown preferred).** No JSON, no YAML frontmatter requirements, no proprietary formats.
-- **Per-familiar isolation, scoped to one owner.** A familiar lives under its owner's user directory; one user can own multiple familiars and their memories never share a directory. See `future-features/configuration-levels.md` for the full ownership model.
+- **Per-install isolation.** One checkout = one familiar. Multi-character setups spin up multiple checkouts, and two familiars never share a directory. See `future-features/configuration-levels.md` for the full ownership model.
 - **Markdown cross-links encouraged.** Files can reference each other with relative links like `[alice](../people/alice.md)`. This is free today (a reader just sees the link text) and sets up graph-style traversal tools later without changing the storage format.
 - **Character cards are unpacked into `self/` on familiar creation.** Each field of a loaded Character Card V3 becomes a file. Editing the character is then just editing those files, and the search agent finds them the same way it finds everything else.
 - **SillyTavern lorebook / world-info JSON imports are flattened to Markdown** in the appropriate subdirectory at import time. We never maintain a runtime keyword walker over ST's trigger format.
@@ -188,7 +188,7 @@ incoming event → [pre-processors] → ContextRequest
 
 All in a new `familiar_connect.context` package.
 
-- **`ContextRequest`** — the triggering event, recent turns, the active `Familiar` handle (which knows its memory directory), the familiar's `owner_user_id` and `familiar_id`, the originating `channel_id`, the originating `guild_id` (observability only), per-character config, target token budget, deadline, and modality (`"voice"` or `"text"`).
+- **`ContextRequest`** — the triggering event, `familiar_id`, originating `channel_id`, originating `guild_id` (observability only), `speaker`, `utterance`, `modality` (`"voice"` or `"text"`), target token budget, deadline, and any contributions pre-processors have accumulated. The active `Familiar` bundle is held separately by the bot layer and looked up per turn.
 - **`Contribution`** — a typed bundle of `layer`, `priority`, `text`, `estimated_tokens`, and `source`. Providers return lists of these.
 - **`ContextProvider`** — `Protocol` with one method, `async def contribute(request) -> list[Contribution]`.
 - **`PreProcessor` / `PostProcessor`** — `Protocol`s with `async def process(...)`. Pre-processors mutate the outgoing request (e.g. inject a hidden chain-of-thought). Post-processors mutate the reply before it reaches TTS (e.g. tone cleanup, rewriting for speech).

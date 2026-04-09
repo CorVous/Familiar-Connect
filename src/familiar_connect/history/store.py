@@ -3,19 +3,24 @@
 The HistoryStore owns one SQLite database with two tables:
 
 - ``turns`` — every conversational turn the bot has seen, scoped by
-  ``(owner_user_id, familiar_id, channel_id)``. Each turn carries a
-  monotonically increasing primary key, a role
-  (user/assistant/system), an optional speaker name, the textual
-  content, an optional ``guild_id`` (observability only), and a UTC
-  timestamp.
-- ``summaries`` — at most one rolling summary per
-  ``(owner_user_id, familiar_id)`` pair, with a
-  ``last_summarised_id`` watermark so the
+  ``(familiar_id, channel_id)``. Each turn carries a monotonically
+  increasing primary key, a role (user/assistant/system), an
+  optional speaker name, the textual content, an optional
+  ``guild_id`` (observability only), and a UTC timestamp.
+- ``summaries`` — at most one rolling summary per ``familiar_id``,
+  with a ``last_summarised_id`` watermark so the
   :class:`HistoryProvider` can tell whether the cache still covers
   every turn the familiar has heard. The summary is *global per
   familiar* — see ``plan.md`` § Context Management for the rationale.
   The recent rolling window is partitioned per channel; the rolling
   summary is not.
+
+A Familiar-Connect install runs exactly one familiar at a time, so
+``familiar_id`` effectively identifies the single active character on
+this install. It's still carried through the API surface (rather than
+implicit) so that tests can exercise multiple familiars against a
+single store and future work that revisits the single-character
+constraint has a clean extension point.
 
 The store deliberately exposes a small, synchronous API. SQLite is
 fast enough for the volumes a per-host bot will see, and keeping the
@@ -49,7 +54,7 @@ class HistoryTurn:
 
 @dataclass(frozen=True)
 class SummaryEntry:
-    """A cached rolling summary for one (owner_user_id, familiar_id)."""
+    """A cached rolling summary for one ``familiar_id``."""
 
     last_summarised_id: int
     summary_text: str
@@ -59,7 +64,6 @@ class SummaryEntry:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_user_id  INTEGER NOT NULL,
     familiar_id    TEXT    NOT NULL,
     channel_id     INTEGER NOT NULL,
     guild_id       INTEGER,
@@ -70,18 +74,17 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
-    ON turns (owner_user_id, familiar_id, channel_id, id);
+    ON turns (familiar_id, channel_id, id);
 
 CREATE INDEX IF NOT EXISTS idx_turns_global
-    ON turns (owner_user_id, familiar_id, id);
+    ON turns (familiar_id, id);
 
 CREATE TABLE IF NOT EXISTS summaries (
-    owner_user_id       INTEGER NOT NULL,
     familiar_id         TEXT    NOT NULL,
     last_summarised_id  INTEGER NOT NULL,
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
-    PRIMARY KEY (owner_user_id, familiar_id)
+    PRIMARY KEY (familiar_id)
 );
 """
 
@@ -122,7 +125,6 @@ class HistoryStore:
     def append_turn(
         self,
         *,
-        owner_user_id: int,
         familiar_id: str,
         channel_id: int,
         role: str,
@@ -135,12 +137,11 @@ class HistoryStore:
         cur = self._conn.execute(
             """
             INSERT INTO turns
-                (owner_user_id, familiar_id, channel_id, guild_id,
+                (familiar_id, channel_id, guild_id,
                  role, speaker, content, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                owner_user_id,
                 familiar_id,
                 channel_id,
                 guild_id,
@@ -162,7 +163,6 @@ class HistoryStore:
     def recent(
         self,
         *,
-        owner_user_id: int,
         familiar_id: str,
         channel_id: int,
         limit: int,
@@ -180,47 +180,44 @@ class HistoryStore:
             """
             SELECT id, timestamp, role, speaker, content
               FROM turns
-             WHERE owner_user_id = ? AND familiar_id = ? AND channel_id = ?
+             WHERE familiar_id = ? AND channel_id = ?
              ORDER BY id DESC
              LIMIT ?
             """,
-            (owner_user_id, familiar_id, channel_id, limit),
+            (familiar_id, channel_id, limit),
         ).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
 
     def older_than(
         self,
         *,
-        owner_user_id: int,
         familiar_id: str,
         max_id: int,
         limit: int = 10_000,
     ) -> list[HistoryTurn]:
         """Return turns whose ``id`` is *<= max_id*, oldest first.
 
-        Globally per ``(owner_user_id, familiar_id)`` — *not*
-        partitioned by channel. The HistoryProvider's rolling summary
-        covers everything the familiar has ever heard, regardless of
-        which channel each turn happened in.
+        Globally per ``familiar_id`` — *not* partitioned by channel.
+        The HistoryProvider's rolling summary covers everything the
+        familiar has ever heard, regardless of which channel each
+        turn happened in.
         """
         rows = self._conn.execute(
             """
             SELECT id, timestamp, role, speaker, content
               FROM turns
-             WHERE owner_user_id = ?
-               AND familiar_id = ?
+             WHERE familiar_id = ?
                AND id <= ?
              ORDER BY id ASC
              LIMIT ?
             """,
-            (owner_user_id, familiar_id, max_id, limit),
+            (familiar_id, max_id, limit),
         ).fetchall()
         return [_row_to_turn(r) for r in rows]
 
     def latest_id(
         self,
         *,
-        owner_user_id: int,
         familiar_id: str,
     ) -> int | None:
         """Return the highest turn id for the familiar across all channels.
@@ -234,9 +231,9 @@ class HistoryStore:
             """
             SELECT MAX(id) AS max_id
               FROM turns
-             WHERE owner_user_id = ? AND familiar_id = ?
+             WHERE familiar_id = ?
             """,
-            (owner_user_id, familiar_id),
+            (familiar_id,),
         ).fetchone()
         if row is None or row["max_id"] is None:
             return None
@@ -245,7 +242,6 @@ class HistoryStore:
     def count(
         self,
         *,
-        owner_user_id: int,
         familiar_id: str,
         channel_id: int | None = None,
     ) -> int:
@@ -259,20 +255,19 @@ class HistoryStore:
                 """
                 SELECT COUNT(*) AS n
                   FROM turns
-                 WHERE owner_user_id = ? AND familiar_id = ?
+                 WHERE familiar_id = ?
                 """,
-                (owner_user_id, familiar_id),
+                (familiar_id,),
             ).fetchone()
         else:
             row = self._conn.execute(
                 """
                 SELECT COUNT(*) AS n
                   FROM turns
-                 WHERE owner_user_id = ?
-                   AND familiar_id = ?
+                 WHERE familiar_id = ?
                    AND channel_id = ?
                 """,
-                (owner_user_id, familiar_id, channel_id),
+                (familiar_id, channel_id),
             ).fetchone()
         return int(row["n"])
 
@@ -283,7 +278,6 @@ class HistoryStore:
     def get_summary(
         self,
         *,
-        owner_user_id: int,
         familiar_id: str,
     ) -> SummaryEntry | None:
         """Return the cached summary for the familiar, or ``None``."""
@@ -291,9 +285,9 @@ class HistoryStore:
             """
             SELECT last_summarised_id, summary_text, created_at
               FROM summaries
-             WHERE owner_user_id = ? AND familiar_id = ?
+             WHERE familiar_id = ?
             """,
-            (owner_user_id, familiar_id),
+            (familiar_id,),
         ).fetchone()
         if row is None:
             return None
@@ -306,7 +300,6 @@ class HistoryStore:
     def put_summary(
         self,
         *,
-        owner_user_id: int,
         familiar_id: str,
         last_summarised_id: int,
         summary_text: str,
@@ -316,17 +309,16 @@ class HistoryStore:
         self._conn.execute(
             """
             INSERT INTO summaries
-                (owner_user_id, familiar_id,
+                (familiar_id,
                  last_summarised_id, summary_text, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (owner_user_id, familiar_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (familiar_id)
             DO UPDATE SET
                 last_summarised_id = excluded.last_summarised_id,
                 summary_text       = excluded.summary_text,
                 created_at         = excluded.created_at
             """,
             (
-                owner_user_id,
                 familiar_id,
                 last_summarised_id,
                 summary_text,

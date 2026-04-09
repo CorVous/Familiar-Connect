@@ -45,7 +45,6 @@ from familiar_connect.context.types import (
 
 def _make_request(**overrides: object) -> ContextRequest:
     defaults: dict[str, Any] = {
-        "owner_user_id": 42,
         "familiar_id": "aria",
         "channel_id": 100,
         "guild_id": 1,
@@ -124,6 +123,32 @@ class _ContributingPreProcessor:
                 self._contribution,
             ),
         )
+
+
+class _RecordingPostProcessor:
+    """Post-processor that records every reply it sees and appends a tag."""
+
+    def __init__(self, processor_id: str, tag: str) -> None:
+        self.id = processor_id
+        self._tag = tag
+        self.seen: list[str] = []
+
+    async def process(self, reply_text: str, request: ContextRequest) -> str:  # noqa: ARG002
+        self.seen.append(reply_text)
+        return f"{reply_text}|{self._tag}"
+
+
+class _FailingPostProcessor:
+    def __init__(self, processor_id: str, exc: Exception) -> None:
+        self.id = processor_id
+        self._exc = exc
+
+    async def process(
+        self,
+        reply_text: str,  # noqa: ARG002
+        request: ContextRequest,  # noqa: ARG002
+    ) -> str:
+        raise self._exc
 
 
 # ---------------------------------------------------------------------------
@@ -403,3 +428,73 @@ class TestPreProcessors:
         # Both layers populated.
         assert result.budget.by_layer[Layer.character] == "A calm spirit."
         assert result.budget.by_layer[Layer.depth_inject] == "hidden chain of thought"
+
+
+# ---------------------------------------------------------------------------
+# Post-processors
+# ---------------------------------------------------------------------------
+
+
+class TestPostProcessors:
+    """``run_post_processors`` is the call-site for PostProcessors.
+
+    The pipeline deliberately does *not* own the LLM call (the bot
+    layer still does that, so TTS and history persistence can stay
+    clustered together). Instead, the pipeline exposes a narrow
+    ``run_post_processors`` method that the bot invokes on the LLM's
+    reply before writing it to history or TTS.
+
+    Post-processors run in **reverse** registration order so that the
+    most-recently-registered processor (the one the operator added
+    last / the outermost wrapper) is the last to see the reply. Each
+    processor that raises or times out degrades to a no-op: its
+    exception is caught and the previous stage's text is passed
+    through, so one buggy processor never swallows a reply entirely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_post_processors_returns_reply_unchanged(self) -> None:
+        pipeline = ContextPipeline(providers=[])
+        result = await pipeline.run_post_processors("original", _make_request())
+        assert result == "original"
+
+    @pytest.mark.asyncio
+    async def test_single_post_processor_sees_reply(self) -> None:
+        post = _RecordingPostProcessor("p", "A")
+        pipeline = ContextPipeline(providers=[], post_processors=[post])
+
+        result = await pipeline.run_post_processors("hello", _make_request())
+
+        assert post.seen == ["hello"]
+        assert result == "hello|A"
+
+    @pytest.mark.asyncio
+    async def test_post_processors_run_in_reverse_registration_order(self) -> None:
+        """Later processors run first so they wrap earlier ones symmetrically."""
+        inner = _RecordingPostProcessor("inner", "inner")
+        outer = _RecordingPostProcessor("outer", "outer")
+        pipeline = ContextPipeline(providers=[], post_processors=[inner, outer])
+
+        result = await pipeline.run_post_processors("hi", _make_request())
+
+        # Outer runs first (sees the raw reply), then inner sees outer's output.
+        assert outer.seen == ["hi"]
+        assert inner.seen == ["hi|outer"]
+        assert result == "hi|outer|inner"
+
+    @pytest.mark.asyncio
+    async def test_failing_post_processor_is_skipped(self) -> None:
+        """A raising post-processor degrades to a no-op for just that stage."""
+        post = _RecordingPostProcessor("good", "tag")
+        bad = _FailingPostProcessor("bad", RuntimeError("kaboom"))
+        pipeline = ContextPipeline(
+            providers=[],
+            post_processors=[post, bad],
+        )
+
+        result = await pipeline.run_post_processors("hi", _make_request())
+
+        # bad runs first (reverse order), raises, gets skipped; then post runs
+        # and sees the untransformed text.
+        assert post.seen == ["hi"]
+        assert result == "hi|tag"

@@ -81,20 +81,15 @@ class ContextRequest:
     each read it, produce a list of ``Contribution``s, and the budgeter
     merges everything into the final ``SystemPromptLayers``.
 
-    Familiars are owned by Discord users, not guilds — see
-    ``future-features/configuration-levels.md`` for the ownership
-    model. ``owner_user_id`` + ``familiar_id`` is the partition key
-    for memory and the rolling history summary; ``channel_id``
-    additionally partitions the per-conversation recent window so two
-    simultaneous conversations don't bleed into each other;
-    ``guild_id`` is observability only.
+    A Familiar-Connect install runs exactly one familiar at a time —
+    see ``future-features/configuration-levels.md``. ``familiar_id``
+    therefore identifies which character folder on disk is active;
+    ``channel_id`` partitions the per-conversation recent history
+    window so two simultaneous conversations don't bleed into each
+    other; ``guild_id`` is observability only.
 
-    :param owner_user_id: Discord user id of the familiar's owner.
-        The primary partition key for ``memory/`` and the long-term
-        rolling summary in ``HistoryStore``.
-    :param familiar_id: Which familiar is replying. Scoped to a single
-        owner, so ``("alice", "aria")`` and ``("bob", "aria")`` are
-        distinct familiars with disjoint memory.
+    :param familiar_id: Which familiar is replying. Matches the folder
+        name under ``data/familiars/``.
     :param channel_id: Discord channel id (text or voice). Used as
         the partition key for the per-conversation recent history
         window.
@@ -120,7 +115,6 @@ class ContextRequest:
         request via :func:`dataclasses.replace`.
     """
 
-    owner_user_id: int
     familiar_id: str
     channel_id: int
     guild_id: int | None

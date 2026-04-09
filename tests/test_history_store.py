@@ -1,16 +1,16 @@
 """Red-first tests for the SQLite-backed HistoryStore.
 
 The HistoryStore is the persistent record of every conversational
-turn the bot sees, plus a per-(owner_user_id, familiar_id) cache of
-rolling summaries built from older turns by a cheap side-model.
+turn the bot sees, plus a per-``familiar_id`` cache of rolling
+summaries built from older turns by a cheap side-model.
 HistoryProvider reads from it; the bot's text-session and voice-
-session loops will write to it (step 7 of
-future-features/context-management.md).
+session loops write to it.
 
-Familiars are owned by Discord users, not guilds — see
-``future-features/configuration-levels.md`` for the ownership model.
-The recent conversation window is partitioned per channel, but the
-rolling summary is global per familiar.
+Familiar-Connect runs exactly one familiar per install — see
+``future-features/configuration-levels.md``. ``familiar_id`` still
+rides through the API so tests can exercise multiple familiars
+against a single store; in production the bot always passes the one
+currently-active character id.
 
 Covers familiar_connect.history.store.
 """
@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-_OWNER = 42
 _CHANNEL = 200
 _FAMILIAR = "aria"
 
@@ -52,7 +51,6 @@ def _seed(store: HistoryStore, n: int) -> list[HistoryTurn]:
         speaker = "Alice" if role == "user" else None
         out.append(
             store.append_turn(
-                owner_user_id=_OWNER,
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
                 role=role,
@@ -79,21 +77,20 @@ class TestConstruction:
         HistoryStore(str(tmp_path / "history.db"))
 
     def test_creates_intermediate_directories(self, tmp_path: Path) -> None:
-        nested = tmp_path / "data" / "users" / "1" / "history.db"
+        nested = tmp_path / "data" / "familiars" / "aria" / "history.db"
         HistoryStore(nested)
         assert nested.exists()
 
     def test_in_memory_database_for_tests(self) -> None:
-        """Passing ``:memory:`` (or None) gives an ephemeral DB."""
+        """Passing ``:memory:`` gives an ephemeral DB."""
         s = HistoryStore(":memory:")
         s.append_turn(
-            owner_user_id=1,
             channel_id=1,
             familiar_id="x",
             role="user",
             content="hello",
         )
-        assert s.count(owner_user_id=1, familiar_id="x", channel_id=1) == 1
+        assert s.count(familiar_id="x", channel_id=1) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +102,6 @@ class TestAppendTurn:
     def test_returns_history_turn_with_id(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         turn = s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
@@ -122,7 +118,6 @@ class TestAppendTurn:
     def test_assistant_turn_has_no_speaker(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         turn = s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="assistant",
@@ -134,7 +129,6 @@ class TestAppendTurn:
         """guild_id is observability-only — accepted but never partitioning."""
         s = _store(tmp_path)
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
@@ -142,7 +136,6 @@ class TestAppendTurn:
             guild_id=999,
         )
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
@@ -150,7 +143,6 @@ class TestAppendTurn:
         )
         # Both turns are in the same channel partition regardless of guild.
         turns = s.recent(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             limit=10,
@@ -168,7 +160,6 @@ class TestAppendTurn:
         path = tmp_path / "history.db"
         s = HistoryStore(path)
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
@@ -178,7 +169,6 @@ class TestAppendTurn:
 
         reopened = HistoryStore(path)
         turns = reopened.recent(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             limit=10,
@@ -197,7 +187,6 @@ class TestRecent:
         s = _store(tmp_path)
         assert (
             s.recent(
-                owner_user_id=_OWNER,
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
                 limit=10,
@@ -209,7 +198,6 @@ class TestRecent:
         s = _store(tmp_path)
         _seed(s, 5)
         turns = s.recent(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             limit=10,
@@ -226,7 +214,6 @@ class TestRecent:
         s = _store(tmp_path)
         _seed(s, 5)
         turns = s.recent(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             limit=3,
@@ -237,71 +224,38 @@ class TestRecent:
     def test_isolated_per_channel(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=200,
             familiar_id=_FAMILIAR,
             role="user",
             content="ch1",
         )
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=300,
             familiar_id=_FAMILIAR,
             role="user",
             content="ch2",
         )
-        ch1 = s.recent(
-            owner_user_id=_OWNER, channel_id=200, familiar_id=_FAMILIAR, limit=10
-        )
-        ch2 = s.recent(
-            owner_user_id=_OWNER, channel_id=300, familiar_id=_FAMILIAR, limit=10
-        )
+        ch1 = s.recent(channel_id=200, familiar_id=_FAMILIAR, limit=10)
+        ch2 = s.recent(channel_id=300, familiar_id=_FAMILIAR, limit=10)
         assert [t.content for t in ch1] == ["ch1"]
         assert [t.content for t in ch2] == ["ch2"]
 
-    def test_isolated_per_owner(self, tmp_path: Path) -> None:
-        """Two users with same-named familiars never see each other's turns."""
-        s = _store(tmp_path)
-        s.append_turn(
-            owner_user_id=1,
-            channel_id=_CHANNEL,
-            familiar_id=_FAMILIAR,
-            role="user",
-            content="for-owner-1",
-        )
-        s.append_turn(
-            owner_user_id=2,
-            channel_id=_CHANNEL,
-            familiar_id=_FAMILIAR,
-            role="user",
-            content="for-owner-2",
-        )
-        owner_1 = s.recent(
-            owner_user_id=1,
-            channel_id=_CHANNEL,
-            familiar_id=_FAMILIAR,
-            limit=10,
-        )
-        assert [t.content for t in owner_1] == ["for-owner-1"]
-
     def test_isolated_per_familiar(self, tmp_path: Path) -> None:
+        """A single store may host multiple familiars; each sees only its own turns."""
         s = _store(tmp_path)
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id="aria",
             role="user",
             content="for-aria",
         )
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id="bob",
             role="user",
             content="for-bob",
         )
         aria = s.recent(
-            owner_user_id=_OWNER,
             channel_id=_CHANNEL,
             familiar_id="aria",
             limit=10,
@@ -321,7 +275,6 @@ class TestOlderThan:
         cut_id = turns[2].id  # the third turn
 
         older = s.older_than(
-            owner_user_id=_OWNER,
             familiar_id=_FAMILIAR,
             max_id=cut_id,
         )
@@ -331,7 +284,6 @@ class TestOlderThan:
         s = _store(tmp_path)
         _seed(s, 3)
         older = s.older_than(
-            owner_user_id=_OWNER,
             familiar_id=_FAMILIAR,
             max_id=0,
         )
@@ -341,21 +293,18 @@ class TestOlderThan:
         """older_than is per familiar, not per channel."""
         s = _store(tmp_path)
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=200,
             familiar_id=_FAMILIAR,
             role="user",
             content="ch200",
         )
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=300,
             familiar_id=_FAMILIAR,
             role="user",
             content="ch300",
         )
         older = s.older_than(
-            owner_user_id=_OWNER,
             familiar_id=_FAMILIAR,
             max_id=10,
         )
@@ -372,32 +321,30 @@ class TestOlderThan:
 class TestLatestId:
     def test_none_when_empty(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
-        assert s.latest_id(owner_user_id=_OWNER, familiar_id=_FAMILIAR) is None
+        assert s.latest_id(familiar_id=_FAMILIAR) is None
 
     def test_returns_max_id_globally(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         _seed(s, 5)
-        latest = s.latest_id(owner_user_id=_OWNER, familiar_id=_FAMILIAR)
+        latest = s.latest_id(familiar_id=_FAMILIAR)
         assert latest is not None
         assert latest > 0
 
     def test_global_across_channels(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=200,
             familiar_id=_FAMILIAR,
             role="user",
             content="a",
         )
         last = s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=300,
             familiar_id=_FAMILIAR,
             role="user",
             content="b",
         )
-        latest = s.latest_id(owner_user_id=_OWNER, familiar_id=_FAMILIAR)
+        latest = s.latest_id(familiar_id=_FAMILIAR)
         assert latest == last.id
 
 
@@ -409,37 +356,29 @@ class TestLatestId:
 class TestCount:
     def test_zero_when_empty(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
-        assert (
-            s.count(owner_user_id=_OWNER, familiar_id=_FAMILIAR, channel_id=_CHANNEL)
-            == 0
-        )
+        assert s.count(familiar_id=_FAMILIAR, channel_id=_CHANNEL) == 0
 
     def test_grows_with_appends(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         _seed(s, 7)
-        assert (
-            s.count(owner_user_id=_OWNER, familiar_id=_FAMILIAR, channel_id=_CHANNEL)
-            == 7
-        )
+        assert s.count(familiar_id=_FAMILIAR, channel_id=_CHANNEL) == 7
 
     def test_global_when_channel_id_omitted(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=200,
             familiar_id=_FAMILIAR,
             role="user",
             content="a",
         )
         s.append_turn(
-            owner_user_id=_OWNER,
             channel_id=300,
             familiar_id=_FAMILIAR,
             role="user",
             content="b",
         )
-        assert s.count(owner_user_id=_OWNER, familiar_id=_FAMILIAR) == 2
-        assert s.count(owner_user_id=_OWNER, familiar_id=_FAMILIAR, channel_id=200) == 1
+        assert s.count(familiar_id=_FAMILIAR) == 2
+        assert s.count(familiar_id=_FAMILIAR, channel_id=200) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -450,17 +389,16 @@ class TestCount:
 class TestSummaryCache:
     def test_get_summary_missing_returns_none(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
-        assert s.get_summary(owner_user_id=_OWNER, familiar_id=_FAMILIAR) is None
+        assert s.get_summary(familiar_id=_FAMILIAR) is None
 
     def test_put_then_get_round_trip(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         s.put_summary(
-            owner_user_id=_OWNER,
             familiar_id=_FAMILIAR,
             last_summarised_id=42,
             summary_text="they argued about ska",
         )
-        entry = s.get_summary(owner_user_id=_OWNER, familiar_id=_FAMILIAR)
+        entry = s.get_summary(familiar_id=_FAMILIAR)
         assert isinstance(entry, SummaryEntry)
         assert entry.last_summarised_id == 42
         assert entry.summary_text == "they argued about ska"
@@ -469,37 +407,33 @@ class TestSummaryCache:
     def test_put_summary_overwrites_existing(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         s.put_summary(
-            owner_user_id=_OWNER,
             familiar_id=_FAMILIAR,
             last_summarised_id=10,
             summary_text="old",
         )
         s.put_summary(
-            owner_user_id=_OWNER,
             familiar_id=_FAMILIAR,
             last_summarised_id=15,
             summary_text="new",
         )
-        entry = s.get_summary(owner_user_id=_OWNER, familiar_id=_FAMILIAR)
+        entry = s.get_summary(familiar_id=_FAMILIAR)
         assert entry is not None
         assert entry.last_summarised_id == 15
         assert entry.summary_text == "new"
 
-    def test_summary_isolated_per_owner(self, tmp_path: Path) -> None:
+    def test_summary_isolated_per_familiar(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         s.put_summary(
-            owner_user_id=1,
-            familiar_id=_FAMILIAR,
+            familiar_id="aria",
             last_summarised_id=5,
-            summary_text="owner-1 summary",
+            summary_text="aria summary",
         )
-        assert s.get_summary(owner_user_id=2, familiar_id=_FAMILIAR) is None
+        assert s.get_summary(familiar_id="bob") is None
 
     def test_summary_persists_across_reopens(self, tmp_path: Path) -> None:
         path = tmp_path / "history.db"
         s = HistoryStore(path)
         s.put_summary(
-            owner_user_id=_OWNER,
             familiar_id=_FAMILIAR,
             last_summarised_id=99,
             summary_text="persisted",
@@ -507,7 +441,7 @@ class TestSummaryCache:
         s.close()
 
         reopened = HistoryStore(path)
-        entry = reopened.get_summary(owner_user_id=_OWNER, familiar_id=_FAMILIAR)
+        entry = reopened.get_summary(familiar_id=_FAMILIAR)
         assert entry is not None
         assert entry.last_summarised_id == 99
         assert entry.summary_text == "persisted"
