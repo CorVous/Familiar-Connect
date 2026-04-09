@@ -163,17 +163,20 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
     if mode is ChannelMode.text_conversation_rp:
         return ChannelConfig(
             mode=mode,
-            budget_tokens=4000,
+            budget_tokens=6000,
             deadline_s=8.0,
             budget_by_layer={
                 Layer.core: 400,
                 Layer.character: 1200,
+                Layer.content: 2000,
                 Layer.history_summary: 600,
                 Layer.recent_history: 1400,
                 Layer.author_note: 300,
                 Layer.depth_inject: 400,
             },
-            providers_enabled=frozenset({"character", "history", "mode_instructions"}),
+            providers_enabled=frozenset(
+                {"character", "history", "content_search", "mode_instructions"},
+            ),
             preprocessors_enabled=frozenset({"stepped_thinking"}),
             postprocessors_enabled=frozenset(),
         )

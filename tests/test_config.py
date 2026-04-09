@@ -70,9 +70,22 @@ class TestModeDefaults:
 
     def test_text_conversation_rp_omits_content_search(self) -> None:
         cfg = channel_config_for_mode(ChannelMode.text_conversation_rp)
-        assert "content_search" not in cfg.providers_enabled
+        # Content search IS on in text_conversation_rp so lore files work
+        # in casual text chat; only imitate_voice drops it for TTFB.
+        assert "content_search" in cfg.providers_enabled
         assert "character" in cfg.providers_enabled
         assert "history" in cfg.providers_enabled
+        assert cfg.budget_by_layer.get(Layer.content, 0) == 2000
+
+    def test_imitate_voice_drops_content_search_for_latency(self) -> None:
+        """Voice TTFB is too tight to carry the content-search agent.
+
+        The extra 2-5 side-model calls per turn would blow the voice
+        reply budget, so ``imitate_voice`` drops the provider entirely.
+        """
+        cfg = channel_config_for_mode(ChannelMode.imitate_voice)
+        assert "content_search" not in cfg.providers_enabled
+        assert cfg.budget_by_layer.get(Layer.content, 0) == 0
 
     def test_imitate_voice_drops_stepped_thinking_for_latency(self) -> None:
         cfg = channel_config_for_mode(ChannelMode.imitate_voice)
