@@ -12,6 +12,7 @@ from familiar_connect.llm import (
     SystemPromptLayers,
     build_system_prompt,
     create_client_from_env,
+    create_side_client_from_env,
 )
 
 # --- Message dataclass ---
@@ -356,6 +357,70 @@ class TestCreateClientFromEnv:
             pytest.raises(ValueError, match=r"OPENROUTER_API_KEY"),
         ):
             create_client_from_env()
+
+
+# --- Factory for the side-model client ---
+
+
+class TestCreateSideClientFromEnv:
+    def test_returns_none_when_side_model_env_var_is_unset(self) -> None:
+        """Unset OPENROUTER_SIDE_MODEL falls back to reusing the main client.
+
+        The factory signals that fallback with a ``None`` return — the
+        caller decides what to do (today, ``Familiar.load_from_disk``
+        wraps the main ``LLMClient`` instead).
+        """
+        env = {"OPENROUTER_API_KEY": "sk-or-test-abc"}
+        with patch.dict(os.environ, env, clear=True):
+            assert create_side_client_from_env() is None
+
+    def test_returns_none_when_api_key_missing(self) -> None:
+        """No API key means no client at all — no point returning one."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert create_side_client_from_env() is None
+
+    def test_creates_client_with_side_model(self) -> None:
+        """With OPENROUTER_SIDE_MODEL set, returns a separate LLMClient."""
+        env = {
+            "OPENROUTER_API_KEY": "sk-or-test-abc",
+            "OPENROUTER_SIDE_MODEL": "openai/gpt-4o-mini",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = create_side_client_from_env()
+
+        assert client is not None
+        assert client.api_key == "sk-or-test-abc"
+        assert client.model == "openai/gpt-4o-mini"
+
+    def test_side_model_client_uses_side_temperature_override(self) -> None:
+        """Optional OPENROUTER_SIDE_TEMPERATURE overrides the main temperature."""
+        env = {
+            "OPENROUTER_API_KEY": "sk-or-test-abc",
+            "OPENROUTER_SIDE_MODEL": "openai/gpt-4o-mini",
+            "OPENROUTER_SIDE_TEMPERATURE": "0.2",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = create_side_client_from_env()
+
+        assert client is not None
+        assert client.temperature == pytest.approx(0.2)
+
+    def test_side_model_is_independent_of_main_model(self) -> None:
+        """Main and side model factories return clients with different models."""
+        env = {
+            "OPENROUTER_API_KEY": "sk-or-test-abc",
+            "OPENROUTER_MODEL": "openai/gpt-4o",
+            "OPENROUTER_SIDE_MODEL": "openai/gpt-4o-mini",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            main = create_client_from_env()
+            side = create_side_client_from_env()
+
+        assert side is not None
+        assert main.model == "openai/gpt-4o"
+        assert side.model == "openai/gpt-4o-mini"
+        # Distinct instances — the main LLMClient is not reused.
+        assert main is not side
 
 
 # --- Integration-style test with full prompt assembly ---

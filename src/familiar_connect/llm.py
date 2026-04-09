@@ -162,3 +162,40 @@ def create_client_from_env() -> LLMClient:
         temperature = float(raw_temp)
 
     return LLMClient(api_key=api_key, model=model, temperature=temperature)
+
+
+def create_side_client_from_env() -> LLMClient | None:
+    """Create a side-model LLMClient from environment variables, or None.
+
+    The context pipeline's providers and processors call a
+    :class:`~familiar_connect.context.side_model.SideModel` for
+    focused sub-tasks (stepped thinking, recast, history summary,
+    content search). Those calls are designed to run against a
+    cheaper, faster model than the main reply path so they don't
+    inflate the main call's cost and latency.
+
+    If ``OPENROUTER_SIDE_MODEL`` is set, this returns a fresh
+    :class:`LLMClient` configured against it — the caller wraps it
+    in :class:`~familiar_connect.context.side_model.LLMSideModel`
+    for the side-model slot. If it isn't set, the function returns
+    ``None`` so the caller can fall back to reusing the main
+    :class:`LLMClient` (today's default behaviour, flagged loud at
+    startup).
+
+    Required: ``OPENROUTER_API_KEY`` (same as the main factory).
+    Optional: ``OPENROUTER_SIDE_MODEL``, ``OPENROUTER_SIDE_TEMPERATURE``.
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+
+    model = os.environ.get("OPENROUTER_SIDE_MODEL")
+    if not model:
+        return None
+
+    temperature: float | None = None
+    raw_temp = os.environ.get("OPENROUTER_SIDE_TEMPERATURE")
+    if raw_temp is not None:
+        temperature = float(raw_temp)
+
+    return LLMClient(api_key=api_key, model=model, temperature=temperature)
