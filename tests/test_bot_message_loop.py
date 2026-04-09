@@ -230,7 +230,10 @@ class TestOnMessagePipelineIntegration:
         messages = main_calls[0]
         assert messages[0].role == "system"
         assert messages[-1].role == "user"
-        assert messages[-1].content == "hi"
+        # The renderer prefixes user turns with "Speaker: " for cross-model
+        # reliability (OpenRouter drops the OpenAI ``name`` field on
+        # non-OpenAI backends).
+        assert messages[-1].content == "Alice: hi"
 
     def test_reply_posted_to_channel(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path, reply="Hello Alice.")

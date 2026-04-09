@@ -14,8 +14,19 @@ renderer is the one place in the codebase that knows:
 - Where :class:`Layer.depth_inject` content goes (inserted between
   messages at a configurable position-from-end, per SillyTavern's
   ``@D N`` convention).
+- How user turns are labelled so the LLM can tell speakers apart.
+  Every user turn's content is prefixed with ``Speaker: `` — the
+  same display-name already carried on :attr:`Message.name` for
+  OpenAI-compatible backends. The redundant prefix exists because
+  OpenRouter silently drops the OpenAI ``name`` field when routing
+  to non-OpenAI models (Anthropic, Gemini, most local runners), so
+  relying on ``name`` alone means those models never see who's
+  talking. Assistant turns are NOT prefixed — the ``assistant``
+  role is sufficient to distinguish the bot's own replies, and
+  prefixing them would invite the LLM to echo the prefix back into
+  the reply it generates.
 
-Keeping all three rules in one file means the "where does what go"
+Keeping all four rules in one file means the "where does what go"
 decision moves with the file; adding a new layer is a one-edit
 change.
 """
@@ -49,6 +60,38 @@ Layers not listed here are deliberately excluded:
 :class:`Layer.recent_history` renders as discrete messages;
 :class:`Layer.depth_inject` renders mid-chat.
 """
+
+_SPEAKER_PREFIX_PREAMBLE = (
+    "User messages in this conversation are prefixed with the speaker's "
+    'display name followed by a colon — for example, "Alice: hello". '
+    "Different prefixes mean different people. When replying, address "
+    "users by name when it's natural; do NOT prefix your own replies with "
+    "your name — just write the reply directly."
+)
+"""Fixed preamble prepended to every system prompt.
+
+This is a property of the rendering contract itself, not something the
+character or mode can tune. It tells the LLM how to interpret the
+``Speaker: `` prefix the renderer attaches to user turns, and
+explicitly instructs it not to echo the prefix back in its own
+replies. Kept as a module-level constant (rather than a provider) so
+the invariant moves with the code that enforces it."""
+
+
+def _prefix_user_content(speaker: str | None, content: str) -> str:
+    """Prepend ``Speaker: `` to user content when a speaker is known.
+
+    The prefix is redundant with :attr:`Message.name` for backends
+    that honour the OpenAI ``name`` field, but it's the only way
+    non-OpenAI models routed through OpenRouter ever see the
+    speaker — see the module docstring for the rationale. A
+    ``None`` speaker (system-generated events, sanitised-to-empty
+    display names) renders bare rather than producing literal
+    ``None: content``.
+    """
+    if not speaker:
+        return content
+    return f"{speaker}: {content}"
 
 
 def assemble_chat_messages(
@@ -85,28 +128,36 @@ def assemble_chat_messages(
     system_prompt = _build_system_prompt(by_layer)
     messages: list[Message] = [Message(role="system", content=system_prompt)]
 
-    # 2. Recent history rendered as discrete messages.
+    # 2. Recent history rendered as discrete messages. User turns are
+    # prefixed with ``Speaker: `` so backends that drop the OpenAI
+    # ``name`` field can still distinguish speakers; assistant turns
+    # are left bare.
     turns = store.recent(
         familiar_id=request.familiar_id,
         channel_id=request.channel_id,
         limit=history_window_size,
     )
-    messages.extend(
-        Message(
-            role=turn.role,
-            content=turn.content,
-            name=turn.speaker if turn.role == "user" else None,
-        )
-        for turn in turns
-    )
+    for turn in turns:
+        if turn.role == "user":
+            messages.append(
+                Message(
+                    role="user",
+                    content=_prefix_user_content(turn.speaker, turn.content),
+                    name=turn.speaker,
+                ),
+            )
+        else:
+            messages.append(
+                Message(role=turn.role, content=turn.content, name=None),
+            )
 
     # 3. The final user turn — the triggering utterance from the request.
     messages.append(
         Message(
             role="user",
-            content=request.utterance,
+            content=_prefix_user_content(request.speaker, request.utterance),
             name=request.speaker,
-        )
+        ),
     )
 
     # 4. Depth-inject at position-from-end, computed against the full list
@@ -126,7 +177,10 @@ def assemble_chat_messages(
 
 
 def _build_system_prompt(by_layer: dict[Layer, str]) -> str:
-    sections: list[str] = []
+    # The speaker-prefix preamble is always first so the LLM reads the
+    # rendering convention before any character or mode content that
+    # might assume it.
+    sections: list[str] = [_SPEAKER_PREFIX_PREAMBLE]
     for layer in _SYSTEM_PROMPT_LAYER_ORDER:
         text = by_layer.get(layer, "").strip()
         if text:
