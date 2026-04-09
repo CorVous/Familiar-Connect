@@ -94,7 +94,7 @@ This is the single piece of new infrastructure the agentic-search design adds. E
 
 ### 4. Character-card unpacker
 
-**New module:** `familiar_connect.memory.unpack_character`.
+**New module:** `familiar_connect.bootstrap.unpack_character`.
 
 - On familiar creation, read the loaded `CharacterCard` (already provided by `character.py`) and write one Markdown file per field into `memory/self/`:
   - `self/description.md`
@@ -107,7 +107,7 @@ This is the single piece of new infrastructure the agentic-search design adds. E
 - Preserves the original card bytes alongside the unpacked files as `self/.original.png` so a future unpacker revision can re-run against the original source.
 - Idempotent. Re-unpacking the same card produces the same files; re-unpacking a *different* card errors unless `overwrite=True` is passed.
 
-**Tests** — `tests/test_unpack_character.py`:
+**Tests** — `tests/bootstrap/test_unpack_character.py`:
 
 - Unpacking writes the expected files with the expected content.
 - Re-unpacking the same card is a no-op.
@@ -192,13 +192,13 @@ This is the interesting one. It is a small tool-using cheap-model loop scoped to
 
 ### 9. SillyTavern lorebook / world-info importer
 
-**New module:** `familiar_connect.memory.import_silly_tavern`.
+**New module:** `familiar_connect.bootstrap.import_silly_tavern`.
 
 - Reads a SillyTavern lorebook or world-info JSON file and writes one Markdown file per entry into a subdirectory of the memory store (e.g. `lore/imported/` or similar).
 - Each output file is plain Markdown: the entry title as the H1, the content as the body, and the trigger keywords as a short bulleted list at the top (kept for human reference; the runtime does not use them).
 - Importer prints a summary of what was written and refuses to overwrite existing files without `--force`.
 
-**Tests** — `tests/test_import_silly_tavern.py`:
+**Tests** — `tests/bootstrap/test_import_silly_tavern.py`:
 
 - Importing a known-shape lorebook JSON produces the expected files.
 - Importing a malformed JSON errors cleanly.

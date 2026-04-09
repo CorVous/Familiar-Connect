@@ -1,7 +1,7 @@
-"""Red-first tests for the character-card unpacker.
+"""Tests for the character-card unpacker.
 
-Covers familiar_connect.memory.unpack_character, which doesn't exist
-yet. Per future-features/context-management.md step 4: on familiar
+Covers :mod:`familiar_connect.bootstrap.unpack_character`. Per
+``future-features/context-management.md`` step 4: on familiar
 creation, read the loaded CharacterCard and write one Markdown file
 per non-empty field into the MemoryStore at ``self/<field>.md``. Empty
 fields are skipped (no empty file on disk). Idempotent: re-unpacking
@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from familiar_connect.character import CharacterCard
-from familiar_connect.memory.store import MemoryStore
-from familiar_connect.memory.unpack_character import (
+from familiar_connect.bootstrap.unpack_character import (
     CharacterUnpackError,
     unpack_character,
 )
+from familiar_connect.character import CharacterCard
+from familiar_connect.memory.store import MemoryStore
 
 if TYPE_CHECKING:
     from pathlib import Path

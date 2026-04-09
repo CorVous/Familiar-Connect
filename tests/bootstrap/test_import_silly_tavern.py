@@ -1,15 +1,14 @@
-"""Red-first tests for the SillyTavern lorebook / world-info importer.
+"""Tests for the SillyTavern lorebook / world-info importer.
 
-Step 9 of future-features/context-management.md. Reads a SillyTavern
-lorebook JSON file and writes one Markdown file per entry into a
-subdirectory of the familiar's MemoryStore (default ``lore/imported``).
-Each output file is plain Markdown — H1 from the entry's comment, the
-trigger keywords as a blockquoted bulleted list at the top (kept for
-human reference; the runtime never reads them), and the entry's
-content as the body.
+Step 9 of ``future-features/context-management.md``. Reads a
+SillyTavern lorebook JSON file and writes one Markdown file per entry
+into a subdirectory of the familiar's MemoryStore (default
+``lore/imported``). Each output file is plain Markdown — H1 from the
+entry's comment, the trigger keywords as a blockquoted bulleted list at
+the top (kept for human reference; the runtime never reads them), and
+the entry's content as the body.
 
-Covers familiar_connect.memory.import_silly_tavern, which doesn't
-exist yet.
+Covers :mod:`familiar_connect.bootstrap.import_silly_tavern`.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from familiar_connect.memory.import_silly_tavern import (
+from familiar_connect.bootstrap.import_silly_tavern import (
     ImportResult,
     LorebookImportError,
     import_silly_tavern_lorebook,

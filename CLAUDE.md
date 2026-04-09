@@ -8,6 +8,7 @@ Update uv before anything else: `uv self update`
 
 - **`plan.md`** — contains the project plan and feature roadmap
 - **`README.md`** — contains project overview and development commands
+- **`bootstrapping.md`** — one-shot operator utilities (character-card unpacker, lorebook importer) that are never invoked by the runtime reply pipeline
 
 ## TDD Workflow
 
