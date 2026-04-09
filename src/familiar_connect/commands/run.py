@@ -18,6 +18,7 @@ from familiar_connect.bot import create_bot
 from familiar_connect.character import CharacterCardError, load_card
 from familiar_connect.llm import create_client_from_env
 from familiar_connect.preset import PresetError, assemble_prompt, load_preset
+from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client_from_env
 
 _logger = logging.getLogger(__name__)
@@ -117,10 +118,17 @@ async def _async_main(token: str, system_prompt: str) -> None:
         _logger.warning("TTS client unavailable: %s", exc)
         tts_client = None
 
+    try:
+        transcriber = create_transcriber_from_env()
+    except ValueError as exc:
+        _logger.warning("Transcriber unavailable: %s", exc)
+        transcriber = None
+
     bot = create_bot(
         llm_client=llm_client,
         system_prompt=system_prompt,
         tts_client=tts_client,
+        transcriber=transcriber,
     )
     await bot.start(token)
 

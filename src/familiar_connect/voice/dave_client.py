@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import davey
 from discord import VoiceClient
+from discord.sinks.core import RawData
 
 from familiar_connect.voice.dave_ws import DaveVoiceWebSocket
 
@@ -87,6 +88,46 @@ class DaveVoiceClient(VoiceClient):
             DaveVoiceWebSocket.MLS_KEY_PACKAGE,
             key_package,
         )
+
+    def unpack_audio(self, data: bytes) -> None:
+        """Unpack received audio, inserting DAVE decryption before opus decode.
+
+        The base class decrypts SRTP and constructs a :class:`RawData` whose
+        ``decrypted_data`` is the inner payload. With DAVE, that payload is
+        still DAVE-encrypted. This override decrypts it before the opus decoder
+        sees it.
+        """
+        if data[1] & 0x78 != 0x78:
+            return
+        if self.paused:
+            return
+
+        raw = RawData(data, self)
+        if raw.decrypted_data == b"\xf8\xff\xfe":
+            return
+
+        if (
+            self.dave_session is not None
+            and self.dave_session.ready
+            and raw.decrypted_data is not None
+        ):
+            ssrc_info = self.ws.ssrc_map.get(raw.ssrc)
+            if ssrc_info is not None:
+                user_id = ssrc_info.get("user_id")
+                if user_id is not None:
+                    try:
+                        raw.decrypted_data = self.dave_session.decrypt(
+                            user_id, davey.MediaType.audio, raw.decrypted_data
+                        )
+                    except Exception:  # noqa: BLE001
+                        _logger.debug(
+                            "DAVE decrypt failed for SSRC %d, dropping frame",
+                            raw.ssrc,
+                        )
+                        return
+
+        if self.decoder is not None:
+            self.decoder.decode(raw)
 
     def _get_voice_packet(self, data: bytes) -> bytes:
         """Build an RTP packet, applying DAVE encryption before SRTP.

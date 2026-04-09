@@ -15,11 +15,12 @@ from familiar_connect.text_session import (
     get_session,
     set_session,
 )
+from familiar_connect.voice_pipeline import clear_pipeline
 
 
 @pytest.fixture(autouse=True)
 def _fresh_loop_and_session():
-    """Fresh asyncio event loop and cleared session registry per test.
+    """Fresh asyncio event loop and cleared session/pipeline per test.
 
     Yields:
         None
@@ -28,8 +29,10 @@ def _fresh_loop_and_session():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     clear_session()
+    clear_pipeline()
     yield
     clear_session()
+    clear_pipeline()
 
 
 # ---------------------------------------------------------------------------

@@ -257,3 +257,115 @@ class TestGetVoicePacket:
 
         args = c.dave_session.encrypt_opus.call_args[0]
         assert isinstance(args[0], bytes)
+
+
+# ---------------------------------------------------------------------------
+# unpack_audio — DAVE decryption layer
+# ---------------------------------------------------------------------------
+
+
+class TestUnpackAudioDaveDecrypt:
+    """Tests for DAVE decryption in the receive path."""
+
+    # Minimal valid RTP header: version=2 (0x80), payload type=0x78
+    _RTP_HEADER = b"\x80\x78" + b"\x00" * 12
+
+    def _make_raw_data(
+        self,
+        *,
+        ssrc: int = 42,
+        decrypted_data: bytes = b"\xaa\xbb\xcc\xdd",
+    ) -> MagicMock:
+        """Create a mock RawData with controllable decrypted_data."""
+        raw = MagicMock()
+        raw.ssrc = ssrc
+        raw.decrypted_data = decrypted_data
+        return raw
+
+    def test_dave_decrypts_audio_on_receive(self) -> None:
+        """When DAVE is ready, unpack_audio DAVE-decrypts the payload."""
+        c = _TestClient()
+        c.paused = False
+        c.dave_session = MagicMock()
+        c.dave_session.ready = True
+        c.dave_session.decrypt.return_value = b"\x01\x02"
+        c.decoder = MagicMock()
+        c.ws = MagicMock()
+        c.ws.ssrc_map = {42: {"user_id": 12345}}
+
+        raw = self._make_raw_data(ssrc=42, decrypted_data=b"\xaa\xbb")
+
+        with patch("familiar_connect.voice.dave_client.RawData", return_value=raw):
+            c.unpack_audio(self._RTP_HEADER)
+
+        c.dave_session.decrypt.assert_called_once_with(
+            12345, davey.MediaType.audio, b"\xaa\xbb"
+        )
+        assert raw.decrypted_data == b"\x01\x02"
+
+    def test_no_dave_session_skips_decrypt(self) -> None:
+        """Without a DAVE session, decrypted_data passes through unchanged."""
+        c = _TestClient()
+        c.paused = False
+        c.dave_session = None
+        c.decoder = MagicMock()
+        c.ws = MagicMock()
+
+        raw = self._make_raw_data(decrypted_data=b"\xaa\xbb")
+
+        with patch("familiar_connect.voice.dave_client.RawData", return_value=raw):
+            c.unpack_audio(self._RTP_HEADER)
+
+        assert raw.decrypted_data == b"\xaa\xbb"
+
+    def test_dave_not_ready_skips_decrypt(self) -> None:
+        """When DAVE session exists but is not ready, data passes through."""
+        c = _TestClient()
+        c.paused = False
+        c.dave_session = MagicMock()
+        c.dave_session.ready = False
+        c.decoder = MagicMock()
+        c.ws = MagicMock()
+
+        raw = self._make_raw_data(decrypted_data=b"\xaa\xbb")
+
+        with patch("familiar_connect.voice.dave_client.RawData", return_value=raw):
+            c.unpack_audio(self._RTP_HEADER)
+
+        c.dave_session.decrypt.assert_not_called()
+        assert raw.decrypted_data == b"\xaa\xbb"
+
+    def test_unknown_ssrc_skips_decrypt(self) -> None:
+        """When the SSRC is not in the ssrc_map, DAVE decrypt is skipped."""
+        c = _TestClient()
+        c.paused = False
+        c.dave_session = MagicMock()
+        c.dave_session.ready = True
+        c.decoder = MagicMock()
+        c.ws = MagicMock()
+        c.ws.ssrc_map = {}
+
+        raw = self._make_raw_data(ssrc=999, decrypted_data=b"\xaa\xbb")
+
+        with patch("familiar_connect.voice.dave_client.RawData", return_value=raw):
+            c.unpack_audio(self._RTP_HEADER)
+
+        c.dave_session.decrypt.assert_not_called()
+
+    def test_dave_decrypt_error_skips_frame(self) -> None:
+        """When DAVE decrypt fails, the frame is dropped (not opus-decoded)."""
+        c = _TestClient()
+        c.paused = False
+        c.dave_session = MagicMock()
+        c.dave_session.ready = True
+        c.dave_session.decrypt.side_effect = RuntimeError("bad frame")
+        c.decoder = MagicMock()
+        c.ws = MagicMock()
+        c.ws.ssrc_map = {42: {"user_id": 12345}}
+
+        raw = self._make_raw_data(ssrc=42, decrypted_data=b"\xaa\xbb")
+
+        with patch("familiar_connect.voice.dave_client.RawData", return_value=raw):
+            c.unpack_audio(self._RTP_HEADER)
+
+        c.decoder.decode.assert_not_called()
