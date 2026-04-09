@@ -22,7 +22,7 @@ Discord Voice → audio capture → asyncio.Queue
                                       ↓
                   asyncio.Queue (text) ← Twitch Events
                                       ↓
-                          Message Processor + Chattiness
+                    ConversationMonitor (chattiness + interruption)
                                       ↓
                Context Management pipeline (see § Context Management)
                                       ↓
@@ -70,37 +70,24 @@ Bot token in `.env` as `DISCORD_BOT`.
 
 Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz → stream to Deepgram WebSocket (or feed chunks to faster-whisper).
 
-### Message Processing & Chattiness
+### Conversation Flow (Chattiness & Interruption)
 
-The bot evaluates each incoming event (transcription, text message, Twitch event) against a decision pipeline to determine whether to respond.
+A `ConversationMonitor` gates whether the bot responds. Messages buffer per-channel; a side model (cheap LLM) is consulted to decide if the familiar wants to speak. Two orthogonal controls in `character.toml`:
 
-**Response decision heuristics (evaluated in priority order):**
-1. **Direct address** (name mention, @mention, "hey familiar-name"): Always respond.
-2. **Direct question to nobody specific** ("does anyone know..."): Roll against chattiness threshold.
-3. **Silence detection**: If nobody speaks for N seconds (scaled by chattiness), the bot may interject.
-4. **Topic relevance**: If the conversation touches the familiar's domain knowledge, increase response probability by ~20-30%.
-5. **Twitch events**: Always acknowledge subs/bits/raids. Follows only at chattiness > 50.
+- **Chattiness** (`str`) — free-text personality trait (e.g. `"Curious and opinionated"`) fed to the side model's evaluation prompt. The LLM decides whether the familiar would want to respond based on this personality and the conversation content.
+- **Interruption** (`Interruption` enum) — controls how many messages pass before the side model is even consulted. Five tiers: `very_quiet` (first check at 15 messages), `quiet` (12), `average` (9), `interruptive` (6), `very_interruptive` (3). After each declined check, the interval decreases by 3, flooring at 3.
 
-**Chattiness slider mapping (0-100):**
+**Three triggers, one evaluation path:**
 
-| Range | Behavior |
-|-------|----------|
-| 0–10 | Only respond when directly addressed by name |
-| 11–30 | + Respond to direct questions aimed at nobody specific |
-| 31–60 | + Interject after prolonged silence (threshold = `12 - (chattiness * 0.1)` seconds). React to Twitch events. |
-| 61–85 | + Probabilistic response to general conversation (`(chattiness - 60) / 100` chance per utterance) |
-| 86–100 | + Comment on most topics, shorter silence threshold, react to almost everything |
+1. **Direct address** (name/alias/@mention) — side model evaluated immediately.
+2. **Interruption threshold** — counter hits the tier-scaled threshold; side model asked with "N messages have been said without you speaking."
+3. **Lull** — no new message for `lull_timeout` seconds (default 2.0); side model asked with no extra context.
 
-**Turn-taking rules:**
-- Wait 1.5–2s after the last speaker finishes (VAD silence) before starting a response
-- If someone starts speaking while the bot is generating but hasn't started outputting audio, abort
-- If already speaking, finish the current sentence then yield
-- If interrupted twice in 60s, double the silence threshold temporarily
+All three send the same inputs to the side model: character card + conversation summary + buffer + chattiness personality. The model returns YES/NO. On YES, the full context pipeline fires. On NO, the monitor waits.
 
-**Rate limiting:**
-- Minimum 15–30s between unprompted responses (scales inversely with chattiness)
-- Hard cap: max 3 unprompted responses per minute
-- If 3+ humans are actively talking (multiple speakers in last 10s), raise the response threshold — talk less in fast-moving conversations, not more
+**Turn-taking rules** are covered separately in `future-features/interruption-flow.md` (mid-speech interruption handling for voice).
+
+Full design: [`future-features/conversation-flow.md`](./future-features/conversation-flow.md).
 
 ### AI Response (OpenRouter)
 
