@@ -58,7 +58,7 @@ window (80), higher than the rolling history summary (60). The
 familiar's persona and the active conversation always win against
 retrieved context under budget pressure."""
 
-DEFAULT_DEADLINE_S = 5.0
+DEFAULT_DEADLINE_S = 15.0
 """Hard cap the pipeline enforces on this provider's contribute() call.
 
 The provider's internal loop has its own iteration cap; the deadline

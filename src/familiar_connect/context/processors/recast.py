@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-DEFAULT_PROCESSOR_TIMEOUT_S = 3.0
+DEFAULT_PROCESSOR_TIMEOUT_S = 9.0
 """Soft cap on the side-model call. Strictly bounded so a stalled
 cheap model can never block the post-processing phase."""
 

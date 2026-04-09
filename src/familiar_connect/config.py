@@ -144,7 +144,7 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
         return ChannelConfig(
             mode=mode,
             budget_tokens=8000,
-            deadline_s=10.0,
+            deadline_s=30.0,
             budget_by_layer={
                 Layer.core: 400,
                 Layer.character: 2000,
@@ -164,7 +164,7 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
         return ChannelConfig(
             mode=mode,
             budget_tokens=6000,
-            deadline_s=8.0,
+            deadline_s=24.0,
             budget_by_layer={
                 Layer.core: 400,
                 Layer.character: 1200,
@@ -184,7 +184,7 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
         return ChannelConfig(
             mode=mode,
             budget_tokens=2000,
-            deadline_s=3.0,
+            deadline_s=9.0,
             budget_by_layer={
                 Layer.core: 300,
                 Layer.character: 700,

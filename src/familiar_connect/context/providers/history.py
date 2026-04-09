@@ -66,10 +66,10 @@ drop the lossy summary first."""
 DEFAULT_WINDOW_SIZE = 20
 """How many of the most recent turns to surface verbatim by default."""
 
-DEFAULT_DEADLINE_S = 5.0
+DEFAULT_DEADLINE_S = 15.0
 """Hard cap the pipeline enforces on this provider's contribute() call."""
 
-DEFAULT_SUMMARY_TIMEOUT_S = 4.0
+DEFAULT_SUMMARY_TIMEOUT_S = 12.0
 """Soft cap on the summariser sub-call. Strictly less than
 DEFAULT_DEADLINE_S so the recent-history layer always returns even
 when the cheap model stalls."""

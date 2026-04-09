@@ -46,7 +46,7 @@ reasoning beats stale long-term context under budget pressure;
 lower than recent history (80) so the active conversation always
 wins."""
 
-DEFAULT_PROCESSOR_TIMEOUT_S = 3.0
+DEFAULT_PROCESSOR_TIMEOUT_S = 9.0
 """Soft cap on the side-model call. Strictly bounded so a stalled
 cheap model can never block the pipeline's pre-processor phase."""
 
