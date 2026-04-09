@@ -259,10 +259,11 @@ Per `future-features/persistence.md` and the memory-directory rules above:
 
 | From ST | What we do with it |
 |---|---|
-| Character Card V3 (`character.py`, already implemented) | Unpacked into `self/*.md` on familiar creation |
-| SillyTavern preset JSON / `prompt_order` (`preset.py`, already implemented) | Still used to assemble the core instructions layer |
+| Character Card V3 (`character.py`, already implemented) | Unpacked into `self/*.md` on familiar creation via `memory/unpack_character.py`; the `CharacterProvider` then surfaces them per turn |
 | SillyTavern World Info / Lorebook JSON | One-shot import → flattened to Markdown files in the memory directory |
 | Macro vocabulary (`{{char}}`, `{{user}}`) via `macros.py` | Still supported at prompt-assembly time |
+
+We deliberately do **not** borrow SillyTavern's preset / `prompt_order` format. An earlier prototype on this branch did, via a now-deleted `preset.py`. It's been replaced by the layered pipeline: `Layer` ordering in `context/render.py` drives the top-to-bottom assembly, `channel_config_for_mode()` in `config.py` drives which providers run per channel mode, and per-mode prose instructions live in `data/familiars/<id>/modes/<mode>.md`. A SillyTavern preset could still be imported *into* Markdown later, the same way lorebooks are — but the runtime's prompt ordering is not preset-shaped.
 
 We do **not** embed SillyTavern, run it as a side-car, RPC into it, or host its extensions. See *Design Decisions Considered and Rejected* for the long version.
 
