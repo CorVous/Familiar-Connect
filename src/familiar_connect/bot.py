@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from typing import TYPE_CHECKING
@@ -16,19 +17,33 @@ from familiar_connect.text_session import (
     get_session,
     set_session,
 )
-from familiar_connect.voice import DaveVoiceClient
+from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
+from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+    from typing import Any
+
+    from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
     from familiar_connect.tts import CartesiaTTSClient
 
 _logger = logging.getLogger(__name__)
+
+
+async def _recording_finished_callback(sink: discord.sinks.Sink, *args: object) -> None:
+    """No-op callback required by py-cord's start_recording.
+
+    Cleanup is handled by :func:`stop_pipeline`, not this callback.
+    """
 
 
 async def awaken(
     ctx: discord.ApplicationContext,
     system_prompt: str = "",
     tts_client: CartesiaTTSClient | None = None,
+    transcriber: DeepgramTranscriber | None = None,
+    llm_client: LLMClient | None = None,
 ) -> None:
     """Handle the /awaken slash command.
 
@@ -45,6 +60,12 @@ async def awaken(
     :param system_prompt: Pre-assembled system prompt string (injected by the
         run command; empty string disables LLM responses).
     :param tts_client: Optional TTS client used to speak a greeting on join.
+    :param transcriber: Optional Deepgram transcriber template for voice
+        transcription. When provided, per-user streams are started and
+        speech is debug-logged.
+    :param llm_client: Optional LLM client for generating voice responses.
+        When combined with a transcriber, the bot will respond to speech
+        via LLM + TTS.
     """
     author = ctx.author
 
@@ -52,19 +73,89 @@ async def awaken(
     in_voice = isinstance(author, discord.Member) and author.voice is not None
 
     if in_voice:
-        await _awaken_voice(ctx, tts_client=tts_client)
+        await _awaken_voice(
+            ctx,
+            tts_client=tts_client,
+            transcriber=transcriber,
+            llm_client=llm_client,
+            system_prompt=system_prompt,
+        )
     else:
         await _awaken_text(ctx, system_prompt)
+
+
+def _build_voice_response_handler(
+    *,
+    vc: discord.VoiceClient,
+    llm_client: LLMClient | None,
+    tts_client: CartesiaTTSClient | None,
+    system_prompt: str,
+    user_names: dict[int, str],
+) -> Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None:
+    """Build the async callback invoked for each final transcription.
+
+    Returns ``None`` when no *llm_client* is provided (no responses
+    possible without an LLM).
+    """
+    if llm_client is None:
+        return None
+
+    history: list[Message] = []
+
+    async def _handle_voice_result(
+        user_id: int,
+        result: TranscriptionResult,
+    ) -> None:
+        speaker = user_names.get(user_id, f"User-{user_id}")
+        safe_name = sanitize_name(speaker) or speaker
+        user_msg = result.to_message(
+            speaker_names={result.speaker or 0: safe_name},
+        )
+        user_msg.name = sanitize_name(speaker)
+        history.append(user_msg)
+
+        messages: list[Message] = [
+            Message(role="system", content=system_prompt),
+            *history,
+        ]
+
+        reply = await llm_client.chat(messages)
+        history.append(reply)
+        _logger.info("[Voice Response] %s", reply.content)
+
+        if tts_client is not None:
+            try:
+                pcm_mono = await tts_client.synthesize(reply.content)
+                stereo = mono_to_stereo(pcm_mono)
+                # Wait for any currently-playing audio to finish.
+                # vc.is_playing() is a third-party poll; no event available.
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+            except Exception:
+                _logger.exception("Voice response TTS failed")
+
+    return _handle_voice_result
 
 
 async def _awaken_voice(
     ctx: discord.ApplicationContext,
     tts_client: CartesiaTTSClient | None = None,
+    transcriber: DeepgramTranscriber | None = None,
+    llm_client: LLMClient | None = None,
+    system_prompt: str = "",
 ) -> None:
     """Join the invoking user's voice channel.
 
     If *tts_client* is provided, speaks a brief greeting immediately after
     connecting so the TTS audio pipeline can be verified end-to-end.
+
+    If *transcriber* is provided, starts per-user transcription streams and
+    begins recording voice audio for speech-to-text.
+
+    If *llm_client* is also provided, a response handler is installed that
+    sends each final transcription through the LLM and (optionally) speaks
+    the reply via TTS.
     """
     author = ctx.author
 
@@ -96,6 +187,37 @@ async def _awaken_voice(
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
         except Exception:
             _logger.exception("Opening greeting TTS failed")
+
+    if transcriber is not None:
+        user_names = {m.id: m.display_name for m in channel.members}
+
+        def _resolve_from_channel(user_id: int) -> str | None:
+            for member in channel.members:
+                if member.id == user_id:
+                    return member.display_name
+            return None
+
+        # Build voice response handler if LLM is available.
+        response_handler = _build_voice_response_handler(
+            vc=vc,
+            llm_client=llm_client,
+            tts_client=tts_client,
+            system_prompt=system_prompt,
+            user_names=user_names,
+        )
+
+        pipeline = await start_pipeline(
+            transcriber,
+            user_names=user_names,
+            resolve_name=_resolve_from_channel,
+            response_handler=response_handler,
+        )
+        sink = RecordingSink(
+            loop=asyncio.get_running_loop(),
+            audio_queue=pipeline.tagged_audio_queue,
+        )
+        vc.start_recording(sink, _recording_finished_callback)
+        _logger.info("Started voice transcription pipeline")
 
     await ctx.followup.send(f"Joined **{channel.name}**.")
 
@@ -137,6 +259,11 @@ async def sleep_cmd(ctx: discord.ApplicationContext) -> None:
     :param ctx: The application context for the slash command invocation.
     """
     if ctx.voice_client is not None:
+        if get_pipeline() is not None:
+            if hasattr(ctx.voice_client, "recording") and ctx.voice_client.recording:
+                ctx.voice_client.stop_recording()
+            await stop_pipeline()
+            _logger.info("Stopped voice transcription pipeline")
         await ctx.voice_client.disconnect()
         _logger.info("Left voice channel")
         await ctx.respond("Goodnight.")
@@ -213,6 +340,7 @@ def create_bot(
     llm_client: LLMClient | None = None,
     system_prompt: str = "",
     tts_client: CartesiaTTSClient | None = None,
+    transcriber: DeepgramTranscriber | None = None,
 ) -> discord.Bot:
     """Create and configure the Discord bot with slash commands.
 
@@ -222,6 +350,8 @@ def create_bot(
     :param system_prompt: Pre-assembled system prompt passed to /awaken.
     :param tts_client: Optional TTS client for voice output. When provided
         and the bot is in a voice channel, LLM replies are also spoken aloud.
+    :param transcriber: Optional Deepgram transcriber template for voice
+        transcription. Cloned per-user when the bot joins a voice channel.
     :return: A configured discord.Bot.
     """
     intents = discord.Intents.default()
@@ -231,7 +361,13 @@ def create_bot(
     bot = discord.Bot(intents=intents)
 
     async def _awaken_cmd(ctx: discord.ApplicationContext) -> None:
-        await awaken(ctx, system_prompt=system_prompt, tts_client=tts_client)
+        await awaken(
+            ctx,
+            system_prompt=system_prompt,
+            tts_client=tts_client,
+            transcriber=transcriber,
+            llm_client=llm_client,
+        )
 
     async def _on_message(message: discord.Message) -> None:
         if llm_client is not None:

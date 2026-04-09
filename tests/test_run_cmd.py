@@ -1,11 +1,13 @@
 """Tests for the 'run' CLI subcommand."""
 
 import argparse
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from familiar_connect.character import CharacterCardError
 from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
+    _async_main,
     build_system_prompt,
     load_opus,
     run,
@@ -257,3 +259,66 @@ class TestLoadOpus:
         mock_load.assert_not_called()
         mock_logger.warning.assert_called_once()
         assert "not found" in mock_logger.warning.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# _async_main — transcriber integration
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncMainTranscriber:
+    def test_creates_transcriber_from_env(self) -> None:
+        """When DEEPGRAM_API_KEY is set, _async_main creates a transcriber."""
+        mock_transcriber = MagicMock()
+        mock_bot = MagicMock()
+        mock_bot.start = AsyncMock()
+
+        with (
+            patch(
+                "familiar_connect.commands.run.create_client_from_env",
+                side_effect=ValueError("no key"),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_tts_client_from_env",
+                side_effect=ValueError("no key"),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_transcriber_from_env",
+                return_value=mock_transcriber,
+            ) as mock_create,
+            patch(
+                "familiar_connect.commands.run.create_bot",
+                return_value=mock_bot,
+            ) as mock_create_bot,
+        ):
+            asyncio.run(_async_main("fake-token", ""))
+
+        mock_create.assert_called_once()
+        assert mock_create_bot.call_args.kwargs.get("transcriber") is mock_transcriber
+
+    def test_skips_transcriber_when_no_api_key(self) -> None:
+        """When DEEPGRAM_API_KEY is missing, transcriber is None."""
+        mock_bot = MagicMock()
+        mock_bot.start = AsyncMock()
+
+        with (
+            patch(
+                "familiar_connect.commands.run.create_client_from_env",
+                side_effect=ValueError("no key"),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_tts_client_from_env",
+                side_effect=ValueError("no key"),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_transcriber_from_env",
+                side_effect=ValueError("DEEPGRAM_API_KEY not set"),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_bot",
+                return_value=mock_bot,
+            ) as mock_create_bot,
+        ):
+            asyncio.run(_async_main("fake-token", ""))
+
+        assert mock_create_bot.call_args.kwargs.get("transcriber") is None

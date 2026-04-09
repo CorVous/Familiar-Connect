@@ -147,6 +147,7 @@ ignore = [
     "SLF001", # Tests often poke at private members
     "FBT003", # Boolean positional args common in mock assertions
     "ANN202", # Private helper annotations not critical in tests
+    "PLC2701", # Tests import private names for unit testing
 ]
 
 [tool.ruff.format]
