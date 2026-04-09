@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import discord
 import pytest
@@ -349,6 +349,60 @@ class TestVoiceSubscription:
         voice_channel.connect.assert_called_once()
         assert familiar.subscriptions.voice_in_guild(999) is not None
 
+    def test_subscribe_my_voice_skips_transcription_when_no_transcriber(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Without a transcriber, the bot joins and greets but doesn't record."""
+        familiar = _make_familiar(tmp_path)
+        assert familiar.transcriber is None
+        ctx = _make_voice_ctx()
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+        ) as mock_start:
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        mock_start.assert_not_called()
+        voice_channel = ctx.author.voice.channel
+        voice_channel.connect.return_value.start_recording.assert_not_called()
+
+    def test_subscribe_my_voice_starts_pipeline_when_transcriber_present(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """``familiar.transcriber`` being set fires ``start_pipeline``.
+
+        The voice client begins recording against a ``RecordingSink``
+        backed by the pipeline's tagged queue. This is the PR #17
+        wiring, retargeted at the subscription surface.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx()
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ) as mock_start:
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        mock_start.assert_called_once()
+        # The transcriber we put on the Familiar reached start_pipeline.
+        assert mock_start.call_args.args[0] is familiar.transcriber
+        # user_names is keyed by member id — discord.Member mocks have .id,
+        # and _make_voice_ctx doesn't attach members, so the dict is empty
+        # but the key kwarg is present.
+        assert "user_names" in mock_start.call_args.kwargs
+        # start_recording was actually called on the voice client.
+        voice_channel = ctx.author.voice.channel
+        voice_channel.connect.return_value.start_recording.assert_called_once()
+
     def test_unsubscribe_voice_disconnects(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
         familiar.subscriptions.add(
@@ -363,6 +417,39 @@ class TestVoiceSubscription:
 
         ctx.voice_client.disconnect.assert_called_once()
         assert familiar.subscriptions.voice_in_guild(999) is None
+
+    def test_unsubscribe_voice_stops_active_pipeline(self, tmp_path: Path) -> None:
+        """Active voice pipeline is torn down before the voice client disconnects.
+
+        Mirrors the intent of main's ``TestSleepPipelineTeardown``,
+        retargeted at ``/unsubscribe-voice``.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000,
+            kind=SubscriptionKind.voice,
+            guild_id=999,
+        )
+        ctx = _make_voice_ctx(already_connected=True)
+        # Mark the voice client as currently recording.
+        ctx.voice_client.recording = True
+        ctx.voice_client.stop_recording = MagicMock()
+
+        with (
+            patch(
+                "familiar_connect.bot.get_pipeline",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "familiar_connect.bot.stop_pipeline",
+                new_callable=AsyncMock,
+            ) as mock_stop,
+        ):
+            asyncio.run(unsubscribe_voice(ctx, familiar))
+
+        ctx.voice_client.stop_recording.assert_called_once()
+        mock_stop.assert_called_once()
+        ctx.voice_client.disconnect.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

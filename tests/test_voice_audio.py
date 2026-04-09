@@ -6,7 +6,11 @@ import struct
 
 import pytest
 
-from familiar_connect.voice.audio import DISCORD_FRAME_SIZE, mono_to_stereo
+from familiar_connect.voice.audio import (
+    DISCORD_FRAME_SIZE,
+    mono_to_stereo,
+    stereo_to_mono,
+)
 
 
 class TestMonoToStereo:
@@ -52,6 +56,44 @@ class TestMonoToStereo:
         for i, original in enumerate(samples):
             assert stereo_samples[i * 2] == original  # left
             assert stereo_samples[i * 2 + 1] == original  # right
+
+
+class TestStereoToMono:
+    def test_halves_length(self) -> None:
+        """Stereo input of 16 bytes produces mono output of 8 bytes."""
+        stereo = bytes(16)  # 4 stereo frames (L/R pairs)
+        mono = stereo_to_mono(stereo)
+        assert len(mono) == 8
+
+    def test_averages_left_and_right(self) -> None:
+        """Left=100, Right=200 averages to mono=150."""
+        stereo = struct.pack("<hh", 100, 200)
+        mono = stereo_to_mono(stereo)
+        (sample,) = struct.unpack("<h", mono)
+        assert sample == 150
+
+    def test_empty_returns_empty(self) -> None:
+        """Empty stereo input yields empty mono output."""
+        assert stereo_to_mono(b"") == b""
+
+    def test_raises_on_invalid_length(self) -> None:
+        """Length not divisible by 4 is not valid stereo — raises ValueError."""
+        with pytest.raises(ValueError, match=r"divisible by 4"):
+            stereo_to_mono(b"\x00\x01\x02")
+
+    def test_single_stereo_frame(self) -> None:
+        """One L/R pair produces one mono sample."""
+        stereo = struct.pack("<hh", -1000, -1000)
+        mono = stereo_to_mono(stereo)
+        assert len(mono) == 2
+        (sample,) = struct.unpack("<h", mono)
+        assert sample == -1000
+
+    def test_roundtrip(self) -> None:
+        """stereo_to_mono(mono_to_stereo(data)) recovers the original data."""
+        original = struct.pack("<5h", 100, -200, 32767, -32768, 0)
+        roundtripped = stereo_to_mono(mono_to_stereo(original))
+        assert roundtripped == original
 
 
 class TestDiscordFrameSize:

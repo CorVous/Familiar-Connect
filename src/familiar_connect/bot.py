@@ -1,6 +1,7 @@
 """Discord bot factory, slash commands, and pipeline-routed message loop.
 
-Step 7 of ``future-features/context-management.md``. Replaces the
+Step 7 of ``future-features/context-management.md``, plus the
+post-merge voice transcription wiring from PR #17. Replaces the
 single-slot ``TextSession``/``/awaken`` surface with:
 
 - A multi-channel :class:`SubscriptionRegistry` persisted to disk.
@@ -10,18 +11,28 @@ single-slot ``TextSession``/``/awaken`` surface with:
   ``/channel-text-conversation-rp``, ``/channel-imitate-voice``)
   that flip the :class:`ChannelMode` stored in the channel's
   TOML sidecar.
-- ``on_message`` that routes every subscribed message through
+- ``on_message`` that routes every subscribed text message through
   the :class:`ContextPipeline`, lets registered pre/post processors
   run, and persists user + assistant turns to
   :class:`HistoryStore`.
+- ``/subscribe-my-voice`` that, when the familiar has a
+  :class:`DeepgramTranscriber` configured, starts a per-user
+  transcription pipeline and routes every final transcription
+  through the **same** :class:`ContextPipeline` text uses. Voice
+  turns land in the :class:`HistoryStore` with ``role="user"``,
+  a sanitised speaker name, and the channel id of the voice
+  channel — so voice and text share memory, speaker prefixing,
+  history summaries, and every other pipeline output without the
+  voice path carrying its own state.
 
 The bot owns a single :class:`Familiar` bundle for the lifetime of
 the process — per ``future-features/configuration-levels.md`` one
-install = one character.
+process runs exactly one active character.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from typing import TYPE_CHECKING
@@ -33,13 +44,52 @@ from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality
 from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
-from familiar_connect.voice import DaveVoiceClient
+from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
+from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+    from typing import Any
+
+    from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
+    from familiar_connect.transcription import TranscriptionResult
 
 _logger = logging.getLogger(__name__)
+
+
+async def _recording_finished_callback(  # noqa: RUF029
+    sink: discord.sinks.Sink,
+    *args: object,
+) -> None:
+    """No-op callback required by py-cord's ``start_recording`` API.
+
+    Must be a coroutine even though it awaits nothing — py-cord
+    awaits this callback internally when a recording ends. Cleanup
+    is handled by :func:`stop_pipeline` inside
+    :func:`unsubscribe_voice`, not here.
+    """
+    del sink, args
+
+
+def _log_pipeline_outcomes(
+    channel_id: int,
+    outcomes: list[ProviderOutcome],
+) -> None:
+    """Emit a structured log entry per provider outcome.
+
+    Kept tiny so the dashboard-backing work can later hook the same
+    call site without having to parse the bot's freeform logs.
+    """
+    for outcome in outcomes:
+        _logger.info(
+            "pipeline channel=%s provider=%s status=%s duration=%.3fs",
+            channel_id,
+            outcome.provider_id,
+            outcome.status,
+            outcome.duration_s,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -92,15 +142,117 @@ async def unsubscribe_text(
     await ctx.respond("No longer listening here.")
 
 
+def _build_voice_response_handler(
+    *,
+    vc: discord.VoiceClient,
+    familiar: Familiar,
+    voice_channel_id: int,
+    guild_id: int | None,
+    user_names: dict[int, str],
+) -> Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]]:
+    """Build the async callback invoked for each final voice transcription.
+
+    Routes voice turns through the **same** :class:`ContextPipeline`
+    the text loop uses: assemble a :class:`ContextRequest` with
+    :attr:`Modality.voice` and the voice channel's id, run the
+    pipeline, render, call the main LLM, run post-processors,
+    persist to :class:`HistoryStore`, fan out to TTS.
+
+    This is the only way voice turns get the same memory search,
+    history summary, speaker prefixing, and mode instructions that
+    text turns get. The earlier PR #17 implementation stashed voice
+    history in a closure-local ``list[Message]`` that bypassed the
+    pipeline entirely; that stub is replaced by this handler.
+    """
+
+    async def _handle_voice_result(
+        user_id: int,
+        result: TranscriptionResult,
+    ) -> None:
+        # Resolve the speaker's display name. ``user_names`` is mutated
+        # by voice_pipeline's name resolver when a late joiner shows up,
+        # so a lookup failure falls back to a stable ``User-<id>`` form
+        # rather than ``None``.
+        speaker = user_names.get(user_id, f"User-{user_id}")
+        safe_name = sanitize_name(speaker) or speaker
+
+        channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
+        request = ContextRequest(
+            familiar_id=familiar.id,
+            channel_id=voice_channel_id,
+            guild_id=guild_id,
+            speaker=safe_name,
+            utterance=result.text,
+            modality=Modality.voice,
+            budget_tokens=channel_config.budget_tokens,
+            deadline_s=channel_config.deadline_s,
+        )
+
+        pipeline = familiar.build_pipeline(channel_config)
+        pipeline_output = await pipeline.assemble(
+            request,
+            budget_by_layer=channel_config.budget_by_layer,
+        )
+        _log_pipeline_outcomes(voice_channel_id, pipeline_output.outcomes)
+
+        messages = assemble_chat_messages(
+            pipeline_output,
+            store=familiar.history_store,
+            history_window_size=familiar.config.history_window_size,
+            depth_inject_position=familiar.config.depth_inject_position,
+            depth_inject_role=familiar.config.depth_inject_role,
+        )
+
+        reply = await familiar.llm_client.chat(messages)
+        reply_text = await pipeline.run_post_processors(reply.content, request)
+
+        # Persist both turns *after* the LLM call so a mid-turn crash
+        # doesn't leave the store with a user turn but no reply.
+        familiar.history_store.append_turn(
+            familiar_id=familiar.id,
+            channel_id=voice_channel_id,
+            guild_id=guild_id,
+            role="user",
+            content=result.text,
+            speaker=safe_name,
+        )
+        familiar.history_store.append_turn(
+            familiar_id=familiar.id,
+            channel_id=voice_channel_id,
+            guild_id=guild_id,
+            role="assistant",
+            content=reply_text,
+        )
+
+        _logger.info("[Voice Response] %s", reply_text)
+
+        if familiar.tts_client is not None:
+            try:
+                pcm_mono = await familiar.tts_client.synthesize(reply_text)
+                stereo = mono_to_stereo(pcm_mono)
+                # Wait for any currently-playing audio to finish.
+                # vc.is_playing() is a third-party poll; no event available.
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+            except Exception:
+                _logger.exception("Voice response TTS failed")
+
+    return _handle_voice_result
+
+
 async def subscribe_my_voice(
     ctx: discord.ApplicationContext,
     familiar: Familiar,
 ) -> None:
     """Join the caller's voice channel and register a voice subscription.
 
-    The actual incoming-audio / STT loop lives in a later roadmap
-    step; for now "subscribe to voice" means "join the channel and
-    keep the PCM sink open for TTS output".
+    When ``familiar.transcriber`` is configured, this also starts a
+    per-user Deepgram transcription pipeline and wires every final
+    transcription through the ContextPipeline via
+    :func:`_build_voice_response_handler`. Without a transcriber the
+    bot still joins the channel and plays TTS but does not react to
+    incoming speech.
     """
     author = ctx.author
     if not isinstance(author, discord.Member) or author.voice is None:
@@ -138,6 +290,39 @@ async def subscribe_my_voice(
         except Exception:
             _logger.exception("Opening greeting TTS failed")
 
+    if familiar.transcriber is not None:
+        user_names = {m.id: m.display_name for m in channel.members}
+
+        def _resolve_from_channel(user_id: int) -> str | None:
+            for member in channel.members:
+                if member.id == user_id:
+                    return member.display_name
+            return None
+
+        response_handler = _build_voice_response_handler(
+            vc=vc,
+            familiar=familiar,
+            voice_channel_id=channel.id,
+            guild_id=ctx.guild_id,
+            user_names=user_names,
+        )
+
+        pipeline = await start_pipeline(
+            familiar.transcriber,
+            user_names=user_names,
+            resolve_name=_resolve_from_channel,
+            response_handler=response_handler,
+        )
+        sink = RecordingSink(
+            loop=asyncio.get_running_loop(),
+            audio_queue=pipeline.tagged_audio_queue,
+        )
+        vc.start_recording(sink, _recording_finished_callback)
+        _logger.info(
+            "Started voice transcription pipeline for channel %s",
+            channel.id,
+        )
+
     await ctx.followup.send(f"Joined **{channel.name}**.")
 
 
@@ -145,9 +330,16 @@ async def unsubscribe_voice(
     ctx: discord.ApplicationContext,
     familiar: Familiar,
 ) -> None:
-    """Leave the current voice channel and drop the voice subscription."""
+    """Leave the current voice channel, tear down the pipeline, drop the sub."""
     vc = ctx.voice_client
     if vc is not None:
+        # Stop the transcription pipeline first so audio chunks stop
+        # flowing into a voice client that's about to disconnect.
+        if get_pipeline() is not None:
+            if hasattr(vc, "recording") and vc.recording:
+                vc.stop_recording()
+            await stop_pipeline()
+            _logger.info("Stopped voice transcription pipeline")
         await vc.disconnect()
 
     guild_id = ctx.guild_id
@@ -287,22 +479,6 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
                 vc.play(discord.PCMAudio(io.BytesIO(stereo)))
             except Exception:
                 _logger.exception("TTS synthesis failed")
-
-
-def _log_pipeline_outcomes(channel_id: int, outcomes: list) -> None:
-    """Emit a structured log entry per provider outcome.
-
-    Kept tiny so the dashboard-backing work can later hook the same
-    call site without having to parse the bot's freeform logs.
-    """
-    for outcome in outcomes:
-        _logger.info(
-            "pipeline channel=%s provider=%s status=%s duration=%.3fs",
-            channel_id,
-            outcome.provider_id,
-            outcome.status,
-            outcome.duration_s,
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from familiar_connect.bot import create_bot
 from familiar_connect.config import ConfigError
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_client_from_env, create_side_client_from_env
+from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client_from_env
 
 _logger = logging.getLogger(__name__)
@@ -178,11 +179,18 @@ def run(args: argparse.Namespace) -> int:
         tts_client = None
 
     try:
+        transcriber = create_transcriber_from_env()
+    except ValueError as exc:
+        _logger.warning("Transcriber unavailable: %s", exc)
+        transcriber = None
+
+    try:
         familiar = Familiar.load_from_disk(
             familiar_root,
             llm_client=llm_client,
             tts_client=tts_client,
             side_llm_client=side_llm_client,
+            transcriber=transcriber,
         )
     except ConfigError as exc:
         _logger.error("Failed to load familiar config: %s", exc)

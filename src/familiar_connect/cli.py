@@ -52,6 +52,12 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
         format="%(levelname)s: %(message)s",
         force=True,  # Reconfigure if already configured
     )
+
+    # Always show our own INFO messages (connection status, transcriptions, etc.)
+    # even when the root logger is at WARNING. -vv still enables DEBUG for us.
+    pkg_logger = logging.getLogger("familiar_connect")
+    pkg_logger.setLevel(min(log_level, logging.INFO))
+
     _logger.debug("Logging configured: level=%s", logging.getLevelName(log_level))
 
 

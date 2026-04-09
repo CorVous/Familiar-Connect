@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     )
     from familiar_connect.context.side_model import SideModel
     from familiar_connect.llm import LLMClient
+    from familiar_connect.transcription import DeepgramTranscriber
     from familiar_connect.tts import CartesiaTTSClient
 
 
@@ -78,6 +79,11 @@ class Familiar:
         does not call it — the bot layer does — but it's held here
         so every caller has a single handle.
     :param tts_client: Optional TTS client for voice output.
+    :param transcriber: Optional Deepgram transcriber template used
+        by the voice-subscription path to drive per-user speech-to-
+        text streams. When ``None``, ``/subscribe-my-voice`` still
+        joins the voice channel and plays TTS, but no incoming
+        audio is transcribed.
     :param side_model: The cheap model used by providers and
         processors. Defaults to a :class:`LLMSideModel` adapter
         over ``llm_client``.
@@ -97,6 +103,7 @@ class Familiar:
     history_store: HistoryStore
     llm_client: LLMClient
     tts_client: CartesiaTTSClient | None
+    transcriber: DeepgramTranscriber | None
     side_model: SideModel
     providers: dict[str, ContextProvider]
     pre_processors: dict[str, PreProcessor]
@@ -119,6 +126,7 @@ class Familiar:
         llm_client: LLMClient,
         tts_client: CartesiaTTSClient | None = None,
         side_llm_client: LLMClient | None = None,
+        transcriber: DeepgramTranscriber | None = None,
     ) -> Familiar:
         """Build a Familiar bundle from the on-disk ``data/familiars/<id>/`` layout.
 
@@ -139,6 +147,11 @@ class Familiar:
             Set ``OPENROUTER_SIDE_MODEL`` and pass the result of
             :func:`familiar_connect.llm.create_side_client_from_env`
             to use a cheaper model.
+        :param transcriber: Optional Deepgram transcriber template
+            used by ``/subscribe-my-voice`` to drive per-user
+            speech-to-text streams. When ``None``, the voice
+            subscription still joins the channel and plays TTS but
+            no audio is transcribed.
         """
         familiar_id = root.name
         character_config = load_character_config(root / "character.toml")
@@ -193,6 +206,7 @@ class Familiar:
             history_store=history_store,
             llm_client=llm_client,
             tts_client=tts_client,
+            transcriber=transcriber,
             side_model=side_model,
             providers=providers,
             pre_processors=pre_processors,

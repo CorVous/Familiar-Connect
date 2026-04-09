@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
-    _resolve_familiar_root,  # noqa: PLC2701 — the private helper is the unit
+    _resolve_familiar_root,
     load_opus,
     run,
 )
@@ -199,6 +199,10 @@ def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
             "familiar_connect.commands.run.create_tts_client_from_env",
             return_value=None,
         ),
+        patch(
+            "familiar_connect.commands.run.create_transcriber_from_env",
+            return_value=None,
+        ),
         patch("familiar_connect.commands.run.load_opus"),
         patch(
             "familiar_connect.commands.run._async_main",
@@ -215,3 +219,113 @@ def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
     call_args = mock_async_main.call_args
     assert call_args[0][0] == "fake-token"
     mock_run.assert_called_once_with(sentinel_coro)
+
+
+# ---------------------------------------------------------------------------
+# run — transcriber integration
+# ---------------------------------------------------------------------------
+
+
+class TestRunTranscriberIntegration:
+    """Cover the Deepgram transcriber factory plumbing added in PR #17.
+
+    The bot-level wiring shifted away from ``_async_main`` creating the
+    clients directly — it now happens in :func:`run`, which passes the
+    transcriber to :meth:`Familiar.load_from_disk`. These tests pin
+    that new plumbing so the PR #17 coverage intent survives the merge.
+    """
+
+    def test_run_passes_transcriber_to_familiar_when_configured(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A successful create_transcriber_from_env reaches load_from_disk."""
+        (tmp_path / "aria").mkdir()
+        args = argparse.Namespace(familiar="aria")
+        mock_transcriber = MagicMock(name="transcriber")
+
+        with (
+            patch.dict("os.environ", {"DISCORD_BOT": "fake-token"}, clear=True),
+            patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+            patch(
+                "familiar_connect.commands.run.create_client_from_env",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_side_client_from_env",
+                return_value=None,
+            ),
+            patch(
+                "familiar_connect.commands.run.create_tts_client_from_env",
+                return_value=None,
+            ),
+            patch(
+                "familiar_connect.commands.run.create_transcriber_from_env",
+                return_value=mock_transcriber,
+            ) as mock_create,
+            patch(
+                "familiar_connect.commands.run.Familiar.load_from_disk",
+                return_value=MagicMock(
+                    id="aria",
+                    config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                ),
+            ) as mock_load,
+            patch("familiar_connect.commands.run.load_opus"),
+            patch(
+                "familiar_connect.commands.run._async_main",
+                new_callable=MagicMock,
+                return_value=MagicMock(name="coroutine"),
+            ),
+            patch("familiar_connect.commands.run.asyncio.run"),
+        ):
+            run(args)
+
+        mock_create.assert_called_once()
+        assert mock_load.call_args.kwargs.get("transcriber") is mock_transcriber
+
+    def test_run_threads_none_when_transcriber_unavailable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A ValueError from the factory becomes transcriber=None (warn + continue)."""
+        (tmp_path / "aria").mkdir()
+        args = argparse.Namespace(familiar="aria")
+
+        with (
+            patch.dict("os.environ", {"DISCORD_BOT": "fake-token"}, clear=True),
+            patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+            patch(
+                "familiar_connect.commands.run.create_client_from_env",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_side_client_from_env",
+                return_value=None,
+            ),
+            patch(
+                "familiar_connect.commands.run.create_tts_client_from_env",
+                return_value=None,
+            ),
+            patch(
+                "familiar_connect.commands.run.create_transcriber_from_env",
+                side_effect=ValueError("DEEPGRAM_API_KEY not set"),
+            ),
+            patch(
+                "familiar_connect.commands.run.Familiar.load_from_disk",
+                return_value=MagicMock(
+                    id="aria",
+                    config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                ),
+            ) as mock_load,
+            patch("familiar_connect.commands.run.load_opus"),
+            patch(
+                "familiar_connect.commands.run._async_main",
+                new_callable=MagicMock,
+                return_value=MagicMock(name="coroutine"),
+            ),
+            patch("familiar_connect.commands.run.asyncio.run"),
+        ):
+            result = run(args)
+
+        assert result == 0
+        assert mock_load.call_args.kwargs.get("transcriber") is None
