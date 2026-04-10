@@ -22,7 +22,7 @@ Discord Voice → audio capture → asyncio.Queue
                                       ↓
                   asyncio.Queue (text) ← Twitch Events
                                       ↓
-                    ConversationMonitor (chattiness + interruption)
+                    ConversationMonitor (chattiness + interjection)
                                       ↓
                Context Management pipeline (see § Context Management)
                                       ↓
@@ -70,17 +70,17 @@ Bot token in `.env` as `DISCORD_BOT`.
 
 Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz → stream to Deepgram WebSocket (or feed chunks to faster-whisper).
 
-### Conversation Flow (Chattiness & Interruption)
+### Conversation Flow (Chattiness & Interjection)
 
 A `ConversationMonitor` gates whether the bot responds. Messages buffer per-channel; a side model (cheap LLM) is consulted to decide if the familiar wants to speak. Two orthogonal controls in `character.toml`:
 
 - **Chattiness** (`str`) — free-text personality trait (e.g. `"Curious and opinionated"`) fed to the side model's evaluation prompt. The LLM decides whether the familiar would want to respond based on this personality and the conversation content.
-- **Interruption** (`Interruption` enum) — controls how many messages pass before the side model is even consulted. Five tiers: `very_quiet` (first check at 15 messages), `quiet` (12), `average` (9), `interruptive` (6), `very_interruptive` (3). After each declined check, the interval decreases by 3, flooring at 3.
+- **Interjection** (`Interjection` enum) — controls how many messages pass before the side model is even consulted. Five tiers: `very_quiet` (first check at 15 messages), `quiet` (12), `average` (9), `interjective` (6), `very_interjective` (3). After each declined check, the interval decreases by 3, flooring at 3.
 
 **Three triggers, one evaluation path:**
 
 1. **Direct address** (name/alias/@mention) — side model evaluated immediately.
-2. **Interruption threshold** — counter hits the tier-scaled threshold; side model asked with "N messages have been said without you speaking."
+2. **Interjection threshold** — counter hits the tier-scaled threshold; side model asked with "N messages have been said without you speaking."
 3. **Lull** — no new message for `lull_timeout` seconds (default 2.0); side model asked with no extra context.
 
 All three send the same inputs to the side model: character card + conversation summary + buffer + chattiness personality. The model returns YES/NO. On YES, the full context pipeline fires. On NO, the monitor waits.
