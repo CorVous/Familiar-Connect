@@ -33,13 +33,15 @@ change.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
+from familiar_connect.config import ChannelMode
 from familiar_connect.context.types import Layer
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
-    from familiar_connect.config import ChannelMode
     from familiar_connect.context.pipeline import PipelineOutput
     from familiar_connect.history.store import HistoryStore
 
@@ -95,6 +97,36 @@ def _prefix_user_content(speaker: str | None, content: str) -> str:
     return f"{speaker}: {content}"
 
 
+def _format_timestamp(ts: datetime, tz_name: str) -> str:
+    """Render *ts* as ``[HH:MM]`` in the given IANA timezone."""
+    tz = ZoneInfo(tz_name)
+    local = ts.astimezone(tz)
+    return f"[{local.strftime('%H:%M')}]"
+
+
+_GAP_THRESHOLD = timedelta(seconds=30)
+
+
+def _format_gap(delta: timedelta) -> str | None:
+    """Return a human-readable gap hint, or ``None`` if under threshold.
+
+    Returns phrases like ``(about 2 minutes later)``.
+    """
+    if delta < _GAP_THRESHOLD:
+        return None
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return f"(about {seconds} seconds later)"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"(about {minutes} minute{'s' if minutes != 1 else ''} later)"
+    hours = minutes // 60
+    if hours < 24:
+        return f"(about {hours} hour{'s' if hours != 1 else ''} later)"
+    days = hours // 24
+    return f"(about {days} day{'s' if days != 1 else ''} later)"
+
+
 def assemble_chat_messages(
     output: PipelineOutput,
     *,
@@ -103,6 +135,7 @@ def assemble_chat_messages(
     depth_inject_position: int = 0,
     depth_inject_role: str = "system",
     mode: ChannelMode | None = None,
+    display_tz: str = "UTC",
 ) -> list[Message]:
     """Return a list of :class:`Message` ready to hand to the LLM client.
 
@@ -122,6 +155,10 @@ def assemble_chat_messages(
         buffer clamp to the top of history.
     :param depth_inject_role: Either ``"system"`` (default) or
         ``"user"`` — the role assigned to the inserted message.
+    :param mode: When set, only turns tagged with this mode are
+        fetched and per-mode timestamp formatting is applied.
+    :param display_tz: IANA timezone name for rendering timestamps
+        in ``text_conversation_rp`` mode. Defaults to ``"UTC"``.
     """
     request = output.request
     by_layer = output.budget.by_layer
@@ -133,25 +170,50 @@ def assemble_chat_messages(
     # 2. Recent history rendered as discrete messages. User turns are
     # prefixed with ``Speaker: `` so backends that drop the OpenAI
     # ``name`` field can still distinguish speakers; assistant turns
-    # are left bare.
+    # are left bare. Per-mode formatting applies timestamps or gap hints.
     turns = store.recent(
         familiar_id=request.familiar_id,
         channel_id=request.channel_id,
         limit=history_window_size,
         mode=mode,
     )
+    prev_ts: datetime | None = None
     for turn in turns:
+        content = turn.content
+
+        # Per-mode formatting on user turns.
+        if turn.role == "user":
+            if mode is ChannelMode.text_conversation_rp:
+                ts_prefix = _format_timestamp(turn.timestamp, display_tz)
+                content = _prefix_user_content(
+                    turn.speaker,
+                    turn.content,
+                )
+                content = f"{ts_prefix} {content}"
+            else:
+                content = _prefix_user_content(turn.speaker, turn.content)
+
+        # imitate_voice gap hints: prefix the *next* turn's content
+        # when the gap from the previous turn exceeds the threshold.
+        if mode is ChannelMode.imitate_voice and prev_ts is not None:
+            gap = turn.timestamp - prev_ts
+            hint = _format_gap(gap)
+            if hint:
+                content = f"{hint} {content}"
+
+        prev_ts = turn.timestamp
+
         if turn.role == "user":
             messages.append(
                 Message(
                     role="user",
-                    content=_prefix_user_content(turn.speaker, turn.content),
+                    content=content,
                     name=turn.speaker,
                 ),
             )
         else:
             messages.append(
-                Message(role=turn.role, content=turn.content, name=None),
+                Message(role=turn.role, content=content, name=None),
             )
 
     # 3. The final user turn — the triggering utterance from the request.

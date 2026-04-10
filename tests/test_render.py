@@ -12,6 +12,8 @@ Covers familiar_connect.context.render, which doesn't exist yet.
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from familiar_connect.config import ChannelMode
@@ -557,3 +559,218 @@ class TestModeFilteredHistory:
         assert any("rp action" in c for c in contents)
         assert any("another rp" in c for c in contents)
         assert not any("voice line" in c for c in contents)
+
+
+# ---------------------------------------------------------------------------
+# Per-mode timestamp formatting
+# ---------------------------------------------------------------------------
+
+
+class TestTextConversationTimestamps:
+    def test_user_turns_get_hhmm_prefix(self, tmp_path: Path) -> None:
+        """In text_conversation_rp, user turns are prefixed [HH:MM]."""
+        store = HistoryStore(tmp_path / "history.db")
+        # Insert a turn with a known timestamp.
+        store.append_turn(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            role="user",
+            content="hello there",
+            speaker="Alice",
+            mode=ChannelMode.text_conversation_rp,
+        )
+
+        request = _request(utterance="reply")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(
+            output,
+            store=store,
+            mode=ChannelMode.text_conversation_rp,
+            display_tz="UTC",
+        )
+
+        # Find the history user turn (not the final utterance).
+        history_msgs = [m for m in messages[1:-1] if m.role == "user"]
+        assert len(history_msgs) == 1
+        # Should start with [HH:MM] pattern.
+        assert re.match(
+            r"^\[\d{2}:\d{2}\] Alice: hello there$",
+            history_msgs[0].content,
+        )
+
+    def test_assistant_turns_unchanged(self, tmp_path: Path) -> None:
+        """Assistant turns should NOT get timestamps in any mode."""
+        store = HistoryStore(tmp_path / "history.db")
+        store.append_turn(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            role="assistant",
+            content="hey",
+            mode=ChannelMode.text_conversation_rp,
+        )
+
+        request = _request(utterance="reply")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(
+            output,
+            store=store,
+            mode=ChannelMode.text_conversation_rp,
+            display_tz="UTC",
+        )
+
+        assistant_msgs = [m for m in messages[1:-1] if m.role == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0].content == "hey"
+
+
+class TestImitateVoiceGapHints:
+    def test_gap_over_30s_adds_breadcrumb(self, tmp_path: Path) -> None:
+        """A gap >= 30s between turns produces a time-gap prefix."""
+        store = HistoryStore(tmp_path / "history.db")
+        # We need control over timestamps, so insert via raw SQL.
+        t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t2 = t1 + timedelta(minutes=3)
+        store._conn.execute(
+            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
+            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "user",
+                "Alice",
+                "first",
+                t1.isoformat(),
+                "imitate_voice",
+            ),
+        )
+        store._conn.execute(
+            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
+            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "user",
+                "Alice",
+                "second",
+                t2.isoformat(),
+                "imitate_voice",
+            ),
+        )
+        store._conn.commit()
+
+        request = _request(utterance="third")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(
+            output,
+            store=store,
+            mode=ChannelMode.imitate_voice,
+        )
+
+        # The second history turn should have a gap prefix.
+        history = messages[1:-1]
+        assert len(history) == 2
+        assert "(about 3 minutes later)" in history[1].content
+
+    def test_gap_under_30s_no_breadcrumb(self, tmp_path: Path) -> None:
+        """Gaps under 30s produce no breadcrumb."""
+        store = HistoryStore(tmp_path / "history.db")
+        t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t2 = t1 + timedelta(seconds=10)
+        store._conn.execute(
+            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
+            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "user",
+                "Alice",
+                "first",
+                t1.isoformat(),
+                "imitate_voice",
+            ),
+        )
+        store._conn.execute(
+            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
+            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "user",
+                "Alice",
+                "second",
+                t2.isoformat(),
+                "imitate_voice",
+            ),
+        )
+        store._conn.commit()
+
+        request = _request(utterance="third")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(
+            output,
+            store=store,
+            mode=ChannelMode.imitate_voice,
+        )
+
+        history = messages[1:-1]
+        assert len(history) == 2
+        # No gap breadcrumb on the second turn.
+        assert "later)" not in history[1].content
+
+    def test_first_turn_has_no_breadcrumb(self, tmp_path: Path) -> None:
+        """The very first turn never gets a gap prefix."""
+        store = HistoryStore(tmp_path / "history.db")
+        t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        store._conn.execute(
+            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
+            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "user",
+                "Alice",
+                "only one",
+                t1.isoformat(),
+                "imitate_voice",
+            ),
+        )
+        store._conn.commit()
+
+        request = _request(utterance="reply")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(
+            output,
+            store=store,
+            mode=ChannelMode.imitate_voice,
+        )
+
+        history = messages[1:-1]
+        assert len(history) == 1
+        assert "later)" not in history[0].content
+
+
+class TestFullRpNoTimestamps:
+    def test_user_turns_unchanged(self, tmp_path: Path) -> None:
+        """full_rp turns get no timestamps, no gap hints."""
+        store = HistoryStore(tmp_path / "history.db")
+        store.append_turn(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            role="user",
+            content="she walks in",
+            speaker="Alice",
+            mode=ChannelMode.full_rp,
+        )
+
+        request = _request(utterance="continue")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(
+            output,
+            store=store,
+            mode=ChannelMode.full_rp,
+        )
+
+        history_msgs = [m for m in messages[1:-1] if m.role == "user"]
+        assert len(history_msgs) == 1
+        # No timestamp prefix — just the standard speaker prefix.
+        assert history_msgs[0].content == "Alice: she walks in"

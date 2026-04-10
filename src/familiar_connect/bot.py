@@ -202,6 +202,7 @@ def _build_voice_response_handler(
             depth_inject_position=familiar.config.depth_inject_position,
             depth_inject_role=familiar.config.depth_inject_role,
             mode=channel_config.mode,
+            display_tz=familiar.config.display_tz,
         )
 
         reply = await familiar.llm_client.chat(messages)
@@ -441,6 +442,7 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
         depth_inject_position=familiar.config.depth_inject_position,
         depth_inject_role=familiar.config.depth_inject_role,
         mode=channel_config.mode,
+        display_tz=familiar.config.display_tz,
     )
 
     async with message.channel.typing():
