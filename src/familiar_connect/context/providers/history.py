@@ -37,13 +37,18 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from familiar_connect.config import ChannelMode
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 
 if TYPE_CHECKING:
     from familiar_connect.context.side_model import SideModel
     from familiar_connect.context.types import ContextRequest
-    from familiar_connect.history.store import HistoryStore, HistoryTurn
+    from familiar_connect.history.store import (
+        HistoryStore,
+        HistoryTurn,
+        OtherChannelInfo,
+    )
 
 
 _logger = logging.getLogger(__name__)
@@ -62,6 +67,15 @@ HISTORY_SUMMARY_PRIORITY = 60
 Lower than recent_history because the summary is a derivative
 artefact of the same conversation; if we have to drop something, we
 drop the lossy summary first."""
+
+CROSS_CONTEXT_PRIORITY = 55
+"""Priority assigned to cross-context "meanwhile elsewhere" contributions.
+
+Below within-channel summary (60) so budget pressure drops cross-channel
+summaries first."""
+
+_MAX_CROSS_CHANNELS = 2
+"""How many other channels to surface cross-context summaries for."""
 
 DEFAULT_WINDOW_SIZE = 20
 """How many of the most recent turns to surface verbatim by default."""
@@ -87,6 +101,24 @@ _SUMMARY_PROMPT_TEMPLATE = (
     "Summary:"
 )
 
+_MODE_DESCRIPTIONS: dict[str, str] = {
+    "full_rp": "live roleplay scene",
+    "text_conversation_rp": "text-message / chatroom conversation",
+    "imitate_voice": "voice call",
+}
+
+_CROSS_CONTEXT_PROMPT_TEMPLATE = (
+    "You are summarising recent activity from another channel for context. "
+    "The reader is currently in a {viewer_mode_desc}. The source channel "
+    "is a {source_mode_desc}. Summarise what happened in 1-2 sentences, "
+    'framed as "Meanwhile, in the {source_mode_desc}, …". '
+    "Focus on facts and decisions relevant to ongoing interaction.\n\n"
+    "----- conversation -----\n"
+    "{transcript}\n"
+    "----- end conversation -----\n\n"
+    "Summary:"
+)
+
 
 class HistoryProvider:
     """ContextProvider that surfaces recent turns + a rolling summary.
@@ -106,6 +138,12 @@ class HistoryProvider:
         global rolling window. Setting it equal to ``window_size``
         also means single-channel scenarios produce zero overlap
         between the recent layer and the summary layer.
+    :param mode: The :class:`ChannelMode` this provider instance is
+        scoped to. One provider is constructed per turn inside
+        :meth:`Familiar.build_pipeline`, so the mode is fixed for
+        the lifetime of the provider. When ``None``, no mode
+        filtering is applied (backwards-compatible default for
+        existing callers and tests).
     :param summary_timeout_s: Soft cap on the summariser sub-call.
     :param max_summary_tokens: Approximate target length for the
         summariser's output.
@@ -121,6 +159,7 @@ class HistoryProvider:
         side_model: SideModel,
         window_size: int = DEFAULT_WINDOW_SIZE,
         summary_lag: int | None = None,
+        mode: ChannelMode | None = None,
         summary_timeout_s: float = DEFAULT_SUMMARY_TIMEOUT_S,
         max_summary_tokens: int = DEFAULT_MAX_SUMMARY_TOKENS,
     ) -> None:
@@ -131,6 +170,7 @@ class HistoryProvider:
         self._side_model = side_model
         self._window_size = window_size
         self._summary_lag = summary_lag if summary_lag is not None else window_size
+        self._mode = mode
         self._summary_timeout_s = summary_timeout_s
         self._max_summary_tokens = max_summary_tokens
 
@@ -150,10 +190,12 @@ class HistoryProvider:
             familiar_id=request.familiar_id,
             channel_id=request.channel_id,
             limit=self._window_size,
+            mode=self._mode,
         )
 
         latest = self._store.latest_id(
             familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
         )
         if latest is None:
             # No global history at all — nothing to surface, anywhere.
@@ -165,13 +207,16 @@ class HistoryProvider:
 
         # Only build a summary if there's enough global history that
         # at least one turn lives outside the rolling-window region.
-        if latest <= self._summary_lag:
-            return contributions
+        if latest > self._summary_lag:
+            target_max_id = latest - self._summary_lag
+            summary_text = await self._fetch_or_build_summary(request, target_max_id)
+            if summary_text:
+                contributions.append(self._summary_contribution(summary_text))
 
-        target_max_id = latest - self._summary_lag
-        summary_text = await self._fetch_or_build_summary(request, target_max_id)
-        if summary_text:
-            contributions.append(self._summary_contribution(summary_text))
+        # Cross-context: summarise activity in other channels.
+        if self._mode is not None:
+            cross = await self._build_cross_context_contributions(request)
+            contributions.extend(cross)
 
         return contributions
 
@@ -186,6 +231,7 @@ class HistoryProvider:
     ) -> str:
         cached = self._store.get_summary(
             familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
         )
         if cached is not None and cached.last_summarised_id >= target_max_id:
             return cached.summary_text
@@ -221,6 +267,7 @@ class HistoryProvider:
         older = self._store.older_than(
             familiar_id=request.familiar_id,
             max_id=target_max_id,
+            channel_id=request.channel_id,
         )
         if not older:
             return ""
@@ -239,7 +286,121 @@ class HistoryProvider:
         # Update the cache so future calls reuse this work.
         self._store.put_summary(
             familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
             last_summarised_id=target_max_id,
+            summary_text=summary,
+        )
+        return summary
+
+    async def _build_cross_context_contributions(
+        self,
+        request: ContextRequest,
+    ) -> list[Contribution]:
+        """Build cross-context summaries for other channels' activity.
+
+        For ``full_rp`` mode the summaries are built and cached (so the
+        renderer can read them for mid-chat breadcrumbs) but NOT emitted
+        as ``Layer.history_summary`` contributions — that would duplicate
+        the information the renderer already places at the gap.
+        """
+        assert self._mode is not None  # caller guards  # noqa: S101
+        others = self._store.distinct_other_channels(
+            familiar_id=request.familiar_id,
+            exclude_channel_id=request.channel_id,
+        )
+        if not others:
+            return []
+
+        contributions: list[Contribution] = []
+        viewer_mode_desc = _MODE_DESCRIPTIONS.get(self._mode.value, self._mode.value)
+        emit = self._mode is not ChannelMode.full_rp
+
+        for info in others[:_MAX_CROSS_CHANNELS]:
+            text = await self._fetch_or_build_cross_context(
+                request, info, viewer_mode_desc
+            )
+            if text and emit:
+                contributions.append(
+                    Contribution(
+                        layer=Layer.history_summary,
+                        priority=CROSS_CONTEXT_PRIORITY,
+                        text=text,
+                        estimated_tokens=estimate_tokens(text),
+                        source=f"history:cross_channel:{info.channel_id}",
+                    )
+                )
+        return contributions
+
+    async def _fetch_or_build_cross_context(
+        self,
+        request: ContextRequest,
+        info: OtherChannelInfo,
+        viewer_mode_desc: str,
+    ) -> str:
+        """Return a cross-context summary for *info*, using the cache when fresh."""
+        assert self._mode is not None  # noqa: S101
+        cached = self._store.get_cross_context(
+            familiar_id=request.familiar_id,
+            viewer_mode=self._mode.value,
+            source_channel_id=info.channel_id,
+        )
+        if cached is not None and cached.source_last_id >= info.latest_id:
+            return cached.summary_text
+
+        # Cache miss or stale — build via side model.
+        try:
+            async with asyncio.timeout(self._summary_timeout_s):
+                return await self._build_cross_context(request, info, viewer_mode_desc)
+        except TimeoutError:
+            _logger.warning(
+                "cross-context summariser timed out for channel=%s",
+                info.channel_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "cross-context summariser raised %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+        return cached.summary_text if cached is not None else ""
+
+    async def _build_cross_context(
+        self,
+        request: ContextRequest,
+        info: OtherChannelInfo,
+        viewer_mode_desc: str,
+    ) -> str:
+        """Build a cross-context POV summary for one other channel."""
+        assert self._mode is not None  # noqa: S101
+        turns = self._store.recent(
+            familiar_id=request.familiar_id,
+            channel_id=info.channel_id,
+            limit=self._window_size,
+        )
+        if not turns:
+            return ""
+
+        source_mode_desc = _MODE_DESCRIPTIONS.get(
+            info.mode or "", info.mode or "unknown"
+        )
+        prompt = _CROSS_CONTEXT_PROMPT_TEMPLATE.format(
+            viewer_mode_desc=viewer_mode_desc,
+            source_mode_desc=source_mode_desc,
+            transcript=_render_turns(turns),
+        )
+        summary = await self._side_model.complete(
+            prompt,
+            max_tokens=self._max_summary_tokens,
+        )
+        if not summary:
+            return ""
+
+        self._store.put_cross_context(
+            familiar_id=request.familiar_id,
+            viewer_mode=self._mode.value,
+            source_channel_id=info.channel_id,
+            source_last_id=info.latest_id,
             summary_text=summary,
         )
         return summary

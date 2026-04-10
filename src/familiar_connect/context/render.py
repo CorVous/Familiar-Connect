@@ -33,8 +33,11 @@ change.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
+from familiar_connect.config import ChannelMode
 from familiar_connect.context.types import Layer
 from familiar_connect.llm import Message
 
@@ -94,6 +97,62 @@ def _prefix_user_content(speaker: str | None, content: str) -> str:
     return f"{speaker}: {content}"
 
 
+def _format_timestamp(ts: datetime, tz_name: str) -> str:
+    """Render *ts* as ``[HH:MM]`` in the given IANA timezone."""
+    tz = ZoneInfo(tz_name)
+    local = ts.astimezone(tz)
+    return f"[{local.strftime('%H:%M')}]"
+
+
+_GAP_THRESHOLD = timedelta(seconds=30)
+
+_FULL_RP_GAP_THRESHOLD = timedelta(minutes=5)
+"""Minimum gap between full_rp turns before a cross-context breadcrumb
+is considered. Longer than the voice gap threshold because RP scenes
+have natural typing pauses that shouldn't trigger breadcrumbs."""
+
+
+def _format_gap(delta: timedelta) -> str | None:
+    """Return a human-readable gap hint, or ``None`` if under threshold.
+
+    Returns phrases like ``(about 2 minutes later)``.
+    """
+    if delta < _GAP_THRESHOLD:
+        return None
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return f"(about {seconds} seconds later)"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"(about {minutes} minute{'s' if minutes != 1 else ''} later)"
+    hours = minutes // 60
+    if hours < 24:
+        return f"(about {hours} hour{'s' if hours != 1 else ''} later)"
+    days = hours // 24
+    return f"(about {days} day{'s' if days != 1 else ''} later)"
+
+
+def _collect_gap_breadcrumbs(
+    cross_summaries: dict[int, str],
+    cross_timestamps: dict[int, datetime],
+    *,
+    gap_start: datetime,
+    gap_end: datetime,
+) -> str:
+    """Return combined breadcrumb text for cross-channel activity during a gap.
+
+    Only includes summaries whose latest activity timestamp falls
+    strictly within ``(gap_start, gap_end)``. Returns an empty string
+    when no channels qualify.
+    """
+    parts: list[str] = []
+    for channel_id, summary in cross_summaries.items():
+        ts = cross_timestamps.get(channel_id)
+        if ts is not None and gap_start < ts < gap_end:
+            parts.append(summary)
+    return " ".join(parts)
+
+
 def assemble_chat_messages(
     output: PipelineOutput,
     *,
@@ -101,6 +160,8 @@ def assemble_chat_messages(
     history_window_size: int = _DEFAULT_HISTORY_WINDOW,
     depth_inject_position: int = 0,
     depth_inject_role: str = "system",
+    mode: ChannelMode | None = None,
+    display_tz: str = "UTC",
 ) -> list[Message]:
     """Return a list of :class:`Message` ready to hand to the LLM client.
 
@@ -120,6 +181,10 @@ def assemble_chat_messages(
         buffer clamp to the top of history.
     :param depth_inject_role: Either ``"system"`` (default) or
         ``"user"`` — the role assigned to the inserted message.
+    :param mode: When set, only turns tagged with this mode are
+        fetched and per-mode timestamp formatting is applied.
+    :param display_tz: IANA timezone name for rendering timestamps
+        in ``text_conversation_rp`` mode. Defaults to ``"UTC"``.
     """
     request = output.request
     by_layer = output.budget.by_layer
@@ -131,24 +196,86 @@ def assemble_chat_messages(
     # 2. Recent history rendered as discrete messages. User turns are
     # prefixed with ``Speaker: `` so backends that drop the OpenAI
     # ``name`` field can still distinguish speakers; assistant turns
-    # are left bare.
+    # are left bare. Per-mode formatting applies timestamps or gap hints.
     turns = store.recent(
         familiar_id=request.familiar_id,
         channel_id=request.channel_id,
         limit=history_window_size,
+        mode=mode,
     )
+
+    # Pre-fetch cross-context data for full_rp breadcrumbs.
+    cross_summaries: dict[int, str] = {}
+    cross_timestamps: dict[int, datetime] = {}
+    if mode is ChannelMode.full_rp:
+        others = store.distinct_other_channels(
+            familiar_id=request.familiar_id,
+            exclude_channel_id=request.channel_id,
+        )
+        for info in others:
+            cached = store.get_cross_context(
+                familiar_id=request.familiar_id,
+                viewer_mode="full_rp",
+                source_channel_id=info.channel_id,
+            )
+            if cached is not None:
+                cross_summaries[info.channel_id] = cached.summary_text
+                cross_timestamps[info.channel_id] = info.latest_timestamp
+
+    prev_ts: datetime | None = None
     for turn in turns:
+        content = turn.content
+
+        # full_rp gap breadcrumbs: when there's a gap >= 5 minutes AND
+        # another channel had activity during that gap, insert a
+        # role=system breadcrumb before the resuming turn.
+        if mode is ChannelMode.full_rp and prev_ts is not None:
+            gap = turn.timestamp - prev_ts
+            if gap >= _FULL_RP_GAP_THRESHOLD:
+                breadcrumb = _collect_gap_breadcrumbs(
+                    cross_summaries,
+                    cross_timestamps,
+                    gap_start=prev_ts,
+                    gap_end=turn.timestamp,
+                )
+                if breadcrumb:
+                    messages.append(
+                        Message(role="system", content=breadcrumb),
+                    )
+
+        # Per-mode formatting on user turns.
+        if turn.role == "user":
+            if mode is ChannelMode.text_conversation_rp:
+                ts_prefix = _format_timestamp(turn.timestamp, display_tz)
+                content = _prefix_user_content(
+                    turn.speaker,
+                    turn.content,
+                )
+                content = f"{ts_prefix} {content}"
+            else:
+                content = _prefix_user_content(turn.speaker, turn.content)
+
+        # imitate_voice gap hints: prefix the *next* turn's content
+        # when the gap from the previous turn exceeds the threshold.
+        if mode is ChannelMode.imitate_voice and prev_ts is not None:
+            gap = turn.timestamp - prev_ts
+            hint = _format_gap(gap)
+            if hint:
+                content = f"{hint} {content}"
+
+        prev_ts = turn.timestamp
+
         if turn.role == "user":
             messages.append(
                 Message(
                     role="user",
-                    content=_prefix_user_content(turn.speaker, turn.content),
+                    content=content,
                     name=turn.speaker,
                 ),
             )
         else:
             messages.append(
-                Message(role=turn.role, content=turn.content, name=None),
+                Message(role=turn.role, content=content, name=None),
             )
 
     # 3. The final user turn — the triggering utterance from the request.

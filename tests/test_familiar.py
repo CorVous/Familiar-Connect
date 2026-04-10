@@ -79,13 +79,16 @@ class TestLoadFromDisk:
         assert (root / "modes").is_dir()
 
     def test_providers_registered(self, tmp_path: Path) -> None:
-        """The three first-party providers are wired in by default."""
+        """Startup providers are wired in by default.
+
+        ``history`` is now constructed per-turn in build_pipeline
+        (mode-scoped), so it no longer appears in the startup dict.
+        """
         root = tmp_path / "aria"
         root.mkdir()
         familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
         assert set(familiar.providers.keys()) == {
             "character",
-            "history",
             "content_search",
         }
 
@@ -210,6 +213,22 @@ class TestBuildPipeline:
         )
         provider_ids = {p.id for p in full_pipeline._providers}
         assert "mode_instructions" in provider_ids
+
+    def test_history_provider_is_added_per_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """HistoryProvider is constructed per call with mode baked in."""
+        root = tmp_path / "aria"
+        root.mkdir()
+        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        assert "history" not in familiar.providers
+
+        pipeline = familiar.build_pipeline(
+            channel_config_for_mode(ChannelMode.full_rp),
+        )
+        provider_ids = {p.id for p in pipeline._providers}
+        assert "history" in provider_ids
 
     def test_mode_instructions_provider_is_mode_scoped(
         self,

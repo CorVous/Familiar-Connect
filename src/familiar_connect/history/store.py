@@ -37,6 +37,10 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from familiar_connect.config import ChannelMode
 
 PathLike = str | Path
 
@@ -61,6 +65,25 @@ class SummaryEntry:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class OtherChannelInfo:
+    """Summary info about another channel's recent activity."""
+
+    channel_id: int
+    mode: str | None
+    latest_id: int
+    latest_timestamp: datetime
+
+
+@dataclass(frozen=True)
+class CrossContextEntry:
+    """A cached cross-context summary for one source channel."""
+
+    source_last_id: int
+    summary_text: str
+    created_at: datetime
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +93,8 @@ CREATE TABLE IF NOT EXISTS turns (
     role           TEXT    NOT NULL,
     speaker        TEXT,
     content        TEXT    NOT NULL,
-    timestamp      TEXT    NOT NULL
+    timestamp      TEXT    NOT NULL,
+    mode           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -79,12 +103,26 @@ CREATE INDEX IF NOT EXISTS idx_turns_channel
 CREATE INDEX IF NOT EXISTS idx_turns_global
     ON turns (familiar_id, id);
 
+CREATE INDEX IF NOT EXISTS idx_turns_channel_mode
+    ON turns (familiar_id, channel_id, mode, id);
+
 CREATE TABLE IF NOT EXISTS summaries (
     familiar_id         TEXT    NOT NULL,
+    channel_id          INTEGER NOT NULL DEFAULT 0,
     last_summarised_id  INTEGER NOT NULL,
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
-    PRIMARY KEY (familiar_id)
+    PRIMARY KEY (familiar_id, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS cross_context_summaries (
+    familiar_id        TEXT    NOT NULL,
+    viewer_mode        TEXT    NOT NULL,
+    source_channel_id  INTEGER NOT NULL,
+    source_last_id     INTEGER NOT NULL,
+    summary_text       TEXT    NOT NULL,
+    created_at         TEXT    NOT NULL,
+    PRIMARY KEY (familiar_id, viewer_mode, source_channel_id)
 );
 """
 
@@ -107,8 +145,46 @@ class HistoryStore:
             self._path = path
             self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
+        self._migrate_if_needed()
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+
+    def _migrate_if_needed(self) -> None:
+        """Run idempotent migrations for schema changes.
+
+        Currently handles:
+        - Adding the ``mode`` column to ``turns`` (+ backfill index).
+        """
+        # Check whether the turns table exists at all — if not, the
+        # CREATE TABLE IF NOT EXISTS in _SCHEMA will handle it.
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='turns'"
+        ).fetchone()
+        if row is None:
+            return
+
+        columns = {
+            col["name"]
+            for col in self._conn.execute("PRAGMA table_info(turns)").fetchall()
+        }
+        if "mode" not in columns:
+            self._conn.execute("ALTER TABLE turns ADD COLUMN mode TEXT")
+            self._conn.commit()
+
+        # Migrate summaries table: old schema had PK (familiar_id) only.
+        # New schema adds channel_id to the PK. Summaries are a cache —
+        # dropping and recreating is safe (they rebuild on next request).
+        summary_row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='summaries'"
+        ).fetchone()
+        if summary_row is not None:
+            summary_cols = {
+                col["name"]
+                for col in self._conn.execute("PRAGMA table_info(summaries)").fetchall()
+            }
+            if "channel_id" not in summary_cols:
+                self._conn.execute("DROP TABLE summaries")
+                self._conn.commit()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -131,15 +207,17 @@ class HistoryStore:
         content: str,
         speaker: str | None = None,
         guild_id: int | None = None,
+        mode: ChannelMode | None = None,
     ) -> HistoryTurn:
         """Append a single turn and return its persisted form."""
         timestamp = datetime.now(tz=UTC)
+        mode_value = mode.value if mode is not None else None
         cur = self._conn.execute(
             """
             INSERT INTO turns
                 (familiar_id, channel_id, guild_id,
-                 role, speaker, content, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 role, speaker, content, timestamp, mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -149,6 +227,7 @@ class HistoryStore:
                 speaker,
                 content,
                 timestamp.isoformat(),
+                mode_value,
             ),
         )
         self._conn.commit()
@@ -166,6 +245,7 @@ class HistoryStore:
         familiar_id: str,
         channel_id: int,
         limit: int,
+        mode: ChannelMode | None = None,
     ) -> list[HistoryTurn]:
         """Return up to *limit* most recent turns *in this channel*.
 
@@ -173,19 +253,35 @@ class HistoryStore:
         simultaneous conversations don't bleed into each other.
         Results are sorted oldest-first so callers can render them
         without re-reversing.
+
+        When *mode* is provided, only turns recorded under that mode
+        are returned. This prevents cross-mode style contamination in
+        the verbatim example window.
         """
         if limit <= 0:
             return []
-        rows = self._conn.execute(
-            """
-            SELECT id, timestamp, role, speaker, content
-              FROM turns
-             WHERE familiar_id = ? AND channel_id = ?
-             ORDER BY id DESC
-             LIMIT ?
-            """,
-            (familiar_id, channel_id, limit),
-        ).fetchall()
+        if mode is not None:
+            rows = self._conn.execute(
+                """
+                SELECT id, timestamp, role, speaker, content
+                  FROM turns
+                 WHERE familiar_id = ? AND channel_id = ? AND mode = ?
+                 ORDER BY id DESC
+                 LIMIT ?
+                """,
+                (familiar_id, channel_id, mode.value, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT id, timestamp, role, speaker, content
+                  FROM turns
+                 WHERE familiar_id = ? AND channel_id = ?
+                 ORDER BY id DESC
+                 LIMIT ?
+                """,
+                (familiar_id, channel_id, limit),
+            ).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
 
     def older_than(
@@ -193,48 +289,74 @@ class HistoryStore:
         *,
         familiar_id: str,
         max_id: int,
+        channel_id: int | None = None,
         limit: int = 10_000,
     ) -> list[HistoryTurn]:
         """Return turns whose ``id`` is *<= max_id*, oldest first.
 
-        Globally per ``familiar_id`` — *not* partitioned by channel.
-        The HistoryProvider's rolling summary covers everything the
-        familiar has ever heard, regardless of which channel each
-        turn happened in.
+        When *channel_id* is provided, scopes to that single channel.
+        When omitted, returns turns globally across all channels (the
+        legacy behaviour).
         """
-        rows = self._conn.execute(
-            """
-            SELECT id, timestamp, role, speaker, content
-              FROM turns
-             WHERE familiar_id = ?
-               AND id <= ?
-             ORDER BY id ASC
-             LIMIT ?
-            """,
-            (familiar_id, max_id, limit),
-        ).fetchall()
+        if channel_id is not None:
+            rows = self._conn.execute(
+                """
+                SELECT id, timestamp, role, speaker, content
+                  FROM turns
+                 WHERE familiar_id = ?
+                   AND channel_id = ?
+                   AND id <= ?
+                 ORDER BY id ASC
+                 LIMIT ?
+                """,
+                (familiar_id, channel_id, max_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT id, timestamp, role, speaker, content
+                  FROM turns
+                 WHERE familiar_id = ?
+                   AND id <= ?
+                 ORDER BY id ASC
+                 LIMIT ?
+                """,
+                (familiar_id, max_id, limit),
+            ).fetchall()
         return [_row_to_turn(r) for r in rows]
 
     def latest_id(
         self,
         *,
         familiar_id: str,
+        channel_id: int | None = None,
     ) -> int | None:
-        """Return the highest turn id for the familiar across all channels.
+        """Return the highest turn id for the familiar.
+
+        When *channel_id* is provided, scopes to that single channel.
+        When omitted, returns the global max across all channels.
 
         Used by :class:`HistoryProvider` as the watermark for cache
-        freshness — if the cached summary's ``last_summarised_id``
-        matches this, the cache is fresh; otherwise it needs
-        regenerating.
+        freshness.
         """
-        row = self._conn.execute(
-            """
-            SELECT MAX(id) AS max_id
-              FROM turns
-             WHERE familiar_id = ?
-            """,
-            (familiar_id,),
-        ).fetchone()
+        if channel_id is not None:
+            row = self._conn.execute(
+                """
+                SELECT MAX(id) AS max_id
+                  FROM turns
+                 WHERE familiar_id = ? AND channel_id = ?
+                """,
+                (familiar_id, channel_id),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """
+                SELECT MAX(id) AS max_id
+                  FROM turns
+                 WHERE familiar_id = ?
+                """,
+                (familiar_id,),
+            ).fetchone()
         if row is None or row["max_id"] is None:
             return None
         return int(row["max_id"])
@@ -279,15 +401,16 @@ class HistoryStore:
         self,
         *,
         familiar_id: str,
+        channel_id: int = 0,
     ) -> SummaryEntry | None:
-        """Return the cached summary for the familiar, or ``None``."""
+        """Return the cached summary for the familiar + channel, or ``None``."""
         row = self._conn.execute(
             """
             SELECT last_summarised_id, summary_text, created_at
               FROM summaries
-             WHERE familiar_id = ?
+             WHERE familiar_id = ? AND channel_id = ?
             """,
-            (familiar_id,),
+            (familiar_id, channel_id),
         ).fetchone()
         if row is None:
             return None
@@ -303,16 +426,17 @@ class HistoryStore:
         familiar_id: str,
         last_summarised_id: int,
         summary_text: str,
+        channel_id: int = 0,
     ) -> None:
-        """Insert or replace the summary for the familiar."""
+        """Insert or replace the summary for the familiar + channel."""
         timestamp = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
             """
             INSERT INTO summaries
-                (familiar_id,
+                (familiar_id, channel_id,
                  last_summarised_id, summary_text, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (familiar_id)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (familiar_id, channel_id)
             DO UPDATE SET
                 last_summarised_id = excluded.last_summarised_id,
                 summary_text       = excluded.summary_text,
@@ -320,7 +444,106 @@ class HistoryStore:
             """,
             (
                 familiar_id,
+                channel_id,
                 last_summarised_id,
+                summary_text,
+                timestamp,
+            ),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # cross-context summaries
+    # ------------------------------------------------------------------
+
+    def distinct_other_channels(
+        self,
+        *,
+        familiar_id: str,
+        exclude_channel_id: int,
+    ) -> list[OtherChannelInfo]:
+        """Return info about other channels with activity for this familiar.
+
+        Each row carries the channel's most recent mode, latest turn id,
+        and latest timestamp. Channels with *only* the excluded channel_id
+        are omitted. Results are ordered by latest turn id descending
+        (most-recently-active first).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT channel_id, mode, MAX(id) AS latest_id,
+                   MAX(timestamp) AS latest_ts
+              FROM turns
+             WHERE familiar_id = ? AND channel_id != ?
+             GROUP BY channel_id
+             ORDER BY latest_id DESC
+            """,
+            (familiar_id, exclude_channel_id),
+        ).fetchall()
+        return [
+            OtherChannelInfo(
+                channel_id=int(row["channel_id"]),
+                mode=row["mode"],
+                latest_id=int(row["latest_id"]),
+                latest_timestamp=datetime.fromisoformat(row["latest_ts"]),
+            )
+            for row in rows
+        ]
+
+    def get_cross_context(
+        self,
+        *,
+        familiar_id: str,
+        viewer_mode: str,
+        source_channel_id: int,
+    ) -> CrossContextEntry | None:
+        """Return the cached cross-context summary, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT source_last_id, summary_text, created_at
+              FROM cross_context_summaries
+             WHERE familiar_id = ?
+               AND viewer_mode = ?
+               AND source_channel_id = ?
+            """,
+            (familiar_id, viewer_mode, source_channel_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return CrossContextEntry(
+            source_last_id=int(row["source_last_id"]),
+            summary_text=str(row["summary_text"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def put_cross_context(
+        self,
+        *,
+        familiar_id: str,
+        viewer_mode: str,
+        source_channel_id: int,
+        source_last_id: int,
+        summary_text: str,
+    ) -> None:
+        """Insert or replace a cross-context summary."""
+        timestamp = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO cross_context_summaries
+                (familiar_id, viewer_mode, source_channel_id,
+                 source_last_id, summary_text, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (familiar_id, viewer_mode, source_channel_id)
+            DO UPDATE SET
+                source_last_id = excluded.source_last_id,
+                summary_text   = excluded.summary_text,
+                created_at     = excluded.created_at
+            """,
+            (
+                familiar_id,
+                viewer_mode,
+                source_channel_id,
+                source_last_id,
                 summary_text,
                 timestamp,
             ),

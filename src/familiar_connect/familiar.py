@@ -166,11 +166,6 @@ class Familiar:
 
         providers: dict[str, ContextProvider] = {
             "character": CharacterProvider(memory_store),
-            "history": HistoryProvider(
-                store=history_store,
-                side_model=side_model,
-                window_size=character_config.history_window_size,
-            ),
             "content_search": ContentSearchProvider(
                 store=memory_store,
                 side_model=side_model,
@@ -236,6 +231,15 @@ class Familiar:
             for pid in channel_config.providers_enabled
             if pid in self.providers
         ]
+        if "history" in channel_config.providers_enabled:
+            active_providers.append(
+                HistoryProvider(
+                    store=self.history_store,
+                    side_model=self.side_model,
+                    window_size=self.config.history_window_size,
+                    mode=channel_config.mode,
+                ),
+            )
         if "mode_instructions" in channel_config.providers_enabled:
             active_providers.append(
                 ModeInstructionProvider(
