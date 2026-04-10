@@ -39,6 +39,7 @@ from familiar_connect.context.types import Layer
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
+    from familiar_connect.config import ChannelMode
     from familiar_connect.context.pipeline import PipelineOutput
     from familiar_connect.history.store import HistoryStore
 
@@ -101,6 +102,7 @@ def assemble_chat_messages(
     history_window_size: int = _DEFAULT_HISTORY_WINDOW,
     depth_inject_position: int = 0,
     depth_inject_role: str = "system",
+    mode: ChannelMode | None = None,
 ) -> list[Message]:
     """Return a list of :class:`Message` ready to hand to the LLM client.
 
@@ -136,6 +138,7 @@ def assemble_chat_messages(
         familiar_id=request.familiar_id,
         channel_id=request.channel_id,
         limit=history_window_size,
+        mode=mode,
     )
     for turn in turns:
         if turn.role == "user":

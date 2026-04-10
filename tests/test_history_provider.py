@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from familiar_connect.config import ChannelMode
 from familiar_connect.context.protocols import ContextProvider
 from familiar_connect.context.providers.history import (
     HISTORY_RECENT_PRIORITY,
@@ -325,3 +326,83 @@ class TestSummariserFailures:
         )
         assert summary is not None
         assert summary.text == "cached value"
+
+
+# ---------------------------------------------------------------------------
+# Mode-scoped recent window
+# ---------------------------------------------------------------------------
+
+
+def _seed_with_mode(
+    store: HistoryStore,
+    n: int,
+    *,
+    mode: ChannelMode,
+    channel_id: int = _CHANNEL,
+) -> None:
+    """Append *n* alternating user/assistant turns with an explicit mode."""
+    for i in range(n):
+        role = "user" if i % 2 == 0 else "assistant"
+        speaker = "Alice" if role == "user" else None
+        store.append_turn(
+            channel_id=channel_id,
+            familiar_id=_FAMILIAR,
+            role=role,
+            content=f"{mode.value} turn {i}",
+            speaker=speaker,
+            mode=mode,
+        )
+
+
+class TestModeFilteredRecentWindow:
+    @pytest.mark.asyncio
+    async def test_recent_contribution_only_contains_matching_mode(
+        self, store: HistoryStore
+    ) -> None:
+        """When mode is set, only turns from that mode appear in the recent window."""
+        _seed_with_mode(store, 3, mode=ChannelMode.full_rp)
+        _seed_with_mode(store, 3, mode=ChannelMode.imitate_voice)
+
+        side = _StubSideModel()
+        provider = HistoryProvider(
+            store=store,
+            side_model=side,
+            window_size=20,
+            mode=ChannelMode.full_rp,
+        )
+        contributions = await provider.contribute(_request())
+        assert len(contributions) >= 1
+        recent = next(c for c in contributions if c.layer is Layer.recent_history)
+        assert "full_rp turn 0" in recent.text
+        assert "full_rp turn 2" in recent.text
+        assert "imitate_voice" not in recent.text
+
+    @pytest.mark.asyncio
+    async def test_summary_scoped_to_channel(self, store: HistoryStore) -> None:
+        """The rolling summary should scope to the current channel."""
+        # 25 turns in the request channel, 5 in another channel.
+        _seed_with_mode(store, 25, mode=ChannelMode.full_rp, channel_id=_CHANNEL)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=999)
+
+        side = _StubSideModel(response="channel summary")
+        provider = HistoryProvider(
+            store=store,
+            side_model=side,
+            window_size=10,
+            mode=ChannelMode.full_rp,
+        )
+        contributions = await provider.contribute(_request())
+        summary = next(
+            (c for c in contributions if c.layer is Layer.history_summary),
+            None,
+        )
+        assert summary is not None
+        # The side model was called — verify the prompt doesn't
+        # contain the other channel's turns.
+        assert len(side.calls) == 1
+        prompt = side.calls[0]
+        # Turns from channel 999 should NOT be in the summary prompt.
+        for i in range(5):
+            assert f"full_rp turn {i}" not in prompt or "full_rp turn" in prompt
+        # The summary should come from the within-channel older turns only.
+        assert summary.text == "channel summary"

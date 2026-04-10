@@ -41,6 +41,7 @@ from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 
 if TYPE_CHECKING:
+    from familiar_connect.config import ChannelMode
     from familiar_connect.context.side_model import SideModel
     from familiar_connect.context.types import ContextRequest
     from familiar_connect.history.store import HistoryStore, HistoryTurn
@@ -106,6 +107,12 @@ class HistoryProvider:
         global rolling window. Setting it equal to ``window_size``
         also means single-channel scenarios produce zero overlap
         between the recent layer and the summary layer.
+    :param mode: The :class:`ChannelMode` this provider instance is
+        scoped to. One provider is constructed per turn inside
+        :meth:`Familiar.build_pipeline`, so the mode is fixed for
+        the lifetime of the provider. When ``None``, no mode
+        filtering is applied (backwards-compatible default for
+        existing callers and tests).
     :param summary_timeout_s: Soft cap on the summariser sub-call.
     :param max_summary_tokens: Approximate target length for the
         summariser's output.
@@ -121,6 +128,7 @@ class HistoryProvider:
         side_model: SideModel,
         window_size: int = DEFAULT_WINDOW_SIZE,
         summary_lag: int | None = None,
+        mode: ChannelMode | None = None,
         summary_timeout_s: float = DEFAULT_SUMMARY_TIMEOUT_S,
         max_summary_tokens: int = DEFAULT_MAX_SUMMARY_TOKENS,
     ) -> None:
@@ -131,6 +139,7 @@ class HistoryProvider:
         self._side_model = side_model
         self._window_size = window_size
         self._summary_lag = summary_lag if summary_lag is not None else window_size
+        self._mode = mode
         self._summary_timeout_s = summary_timeout_s
         self._max_summary_tokens = max_summary_tokens
 
@@ -150,10 +159,12 @@ class HistoryProvider:
             familiar_id=request.familiar_id,
             channel_id=request.channel_id,
             limit=self._window_size,
+            mode=self._mode,
         )
 
         latest = self._store.latest_id(
             familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
         )
         if latest is None:
             # No global history at all — nothing to surface, anywhere.
@@ -186,6 +197,7 @@ class HistoryProvider:
     ) -> str:
         cached = self._store.get_summary(
             familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
         )
         if cached is not None and cached.last_summarised_id >= target_max_id:
             return cached.summary_text
@@ -221,6 +233,7 @@ class HistoryProvider:
         older = self._store.older_than(
             familiar_id=request.familiar_id,
             max_id=target_max_id,
+            channel_id=request.channel_id,
         )
         if not older:
             return ""
@@ -239,6 +252,7 @@ class HistoryProvider:
         # Update the cache so future calls reuse this work.
         self._store.put_summary(
             familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
             last_summarised_id=target_max_id,
             summary_text=summary,
         )

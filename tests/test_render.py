@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from familiar_connect.config import ChannelMode
 from familiar_connect.context.budget import BudgetResult
 from familiar_connect.context.pipeline import PipelineOutput
 from familiar_connect.context.render import assemble_chat_messages
@@ -504,3 +505,55 @@ class TestHistoryWindowSize:
         assert "core" in messages[0].content
         contents = [m.content for m in messages[1:]]
         assert contents == ["four", "Alice: five", "Alice: six"]
+
+
+# ---------------------------------------------------------------------------
+# Mode-filtered history
+# ---------------------------------------------------------------------------
+
+
+class TestModeFilteredHistory:
+    def test_only_matching_mode_turns_appear_in_messages(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When mode is passed, only turns tagged with that mode surface."""
+        store = HistoryStore(tmp_path / "history.db")
+        store.append_turn(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            role="user",
+            content="rp action",
+            speaker="Alice",
+            mode=ChannelMode.full_rp,
+        )
+        store.append_turn(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            role="user",
+            content="voice line",
+            speaker="Alice",
+            mode=ChannelMode.imitate_voice,
+        )
+        store.append_turn(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            role="user",
+            content="another rp",
+            speaker="Alice",
+            mode=ChannelMode.full_rp,
+        )
+
+        request = _request(utterance="continue the scene")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(
+            output,
+            store=store,
+            mode=ChannelMode.full_rp,
+        )
+
+        contents = [m.content for m in messages[1:]]  # skip system prompt
+        # Should see only the two full_rp turns + the final user turn.
+        assert any("rp action" in c for c in contents)
+        assert any("another rp" in c for c in contents)
+        assert not any("voice line" in c for c in contents)

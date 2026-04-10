@@ -201,6 +201,7 @@ def _build_voice_response_handler(
             history_window_size=familiar.config.history_window_size,
             depth_inject_position=familiar.config.depth_inject_position,
             depth_inject_role=familiar.config.depth_inject_role,
+            mode=channel_config.mode,
         )
 
         reply = await familiar.llm_client.chat(messages)
@@ -215,6 +216,7 @@ def _build_voice_response_handler(
             role="user",
             content=result.text,
             speaker=safe_name,
+            mode=channel_config.mode,
         )
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
@@ -222,6 +224,7 @@ def _build_voice_response_handler(
             guild_id=guild_id,
             role="assistant",
             content=reply_text,
+            mode=channel_config.mode,
         )
 
         _logger.info("[Voice Response] %s", reply_text)
@@ -437,6 +440,7 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
         history_window_size=familiar.config.history_window_size,
         depth_inject_position=familiar.config.depth_inject_position,
         depth_inject_role=familiar.config.depth_inject_role,
+        mode=channel_config.mode,
     )
 
     async with message.channel.typing():
@@ -453,6 +457,7 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
         role="user",
         content=message.content,
         speaker=speaker,
+        mode=channel_config.mode,
     )
     familiar.history_store.append_turn(
         familiar_id=familiar.id,
@@ -460,6 +465,7 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
         guild_id=guild_id,
         role="assistant",
         content=reply_text,
+        mode=channel_config.mode,
     )
 
     await message.channel.send(reply_text)
