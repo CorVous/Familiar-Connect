@@ -29,6 +29,7 @@ import discord
 import pytest
 
 from familiar_connect.bot import (
+    _run_text_response,
     create_bot,
     on_message,
     set_channel_mode,
@@ -37,6 +38,7 @@ from familiar_connect.bot import (
     unsubscribe_text,
     unsubscribe_voice,
 )
+from familiar_connect.chattiness import BufferedMessage
 from familiar_connect.config import ChannelMode
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
@@ -180,17 +182,32 @@ def _make_voice_ctx(
 
 
 # ---------------------------------------------------------------------------
-# on_message happy path
+# on_message — routes to monitor
 # ---------------------------------------------------------------------------
 
 
-class TestOnMessagePipelineIntegration:
+def _make_channel(channel_id: int = 12345) -> MagicMock:
+    """Build a minimal fake discord.TextChannel for _run_text_response tests."""
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = channel_id
+    channel.send = AsyncMock()
+    typing_cm = MagicMock()
+    typing_cm.__aenter__ = AsyncMock(return_value=None)
+    typing_cm.__aexit__ = AsyncMock(return_value=False)
+    channel.typing = MagicMock(return_value=typing_cm)
+    return channel
+
+
+class TestOnMessageMonitorRouting:
+    """on_message now delegates to familiar.monitor.on_message."""
+
     def test_message_outside_subscription_is_ignored(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
+        mock = AsyncMock()
+        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
         msg = _make_message()
         asyncio.run(on_message(msg, familiar))
-        assert isinstance(familiar.llm_client, _StubLLMClient)
-        assert familiar.llm_client.calls == []
+        mock.assert_not_called()
 
     def test_bot_messages_are_ignored(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
@@ -199,88 +216,188 @@ class TestOnMessagePipelineIntegration:
             kind=SubscriptionKind.text,
             guild_id=999,
         )
+        mock = AsyncMock()
+        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
         msg = _make_message(author_bot=True)
         asyncio.run(on_message(msg, familiar))
-        assert isinstance(familiar.llm_client, _StubLLMClient)
-        assert familiar.llm_client.calls == []
+        mock.assert_not_called()
 
-    def test_subscribed_message_reaches_llm(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="Hello Alice.")
+    def test_subscribed_message_calls_monitor(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path)
         familiar.subscriptions.add(
             channel_id=12345,
             kind=SubscriptionKind.text,
             guild_id=999,
         )
-        # Use imitate_voice mode so stepped_thinking doesn't inflate call counts
-        # — we want a clean "the main LLM call happened once" assertion.
-        familiar.channel_configs.set_mode(
-            channel_id=12345,
-            mode=ChannelMode.imitate_voice,
-        )
+        mock = AsyncMock()
+        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
         msg = _make_message(content="hi", channel_id=12345)
-
         asyncio.run(on_message(msg, familiar))
+        mock.assert_called_once()
+        call_kwargs = mock.call_args.kwargs
+        assert call_kwargs["channel_id"] == 12345
+        assert call_kwargs["text"] == "hi"
+        assert call_kwargs["speaker"] == "Alice"
+
+    def test_on_message_passes_is_mention(self, tmp_path: Path) -> None:
+        """Bot @mention is passed through to the monitor."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345,
+            kind=SubscriptionKind.text,
+            guild_id=999,
+        )
+        mock = AsyncMock()
+        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
+        msg = _make_message(content="hey there", channel_id=12345)
+        # Simulate a mention by adding bot_user to extras and message.mentions
+        bot_user = MagicMock()
+        familiar.extras["bot_user"] = bot_user
+        msg.mentions = [bot_user]
+        msg.guild = MagicMock()
+        msg.guild.id = 999
+        asyncio.run(on_message(msg, familiar))
+        call_kwargs = mock.call_args.kwargs
+        assert call_kwargs["is_mention"] is True
+
+
+# ---------------------------------------------------------------------------
+# _run_text_response — full pipeline path
+# ---------------------------------------------------------------------------
+
+
+class TestOnRespond:
+    """_run_text_response exercises the full pipeline + LLM + reply path."""
+
+    def test_subscribed_message_reaches_llm(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path, reply="Hello Alice.")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.imitate_voice
+        )
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        asyncio.run(
+            _run_text_response(
+                channel_id=12345,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hi",
+                buffer=buffer,
+                familiar=familiar,
+                channel=channel,
+            )
+        )
 
         llm = familiar.llm_client
         assert isinstance(llm, _StubLLMClient)
-        # The main call is the one whose message list starts with a system
-        # prompt; the recast post-processor's call is a single user message.
         main_calls = [c for c in llm.calls if c and c[0].role == "system"]
         assert len(main_calls) == 1
         messages = main_calls[0]
         assert messages[0].role == "system"
         assert messages[-1].role == "user"
-        # The renderer prefixes user turns with "Speaker: " for cross-model
-        # reliability (OpenRouter drops the OpenAI ``name`` field on
-        # non-OpenAI backends).
         assert messages[-1].content == "Alice: hi"
 
     def test_reply_posted_to_channel(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path, reply="Hello Alice.")
         familiar.subscriptions.add(
-            channel_id=12345,
-            kind=SubscriptionKind.text,
-            guild_id=999,
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
-        # Use imitate_voice so we can assert on exact text without recast
-        # or stepped_thinking mangling it — in imitate_voice, recast runs
-        # and strips trailing whitespace but preserves the stub reply.
         familiar.channel_configs.set_mode(
-            channel_id=12345,
-            mode=ChannelMode.imitate_voice,
+            channel_id=12345, mode=ChannelMode.imitate_voice
         )
-        msg = _make_message(content="hi")
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
-        asyncio.run(on_message(msg, familiar))
+        asyncio.run(
+            _run_text_response(
+                channel_id=12345,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hi",
+                buffer=buffer,
+                familiar=familiar,
+                channel=channel,
+            )
+        )
 
-        msg.channel.send.assert_called_once_with("Hello Alice.")
+        channel.send.assert_called_once_with("Hello Alice.")
 
     def test_turns_are_persisted_to_history(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path, reply="Hello.")
         familiar.subscriptions.add(
-            channel_id=12345,
-            kind=SubscriptionKind.text,
-            guild_id=999,
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
         familiar.channel_configs.set_mode(
-            channel_id=12345,
-            mode=ChannelMode.imitate_voice,
+            channel_id=12345, mode=ChannelMode.imitate_voice
         )
-        msg = _make_message(content="hi there")
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hi there", timestamp=0.0)]
 
-        asyncio.run(on_message(msg, familiar))
+        asyncio.run(
+            _run_text_response(
+                channel_id=12345,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hi there",
+                buffer=buffer,
+                familiar=familiar,
+                channel=channel,
+            )
+        )
 
         turns = familiar.history_store.recent(
             familiar_id=familiar.id,
             channel_id=12345,
             limit=10,
         )
-        # user turn + assistant turn
         assert len(turns) == 2
         assert turns[0].role == "user"
         assert turns[0].content == "hi there"
         assert turns[1].role == "assistant"
         assert turns[1].content == "Hello."
+
+    def test_multiple_buffered_messages_all_persisted(self, tmp_path: Path) -> None:
+        """All buffered user messages are persisted, not just the trigger."""
+        familiar = _make_familiar(tmp_path, reply="Sure.")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.imitate_voice
+        )
+        channel = _make_channel(12345)
+        buffer = [
+            BufferedMessage(speaker="Alice", text="msg1", timestamp=0.0),
+            BufferedMessage(speaker="Bob", text="msg2", timestamp=1.0),
+            BufferedMessage(speaker="Alice", text="msg3", timestamp=2.0),
+        ]
+
+        asyncio.run(
+            _run_text_response(
+                channel_id=12345,
+                guild_id=999,
+                speaker="Alice",
+                utterance="msg3",
+                buffer=buffer,
+                familiar=familiar,
+                channel=channel,
+            )
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id,
+            channel_id=12345,
+            limit=20,
+        )
+        user_turns = [t for t in turns if t.role == "user"]
+        assert len(user_turns) == 3
+        assert user_turns[0].content == "msg1"
+        assert user_turns[1].content == "msg2"
+        assert user_turns[2].content == "msg3"
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +448,21 @@ class TestSubscriptionCommands:
             familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
             is None
         )
+
+    def test_unsubscribe_text_clears_monitor_state(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=42,
+            kind=SubscriptionKind.text,
+            guild_id=999,
+        )
+        mock_clear = MagicMock()
+        familiar.monitor.clear_channel = mock_clear  # ty: ignore[invalid-assignment]
+        ctx = _make_text_ctx(channel_id=42, guild_id=999)
+
+        asyncio.run(unsubscribe_text(ctx, familiar))
+
+        mock_clear.assert_called_once_with(42)
 
 
 # ---------------------------------------------------------------------------

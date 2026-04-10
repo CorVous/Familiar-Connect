@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from typing import Any
 
+    from familiar_connect.chattiness import BufferedMessage
     from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
@@ -139,6 +140,7 @@ async def unsubscribe_text(
         channel_id=channel_id,
         kind=SubscriptionKind.text,
     )
+    familiar.monitor.clear_channel(channel_id)
     await ctx.respond("No longer listening here.")
 
 
@@ -380,49 +382,45 @@ async def set_channel_mode(
 
 
 # ---------------------------------------------------------------------------
-# Message loop
+# Pipeline response path
 # ---------------------------------------------------------------------------
 
 
-async def on_message(message: discord.Message, familiar: Familiar) -> None:
-    """Route an incoming Discord message through the context pipeline.
+async def _run_text_response(
+    channel_id: int,
+    guild_id: int | None,
+    speaker: str,
+    utterance: str,
+    buffer: list[BufferedMessage],
+    familiar: Familiar,
+    channel: discord.TextChannel,
+) -> None:
+    """Execute the full pipeline → LLM → reply path for a text channel.
 
-    The flow:
+    Called by the ``on_respond`` callback built in :func:`create_bot`
+    when the :class:`ConversationMonitor` decides the familiar should
+    speak. Persists all buffered user messages to history (in order)
+    and then the assistant reply, so the history store has a complete
+    record of the conversation even though some messages were buffered
+    before the pipeline ran.
 
-    1. Ignore bot messages.
-    2. Look up the text subscription for this channel; return if absent.
-    3. Load the channel's :class:`ChannelConfig` (falls back to the
-       character's default mode).
-    4. Build a :class:`ContextRequest`.
-    5. Run the per-channel :class:`ContextPipeline`.
-    6. Assemble chat messages via :func:`assemble_chat_messages`.
-    7. Call the main LLM.
-    8. Run post-processors against the reply.
-    9. Persist the user + assistant turns to :class:`HistoryStore`.
-    10. Post the final reply. Fan out to TTS if a voice sub exists
-        in the same guild.
+    :param channel_id: Discord channel id.
+    :param guild_id: Discord guild id, or ``None`` for DMs.
+    :param speaker: Sanitised display name of the triggering speaker.
+    :param utterance: Text of the most recent (trigger) message.
+    :param buffer: All messages accumulated since the last response,
+        including the trigger. Persisted to history after the LLM call.
+    :param familiar: The active :class:`Familiar` bundle.
+    :param channel: Discord text channel to send the reply to.
     """
-    if message.author.bot:
-        return
-
-    channel_id = message.channel.id
-    text_sub = familiar.subscriptions.get(
-        channel_id=channel_id,
-        kind=SubscriptionKind.text,
-    )
-    if text_sub is None:
-        return
-
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
-    guild_id = message.guild.id if message.guild is not None else None
-    speaker = sanitize_name(message.author.display_name)
 
     request = ContextRequest(
         familiar_id=familiar.id,
         channel_id=channel_id,
         guild_id=guild_id,
         speaker=speaker,
-        utterance=message.content,
+        utterance=utterance,
         modality=Modality.text,
         budget_tokens=channel_config.budget_tokens,
         deadline_s=channel_config.deadline_s,
@@ -445,22 +443,24 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
         display_tz=familiar.config.display_tz,
     )
 
-    async with message.channel.typing():
+    async with channel.typing():
         reply = await familiar.llm_client.chat(messages)
 
     reply_text = await pipeline.run_post_processors(reply.content, request)
 
-    # Persist both turns *after* the LLM call so a mid-request crash
-    # doesn't leave the store with a user turn but no reply.
-    familiar.history_store.append_turn(
-        familiar_id=familiar.id,
-        channel_id=channel_id,
-        guild_id=guild_id,
-        role="user",
-        content=message.content,
-        speaker=speaker,
-        mode=channel_config.mode,
-    )
+    # Persist all buffered user turns, then the assistant reply. Done
+    # after the LLM call so a mid-request crash doesn't leave an
+    # orphaned user turn with no reply.
+    for msg in buffer:
+        familiar.history_store.append_turn(
+            familiar_id=familiar.id,
+            channel_id=channel_id,
+            guild_id=guild_id,
+            role="user",
+            content=msg.text,
+            speaker=msg.speaker,
+            mode=channel_config.mode,
+        )
     familiar.history_store.append_turn(
         familiar_id=familiar.id,
         channel_id=channel_id,
@@ -470,16 +470,17 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
         mode=channel_config.mode,
     )
 
-    await message.channel.send(reply_text)
+    await channel.send(reply_text)
 
     # TTS fan-out: if a voice sub exists in this guild and a voice
     # client is connected, speak the same reply the text channel saw.
+    guild = getattr(channel, "guild", None)
     if (
         familiar.tts_client is not None
-        and message.guild is not None
-        and familiar.subscriptions.voice_in_guild(message.guild.id) is not None
+        and guild is not None
+        and familiar.subscriptions.voice_in_guild(guild.id) is not None
     ):
-        vc = message.guild.voice_client
+        vc = guild.voice_client
         if vc is not None and not vc.is_playing():
             try:
                 pcm_mono = await familiar.tts_client.synthesize(reply_text)
@@ -487,6 +488,53 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
                 vc.play(discord.PCMAudio(io.BytesIO(stereo)))
             except Exception:
                 _logger.exception("TTS synthesis failed")
+
+
+# ---------------------------------------------------------------------------
+# Message loop
+# ---------------------------------------------------------------------------
+
+
+async def on_message(message: discord.Message, familiar: Familiar) -> None:
+    """Hand an incoming Discord message to the conversation monitor.
+
+    The monitor decides whether and when the familiar responds. If it
+    does, the ``on_respond`` callback (wired up in :func:`create_bot`)
+    calls :func:`_run_text_response` with the buffered messages.
+
+    Flow:
+
+    1. Ignore bot messages.
+    2. Look up the text subscription for this channel; return if absent.
+    3. Detect whether the bot itself is @mentioned.
+    4. Delegate to :attr:`familiar.monitor.on_message`.
+    """
+    if message.author.bot:
+        return
+
+    channel_id = message.channel.id
+    text_sub = familiar.subscriptions.get(
+        channel_id=channel_id,
+        kind=SubscriptionKind.text,
+    )
+    if text_sub is None:
+        return
+
+    bot_user = familiar.extras.get("bot_user")
+    is_mention = (
+        message.guild is not None
+        and bot_user is not None
+        and bot_user in message.mentions
+    )
+
+    raw_name = message.author.display_name
+    speaker = sanitize_name(raw_name) or raw_name
+    await familiar.monitor.on_message(
+        channel_id=channel_id,
+        speaker=speaker,
+        text=message.content,
+        is_mention=is_mention,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -498,13 +546,52 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     """Create and configure the Discord bot bound to *familiar*.
 
     Registers the full subscription + channel-mode slash command
-    surface and wires ``on_message`` to the pipeline-routed handler.
+    surface and wires ``on_message`` to the monitor-routed handler.
+    Also builds and installs the ``on_respond`` callback on the
+    :class:`ConversationMonitor` so pipeline responses can reach
+    Discord channels.
     """
     intents = discord.Intents.default()
     intents.voice_states = True
     intents.message_content = True
     intents.messages = True
     bot = discord.Bot(intents=intents)
+
+    # Store bot.user in extras once the bot is ready so on_message can
+    # detect @mentions by comparing against bot.user in message.mentions.
+    @bot.event
+    async def on_ready() -> None:  # noqa: RUF029
+        familiar.extras["bot_user"] = bot.user
+
+    # Build the on_respond callback that drives the full pipeline path.
+    # Captured variables: bot (for channel lookup) and familiar.
+    async def _on_respond(
+        channel_id: int,
+        buffer: list[BufferedMessage],
+    ) -> None:
+        channel = bot.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        sub = familiar.subscriptions.get(
+            channel_id=channel_id,
+            kind=SubscriptionKind.text,
+        )
+        if sub is None:
+            return
+        last = buffer[-1] if buffer else None
+        if last is None:
+            return
+        await _run_text_response(
+            channel_id=channel_id,
+            guild_id=sub.guild_id,
+            speaker=last.speaker,
+            utterance=last.text,
+            buffer=buffer,
+            familiar=familiar,
+            channel=channel,
+        )
+
+    familiar.monitor.on_respond = _on_respond
 
     # --- /subscribe-* / /unsubscribe-* ---
     async def _subscribe_text_cmd(ctx: discord.ApplicationContext) -> None:
