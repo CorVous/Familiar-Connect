@@ -680,3 +680,115 @@ class TestLatestIdPerChannel:
         latest_100 = s.latest_id(familiar_id=_FAMILIAR, channel_id=100)
         assert latest_100 is not None
         assert latest_100 < last_200.id
+
+
+# ---------------------------------------------------------------------------
+# Cross-context support: distinct_other_channels + cache
+# ---------------------------------------------------------------------------
+
+
+class TestDistinctOtherChannels:
+    def test_returns_other_channels_with_mode(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="a",
+            mode=ChannelMode.full_rp,
+        )
+        s.append_turn(
+            channel_id=200,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="b",
+            mode=ChannelMode.text_conversation_rp,
+        )
+        s.append_turn(
+            channel_id=300,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="c",
+            mode=ChannelMode.imitate_voice,
+        )
+        others = s.distinct_other_channels(
+            familiar_id=_FAMILIAR,
+            exclude_channel_id=100,
+        )
+        channel_ids = {o.channel_id for o in others}
+        assert channel_ids == {200, 300}
+        # Should carry mode info.
+        modes = {o.channel_id: o.mode for o in others}
+        assert modes[200] == "text_conversation_rp"
+        assert modes[300] == "imitate_voice"
+
+    def test_empty_when_no_other_channels(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="only",
+            mode=ChannelMode.full_rp,
+        )
+        others = s.distinct_other_channels(
+            familiar_id=_FAMILIAR,
+            exclude_channel_id=100,
+        )
+        assert others == []
+
+
+class TestCrossContextCache:
+    def test_put_and_get_round_trip(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.put_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=200,
+            source_last_id=42,
+            summary_text="Meanwhile in chat...",
+        )
+        entry = s.get_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=200,
+        )
+        assert entry is not None
+        assert entry.source_last_id == 42
+        assert entry.summary_text == "Meanwhile in chat..."
+
+    def test_get_missing_returns_none(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert (
+            s.get_cross_context(
+                familiar_id=_FAMILIAR,
+                viewer_mode="full_rp",
+                source_channel_id=999,
+            )
+            is None
+        )
+
+    def test_upsert_overwrites(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.put_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=200,
+            source_last_id=10,
+            summary_text="old",
+        )
+        s.put_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=200,
+            source_last_id=20,
+            summary_text="new",
+        )
+        entry = s.get_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=200,
+        )
+        assert entry is not None
+        assert entry.source_last_id == 20
+        assert entry.summary_text == "new"

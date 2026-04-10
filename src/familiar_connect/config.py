@@ -193,6 +193,7 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
                 Layer.core: 300,
                 Layer.character: 700,
                 Layer.recent_history: 900,
+                Layer.history_summary: 200,
                 Layer.author_note: 150,
                 Layer.depth_inject: 100,
             },

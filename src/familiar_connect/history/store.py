@@ -65,6 +65,25 @@ class SummaryEntry:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class OtherChannelInfo:
+    """Summary info about another channel's recent activity."""
+
+    channel_id: int
+    mode: str | None
+    latest_id: int
+    latest_timestamp: datetime
+
+
+@dataclass(frozen=True)
+class CrossContextEntry:
+    """A cached cross-context summary for one source channel."""
+
+    source_last_id: int
+    summary_text: str
+    created_at: datetime
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +113,16 @@ CREATE TABLE IF NOT EXISTS summaries (
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
     PRIMARY KEY (familiar_id, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS cross_context_summaries (
+    familiar_id        TEXT    NOT NULL,
+    viewer_mode        TEXT    NOT NULL,
+    source_channel_id  INTEGER NOT NULL,
+    source_last_id     INTEGER NOT NULL,
+    summary_text       TEXT    NOT NULL,
+    created_at         TEXT    NOT NULL,
+    PRIMARY KEY (familiar_id, viewer_mode, source_channel_id)
 );
 """
 
@@ -417,6 +446,104 @@ class HistoryStore:
                 familiar_id,
                 channel_id,
                 last_summarised_id,
+                summary_text,
+                timestamp,
+            ),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # cross-context summaries
+    # ------------------------------------------------------------------
+
+    def distinct_other_channels(
+        self,
+        *,
+        familiar_id: str,
+        exclude_channel_id: int,
+    ) -> list[OtherChannelInfo]:
+        """Return info about other channels with activity for this familiar.
+
+        Each row carries the channel's most recent mode, latest turn id,
+        and latest timestamp. Channels with *only* the excluded channel_id
+        are omitted. Results are ordered by latest turn id descending
+        (most-recently-active first).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT channel_id, mode, MAX(id) AS latest_id,
+                   MAX(timestamp) AS latest_ts
+              FROM turns
+             WHERE familiar_id = ? AND channel_id != ?
+             GROUP BY channel_id
+             ORDER BY latest_id DESC
+            """,
+            (familiar_id, exclude_channel_id),
+        ).fetchall()
+        return [
+            OtherChannelInfo(
+                channel_id=int(row["channel_id"]),
+                mode=row["mode"],
+                latest_id=int(row["latest_id"]),
+                latest_timestamp=datetime.fromisoformat(row["latest_ts"]),
+            )
+            for row in rows
+        ]
+
+    def get_cross_context(
+        self,
+        *,
+        familiar_id: str,
+        viewer_mode: str,
+        source_channel_id: int,
+    ) -> CrossContextEntry | None:
+        """Return the cached cross-context summary, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT source_last_id, summary_text, created_at
+              FROM cross_context_summaries
+             WHERE familiar_id = ?
+               AND viewer_mode = ?
+               AND source_channel_id = ?
+            """,
+            (familiar_id, viewer_mode, source_channel_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return CrossContextEntry(
+            source_last_id=int(row["source_last_id"]),
+            summary_text=str(row["summary_text"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def put_cross_context(
+        self,
+        *,
+        familiar_id: str,
+        viewer_mode: str,
+        source_channel_id: int,
+        source_last_id: int,
+        summary_text: str,
+    ) -> None:
+        """Insert or replace a cross-context summary."""
+        timestamp = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO cross_context_summaries
+                (familiar_id, viewer_mode, source_channel_id,
+                 source_last_id, summary_text, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (familiar_id, viewer_mode, source_channel_id)
+            DO UPDATE SET
+                source_last_id = excluded.source_last_id,
+                summary_text   = excluded.summary_text,
+                created_at     = excluded.created_at
+            """,
+            (
+                familiar_id,
+                viewer_mode,
+                source_channel_id,
+                source_last_id,
                 summary_text,
                 timestamp,
             ),
