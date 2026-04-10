@@ -16,3 +16,6 @@ wheels/
 
 # Auto-generated version file
 src/*/_version.py
+
+# Familiar Data
+data/familiars/
