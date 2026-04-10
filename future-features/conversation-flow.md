@@ -64,8 +64,8 @@ Enum controlling how long the familiar waits before the side model is even consu
 | `very_quiet`         | 15                           |
 | `quiet`              | 12                           |
 | `average`            | 9                            |
-| `interjective`       | 6                            |
-| `very_interjective`  | 3                            |
+| `eager`              | 6                            |
+| `very_eager`         | 3                            |
 
 ### `lull_timeout: float`
 

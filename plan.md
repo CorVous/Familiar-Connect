@@ -75,7 +75,7 @@ Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz → stream 
 A `ConversationMonitor` gates whether the bot responds. Messages buffer per-channel; a side model (cheap LLM) is consulted to decide if the familiar wants to speak. Two orthogonal controls in `character.toml`:
 
 - **Chattiness** (`str`) — free-text personality trait (e.g. `"Curious and opinionated"`) fed to the side model's evaluation prompt. The LLM decides whether the familiar would want to respond based on this personality and the conversation content.
-- **Interjection** (`Interjection` enum) — controls how many messages pass before the side model is even consulted. Five tiers: `very_quiet` (first check at 15 messages), `quiet` (12), `average` (9), `interjective` (6), `very_interjective` (3). After each declined check, the interval decreases by 3, flooring at 3.
+- **Interjection** (`Interjection` enum) — controls how many messages pass before the side model is even consulted. Five tiers: `very_quiet` (first check at 15 messages), `quiet` (12), `average` (9), `eager` (6), `very_eager` (3). After each declined check, the interval decreases by 3, flooring at 3.
 
 **Three triggers, one evaluation path:**
 
