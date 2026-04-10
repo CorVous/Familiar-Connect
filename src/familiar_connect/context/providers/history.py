@@ -37,11 +37,11 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from familiar_connect.config import ChannelMode
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 
 if TYPE_CHECKING:
-    from familiar_connect.config import ChannelMode
     from familiar_connect.context.side_model import SideModel
     from familiar_connect.context.types import ContextRequest
     from familiar_connect.history.store import (
@@ -296,7 +296,13 @@ class HistoryProvider:
         self,
         request: ContextRequest,
     ) -> list[Contribution]:
-        """Build cross-context summaries for other channels' activity."""
+        """Build cross-context summaries for other channels' activity.
+
+        For ``full_rp`` mode the summaries are built and cached (so the
+        renderer can read them for mid-chat breadcrumbs) but NOT emitted
+        as ``Layer.history_summary`` contributions — that would duplicate
+        the information the renderer already places at the gap.
+        """
         assert self._mode is not None  # caller guards  # noqa: S101
         others = self._store.distinct_other_channels(
             familiar_id=request.familiar_id,
@@ -307,12 +313,13 @@ class HistoryProvider:
 
         contributions: list[Contribution] = []
         viewer_mode_desc = _MODE_DESCRIPTIONS.get(self._mode.value, self._mode.value)
+        emit = self._mode is not ChannelMode.full_rp
 
         for info in others[:_MAX_CROSS_CHANNELS]:
             text = await self._fetch_or_build_cross_context(
                 request, info, viewer_mode_desc
             )
-            if text:
+            if text and emit:
                 contributions.append(
                     Contribution(
                         layer=Layer.history_summary,

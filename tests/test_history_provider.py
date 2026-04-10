@@ -415,21 +415,19 @@ class TestModeFilteredRecentWindow:
 
 class TestCrossContextContributions:
     @pytest.mark.asyncio
-    async def test_cross_context_emitted_per_other_channel(
+    async def test_cross_context_emitted_for_non_full_rp(
         self, store: HistoryStore
     ) -> None:
-        """When other channels have activity, cross-context summaries appear."""
-        # Current channel (100) has full_rp turns.
-        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
-        # Other channel (200) has text_conversation_rp turns.
-        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=200)
+        """Non-full_rp modes get cross-context as contributions."""
+        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
-        side = _StubSideModel(response="Meanwhile in text chat...")
+        side = _StubSideModel(response="Meanwhile in the RP scene...")
         provider = HistoryProvider(
             store=store,
             side_model=side,
             window_size=20,
-            mode=ChannelMode.full_rp,
+            mode=ChannelMode.text_conversation_rp,
         )
         contributions = await provider.contribute(_request(channel_id=100))
 
@@ -442,44 +440,17 @@ class TestCrossContextContributions:
         assert "Meanwhile" in cross[0].text
 
     @pytest.mark.asyncio
-    async def test_cross_context_cache_reuse(self, store: HistoryStore) -> None:
-        """A fresh cross-context cache is reused without re-calling the side model."""
-        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
-        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=200)
-
-        side = _StubSideModel(response="cached cross summary")
-        provider = HistoryProvider(
-            store=store,
-            side_model=side,
-            window_size=20,
-            mode=ChannelMode.full_rp,
-        )
-        # First call builds the cache.
-        await provider.contribute(_request(channel_id=100))
-        call_count_after_first = len(side.calls)
-
-        # Second call should reuse the cache — no new side-model calls
-        # for the cross-context summary.
-        await provider.contribute(_request(channel_id=100))
-        # The side model may be called for the within-channel summary,
-        # but the cross-context summary call should not repeat.
-        cross_calls = [
-            c
-            for c in side.calls[call_count_after_first:]
-            if "cross" in c.lower() or "meanwhile" in c.lower()
-        ]
-        # No new cross-context calls expected — the cache is fresh.
-        assert cross_calls == []
-
-    @pytest.mark.asyncio
-    async def test_cross_context_falls_back_on_side_model_failure(
+    async def test_full_rp_caches_but_does_not_emit_cross_context(
         self, store: HistoryStore
     ) -> None:
-        """When the side model fails, cross-context contributions are skipped."""
+        """full_rp caches cross-context but does not emit contributions.
+
+        The renderer inserts them as mid-chat breadcrumbs instead.
+        """
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=200)
 
-        side = _StubSideModel(exc=RuntimeError("kaboom"))
+        side = _StubSideModel(response="Meanwhile in text chat...")
         provider = HistoryProvider(
             store=store,
             side_model=side,
@@ -488,10 +459,68 @@ class TestCrossContextContributions:
         )
         contributions = await provider.contribute(_request(channel_id=100))
 
+        # No cross-context contributions emitted for full_rp.
         cross = [
             c for c in contributions if c.source.startswith("history:cross_channel:")
         ]
-        # The failure is gracefully handled — no cross contributions.
+        assert cross == []
+
+        # But the cache was populated so the renderer can use it.
+        cached = store.get_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=200,
+        )
+        assert cached is not None
+        assert "Meanwhile" in cached.summary_text
+
+    @pytest.mark.asyncio
+    async def test_cross_context_cache_reuse(self, store: HistoryStore) -> None:
+        """A fresh cross-context cache is reused without re-calling the side model."""
+        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
+
+        side = _StubSideModel(response="cached cross summary")
+        provider = HistoryProvider(
+            store=store,
+            side_model=side,
+            window_size=20,
+            mode=ChannelMode.text_conversation_rp,
+        )
+        # First call builds the cache.
+        await provider.contribute(_request(channel_id=100))
+        call_count_after_first = len(side.calls)
+
+        # Second call should reuse the cache — no new side-model calls
+        # for the cross-context summary.
+        await provider.contribute(_request(channel_id=100))
+        cross_calls = [
+            c
+            for c in side.calls[call_count_after_first:]
+            if "cross" in c.lower() or "meanwhile" in c.lower()
+        ]
+        assert cross_calls == []
+
+    @pytest.mark.asyncio
+    async def test_cross_context_falls_back_on_side_model_failure(
+        self, store: HistoryStore
+    ) -> None:
+        """When the side model fails, cross-context contributions are skipped."""
+        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
+
+        side = _StubSideModel(exc=RuntimeError("kaboom"))
+        provider = HistoryProvider(
+            store=store,
+            side_model=side,
+            window_size=20,
+            mode=ChannelMode.text_conversation_rp,
+        )
+        contributions = await provider.contribute(_request(channel_id=100))
+
+        cross = [
+            c for c in contributions if c.source.startswith("history:cross_channel:")
+        ]
         assert cross == []
 
     @pytest.mark.asyncio
@@ -499,14 +528,14 @@ class TestCrossContextContributions:
         self, store: HistoryStore
     ) -> None:
         """Single-channel familiars produce no cross-context contributions."""
-        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
 
         side = _StubSideModel(response="should not appear")
         provider = HistoryProvider(
             store=store,
             side_model=side,
             window_size=20,
-            mode=ChannelMode.full_rp,
+            mode=ChannelMode.text_conversation_rp,
         )
         contributions = await provider.contribute(_request(channel_id=100))
 

@@ -106,6 +106,11 @@ def _format_timestamp(ts: datetime, tz_name: str) -> str:
 
 _GAP_THRESHOLD = timedelta(seconds=30)
 
+_FULL_RP_GAP_THRESHOLD = timedelta(minutes=5)
+"""Minimum gap between full_rp turns before a cross-context breadcrumb
+is considered. Longer than the voice gap threshold because RP scenes
+have natural typing pauses that shouldn't trigger breadcrumbs."""
+
 
 def _format_gap(delta: timedelta) -> str | None:
     """Return a human-readable gap hint, or ``None`` if under threshold.
@@ -125,6 +130,27 @@ def _format_gap(delta: timedelta) -> str | None:
         return f"(about {hours} hour{'s' if hours != 1 else ''} later)"
     days = hours // 24
     return f"(about {days} day{'s' if days != 1 else ''} later)"
+
+
+def _collect_gap_breadcrumbs(
+    cross_summaries: dict[int, str],
+    cross_timestamps: dict[int, datetime],
+    *,
+    gap_start: datetime,
+    gap_end: datetime,
+) -> str:
+    """Return combined breadcrumb text for cross-channel activity during a gap.
+
+    Only includes summaries whose latest activity timestamp falls
+    strictly within ``(gap_start, gap_end)``. Returns an empty string
+    when no channels qualify.
+    """
+    parts: list[str] = []
+    for channel_id, summary in cross_summaries.items():
+        ts = cross_timestamps.get(channel_id)
+        if ts is not None and gap_start < ts < gap_end:
+            parts.append(summary)
+    return " ".join(parts)
 
 
 def assemble_chat_messages(
@@ -177,9 +203,45 @@ def assemble_chat_messages(
         limit=history_window_size,
         mode=mode,
     )
+
+    # Pre-fetch cross-context data for full_rp breadcrumbs.
+    cross_summaries: dict[int, str] = {}
+    cross_timestamps: dict[int, datetime] = {}
+    if mode is ChannelMode.full_rp:
+        others = store.distinct_other_channels(
+            familiar_id=request.familiar_id,
+            exclude_channel_id=request.channel_id,
+        )
+        for info in others:
+            cached = store.get_cross_context(
+                familiar_id=request.familiar_id,
+                viewer_mode="full_rp",
+                source_channel_id=info.channel_id,
+            )
+            if cached is not None:
+                cross_summaries[info.channel_id] = cached.summary_text
+                cross_timestamps[info.channel_id] = info.latest_timestamp
+
     prev_ts: datetime | None = None
     for turn in turns:
         content = turn.content
+
+        # full_rp gap breadcrumbs: when there's a gap >= 5 minutes AND
+        # another channel had activity during that gap, insert a
+        # role=system breadcrumb before the resuming turn.
+        if mode is ChannelMode.full_rp and prev_ts is not None:
+            gap = turn.timestamp - prev_ts
+            if gap >= _FULL_RP_GAP_THRESHOLD:
+                breadcrumb = _collect_gap_breadcrumbs(
+                    cross_summaries,
+                    cross_timestamps,
+                    gap_start=prev_ts,
+                    gap_end=turn.timestamp,
+                )
+                if breadcrumb:
+                    messages.append(
+                        Message(role="system", content=breadcrumb),
+                    )
 
         # Per-mode formatting on user turns.
         if turn.role == "user":
