@@ -6,21 +6,28 @@ Fix the mismatch in the same PR — don't ignore the failure. See
 
 The checks are deliberately one-directional: anything a doc names must
 exist in source, but the reverse is not enforced (too many internal
-tuning knobs to reasonably document). The one exception is the
-canonical slash-commands reference page, which is checked bidirectionally.
+tuning knobs to reasonably document). Slash-command names and
+descriptions are handled automatically by the ``cli_reference`` mkdocs
+hook (``docs/hooks/cli_reference.py``), so the slash-commands reference
+page doesn't need a parity test — it's regenerated from ``bot.py`` on
+every build.
 """
 
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
 import yaml
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
+    from types import ModuleType
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -31,8 +38,10 @@ DOCS_ROOT = REPO_ROOT / "docs"
 SRC_ROOT = REPO_ROOT / "src" / "familiar_connect"
 MKDOCS_YML = REPO_ROOT / "mkdocs.yml"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
-SLASH_COMMANDS_DOC = DOCS_ROOT / "getting-started" / "slash-commands.md"
 BOT_MODULE = SRC_ROOT / "bot.py"
+CLI_REFERENCE_HOOK = REPO_ROOT / "docs" / "hooks" / "cli_reference.py"
+SLASH_COMMANDS_DOC = DOCS_ROOT / "getting-started" / "slash-commands.md"
+INSTALLATION_DOC = DOCS_ROOT / "getting-started" / "installation.md"
 
 # ---------------------------------------------------------------------------
 # Allowlists
@@ -260,14 +269,23 @@ def _collect_registered_slash_commands() -> set[str]:
     return registered
 
 
-_INLINE_SLASH_COMMAND_RE = re.compile(r"`/([a-z][a-z0-9-]*)`")
+@pytest.fixture(scope="module")
+def cli_reference_hook() -> ModuleType:
+    """Import ``docs/hooks/cli_reference.py`` by path.
 
-
-def _collect_documented_slash_commands(doc_path: Path) -> set[str]:
-    """Scrape inline /command backtick tokens from a canonical reference doc."""
-    return set(
-        _INLINE_SLASH_COMMAND_RE.findall(doc_path.read_text(encoding="utf-8")),
+    The hook file lives outside ``src/`` so it isn't on the default
+    import path — pytest needs a loader fixture to touch it directly.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "cli_reference_hook",
+        CLI_REFERENCE_HOOK,
     )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 # ---------------------------------------------------------------------------
@@ -316,25 +334,79 @@ def test_env_vars_documented_exist_in_src() -> None:
     )
 
 
-def test_slash_commands_documented_match_code() -> None:
-    """Slash commands in the canonical reference doc must match code exactly.
+_RAW_HOOK_TOKEN_RE = re.compile(r"<!--\s*@[a-z-]+")
 
-    Scoped to ``docs/getting-started/slash-commands.md``. This is the one
-    place we enforce bidirectional parity — commands documented elsewhere
-    (e.g. the Twitch guide's command groups) live under different
-    registration patterns and are out of scope.
+
+@pytest.mark.parametrize(
+    "doc_path",
+    [SLASH_COMMANDS_DOC, INSTALLATION_DOC],
+    ids=lambda p: p.relative_to(DOCS_ROOT).as_posix(),
+)
+def test_cli_reference_hook_resolves_all_tokens(
+    cli_reference_hook: ModuleType,
+    doc_path: Path,
+) -> None:
+    """Every ``<!-- @... -->`` token in a hook-using doc must resolve.
+
+    Runs the hook's substitute() directly on the page source so the
+    test doesn't need a full mkdocs build. Two-part check:
+
+    1. The doc must actually contain at least one ``<!-- @... -->``
+       token — catches accidental reversion to hand-written content
+       that would restore the dual-maintenance hazard.
+    2. After substitution no raw tokens may survive — catches typos
+       and unsupported token names.
     """
-    documented = _collect_documented_slash_commands(SLASH_COMMANDS_DOC)
-    registered = _collect_registered_slash_commands()
-    unimplemented = documented - registered
-    undocumented = registered - documented
-    assert not unimplemented, (
-        f"slash-commands.md mentions commands that aren't registered in "
-        f"bot.py: {sorted(unimplemented)}. Either wire them up or remove "
-        f"them from the doc."
+    markdown = doc_path.read_text(encoding="utf-8")
+    pre_tokens = _RAW_HOOK_TOKEN_RE.findall(markdown)
+    assert pre_tokens, (
+        f"{doc_path.relative_to(REPO_ROOT)} no longer contains any "
+        f"<!-- @... --> tokens. If you intentionally moved its content "
+        f"back to hand-written markdown, drop this doc from the "
+        f"test_cli_reference_hook_resolves_all_tokens parametrization."
     )
-    assert not undocumented, (
-        f"bot.py registers slash commands that aren't in "
-        f"docs/getting-started/slash-commands.md: {sorted(undocumented)}. "
-        f"Add a row to the command table."
+    rendered = cli_reference_hook.substitute(markdown)
+    leftover = _RAW_HOOK_TOKEN_RE.findall(rendered)
+    assert not leftover, (
+        f"{doc_path.relative_to(REPO_ROOT)} contains unresolved hook "
+        f"tokens after substitution: {leftover}. Either the token name "
+        f"is wrong or the hook doesn't handle it."
+    )
+
+
+def test_slash_commands_table_covers_every_registered_command(
+    cli_reference_hook: ModuleType,
+) -> None:
+    """The generated slash-commands table must list every command in bot.py.
+
+    This replaces the old bidirectional parity test: instead of diffing
+    two copies, we check that the single generated copy mentions every
+    ``bot.slash_command(name=...)`` call.
+    """
+    registered = _collect_registered_slash_commands()
+    table = cli_reference_hook._slash_commands_table()
+    missing = {name for name in registered if f"`/{name}`" not in table}
+    assert not missing, (
+        f"Generated slash-commands table is missing commands registered "
+        f"in bot.py: {sorted(missing)}. The hook's AST walker in "
+        f"docs/hooks/cli_reference.py:_collect_slash_commands needs to "
+        f"learn the new registration shape."
+    )
+
+
+def test_cli_reference_hook_registered_in_mkdocs_yml() -> None:
+    """``mkdocs.yml`` must load ``docs/hooks/cli_reference.py``.
+
+    Without this registration the tokens silently pass through into the
+    rendered site — and `mkdocs build --strict` wouldn't catch it.
+    """
+    cfg = yaml.load(
+        MKDOCS_YML.read_text(encoding="utf-8"),
+        Loader=_MkdocsLoader,  # noqa: S506
+    )
+    hooks = cfg.get("hooks") or []
+    assert "docs/hooks/cli_reference.py" in hooks, (
+        "mkdocs.yml must register docs/hooks/cli_reference.py under "
+        "`hooks:` so slash-commands.md and installation.md can inline "
+        "live CLI help and command tables."
     )

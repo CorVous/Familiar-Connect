@@ -7,6 +7,9 @@ edit_uri: edit/main/docs/
 
 strict: true
 
+hooks:
+  - docs/hooks/cli_reference.py
+
 theme:
   name: material
   features:

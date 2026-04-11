@@ -63,10 +63,24 @@ warns if you left it unset.
 
 ```bash
 uv sync --dev
-uv run familiar-connect run                      # uses $FAMILIAR_ID
-uv run familiar-connect run --familiar aria      # or pick one explicitly
-uv run familiar-connect -vv run --familiar aria  # verbose logging, good for smoke-tests
+uv run familiar-connect run
+uv run familiar-connect run --familiar aria
+uv run familiar-connect -vv run --familiar aria
 ```
+
+The `run` subcommand resolves the active familiar via `--familiar`
+first, then `FAMILIAR_ID`. `-v` / `-vv` / `-vvv` tune logging
+verbosity — `-vv` is the sweet spot for smoke tests.
+
+## CLI reference
+
+The help text below is generated at build time from the argparse
+parser in `src/familiar_connect/cli.py`. Run `uv run familiar-connect
+--help` locally to get the same output.
+
+<!-- @cli-help: familiar-connect -->
+
+<!-- @cli-help: familiar-connect run -->
 
 Once the bot is online, see [Slash commands](slash-commands.md) for
 the smoke-test surface.
