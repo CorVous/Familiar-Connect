@@ -635,6 +635,37 @@ class TestVoiceSubscription:
         mock_stop.assert_called_once()
         ctx.voice_client.disconnect.assert_called_once()
 
+    def test_unsubscribe_voice_not_connected_returns_ephemeral(
+        self, tmp_path: Path
+    ) -> None:
+        """Trying to leave voice when not in a channel should report an error."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx(already_connected=False)
+
+        asyncio.run(unsubscribe_voice(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+
+    def test_subscribe_my_voice_connect_failure_does_not_register(
+        self, tmp_path: Path
+    ) -> None:
+        """If channel.connect() raises, no subscription should be created."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx()
+        ctx.author.voice.channel.connect = AsyncMock(
+            side_effect=discord.errors.ClientException("cannot connect"),
+        )
+
+        asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        # Should have sent an ephemeral error via followup (after defer).
+        ctx.followup.send.assert_called_once()
+        _, kwargs = ctx.followup.send.call_args
+        assert kwargs.get("ephemeral") is True
+        assert familiar.subscriptions.voice_in_guild(999) is None
+
     def test_subscribe_my_voice_no_connect_permission_returns_ephemeral(
         self, tmp_path: Path
     ) -> None:

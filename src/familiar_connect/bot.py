@@ -313,7 +313,16 @@ async def subscribe_my_voice(
 
     # Voice connection + DAVE handshake takes >3s, so defer.
     await ctx.defer()
-    vc = await channel.connect(cls=DaveVoiceClient)
+    try:
+        vc = await channel.connect(cls=DaveVoiceClient)
+    except Exception:
+        _logger.exception("Failed to connect to voice channel %s", channel.name)
+        await ctx.followup.send(
+            "I couldn't enter that voice channel"
+            " \N{EM DASH} something went wrong when I tried to connect.",
+            ephemeral=True,
+        )
+        return
     _logger.info("Joined voice channel: %s", channel.name)
 
     familiar.subscriptions.add(
@@ -372,6 +381,17 @@ async def unsubscribe_voice(
 ) -> None:
     """Leave the current voice channel, tear down the pipeline, drop the sub."""
     vc = ctx.voice_client
+    guild_id = ctx.guild_id
+    sub = (
+        familiar.subscriptions.voice_in_guild(guild_id)
+        if guild_id is not None
+        else None
+    )
+
+    if vc is None and sub is None:
+        await ctx.respond("I'm not in a voice channel.", ephemeral=True)
+        return
+
     if vc is not None:
         # Stop the transcription pipeline first so audio chunks stop
         # flowing into a voice client that's about to disconnect.
@@ -382,14 +402,11 @@ async def unsubscribe_voice(
             _logger.info("Stopped voice transcription pipeline")
         await vc.disconnect()
 
-    guild_id = ctx.guild_id
-    if guild_id is not None:
-        sub = familiar.subscriptions.voice_in_guild(guild_id)
-        if sub is not None:
-            familiar.subscriptions.remove(
-                channel_id=sub.channel_id,
-                kind=SubscriptionKind.voice,
-            )
+    if sub is not None:
+        familiar.subscriptions.remove(
+            channel_id=sub.channel_id,
+            kind=SubscriptionKind.voice,
+        )
 
     await ctx.respond("Left voice.")
 
