@@ -7,9 +7,11 @@ Everything on this page is *planned, not shipped*. The shipped surface is descri
 | Feature | State | Page |
 |---|---|---|
 | Chattiness & interjection (proactive replies) | Design | [Conversation flow](conversation-flow.md) |
-| Voice input (STT → pipeline) + barge-in | Design | [Voice input](voice-input.md) |
+| Voice input (STT → pipeline) | Design | [Voice input](voice-input.md) |
+| Barge-in / interruption handling | Design — scope under review | [Interruption flow](interruption-flow.md) |
 | Voice channel logging (passive listeners) | Design | [Voice logging](voice-logging.md) |
 | Session logging & post-session writer pass | Design | [Session logging](session-logging.md) |
+| Thread & forum-post subscriptions | Design | [Threads and forum posts](threads-and-forum-posts.md) |
 | Web search provider | Design | [Web search](web-search.md) |
 | Per-turn monitoring dashboard | Partial — data exists, no UI | [Context pipeline § deferred](../architecture/context-pipeline.md) |
 | `/context` slash command | Deferred | [Context pipeline § deferred](../architecture/context-pipeline.md) |

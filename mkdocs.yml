@@ -68,7 +68,9 @@ nav:
       - roadmap/index.md
       - roadmap/conversation-flow.md
       - roadmap/voice-input.md
+      - roadmap/interruption-flow.md
       - roadmap/voice-logging.md
       - roadmap/session-logging.md
+      - roadmap/threads-and-forum-posts.md
       - roadmap/web-search.md
   - Contributing: contributing.md

@@ -278,14 +278,26 @@ def assemble_chat_messages(
                 Message(role=turn.role, content=content, name=None),
             )
 
-    # 3. The final user turn — the triggering utterance from the request.
-    messages.append(
-        Message(
-            role="user",
-            content=_prefix_user_content(request.speaker, request.utterance),
-            name=request.speaker,
-        ),
-    )
+    # 3. Pending user turns — every message buffered since the last
+    # response. Falls back to the single trigger utterance when no
+    # pending turns are provided (voice path, tests, etc.).
+    if request.pending_turns:
+        messages.extend(
+            Message(
+                role="user",
+                content=_prefix_user_content(pt.speaker, pt.text),
+                name=pt.speaker,
+            )
+            for pt in request.pending_turns
+        )
+    else:
+        messages.append(
+            Message(
+                role="user",
+                content=_prefix_user_content(request.speaker, request.utterance),
+                name=request.speaker,
+            ),
+        )
 
     # 4. Depth-inject at position-from-end, computed against the full list
     # (including the final user turn). ``position=0`` means immediately

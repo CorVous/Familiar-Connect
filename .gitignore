@@ -19,3 +19,6 @@ src/*/_version.py
 
 # mkdocs build output
 site/
+
+# Familiar Data
+data/familiars/

@@ -73,6 +73,19 @@ class Contribution:
 
 
 @dataclass(frozen=True)
+class PendingTurn:
+    """A user message buffered by the conversation monitor.
+
+    Carried on :attr:`ContextRequest.pending_turns` so the renderer
+    can inject every accumulated message — not just the final trigger —
+    into the chat payload sent to the LLM.
+    """
+
+    speaker: str | None
+    text: str
+
+
+@dataclass(frozen=True)
 class ContextRequest:
     """The input to a single run of the context pipeline.
 
@@ -123,4 +136,9 @@ class ContextRequest:
     modality: Modality
     budget_tokens: int
     deadline_s: float
+    pending_turns: tuple[PendingTurn, ...] = ()
+    """User messages buffered by the conversation monitor since the last
+    response. When non-empty, the renderer appends *all* of these as
+    user turns instead of the single ``utterance``. The last entry
+    should match ``utterance`` / ``speaker``."""
     preprocessor_contributions: tuple[Contribution, ...] = ()

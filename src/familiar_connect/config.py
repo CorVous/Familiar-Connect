@@ -66,6 +66,44 @@ DEFAULT_CHANNEL_MODE = ChannelMode.text_conversation_rp
 """Mode used when neither the character nor the channel sidecar names one."""
 
 
+class Interjection(Enum):
+    """How patient the familiar is before the side model is consulted.
+
+    Controls the message-count threshold at which the monitor asks the
+    side model whether to interject. Higher tiers evaluate sooner and
+    more frequently (shorter starting interval). After each declined
+    check the interval shrinks by 3, flooring at 3.
+
+    | Value        | Starting interval (messages) |
+    |--------------|------------------------------|
+    | ``very_quiet`` | 15                         |
+    | ``quiet``      | 12                         |
+    | ``average``    | 9                          |
+    | ``eager``      | 6                          |
+    | ``very_eager`` | 3                          |
+    """
+
+    very_quiet = "very_quiet"
+    quiet = "quiet"
+    average = "average"
+    eager = "eager"
+    very_eager = "very_eager"
+
+    @property
+    def starting_interval(self) -> int:
+        """Messages between the last response and the first interjection check."""
+        return {
+            Interjection.very_quiet: 15,
+            Interjection.quiet: 12,
+            Interjection.average: 9,
+            Interjection.eager: 6,
+            Interjection.very_eager: 3,
+        }[self]
+
+
+_DEFAULT_CHATTINESS = "Balanced — responds when the conversation is relevant"
+
+
 @dataclass(frozen=True)
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``.
@@ -84,6 +122,15 @@ class CharacterConfig:
     :param depth_inject_role: Role the renderer assigns to the
         depth-injected message. Either ``"system"`` (default) or
         ``"user"``.
+    :param aliases: Additional names the familiar responds to (beyond
+        the ``familiar_id``). Used for direct-address detection.
+    :param chattiness: Free-text personality trait describing the
+        familiar's conversational disposition. Fed to the side model's
+        evaluation prompt.
+    :param interjection: Controls how long the familiar waits before
+        the side model is consulted during an active conversation.
+    :param lull_timeout: Seconds of silence before the lull evaluation
+        fires.
     """
 
     default_mode: ChannelMode = DEFAULT_CHANNEL_MODE
@@ -94,6 +141,10 @@ class CharacterConfig:
     """IANA timezone name for rendering timestamps in ``text_conversation_rp``
     mode (e.g. ``"America/New_York"``). Defaults to UTC. Loaded from
     ``display_tz`` in ``character.toml``."""
+    aliases: list[str] = field(default_factory=list)
+    chattiness: str = _DEFAULT_CHATTINESS
+    interjection: Interjection = Interjection.average
+    lull_timeout: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -238,12 +289,30 @@ def load_character_config(path: Path) -> CharacterConfig:
 
     display_tz = str(data.get("display_tz", "UTC"))
 
+    aliases_raw = data.get("aliases", [])
+    if not isinstance(aliases_raw, list):
+        msg = f"aliases must be a list of strings, got {type(aliases_raw).__name__}"
+        raise ConfigError(msg)
+    aliases = [str(a) for a in aliases_raw]
+
+    chattiness = str(data.get("chattiness", _DEFAULT_CHATTINESS))
+
+    interjection = _parse_interjection(
+        data.get("interjection"), default=Interjection.average
+    )
+
+    lull_timeout = float(data.get("lull_timeout", 2.0))
+
     return CharacterConfig(
         default_mode=default_mode,
         history_window_size=history_window_size,
         depth_inject_position=depth_inject_position,
         depth_inject_role=depth_inject_role,
         display_tz=display_tz,
+        aliases=aliases,
+        chattiness=chattiness,
+        interjection=interjection,
+        lull_timeout=lull_timeout,
     )
 
 
@@ -283,6 +352,20 @@ def _read_toml(path: Path) -> dict | None:
             return tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         msg = f"failed to parse TOML config at {path}: {exc}"
+        raise ConfigError(msg) from exc
+
+
+def _parse_interjection(raw: object, *, default: Interjection) -> Interjection:
+    if raw is None:
+        return default
+    if not isinstance(raw, str):
+        msg = f"interjection must be a string, got {type(raw).__name__}"
+        raise ConfigError(msg)
+    try:
+        return Interjection(raw)
+    except ValueError as exc:
+        valid = ", ".join(m.value for m in Interjection)
+        msg = f"unknown interjection tier {raw!r}; valid options: {valid}"
         raise ConfigError(msg) from exc
 
 

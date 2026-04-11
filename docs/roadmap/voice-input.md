@@ -20,12 +20,7 @@ The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` o
 
 ### Barge-in / interruption handling
 
-When the familiar is mid-reply and someone starts talking, the bot needs a policy for whether to keep talking, stop immediately, or finish the current sentence. Two dimensions to decide:
-
-1. **Should there be a character trait / config knob** that controls how the familiar reacts? (e.g. a `barge_in_behaviour` enum with values like `yield_immediately`, `finish_sentence`, `hold_ground`.) Naively this is a personality thing — a polite familiar defers, a brash one doesn't.
-2. **Don't lose messages during the transition.** Whatever the policy, the partial TTS audio that was in flight, the partial transcript that triggered the interruption, and the still-generating LLM reply all need to be accounted for: the reply must be truncated cleanly, the partial transcript must be persisted to history even though the familiar cut itself off, and the new utterance needs to be fed into the next turn without dropping words at the seam.
-
-Open questions live on this — the section is deliberately short because this is research territory, not a committed design.
+When the familiar is mid-reply and someone starts talking, the bot needs a policy for whether to keep talking, stop immediately, or finish the current sentence. A separate, more detailed design proposal lives on the [Interruption flow](interruption-flow.md) page — it is scoped specifically to voice as written, and should be rescoped to cover both voice and text latency handling before it ships.
 
 ### Text and image input during a voice session
 
@@ -47,6 +42,5 @@ While the bot is active in a voice channel, the associated text channel should a
 
 - **STT provider choice.** Deepgram is the default assumption from earlier planning. Worth confirming before coding; the provider boundary is a small one and easy to swap.
 - **Turn segmentation.** When is "the user has stopped talking" fired? Silence threshold? Deepgram's own endpointing? Both? This affects the naturalness of turn-taking.
-- **Barge-in policy default.** What should a brand-new familiar do out of the box? Probably the most polite option (`yield_immediately`) so the bot never feels rude, with the knob available to tune later.
-- **Partial-reply truncation in TTS.** Cartesia and similar providers stream audio; interrupting cleanly mid-sentence requires knowing how much audio has already played so we can truncate history to match. Not hard, but needs to be designed, not bolted on.
+- **Barge-in / interruption handling.** See [Interruption flow](interruption-flow.md). Needs a scope review (voice-only vs. modality-agnostic) before anything else.
 - **Vision fallback UX.** What's the observable behaviour when the user sends an image to a non-vision model? A warning in the same channel? A silent log line? Both?
