@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 from familiar_connect.transcription import TranscriptionResult, VadEvent
 from familiar_connect.voice.interruption import InterruptionDetector, ResponseTracker
 from familiar_connect.voice_pipeline import (
+    DISCORD_SILENCE_S,
+    AudioActivityTracker,
     PipelineError,
     VoicePipeline,
     _audio_pump,
@@ -685,3 +687,147 @@ class TestPipelineVadWiring:
             assert pipeline.vad_dispatcher_task is None
         finally:
             await stop_pipeline()
+
+
+# ---------------------------------------------------------------------------
+# Discord audio activity tracker
+# ---------------------------------------------------------------------------
+
+
+class TestAudioActivityTracker:
+    """Verify AudioActivityTracker fires events from Discord audio timing."""
+
+    @pytest.mark.asyncio
+    async def test_first_audio_fires_speech_started(self) -> None:
+        """First audio chunk from a user fires SpeechStarted."""
+        events: list[tuple[int, str]] = []
+        tracker = AudioActivityTracker(
+            silence_s=0.1,
+            callback=lambda uid, evt: events.append((uid, evt)),
+        )
+        try:
+            tracker.on_audio(42)
+            assert events == [(42, "SpeechStarted")]
+        finally:
+            tracker.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_continuous_audio_no_duplicate_speech_started(self) -> None:
+        """Rapid audio chunks only fire SpeechStarted once."""
+        events: list[tuple[int, str]] = []
+        tracker = AudioActivityTracker(
+            silence_s=0.1,
+            callback=lambda uid, evt: events.append((uid, evt)),
+        )
+        try:
+            tracker.on_audio(42)
+            tracker.on_audio(42)
+            tracker.on_audio(42)
+            assert events == [(42, "SpeechStarted")]
+        finally:
+            tracker.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_silence_fires_utterance_end(self) -> None:
+        """After silence_s without audio, UtteranceEnd fires."""
+        events: list[tuple[int, str]] = []
+        tracker = AudioActivityTracker(
+            silence_s=0.05,
+            callback=lambda uid, evt: events.append((uid, evt)),
+        )
+        tracker.on_audio(42)
+        await asyncio.sleep(0.1)
+        assert (42, "UtteranceEnd") in events
+
+    @pytest.mark.asyncio
+    async def test_audio_resets_silence_timer(self) -> None:
+        """A new audio chunk resets the silence countdown."""
+        events: list[tuple[int, str]] = []
+        tracker = AudioActivityTracker(
+            silence_s=0.08,
+            callback=lambda uid, evt: events.append((uid, evt)),
+        )
+        try:
+            tracker.on_audio(42)
+            await asyncio.sleep(0.04)
+            # Timer not yet fired, send more audio to reset it
+            tracker.on_audio(42)
+            await asyncio.sleep(0.04)
+            # Still within silence_s of the last audio — no UtteranceEnd yet
+            assert (42, "UtteranceEnd") not in events
+            # Wait for the full silence to expire
+            await asyncio.sleep(0.1)
+            assert (42, "UtteranceEnd") in events
+        finally:
+            tracker.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_resumed_speech_fires_new_speech_started(self) -> None:
+        """After UtteranceEnd, new audio fires SpeechStarted again."""
+        events: list[tuple[int, str]] = []
+        tracker = AudioActivityTracker(
+            silence_s=0.05,
+            callback=lambda uid, evt: events.append((uid, evt)),
+        )
+        tracker.on_audio(42)
+        await asyncio.sleep(0.1)
+        # Should have SpeechStarted + UtteranceEnd
+        assert events == [(42, "SpeechStarted"), (42, "UtteranceEnd")]
+
+        tracker.on_audio(42)
+        assert events == [
+            (42, "SpeechStarted"),
+            (42, "UtteranceEnd"),
+            (42, "SpeechStarted"),
+        ]
+        tracker.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_multiple_speakers_tracked_independently(self) -> None:
+        """Each user gets independent SpeechStarted/UtteranceEnd."""
+        events: list[tuple[int, str]] = []
+        tracker = AudioActivityTracker(
+            silence_s=0.10,
+            callback=lambda uid, evt: events.append((uid, evt)),
+        )
+        tracker.on_audio(42)
+        tracker.on_audio(99)
+        assert (42, "SpeechStarted") in events
+        assert (99, "SpeechStarted") in events
+
+        # User 42 goes silent, user 99 keeps talking
+        await asyncio.sleep(0.05)
+        tracker.on_audio(99)  # resets user 99's timer to now+0.10
+
+        await asyncio.sleep(0.08)
+        # At t≈0.13: user 42 silent since t=0 → UtteranceEnd (0+0.10=0.10 < 0.13)
+        # user 99 reset at t=0.05 → fires at t=0.15 → still active
+        assert (42, "UtteranceEnd") in events
+        assert (99, "UtteranceEnd") not in events
+
+        await asyncio.sleep(0.15)
+        assert (99, "UtteranceEnd") in events
+        tracker.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_prevents_utterance_end(self) -> None:
+        """cancel_all prevents pending silence timers from firing."""
+        events: list[tuple[int, str]] = []
+        tracker = AudioActivityTracker(
+            silence_s=0.05,
+            callback=lambda uid, evt: events.append((uid, evt)),
+        )
+        tracker.on_audio(42)
+        tracker.cancel_all()
+        await asyncio.sleep(0.1)
+        # Only SpeechStarted, no UtteranceEnd
+        assert events == [(42, "SpeechStarted")]
+
+    @pytest.mark.asyncio
+    async def test_default_silence_matches_constant(self) -> None:
+        """Default silence_s matches the module constant."""
+        tracker = AudioActivityTracker(
+            callback=lambda _uid, _evt: None,
+        )
+        assert tracker._silence_s == DISCORD_SILENCE_S
+        tracker.cancel_all()

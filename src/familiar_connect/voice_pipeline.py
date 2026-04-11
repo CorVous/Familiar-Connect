@@ -27,6 +27,64 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Discord audio activity tracking
+# ---------------------------------------------------------------------------
+
+DISCORD_SILENCE_S: float = 0.3
+"""Seconds without audio packets before a user is considered silent.
+
+Discord sends audio at ~20 ms intervals.  300 ms bridges natural
+micro-pauses between words while still detecting actual silence
+quickly enough to start the debounce lull countdown.
+"""
+
+
+class AudioActivityTracker:
+    """Track per-user voice activity from Discord audio packet timing.
+
+    Fires ``SpeechStarted`` when audio first arrives for a user, and
+    ``UtteranceEnd`` after *silence_s* seconds without audio.  Each
+    user is tracked independently so overlapping speakers are handled
+    correctly.
+
+    This replaces Deepgram's server-side VAD for debounce purposes —
+    Discord packet timing is immediate (no WebSocket round-trip).
+    """
+
+    def __init__(
+        self,
+        *,
+        callback: Callable[[int, str], None],
+        silence_s: float = DISCORD_SILENCE_S,
+    ) -> None:
+        self._silence_s = silence_s
+        self._callback = callback
+        self._timers: dict[int, asyncio.TimerHandle] = {}
+        self._loop = asyncio.get_running_loop()
+
+    def on_audio(self, user_id: int) -> None:
+        """Notify that an audio chunk arrived from *user_id*."""
+        if user_id not in self._timers:
+            # First audio from this user (or first since UtteranceEnd).
+            self._callback(user_id, "SpeechStarted")
+        else:
+            # Still speaking — cancel the pending silence timer.
+            self._timers[user_id].cancel()
+
+        # (Re)start the silence countdown.
+        def _on_silence(uid: int = user_id) -> None:
+            self._timers.pop(uid, None)
+            self._callback(uid, "UtteranceEnd")
+
+        self._timers[user_id] = self._loop.call_later(self._silence_s, _on_silence)
+
+    def cancel_all(self) -> None:
+        """Cancel all pending silence timers (used during shutdown)."""
+        for handle in self._timers.values():
+            handle.cancel()
+        self._timers.clear()
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -189,21 +247,15 @@ async def _vad_forwarder(
 async def _vad_dispatcher(
     shared_queue: asyncio.Queue[tuple[int, VadEvent]],
     detector: InterruptionDetector | None,
-    vad_callback: Callable[[int, str], None] | None = None,
 ) -> None:
     """Read tagged VAD events and feed them to the InterruptionDetector.
 
-    Also calls *vad_callback* (if provided) with ``(user_id,
-    event_type)`` for every event, regardless of detector state.
-    The callback is used by the voice debounce logic to track
-    active speakers.
+    Voice debounce is handled separately by :class:`AudioActivityTracker`
+    using Discord audio packet timing (faster, no Deepgram round-trip).
+    This dispatcher only feeds the interruption detector.
     """
     while True:
         user_id, event = await shared_queue.get()
-        # Notify the debounce layer (always, even during IDLE).
-        if vad_callback is not None:
-            vad_callback(user_id, event.event_type)
-        # Notify the interruption detector (only during non-IDLE).
         if detector is None:
             continue
         now = time.monotonic()
@@ -259,32 +311,53 @@ async def _audio_router(
     tagged_queue: asyncio.Queue[tuple[int, bytes]],
     pipeline: VoicePipeline,
 ) -> None:
-    """Route tagged audio to per-user streams, creating them on demand."""
+    """Route tagged audio to per-user streams, creating them on demand.
+
+    When a ``vad_callback`` is configured, an :class:`AudioActivityTracker`
+    fires ``SpeechStarted`` / ``UtteranceEnd`` events based on Discord
+    audio packet timing — faster and more reliable than Deepgram's
+    server-side VAD for debounce purposes.
+    """
+    activity_tracker: AudioActivityTracker | None = None
+    if pipeline.vad_callback is not None:
+        activity_tracker = AudioActivityTracker(
+            callback=pipeline.vad_callback,
+        )
+
     chunks_routed = 0
-    while True:
-        user_id, data = await tagged_queue.get()
-        if user_id not in pipeline.streams:
-            name = _get_user_name(pipeline, user_id)
-            _logger.info(
-                "[Router] Creating transcription stream for %s (id=%d)",
-                name,
-                user_id,
-            )
-            stream = await _create_user_stream(
-                user_id,
-                pipeline.template,
-                pipeline.shared_transcript_queue,
-                shared_vad_queue=pipeline.shared_vad_queue,
-            )
-            pipeline.streams[user_id] = stream
-        await pipeline.streams[user_id].audio_queue.put(data)
-        chunks_routed += 1
-        if chunks_routed % 500 == 1:
-            _logger.debug(
-                "[Router] Routed %d chunks total (%d active streams)",
-                chunks_routed,
-                len(pipeline.streams),
-            )
+    try:
+        while True:
+            user_id, data = await tagged_queue.get()
+
+            # Discord voice activity tracking for debounce.
+            if activity_tracker is not None:
+                activity_tracker.on_audio(user_id)
+
+            if user_id not in pipeline.streams:
+                name = _get_user_name(pipeline, user_id)
+                _logger.info(
+                    "[Router] Creating transcription stream for %s (id=%d)",
+                    name,
+                    user_id,
+                )
+                stream = await _create_user_stream(
+                    user_id,
+                    pipeline.template,
+                    pipeline.shared_transcript_queue,
+                    shared_vad_queue=pipeline.shared_vad_queue,
+                )
+                pipeline.streams[user_id] = stream
+            await pipeline.streams[user_id].audio_queue.put(data)
+            chunks_routed += 1
+            if chunks_routed % 500 == 1:
+                _logger.debug(
+                    "[Router] Routed %d chunks total (%d active streams)",
+                    chunks_routed,
+                    len(pipeline.streams),
+                )
+    finally:
+        if activity_tracker is not None:
+            activity_tracker.cancel_all()
 
 
 # ---------------------------------------------------------------------------
@@ -361,11 +434,12 @@ async def start_pipeline(  # noqa: RUF029
         trigger LLM + TTS responses.
     :param interruption_detector: Optional detector that receives VAD
         events (``SpeechStarted``, ``UtteranceEnd``) from all per-user
-        Deepgram streams.
+        Deepgram streams.  Used for interruption detection during
+        GENERATING/SPEAKING states.
     :param vad_callback: Optional sync callback invoked with
-        ``(user_id, event_type)`` for every VAD event.  Used by the
-        voice debounce logic to track active speakers independently
-        of the interruption detector.
+        ``(user_id, event_type)`` for voice activity events.  Driven
+        by Discord audio packet timing via :class:`AudioActivityTracker`
+        (not Deepgram VAD) for lower latency.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
@@ -373,9 +447,11 @@ async def start_pipeline(  # noqa: RUF029
         asyncio.Queue()
     )
 
-    # Create a shared VAD queue whenever we have a detector OR a callback.
+    # Deepgram VAD queue — only needed for the interruption detector.
+    # The debounce vad_callback is now driven by Discord audio packet
+    # timing via AudioActivityTracker inside _audio_router.
     shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
-    if interruption_detector is not None or vad_callback is not None:
+    if interruption_detector is not None:
         shared_vad_queue = asyncio.Queue()
 
     # We create a placeholder pipeline first so the router can reference it.
@@ -402,7 +478,7 @@ async def start_pipeline(  # noqa: RUF029
 
     if shared_vad_queue is not None:
         pipeline.vad_dispatcher_task = asyncio.create_task(
-            _vad_dispatcher(shared_vad_queue, interruption_detector, vad_callback)
+            _vad_dispatcher(shared_vad_queue, interruption_detector)
         )
 
     set_pipeline(pipeline)
