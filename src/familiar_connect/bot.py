@@ -289,7 +289,15 @@ async def subscribe_my_voice(
         return
 
     # Voice connection + DAVE handshake takes >3s, so defer.
-    await ctx.defer()
+    deferred = True
+    try:
+        await ctx.defer()
+    except discord.NotFound:
+        deferred = False
+        _logger.warning(
+            "Interaction expired before defer — voice join will proceed silently",
+        )
+
     vc = await channel.connect(cls=DaveVoiceClient)
     _logger.info("Joined voice channel: %s", channel.name)
 
@@ -340,7 +348,8 @@ async def subscribe_my_voice(
             channel.id,
         )
 
-    await ctx.followup.send(f"Joined **{channel.name}**.")
+    if deferred:
+        await ctx.followup.send(f"Joined **{channel.name}**.")
 
 
 async def unsubscribe_voice(

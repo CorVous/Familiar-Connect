@@ -535,6 +535,32 @@ class TestVoiceSubscription:
         voice_channel = ctx.author.voice.channel
         voice_channel.connect.return_value.start_recording.assert_called_once()
 
+    def test_subscribe_my_voice_tolerates_expired_interaction(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """If the Discord interaction expires before defer, the bot still joins."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx()
+
+        # Simulate the interaction timing out before ctx.defer() is called.
+        mock_response = MagicMock()
+        mock_response.status = 404
+        ctx.defer = AsyncMock(
+            side_effect=discord.NotFound(mock_response, "Unknown interaction"),
+        )
+
+        # Must NOT raise — the bot should swallow the NotFound and proceed.
+        asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        # Voice channel connect still happened.
+        voice_channel = ctx.author.voice.channel
+        voice_channel.connect.assert_called_once()
+        # Subscription was still registered.
+        assert familiar.subscriptions.voice_in_guild(999) is not None
+        # Followup was NOT sent (interaction is dead).
+        ctx.followup.send.assert_not_called()
+
     def test_unsubscribe_voice_disconnects(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
         familiar.subscriptions.add(
