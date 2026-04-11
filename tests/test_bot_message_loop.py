@@ -609,6 +609,78 @@ class TestVoiceSubscription:
         mock_stop.assert_called_once()
         ctx.voice_client.disconnect.assert_called_once()
 
+    def test_subscribe_reports_error_on_connection_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When ``channel.connect()`` raises, the user gets an error followup."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx()
+        ctx.author.voice.channel.connect = AsyncMock(side_effect=TimeoutError)
+
+        asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        ctx.followup.send.assert_called_once()
+        msg = ctx.followup.send.call_args.args[0]
+        assert "could not join" in msg.lower()
+        assert familiar.subscriptions.voice_in_guild(999) is None
+
+    def test_subscribe_handles_pipeline_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Pipeline failure still leaves the bot in voice (TTS-only mode)."""
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx()
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("deepgram broke"),
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        ctx.followup.send.assert_called_once()
+        msg = ctx.followup.send.call_args.args[0]
+        assert "transcription" in msg.lower()
+        # Voice client should NOT be disconnected — TTS-only still works.
+        ctx.author.voice.channel.connect.return_value.disconnect.assert_not_called()
+
+    def test_subscribe_clears_stale_pipeline(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A stale ``_active`` pipeline is cleaned up before the new one starts."""
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx()
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with (
+            patch(
+                "familiar_connect.bot.get_pipeline",
+                return_value=MagicMock(name="stale_pipeline"),
+            ),
+            patch(
+                "familiar_connect.bot.stop_pipeline",
+                new_callable=AsyncMock,
+            ) as mock_stop,
+            patch(
+                "familiar_connect.bot.start_pipeline",
+                new_callable=AsyncMock,
+                return_value=mock_pipeline,
+            ) as mock_start,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        mock_stop.assert_called_once()
+        mock_start.assert_called_once()
+        ctx.followup.send.assert_called_once()
+        assert "joined" in ctx.followup.send.call_args.args[0].lower()
+
 
 # ---------------------------------------------------------------------------
 # /channel-* mode commands

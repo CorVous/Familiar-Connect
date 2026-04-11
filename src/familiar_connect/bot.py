@@ -288,6 +288,13 @@ async def subscribe_my_voice(
         await ctx.respond("I'm already in a voice channel.", ephemeral=True)
         return
 
+    # If a stale pipeline remains from a previous session (e.g. the bot
+    # was kicked and cleanup didn't fire), clear it so start_pipeline()
+    # won't raise PipelineError.
+    if get_pipeline() is not None:
+        _logger.warning("Clearing stale voice pipeline before new connection")
+        await stop_pipeline()
+
     # Voice connection + DAVE handshake takes >3s, so defer.
     deferred = True
     try:
@@ -298,7 +305,16 @@ async def subscribe_my_voice(
             "Interaction expired before defer — voice join will proceed silently",
         )
 
-    vc = await channel.connect(cls=DaveVoiceClient)
+    try:
+        vc = await channel.connect(cls=DaveVoiceClient)
+    except Exception:
+        _logger.exception("Failed to connect to voice channel %s", channel.name)
+        if deferred:
+            await ctx.followup.send(
+                f"Could not join **{channel.name}** — the voice handshake failed.",
+            )
+        return
+
     _logger.info("Joined voice channel: %s", channel.name)
 
     familiar.subscriptions.add(
@@ -316,37 +332,45 @@ async def subscribe_my_voice(
             _logger.exception("Opening greeting TTS failed")
 
     if familiar.transcriber is not None:
-        user_names = {m.id: m.display_name for m in channel.members}
+        try:
+            user_names = {m.id: m.display_name for m in channel.members}
 
-        def _resolve_from_channel(user_id: int) -> str | None:
-            for member in channel.members:
-                if member.id == user_id:
-                    return member.display_name
-            return None
+            def _resolve_from_channel(user_id: int) -> str | None:
+                for member in channel.members:
+                    if member.id == user_id:
+                        return member.display_name
+                return None
 
-        response_handler = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=channel.id,
-            guild_id=ctx.guild_id,
-            user_names=user_names,
-        )
+            response_handler = _build_voice_response_handler(
+                vc=vc,
+                familiar=familiar,
+                voice_channel_id=channel.id,
+                guild_id=ctx.guild_id,
+                user_names=user_names,
+            )
 
-        pipeline = await start_pipeline(
-            familiar.transcriber,
-            user_names=user_names,
-            resolve_name=_resolve_from_channel,
-            response_handler=response_handler,
-        )
-        sink = RecordingSink(
-            loop=asyncio.get_running_loop(),
-            audio_queue=pipeline.tagged_audio_queue,
-        )
-        vc.start_recording(sink, _recording_finished_callback)
-        _logger.info(
-            "Started voice transcription pipeline for channel %s",
-            channel.id,
-        )
+            pipeline = await start_pipeline(
+                familiar.transcriber,
+                user_names=user_names,
+                resolve_name=_resolve_from_channel,
+                response_handler=response_handler,
+            )
+            sink = RecordingSink(
+                loop=asyncio.get_running_loop(),
+                audio_queue=pipeline.tagged_audio_queue,
+            )
+            vc.start_recording(sink, _recording_finished_callback)
+            _logger.info(
+                "Started voice transcription pipeline for channel %s",
+                channel.id,
+            )
+        except Exception:
+            _logger.exception("Failed to start voice transcription pipeline")
+            if deferred:
+                await ctx.followup.send(
+                    f"Joined **{channel.name}** but transcription failed to start.",
+                )
+            return
 
     if deferred:
         await ctx.followup.send(f"Joined **{channel.name}**.")
