@@ -31,6 +31,10 @@ dev = [
     "twine >= 6.2.0, < 7",
     "requests >= 2.32.5, < 3",
 ]
+docs = [
+    "mkdocs >= 1.6, < 2",
+    "mkdocs-material >= 9.5, < 10",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
