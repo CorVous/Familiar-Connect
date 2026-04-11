@@ -7,6 +7,37 @@ The context pipeline is the single path between "something happened" and "call t
 
     **Still deferred:** the per-turn monitoring dashboard, a `/context` slash command that shows the last assembled context, wiring STT input into the pipeline, and a `familiar init --from-card` subcommand. See [Roadmap](../roadmap/index.md).
 
+## Shape of one reply turn
+
+```mermaid
+flowchart TB
+    req([ContextRequest<br/>speaker + utterance + modality + deadline])
+    req --> tg
+
+    subgraph tg[asyncio.TaskGroup - providers run in parallel]
+        direction LR
+        char[CharacterProvider<br/>self/*.md]
+        hist[HistoryProvider<br/>recent + summary]
+        content[ContentSearchProvider<br/>agentic grep/read]
+    end
+
+    tg --> contribs([list of Contribution<br/>layer + priority + text + tokens])
+    contribs --> budget[Budgeter.fill<br/>pack by priority, truncate tail]
+    budget --> pre[Pre-processors<br/>SteppedThinkingPreProcessor, ...]
+    pre --> llm[OpenRouter<br/>streaming completion]
+    llm --> post[Post-processors<br/>RecastPostProcessor, ...]
+    post --> out([Reply → TTS / Discord<br/>+ HistoryStore write])
+
+    classDef phase fill:#f4ecff,stroke:#6a1b9a;
+    class budget,pre,llm,post phase;
+```
+
+Every provider runs with its own `asyncio.timeout`; a straggler past
+its deadline is dropped and logged, not awaited, so no single slow
+provider can stall the reply. A failing provider is caught and logged
+too — the rest of the pipeline carries on with whatever contributions
+did return.
+
 ## Working assumptions
 
 - **Concurrency stack: `asyncio` + `asyncio.TaskGroup`.** The codebase is asyncio-native top to bottom.
@@ -49,6 +80,31 @@ Module: `familiar_connect.context.budget`.
 - Wraps `tiktoken` for OpenAI-family models and falls back to a character-count heuristic for non-OpenAI models.
 - `Budgeter.fill(layers, contributions, budget_by_layer)` walks contributions in priority order, assigns them to layers, truncates from the lowest-priority end when a layer's budget is exceeded, and emits a structured log entry for any dropped or truncated content.
 - Truncation prefers sentence boundaries, falls back to whitespace, and finally to a hard slice.
+
+A typical allocation for an 8k-token request budget, with the default
+providers enabled, looks like this (numbers illustrative — the
+per-layer budget is configurable per familiar):
+
+```mermaid
+---
+config:
+  sankey:
+    showValues: false
+---
+sankey-beta
+Request budget,Character,1500
+Request budget,Recent history,2500
+Request budget,History summary,800
+Request budget,Content search,1500
+Request budget,Stepped thinking,500
+Request budget,Reserved for completion,1200
+```
+
+Layers on the right are filled highest-priority first. If a layer
+overflows its slot, the lowest-priority contribution in that layer is
+truncated or dropped, and the drop is logged with enough metadata that
+`/context` (when it ships) can show "this turn dropped the rolling
+summary because recent-history overflowed."
 
 ## 3. `MemoryStore`
 

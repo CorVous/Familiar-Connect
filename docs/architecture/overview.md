@@ -32,25 +32,75 @@ All components run as coroutines within a single `asyncio` event
 loop, scoped by `asyncio.TaskGroup` for structured concurrency and
 clean cancellation (Python 3.13+):
 
-```
-Discord Voice → audio capture → asyncio.Queue
-                                      ↓
-                            Transcription (Deepgram streaming)
-                                      ↓
-                  asyncio.Queue (text) ← Twitch Events
-                                      ↓
-                    ConversationMonitor (chattiness + interjection)
-                                      ↓
-               Context pipeline (see Context pipeline page)
-                                      ↓
-                           OpenRouter (streaming)
-                                      ↓
-                              TTS (Cartesia / Azure) → Audio
-                                      ↓
-                    asyncio.Queue → Discord Voice Playback
+```mermaid
+flowchart TB
+    dv([Discord voice channel]) --> cap[Audio capture]
+    cap --> aq[(asyncio.Queue&#58; PCM)]
+    aq --> stt[Transcription<br/>Deepgram streaming]
+    stt --> tq[(asyncio.Queue&#58; text)]
+    tw([Twitch EventSub]) --> tq
+    tq --> cm[ConversationMonitor<br/>chattiness &amp; interjection]
+    cm --> cp[Context pipeline]
+    cp --> or[OpenRouter<br/>streaming completion]
+    or --> tts[TTS<br/>Cartesia / Azure]
+    tts --> oq[(asyncio.Queue&#58; audio)]
+    oq --> dvp([Discord voice playback])
+
+    classDef queue fill:#eee,stroke:#888,stroke-dasharray:3 3;
+    class aq,tq,oq queue;
 ```
 
+Every box in that diagram is a task running under one root
+`asyncio.TaskGroup`, so a crash anywhere cancels the whole reply path
+cleanly rather than leaking half-dead tasks.
+
 Development uses red/green TDD throughout.
+
+## External services
+
+The runtime talks to exactly five kinds of outside service. Two are
+required (nothing runs without them), the rest are optional and the
+bot degrades gracefully when they are absent or unconfigured.
+
+```mermaid
+architecture-beta
+    group runtime[Runtime]
+    service bot(server)[familiar connect] in runtime
+
+    group required[Required]
+    service discord(internet)[Discord Gateway] in required
+    service openrouter(internet)[OpenRouter LLM] in required
+
+    group optional[Optional]
+    service cartesia(internet)[Cartesia TTS] in optional
+    service azure(internet)[Azure Speech] in optional
+    service deepgram(internet)[Deepgram STT] in optional
+    service twitch(internet)[Twitch EventSub] in optional
+
+    bot:L -- R:discord
+    bot:R -- L:openrouter
+    bot:T -- B:cartesia
+    bot:T -- B:azure
+    bot:B -- T:deepgram
+    bot:B -- T:twitch
+```
+
+- **Discord Gateway** (required) — `DISCORD_TOKEN`. The bot has nothing
+  to listen to or speak into without it.
+- **OpenRouter** (required) — `OPENROUTER_API_KEY`. The reply
+  generation call. Model selectable per-familiar.
+- **Cartesia / Azure Speech** (optional) — TTS providers. Without
+  either, the bot still replies in text channels it is subscribed to.
+- **Deepgram** (optional, not yet wired) — streaming STT for voice
+  input. See the
+  [Voice input roadmap entry](../roadmap/voice-input.md).
+- **Twitch EventSub** (optional) — only needed if a familiar uses the
+  Twitch commentary features in the
+  [Twitch guide](../guides/twitch.md).
+
+See [Installation](../getting-started/installation.md) for the exact
+env-var names, the minimal "just text replies" configuration, and how
+to turn each optional service on.
 
 ## Core components
 
