@@ -81,21 +81,21 @@ def _make_vc_mock() -> MagicMock:
     return vc
 
 
-def _build(*, lull_timeout: float = 0.05) -> tuple[Any, Any, Any, Any, MagicMock]:
+def _build(*, lull_timeout: float = 0.05) -> tuple[Any, Any, Any, Any, Any, MagicMock]:
     """Build handler + mocks.
 
-    Returns (handler, tracker, detector, vad_cb, familiar).
+    Returns (handler, tracker, detector, vad_cb, deepgram_vad_cb, familiar).
     """
     familiar = _make_familiar_mock(lull_timeout=lull_timeout)
     vc = _make_vc_mock()
-    handler, tracker, detector, vad_cb = _build_voice_response_handler(
+    handler, tracker, detector, vad_cb, deepgram_vad_cb = _build_voice_response_handler(
         vc=vc,
         familiar=familiar,
         voice_channel_id=100,
         guild_id=1,
         user_names={42: "Alice", 99: "Bob"},
     )
-    return handler, tracker, detector, vad_cb, familiar
+    return handler, tracker, detector, vad_cb, deepgram_vad_cb, familiar
 
 
 class TestVoiceDebounce:
@@ -118,7 +118,7 @@ class TestVoiceDebounce:
     @pytest.mark.asyncio
     async def test_single_result_fallback_generates_after_lull(self) -> None:
         """Result with no active speakers uses the fallback timer."""
-        handler, tracker, _, _, familiar = _build(lull_timeout=0.05)
+        handler, tracker, _, _, _, familiar = _build(lull_timeout=0.05)
 
         result = TranscriptionResult(
             text="hello there", is_final=True, start=0.0, end=1.0
@@ -138,7 +138,7 @@ class TestVoiceDebounce:
     @pytest.mark.asyncio
     async def test_vad_speech_blocks_lull_timer(self) -> None:
         """SpeechStarted cancels the lull timer; UtteranceEnd restarts it."""
-        handler, _, _, vad_cb, familiar = _build(lull_timeout=0.05)
+        handler, _, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
 
         # Simulate: user starts speaking, then final arrives.
         vad_cb(42, "SpeechStarted")
@@ -152,8 +152,9 @@ class TestVoiceDebounce:
             await asyncio.sleep(0)
         familiar.llm_client.chat.assert_not_called()
 
-        # Now the user stops.
+        # Now the user stops (Discord + Deepgram).
         vad_cb(42, "UtteranceEnd")
+        dg_cb(42, "UtteranceEnd")
 
         # Lull timer starts now.
         await asyncio.sleep(0.10)
@@ -169,14 +170,14 @@ class TestVoiceDebounce:
         with Deepgram finalising "hello" during the pause but VAD
         showing continued speech.
         """
-        handler, _, _, vad_cb, familiar = _build(lull_timeout=0.05)
+        handler, _, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
 
         # Segment 1: user starts talking
         vad_cb(42, "SpeechStarted")
         r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
         await handler(42, r1)
 
-        # Brief pause — Deepgram sends UtteranceEnd then SpeechStarted
+        # Brief pause — Discord detects silence then speech again
         vad_cb(42, "UtteranceEnd")
         # User resumes before lull fires
         vad_cb(42, "SpeechStarted")
@@ -191,8 +192,9 @@ class TestVoiceDebounce:
             await asyncio.sleep(0)
         familiar.llm_client.chat.assert_not_called()
 
-        # User finishes
+        # User finishes (Discord + Deepgram)
         vad_cb(42, "UtteranceEnd")
+        dg_cb(42, "UtteranceEnd")
 
         await asyncio.sleep(0.10)
         for _ in range(10):
@@ -207,7 +209,7 @@ class TestVoiceDebounce:
     @pytest.mark.asyncio
     async def test_multiple_speakers_wait_for_all_silent(self) -> None:
         """Lull timer only starts when ALL speakers stop."""
-        handler, _, _, vad_cb, familiar = _build(lull_timeout=0.05)
+        handler, _, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
 
         vad_cb(42, "SpeechStarted")
         vad_cb(99, "SpeechStarted")
@@ -217,6 +219,7 @@ class TestVoiceDebounce:
 
         # User 42 stops, but user 99 is still talking.
         vad_cb(42, "UtteranceEnd")
+        dg_cb(42, "UtteranceEnd")
         await asyncio.sleep(0.10)
         for _ in range(10):
             await asyncio.sleep(0)
@@ -227,6 +230,7 @@ class TestVoiceDebounce:
 
         # Now user 99 stops.
         vad_cb(99, "UtteranceEnd")
+        dg_cb(99, "UtteranceEnd")
         await asyncio.sleep(0.10)
         for _ in range(10):
             await asyncio.sleep(0)
@@ -235,7 +239,7 @@ class TestVoiceDebounce:
     @pytest.mark.asyncio
     async def test_tracker_idle_during_debounce(self) -> None:
         """Tracker stays IDLE while results are being buffered."""
-        handler, tracker, _, vad_cb, _ = _build(lull_timeout=0.1)
+        handler, tracker, _, vad_cb, _, _ = _build(lull_timeout=0.1)
 
         vad_cb(42, "SpeechStarted")
         r1 = TranscriptionResult(text="hi", is_final=True, start=0.0, end=0.3)
@@ -251,7 +255,7 @@ class TestVoiceDebounce:
     @pytest.mark.asyncio
     async def test_combined_text_joins_all_utterances(self) -> None:
         """The LLM receives the combined text of all buffered utterances."""
-        handler, _, _, _vad_cb, familiar = _build(lull_timeout=0.05)
+        handler, _, _, _vad_cb, _, familiar = _build(lull_timeout=0.05)
 
         r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
         r2 = TranscriptionResult(text="how are you", is_final=True, start=0.5, end=1.5)
@@ -276,7 +280,7 @@ class TestVoiceDebounce:
         faster than the lull timeout.  Without timer-reset, the first
         timer could fire before later segments arrive.
         """
-        handler, _, _, _vad_cb, familiar = _build(lull_timeout=0.08)
+        handler, _, _, _vad_cb, _, familiar = _build(lull_timeout=0.08)
 
         r1 = TranscriptionResult(text="first", is_final=True, start=0.0, end=0.5)
         await handler(42, r1)
@@ -305,3 +309,125 @@ class TestVoiceDebounce:
         pipeline_mock = familiar.build_pipeline.return_value
         request = pipeline_mock.assemble.call_args[0][0]
         assert request.utterance == "first second third"
+
+
+class TestDeepgramFlushGate:
+    """Verify generation waits for Deepgram to flush in-transit transcripts."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_chat(self) -> Iterator[None]:  # type: ignore[misc]
+        """Patch assemble_chat_messages — we test timing, not rendering.
+
+        Yields:
+            None
+
+        """
+        with patch(
+            "familiar_connect.bot.assemble_chat_messages",
+            return_value=[Message(role="user", content="hi")],
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_lull_waits_for_deepgram_flush(self) -> None:
+        """After lull expires, generation waits for Deepgram UtteranceEnd."""
+        handler, _, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
+
+        # User speaks (Discord audio detected).
+        vad_cb(42, "SpeechStarted")
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+
+        # User stops (Discord silence) — lull timer starts.
+        vad_cb(42, "UtteranceEnd")
+
+        # Lull expires, but Deepgram hasn't confirmed flush yet.
+        await asyncio.sleep(0.10)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        familiar.llm_client.chat.assert_not_called()
+
+        # Deepgram confirms all transcriptions flushed.
+        dg_cb(42, "UtteranceEnd")
+        await asyncio.sleep(0.05)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        familiar.llm_client.chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_flush_gate_collects_late_transcript(self) -> None:
+        """A transcript arriving during the flush wait is included."""
+        handler, _, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
+
+        vad_cb(42, "SpeechStarted")
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+        vad_cb(42, "UtteranceEnd")
+
+        # Lull expires — waiting for Deepgram flush.
+        await asyncio.sleep(0.10)
+        familiar.llm_client.chat.assert_not_called()
+
+        # Late transcript arrives (Deepgram was slow).
+        r2 = TranscriptionResult(text="world", is_final=True, start=0.5, end=1.0)
+        await handler(42, r2)
+
+        # The late transcript resets the lull timer (cancels the
+        # flush wait).  After it also finishes, both are included.
+        dg_cb(42, "UtteranceEnd")
+        await asyncio.sleep(0.10)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        familiar.llm_client.chat.assert_called_once()
+        pipeline_mock = familiar.build_pipeline.return_value
+        request = pipeline_mock.assemble.call_args[0][0]
+        assert request.utterance == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_no_vad_events_skips_flush_gate(self) -> None:
+        """Without SpeechStarted, deepgram_ready stays set — no wait."""
+        handler, _, _, _vad_cb, _dg_cb, familiar = _build(lull_timeout=0.05)
+
+        # No Discord VAD events — fallback timer only.
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+
+        await asyncio.sleep(0.10)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        # Should generate without waiting for Deepgram flush.
+        familiar.llm_client.chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_flush_gate_per_user_tracking(self) -> None:
+        """Deepgram flush is tracked per-user; all must confirm."""
+        handler, _, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
+
+        vad_cb(42, "SpeechStarted")
+        vad_cb(99, "SpeechStarted")
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+        r2 = TranscriptionResult(text="world", is_final=True, start=0.0, end=0.5)
+        await handler(99, r2)
+
+        vad_cb(42, "UtteranceEnd")
+        vad_cb(99, "UtteranceEnd")
+
+        # Lull fires — waiting for both users' Deepgram flush.
+        await asyncio.sleep(0.10)
+        familiar.llm_client.chat.assert_not_called()
+
+        # Only user 42 confirmed — still waiting.
+        dg_cb(42, "UtteranceEnd")
+        await asyncio.sleep(0.05)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        familiar.llm_client.chat.assert_not_called()
+
+        # User 99 confirms — now generate.
+        dg_cb(99, "UtteranceEnd")
+        await asyncio.sleep(0.05)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        familiar.llm_client.chat.assert_called_once()

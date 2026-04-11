@@ -136,6 +136,7 @@ class VoicePipeline:
     shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
     interruption_detector: InterruptionDetector | None = None
     vad_callback: Callable[[int, str], None] | None = None
+    deepgram_vad_callback: Callable[[int, str], None] | None = None
     vad_dispatcher_task: asyncio.Task[None] | None = None
 
 
@@ -247,15 +248,24 @@ async def _vad_forwarder(
 async def _vad_dispatcher(
     shared_queue: asyncio.Queue[tuple[int, VadEvent]],
     detector: InterruptionDetector | None,
+    deepgram_vad_callback: Callable[[int, str], None] | None = None,
 ) -> None:
-    """Read tagged VAD events and feed them to the InterruptionDetector.
+    """Read tagged VAD events from Deepgram and dispatch them.
 
-    Voice debounce is handled separately by :class:`AudioActivityTracker`
-    using Discord audio packet timing (faster, no Deepgram round-trip).
-    This dispatcher only feeds the interruption detector.
+    Feeds events to the :class:`InterruptionDetector` for interruption
+    handling, and to *deepgram_vad_callback* for the transcription
+    flush gate (so the debounce logic knows when all in-transit
+    transcriptions have been delivered).
+
+    Voice debounce timing is handled separately by
+    :class:`AudioActivityTracker` using Discord audio packets.
     """
     while True:
         user_id, event = await shared_queue.get()
+        # Notify the flush gate (always, regardless of detector state).
+        if deepgram_vad_callback is not None:
+            deepgram_vad_callback(user_id, event.event_type)
+        # Notify the interruption detector.
         if detector is None:
             continue
         now = time.monotonic()
@@ -420,6 +430,7 @@ async def start_pipeline(  # noqa: RUF029
     ) = None,
     interruption_detector: InterruptionDetector | None = None,
     vad_callback: Callable[[int, str], None] | None = None,
+    deepgram_vad_callback: Callable[[int, str], None] | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -440,6 +451,10 @@ async def start_pipeline(  # noqa: RUF029
         ``(user_id, event_type)`` for voice activity events.  Driven
         by Discord audio packet timing via :class:`AudioActivityTracker`
         (not Deepgram VAD) for lower latency.
+    :param deepgram_vad_callback: Optional sync callback invoked with
+        ``(user_id, event_type)`` for Deepgram VAD events.  Used by
+        the transcription flush gate to know when all in-transit
+        transcriptions have been delivered.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
@@ -447,11 +462,10 @@ async def start_pipeline(  # noqa: RUF029
         asyncio.Queue()
     )
 
-    # Deepgram VAD queue — only needed for the interruption detector.
-    # The debounce vad_callback is now driven by Discord audio packet
-    # timing via AudioActivityTracker inside _audio_router.
+    # Deepgram VAD queue — needed when we have an interruption detector
+    # OR a deepgram_vad_callback (transcription flush gate).
     shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
-    if interruption_detector is not None:
+    if interruption_detector is not None or deepgram_vad_callback is not None:
         shared_vad_queue = asyncio.Queue()
 
     # We create a placeholder pipeline first so the router can reference it.
@@ -467,6 +481,7 @@ async def start_pipeline(  # noqa: RUF029
         shared_vad_queue=shared_vad_queue,
         interruption_detector=interruption_detector,
         vad_callback=vad_callback,
+        deepgram_vad_callback=deepgram_vad_callback,
     )
 
     pipeline.router_task = asyncio.create_task(
@@ -478,7 +493,9 @@ async def start_pipeline(  # noqa: RUF029
 
     if shared_vad_queue is not None:
         pipeline.vad_dispatcher_task = asyncio.create_task(
-            _vad_dispatcher(shared_vad_queue, interruption_detector)
+            _vad_dispatcher(
+                shared_vad_queue, interruption_detector, deepgram_vad_callback
+            )
         )
 
     set_pipeline(pipeline)

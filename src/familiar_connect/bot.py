@@ -183,6 +183,7 @@ def _build_voice_response_handler(
     ResponseTracker,
     InterruptionDetector,
     Callable[[int, str], None],
+    Callable[[int, str], None],
 ]:
     """Build the async callback invoked for each final voice transcription.
 
@@ -192,10 +193,12 @@ def _build_voice_response_handler(
     pipeline, render, call the main LLM, run post-processors,
     persist to :class:`HistoryStore`, fan out to TTS.
 
-    Returns ``(handler, tracker, detector, vad_callback)`` — the
-    handler plus the per-guild :class:`ResponseTracker`,
-    :class:`InterruptionDetector`, and a synchronous VAD event
-    callback for the voice debounce logic.
+    Returns ``(handler, tracker, detector, vad_callback,
+    deepgram_vad_callback)`` — the handler plus the per-guild
+    :class:`ResponseTracker`, :class:`InterruptionDetector`,
+    a synchronous VAD event callback for the voice debounce
+    logic (driven by Discord audio), and a Deepgram VAD
+    callback for the transcription flush gate.
     """
     tracker = ResponseTracker()
 
@@ -279,6 +282,14 @@ def _build_voice_response_handler(
     pending_utterances: list[tuple[int, TranscriptionResult]] = []
     lull_gen_task: asyncio.Task[None] | None = None
     debounce_speakers: set[int] = set()
+
+    # Deepgram flush gate: after the lull timer fires, wait for
+    # Deepgram to confirm all in-transit transcriptions have been
+    # delivered (via UtteranceEnd) before generating.  Prevents
+    # generating before a slow final transcript arrives.
+    pending_deepgram_speakers: set[int] = set()
+    deepgram_ready = asyncio.Event()
+    deepgram_ready.set()  # Initially ready (no pending transcripts)
 
     async def _generate_response(
         user_id: int,
@@ -446,11 +457,38 @@ def _build_voice_response_handler(
         await _generate_response(last_user_id, combined_text)
 
     async def _lull_then_generate() -> None:
-        """Wait for lull_timeout seconds of silence, then flush."""
+        """Wait for lull_timeout seconds of silence, then flush.
+
+        After the lull timer expires, waits for Deepgram to confirm
+        all in-transit transcriptions have been delivered before
+        generating.  This gate prevents generating before a slow
+        final transcript arrives.  The task is cancellable during
+        both the sleep and the Deepgram wait phases (by new speech
+        or new transcripts), but NOT during the generation phase.
+        """
         nonlocal lull_gen_task
-        await asyncio.sleep(familiar.config.lull_timeout)
-        # Timer done — clear reference so new results don't cancel
-        # the generation phase that follows.
+        try:
+            await asyncio.sleep(familiar.config.lull_timeout)
+            # Wait for Deepgram to confirm all transcriptions flushed.
+            if not deepgram_ready.is_set():
+                _logger.info(
+                    "Lull expired, waiting for Deepgram to flush (pending=%s)",
+                    pending_deepgram_speakers,
+                )
+                try:
+                    await asyncio.wait_for(deepgram_ready.wait(), timeout=5.0)
+                except TimeoutError:
+                    _logger.warning(
+                        "Timed out waiting for Deepgram flush, "
+                        "generating anyway (pending=%s)",
+                        pending_deepgram_speakers,
+                    )
+                    pending_deepgram_speakers.clear()
+                    deepgram_ready.set()
+        except asyncio.CancelledError:
+            return
+        # Past the cancellable phases — clear reference so new
+        # results don't cancel the generation phase that follows.
         lull_gen_task = None
         await _flush_pending()
 
@@ -467,6 +505,9 @@ def _build_voice_response_handler(
 
         if event_type == "SpeechStarted":
             debounce_speakers.add(user_id)
+            # Mark that Deepgram has pending audio for this user.
+            pending_deepgram_speakers.add(user_id)
+            deepgram_ready.clear()
             had_timer = lull_gen_task is not None
             # Someone started talking — cancel the lull timer.
             if lull_gen_task is not None:
@@ -525,7 +566,31 @@ def _build_voice_response_handler(
                 lull_gen_task.cancel()
             lull_gen_task = asyncio.create_task(_lull_then_generate())
 
-    return _handle_voice_result, tracker, detector, _on_vad_event
+    def _on_deepgram_vad(user_id: int, event_type: str) -> None:
+        """Track Deepgram transcription flush state.
+
+        Called by the voice pipeline's VAD dispatcher for Deepgram
+        ``UtteranceEnd`` events.  When all pending speakers have been
+        flushed, ``deepgram_ready`` is set so the lull gate can
+        proceed to generation.
+        """
+        if event_type == "UtteranceEnd":
+            pending_deepgram_speakers.discard(user_id)
+            if not pending_deepgram_speakers:
+                deepgram_ready.set()
+            _logger.debug(
+                "Deepgram UtteranceEnd for %s (pending_deepgram=%s)",
+                user_names.get(user_id, f"User-{user_id}"),
+                pending_deepgram_speakers,
+            )
+
+    return (
+        _handle_voice_result,
+        tracker,
+        detector,
+        _on_vad_event,
+        _on_deepgram_vad,
+    )
 
 
 async def subscribe_my_voice(
@@ -586,12 +651,14 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        response_handler, _tracker, detector, vad_cb = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=channel.id,
-            guild_id=ctx.guild_id,
-            user_names=user_names,
+        response_handler, _tracker, detector, vad_cb, dg_vad_cb = (
+            _build_voice_response_handler(
+                vc=vc,
+                familiar=familiar,
+                voice_channel_id=channel.id,
+                guild_id=ctx.guild_id,
+                user_names=user_names,
+            )
         )
 
         pipeline = await start_pipeline(
@@ -601,6 +668,7 @@ async def subscribe_my_voice(
             response_handler=response_handler,
             interruption_detector=detector,
             vad_callback=vad_cb,
+            deepgram_vad_callback=dg_vad_cb,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),
