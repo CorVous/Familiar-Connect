@@ -271,19 +271,27 @@ def _build_voice_response_handler(
         user_id: int,
         result: TranscriptionResult,
     ) -> None:
-        # Only start a new response cycle when IDLE.  When the tracker
-        # is GENERATING or SPEAKING, the InterruptionDetector is already
-        # handling the user's speech via VAD events (SpeechStarted /
-        # UtteranceEnd) and dispatching to the appropriate interruption
-        # handler callback.  We skip here to avoid a second concurrent
-        # generation — the interruption flow is in control.
+        # Wait for the tracker to become IDLE before starting a new
+        # response cycle.  When the tracker is GENERATING or SPEAKING,
+        # the InterruptionDetector is handling the user's speech via VAD
+        # events.  We poll until the current cycle finishes (the
+        # interrupted handler resets the tracker to IDLE via cancellation
+        # or normal completion).
         if tracker.state is not ResponseState.IDLE:
             _logger.info(
-                "Voice result while %s (interruption detector handling): %r",
+                "Voice result while %s — waiting for current cycle: %r",
                 tracker.state.value,
                 result.text[:80],
             )
-            return
+            deadline = asyncio.get_event_loop().time() + 30.0
+            while tracker.state is not ResponseState.IDLE:
+                if asyncio.get_event_loop().time() > deadline:
+                    _logger.warning(
+                        "Timed out waiting for IDLE, dropping: %r",
+                        result.text[:80],
+                    )
+                    return
+                await asyncio.sleep(0.1)
 
         # Resolve the speaker's display name. ``user_names`` is mutated
         # by voice_pipeline's name resolver when a late joiner shows up,
