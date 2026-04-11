@@ -50,6 +50,7 @@ from familiar_connect.voice.audio import mono_to_stereo
 from familiar_connect.voice.interruption import (
     InterruptionDetector,
     InterruptionEvent,
+    ResponseState,
     ResponseTracker,
     should_keep_talking,
 )
@@ -270,6 +271,20 @@ def _build_voice_response_handler(
         user_id: int,
         result: TranscriptionResult,
     ) -> None:
+        # Only start a new response cycle when IDLE.  When the tracker
+        # is GENERATING or SPEAKING, the InterruptionDetector is already
+        # handling the user's speech via VAD events (SpeechStarted /
+        # UtteranceEnd) and dispatching to the appropriate interruption
+        # handler callback.  We skip here to avoid a second concurrent
+        # generation — the interruption flow is in control.
+        if tracker.state is not ResponseState.IDLE:
+            _logger.info(
+                "Voice result while %s (interruption detector handling): %r",
+                tracker.state.value,
+                result.text[:80],
+            )
+            return
+
         # Resolve the speaker's display name. ``user_names`` is mutated
         # by voice_pipeline's name resolver when a late joiner shows up,
         # so a lookup failure falls back to a stable ``User-<id>`` form
