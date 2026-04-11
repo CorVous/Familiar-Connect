@@ -88,7 +88,7 @@ flowchart LR
     twitch --> bot
 ```
 
-- **Discord Gateway** (required) — `DISCORD_TOKEN`. The bot has nothing
+- **Discord Gateway** (required) — `DISCORD_BOT`. The bot has nothing
   to listen to or speak into without it.
 - **OpenRouter** (required) — `OPENROUTER_API_KEY`. The reply
   generation call. Model selectable per-familiar.
