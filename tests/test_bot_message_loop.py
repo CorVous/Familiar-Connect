@@ -128,17 +128,28 @@ def _make_text_ctx(
     *,
     channel_id: int = 12345,
     guild_id: int = 999,
+    view_channel: bool = True,
+    send_messages: bool = True,
 ) -> MagicMock:
     ctx = MagicMock(spec=discord.ApplicationContext)
     ctx.respond = AsyncMock()
     channel = MagicMock(spec=discord.TextChannel)
     channel.id = channel_id
     channel.name = "general"
+
+    # Wire up permissions_for so permission checks work.
+    perms = MagicMock(spec=discord.Permissions)
+    perms.view_channel = view_channel
+    perms.send_messages = send_messages
+    channel.permissions_for = MagicMock(return_value=perms)
+
     type(ctx).channel = PropertyMock(return_value=channel)
     type(ctx).channel_id = PropertyMock(return_value=channel_id)
     if guild_id is not None:
         guild = MagicMock(spec=discord.Guild)
         guild.id = guild_id
+        bot_member = MagicMock(spec=discord.Member)
+        type(guild).me = PropertyMock(return_value=bot_member)
         type(ctx).guild_id = PropertyMock(return_value=guild_id)
         type(ctx).guild = PropertyMock(return_value=guild)
     else:
@@ -152,6 +163,8 @@ def _make_voice_ctx(
     channel_id: int = 9000,
     guild_id: int = 999,
     already_connected: bool = False,
+    connect: bool = True,
+    speak: bool = True,
 ) -> MagicMock:
     ctx = _make_text_ctx(channel_id=channel_id, guild_id=guild_id)
     ctx.defer = AsyncMock()
@@ -170,6 +183,13 @@ def _make_voice_ctx(
     mock_vc.is_playing = MagicMock(return_value=False)
     mock_vc.disconnect = AsyncMock()
     voice_channel.connect = AsyncMock(return_value=mock_vc)
+
+    # Wire up voice channel permissions.
+    voice_perms = MagicMock(spec=discord.Permissions)
+    voice_perms.connect = connect
+    voice_perms.speak = speak
+    voice_channel.permissions_for = MagicMock(return_value=voice_perms)
+
     voice_state.channel = voice_channel
     type(author).voice = PropertyMock(return_value=voice_state)
 
@@ -464,6 +484,38 @@ class TestSubscriptionCommands:
 
         mock_clear.assert_called_once_with(42)
 
+    def test_subscribe_text_no_send_permission_returns_ephemeral(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_text_ctx(channel_id=42, guild_id=999, send_messages=False)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
+            is None
+        )
+
+    def test_subscribe_text_no_view_permission_returns_ephemeral(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_text_ctx(channel_id=42, guild_id=999, view_channel=False)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
+            is None
+        )
+
 
 # ---------------------------------------------------------------------------
 # /subscribe-my-voice
@@ -582,6 +634,66 @@ class TestVoiceSubscription:
         ctx.voice_client.stop_recording.assert_called_once()
         mock_stop.assert_called_once()
         ctx.voice_client.disconnect.assert_called_once()
+
+    def test_unsubscribe_voice_not_connected_returns_ephemeral(
+        self, tmp_path: Path
+    ) -> None:
+        """Trying to leave voice when not in a channel should report an error."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx(already_connected=False)
+
+        asyncio.run(unsubscribe_voice(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+
+    def test_subscribe_my_voice_connect_failure_does_not_register(
+        self, tmp_path: Path
+    ) -> None:
+        """If channel.connect() raises, no subscription should be created."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx()
+        ctx.author.voice.channel.connect = AsyncMock(
+            side_effect=discord.errors.ClientException("cannot connect"),
+        )
+
+        asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        # Should have sent an ephemeral error via followup (after defer).
+        ctx.followup.send.assert_called_once()
+        _, kwargs = ctx.followup.send.call_args
+        assert kwargs.get("ephemeral") is True
+        assert familiar.subscriptions.voice_in_guild(999) is None
+
+    def test_subscribe_my_voice_no_connect_permission_returns_ephemeral(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx(connect=False)
+
+        asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        # Bot should NOT have attempted to connect.
+        ctx.author.voice.channel.connect.assert_not_called()
+        assert familiar.subscriptions.voice_in_guild(999) is None
+
+    def test_subscribe_my_voice_no_speak_permission_returns_ephemeral(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx(speak=False)
+
+        asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        ctx.author.voice.channel.connect.assert_not_called()
+        assert familiar.subscriptions.voice_in_guild(999) is None
 
 
 # ---------------------------------------------------------------------------
