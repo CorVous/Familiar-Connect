@@ -51,6 +51,7 @@ fallback-version = "0.1.0"
 version-file = "src/familiar_connect/_version.py"
 
 [tool.uv]
+default-groups = ["dev", "docs"]
 exclude-newer = "7d"
 
 [tool.uv.exclude-newer-package]
