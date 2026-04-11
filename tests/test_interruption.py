@@ -302,9 +302,26 @@ class TestResponseTracker:
 
 
 class TestInterruptionDetector:
+    """Two-phase interruption model.
+
+    Moment 1 fires ``min_interruption_s`` after the first SpeechStarted
+    (toll check).  Moment 2 fires after all speakers stop + a lull
+    (short/long classification and handler dispatch).
+    """
+
+    @staticmethod
+    async def _tick() -> None:
+        """Give the event loop time to run pending timer tasks."""
+        for _ in range(5):
+            await asyncio.sleep(0)
+
     def _make_detector(
         self,
         tracker: ResponseTracker | None = None,
+        *,
+        min_interruption_s: float = 0.0,
+        short_long_boundary_s: float = 4.0,
+        lull_timeout_s: float = 0.0,
     ) -> tuple[
         InterruptionDetector,
         ResponseTracker,
@@ -312,153 +329,291 @@ class TestInterruptionDetector:
         AsyncMock,
         AsyncMock,
         AsyncMock,
+        AsyncMock,
     ]:
         t = tracker or ResponseTracker()
+        on_start = AsyncMock(return_value=True)
         on_short_gen = AsyncMock()
         on_long_gen = AsyncMock()
         on_short_speak = AsyncMock()
         on_long_speak = AsyncMock()
         detector = InterruptionDetector(
             tracker=t,
-            min_interruption_s=1.5,
-            short_long_boundary_s=4.0,
+            min_interruption_s=min_interruption_s,
+            short_long_boundary_s=short_long_boundary_s,
+            lull_timeout_s=lull_timeout_s,
+            on_interrupt_start=on_start,
             on_short_during_generating=on_short_gen,
             on_long_during_generating=on_long_gen,
             on_short_during_speaking=on_short_speak,
             on_long_during_speaking=on_long_speak,
         )
-        return detector, t, on_short_gen, on_long_gen, on_short_speak, on_long_speak
-
-    def test_speech_during_idle_ignored(self) -> None:
-        detector, _tracker, *mocks = self._make_detector()
-        # Tracker is IDLE by default
-        detector.on_speech_started(user_id=1, timestamp=0.0)
-        result = asyncio.run(
-            detector.on_utterance_end(user_id=1, transcript="hey", timestamp=2.0)
+        return (
+            detector,
+            t,
+            on_start,
+            on_short_gen,
+            on_long_gen,
+            on_short_speak,
+            on_long_speak,
         )
-        assert result is None
+
+    # -- Moment 1 tests --
+
+    @pytest.mark.asyncio
+    async def test_speech_during_idle_ignored(self) -> None:
+        detector, _tracker, on_start, *mocks = self._make_detector()
+        detector.on_speech_started(user_id=1, timestamp=0.0)
+        await self._tick()
+        await detector.on_utterance_end(user_id=1, transcript="hey", timestamp=2.0)
+        await self._tick()
+        on_start.assert_not_called()
         for mock in mocks:
             mock.assert_not_called()
 
-    def test_short_interruption_during_generating(self) -> None:
-        detector, tracker, on_short_gen, on_long_gen, *_ = self._make_detector()
+    @pytest.mark.asyncio
+    async def test_moment1_fires_after_threshold_during_generating(self) -> None:
+        detector, tracker, on_start, *_ = self._make_detector()
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
 
         detector.on_speech_started(user_id=1, timestamp=10.0)
-        result = asyncio.run(
-            detector.on_utterance_end(user_id=1, transcript="wait", timestamp=12.0)
+        await self._tick()
+        on_start.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_moment1_fires_after_threshold_during_speaking(self) -> None:
+        detector, tracker, on_start, *_ = self._make_detector()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+        tracker.start_speaking()
+
+        detector.on_speech_started(user_id=1, timestamp=10.0)
+        await self._tick()
+        on_start.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_yield_resets_and_skips_moment2(self) -> None:
+        detector, tracker, on_start, *mocks = self._make_detector()
+        on_start.return_value = False  # familiar keeps talking
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+        tracker.start_speaking()
+
+        detector.on_speech_started(user_id=1, timestamp=10.0)
+        await self._tick()
+        on_start.assert_called_once()
+
+        # UtteranceEnd + lull should not dispatch moment 2.
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await self._tick()
+        for mock in mocks:
+            mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_no_moment1(self) -> None:
+        """Speech shorter than min_interruption_s never fires moment 1."""
+        detector, tracker, on_start, *mocks = self._make_detector(
+            min_interruption_s=1.5,
         )
-        assert result is not None
-        assert result.kind is InterruptionKind.short
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+
+        detector.on_speech_started(user_id=1, timestamp=10.0)
+        await detector.on_utterance_end(user_id=1, transcript="mm", timestamp=11.0)
+        # Lull fires (0.0 delay) before threshold (1.5s) — resets.
+        await self._tick()
+        on_start.assert_not_called()
+        for mock in mocks:
+            mock.assert_not_called()
+
+    # -- Moment 2 tests --
+
+    @pytest.mark.asyncio
+    async def test_short_interruption_during_generating(self) -> None:
+        detector, tracker, on_start, on_short_gen, on_long_gen, *_ = (
+            self._make_detector()
+        )
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+
+        detector.on_speech_started(user_id=1, timestamp=10.0)
+        await self._tick()  # moment 1
+        on_start.assert_called_once()
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await self._tick()  # lull → short (2.0 < 4.0)
         on_short_gen.assert_called_once()
         on_long_gen.assert_not_called()
 
-    def test_long_interruption_during_generating(self) -> None:
-        detector, tracker, on_short_gen, on_long_gen, *_ = self._make_detector()
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_generating(self) -> None:
+        detector, tracker, _on_start, on_short_gen, on_long_gen, *_ = (
+            self._make_detector()
+        )
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
 
         detector.on_speech_started(user_id=1, timestamp=10.0)
-        result = asyncio.run(
-            detector.on_utterance_end(
-                user_id=1, transcript="actually let me explain", timestamp=15.0
-            )
-        )
-        assert result is not None
-        assert result.kind is InterruptionKind.long
+        await self._tick()
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=15.0)
+        await self._tick()  # lull → long (5.0 >= 4.0)
         on_long_gen.assert_called_once()
         on_short_gen.assert_not_called()
 
-    def test_short_interruption_during_speaking(self) -> None:
-        detector, tracker, _, _, on_short_speak, on_long_speak = self._make_detector()
+    @pytest.mark.asyncio
+    async def test_short_interruption_during_speaking(self) -> None:
+        detector, tracker, _, _, _, on_short_speak, on_long_speak = (
+            self._make_detector()
+        )
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
         tracker.start_speaking()
 
         detector.on_speech_started(user_id=1, timestamp=10.0)
-        result = asyncio.run(
-            detector.on_utterance_end(user_id=1, transcript="hmm", timestamp=12.0)
-        )
-        assert result is not None
-        assert result.kind is InterruptionKind.short
+        await self._tick()
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await self._tick()
         on_short_speak.assert_called_once()
         on_long_speak.assert_not_called()
 
-    def test_long_interruption_during_speaking(self) -> None:
-        detector, tracker, _, _, on_short_speak, on_long_speak = self._make_detector()
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_speaking(self) -> None:
+        detector, tracker, _, _, _, on_short_speak, on_long_speak = (
+            self._make_detector()
+        )
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
         tracker.start_speaking()
 
         detector.on_speech_started(user_id=1, timestamp=10.0)
-        result = asyncio.run(
-            detector.on_utterance_end(
-                user_id=1, transcript="no stop I need to say something", timestamp=15.0
-            )
-        )
-        assert result is not None
-        assert result.kind is InterruptionKind.long
+        await self._tick()
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=15.0)
+        await self._tick()
         on_long_speak.assert_called_once()
         on_short_speak.assert_not_called()
 
-    def test_below_minimum_duration_ignored(self) -> None:
-        detector, tracker, *mocks = self._make_detector()
+    @pytest.mark.asyncio
+    async def test_state_at_moment1_used_for_dispatch(self) -> None:
+        """Moment 2 dispatches based on the state captured at moment 1."""
+        detector, tracker, _, _, _, on_short_speak, _ = self._make_detector()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+        tracker.start_speaking()
+
+        detector.on_speech_started(user_id=1, timestamp=10.0)
+        await self._tick()  # moment 1 captures SPEAKING
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await self._tick()
+        on_short_speak.assert_called_once()
+
+    # -- Lull and multi-speaker tests --
+
+    @pytest.mark.asyncio
+    async def test_lull_waits_for_all_speakers_to_stop(self) -> None:
+        detector, tracker, _, on_short_gen, *_ = self._make_detector()
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
 
         detector.on_speech_started(user_id=1, timestamp=10.0)
-        result = asyncio.run(
-            detector.on_utterance_end(user_id=1, transcript="mm", timestamp=11.0)
-        )
-        assert result is None
-        for mock in mocks:
-            mock.assert_not_called()
+        detector.on_speech_started(user_id=2, timestamp=10.2)
+        await self._tick()  # moment 1
 
-    def test_multiple_speakers_merged_into_single_event(self) -> None:
-        detector, tracker, on_short_gen, *_ = self._make_detector()
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=11.0)
+        await self._tick()
+        # User 2 still talking — no dispatch yet.
+        on_short_gen.assert_not_called()
+
+        await detector.on_utterance_end(user_id=2, transcript="", timestamp=12.0)
+        await self._tick()  # all silent, lull fires
+        on_short_gen.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_speech_during_lull_extends_interruption(self) -> None:
+        detector, tracker, _, _, on_long_gen, *_ = self._make_detector()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+
+        detector.on_speech_started(user_id=1, timestamp=10.0)
+        await self._tick()  # moment 1
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        # Lull timer started — speech resumes before it fires.
+        detector.on_speech_started(user_id=1, timestamp=12.1)
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=15.0)
+        await self._tick()  # lull → long (15.0 - 10.0 = 5.0)
+        on_long_gen.assert_called_once()
+        event = on_long_gen.call_args[0][0]
+        assert event.duration_s == pytest.approx(5.0)
+
+    @pytest.mark.asyncio
+    async def test_multiple_speakers_merged_into_single_event(self) -> None:
+        detector, tracker, _, on_short_gen, *_ = self._make_detector()
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
 
         detector.on_speech_started(user_id=1, timestamp=10.0)
         detector.on_speech_started(user_id=2, timestamp=10.5)
-        result = asyncio.run(
-            detector.on_utterance_end(user_id=2, transcript="wait wait", timestamp=12.0)
-        )
-        assert result is not None
-        assert result.interrupter_ids == frozenset({1, 2})
-        on_short_gen.assert_called_once()
+        await self._tick()  # moment 1
 
-    def test_on_utterance_end_without_speech_start_returns_none(self) -> None:
-        detector, tracker, *mocks = self._make_detector()
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=11.5)
+        await detector.on_utterance_end(user_id=2, transcript="", timestamp=12.0)
+        await self._tick()  # lull fires
+        on_short_gen.assert_called_once()
+        event = on_short_gen.call_args[0][0]
+        assert event.interrupter_ids == frozenset({1, 2})
+
+    @pytest.mark.asyncio
+    async def test_duration_from_first_speech_to_last_utterance(self) -> None:
+        detector, tracker, _, on_short_gen, *_ = self._make_detector()
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
 
-        # No speech_started before utterance_end
-        result = asyncio.run(
-            detector.on_utterance_end(user_id=1, transcript="hey", timestamp=12.0)
-        )
-        assert result is None
+        detector.on_speech_started(user_id=1, timestamp=10.0)
+        await self._tick()
+
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=13.0)
+        await self._tick()
+        event = on_short_gen.call_args[0][0]
+        assert event.duration_s == pytest.approx(3.0)
+
+    @pytest.mark.asyncio
+    async def test_on_utterance_end_without_speech_start_is_noop(self) -> None:
+        detector, tracker, on_start, *mocks = self._make_detector()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+
+        await detector.on_utterance_end(user_id=1, transcript="hey", timestamp=12.0)
+        await self._tick()
+        on_start.assert_not_called()
         for mock in mocks:
             mock.assert_not_called()
 
-    def test_accumulation_resets_after_dispatch(self) -> None:
-        """After dispatching, the detector should reset its internal state."""
-        detector, tracker, _on_short_gen, *_ = self._make_detector()
+    @pytest.mark.asyncio
+    async def test_accumulation_resets_after_dispatch(self) -> None:
+        """After dispatching, the detector resets for the next interruption."""
+        detector, tracker, on_start, on_short_gen, *_ = self._make_detector()
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
 
         # First interruption
         detector.on_speech_started(user_id=1, timestamp=10.0)
-        asyncio.run(
-            detector.on_utterance_end(user_id=1, transcript="wait", timestamp=12.0)
-        )
+        await self._tick()
+        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await self._tick()
+        on_short_gen.assert_called_once()
 
-        # Second speech start - the internal state should be clean
+        # Second interruption — separate event
         detector.on_speech_started(user_id=3, timestamp=15.0)
-        result = asyncio.run(
-            detector.on_utterance_end(user_id=3, transcript="hello", timestamp=17.0)
-        )
-        assert result is not None
-        # Only user 3 should be in the interrupter set (user 1 was reset)
-        assert result.interrupter_ids == frozenset({3})
+        await self._tick()
+        assert on_start.call_count == 2
+        await detector.on_utterance_end(user_id=3, transcript="", timestamp=17.0)
+        await self._tick()
+        assert on_short_gen.call_count == 2
+        event = on_short_gen.call_args[0][0]
+        assert event.interrupter_ids == frozenset({3})

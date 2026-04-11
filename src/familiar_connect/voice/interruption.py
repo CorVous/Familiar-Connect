@@ -8,7 +8,9 @@ Implements the interruption flow described in
 - :class:`ResponseTracker` — per-guild state machine holding the
   generation task, response text, word timestamps, and playback timing.
 - :class:`InterruptionDetector` — watches Deepgram VAD events during
-  non-IDLE states and classifies/dispatches interruptions.
+  non-IDLE states.  Uses a two-phase model: *moment 1* (toll check
+  after ``min_interruption_s``) and *moment 2* (short/long dispatch
+  after everyone stops talking + lull).
 - :func:`classify_interruption` — pure classifier for duration → kind.
 - :func:`should_keep_talking` — RNG toll check with mood modifier.
 - :func:`split_at_elapsed` — word-position tracking for partial resume.
@@ -223,21 +225,37 @@ class InterruptionDetector:
     """Watches VAD events and dispatches interruption handlers.
 
     Created once per guild, receives ``on_speech_started`` and
-    ``on_utterance_end`` calls from the voice pipeline. Classifies
-    interruptions and dispatches to the appropriate handler based on
-    the current :class:`ResponseState`.
+    ``on_utterance_end`` calls from the voice pipeline.  Uses a
+    **two-phase** model:
+
+    *Moment 1* — fires ``min_interruption_s`` after the first
+    ``SpeechStarted`` while the familiar is non-IDLE.  Calls
+    ``on_interrupt_start`` (the toll check).  If it returns ``True``
+    (the familiar yields), tracking continues.  If ``False`` (keeps
+    talking), the interruption is discarded.
+
+    *Moment 2* — fires after **all** speakers stop and a
+    ``lull_timeout_s`` silence window elapses.  The total duration
+    (first ``SpeechStarted`` to last ``UtteranceEnd``) is classified
+    as short or long, and the matching handler is dispatched.
 
     :param tracker: The guild's :class:`ResponseTracker`.
-    :param min_interruption_s: From :class:`CharacterConfig`.
-    :param short_long_boundary_s: From :class:`CharacterConfig`.
-    :param on_short_during_generating: Async callback for short
-        interruptions while generating.
-    :param on_long_during_generating: Async callback for long
-        interruptions while generating.
-    :param on_short_during_speaking: Async callback for short
-        interruptions while speaking.
-    :param on_long_during_speaking: Async callback for long
-        interruptions while speaking.
+    :param min_interruption_s: Wall-clock seconds before moment 1
+        fires.
+    :param short_long_boundary_s: Duration threshold separating
+        short from long interruptions at moment 2.
+    :param lull_timeout_s: Seconds of silence (no active speakers)
+        before moment 2 fires.
+    :param on_interrupt_start: Moment-1 callback.  Returns ``True``
+        if the familiar yields.
+    :param on_short_during_generating: Moment-2 handler for short
+        interruptions that began while generating.
+    :param on_long_during_generating: Moment-2 handler for long
+        interruptions that began while generating.
+    :param on_short_during_speaking: Moment-2 handler for short
+        interruptions that began while speaking.
+    :param on_long_during_speaking: Moment-2 handler for long
+        interruptions that began while speaking.
     """
 
     def __init__(
@@ -246,6 +264,8 @@ class InterruptionDetector:
         tracker: ResponseTracker,
         min_interruption_s: float,
         short_long_boundary_s: float,
+        lull_timeout_s: float,
+        on_interrupt_start: Callable[[], Awaitable[bool]],
         on_short_during_generating: Callable[[InterruptionEvent], Awaitable[None]],
         on_long_during_generating: Callable[[InterruptionEvent], Awaitable[None]],
         on_short_during_speaking: Callable[[InterruptionEvent], Awaitable[None]],
@@ -254,6 +274,8 @@ class InterruptionDetector:
         self._tracker = tracker
         self._min_interruption_s = min_interruption_s
         self._short_long_boundary_s = short_long_boundary_s
+        self._lull_timeout_s = lull_timeout_s
+        self._on_interrupt_start = on_interrupt_start
         self._on_short_during_generating = on_short_during_generating
         self._on_long_during_generating = on_long_during_generating
         self._on_short_during_speaking = on_short_during_speaking
@@ -261,7 +283,22 @@ class InterruptionDetector:
 
         # Interruption accumulation state
         self._speech_start_time: float | None = None
+        self._last_utterance_end_time: float | None = None
         self._interrupter_ids: set[int] = set()
+        self._active_speakers: set[int] = set()
+
+        # Phase tracking
+        self._threshold_passed: bool = False
+        self._moment1_in_progress: bool = False
+        self._yielded: bool = False
+        self._state_at_interrupt: ResponseState | None = None
+
+        # Async timer tasks
+        self._threshold_task: asyncio.Task[None] | None = None
+        self._lull_task: asyncio.Task[None] | None = None
+        self._deferred_moment1: asyncio.Task[None] | None = None
+
+    # ----- public API -----
 
     def on_speech_started(self, user_id: int, timestamp: float) -> None:
         """Record the start of user speech during a non-IDLE state.
@@ -271,32 +308,97 @@ class InterruptionDetector:
         """
         if self._tracker.state is ResponseState.IDLE:
             return
+        self._active_speakers.add(user_id)
+        self._interrupter_ids.add(user_id)
+        # Cancel pending lull — someone is talking again.
+        if self._lull_task is not None:
+            self._lull_task.cancel()
+            self._lull_task = None
         if self._speech_start_time is None:
             self._speech_start_time = timestamp
-        self._interrupter_ids.add(user_id)
+            self._threshold_task = asyncio.create_task(self._threshold_check())
+        elif self._threshold_passed and not self._yielded:
+            # Threshold already passed but nobody was speaking when it
+            # fired.  Now someone started again — fire moment 1.
+            self._deferred_moment1 = asyncio.create_task(self._fire_moment1())
 
     async def on_utterance_end(
         self,
         user_id: int,
-        transcript: str,
+        transcript: str,  # noqa: ARG002
         timestamp: float,
-    ) -> InterruptionEvent | None:
-        """Process the end of user speech and dispatch if it qualifies.
+    ) -> None:
+        """Record the end of user speech and start the lull timer if all silent.
 
         :param user_id: The speaking user's id.
-        :param transcript: What the user said.
+        :param transcript: What the user said (unused — real transcripts
+            arrive via the transcription pipeline).
         :param timestamp: ``time.monotonic()`` value when speech ended.
-        :returns: The :class:`InterruptionEvent` if dispatched, else ``None``.
         """
         if self._tracker.state is ResponseState.IDLE:
             self._reset_accumulation()
-            return None
+            return
 
         if self._speech_start_time is None:
-            return None
+            return
 
         self._interrupter_ids.add(user_id)
-        duration_s = timestamp - self._speech_start_time
+        self._last_utterance_end_time = timestamp
+        self._active_speakers.discard(user_id)
+
+        if not self._active_speakers:
+            self._start_lull_timer()
+
+    # ----- internal timers -----
+
+    async def _threshold_check(self) -> None:
+        """Wait ``min_interruption_s`` then fire moment 1 if appropriate."""
+        await asyncio.sleep(self._min_interruption_s)
+        self._threshold_task = None
+        self._threshold_passed = True
+        if self._tracker.state is ResponseState.IDLE or self._speech_start_time is None:
+            return
+        if self._active_speakers:
+            await self._fire_moment1()
+        # If nobody is speaking, _fire_moment1 deferred to next
+        # on_speech_started (via _threshold_passed flag).
+
+    async def _fire_moment1(self) -> None:
+        """Run the toll-check callback and either yield or discard."""
+        if self._moment1_in_progress or self._yielded:
+            return
+        self._moment1_in_progress = True
+        self._state_at_interrupt = self._tracker.state
+        yielded = await self._on_interrupt_start()
+        self._moment1_in_progress = False
+        # Accumulation may have been reset while we were awaiting.
+        if self._speech_start_time is None:
+            return
+        if yielded:
+            self._yielded = True
+        else:
+            self._reset_accumulation()
+
+    def _start_lull_timer(self) -> None:
+        if self._lull_task is not None:
+            self._lull_task.cancel()
+        self._lull_task = asyncio.create_task(self._lull_expired())
+
+    async def _lull_expired(self) -> None:
+        """Moment 2: classify the interruption and dispatch."""
+        await asyncio.sleep(self._lull_timeout_s)
+        self._lull_task = None
+
+        if not self._yielded:
+            # Moment 1 never fired or the familiar didn't yield.
+            self._reset_accumulation()
+            return
+
+        if self._speech_start_time is None or self._last_utterance_end_time is None:
+            self._reset_accumulation()
+            return
+
+        duration_s = self._last_utterance_end_time - self._speech_start_time
         kind = classify_interruption(
             duration_s,
             min_interruption_s=self._min_interruption_s,
@@ -305,17 +407,17 @@ class InterruptionDetector:
 
         if kind is None:
             self._reset_accumulation()
-            return None
+            return
 
         event = InterruptionEvent(
             kind=kind,
             duration_s=duration_s,
-            transcript=transcript,
+            transcript="",
             interrupter_ids=frozenset(self._interrupter_ids),
         )
+        state = self._state_at_interrupt
         self._reset_accumulation()
 
-        state = self._tracker.state
         if state is ResponseState.GENERATING:
             if kind is InterruptionKind.short:
                 await self._on_short_during_generating(event)
@@ -327,9 +429,19 @@ class InterruptionDetector:
             else:
                 await self._on_long_during_speaking(event)
 
-        return event
-
     def _reset_accumulation(self) -> None:
         """Clear the in-progress interruption tracking state."""
         self._speech_start_time = None
+        self._last_utterance_end_time = None
         self._interrupter_ids.clear()
+        self._active_speakers.clear()
+        self._threshold_passed = False
+        self._moment1_in_progress = False
+        self._yielded = False
+        self._state_at_interrupt = None
+        if self._threshold_task is not None:
+            self._threshold_task.cancel()
+            self._threshold_task = None
+        if self._lull_task is not None:
+            self._lull_task.cancel()
+            self._lull_task = None

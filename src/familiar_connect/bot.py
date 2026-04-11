@@ -199,68 +199,66 @@ def _build_voice_response_handler(
 
     # ----- Interruption handler callbacks -----
 
-    async def _on_short_during_generating(event: InterruptionEvent) -> None:  # noqa: RUF029
-        """Hold response and gate delivery on silence."""
+    async def _on_interrupt_start() -> bool:  # noqa: RUF029
+        """Moment 1: toll check — yield or keep talking.
+
+        Fires ``min_interruption_s`` after someone starts talking over
+        the familiar.  Returns ``True`` if the familiar yields.
+        """
+        tol = effective_tolerance(
+            familiar.config.interrupt_tolerance.tolerance, tracker.mood_modifier
+        )
+        if should_keep_talking(tol):
+            _logger.info(
+                "Interruption detected — keeping talking (tol=%.2f)",
+                tol,
+            )
+            return False
         _logger.info(
-            "Short interruption during generation: %r (%.1fs)",
-            event.transcript,
+            "Interruption detected — yielding (tol=%.2f)",
+            tol,
+        )
+        if vc.is_playing():
+            vc.stop()
+        return True
+
+    async def _on_short_during_generating(event: InterruptionEvent) -> None:  # noqa: RUF029
+        """Short interruption resolved during generation — hold response."""
+        _logger.info(
+            "Short interruption resolved during generation (%.1fs)",
             event.duration_s,
         )
-        # Don't cancel generation — just wait for silence before speaking.
-        # The silence_event is set by the voice pipeline when VAD silence
-        # is detected. For now we let the normal flow continue; the
-        # response will be delivered once generation completes.
+        # Generation continues; response delivered once complete.
 
     async def _on_long_during_generating(event: InterruptionEvent) -> None:  # noqa: RUF029
-        """Cancel generation and rebuild context with interruption."""
+        """Long interruption resolved during generation — cancel task."""
         _logger.info(
-            "Long interruption during generation: %r (%.1fs)",
-            event.transcript,
+            "Long interruption resolved during generation (%.1fs)",
             event.duration_s,
         )
         if tracker.generation_task is not None:
             tracker.generation_task.cancel()
 
-    async def _on_short_during_speaking(_event: InterruptionEvent) -> None:  # noqa: RUF029
-        """RNG toll check, then stop and resume or keep talking."""
-        tol = effective_tolerance(
-            familiar.config.interrupt_tolerance.tolerance, tracker.mood_modifier
-        )
-        if should_keep_talking(tol):
-            _logger.info(
-                "Short interruption during speaking — keeping talking (tol=%.2f)",
-                tol,
-            )
-            return
+    async def _on_short_during_speaking(event: InterruptionEvent) -> None:  # noqa: RUF029
+        """Short interruption resolved during speaking — may resume."""
         _logger.info(
-            "Short interruption during speaking — yielding (tol=%.2f)",
-            tol,
+            "Short interruption resolved during speaking (%.1fs)",
+            event.duration_s,
         )
-        if vc.is_playing():
-            vc.stop()
 
-    async def _on_long_during_speaking(_event: InterruptionEvent) -> None:  # noqa: RUF029
-        """RNG toll check, then stop and regenerate or keep talking."""
-        tol = effective_tolerance(
-            familiar.config.interrupt_tolerance.tolerance, tracker.mood_modifier
-        )
-        if should_keep_talking(tol):
-            _logger.info(
-                "Long interruption during speaking — keeping talking (tol=%.2f)",
-                tol,
-            )
-            return
+    async def _on_long_during_speaking(event: InterruptionEvent) -> None:  # noqa: RUF029
+        """Long interruption resolved during speaking — regenerate."""
         _logger.info(
-            "Long interruption during speaking — yielding (tol=%.2f)",
-            tol,
+            "Long interruption resolved during speaking (%.1fs)",
+            event.duration_s,
         )
-        if vc.is_playing():
-            vc.stop()
 
     detector = InterruptionDetector(
         tracker=tracker,
         min_interruption_s=familiar.config.min_interruption_s,
         short_long_boundary_s=familiar.config.short_long_boundary_s,
+        lull_timeout_s=familiar.config.lull_timeout,
+        on_interrupt_start=_on_interrupt_start,
         on_short_during_generating=_on_short_during_generating,
         on_long_during_generating=_on_long_during_generating,
         on_short_during_speaking=_on_short_during_speaking,
