@@ -278,3 +278,73 @@ class TestCharacterConfigConversationFields:
             path.write_text(f'interjection = "{tier.value}"\n')
             cfg = load_character_config(path)
             assert cfg.interjection is tier
+
+
+# ---------------------------------------------------------------------------
+# CharacterConfig interruption fields
+# ---------------------------------------------------------------------------
+
+
+class TestCharacterConfigInterruptionFields:
+    def test_defaults_when_file_absent(self, tmp_path: Path) -> None:
+        cfg = load_character_config(tmp_path / "no-such-file.toml")
+        assert cfg.interrupt_tolerance == 0.3  # noqa: RUF069
+        assert cfg.min_interruption_s == 1.5  # noqa: RUF069
+        assert cfg.short_long_boundary_s == 4.0  # noqa: RUF069
+
+    def test_reads_interrupt_tolerance_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\ninterrupt_tolerance = 0.7\n",
+        )
+        cfg = load_character_config(path)
+        assert cfg.interrupt_tolerance == 0.7  # noqa: RUF069
+
+    def test_reads_min_interruption_s_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\nmin_interruption_s = 2.0\n",
+        )
+        cfg = load_character_config(path)
+        assert cfg.min_interruption_s == 2.0  # noqa: RUF069
+
+    def test_reads_short_long_boundary_s_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\nshort_long_boundary_s = 5.0\n",
+        )
+        cfg = load_character_config(path)
+        assert cfg.short_long_boundary_s == 5.0  # noqa: RUF069
+
+    def test_all_three_interruption_fields_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\n"
+            "interrupt_tolerance = 0.5\n"
+            "min_interruption_s = 2.5\n"
+            "short_long_boundary_s = 6.0\n",
+        )
+        cfg = load_character_config(path)
+        assert cfg.interrupt_tolerance == 0.5  # noqa: RUF069
+        assert cfg.min_interruption_s == 2.5  # noqa: RUF069
+        assert cfg.short_long_boundary_s == 6.0  # noqa: RUF069
+
+    def test_interrupt_tolerance_above_one_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[voice.interruption]\ninterrupt_tolerance = 1.5\n")
+        with pytest.raises(ConfigError, match="interrupt_tolerance"):
+            load_character_config(path)
+
+    def test_interrupt_tolerance_below_zero_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[voice.interruption]\ninterrupt_tolerance = -0.1\n")
+        with pytest.raises(ConfigError, match="interrupt_tolerance"):
+            load_character_config(path)
+
+    def test_partial_section_uses_defaults_for_missing(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[voice.interruption]\ninterrupt_tolerance = 0.5\n")
+        cfg = load_character_config(path)
+        assert cfg.interrupt_tolerance == 0.5  # noqa: RUF069
+        assert cfg.min_interruption_s == 1.5  # noqa: RUF069
+        assert cfg.short_long_boundary_s == 4.0  # noqa: RUF069

@@ -144,3 +144,16 @@ class TestContextRequest:
         # checker correctly rejects such calls, so it's not a runtime concern.
         req = self._make(deadline_s=0.25)
         assert math.isclose(req.deadline_s, 0.25)
+
+    def test_interruption_context_defaults_to_none(self) -> None:
+        req = self._make()
+        assert req.interruption_context is None
+
+    def test_interruption_context_can_be_set(self) -> None:
+        req = self._make(
+            interruption_context="Alice interrupted while you were forming a response."
+        )
+        assert (
+            req.interruption_context
+            == "Alice interrupted while you were forming a response."
+        )

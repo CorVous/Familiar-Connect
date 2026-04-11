@@ -299,6 +299,15 @@ def assemble_chat_messages(
             ),
         )
 
+    # 3b. Interruption context — when the interruption handler sets this,
+    # inject it as a system message just before the final user turn so
+    # the LLM reads it immediately before deciding how to respond.
+    if request.interruption_context:
+        messages.insert(
+            len(messages) - 1,
+            Message(role="system", content=request.interruption_context),
+        )
+
     # 4. Depth-inject at position-from-end, computed against the full list
     # (including the final user turn). ``position=0`` means immediately
     # before the final user turn — i.e. ``len - 1`` from the top. Values

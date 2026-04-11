@@ -142,3 +142,7 @@ class ContextRequest:
     user turns instead of the single ``utterance``. The last entry
     should match ``utterance`` / ``speaker``."""
     preprocessor_contributions: tuple[Contribution, ...] = ()
+    interruption_context: str | None = None
+    """Optional system-level note injected when an interruption occurs
+    during voice generation or playback. Set by the interruption handler
+    in ``bot.py``; ``None`` means no interruption happened."""

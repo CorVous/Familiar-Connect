@@ -3,9 +3,41 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import httpx
+
+# ---------------------------------------------------------------------------
+# Data types for word-level timestamps (used by interruption system)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WordTimestamp:
+    """A single word's timing from TTS synthesis.
+
+    :param word: The word spoken.
+    :param start_ms: Milliseconds from audio start when the word begins.
+    :param end_ms: Milliseconds from audio start when the word ends.
+    """
+
+    word: str
+    start_ms: float
+    end_ms: float
+
+
+@dataclass(frozen=True)
+class TTSResult:
+    """TTS synthesis result with audio and word-level timestamps.
+
+    :param audio: Raw PCM mono audio bytes.
+    :param timestamps: Ordered word-level timestamps from the TTS engine.
+    """
+
+    audio: bytes
+    timestamps: list[WordTimestamp]
+
 
 if TYPE_CHECKING:
     from typing import Any, Self

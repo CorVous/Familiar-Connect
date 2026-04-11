@@ -145,6 +145,13 @@ class CharacterConfig:
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average
     lull_timeout: float = 2.0
+    interrupt_tolerance: float = 0.3
+    """Probability of continuing to talk when interrupted while speaking.
+    0.0 = always yields (meek), 1.0 = never yields (stubborn)."""
+    min_interruption_s: float = 1.5
+    """Minimum seconds of user speech before it counts as an interruption."""
+    short_long_boundary_s: float = 4.0
+    """Seconds threshold separating short from long interruption."""
 
 
 @dataclass(frozen=True)
@@ -303,6 +310,20 @@ def load_character_config(path: Path) -> CharacterConfig:
 
     lull_timeout = float(data.get("lull_timeout", 2.0))
 
+    voice_section = data.get("voice", {})
+    interruption_section = voice_section.get("interruption", {})
+    interrupt_tolerance = float(interruption_section.get("interrupt_tolerance", 0.3))
+    if not 0.0 <= interrupt_tolerance <= 1.0:
+        msg = (
+            f"interrupt_tolerance must be between 0.0 and 1.0, "
+            f"got {interrupt_tolerance}"
+        )
+        raise ConfigError(msg)
+    min_interruption_s = float(interruption_section.get("min_interruption_s", 1.5))
+    short_long_boundary_s = float(
+        interruption_section.get("short_long_boundary_s", 4.0)
+    )
+
     return CharacterConfig(
         default_mode=default_mode,
         history_window_size=history_window_size,
@@ -313,6 +334,9 @@ def load_character_config(path: Path) -> CharacterConfig:
         chattiness=chattiness,
         interjection=interjection,
         lull_timeout=lull_timeout,
+        interrupt_tolerance=interrupt_tolerance,
+        min_interruption_s=min_interruption_s,
+        short_long_boundary_s=short_long_boundary_s,
     )
 
 

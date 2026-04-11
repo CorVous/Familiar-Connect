@@ -43,9 +43,16 @@ from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
+from familiar_connect.mood import effective_tolerance
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
+from familiar_connect.voice.interruption import (
+    InterruptionDetector,
+    InterruptionEvent,
+    ResponseTracker,
+    should_keep_talking,
+)
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
@@ -91,6 +98,25 @@ def _log_pipeline_outcomes(
             outcome.status,
             outcome.duration_s,
         )
+
+
+def _format_recent_for_mood(
+    familiar: Familiar,
+    channel_id: int,
+    mode: ChannelMode | None,
+) -> str:
+    """Format recent history as text for the mood evaluator prompt."""
+    turns = familiar.history_store.recent(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        limit=10,
+        mode=mode,
+    )
+    lines: list[str] = []
+    for turn in turns:
+        prefix = turn.speaker or familiar.id if turn.role == "user" else familiar.id
+        lines.append(f"{prefix}: {turn.content}")
+    return "\n".join(lines) if lines else "(no recent conversation)"
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +177,11 @@ def _build_voice_response_handler(
     voice_channel_id: int,
     guild_id: int | None,
     user_names: dict[int, str],
-) -> Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]]:
+) -> tuple[
+    Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]],
+    ResponseTracker,
+    InterruptionDetector,
+]:
     """Build the async callback invoked for each final voice transcription.
 
     Routes voice turns through the **same** :class:`ContextPipeline`
@@ -160,12 +190,81 @@ def _build_voice_response_handler(
     pipeline, render, call the main LLM, run post-processors,
     persist to :class:`HistoryStore`, fan out to TTS.
 
-    This is the only way voice turns get the same memory search,
-    history summary, speaker prefixing, and mode instructions that
-    text turns get. The earlier PR #17 implementation stashed voice
-    history in a closure-local ``list[Message]`` that bypassed the
-    pipeline entirely; that stub is replaced by this handler.
+    Returns the handler callback plus the per-guild
+    :class:`ResponseTracker` and :class:`InterruptionDetector` so the
+    voice pipeline can feed VAD events to the detector.
     """
+    tracker = ResponseTracker()
+
+    # ----- Interruption handler callbacks -----
+
+    async def _on_short_during_generating(event: InterruptionEvent) -> None:  # noqa: RUF029
+        """Hold response and gate delivery on silence."""
+        _logger.info(
+            "Short interruption during generation: %r (%.1fs)",
+            event.transcript,
+            event.duration_s,
+        )
+        # Don't cancel generation — just wait for silence before speaking.
+        # The silence_event is set by the voice pipeline when VAD silence
+        # is detected. For now we let the normal flow continue; the
+        # response will be delivered once generation completes.
+
+    async def _on_long_during_generating(event: InterruptionEvent) -> None:  # noqa: RUF029
+        """Cancel generation and rebuild context with interruption."""
+        _logger.info(
+            "Long interruption during generation: %r (%.1fs)",
+            event.transcript,
+            event.duration_s,
+        )
+        if tracker.generation_task is not None:
+            tracker.generation_task.cancel()
+
+    async def _on_short_during_speaking(_event: InterruptionEvent) -> None:  # noqa: RUF029
+        """RNG toll check, then stop and resume or keep talking."""
+        tol = effective_tolerance(
+            familiar.config.interrupt_tolerance, tracker.mood_modifier
+        )
+        if should_keep_talking(tol):
+            _logger.info(
+                "Short interruption during speaking — keeping talking (tol=%.2f)",
+                tol,
+            )
+            return
+        _logger.info(
+            "Short interruption during speaking — yielding (tol=%.2f)",
+            tol,
+        )
+        if vc.is_playing():
+            vc.stop()
+
+    async def _on_long_during_speaking(_event: InterruptionEvent) -> None:  # noqa: RUF029
+        """RNG toll check, then stop and regenerate or keep talking."""
+        tol = effective_tolerance(
+            familiar.config.interrupt_tolerance, tracker.mood_modifier
+        )
+        if should_keep_talking(tol):
+            _logger.info(
+                "Long interruption during speaking — keeping talking (tol=%.2f)",
+                tol,
+            )
+            return
+        _logger.info(
+            "Long interruption during speaking — yielding (tol=%.2f)",
+            tol,
+        )
+        if vc.is_playing():
+            vc.stop()
+
+    detector = InterruptionDetector(
+        tracker=tracker,
+        min_interruption_s=familiar.config.min_interruption_s,
+        short_long_boundary_s=familiar.config.short_long_boundary_s,
+        on_short_during_generating=_on_short_during_generating,
+        on_long_during_generating=_on_long_during_generating,
+        on_short_during_speaking=_on_short_during_speaking,
+        on_long_during_speaking=_on_long_during_speaking,
+    )
 
     async def _handle_voice_result(
         user_id: int,
@@ -218,8 +317,31 @@ def _build_voice_response_handler(
             ),
         )
 
-        reply = await familiar.llm_client.chat(messages)
+        # --- State machine: IDLE → GENERATING ---
+        generation_task = asyncio.current_task()
+        if generation_task is not None:
+            tracker.start_generating(generation_task)
+
+        # Pre-compute mood modifier for potential interruption toll check
+        if familiar.mood_evaluator is not None and guild_id is not None:
+            recent = _format_recent_for_mood(
+                familiar, voice_channel_id, channel_config.mode
+            )
+            evaluation = await familiar.mood_evaluator.evaluate(
+                guild_id=guild_id,
+                recent_context=recent,
+            )
+            tracker.mood_modifier = evaluation.modifier
+
+        try:
+            reply = await familiar.llm_client.chat(messages)
+        except asyncio.CancelledError:
+            _logger.info("LLM generation cancelled by interruption")
+            tracker.reset()
+            return
+
         reply_text = await pipeline.run_post_processors(reply.content, request)
+        tracker.generation_complete(reply_text)
 
         # Persist both turns *after* the LLM call so a mid-turn crash
         # doesn't leave the store with a user turn but no reply.
@@ -251,11 +373,19 @@ def _build_voice_response_handler(
                 # vc.is_playing() is a third-party poll; no event available.
                 while vc.is_playing():  # noqa: ASYNC110
                     await asyncio.sleep(0.1)
+                # --- State machine: GENERATING → SPEAKING ---
+                tracker.start_speaking()
                 vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+                # Wait for playback to finish
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
             except Exception:
                 _logger.exception("Voice response TTS failed")
 
-    return _handle_voice_result
+        # --- State machine: → IDLE ---
+        tracker.reset()
+
+    return _handle_voice_result, tracker, detector
 
 
 async def subscribe_my_voice(
@@ -316,7 +446,7 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        response_handler = _build_voice_response_handler(
+        response_handler, _tracker, _detector = _build_voice_response_handler(
             vc=vc,
             familiar=familiar,
             voice_channel_id=channel.id,

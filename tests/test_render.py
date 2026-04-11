@@ -917,3 +917,50 @@ class TestFullRpGapBreadcrumbs:
 
         breadcrumbs = [m for m in messages[1:-1] if m.role == "system"]
         assert breadcrumbs == []
+
+
+# ---------------------------------------------------------------------------
+# Interruption context injection
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptionContextRendering:
+    def test_interruption_context_injected_as_system_message(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When interruption_context is set, a system message appears.
+
+        Specifically, the system message appears immediately before the
+        final user turn.
+        """
+        request = _request(
+            interruption_context=(
+                "Alice interrupted while you were forming a response."
+            ),
+        )
+        store = _store_with(tmp_path, [])
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(output, store=store)
+
+        # The last message is the user turn; the one before it should be
+        # the interruption context system message.
+        assert messages[-1].role == "user"
+        assert messages[-2].role == "system"
+        assert messages[-2].content == (
+            "Alice interrupted while you were forming a response."
+        )
+
+    def test_no_interruption_context_no_extra_message(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Without interruption_context, no extra system message is injected."""
+        request = _request()  # interruption_context defaults to None
+        store = _store_with(tmp_path, [])
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(output, store=store)
+
+        # Only the initial system prompt + the final user turn.
+        system_messages = [m for m in messages if m.role == "system"]
+        assert len(system_messages) == 1  # just the main system prompt

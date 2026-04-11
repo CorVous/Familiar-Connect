@@ -46,6 +46,7 @@ from familiar_connect.context.providers.mode_instructions import (
 from familiar_connect.context.side_model import LLMSideModel
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.memory.store import MemoryStore
+from familiar_connect.mood import MoodEvaluator
 from familiar_connect.subscriptions import SubscriptionRegistry
 
 if TYPE_CHECKING:
@@ -112,6 +113,9 @@ class Familiar:
     subscriptions: SubscriptionRegistry
     channel_configs: ChannelConfigStore
     monitor: ConversationMonitor
+    mood_evaluator: MoodEvaluator | None = None
+    """Mood evaluator for interrupt tolerance drift. ``None`` when voice
+    is not configured (no transcriber)."""
     extras: dict[str, object] = field(default_factory=dict)
     """Scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet."""
@@ -221,6 +225,14 @@ class Familiar:
             on_respond=_noop_respond,
         )
 
+        mood_evaluator: MoodEvaluator | None = None
+        if transcriber is not None:
+            mood_evaluator = MoodEvaluator(
+                side_model=side_model,
+                familiar_name=familiar_id,
+                character_card=character_card,
+            )
+
         return cls(
             id=familiar_id,
             root=root,
@@ -237,6 +249,7 @@ class Familiar:
             subscriptions=subscriptions,
             channel_configs=channel_configs,
             monitor=monitor,
+            mood_evaluator=mood_evaluator,
         )
 
     # ------------------------------------------------------------------
