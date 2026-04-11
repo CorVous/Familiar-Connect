@@ -295,6 +295,24 @@ class TestResponseTracker:
         tracker.start_generating(task)
         assert not tracker.silence_event.is_set()
 
+    def test_idle_event_set_initially(self) -> None:
+        tracker = ResponseTracker()
+        assert tracker.idle_event.is_set()
+
+    def test_idle_event_cleared_on_start_generating(self) -> None:
+        tracker = ResponseTracker()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+        assert not tracker.idle_event.is_set()
+
+    def test_idle_event_set_on_reset(self) -> None:
+        tracker = ResponseTracker()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+        assert not tracker.idle_event.is_set()
+        tracker.reset()
+        assert tracker.idle_event.is_set()
+
 
 # ---------------------------------------------------------------------------
 # Step 7 — InterruptionDetector

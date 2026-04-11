@@ -270,26 +270,25 @@ def _build_voice_response_handler(
         result: TranscriptionResult,
     ) -> None:
         # Wait for the tracker to become IDLE before starting a new
-        # response cycle.  When the tracker is GENERATING or SPEAKING,
-        # the InterruptionDetector is handling the user's speech via VAD
-        # events.  We poll until the current cycle finishes (the
-        # interrupted handler resets the tracker to IDLE via cancellation
-        # or normal completion).
+        # response cycle.  Uses idle_event (set by reset(), cleared
+        # by start_generating()) so concurrent handlers wake up
+        # deterministically instead of polling.
         if tracker.state is not ResponseState.IDLE:
             _logger.info(
                 "Voice result while %s — waiting for current cycle: %r",
                 tracker.state.value,
                 result.text[:80],
             )
-            deadline = asyncio.get_event_loop().time() + 30.0
             while tracker.state is not ResponseState.IDLE:
-                if asyncio.get_event_loop().time() > deadline:
+                try:
+                    await asyncio.wait_for(tracker.idle_event.wait(), timeout=30.0)
+                except TimeoutError:
                     _logger.warning(
-                        "Timed out waiting for IDLE, dropping: %r",
+                        "Timed out waiting for IDLE (stuck in %s), dropping: %r",
+                        tracker.state.value,
                         result.text[:80],
                     )
                     return
-                await asyncio.sleep(0.1)
 
         # --- State machine: IDLE → GENERATING ---
         # Claim the tracker *before* any await so no concurrent handler

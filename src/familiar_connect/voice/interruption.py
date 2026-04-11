@@ -132,6 +132,13 @@ def split_at_elapsed(
 # ---------------------------------------------------------------------------
 
 
+def _idle_event_factory() -> asyncio.Event:
+    """Create an :class:`asyncio.Event` that starts **set** (IDLE)."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass
 class ResponseTracker:
     """Per-guild state machine for the voice response lifecycle.
@@ -141,6 +148,11 @@ class ResponseTracker:
     response text, TTS word timestamps, and playback timing. Used by the
     interruption handlers in ``bot.py`` to decide what to do when a user
     speaks.
+
+    :attr:`idle_event` is **set** whenever the tracker is IDLE and
+    **cleared** when it transitions to GENERATING.  Concurrent handlers
+    can ``await idle_event.wait()`` instead of polling — they wake up
+    deterministically when :meth:`reset` runs.
     """
 
     state: ResponseState = ResponseState.IDLE
@@ -149,6 +161,8 @@ class ResponseTracker:
     word_timestamps: list[WordTimestamp] = field(default_factory=list)
     playback_start_time: float | None = None
     silence_event: asyncio.Event = field(default_factory=asyncio.Event)
+    idle_event: asyncio.Event = field(default_factory=_idle_event_factory)
+    """Set when IDLE, cleared when GENERATING. Use for waiting."""
     mood_modifier: float = 0.0
     """Cached mood drift modifier, set at generation start."""
 
@@ -160,6 +174,7 @@ class ResponseTracker:
         self.state = ResponseState.GENERATING
         self.generation_task = task
         self.silence_event.clear()
+        self.idle_event.clear()
 
     def generation_complete(self, text: str) -> None:
         """Record the completed response text (still in GENERATING state)."""
@@ -199,6 +214,7 @@ class ResponseTracker:
         self.playback_start_time = None
         self.silence_event.clear()
         self.mood_modifier = 0.0
+        self.idle_event.set()
 
 
 # ---------------------------------------------------------------------------
