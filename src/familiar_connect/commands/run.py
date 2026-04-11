@@ -17,6 +17,7 @@ import discord
 
 from familiar_connect.bot import create_bot
 from familiar_connect.config import ConfigError
+from familiar_connect.context.side_model import LLMSideModel
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_client_from_env, create_side_client_from_env
 from familiar_connect.transcription import create_transcriber_from_env
@@ -85,7 +86,15 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     :param familiar: The loaded :class:`Familiar` bundle.
     """
     bot = create_bot(familiar)
-    await bot.start(token)
+    try:
+        await bot.start(token)
+    finally:
+        await familiar.llm_client.close()
+        if (
+            isinstance(familiar.side_model, LLMSideModel)
+            and familiar.side_model.llm_client is not familiar.llm_client
+        ):
+            await familiar.side_model.llm_client.close()
 
 
 _OPUS_FALLBACK_PATHS = [

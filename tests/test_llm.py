@@ -1,12 +1,16 @@
 """Tests for the LLM client (OpenRouter integration)."""
 
+import asyncio
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
 
+import familiar_connect.llm as llm_module
 from familiar_connect.llm import (
+    _MAX_DELAY_S,
+    _MAX_RETRIES,
     LLMClient,
     Message,
     SystemPromptLayers,
@@ -458,6 +462,183 @@ class TestPromptAssembly:
         user_messages = [d for d in dicts if d["role"] == "user"]
         assert len(user_messages) == 3
         assert [d["name"] for d in user_messages] == ["Alice", "Bob", "Charlie"]
+
+
+# --- Retry logic ---
+
+
+@pytest.fixture(autouse=True)
+def _reset_semaphore() -> None:
+    """Reset the module-level semaphore between tests."""
+    llm_module._request_semaphore = None
+
+
+class TestRetryLogic:
+    @pytest.fixture
+    def client(self) -> LLMClient:
+        return LLMClient(api_key="test-key")
+
+    @pytest.mark.asyncio
+    async def test_post_retries_on_429_then_succeeds(self, client: LLMClient) -> None:
+        """_post() retries once on 429, then returns the successful response."""
+        resp_429 = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+        resp_200 = httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            request=httpx.Request("POST", "http://x"),
+        )
+        mock_post = AsyncMock(side_effect=[resp_429, resp_200])
+
+        with (
+            patch.object(client, "_get_http") as mock_get_http,
+            patch(
+                "familiar_connect.llm.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            mock_get_http.return_value.post = mock_post
+            result = await client._post("http://x", {}, {})
+
+        assert result.status_code == 200
+        mock_sleep.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_post_respects_retry_after_header(self, client: LLMClient) -> None:
+        """_post() uses the Retry-After header value as sleep delay."""
+        resp_429 = httpx.Response(
+            429,
+            headers={"Retry-After": "2"},
+            request=httpx.Request("POST", "http://x"),
+        )
+        resp_200 = httpx.Response(
+            200, json={}, request=httpx.Request("POST", "http://x")
+        )
+        mock_post = AsyncMock(side_effect=[resp_429, resp_200])
+
+        with (
+            patch.object(client, "_get_http") as mock_get_http,
+            patch(
+                "familiar_connect.llm.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            mock_get_http.return_value.post = mock_post
+            await client._post("http://x", {}, {})
+
+        mock_sleep.assert_called_once_with(2.0)
+
+    @pytest.mark.asyncio
+    async def test_post_gives_up_after_max_retries(self, client: LLMClient) -> None:
+        """_post() returns the 429 response after exhausting retries."""
+        resp_429 = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+        mock_post = AsyncMock(return_value=resp_429)
+
+        with (
+            patch.object(client, "_get_http") as mock_get_http,
+            patch(
+                "familiar_connect.llm.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            mock_get_http.return_value.post = mock_post
+            result = await client._post("http://x", {}, {})
+
+        assert result.status_code == 429
+        assert mock_sleep.call_count == _MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_post_does_not_retry_non_429(self, client: LLMClient) -> None:
+        """_post() returns non-429 errors immediately without retrying."""
+        resp_500 = httpx.Response(500, request=httpx.Request("POST", "http://x"))
+        mock_post = AsyncMock(return_value=resp_500)
+
+        with (
+            patch.object(client, "_get_http") as mock_get_http,
+            patch(
+                "familiar_connect.llm.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            mock_get_http.return_value.post = mock_post
+            result = await client._post("http://x", {}, {})
+
+        assert result.status_code == 500
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_post_caps_backoff_at_max_delay(self, client: LLMClient) -> None:
+        """Exponential backoff never exceeds _MAX_DELAY_S."""
+        resp_429 = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+        mock_post = AsyncMock(return_value=resp_429)
+
+        with (
+            patch.object(client, "_get_http") as mock_get_http,
+            patch(
+                "familiar_connect.llm.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            mock_get_http.return_value.post = mock_post
+            await client._post("http://x", {}, {})
+
+        for call in mock_sleep.call_args_list:
+            assert call.args[0] <= _MAX_DELAY_S
+
+
+# --- Connection pooling ---
+
+
+class TestConnectionPooling:
+    @pytest.mark.asyncio
+    async def test_reuses_http_client_across_calls(self) -> None:
+        """_get_http() returns the same client instance on repeated calls."""
+        client = LLMClient(api_key="test-key")
+        http1 = client._get_http()
+        http2 = client._get_http()
+        assert http1 is http2
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_close_shuts_down_http_client(self) -> None:
+        """close() calls aclose() on the underlying httpx client."""
+        client = LLMClient(api_key="test-key")
+        http = client._get_http()
+        with patch.object(http, "aclose", new_callable=AsyncMock) as mock_aclose:
+            await client.close()
+        mock_aclose.assert_called_once()
+
+
+# --- Concurrency semaphore ---
+
+
+class TestConcurrencySemaphore:
+    @pytest.mark.asyncio
+    async def test_semaphore_limits_concurrent_requests(self) -> None:
+        """At most 4 requests are in-flight simultaneously."""
+        max_concurrent_seen = 0
+        current = 0
+        lock = asyncio.Lock()
+
+        async def slow_post(*_args: object, **_kwargs: object) -> httpx.Response:
+            nonlocal max_concurrent_seen, current
+            async with lock:
+                current += 1
+                max_concurrent_seen = max(max_concurrent_seen, current)
+            await asyncio.sleep(0.05)
+            async with lock:
+                current -= 1
+            return httpx.Response(
+                200, json={}, request=httpx.Request("POST", "http://x")
+            )
+
+        client = LLMClient(api_key="test-key")
+        with patch.object(client, "_get_http") as mock_get_http:
+            mock_get_http.return_value.post = slow_post
+            tasks = [client._post("http://x", {}, {}) for _ in range(8)]
+            await asyncio.gather(*tasks)
+
+        assert max_concurrent_seen <= 4
+        await client.close()
 
 
 # --- Live integration test (requires OPENROUTER_API_KEY in env) ---

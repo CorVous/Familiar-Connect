@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from familiar_connect.channel_config import ChannelConfigStore
+from familiar_connect.chattiness import ConversationMonitor
 from familiar_connect.config import load_character_config
 from familiar_connect.context.pipeline import ContextPipeline
 from familiar_connect.context.processors.recast import RecastPostProcessor
@@ -110,6 +111,7 @@ class Familiar:
     post_processors: dict[str, PostProcessor]
     subscriptions: SubscriptionRegistry
     channel_configs: ChannelConfigStore
+    monitor: ConversationMonitor
     extras: dict[str, object] = field(default_factory=dict)
     """Scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet."""
@@ -193,6 +195,32 @@ class Familiar:
         modes_root = root / "modes"
         modes_root.mkdir(parents=True, exist_ok=True)
 
+        # Pre-load character card text from memory/self/*.md files so the
+        # monitor has it ready for evaluation prompts without hitting disk
+        # per evaluation.
+        self_dir = memory_root / "self"
+        character_card = ""
+        if self_dir.exists():
+            parts = [p.read_text() for p in sorted(self_dir.glob("*.md"))]
+            character_card = "\n\n".join(parts)
+
+        async def _noop_respond(
+            channel_id: int,
+            buffer: object,
+        ) -> None:
+            """Act as a no-op until create_bot wires the real callback."""
+
+        monitor = ConversationMonitor(
+            familiar_name=familiar_id,
+            aliases=character_config.aliases,
+            chattiness=character_config.chattiness,
+            interjection=character_config.interjection,
+            lull_timeout=character_config.lull_timeout,
+            side_model=side_model,
+            character_card=character_card,
+            on_respond=_noop_respond,
+        )
+
         return cls(
             id=familiar_id,
             root=root,
@@ -208,6 +236,7 @@ class Familiar:
             post_processors=post_processors,
             subscriptions=subscriptions,
             channel_configs=channel_configs,
+            monitor=monitor,
         )
 
     # ------------------------------------------------------------------

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -11,6 +13,8 @@ import httpx
 
 if TYPE_CHECKING:
     from typing import Any, Self
+
+_logger = logging.getLogger(__name__)
 
 _NAME_ALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -27,6 +31,30 @@ def sanitize_name(name: str) -> str | None:
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-4o"
+
+# --- Retry / concurrency constants ---
+
+_MAX_RETRIES = 4
+_BASE_DELAY_S = 1.0
+_MAX_DELAY_S = 30.0
+_DEFAULT_MAX_CONCURRENT = 4
+
+_request_semaphore: asyncio.Semaphore | None = None
+
+
+def get_request_semaphore(
+    max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
+) -> asyncio.Semaphore:
+    """Return the module-level semaphore, creating it on first call.
+
+    Must be called inside a running event loop. The semaphore is shared
+    across all :class:`LLMClient` instances because the bottleneck is
+    the OpenRouter API key's rate limit, not any single client.
+    """
+    global _request_semaphore  # noqa: PLW0603
+    if _request_semaphore is None:
+        _request_semaphore = asyncio.Semaphore(max_concurrent)
+    return _request_semaphore
 
 
 @dataclass
@@ -94,6 +122,19 @@ class LLMClient:
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
+        self._http: httpx.AsyncClient | None = None
+
+    def _get_http(self: Self) -> httpx.AsyncClient:
+        """Return the shared HTTP client, creating it lazily."""
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=120.0)
+        return self._http
+
+    async def close(self: Self) -> None:
+        """Shut down the underlying HTTP connection pool."""
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     def build_headers(self: Self) -> dict[str, str]:
         return {
@@ -119,8 +160,41 @@ class LLMClient:
         headers: dict[str, str],
         payload: dict[str, Any],
     ) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=120.0) as http:
-            return await http.post(url, headers=headers, json=payload)
+        http = self._get_http()
+        response: httpx.Response | None = None
+
+        for attempt in range(_MAX_RETRIES + 1):
+            async with get_request_semaphore():
+                response = await http.post(url, headers=headers, json=payload)
+
+            if response.status_code != 429:
+                return response
+
+            # Last attempt — don't sleep, just return the 429.
+            if attempt == _MAX_RETRIES:
+                break
+
+            retry_after = response.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    delay = min(float(retry_after), _MAX_DELAY_S)
+                except ValueError:
+                    delay = min(_BASE_DELAY_S * 2**attempt, _MAX_DELAY_S)
+            else:
+                delay = min(_BASE_DELAY_S * 2**attempt, _MAX_DELAY_S)
+
+            _logger.warning(
+                "429 from %s (attempt %d/%d), retrying in %.1fs",
+                url,
+                attempt + 1,
+                _MAX_RETRIES + 1,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+        # All retries exhausted — caller's raise_for_status() will handle it.
+        assert response is not None  # noqa: S101 — loop always runs at least once
+        return response
 
     async def chat(self: Self, messages: list[Message]) -> Message:
         """Send messages to OpenRouter and return the assistant's reply."""

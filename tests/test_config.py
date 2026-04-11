@@ -20,6 +20,7 @@ from familiar_connect.config import (
     ChannelMode,
     CharacterConfig,
     ConfigError,
+    Interjection,
     channel_config_for_mode,
     load_channel_config,
     load_character_config,
@@ -196,3 +197,84 @@ class TestLoadChannelConfig:
         path.write_text('mode = "nonsense"\n')
         with pytest.raises(ConfigError):
             load_channel_config(path)
+
+
+# ---------------------------------------------------------------------------
+# Interjection enum
+# ---------------------------------------------------------------------------
+
+
+class TestInterjectionEnum:
+    def test_has_five_tiers(self) -> None:
+        assert len(list(Interjection)) == 5
+
+    def test_tier_values(self) -> None:
+        assert Interjection("very_quiet") is Interjection.very_quiet
+        assert Interjection("quiet") is Interjection.quiet
+        assert Interjection("average") is Interjection.average
+        assert Interjection("eager") is Interjection.eager
+        assert Interjection("very_eager") is Interjection.very_eager
+
+    def test_starting_intervals(self) -> None:
+        assert Interjection.very_quiet.starting_interval == 15
+        assert Interjection.quiet.starting_interval == 12
+        assert Interjection.average.starting_interval == 9
+        assert Interjection.eager.starting_interval == 6
+        assert Interjection.very_eager.starting_interval == 3
+
+
+# ---------------------------------------------------------------------------
+# CharacterConfig conversation-flow fields
+# ---------------------------------------------------------------------------
+
+
+class TestCharacterConfigConversationFields:
+    def test_defaults_when_file_absent(self, tmp_path: Path) -> None:
+        cfg = load_character_config(tmp_path / "no-such-file.toml")
+        assert cfg.aliases == []
+        assert cfg.chattiness == "Balanced — responds when the conversation is relevant"
+        assert cfg.interjection is Interjection.average
+        assert cfg.lull_timeout == 2.0  # noqa: RUF069
+
+    def test_reads_aliases_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('aliases = ["aria", "ari"]\n')
+        cfg = load_character_config(path)
+        assert cfg.aliases == ["aria", "ari"]
+
+    def test_empty_aliases_list(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("aliases = []\n")
+        cfg = load_character_config(path)
+        assert cfg.aliases == []
+
+    def test_reads_chattiness_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('chattiness = "Shy and reserved"\n')
+        cfg = load_character_config(path)
+        assert cfg.chattiness == "Shy and reserved"
+
+    def test_reads_interjection_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('interjection = "eager"\n')
+        cfg = load_character_config(path)
+        assert cfg.interjection is Interjection.eager
+
+    def test_reads_lull_timeout_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("lull_timeout = 5.0\n")
+        cfg = load_character_config(path)
+        assert cfg.lull_timeout == 5.0  # noqa: RUF069
+
+    def test_unknown_interjection_value_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('interjection = "obnoxious"\n')
+        with pytest.raises(ConfigError, match="obnoxious"):
+            load_character_config(path)
+
+    def test_all_interjection_tiers_load_from_toml(self, tmp_path: Path) -> None:
+        for tier in Interjection:
+            path = tmp_path / f"character_{tier.value}.toml"
+            path.write_text(f'interjection = "{tier.value}"\n')
+            cfg = load_character_config(path)
+            assert cfg.interjection is tier

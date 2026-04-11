@@ -55,7 +55,7 @@ class LLMSideModel:
     id = "llm"
 
     def __init__(self, llm_client: LLMClient) -> None:
-        self._llm_client = llm_client
+        self.llm_client = llm_client
 
     async def complete(
         self,
@@ -63,5 +63,5 @@ class LLMSideModel:
         *,
         max_tokens: int = 256,  # noqa: ARG002 — LLMClient honours its own default
     ) -> str:
-        reply = await self._llm_client.chat([Message(role="user", content=prompt)])
+        reply = await self.llm_client.chat([Message(role="user", content=prompt)])
         return reply.content
