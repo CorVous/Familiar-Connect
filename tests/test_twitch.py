@@ -1,6 +1,6 @@
 """Tests for Twitch channel event watcher.
 
-Tests are written red-first against the interface described in twitch-features.md.
+Tests are written red-first against the interface described in docs/guides/twitch.md.
 The module under test is familiar_connect.twitch, which does not exist yet.
 """
 

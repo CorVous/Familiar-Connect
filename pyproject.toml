@@ -161,10 +161,10 @@ ignore = [
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 # Runtime reply pipeline (bot.py, familiar.py, commands/run.py) must never
-# import from this one-shot operator subpackage. See bootstrapping.md for
-# rationale. Bootstrap tests and the bootstrap modules themselves are
+# import from this one-shot operator subpackage. See docs/guides/bootstrapping.md
+# for rationale. Bootstrap tests and the bootstrap modules themselves are
 # exempted via per-file-ignores above.
-"familiar_connect.bootstrap".msg = "Bootstrap utilities are operator-only and must not be imported by the runtime. If you need a helper at runtime, promote it to a runtime module first. See bootstrapping.md."
+"familiar_connect.bootstrap".msg = "Bootstrap utilities are operator-only and must not be imported by the runtime. If you need a helper at runtime, promote it to a runtime module first. See docs/guides/bootstrapping.md."
 
 [tool.ruff.format]
 preview = true # No cowards allowed!

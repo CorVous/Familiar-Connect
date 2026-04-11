@@ -6,9 +6,10 @@ Update uv before anything else: `uv self update`
 
 ## Key Documents
 
-- **`plan.md`** — contains the project plan and feature roadmap
-- **`README.md`** — contains project overview and development commands
-- **`bootstrapping.md`** — one-shot operator utilities (character-card unpacker, lorebook importer) that are never invoked by the runtime reply pipeline
+- **[`docs/index.md`](./docs/index.md)** — full documentation landing page.
+- **[`docs/architecture/overview.md`](./docs/architecture/overview.md)** — architecture, context pipeline, memory directory, configuration model, security, design decisions.
+- **[`docs/guides/bootstrapping.md`](./docs/guides/bootstrapping.md)** — one-shot operator utilities (character-card unpacker, lorebook importer) that are never invoked by the runtime reply pipeline.
+- **[`docs/contributing.md`](./docs/contributing.md)** — full dev workflow (the bullets below are the TL;DR).
 
 ## TDD Workflow
 
@@ -25,3 +26,8 @@ Always follow red/green TDD:
 2. Run `uv run ruff check` to lint
 3. Run `uv run ruff format` to format
 4. Run `uv run ty check` to type-check
+5. Run `uv run pytest` to run tests
+
+## Banned-API Rule
+
+Runtime modules (`bot.py`, `familiar.py`, `commands/run.py`, anything in the context pipeline) must never import from `familiar_connect.bootstrap`. The bootstrap subpackage is operator-only. Ruff enforces this via `[tool.ruff.lint.flake8-tidy-imports.banned-api]`. See [`docs/guides/bootstrapping.md`](./docs/guides/bootstrapping.md) for the rationale.
