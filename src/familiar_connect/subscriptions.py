@@ -9,7 +9,7 @@ restarts without the operator having to re-subscribe everywhere.
 
 The file format is deliberately human-editable — the whole point of
 the file-on-disk config decision (see
-``future-features/configuration-levels.md``) is that an admin can
+``docs/architecture/configuration-model.md``) is that an admin can
 ``$EDITOR data/familiars/<id>/subscriptions.toml`` to sanity-check
 or prune rows without stopping the bot.
 """

@@ -1,6 +1,6 @@
 """HistoryProvider — sliding window of recent turns + rolling summary.
 
-Step 6 of future-features/context-management.md. Reads turns from the
+Step 6 of docs/architecture/context-pipeline.md. Reads turns from the
 :class:`HistoryStore` for the request's
 ``(familiar_id, channel_id)`` and emits up to two contributions:
 
@@ -26,7 +26,7 @@ move on.
 
 The split between per-channel recent window and per-familiar global
 summary is the "hybrid" option from
-``future-features/configuration-levels.md``, picked specifically
+``docs/architecture/configuration-model.md``, picked specifically
 because it forces multi-channel scalability to be a first-class
 concern from day one.
 """

@@ -12,6 +12,6 @@ The dependency direction is one-way: this package may import from
 A ruff ``flake8-tidy-imports`` ``banned-api`` rule in
 ``pyproject.toml`` enforces the invariant — runtime modules that
 accidentally import from :mod:`familiar_connect.bootstrap` will
-fail lint. See ``bootstrapping.md`` at the repo root for the
+fail lint. See ``docs/guides/bootstrapping.md`` for the
 operator-facing how-to.
 """

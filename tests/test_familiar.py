@@ -5,7 +5,7 @@ character — config, memory store, history store, side-model,
 subscription registry, channel config store, and the full set of
 providers/processors — into a single object that the bot layer
 holds for the lifetime of the process. There is exactly one
-Familiar per install (see future-features/configuration-levels.md).
+Familiar per install (see docs/architecture/configuration-model.md).
 
 Covers familiar_connect.familiar, which doesn't exist yet.
 """

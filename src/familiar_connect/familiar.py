@@ -1,6 +1,6 @@
 """Runtime bundle for the single active character.
 
-Per ``future-features/configuration-levels.md``, a Familiar-Connect
+Per ``docs/architecture/configuration-model.md``, a Familiar-Connect
 process runs exactly one character at a time. Multiple character
 folders may coexist under ``data/familiars/``; ``FAMILIAR_ID`` at
 startup selects which one this process actually loads. The

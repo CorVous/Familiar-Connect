@@ -3,7 +3,7 @@
 Covers familiar_connect.memory.store, which does not exist yet.
 
 The store owns a single per-familiar directory of plain-text files
-(see plan.md § Memory Directory and future-features/memory.md). It
+(see docs/architecture/memory.md). It
 exposes a small file-IO surface — list / read / write / append / grep
 / glob — that is safe to hand to a tool-using cheap model later via
 the ContentSearchProvider:

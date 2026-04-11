@@ -1,6 +1,6 @@
 """Discord bot factory, slash commands, and pipeline-routed message loop.
 
-Step 7 of ``future-features/context-management.md``, plus the
+Step 7 of ``docs/architecture/context-pipeline.md``, plus the
 post-merge voice transcription wiring from PR #17. Replaces the
 single-slot ``TextSession``/``/awaken`` surface with:
 
@@ -26,7 +26,7 @@ single-slot ``TextSession``/``/awaken`` surface with:
   voice path carrying its own state.
 
 The bot owns a single :class:`Familiar` bundle for the lifetime of
-the process — per ``future-features/configuration-levels.md`` one
+the process — per ``docs/architecture/configuration-model.md`` one
 process runs exactly one active character.
 """
 

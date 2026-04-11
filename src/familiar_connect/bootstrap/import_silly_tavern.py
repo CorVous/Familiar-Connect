@@ -1,6 +1,6 @@
 """SillyTavern lorebook / world-info importer.
 
-Step 9 of future-features/context-management.md. Reads a SillyTavern
+Step 9 of docs/architecture/context-pipeline.md. Reads a SillyTavern
 lorebook JSON and writes one Markdown file per entry into a
 subdirectory of a familiar's :class:`MemoryStore` (default
 ``lore/imported/``). Each output file is plain Markdown with the

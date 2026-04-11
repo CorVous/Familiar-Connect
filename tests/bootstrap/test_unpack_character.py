@@ -1,7 +1,7 @@
 """Tests for the character-card unpacker.
 
 Covers :mod:`familiar_connect.bootstrap.unpack_character`. Per
-``future-features/context-management.md`` step 4: on familiar
+``docs/architecture/context-pipeline.md`` step 4: on familiar
 creation, read the loaded CharacterCard and write one Markdown file
 per non-empty field into the MemoryStore at ``self/<field>.md``. Empty
 fields are skipped (no empty file on disk). Idempotent: re-unpacking

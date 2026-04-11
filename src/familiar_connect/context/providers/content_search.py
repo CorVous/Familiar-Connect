@@ -1,6 +1,6 @@
 """ContentSearchProvider — the cheap-model memory search agent.
 
-Step 8 of future-features/context-management.md. The interesting one.
+Step 8 of docs/architecture/context-pipeline.md. The interesting one.
 
 Each :meth:`contribute` call hands a single :class:`SideModel` a small
 toolset scoped to one familiar's :class:`MemoryStore` —

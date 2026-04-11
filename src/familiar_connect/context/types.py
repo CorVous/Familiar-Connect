@@ -82,7 +82,7 @@ class ContextRequest:
     merges everything into the final ``SystemPromptLayers``.
 
     A Familiar-Connect install runs exactly one familiar at a time —
-    see ``future-features/configuration-levels.md``. ``familiar_id``
+    see ``docs/architecture/configuration-model.md``. ``familiar_id``
     therefore identifies which character folder on disk is active;
     ``channel_id`` partitions the per-conversation recent history
     window so two simultaneous conversations don't bleed into each

@@ -1,6 +1,6 @@
 """Red-first tests for RecastPostProcessor.
 
-Step 10 of future-features/context-management.md. Post-processor that
+Step 10 of docs/architecture/context-pipeline.md. Post-processor that
 takes the main LLM's reply, runs a cheap SideModel with a focused
 cleanup prompt, and returns the rewritten text. Inspired by
 SillyTavern's ``recast-post-processing``.

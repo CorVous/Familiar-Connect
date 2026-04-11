@@ -1,6 +1,6 @@
 """Red-first tests for the HistoryProvider.
 
-Step 6 of future-features/context-management.md. Reads turns from the
+Step 6 of docs/architecture/context-pipeline.md. Reads turns from the
 HistoryStore for the request's ``(familiar_id, channel_id)`` and
 emits one recent_history Contribution containing the most recent N
 turns *in this channel*, and — when there are enough older turns

@@ -1,6 +1,6 @@
 """Red-first tests for SteppedThinkingPreProcessor.
 
-Step 10 of future-features/context-management.md. Pre-processor that
+Step 10 of docs/architecture/context-pipeline.md. Pre-processor that
 calls a cheap SideModel with a focused "think step by step about
 what the user is really asking" prompt and stashes the result on the
 request as a Contribution at ``Layer.depth_inject`` so the budgeter

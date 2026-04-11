@@ -11,7 +11,7 @@ provider failures (exceptions or deadline misses) are recorded but
 do not poison the rest of the pipeline.
 
 This commit does not exercise the main LLM call or post-processors —
-those wait on later roadmap steps in future-features/context-management.md.
+those wait on later roadmap steps in docs/architecture/context-pipeline.md.
 """
 
 from __future__ import annotations

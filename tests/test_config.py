@@ -1,6 +1,6 @@
 """Red-first tests for the per-character / per-channel config loader.
 
-Step 7 of future-features/context-management.md. The bot reads a
+Step 7 of docs/architecture/context-pipeline.md. The bot reads a
 character's TOML sidecar at startup and a per-channel TOML sidecar
 lazily on first use. Both are optional — missing files produce sane
 defaults so a brand-new install with an empty ``data/`` works.

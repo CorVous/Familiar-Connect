@@ -7,7 +7,7 @@ HistoryProvider reads from it; the bot's text-session and voice-
 session loops write to it.
 
 Familiar-Connect runs exactly one familiar per install — see
-``future-features/configuration-levels.md``. ``familiar_id`` still
+``docs/architecture/configuration-model.md``. ``familiar_id`` still
 rides through the API so tests can exercise multiple familiars
 against a single store; in production the bot always passes the one
 currently-active character id.

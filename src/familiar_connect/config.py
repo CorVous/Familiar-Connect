@@ -1,6 +1,6 @@
 """Per-character and per-channel configuration loaded from TOML sidecars.
 
-Step 7 of future-features/context-management.md. The bot reads two
+Step 7 of docs/architecture/context-pipeline.md. The bot reads two
 kinds of config at runtime:
 
 - ``character.toml`` — one per install, loaded once on startup.
