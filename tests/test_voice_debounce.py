@@ -311,6 +311,132 @@ class TestVoiceDebounce:
         assert request.utterance == "first second third"
 
 
+class TestLullStateTransition:
+    """Verify IDLE→GENERATING happens at lull expiry, not later."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_chat(self) -> Iterator[None]:  # type: ignore[misc]
+        """Patch assemble_chat_messages."""
+        with patch(
+            "familiar_connect.bot.assemble_chat_messages",
+            return_value=[Message(role="user", content="hi")],
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_tracker_generating_after_lull_expires(self) -> None:
+        """Tracker transitions to GENERATING when the lull timer fires."""
+        handler, tracker, _, _, _, familiar = _build(lull_timeout=0.05)
+
+        # Slow down the LLM so we can observe GENERATING before it finishes.
+        gate = asyncio.Event()
+        original_chat = familiar.llm_client.chat
+
+        async def _slow_chat(*args: object, **kwargs: object) -> object:
+            await gate.wait()
+            return await original_chat(*args, **kwargs)
+
+        familiar.llm_client.chat = AsyncMock(side_effect=_slow_chat)
+
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+
+        # Before lull: still IDLE.
+        assert tracker.state is ResponseState.IDLE
+
+        # Wait for lull to expire + a tick for the task to run.
+        await asyncio.sleep(0.07)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        # Lull expired — tracker should be GENERATING now.
+        assert tracker.state is ResponseState.GENERATING
+
+        # Let the LLM finish.
+        gate.set()
+        await asyncio.sleep(0.05)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_speech_during_generating_does_not_cancel_timer(self) -> None:
+        """New speech after GENERATING does not cancel the generation task."""
+        handler, tracker, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
+
+        # Slow down the LLM so we can observe GENERATING.
+        gate = asyncio.Event()
+        original_chat = familiar.llm_client.chat
+
+        async def _slow_chat(*args: object, **kwargs: object) -> object:
+            await gate.wait()
+            return await original_chat(*args, **kwargs)
+
+        familiar.llm_client.chat = AsyncMock(side_effect=_slow_chat)
+
+        vad_cb(42, "SpeechStarted")
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+        vad_cb(42, "UtteranceEnd")
+        dg_cb(42, "UtteranceEnd")
+
+        # Wait for lull to expire.
+        await asyncio.sleep(0.07)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert tracker.state is ResponseState.GENERATING
+
+        # New speech arrives — should NOT cancel the generation.
+        vad_cb(42, "SpeechStarted")
+        r2 = TranscriptionResult(text="world", is_final=True, start=1.0, end=1.5)
+        await handler(42, r2)
+
+        # Still GENERATING — not cancelled.
+        assert tracker.state is ResponseState.GENERATING
+
+        # Let the LLM finish.
+        gate.set()
+        await asyncio.sleep(0.1)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        # Generation completed, tracker should be IDLE again.
+        assert tracker.state is ResponseState.IDLE
+
+        # The new utterance should be in pending_utterances, ready
+        # for the next cycle.
+        familiar.llm_client.chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pending_utterances_trigger_new_cycle(self) -> None:
+        """Utterances arriving during generation trigger a new cycle after."""
+        handler, tracker, _, vad_cb, dg_cb, familiar = _build(lull_timeout=0.05)
+
+        vad_cb(42, "SpeechStarted")
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+        vad_cb(42, "UtteranceEnd")
+        dg_cb(42, "UtteranceEnd")
+
+        # Wait for generation to complete.
+        await asyncio.sleep(0.15)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        familiar.llm_client.chat.assert_called_once()
+        assert tracker.state is ResponseState.IDLE
+
+        # Now send a second utterance — it should trigger a new cycle.
+        r2 = TranscriptionResult(text="world", is_final=True, start=1.0, end=1.5)
+        await handler(42, r2)
+
+        await asyncio.sleep(0.15)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert familiar.llm_client.chat.call_count == 2
+
+
 class TestDeepgramFlushGate:
     """Verify generation waits for Deepgram to flush in-transit transcripts."""
 

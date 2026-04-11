@@ -298,38 +298,9 @@ def _build_voice_response_handler(
         """Run the full generation pipeline for accumulated voice input.
 
         Called by :func:`_flush_pending` after the lull timer fires.
-        Waits for the tracker to become IDLE (in case a previous cycle
-        is still finishing), then claims it and runs the full
-        pipeline → LLM → TTS path.
+        The tracker is already in GENERATING state (set by
+        :func:`_lull_then_generate` when the lull expired).
         """
-        # Wait for the tracker to become IDLE before starting a new
-        # response cycle.  Uses idle_event (set by reset(), cleared
-        # by start_generating()) so concurrent handlers wake up
-        # deterministically instead of polling.
-        if tracker.state is not ResponseState.IDLE:
-            _logger.info(
-                "Waiting for current cycle (%s) before generating: %r",
-                tracker.state.value,
-                combined_text[:80],
-            )
-            while tracker.state is not ResponseState.IDLE:
-                try:
-                    await asyncio.wait_for(tracker.idle_event.wait(), timeout=30.0)
-                except TimeoutError:
-                    _logger.warning(
-                        "Timed out waiting for IDLE (stuck in %s), dropping: %r",
-                        tracker.state.value,
-                        combined_text[:80],
-                    )
-                    return
-
-        # --- State machine: IDLE → GENERATING ---
-        # Claim the tracker *before* any await so no concurrent handler
-        # can also pass the IDLE check and race into start_generating.
-        generation_task = asyncio.current_task()
-        if generation_task is not None:
-            tracker.start_generating(generation_task)
-
         try:
             # Resolve the speaker's display name. ``user_names`` is
             # mutated by voice_pipeline's name resolver when a late
@@ -459,16 +430,22 @@ def _build_voice_response_handler(
     async def _lull_then_generate() -> None:
         """Wait for lull_timeout seconds of silence, then flush.
 
-        After the lull timer expires, waits for Deepgram to confirm
-        all in-transit transcriptions have been delivered before
-        generating.  This gate prevents generating before a slow
-        final transcript arrives.  The task is cancellable during
-        both the sleep and the Deepgram wait phases (by new speech
-        or new transcripts), but NOT during the generation phase.
+        After the lull timer expires, immediately transitions to
+        GENERATING so the InterruptionDetector can handle speech
+        during the Deepgram flush wait.  The task is cancellable
+        during the sleep phase; during the Deepgram wait phase
+        cancellation resets the tracker back to IDLE.
         """
         nonlocal lull_gen_task
         try:
             await asyncio.sleep(familiar.config.lull_timeout)
+
+            # --- State machine: IDLE → GENERATING ---
+            # Committed to generating once Deepgram confirms.
+            current = asyncio.current_task()
+            if current is not None:
+                tracker.start_generating(current)
+
             # Wait for Deepgram to confirm all transcriptions flushed.
             if not deepgram_ready.is_set():
                 _logger.info(
@@ -486,11 +463,25 @@ def _build_voice_response_handler(
                     pending_deepgram_speakers.clear()
                     deepgram_ready.set()
         except asyncio.CancelledError:
+            # If we were already GENERATING (cancelled during flush
+            # wait), roll back to IDLE so the next cycle can start.
+            if tracker.state is ResponseState.GENERATING:
+                tracker.reset()
             return
         # Past the cancellable phases — clear reference so new
         # results don't cancel the generation phase that follows.
         lull_gen_task = None
         await _flush_pending()
+
+        # Check for utterances that arrived during generation.
+        # If new speech was buffered while we were busy, kick off
+        # another cycle.
+        if (
+            pending_utterances
+            and not debounce_speakers
+            and tracker.state is ResponseState.IDLE
+        ):
+            lull_gen_task = asyncio.create_task(_lull_then_generate())
 
     def _on_vad_event(user_id: int, event_type: str) -> None:
         """Track active speakers for VAD-gated debounce.
@@ -509,15 +500,16 @@ def _build_voice_response_handler(
             pending_deepgram_speakers.add(user_id)
             deepgram_ready.clear()
             had_timer = lull_gen_task is not None
-            # Someone started talking — cancel the lull timer.
-            if lull_gen_task is not None:
+            # Someone started talking — cancel the lull timer,
+            # but only if we haven't committed to generating yet.
+            if lull_gen_task is not None and tracker.state is ResponseState.IDLE:
                 lull_gen_task.cancel()
                 lull_gen_task = None
             _logger.debug(
                 "VAD SpeechStarted from %s (active=%s, timer_cancelled=%s)",
                 speaker,
                 debounce_speakers,
-                had_timer,
+                had_timer and tracker.state is ResponseState.IDLE,
             )
         elif event_type == "UtteranceEnd":
             debounce_speakers.discard(user_id)
@@ -528,8 +520,12 @@ def _build_voice_response_handler(
                 len(pending_utterances),
             )
             # Everyone stopped — start the lull timer if we have
-            # buffered results.
-            if not debounce_speakers and pending_utterances:
+            # buffered results and aren't already generating.
+            if (
+                not debounce_speakers
+                and pending_utterances
+                and tracker.state is ResponseState.IDLE
+            ):
                 if lull_gen_task is not None:
                     lull_gen_task.cancel()
                 lull_gen_task = asyncio.create_task(_lull_then_generate())
@@ -561,7 +557,9 @@ def _build_voice_response_handler(
         # latest result, not from a stale UtteranceEnd.  Without
         # this reset, a timer started by an earlier event can fire
         # before the next segment arrives during continuous speech.
-        if not debounce_speakers:
+        # Only start/restart the timer if we're still IDLE — once
+        # GENERATING, the InterruptionDetector handles new speech.
+        if not debounce_speakers and tracker.state is ResponseState.IDLE:
             if lull_gen_task is not None:
                 lull_gen_task.cancel()
             lull_gen_task = asyncio.create_task(_lull_then_generate())

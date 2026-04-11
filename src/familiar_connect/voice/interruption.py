@@ -156,7 +156,7 @@ class ResponseTracker:
     """
 
     state: ResponseState = ResponseState.IDLE
-    generation_task: asyncio.Task[str] | None = None
+    generation_task: asyncio.Task[object] | None = None
     response_text: str | None = None
     word_timestamps: list[WordTimestamp] = field(default_factory=list)
     playback_start_time: float | None = None
@@ -166,7 +166,7 @@ class ResponseTracker:
     mood_modifier: float = 0.0
     """Cached mood drift modifier, set at generation start."""
 
-    def start_generating(self, task: asyncio.Task[str]) -> None:
+    def start_generating(self, task: asyncio.Task[object]) -> None:
         """Transition IDLE → GENERATING with the given task."""
         if self.state is not ResponseState.IDLE:
             msg = f"Cannot start generating from state {self.state.value}"
