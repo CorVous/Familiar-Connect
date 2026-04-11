@@ -445,7 +445,7 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        response_handler, _tracker, _detector = _build_voice_response_handler(
+        response_handler, _tracker, detector = _build_voice_response_handler(
             vc=vc,
             familiar=familiar,
             voice_channel_id=channel.id,
@@ -458,6 +458,7 @@ async def subscribe_my_voice(
             user_names=user_names,
             resolve_name=_resolve_from_channel,
             response_handler=response_handler,
+            interruption_detector=detector,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),

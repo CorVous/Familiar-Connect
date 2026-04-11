@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -17,7 +18,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from typing import Any
 
-    from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
+    from familiar_connect.transcription import (
+        DeepgramTranscriber,
+        TranscriptionResult,
+        VadEvent,
+    )
+    from familiar_connect.voice.interruption import InterruptionDetector
 
 _logger = logging.getLogger(__name__)
 
@@ -45,6 +51,8 @@ class _UserStream:
     transcript_queue: asyncio.Queue[TranscriptionResult]
     pump_task: asyncio.Task[None]
     forwarder_task: asyncio.Task[None]
+    vad_queue: asyncio.Queue[VadEvent] | None = None
+    vad_forwarder_task: asyncio.Task[None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +75,9 @@ class VoicePipeline:
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None
     streams: dict[int, _UserStream] = field(default_factory=dict)
+    shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
+    interruption_detector: InterruptionDetector | None = None
+    vad_dispatcher_task: asyncio.Task[None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -163,26 +174,72 @@ async def _transcript_forwarder(
         await shared_queue.put((user_id, result))
 
 
+async def _vad_forwarder(
+    user_id: int,
+    user_queue: asyncio.Queue[VadEvent],
+    shared_queue: asyncio.Queue[tuple[int, VadEvent]],
+) -> None:
+    """Tag per-user VAD events with user_id and put on the shared queue."""
+    while True:
+        event = await user_queue.get()
+        await shared_queue.put((user_id, event))
+
+
+async def _vad_dispatcher(
+    shared_queue: asyncio.Queue[tuple[int, VadEvent]],
+    detector: InterruptionDetector | None,
+) -> None:
+    """Read tagged VAD events and feed them to the InterruptionDetector."""
+    while True:
+        user_id, event = await shared_queue.get()
+        if detector is None:
+            continue
+        now = time.monotonic()
+        if event.event_type == "SpeechStarted":
+            detector.on_speech_started(user_id=user_id, timestamp=now)
+        elif event.event_type == "UtteranceEnd":
+            await detector.on_utterance_end(
+                user_id=user_id,
+                transcript="",
+                timestamp=now,
+            )
+
+
 async def _create_user_stream(
     user_id: int,
     template: DeepgramTranscriber,
     shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]],
+    shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None,
 ) -> _UserStream:
     """Create and start a per-user transcription stream."""
     transcriber = template.clone()
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
     transcript_queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
-    await transcriber.start(transcript_queue)
+
+    vad_queue: asyncio.Queue[VadEvent] | None = None
+    if shared_vad_queue is not None:
+        vad_queue = asyncio.Queue()
+
+    await transcriber.start(transcript_queue, vad_queue=vad_queue)
     pump_task = asyncio.create_task(_audio_pump(audio_queue, transcriber))
     forwarder_task = asyncio.create_task(
         _transcript_forwarder(user_id, transcript_queue, shared_queue)
     )
+
+    vad_forwarder_task: asyncio.Task[None] | None = None
+    if vad_queue is not None and shared_vad_queue is not None:
+        vad_forwarder_task = asyncio.create_task(
+            _vad_forwarder(user_id, vad_queue, shared_vad_queue)
+        )
+
     return _UserStream(
         transcriber=transcriber,
         audio_queue=audio_queue,
         transcript_queue=transcript_queue,
         pump_task=pump_task,
         forwarder_task=forwarder_task,
+        vad_queue=vad_queue,
+        vad_forwarder_task=vad_forwarder_task,
     )
 
 
@@ -205,6 +262,7 @@ async def _audio_router(
                 user_id,
                 pipeline.template,
                 pipeline.shared_transcript_queue,
+                shared_vad_queue=pipeline.shared_vad_queue,
             )
             pipeline.streams[user_id] = stream
         await pipeline.streams[user_id].audio_queue.put(data)
@@ -275,6 +333,7 @@ async def start_pipeline(  # noqa: RUF029
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None,
+    interruption_detector: InterruptionDetector | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -287,12 +346,19 @@ async def start_pipeline(  # noqa: RUF029
     :param response_handler: Optional async callback invoked with
         ``(user_id, result)`` for each final transcription. Used to
         trigger LLM + TTS responses.
+    :param interruption_detector: Optional detector that receives VAD
+        events (``SpeechStarted``, ``UtteranceEnd``) from all per-user
+        Deepgram streams.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
     shared_transcript_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = (
         asyncio.Queue()
     )
+
+    shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
+    if interruption_detector is not None:
+        shared_vad_queue = asyncio.Queue()
 
     # We create a placeholder pipeline first so the router can reference it.
     pipeline = VoicePipeline(
@@ -304,6 +370,8 @@ async def start_pipeline(  # noqa: RUF029
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,
+        shared_vad_queue=shared_vad_queue,
+        interruption_detector=interruption_detector,
     )
 
     pipeline.router_task = asyncio.create_task(
@@ -312,6 +380,11 @@ async def start_pipeline(  # noqa: RUF029
     pipeline.logger_task = asyncio.create_task(
         _transcript_logger(shared_transcript_queue, pipeline)
     )
+
+    if shared_vad_queue is not None:
+        pipeline.vad_dispatcher_task = asyncio.create_task(
+            _vad_dispatcher(shared_vad_queue, interruption_detector)
+        )
 
     set_pipeline(pipeline)
     _logger.info("Voice transcription pipeline started")
@@ -326,6 +399,10 @@ async def _stop_user_stream(stream: _UserStream) -> None:
         await stream.pump_task
     with contextlib.suppress(asyncio.CancelledError):
         await stream.forwarder_task
+    if stream.vad_forwarder_task is not None:
+        stream.vad_forwarder_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stream.vad_forwarder_task
     await stream.transcriber.stop()
 
 
@@ -352,6 +429,10 @@ async def stop_pipeline() -> None:
         pipeline.logger_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await pipeline.logger_task
+    if pipeline.vad_dispatcher_task is not None:
+        pipeline.vad_dispatcher_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pipeline.vad_dispatcher_task
 
     clear_pipeline()
     _logger.info("Voice transcription pipeline stopped")

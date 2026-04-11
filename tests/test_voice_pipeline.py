@@ -11,7 +11,8 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.transcription import TranscriptionResult, VadEvent
+from familiar_connect.voice.interruption import InterruptionDetector, ResponseTracker
 from familiar_connect.voice_pipeline import (
     PipelineError,
     VoicePipeline,
@@ -19,6 +20,8 @@ from familiar_connect.voice_pipeline import (
     _audio_router,
     _transcript_forwarder,
     _transcript_logger,
+    _vad_dispatcher,
+    _vad_forwarder,
     clear_pipeline,
     get_pipeline,
     set_pipeline,
@@ -552,3 +555,129 @@ class TestStopPipeline:
         """Calling stop_pipeline when no pipeline is active does not raise."""
         await stop_pipeline()
         await stop_pipeline()
+
+
+# ---------------------------------------------------------------------------
+# VAD event forwarding and dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestVadForwarder:
+    @pytest.mark.asyncio
+    async def test_tags_vad_events_with_user_id(self) -> None:
+        """VAD forwarder reads from per-user queue and tags onto shared queue."""
+        user_queue: asyncio.Queue[VadEvent] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, VadEvent]] = asyncio.Queue()
+
+        ev = VadEvent(event_type="SpeechStarted")
+        await user_queue.put(ev)
+
+        task = asyncio.create_task(_vad_forwarder(42, user_queue, shared_queue))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not shared_queue.empty()
+        user_id, tagged_ev = shared_queue.get_nowait()
+        assert user_id == 42
+        assert tagged_ev is ev
+
+
+class TestVadDispatcher:
+    def _make_detector(self) -> InterruptionDetector:
+        tracker = ResponseTracker()
+        return InterruptionDetector(
+            tracker=tracker,
+            min_interruption_s=1.5,
+            short_long_boundary_s=4.0,
+            on_short_during_generating=AsyncMock(),
+            on_long_during_generating=AsyncMock(),
+            on_short_during_speaking=AsyncMock(),
+            on_long_during_speaking=AsyncMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_speech_started_calls_detector(self) -> None:
+        """SpeechStarted events are dispatched to detector.on_speech_started."""
+        shared_queue: asyncio.Queue[tuple[int, VadEvent]] = asyncio.Queue()
+        detector = self._make_detector()
+
+        await shared_queue.put((42, VadEvent(event_type="SpeechStarted")))
+
+        with patch.object(detector, "on_speech_started") as mock_started:
+            task = asyncio.create_task(_vad_dispatcher(shared_queue, detector))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            mock_started.assert_called_once()
+            call_args = mock_started.call_args
+            assert call_args.kwargs["user_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_utterance_end_calls_detector(self) -> None:
+        """UtteranceEnd events are dispatched to detector.on_utterance_end."""
+        shared_queue: asyncio.Queue[tuple[int, VadEvent]] = asyncio.Queue()
+        detector = self._make_detector()
+
+        await shared_queue.put((42, VadEvent(event_type="UtteranceEnd")))
+
+        with patch.object(detector, "on_utterance_end", new=AsyncMock()) as mock_end:
+            task = asyncio.create_task(_vad_dispatcher(shared_queue, detector))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            mock_end.assert_called_once()
+            call_args = mock_end.call_args
+            assert call_args.kwargs["user_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_without_detector_is_noop(self) -> None:
+        """When detector is None, events are consumed but not dispatched."""
+        shared_queue: asyncio.Queue[tuple[int, VadEvent]] = asyncio.Queue()
+        await shared_queue.put((42, VadEvent(event_type="SpeechStarted")))
+
+        task = asyncio.create_task(_vad_dispatcher(shared_queue, None))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert shared_queue.empty()
+
+
+class TestPipelineVadWiring:
+    @pytest.mark.asyncio
+    async def test_start_pipeline_with_detector_spawns_vad_task(self) -> None:
+        """When a detector is provided, start_pipeline spawns a vad_dispatcher."""
+        template = _make_template()
+        tracker = ResponseTracker()
+        detector = InterruptionDetector(
+            tracker=tracker,
+            min_interruption_s=1.5,
+            short_long_boundary_s=4.0,
+            on_short_during_generating=AsyncMock(),
+            on_long_during_generating=AsyncMock(),
+            on_short_during_speaking=AsyncMock(),
+            on_long_during_speaking=AsyncMock(),
+        )
+        pipeline = await start_pipeline(template, {}, interruption_detector=detector)
+        try:
+            assert pipeline.vad_dispatcher_task is not None
+            assert not pipeline.vad_dispatcher_task.done()
+        finally:
+            await stop_pipeline()
+
+    @pytest.mark.asyncio
+    async def test_start_pipeline_without_detector_no_vad_task(self) -> None:
+        """Without a detector, no vad_dispatcher task is spawned."""
+        template = _make_template()
+        pipeline = await start_pipeline(template, {})
+        try:
+            assert pipeline.vad_dispatcher_task is None
+        finally:
+            await stop_pipeline()

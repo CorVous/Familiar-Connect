@@ -16,6 +16,7 @@ from familiar_connect.transcription import (
     DEFAULT_MODEL,
     DeepgramTranscriber,
     TranscriptionResult,
+    VadEvent,
     create_transcriber_from_env,
 )
 
@@ -449,6 +450,114 @@ class TestDeepgramTranscriberLifecycle:
             await client.stop()
 
             assert queue.empty()
+
+
+class TestVadEvent:
+    def test_speech_started_fields(self) -> None:
+        ev = VadEvent(event_type="SpeechStarted")
+        assert ev.event_type == "SpeechStarted"
+
+    def test_utterance_end_fields(self) -> None:
+        ev = VadEvent(event_type="UtteranceEnd")
+        assert ev.event_type == "UtteranceEnd"
+
+
+class TestReceiveLoopVadEvents:
+    """VAD events (SpeechStarted, UtteranceEnd) are forwarded to vad_queue."""
+
+    @pytest.fixture
+    def client(self) -> DeepgramTranscriber:
+        return DeepgramTranscriber(api_key="test-key")
+
+    def _make_ws_mock(self, messages: list[object] | None = None) -> MagicMock:
+        ws = MagicMock()
+        ws.send_bytes = AsyncMock()
+        ws.send_json = AsyncMock()
+        ws.close = AsyncMock()
+        ws.closed = False
+        items = messages if messages is not None else []
+        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        return ws
+
+    @pytest.mark.asyncio
+    async def test_speech_started_forwarded_to_vad_queue(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        msg = MagicMock()
+        msg.type = 1  # aiohttp.WSMsgType.TEXT
+        msg.data = json.dumps({"type": "SpeechStarted"})
+
+        ws_mock = self._make_ws_mock(messages=[msg])
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            output: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            vad_queue: asyncio.Queue[VadEvent] = asyncio.Queue()
+            await client.start(output, vad_queue=vad_queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            assert not vad_queue.empty()
+            ev = vad_queue.get_nowait()
+            assert ev.event_type == "SpeechStarted"
+
+    @pytest.mark.asyncio
+    async def test_utterance_end_forwarded_to_vad_queue(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        msg = MagicMock()
+        msg.type = 1  # aiohttp.WSMsgType.TEXT
+        msg.data = json.dumps({"type": "UtteranceEnd"})
+
+        ws_mock = self._make_ws_mock(messages=[msg])
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            output: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            vad_queue: asyncio.Queue[VadEvent] = asyncio.Queue()
+            await client.start(output, vad_queue=vad_queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            assert not vad_queue.empty()
+            ev = vad_queue.get_nowait()
+            assert ev.event_type == "UtteranceEnd"
+
+    @pytest.mark.asyncio
+    async def test_no_vad_queue_discards_vad_events(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """When vad_queue is not provided, VAD events are silently discarded."""
+        msg = MagicMock()
+        msg.type = 1  # aiohttp.WSMsgType.TEXT
+        msg.data = json.dumps({"type": "SpeechStarted"})
+
+        ws_mock = self._make_ws_mock(messages=[msg])
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            output: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(output)
+            await asyncio.sleep(0.05)
+            await client.stop()
+            # No crash — VAD events discarded when no vad_queue
+
+    @pytest.mark.asyncio
+    async def test_metadata_not_forwarded_to_vad_queue(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Non-VAD events like Metadata are not put on the vad_queue."""
+        msg = MagicMock()
+        msg.type = 1  # aiohttp.WSMsgType.TEXT
+        msg.data = json.dumps({"type": "Metadata", "request_id": "abc"})
+
+        ws_mock = self._make_ws_mock(messages=[msg])
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            output: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            vad_queue: asyncio.Queue[VadEvent] = asyncio.Queue()
+            await client.start(output, vad_queue=vad_queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            assert vad_queue.empty()
 
 
 class TestDeepgramReconnect:
