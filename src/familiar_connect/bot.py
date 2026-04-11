@@ -205,17 +205,21 @@ def _build_voice_response_handler(
         Fires ``min_interruption_s`` after someone starts talking over
         the familiar.  Returns ``True`` if the familiar yields.
         """
-        tol = effective_tolerance(
-            familiar.config.interrupt_tolerance.tolerance, tracker.mood_modifier
-        )
+        base = familiar.config.interrupt_tolerance.tolerance
+        mood = tracker.mood_modifier
+        tol = effective_tolerance(base, mood)
         if should_keep_talking(tol):
             _logger.info(
-                "Interruption detected — keeping talking (tol=%.2f)",
+                "Interruption: pushing through (base=%.2f mood=%+.2f tol=%.2f)",
+                base,
+                mood,
                 tol,
             )
             return False
         _logger.info(
-            "Interruption detected — yielding (tol=%.2f)",
+            "Interruption: yielding (base=%.2f mood=%+.2f tol=%.2f)",
+            base,
+            mood,
             tol,
         )
         if vc.is_playing():
