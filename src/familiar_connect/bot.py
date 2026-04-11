@@ -41,7 +41,7 @@ import discord
 
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
-from familiar_connect.context.types import ContextRequest, Modality
+from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
@@ -205,6 +205,17 @@ def _build_voice_response_handler(
             depth_inject_role=familiar.config.depth_inject_role,
             mode=channel_config.mode,
             display_tz=familiar.config.display_tz,
+        )
+
+        _logger.info(
+            "LLM request channel=%s (voice) messages=%d:\n%s",
+            voice_channel_id,
+            len(messages),
+            "\n".join(
+                f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
+                f"{m.content[:200]}{'…' if len(m.content) > 200 else ''}"
+                for m in messages
+            ),
         )
 
         reply = await familiar.llm_client.chat(messages)
@@ -424,6 +435,9 @@ async def _run_text_response(
         modality=Modality.text,
         budget_tokens=channel_config.budget_tokens,
         deadline_s=channel_config.deadline_s,
+        pending_turns=tuple(
+            PendingTurn(speaker=m.speaker, text=m.text) for m in buffer
+        ),
     )
 
     pipeline = familiar.build_pipeline(channel_config)
@@ -441,6 +455,17 @@ async def _run_text_response(
         depth_inject_role=familiar.config.depth_inject_role,
         mode=channel_config.mode,
         display_tz=familiar.config.display_tz,
+    )
+
+    _logger.info(
+        "LLM request channel=%s messages=%d:\n%s",
+        channel_id,
+        len(messages),
+        "\n".join(
+            f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
+            f"{m.content[:200]}{'…' if len(m.content) > 200 else ''}"
+            for m in messages
+        ),
     )
 
     async with channel.typing():

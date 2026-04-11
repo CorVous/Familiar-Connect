@@ -136,7 +136,7 @@ class TestLoadFromDisk:
         familiar = Familiar.load_from_disk(root, llm_client=main)
         assert isinstance(familiar.side_model, LLMSideModel)
         # The adapter's internal client is the main one.
-        assert familiar.side_model._llm_client is main
+        assert familiar.side_model.llm_client is main
 
     def test_side_model_uses_side_client_when_provided(
         self,
@@ -153,7 +153,7 @@ class TestLoadFromDisk:
             side_llm_client=side,
         )
         assert isinstance(familiar.side_model, LLMSideModel)
-        assert familiar.side_model._llm_client is side
+        assert familiar.side_model.llm_client is side
         # The main LLMClient for the reply path is still the main one.
         assert familiar.llm_client is main
 

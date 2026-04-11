@@ -1,0 +1,7 @@
+# Persistent subscription registry.
+# Managed by /subscribe-* slash commands; safe to hand-edit while the bot is stopped.
+
+[[subscription]]
+channel_id = 1492304826850345181
+kind = "text"
+guild_id = 324917760578682880

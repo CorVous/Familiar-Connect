@@ -358,8 +358,23 @@ class ConversationMonitor:
         trigger_context: str | None,
     ) -> bool:
         """Call the side model and return True if it responds YES."""
-        buffer_text = _format_buffer(buf.buffer)
         if trigger_context is None:
+            trigger_label = "lull"
+        elif trigger_context.startswith("You were directly"):
+            trigger_label = "direct_address"
+        else:
+            trigger_label = "interjection"
+
+        _logger.debug(
+            "evaluate channel=%s trigger=%s msgs=%d buffer_len=%d",
+            channel_id,
+            trigger_label,
+            buf.message_counter,
+            len(buf.buffer),
+        )
+
+        buffer_text = _format_buffer(buf.buffer)
+        if trigger_label == "lull":
             prompt = _LULL_PROMPT.format(
                 familiar_name=self._familiar_name,
                 character_card=self._character_card,
@@ -367,7 +382,7 @@ class ConversationMonitor:
                 conversation_summary="",
                 buffer=buffer_text,
             )
-        elif trigger_context.startswith("You were directly"):
+        elif trigger_label == "direct_address":
             prompt = _DIRECT_ADDRESS_PROMPT.format(
                 familiar_name=self._familiar_name,
                 character_card=self._character_card,
@@ -388,10 +403,21 @@ class ConversationMonitor:
         try:
             response = await self._side_model.complete(prompt)
         except Exception:
-            _logger.exception("Side model evaluation failed for channel %s", channel_id)
+            _logger.exception(
+                "Side model evaluation failed for channel %s",
+                channel_id,
+            )
             return False
 
-        return "YES" in response.upper()
+        decision = "YES" in response.upper()
+        _logger.debug(
+            "evaluate channel=%s trigger=%s decision=%s raw=%r",
+            channel_id,
+            trigger_label,
+            "YES" if decision else "NO",
+            response[:120],
+        )
+        return decision
 
     async def _fire_respond(self, channel_id: int, buf: ChannelBuffer) -> None:
         """Invoke on_respond with a snapshot of the buffer, then reset state."""
