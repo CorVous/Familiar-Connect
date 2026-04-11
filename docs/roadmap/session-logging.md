@@ -32,7 +32,7 @@ Both are needed because they answer different questions: raw history answers "wh
 - **Model.** A cheap side model (same family `HistoryProvider` uses for rolling summaries). Deterministic-mode-injectable for tests, same harness pattern as `ContentSearchProvider`.
 - **Outputs.** Three kinds of file mutation, all through `MemoryStore` so they hit the audit log:
     1. **A new `sessions/<date>-<slot>.md` file.** One file per session. The slot suffix (`evening`, `afternoon`, `short`) disambiguates multiple sessions on one day. Contents are freeform — a paragraph summary, a bulleted list of highlights, or whatever the writer pass produces.
-    2. **Edits (append or rewrite) to `people/<name>.md`** for each person who showed up. The writer pass updates impressions, adds notable moments, flags multi-username suspicions (see [Memory § multi-username handling](../architecture/memory.md#peoplenamemd--someone-the-familiar-has-interacted-with)).
+    2. **Edits (append or rewrite) to `people/<name>.md`** for each person who showed up. The writer pass updates impressions, adds notable moments, flags multi-username suspicions (see [Memory § multi-username handling](../architecture/memory.md#peoplenamemd-someone-the-familiar-has-interacted-with)).
     3. **Edits to `topics/<slug>.md`** for recurring subjects that came up. Updates opinions, adds new events, links back to the session file.
 - **Concurrency.** Only one writer pass runs at a time per familiar. Serialised by a lock on the `Familiar` bundle. Sessions ending back-to-back queue up.
 

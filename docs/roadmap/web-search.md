@@ -54,5 +54,5 @@ Probable module: `familiar_connect.context.providers.web_search`.
 
 - **Does the provider always run, or only on classifier hit?** Always-run is simpler but wastes budget and latency on "hi, how are you?" turns. Start with a cheap keyword heuristic; escalate to a side-model classifier if the heuristic is too blunt.
 - **Who pays for the search API?** Per-operator API key in `.env`, same as every other third-party credential.
-- **How much of the per-turn trace log is safe to show in the `/context` slash command?** URLs are fine; search API keys must never leak. Same sanitisation rules as logging — see [Security § logging & error handling](../architecture/security.md#logging--error-handling).
+- **How much of the per-turn trace log is safe to show in the `/context` slash command?** URLs are fine; search API keys must never leak. Same sanitisation rules as logging — see [Security § logging & error handling](../architecture/security.md#logging-error-handling).
 - **Fallback behaviour when search fails.** Emit nothing and let the main LLM admit it doesn't know, or emit a marker contribution saying "web search failed" so the LLM knows *why* it's uninformed? The latter is more honest but longer-winded.

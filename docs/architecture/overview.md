@@ -161,7 +161,8 @@ the event catalogue and slash command surface.
     The `PipelineOutput.outcomes` data is already captured per turn
     and `bot.py` logs a structured line per outcome; the web
     dashboard itself is a separate work item. See the
-    [Context pipeline deferred list](context-pipeline.md#deferred).
+    [Context pipeline](context-pipeline.md) page for the full list
+    of deferred items.
 
 ## Persistence
 
