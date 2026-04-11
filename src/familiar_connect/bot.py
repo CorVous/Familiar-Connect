@@ -288,6 +288,19 @@ async def subscribe_my_voice(
         await ctx.respond("I'm already in a voice channel.", ephemeral=True)
         return
 
+    # Pre-flight: check the bot has Connect permission in the target
+    # channel.  Without it Discord silently ignores the voice-state
+    # update and the connection times out after 60 s.
+    guild = ctx.guild
+    if guild is not None and guild.me is not None:
+        perms = channel.permissions_for(guild.me)
+        if not perms.connect:
+            await ctx.respond(
+                "I don't have **Connect** permission in that voice channel.",
+                ephemeral=True,
+            )
+            return
+
     # If a stale pipeline remains from a previous session (e.g. the bot
     # was kicked and cleanup didn't fire), clear it so start_pipeline()
     # won't raise PipelineError.

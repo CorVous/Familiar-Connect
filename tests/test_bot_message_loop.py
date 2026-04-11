@@ -152,6 +152,7 @@ def _make_voice_ctx(
     channel_id: int = 9000,
     guild_id: int = 999,
     already_connected: bool = False,
+    bot_can_connect: bool = True,
 ) -> MagicMock:
     ctx = _make_text_ctx(channel_id=channel_id, guild_id=guild_id)
     ctx.defer = AsyncMock()
@@ -170,6 +171,12 @@ def _make_voice_ctx(
     mock_vc.is_playing = MagicMock(return_value=False)
     mock_vc.disconnect = AsyncMock()
     voice_channel.connect = AsyncMock(return_value=mock_vc)
+
+    # Bot's own permissions in the voice channel.
+    perms = MagicMock(spec=discord.Permissions)
+    perms.connect = bot_can_connect
+    voice_channel.permissions_for = MagicMock(return_value=perms)
+
     voice_state.channel = voice_channel
     type(author).voice = PropertyMock(return_value=voice_state)
 
@@ -560,6 +567,25 @@ class TestVoiceSubscription:
         assert familiar.subscriptions.voice_in_guild(999) is not None
         # Followup was NOT sent (interaction is dead).
         ctx.followup.send.assert_not_called()
+
+    def test_subscribe_my_voice_rejects_without_connect_permission(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Bot responds immediately when it lacks Connect permission."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_voice_ctx(bot_can_connect=False)
+
+        asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        # Should respond with an error, not attempt to connect.
+        ctx.respond.assert_called_once()
+        assert "permission" in ctx.respond.call_args.args[0].lower()
+        # Voice channel connect was never attempted.
+        voice_channel = ctx.author.voice.channel
+        voice_channel.connect.assert_not_called()
+        # No subscription registered.
+        assert familiar.subscriptions.voice_in_guild(999) is None
 
     def test_unsubscribe_voice_disconnects(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
