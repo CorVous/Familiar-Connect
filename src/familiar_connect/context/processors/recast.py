@@ -1,6 +1,6 @@
 """RecastPostProcessor — focused cleanup pass on the main LLM reply.
 
-Step 10 of future-features/context-management.md. Inspired by
+Step 10 of docs/architecture/context-pipeline.md. Inspired by
 SillyTavern's ``recast-post-processing``.
 
 Takes the main LLM's reply text and runs a cheap :class:`SideModel`

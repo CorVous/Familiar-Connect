@@ -1,6 +1,6 @@
 """Unpack a CharacterCard into a MemoryStore's ``self/`` directory.
 
-Step 4 of future-features/context-management.md. On familiar creation
+Step 4 of docs/architecture/context-pipeline.md. On familiar creation
 the loaded :class:`~familiar_connect.character.CharacterCard` is
 walked field by field; each non-empty field becomes a Markdown file
 under ``self/`` in the familiar's :class:`MemoryStore`. Empty fields

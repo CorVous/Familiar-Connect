@@ -1,6 +1,6 @@
 """CharacterProvider — surfaces the familiar's ``self/`` files.
 
-Step 5 of future-features/context-management.md. Reads every Markdown
+Step 5 of docs/architecture/context-pipeline.md. Reads every Markdown
 file directly inside ``self/`` in the familiar's :class:`MemoryStore`
 and emits one :class:`Contribution` per non-empty file at high
 priority on :data:`Layer.character`. The provider is always on — if

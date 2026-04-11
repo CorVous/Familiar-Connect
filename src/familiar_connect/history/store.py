@@ -11,7 +11,7 @@ The HistoryStore owns one SQLite database with two tables:
   with a ``last_summarised_id`` watermark so the
   :class:`HistoryProvider` can tell whether the cache still covers
   every turn the familiar has heard. The summary is *global per
-  familiar* — see ``plan.md`` § Context Management for the rationale.
+  familiar* — see ``docs/architecture/context-pipeline.md`` for the rationale.
   The recent rolling window is partitioned per channel; the rolling
   summary is not.
 

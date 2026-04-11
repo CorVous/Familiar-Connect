@@ -1,18 +1,11 @@
-# Configuration Levels
+# Configuration Model
 
-The bot's configuration surface is split into two levels. Step 7 of
-`future-features/context-management.md` has implemented this spec
-and pinned it in code.
+The bot's configuration surface is split into two levels.
 
-**Who runs this bot.** Familiar-Connect targets a single admin
-running the bot on their own machine. Earlier drafts of this spec
-envisioned multiple Discord users each managing their own familiars
-through slash commands; that ambition has been dropped. "Single
-operator" does *not* mean "single character" — the same install can
-hold multiple character folders under `data/familiars/<id>/`, and
-the operator flips between them by changing `FAMILIAR_ID` and
-restarting (or by running multiple processes in parallel, each with
-its own `FAMILIAR_ID`).
+!!! success "Status: Implemented"
+    The two-level model, per-channel TOML sidecars, `SubscriptionRegistry`, and all `/subscribe-*` / `/channel-*` slash commands ship today.
+
+**Who runs this bot.** Familiar-Connect targets a single admin running the bot on their own machine. Earlier drafts of this spec envisioned multiple Discord users each managing their own familiars through slash commands; that ambition has been dropped. "Single operator" does *not* mean "single character" — the same install can hold multiple character folders under `data/familiars/<id>/`, and the operator flips between them by changing `FAMILIAR_ID` and restarting (or by running multiple processes in parallel, each with its own `FAMILIAR_ID`).
 
 ## The two levels
 
@@ -29,17 +22,17 @@ The secrets and global knobs the host machine needs to run the bot at all. Set b
 - Default model overrides, default temperature, default budget caps
 - Storage roots (e.g. `data/`)
 
-**Where it lives:** environment variables and / or a `.env` file. Never checked into git. Never editable from inside Discord.
+**Where it lives:** environment variables and / or a `.env` file. Never checked into git. Never editable from inside Discord. See [Installation](../getting-started/installation.md) for the full env var list.
 
 ### 2. Character config
 
 Per-familiar configuration. The persona, behaviour knobs, and pluggable component selection for the single familiar this install runs.
 
-- Persona — character card fields, unpacked into `memory/self/*.md` (by the `familiar_connect.bootstrap.unpack_character` module — see [`bootstrapping.md`](../bootstrapping.md)).
-- Memory directory — `memory/`, owned by `MemoryStore`.
-- Tuning parameters — history window size, depth-inject position and role, default channel mode.
-- Per-channel overrides — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`.
-- Subscriptions — which Discord channels the bot listens in, written to `subscriptions.toml` by `/subscribe-text` and `/subscribe-my-voice`.
+- **Persona** — character card fields, unpacked into `memory/self/*.md` by `familiar_connect.bootstrap.unpack_character` (see [Bootstrapping](../guides/bootstrapping.md)).
+- **Memory directory** — `memory/`, owned by `MemoryStore`. See [Memory](memory.md).
+- **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
+- **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`.
+- **Subscriptions** — which Discord channels the bot listens in, written to `subscriptions.toml` by `/subscribe-text` and `/subscribe-my-voice`.
 
 **Where it lives:** `data/familiars/<familiar_id>/`. One folder per character. Only one runs at a time in any given process.
 
@@ -79,7 +72,7 @@ data/
 
 **Why TOML:** human-and-machine-readable matches the same principle the memory directory commits to. A user can edit their character's config in any text editor; the bot loads it on startup or on the next mutation. No schema migrations, no opaque blob format.
 
-**Why filesystem and not SQLite:** see § Decisions Considered and Rejected in `plan.md` for the broader local-first principle. Per-character config is the kind of thing a user might want to back up, share, or version-control on their own; a filesystem layout makes that trivial.
+**Why filesystem and not SQLite:** see [Design decisions](decisions.md) for the broader local-first principle. Per-character config is the kind of thing a user might want to back up, share, or version-control on their own; a filesystem layout makes that trivial.
 
 ## Identity model
 
@@ -90,11 +83,9 @@ The speaker in a conversation (the Discord user who triggered a turn) is tracked
 
 ## Trust model
 
-The user explicitly trusts the admin. There is no per-user sandboxing, no resource limits enforced against the user, no isolation between users beyond filesystem path separation. The admin can read, edit, or delete any character's memory directly on disk. This is intentional — Familiar-Connect is a single-host bot for a small trusted group, not a multi-tenant SaaS.
+The user explicitly trusts the admin. There is no per-user sandboxing, no resource limits enforced against the user, no isolation between users beyond filesystem path separation. The admin can read, edit, or delete any character's memory directly on disk. This is intentional — Familiar-Connect is a single-host bot for a small trusted group, not a multi-tenant SaaS. See [Security](security.md) for the defensive lines that *do* exist.
 
-## Slash command surface (committed)
-
-The slash commands listed here ship in step 7 of `context-management.md`.
+## Slash command surface
 
 | Command | What |
 |---|---|
@@ -124,12 +115,8 @@ A future extension could add per-guild *overrides* on top of this — for exampl
 
 ## Relationship to context management
 
-The context-management feature treats this spec as authoritative for partition keys and on-disk paths. Specifically:
-
 - `MemoryStore` is rooted at `data/familiars/<familiar_id>/memory/`.
 - `HistoryStore` lives at `data/familiars/<familiar_id>/history.db` and partitions turns by `(familiar_id, channel_id)` for the per-channel recent window and `(familiar_id,)` for the global rolling summary.
 - `ContextRequest` carries `familiar_id`, `channel_id`, `speaker`, `modality`, and `guild_id` (observability only).
 - `ChannelConfigStore` lives at `data/familiars/<familiar_id>/channels/`.
 - `SubscriptionRegistry` lives at `data/familiars/<familiar_id>/subscriptions.toml`.
-
-Step 7 of `context-management.md` landed these wiring points end-to-end.

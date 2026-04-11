@@ -1,6 +1,6 @@
 """Red-first tests for CharacterProvider.
 
-Step 5 of future-features/context-management.md. Reads ``self/*.md``
+Step 5 of docs/architecture/context-pipeline.md. Reads ``self/*.md``
 from the familiar's MemoryStore and emits one Contribution per
 non-empty file at high priority on Layer.character. Always on (no
 modality toggle); a familiar with no character description is a

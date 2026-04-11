@@ -1,0 +1,76 @@
+site_name: Familiar-Connect
+site_description: An AI familiar that joins Discord voice channels, listens to users, and talks back.
+site_url: https://corvous.github.io/familiar-connect/
+repo_url: https://github.com/corvous/familiar-connect
+repo_name: corvous/familiar-connect
+edit_uri: edit/main/docs/
+
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - getting-started/installation.md
+      - getting-started/on-disk-layout.md
+      - getting-started/slash-commands.md
+      - getting-started/troubleshooting.md
+  - Guides:
+      - guides/bootstrapping.md
+      - guides/twitch.md
+  - Architecture:
+      - architecture/overview.md
+      - architecture/context-pipeline.md
+      - architecture/memory.md
+      - architecture/configuration-model.md
+      - architecture/security.md
+      - architecture/decisions.md
+  - Roadmap:
+      - roadmap/index.md
+      - roadmap/conversation-flow.md
+      - roadmap/voice-input.md
+      - roadmap/interruption-flow.md
+      - roadmap/voice-logging.md
+      - roadmap/session-logging.md
+      - roadmap/threads-and-forum-posts.md
+      - roadmap/web-search.md
+  - Contributing: contributing.md

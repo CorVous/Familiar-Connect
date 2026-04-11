@@ -1,14 +1,13 @@
-# Conversation Flow: Chattiness & Interjection
+# Conversation flow: chattiness & interjection
 
 How the familiar decides **whether** and **when** to speak in a conversation it hasn't been directly addressed in.
 
----
+!!! info "Status: Design"
+    Not yet shipped. Today the bot responds to **every** message on a subscribed channel — `bot.py:on_message` goes straight from subscription check to context pipeline to LLM call. There is no decision gate. This page describes the gate we want to build.
 
-## Overview
+## Motivation
 
-Today the bot responds to **every** message on a subscribed channel — `bot.py:on_message` goes straight from subscription check to context pipeline to LLM call. There is no decision gate. This plan introduces one.
-
-Two orthogonal controls govern the familiar's conversational behaviour:
+Two orthogonal controls should govern the familiar's conversational behaviour:
 
 - **Chattiness** — a free-text personality trait that shapes *how willing* the familiar is to respond. Fed directly into a side-model evaluation prompt. No enum, no tiers — the LLM interprets the personality naturally.
 - **Interjection** — a 5-tier enum that controls *how patient* the familiar is about waiting for a lull before evaluating. Governs the mechanical timing of when the side model is consulted, plus prompt tone.
@@ -22,7 +21,9 @@ A third setting, **lull timeout**, controls how long a gap in messages counts as
 | **Reserved chattiness** | Speaks rarely, waits for silence                 | Speaks rarely, but when it does, cuts right in   |
 | **Eager chattiness**    | Wants to respond to everything, but waits politely | Won't shut up and talks over people              |
 
----
+### Why not just the preset?
+
+An earlier sketch suggested a "chattiness preset" governing response frequency alone. That misses the character layer: a familiar set to "moderate" should feel very different depending on who it is. A shy familiar hedges and apologises when it speaks up unprompted; an arrogant one acts like it's doing the room a favour; a curious one opens with a question. The preset governs *when* it responds. The personality description governs *how it feels* about responding. This design keeps both: `chattiness` for personality, `interjection` for mechanical timing.
 
 ## Configuration
 
@@ -45,7 +46,7 @@ Additional names the familiar responds to beyond the `familiar_id` (the folder n
 
 Free-text personality trait describing the familiar's conversational disposition. Injected verbatim into the side-model evaluation prompt. The LLM decides whether the familiar would want to respond based on this personality, the conversation content, and the trigger context.
 
-**Default:** `"Balanced — responds when the conversation is relevant"` (or a similarly neutral fallback).
+**Default:** `"Balanced — responds when the conversation is relevant"`.
 
 **Examples:**
 
@@ -69,13 +70,11 @@ Enum controlling how long the familiar waits before the side model is even consu
 
 ### `lull_timeout: float`
 
-Seconds of silence (no new messages) before the lull evaluation fires. Configurable so operators can tune per-familiar.
+Seconds of silence before the lull evaluation fires. Configurable so operators can tune per-familiar.
 
 **Default:** `2.0`
 
----
-
-## Architecture
+## Sketch
 
 ### `ConversationMonitor`
 
@@ -107,8 +106,7 @@ class ConversationMonitor:
         ...
 ```
 
-- `on_respond` is a callback that triggers the full pipeline. The monitor passes the channel ID and the buffer contents so the pipeline has the full conversation context. The callback is a closure built in `bot.py` that captures the channel/guild references needed to send the reply.
-- `is_mention` lets `bot.py` pass Discord's native @mention detection rather than the monitor having to understand Discord message objects.
+`on_respond` is a callback that triggers the full pipeline. The monitor passes the channel ID and the buffer contents so the pipeline has the full conversation context. The callback is a closure built in `bot.py` that captures the channel/guild references needed to send the reply.
 
 ### Per-channel state: `ChannelBuffer`
 
@@ -118,8 +116,6 @@ The monitor holds a `dict[int, ChannelBuffer]` keyed by channel ID. Each `Channe
 - **`message_counter: int`** — count of messages since last response. Drives the interjection check schedule.
 - **`check_count: int`** — how many interjection checks have been made since the last response. Drives the step-down curve.
 - **`lull_timer_handle: asyncio.TimerHandle | None`** — handle to the pending lull callback, cancelled and reset on every new message.
-
----
 
 ## Three triggers, one evaluation path
 
@@ -134,6 +130,7 @@ Every incoming message on a subscribed channel flows through the monitor. There 
 **Extra prompt context:** `"You were directly addressed in the conversation."`
 
 **Name matching rules:**
+
 - Case-insensitive.
 - Word-boundary aware: `"aria"` matches `"Hey Aria, what do you think?"` but not `"malaria is spreading"`.
 - Matches against: `familiar_id` (folder name) + all entries in `aliases`.
@@ -146,9 +143,7 @@ Every incoming message on a subscribed channel flows through the monitor. There 
 
 **Extra prompt context:** `"{N} messages have been said without you speaking."` (where N is the total `message_counter` value, not the interval).
 
-**Step-down curve (universal across all tiers):**
-
-The starting interval is tier-dependent. After each check where the familiar declines, the interval for the *next* check decreases by 3, with a floor of 3. The total message counter never resets until the familiar responds.
+**Step-down curve.** The starting interval is tier-dependent. After each check where the familiar declines, the interval for the *next* check decreases by 3, with a floor of 3. The total message counter never resets until the familiar responds.
 
 Example for `average` (starting interval = 9):
 
@@ -179,7 +174,7 @@ The prompt pressure also builds naturally: by check 5 on a `very_quiet` familiar
 
 **Timing:** A timer is started (or reset) on every incoming message. If it expires without a new message arriving, the evaluation fires.
 
-**Extra prompt context:** None. The lull evaluation is the baseline — just the conversation content and the familiar's personality. The side model decides purely on whether the familiar has something to say.
+**Extra prompt context:** None. The lull evaluation is the baseline — just the conversation content and the familiar's personality.
 
 ### On any successful response
 
@@ -190,13 +185,11 @@ The prompt pressure also builds naturally: by check 5 on a `very_quiet` familiar
 
 ### On direct address (regardless of evaluation result)
 
-- Same resets as a successful response: buffer cleared, counter reset, check count reset, lull timer cancelled.
+Same resets as a successful response: buffer cleared, counter reset, check count reset, lull timer cancelled.
 
 ### Concurrency guard
 
 If a lull evaluation and an interjection evaluation both trigger close together, or if a direct-address message arrives while an evaluation is in flight, only one evaluation should run at a time per channel. A per-channel `asyncio.Lock` prevents racing into two simultaneous responses.
-
----
 
 ## Side-model evaluation
 
@@ -206,7 +199,7 @@ If a lull evaluation and an interjection evaluation both trigger close together,
 2. **Conversation summary** — the rolling summary from `HistoryProvider` (the compressed view of older conversation history).
 3. **Buffer contents** — the recent messages that have accumulated since the last response.
 4. **Chattiness personality** — the free-text `chattiness` value from config.
-5. **Trigger context** — the extra prompt context specific to the trigger (see above). Absent for lull evaluations.
+5. **Trigger context** — the extra prompt context specific to the trigger (absent for lull evaluations).
 
 ### Output
 
@@ -232,45 +225,11 @@ The following messages were just said:
 Would you like to respond to this conversation? Answer YES or NO.
 ```
 
-**Direct address:**
+**Direct address:** same prompt with the line `"You were directly addressed in the conversation. Would you like to respond? Answer YES or NO."` at the end.
 
-```
-You are {familiar_name}.
-
-{character_card_summary}
-
-Your conversational personality: {chattiness}
-
-Here is a summary of the recent conversation:
-{conversation_summary}
-
-The following messages were just said:
-{buffer}
-
-You were directly addressed in the conversation. Would you like to respond? Answer YES or NO.
-```
-
-**Interjection:**
-
-```
-You are {familiar_name}.
-
-{character_card_summary}
-
-Your conversational personality: {chattiness}
-
-Here is a summary of the recent conversation:
-{conversation_summary}
-
-The following messages were just said:
-{buffer}
-
-{message_count} messages have been said without you speaking. Would you like to interject? Answer YES or NO.
-```
+**Interjection:** same prompt with the line `"{message_count} messages have been said without you speaking. Would you like to interject? Answer YES or NO."` at the end.
 
 These are starting points. The wording, structure, and whether to allow the model to explain its reasoning (chain-of-thought before the YES/NO) are all tuneable later.
-
----
 
 ## Message flow
 
@@ -298,59 +257,6 @@ familiar.monitor.on_message(channel_id, speaker, text, is_mention)
             └─ on expiry → acquire lock → side model eval → respond or not
 ```
 
-On successful response (side model says YES):
-
-```
-on_respond(channel_id, buffer) callback fires
-    │
-    ├─ build ContextRequest from buffer contents
-    ├─ run ContextPipeline (providers, budgeter, pre-processors)
-    ├─ assemble chat messages
-    ├─ call main LLM
-    ├─ run post-processors
-    ├─ persist turns to HistoryStore
-    ├─ send reply to Discord channel
-    └─ TTS fan-out (if voice sub exists)
-```
-
----
-
-## Integration with `bot.py`
-
-### Current flow (replaced)
-
-```python
-async def on_message(message, familiar):
-    # subscription check
-    # build ContextRequest
-    # pipeline.assemble()
-    # llm_client.chat()
-    # send reply
-```
-
-### New flow
-
-```python
-async def on_message(message, familiar):
-    # subscription check (unchanged)
-    # detect @mention from message.mentions
-    familiar.monitor.on_message(
-        channel_id=message.channel.id,
-        speaker=speaker,
-        text=message.content,
-        is_mention=bot_is_mentioned,
-    )
-    # Response (if any) is handled by the on_respond callback
-```
-
-The pipeline + LLM + reply + TTS logic moves into an `on_respond` callback (or method) built in `bot.py`. The callback captures the Discord channel/guild references it needs to send the reply. The voice transcription handler (`_build_voice_response_handler`) gets the same treatment.
-
-### Cleanup
-
-`unsubscribe_text` and `unsubscribe_voice` must clear the monitor's state for that channel (buffer, counter, timer).
-
----
-
 ## Changes by file
 
 | File | Change |
@@ -362,8 +268,6 @@ The pipeline + LLM + reply + TTS logic moves into an `on_respond` callback (or m
 | `tests/test_chattiness.py` | **New.** Tests for `is_direct_address`, step-down curve, lull timer firing, evaluation trigger conditions, buffer/counter reset on response. |
 | `tests/test_config.py` | Tests for loading `chattiness`, `interjection`, `lull_timeout`, `aliases` from TOML. Validation of enum values and types. |
 | `tests/test_bot_message_loop.py` | Adjust existing tests — `on_message` no longer calls the pipeline directly. Add cases for the monitor integration. |
-
----
 
 ## Implementation order (TDD)
 
@@ -380,34 +284,14 @@ Each step follows red/green: write a failing test first, then the minimum code t
 9. **`bot.py` integration** — replace direct pipeline calls with `monitor.on_message()`, build the `on_respond` callback, wire up cleanup on unsubscribe.
 10. **`familiar.py` integration** — build the monitor in `load_from_disk`, pass through config and dependencies.
 
----
+## Non-goals
 
-## Relationship to existing designs
+- **Interruption of a reply already in progress.** This page covers the **pre-speech** decision (whether to start talking). Cutting off a reply mid-stream when someone else starts talking lives in [Voice input](voice-input.md).
+- **Silence-initiated conversation starts.** The lull trigger requires *some* messages in the buffer. A feature where prolonged silence with an empty buffer causes the familiar to proactively start a new conversation is architecturally different and deferred.
+- **Per-modality monitor tuning.** The current design applies equally to text and voice. Voice may want shorter `lull_timeout` values or different evaluation prompts — a future addition.
 
-### `future-features/chattiness-personality.md`
+## Open questions
 
-That document proposed letting the familiar's personality description influence *how it feels* about responding. This plan subsumes that idea: the `chattiness` free-text field is exactly that personality description, fed directly to the evaluation LLM. No separate field is needed — but operators who want the chattiness personality to emerge from the main `personality.md` file can set `chattiness` to reference it (e.g. `"See my personality description"`).
-
-### `future-features/interruption-flow.md`
-
-That document covers a different concern: what happens when the familiar is **already speaking** and someone else starts talking (mid-speech interruption handling in voice). This plan covers the **pre-speech** decision: whether to speak at all. Both are needed; they don't overlap.
-
-### `plan.md` § Message Processing & Chattiness
-
-The 0-100 slider and five-tier table in `plan.md` are superseded by this design. The core insight is the same (tiered response willingness), but the implementation differs:
-
-- The 0-100 slider is replaced by a free-text `chattiness` personality trait (LLM-evaluated) and a 5-tier `interjection` enum (mechanically-evaluated timing).
-- The heuristic rules (question detection, topic relevance, multi-speaker suppression) are replaced by a single LLM evaluation call that can weigh all of those factors implicitly through the personality description and conversation context.
-- Rate limiting is replaced by the natural pacing of the buffer/timer/evaluation cycle.
-
-`plan.md` should be updated to reflect this design once implementation begins.
-
----
-
-## Open questions (deferred)
-
-- **Voice-specific behaviour.** The current design applies equally to text and voice. Voice may want different `lull_timeout` values (shorter, since voice conversations move faster) or different evaluation prompts. Per-modality overrides are a future addition.
-- **Twitch events.** The plan spec says Twitch events (subs, bits, raids) should always be acknowledged. These could bypass the monitor entirely, or be treated as direct-address-equivalent triggers. Deferred until Twitch integration is wired into the monitor.
-- **Silence-initiated interjection.** The original plan had a feature where prolonged silence (nobody speaking for N seconds) causes the familiar to proactively start a conversation. This is architecturally different from the lull trigger (which requires *some* messages in the buffer). Deferred as a separate feature.
-- **Conversation summary source.** The evaluation prompt includes "a summary of the recent conversation." At evaluation time, this could come from the `HistoryProvider`'s cached rolling summary, or be generated fresh. Using the cached summary is cheaper; generating fresh is more accurate. Start with cached.
-- **Static thresholds feel robotic.** The interjection check fires at fixed intervals (9, 6, 3, …), which means the familiar's timing is perfectly predictable — a patient observer could count messages and know exactly when it's about to weigh in. Real conversational timing is uneven. A small random jitter applied to each threshold (e.g. ±1–2 messages, clamped at 1) would break the mechanical regularity without meaningfully changing the tier semantics. The floor of 3 would still apply after jittering so the familiar never fires twice in immediate succession.
+- **Twitch events.** Twitch events (subs, bits, raids) should always be acknowledged. They could bypass the monitor entirely, or be treated as direct-address-equivalent triggers. Deferred until Twitch integration is wired into the monitor.
+- **Conversation summary source.** The evaluation prompt includes "a summary of the recent conversation." At evaluation time, this could come from `HistoryProvider`'s cached rolling summary, or be generated fresh. Cached is cheaper; fresh is more accurate. Start with cached.
+- **Static thresholds feel robotic.** Interjection checks fire at fixed intervals (9, 6, 3, …), so a patient observer could count messages and know exactly when the familiar is about to weigh in. A small random jitter (±1–2 messages, clamped at 1, floor at 3) would break the mechanical regularity without changing tier semantics.

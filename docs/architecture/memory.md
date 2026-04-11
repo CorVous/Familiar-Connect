@@ -1,10 +1,11 @@
-# Memory — freeform text, per familiar
+# Memory
 
-## Overview
+A familiar's long-term memory is a directory of plain-text files on disk, one tree per familiar, rooted under `data/familiars/<familiar_id>/memory/`. Multiple character folders can coexist on one install; the bot process picks one via `FAMILIAR_ID` at startup.
 
-A familiar's long-term memory is a directory of plain-text files on disk, one tree per familiar, rooted under `data/familiars/<familiar_id>/memory/`. Multiple character folders can coexist on one install; the bot process picks one via `FAMILIAR_ID` at startup. This document covers *what goes in that directory* — the content conventions. The *pipeline that reads and writes it* lives in `context-management.md`, the architectural principles live in `plan.md` § Context Management, and the configuration model lives in `future-features/configuration-levels.md`.
+This page covers *what goes in that directory* — the content conventions. The *pipeline that reads and writes it* lives in [Context pipeline](context-pipeline.md).
 
-This document replaces an earlier "lorebook" spec that described structured, tagged entries with triggered retrieval. The new design deliberately drops structured formats in favour of freeform Markdown that a cheap tool-using model can `grep` / `glob` / `read_file` at reply time. Old rationale is preserved in VCS history; see the commit that replaced `lorebook.md` with this file if you need the context.
+!!! success "Status: Implemented"
+    `MemoryStore`, the character-card unpacker, the lorebook importer, `CharacterProvider`, and `ContentSearchProvider` are all in place. The **post-session writer pass** that updates `people/`, `topics/`, and `sessions/` files automatically is still a roadmap item.
 
 ## Why freeform text
 
@@ -59,10 +60,10 @@ Subdirectories are a human-ergonomic suggestion. The search agent treats the who
 
 - **Plain Markdown.** No YAML frontmatter requirement. If you *want* to put frontmatter on a file that's fine — it'll just be text the model reads along with everything else.
 - **One H1 per file, near the top**, describing what the file is about. This helps the search agent find relevant files from filename + first line alone, without needing to read the whole file.
-- **Markdown cross-links are encouraged.** If `topics/last-tuesdays-argument-about-ska.md` mentions Alice, it should link to her: `[Alice](../people/alice.md)`. Today this is just a convenience for humans; later it gives us free graph-style traversal without changing the storage format.
-- **No required fields.** A person file doesn't have to have "feelings" and "known usernames" as sections; it can have whatever sections the familiar (or a human) felt like writing. The search agent is flexible about structure.
+- **Markdown cross-links are encouraged.** If `topics/last-tuesdays-argument-about-ska.md` mentions Alice, it should link to her: `[Alice](../people/alice.md)`. Today this is just a convenience for humans; later it gives free graph-style traversal without changing the storage format.
+- **No required fields.** A person file doesn't have to have "feelings" and "known usernames" as sections; it can have whatever sections the familiar (or a human) felt like writing.
 - **Short is fine.** A file can be three sentences. A file can be a single bullet list. There is no minimum.
-- **Size caps.** The `MemoryStore` enforces a per-file size cap (default 256 KB) to keep `grep` fast and to prevent one runaway file from eating everything. Hitting the cap is a soft error — the file is still readable, but writes to it fail until something is trimmed.
+- **Size caps.** `MemoryStore` enforces a per-file size cap (default 256 KB) to keep `grep` fast and to prevent one runaway file from eating everything. Hitting the cap is a soft error — the file is still readable, but writes to it fail until something is trimmed.
 
 ## Content conventions by subdirectory
 
@@ -70,7 +71,7 @@ These are *conventions*, not requirements. A familiar that doesn't use them is f
 
 ### `self/` — the familiar's self-description
 
-- Written on familiar creation from a Character Card V3 (see `character-card-unpacker` in `context-management.md`).
+- Written on familiar creation from a Character Card V3 (see [Bootstrapping](../guides/bootstrapping.md)).
 - The familiar does not normally edit these files. A human can edit them to tune the familiar's persona without re-importing a card.
 - `self/.original.png` preserves the original card bytes so a future unpacker revision can re-run against the source.
 
@@ -119,12 +120,12 @@ Suggested sections:
 
 Two patterns, in descending order of preference:
 
-1. **Post-session writer pass (preferred).** After a session ends (via `/sleep`, text-session timeout, or an idle window in voice), a cheap side-model reads the session transcript, produces a session summary file, and proposes updates to relevant `people/` and `topics/` files. The writer pass is the *only* code path that mutates memory under normal operation.
+1. **Post-session writer pass (preferred).** After a session ends (via `/unsubscribe-text`, text-session timeout, or an idle window in voice), a cheap side-model reads the session transcript, produces a session summary file, and proposes updates to relevant `people/` and `topics/` files. The writer pass is the *only* code path that mutates memory under normal operation.
 2. **In-conversation writer tool (not first pass).** In principle, the main LLM or the content search agent could be given a `write_file` tool during a reply and edit memory live. This is strictly more powerful than the writer pass but also strictly more dangerous (the bot rewriting its own memory in real time, during latency-sensitive voice turns). We do not build this in the first cut. If we build it later, it should be heavily audited via the `MemoryStore`'s audit log and probably feature-flagged per character.
 
 ## Reading from memory
 
-Reads happen through `ContentSearchProvider` (see `context-management.md`). The provider gives a cheap tool-using model a deadline-bounded loop with these tools scoped to the familiar's `MemoryStore`:
+Reads happen through `ContentSearchProvider` (see [Context pipeline](context-pipeline.md#8-contentsearchprovider)). The provider gives a cheap tool-using model a deadline-bounded loop with these tools scoped to the familiar's `MemoryStore`:
 
 - `list_dir(path)`
 - `glob(pattern)`
@@ -133,17 +134,32 @@ Reads happen through `ContentSearchProvider` (see `context-management.md`). The 
 
 The model's job is to find and return the snippets of memory that are actually relevant to the current turn. The provider's job is to run that loop within a deadline, log the tool calls for debuggability, and emit the result as a single `Contribution` that the budgeter can place in the system prompt.
 
-## Future add-ons (not first pass)
+## `MemoryStore` API
 
-All of these are optional enhancements on top of the "just text" baseline. None of them change the storage format. They are listed here so they're considered in later design decisions, not as work items for the current branch.
+`MemoryStore` (in `familiar_connect.memory.store`) owns a per-familiar directory, scoped by `familiar_id`. Default path: `data/familiars/<familiar_id>/memory/`.
+
+API (all synchronous file I/O — these are small text files on local disk):
+
+- `list_dir(rel_path: str = "") -> list[MemoryEntry]`
+- `read_file(rel_path: str) -> str`
+- `write_file(rel_path: str, content: str)` — writes via temp-file + rename.
+- `append_file(rel_path: str, content: str)`
+- `grep(pattern: str, rel_path: str = "", case_insensitive: bool = True) -> list[GrepHit]` — uses Python's `re` over the file tree. No shell-out.
+- `glob(pattern: str) -> list[str]`
+
+**Path-traversal safety** — every operation resolves against the store's root with `Path.resolve()` and rejects anything outside it. No `..`, no absolute paths, no symlinks out. See [Security](security.md).
+
+**Sanity limits** — per-file size cap (configurable, default 256 KB), per-operation result cap, per-directory file count cap. Exceeding a cap raises a typed exception the search agent can observe.
+
+**Audit log** — every write is logged (file, length, source) so "when did the bot's beliefs about Alice change" has a reproducible answer.
+
+## Future add-ons
+
+All optional enhancements on top of the "just text" baseline. None of them change the storage format.
 
 - **Graph traversal via Markdown links.** A tool (`follow_links(path)`) that the search agent can use to walk from a file to everything it links to, without having to `grep` for the link.
-- **Vector index as a second search tool.** If and only if measurements show `grep` getting too slow on large directories, add a `semantic_search(query, k)` tool backed by a local embedding model (e.g. `sentence-transformers`) and a simple on-disk or SQLite vector table. The `ContentSearchProvider` agent chooses when to use it. Grep remains the default.
+- **Vector index as a second search tool.** If and only if measurements show `grep` getting too slow on large directories, add a `semantic_search(query, k)` tool backed by a local embedding model (e.g. `sentence-transformers`) and a simple on-disk or SQLite vector table. Grep remains the default.
 - **Housekeeping passes.** Cheap-model jobs that scan the directory for duplicate entries, conflicting information, stale beliefs, or notes ready to be promoted to their own files. They propose edits; a human reviews.
-- **Per-user personas as first-class people files.** A convention (not a code change) where a Discord user id maps to a `people/<user_id>.md` file. The search agent already handles this, but we could standardise the filename so the writer pass can find existing per-user files without searching for the user's name first.
+- **Per-user personas as first-class people files.** A convention where a Discord user id maps to a `people/<user_id>.md` file.
 - **Markdown-link-aware duplicate detection.** The housekeeping pass notices two files that claim to be about the same person but aren't linked to each other, and flags them for merging.
-- **Export to SillyTavern lorebook JSON.** The reverse of the importer. Useful if a user wants to move a familiar's memory out to another tool.
-
-## Goals carried forward from the old `lorebook.md`
-
-For future-me grepping for these: the goals from the earlier lorebook spec — per-person tracking, per-topic tracking, per-session summaries, careful multi-username handling, an LLM-driven manager that keeps the main model's context lean — are all preserved. What changed is *how*: the "structured entries with keyword triggers surfaced by a manager LLM" implementation becomes "freeform Markdown files surfaced by a cheap tool-using agent." The manager LLM still exists; it's just called `ContentSearchProvider` now and it has `grep` instead of a tag index.
+- **Export to SillyTavern lorebook JSON.** The reverse of the importer.

@@ -1,6 +1,6 @@
 """Red-first tests for the ContentSearchProvider.
 
-Step 8 of future-features/context-management.md. The interesting one:
+Step 8 of docs/architecture/context-pipeline.md. The interesting one:
 a cheap tool-using model with grep / glob / read_file / list_dir
 tools scoped to a single familiar's MemoryStore. Each contribute()
 call runs a small loop — the model decides which tools to call, the

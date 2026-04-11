@@ -1,6 +1,6 @@
 """SteppedThinkingPreProcessor — hidden chain-of-thought via a cheap model.
 
-Step 10 of future-features/context-management.md. Inspired by
+Step 10 of docs/architecture/context-pipeline.md. Inspired by
 SillyTavern's ``st-stepped-thinking``.
 
 Calls a cheap :class:`SideModel` with a focused "think step by step

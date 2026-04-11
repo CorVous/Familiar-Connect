@@ -1,5 +1,15 @@
 # Voice Interruption Flow
 
+!!! info "Status: Design — not committed"
+    Ported from an earlier design PR. The mechanism is scoped
+    specifically to voice channels as written, but latency and
+    interruption handling is a spectrum that spans both voice and
+    text modalities, so a modality-agnostic version of this design
+    may be preferable. Revisit the scope before implementation — see
+    [Voice input](voice-input.md) and
+    [Conversation flow](conversation-flow.md) for the adjacent
+    designs this one touches.
+
 When a user speaks for at least `min_interruption_s` (configurable, default 1.5s) while the familiar is either generating a response or speaking, it counts as an **interruption**. This feature applies only to voice channels — text conversations are unaffected.
 
 Back-channel sounds (brief "mm-hm", laughter, etc.) are naturally filtered out by the minimum duration threshold — no special audio classification is needed.

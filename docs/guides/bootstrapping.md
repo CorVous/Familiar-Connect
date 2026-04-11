@@ -1,30 +1,30 @@
-# Bootstrapping
+# Bootstrapping a familiar
 
 One-shot operator utilities for seeding a familiar from external
 assets. **Nothing in this file is invoked by the bot at runtime.** If
 you are only running the bot against a familiar whose `memory/`
 directory is already populated, you can ignore this document entirely.
 
-Everything listed here lives under [`familiar_connect.bootstrap`](./src/familiar_connect/bootstrap/)
-and is expected to be called by hand (Python REPL, one-off script, or
-future CLI subcommand) when you are setting up a new familiar. The
-dependency direction is one-way: the `bootstrap` package imports from
-`familiar_connect.memory.store`, but nothing in the runtime reply
-pipeline (`bot.py`, `familiar.py`, `commands/run.py`) ever imports
-from `bootstrap`. That invariant is enforced by a ruff
+Everything listed here lives under `familiar_connect.bootstrap` in the
+source tree and is expected to be called by hand (Python REPL,
+one-off script, or future CLI subcommand) when you are setting up a
+new familiar. The dependency direction is one-way: the `bootstrap`
+package imports from `familiar_connect.memory.store`, but nothing in
+the runtime reply pipeline (`bot.py`, `familiar.py`, `commands/run.py`)
+ever imports from `bootstrap`. That invariant is enforced by a ruff
 `flake8-tidy-imports` `banned-api` rule in `pyproject.toml` — any PR
 that accidentally crosses the boundary will fail lint.
 
 ## Prerequisites
 
 - A familiar directory on disk at `data/familiars/<id>/`. The smallest
-  layout that boots is documented in [`README.md`](./README.md#minimum-on-disk-layout);
-  the bootstrap utilities write into `data/familiars/<id>/memory/`
-  below that root.
+  layout that boots is documented in
+  [On-disk layout](../getting-started/on-disk-layout.md); the bootstrap
+  utilities write into `data/familiars/<id>/memory/` below that root.
 - At least one of:
-  - A SillyTavern Character Card V3 PNG (for the unpacker), or
-  - A SillyTavern lorebook / world-info JSON export (for the
-    importer).
+    - A SillyTavern Character Card V3 PNG (for the unpacker), or
+    - A SillyTavern lorebook / world-info JSON export (for the
+      importer).
 
 ## Unpacking a character card
 
@@ -34,9 +34,9 @@ file each under `self/` in the familiar's `MemoryStore`. The
 after this runs once the card is fully integrated into the familiar's
 persona. The unpacker is **idempotent** — re-running with the same
 card is a no-op — and gated: re-running with a *different* card
-errors unless you pass `overwrite=True`. See
-[`future-features/context-management.md`](./future-features/context-management.md)
-§ 4 for the design.
+errors unless you pass `overwrite=True`. See the
+[Context pipeline](../architecture/context-pipeline.md) step 4 for
+the design.
 
 ```python
 from pathlib import Path
@@ -82,9 +82,9 @@ indistinguishable from any other Markdown in the memory directory and
 the agentic `ContentSearchProvider` finds them via grep like anything
 else. There is no runtime keyword walker, no World Info trigger
 logic, and no special data path — the import is a one-shot
-translation, not an ongoing dependency. See
-[`future-features/context-management.md`](./future-features/context-management.md)
-§ 9 for the design.
+translation, not an ongoing dependency. See the
+[Context pipeline](../architecture/context-pipeline.md) step 9 for
+the design.
 
 ```python
 from pathlib import Path
@@ -137,6 +137,7 @@ subpackage means:
 ## Future: CLI subcommand
 
 A `familiar init --from-card` CLI subcommand is on the roadmap but
-deferred; see [`future-features/context-management.md`](./future-features/context-management.md)
-for details. Until that lands, the programmatic recipes above are
-the supported operator interface.
+deferred; see the
+[Context pipeline](../architecture/context-pipeline.md) for details.
+Until that lands, the programmatic recipes above are the supported
+operator interface.
