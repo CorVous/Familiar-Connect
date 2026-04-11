@@ -291,106 +291,106 @@ def _build_voice_response_handler(
                     return
                 await asyncio.sleep(0.1)
 
-        # Resolve the speaker's display name. ``user_names`` is mutated
-        # by voice_pipeline's name resolver when a late joiner shows up,
-        # so a lookup failure falls back to a stable ``User-<id>`` form
-        # rather than ``None``.
-        speaker = user_names.get(user_id, f"User-{user_id}")
-        safe_name = sanitize_name(speaker) or speaker
-
-        channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
-        request = ContextRequest(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            speaker=safe_name,
-            utterance=result.text,
-            modality=Modality.voice,
-            budget_tokens=channel_config.budget_tokens,
-            deadline_s=channel_config.deadline_s,
-        )
-
-        pipeline = familiar.build_pipeline(channel_config)
-        pipeline_output = await pipeline.assemble(
-            request,
-            budget_by_layer=channel_config.budget_by_layer,
-        )
-        _log_pipeline_outcomes(voice_channel_id, pipeline_output.outcomes)
-
-        messages = assemble_chat_messages(
-            pipeline_output,
-            store=familiar.history_store,
-            history_window_size=familiar.config.history_window_size,
-            depth_inject_position=familiar.config.depth_inject_position,
-            depth_inject_role=familiar.config.depth_inject_role,
-            mode=channel_config.mode,
-            display_tz=familiar.config.display_tz,
-        )
-
-        _logger.info(
-            "LLM request channel=%s (voice) messages=%d:\n%s",
-            voice_channel_id,
-            len(messages),
-            "\n".join(
-                f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
-                f"{m.content[:200]}{'…' if len(m.content) > 200 else ''}"
-                for m in messages
-            ),
-        )
-
         # --- State machine: IDLE → GENERATING ---
+        # Claim the tracker *before* any await so no concurrent handler
+        # can also pass the IDLE check and race into start_generating.
         generation_task = asyncio.current_task()
         if generation_task is not None:
             tracker.start_generating(generation_task)
 
-        # Pre-compute mood modifier for potential interruption toll check
-        if familiar.mood_evaluator is not None and guild_id is not None:
-            recent = _format_recent_for_mood(
-                familiar, voice_channel_id, channel_config.mode
-            )
-            evaluation = await familiar.mood_evaluator.evaluate(
-                recent_context=recent,
-            )
-            tracker.mood_modifier = evaluation.modifier
-
         try:
+            # Resolve the speaker's display name. ``user_names`` is
+            # mutated by voice_pipeline's name resolver when a late
+            # joiner shows up, so a lookup failure falls back to a
+            # stable ``User-<id>`` form rather than ``None``.
+            speaker = user_names.get(user_id, f"User-{user_id}")
+            safe_name = sanitize_name(speaker) or speaker
+
+            channel_config = familiar.channel_configs.get(
+                channel_id=voice_channel_id,
+            )
+            request = ContextRequest(
+                familiar_id=familiar.id,
+                channel_id=voice_channel_id,
+                guild_id=guild_id,
+                speaker=safe_name,
+                utterance=result.text,
+                modality=Modality.voice,
+                budget_tokens=channel_config.budget_tokens,
+                deadline_s=channel_config.deadline_s,
+            )
+
+            pipeline = familiar.build_pipeline(channel_config)
+            pipeline_output = await pipeline.assemble(
+                request,
+                budget_by_layer=channel_config.budget_by_layer,
+            )
+            _log_pipeline_outcomes(voice_channel_id, pipeline_output.outcomes)
+
+            messages = assemble_chat_messages(
+                pipeline_output,
+                store=familiar.history_store,
+                history_window_size=familiar.config.history_window_size,
+                depth_inject_position=familiar.config.depth_inject_position,
+                depth_inject_role=familiar.config.depth_inject_role,
+                mode=channel_config.mode,
+                display_tz=familiar.config.display_tz,
+            )
+
+            _logger.info(
+                "LLM request channel=%s (voice) messages=%d:\n%s",
+                voice_channel_id,
+                len(messages),
+                "\n".join(
+                    f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
+                    f"{m.content[:200]}"
+                    f"{'…' if len(m.content) > 200 else ''}"
+                    for m in messages
+                ),
+            )
+
+            # Pre-compute mood modifier for the toll check
+            if familiar.mood_evaluator is not None and guild_id is not None:
+                recent = _format_recent_for_mood(
+                    familiar, voice_channel_id, channel_config.mode
+                )
+                evaluation = await familiar.mood_evaluator.evaluate(
+                    recent_context=recent,
+                )
+                tracker.mood_modifier = evaluation.modifier
+
             reply = await familiar.llm_client.chat(messages)
-        except asyncio.CancelledError:
-            _logger.info("LLM generation cancelled by interruption")
-            tracker.reset()
-            return
 
-        reply_text = await pipeline.run_post_processors(reply.content, request)
-        tracker.generation_complete(reply_text)
+            reply_text = await pipeline.run_post_processors(reply.content, request)
+            tracker.generation_complete(reply_text)
 
-        # Persist both turns *after* the LLM call so a mid-turn crash
-        # doesn't leave the store with a user turn but no reply.
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            role="user",
-            content=result.text,
-            speaker=safe_name,
-            mode=channel_config.mode,
-        )
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            role="assistant",
-            content=reply_text,
-            mode=channel_config.mode,
-        )
+            # Persist both turns *after* the LLM call so a mid-turn
+            # crash doesn't leave the store with a user turn but no
+            # reply.
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=voice_channel_id,
+                guild_id=guild_id,
+                role="user",
+                content=result.text,
+                speaker=safe_name,
+                mode=channel_config.mode,
+            )
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=voice_channel_id,
+                guild_id=guild_id,
+                role="assistant",
+                content=reply_text,
+                mode=channel_config.mode,
+            )
 
-        _logger.info("[Voice Response] %s", reply_text)
+            _logger.info("[Voice Response] %s", reply_text)
 
-        if familiar.tts_client is not None:
-            try:
+            if familiar.tts_client is not None:
                 pcm_mono = await familiar.tts_client.synthesize(reply_text)
                 stereo = mono_to_stereo(pcm_mono)
                 # Wait for any currently-playing audio to finish.
-                # vc.is_playing() is a third-party poll; no event available.
                 while vc.is_playing():  # noqa: ASYNC110
                     await asyncio.sleep(0.1)
                 # --- State machine: GENERATING → SPEAKING ---
@@ -399,11 +399,14 @@ def _build_voice_response_handler(
                 # Wait for playback to finish
                 while vc.is_playing():  # noqa: ASYNC110
                     await asyncio.sleep(0.1)
-            except Exception:
-                _logger.exception("Voice response TTS failed")
-
-        # --- State machine: → IDLE ---
-        tracker.reset()
+        except asyncio.CancelledError:
+            _logger.info("Voice generation cancelled by interruption")
+            return
+        except Exception:
+            _logger.exception("Voice response handler failed")
+        finally:
+            # --- State machine: → IDLE ---
+            tracker.reset()
 
     return _handle_voice_result, tracker, detector
 
