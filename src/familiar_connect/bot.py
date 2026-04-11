@@ -182,6 +182,7 @@ def _build_voice_response_handler(
     Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]],
     ResponseTracker,
     InterruptionDetector,
+    Callable[[int, str], None],
 ]:
     """Build the async callback invoked for each final voice transcription.
 
@@ -191,9 +192,10 @@ def _build_voice_response_handler(
     pipeline, render, call the main LLM, run post-processors,
     persist to :class:`HistoryStore`, fan out to TTS.
 
-    Returns the handler callback plus the per-guild
-    :class:`ResponseTracker` and :class:`InterruptionDetector` so the
-    voice pipeline can feed VAD events to the detector.
+    Returns ``(handler, tracker, detector, vad_callback)`` — the
+    handler plus the per-guild :class:`ResponseTracker`,
+    :class:`InterruptionDetector`, and a synchronous VAD event
+    callback for the voice debounce logic.
     """
     tracker = ResponseTracker()
 
@@ -270,11 +272,13 @@ def _build_voice_response_handler(
     )
 
     # Voice debounce state: accumulate transcription results and only
-    # generate after lull_timeout seconds of silence.  Each new final
-    # result resets the timer so the familiar waits for the user to
-    # finish talking before responding.
+    # generate after lull_timeout seconds of silence.  Uses VAD events
+    # to track active speakers so the timer only runs when nobody is
+    # talking — this prevents premature generation when Deepgram
+    # finalises a segment while the user is still mid-sentence.
     pending_utterances: list[tuple[int, TranscriptionResult]] = []
     lull_gen_task: asyncio.Task[None] | None = None
+    debounce_speakers: set[int] = set()
 
     async def _generate_response(
         user_id: int,
@@ -450,19 +454,41 @@ def _build_voice_response_handler(
         lull_gen_task = None
         await _flush_pending()
 
+    def _on_vad_event(user_id: int, event_type: str) -> None:
+        """Track active speakers for VAD-gated debounce.
+
+        Called by the voice pipeline's VAD dispatcher for every
+        ``SpeechStarted`` / ``UtteranceEnd`` event, regardless of
+        tracker state.
+        """
+        nonlocal lull_gen_task
+
+        if event_type == "SpeechStarted":
+            debounce_speakers.add(user_id)
+            # Someone started talking — cancel the lull timer.
+            if lull_gen_task is not None:
+                lull_gen_task.cancel()
+                lull_gen_task = None
+        elif event_type == "UtteranceEnd":
+            debounce_speakers.discard(user_id)
+            # Everyone stopped — start the lull timer if we have
+            # buffered results.
+            if not debounce_speakers and pending_utterances:
+                if lull_gen_task is not None:
+                    lull_gen_task.cancel()
+                lull_gen_task = asyncio.create_task(_lull_then_generate())
+
     async def _handle_voice_result(  # noqa: RUF029
         user_id: int,
         result: TranscriptionResult,
     ) -> None:
-        """Buffer a transcription result and reset the lull timer.
+        """Buffer a transcription result for VAD-gated debounce.
 
-        Instead of generating immediately for every final result,
-        accumulate results and start a lull timer.  When the timer
-        fires (no new results for ``lull_timeout`` seconds), combine
-        all buffered text and generate a single response.  This ensures
-        the familiar waits for the user to finish talking before
-        responding, and keeps the tracker in IDLE during user speech so
-        the interruption detector can work properly.
+        Results are accumulated in ``pending_utterances``.  The lull
+        timer is started by :func:`_on_vad_event` when all speakers
+        stop.  As a fallback (in case VAD events arrive out of order
+        or are missing), a timer is also started here when no speakers
+        are currently active.
         """
         nonlocal lull_gen_task
 
@@ -474,12 +500,13 @@ def _build_voice_response_handler(
             len(pending_utterances),
         )
 
-        # Cancel existing lull timer and start a new one.
-        if lull_gen_task is not None:
-            lull_gen_task.cancel()
-        lull_gen_task = asyncio.create_task(_lull_then_generate())
+        # Fallback: if nobody is currently speaking (VAD already
+        # processed the UtteranceEnd before this result arrived),
+        # start the lull timer.
+        if not debounce_speakers and lull_gen_task is None:
+            lull_gen_task = asyncio.create_task(_lull_then_generate())
 
-    return _handle_voice_result, tracker, detector
+    return _handle_voice_result, tracker, detector, _on_vad_event
 
 
 async def subscribe_my_voice(
@@ -540,7 +567,7 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        response_handler, _tracker, detector = _build_voice_response_handler(
+        response_handler, _tracker, detector, vad_cb = _build_voice_response_handler(
             vc=vc,
             familiar=familiar,
             voice_channel_id=channel.id,
@@ -554,6 +581,7 @@ async def subscribe_my_voice(
             resolve_name=_resolve_from_channel,
             response_handler=response_handler,
             interruption_detector=detector,
+            vad_callback=vad_cb,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),

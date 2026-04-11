@@ -77,6 +77,7 @@ class VoicePipeline:
     streams: dict[int, _UserStream] = field(default_factory=dict)
     shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
     interruption_detector: InterruptionDetector | None = None
+    vad_callback: Callable[[int, str], None] | None = None
     vad_dispatcher_task: asyncio.Task[None] | None = None
 
 
@@ -188,10 +189,21 @@ async def _vad_forwarder(
 async def _vad_dispatcher(
     shared_queue: asyncio.Queue[tuple[int, VadEvent]],
     detector: InterruptionDetector | None,
+    vad_callback: Callable[[int, str], None] | None = None,
 ) -> None:
-    """Read tagged VAD events and feed them to the InterruptionDetector."""
+    """Read tagged VAD events and feed them to the InterruptionDetector.
+
+    Also calls *vad_callback* (if provided) with ``(user_id,
+    event_type)`` for every event, regardless of detector state.
+    The callback is used by the voice debounce logic to track
+    active speakers.
+    """
     while True:
         user_id, event = await shared_queue.get()
+        # Notify the debounce layer (always, even during IDLE).
+        if vad_callback is not None:
+            vad_callback(user_id, event.event_type)
+        # Notify the interruption detector (only during non-IDLE).
         if detector is None:
             continue
         now = time.monotonic()
@@ -334,6 +346,7 @@ async def start_pipeline(  # noqa: RUF029
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None,
     interruption_detector: InterruptionDetector | None = None,
+    vad_callback: Callable[[int, str], None] | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -349,6 +362,10 @@ async def start_pipeline(  # noqa: RUF029
     :param interruption_detector: Optional detector that receives VAD
         events (``SpeechStarted``, ``UtteranceEnd``) from all per-user
         Deepgram streams.
+    :param vad_callback: Optional sync callback invoked with
+        ``(user_id, event_type)`` for every VAD event.  Used by the
+        voice debounce logic to track active speakers independently
+        of the interruption detector.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
@@ -356,8 +373,9 @@ async def start_pipeline(  # noqa: RUF029
         asyncio.Queue()
     )
 
+    # Create a shared VAD queue whenever we have a detector OR a callback.
     shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
-    if interruption_detector is not None:
+    if interruption_detector is not None or vad_callback is not None:
         shared_vad_queue = asyncio.Queue()
 
     # We create a placeholder pipeline first so the router can reference it.
@@ -372,6 +390,7 @@ async def start_pipeline(  # noqa: RUF029
         response_handler=response_handler,
         shared_vad_queue=shared_vad_queue,
         interruption_detector=interruption_detector,
+        vad_callback=vad_callback,
     )
 
     pipeline.router_task = asyncio.create_task(
@@ -383,7 +402,7 @@ async def start_pipeline(  # noqa: RUF029
 
     if shared_vad_queue is not None:
         pipeline.vad_dispatcher_task = asyncio.create_task(
-            _vad_dispatcher(shared_vad_queue, interruption_detector)
+            _vad_dispatcher(shared_vad_queue, interruption_detector, vad_callback)
         )
 
     set_pipeline(pipeline)

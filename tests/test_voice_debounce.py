@@ -1,13 +1,14 @@
 """Tests for voice transcription debounce in _build_voice_response_handler.
 
 Verifies that multiple rapid voice transcription results are buffered
-and only trigger a single LLM generation after a lull timeout.
+and only trigger a single LLM generation after a lull timeout, gated
+by VAD events (SpeechStarted / UtteranceEnd).
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -80,6 +81,23 @@ def _make_vc_mock() -> MagicMock:
     return vc
 
 
+def _build(*, lull_timeout: float = 0.05) -> tuple[Any, Any, Any, Any, MagicMock]:
+    """Build handler + mocks.
+
+    Returns (handler, tracker, detector, vad_cb, familiar).
+    """
+    familiar = _make_familiar_mock(lull_timeout=lull_timeout)
+    vc = _make_vc_mock()
+    handler, tracker, detector, vad_cb = _build_voice_response_handler(
+        vc=vc,
+        familiar=familiar,
+        voice_channel_id=100,
+        guild_id=1,
+        user_names={42: "Alice", 99: "Bob"},
+    )
+    return handler, tracker, detector, vad_cb, familiar
+
+
 class TestVoiceDebounce:
     """Verify that voice results are buffered and generation waits for a lull."""
 
@@ -98,18 +116,9 @@ class TestVoiceDebounce:
             yield
 
     @pytest.mark.asyncio
-    async def test_single_result_generates_after_lull(self) -> None:
-        """A single voice result triggers generation after lull_timeout."""
-        familiar = _make_familiar_mock(lull_timeout=0.05)
-        vc = _make_vc_mock()
-
-        handler, tracker, _detector = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=100,
-            guild_id=1,
-            user_names={42: "Alice"},
-        )
+    async def test_single_result_fallback_generates_after_lull(self) -> None:
+        """Result with no active speakers uses the fallback timer."""
+        handler, tracker, _, _, familiar = _build(lull_timeout=0.05)
 
         result = TranscriptionResult(
             text="hello there", is_final=True, start=0.0, end=1.0
@@ -121,125 +130,114 @@ class TestVoiceDebounce:
 
         # Wait for lull + generation to complete.
         await asyncio.sleep(0.15)
-        # Allow tasks to finish.
         for _ in range(10):
             await asyncio.sleep(0)
 
-        # LLM should have been called once.
         familiar.llm_client.chat.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_multiple_rapid_results_generate_once(self) -> None:
-        """Multiple results within the lull window produce a single generation."""
-        familiar = _make_familiar_mock(lull_timeout=0.05)
-        vc = _make_vc_mock()
+    async def test_vad_speech_blocks_lull_timer(self) -> None:
+        """SpeechStarted cancels the lull timer; UtteranceEnd restarts it."""
+        handler, _, _, vad_cb, familiar = _build(lull_timeout=0.05)
 
-        handler, tracker, _detector = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=100,
-            guild_id=1,
-            user_names={42: "Alice"},
-        )
-
+        # Simulate: user starts speaking, then final arrives.
+        vad_cb(42, "SpeechStarted")
         r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
-        r2 = TranscriptionResult(text="there", is_final=True, start=0.5, end=1.0)
-        r3 = TranscriptionResult(text="friend", is_final=True, start=1.0, end=1.5)
-
         await handler(42, r1)
-        await handler(42, r2)
-        await handler(42, r3)
 
-        # Still IDLE during debounce.
-        assert tracker.state is ResponseState.IDLE
-
-        # Wait for lull + generation.
-        await asyncio.sleep(0.15)
+        # Even though a result arrived, no timer should fire because
+        # the user is still speaking (SpeechStarted, no UtteranceEnd).
+        await asyncio.sleep(0.10)
         for _ in range(10):
             await asyncio.sleep(0)
+        familiar.llm_client.chat.assert_not_called()
 
-        # Only ONE LLM call with combined text.
+        # Now the user stops.
+        vad_cb(42, "UtteranceEnd")
+
+        # Lull timer starts now.
+        await asyncio.sleep(0.10)
+        for _ in range(10):
+            await asyncio.sleep(0)
         familiar.llm_client.chat.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_combined_text_joins_all_utterances(self) -> None:
-        """The LLM receives the combined text of all buffered utterances."""
-        familiar = _make_familiar_mock(lull_timeout=0.05)
-        vc = _make_vc_mock()
+    async def test_vad_links_segments_across_brief_pause(self) -> None:
+        """Segments separated by a brief pause are linked into one response.
 
-        handler, _tracker, _detector = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=100,
-            guild_id=1,
-            user_names={42: "Alice"},
-        )
+        Simulates: user says "hello" → brief pause → "how are you",
+        with Deepgram finalising "hello" during the pause but VAD
+        showing continued speech.
+        """
+        handler, _, _, vad_cb, familiar = _build(lull_timeout=0.05)
 
+        # Segment 1: user starts talking
+        vad_cb(42, "SpeechStarted")
         r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
-        r2 = TranscriptionResult(text="how are you", is_final=True, start=0.5, end=1.5)
-
         await handler(42, r1)
+
+        # Brief pause — Deepgram sends UtteranceEnd then SpeechStarted
+        vad_cb(42, "UtteranceEnd")
+        # User resumes before lull fires
+        vad_cb(42, "SpeechStarted")
+
+        # Segment 2: second part of the utterance
+        r2 = TranscriptionResult(text="how are you", is_final=True, start=0.8, end=1.5)
         await handler(42, r2)
 
-        await asyncio.sleep(0.15)
+        # Still speaking — no generation yet.
+        await asyncio.sleep(0.10)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        familiar.llm_client.chat.assert_not_called()
+
+        # User finishes
+        vad_cb(42, "UtteranceEnd")
+
+        await asyncio.sleep(0.10)
         for _ in range(10):
             await asyncio.sleep(0)
 
-        # Check that the pipeline received "hello how are you" as the utterance.
+        # Single generation with combined text
+        familiar.llm_client.chat.assert_called_once()
         pipeline_mock = familiar.build_pipeline.return_value
-        assemble_call = pipeline_mock.assemble.call_args
-        request = assemble_call[0][0]
+        request = pipeline_mock.assemble.call_args[0][0]
         assert request.utterance == "hello how are you"
 
     @pytest.mark.asyncio
-    async def test_new_result_resets_lull_timer(self) -> None:
-        """A new result arriving before lull expires resets the timer."""
-        familiar = _make_familiar_mock(lull_timeout=0.08)
-        vc = _make_vc_mock()
+    async def test_multiple_speakers_wait_for_all_silent(self) -> None:
+        """Lull timer only starts when ALL speakers stop."""
+        handler, _, _, vad_cb, familiar = _build(lull_timeout=0.05)
 
-        handler, _tracker, _detector = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=100,
-            guild_id=1,
-            user_names={42: "Alice"},
-        )
+        vad_cb(42, "SpeechStarted")
+        vad_cb(99, "SpeechStarted")
 
         r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
         await handler(42, r1)
 
-        # Wait almost the full lull period, then add another result.
-        await asyncio.sleep(0.06)
+        # User 42 stops, but user 99 is still talking.
+        vad_cb(42, "UtteranceEnd")
+        await asyncio.sleep(0.10)
+        for _ in range(10):
+            await asyncio.sleep(0)
         familiar.llm_client.chat.assert_not_called()
 
         r2 = TranscriptionResult(text="world", is_final=True, start=0.5, end=1.0)
-        await handler(42, r2)
+        await handler(99, r2)
 
-        # Wait another 0.06s — still within the RESET lull window.
-        await asyncio.sleep(0.06)
-        familiar.llm_client.chat.assert_not_called()
-
-        # Wait for the full lull to expire from the last result.
-        await asyncio.sleep(0.05)
+        # Now user 99 stops.
+        vad_cb(99, "UtteranceEnd")
+        await asyncio.sleep(0.10)
         for _ in range(10):
             await asyncio.sleep(0)
-
         familiar.llm_client.chat.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_tracker_idle_during_debounce(self) -> None:
         """Tracker stays IDLE while results are being buffered."""
-        familiar = _make_familiar_mock(lull_timeout=0.1)
-        vc = _make_vc_mock()
+        handler, tracker, _, vad_cb, _ = _build(lull_timeout=0.1)
 
-        handler, tracker, _detector = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=100,
-            guild_id=1,
-            user_names={42: "Alice"},
-        )
-
+        vad_cb(42, "SpeechStarted")
         r1 = TranscriptionResult(text="hi", is_final=True, start=0.0, end=0.3)
         await handler(42, r1)
         await asyncio.sleep(0.01)
@@ -249,3 +247,23 @@ class TestVoiceDebounce:
         await handler(42, r2)
         await asyncio.sleep(0.01)
         assert tracker.state is ResponseState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_combined_text_joins_all_utterances(self) -> None:
+        """The LLM receives the combined text of all buffered utterances."""
+        handler, _, _, _vad_cb, familiar = _build(lull_timeout=0.05)
+
+        r1 = TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5)
+        r2 = TranscriptionResult(text="how are you", is_final=True, start=0.5, end=1.5)
+
+        # No active speakers — fallback timer used.
+        await handler(42, r1)
+        await handler(42, r2)
+
+        await asyncio.sleep(0.15)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        pipeline_mock = familiar.build_pipeline.return_value
+        request = pipeline_mock.assemble.call_args[0][0]
+        assert request.utterance == "hello how are you"
