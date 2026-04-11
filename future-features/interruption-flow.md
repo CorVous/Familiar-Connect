@@ -36,6 +36,8 @@ All three values live on `CharacterConfig` and are loaded at startup. They are n
 
 **Future (deferred):** When the familiar keeps talking through an interruption, the interrupted person's words could trigger a follow-up response after the current voice line finishes.
 
+**Future (deferred):** Pre-generated interrupt tolerance. The RNG toll check could be replaced or augmented by a side-model evaluation that runs **before** playback begins — at generation time, the model decides whether the familiar would yield if interrupted for this particular response (e.g. a passionate rant vs. a throwaway comment). The result is cached on the `ResponseTracker` so that when an interruption actually arrives, the yield/keep-talking decision is instant with no latency cost. This becomes worthwhile if the decision logic grows beyond a single RNG roll (e.g. factoring in who is interrupting, emotional state, topic importance).
+
 ---
 
 ## Response State Machine
