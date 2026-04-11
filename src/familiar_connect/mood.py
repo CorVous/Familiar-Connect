@@ -5,9 +5,8 @@ and returns a modifier that adjusts :attr:`CharacterConfig.interrupt_tolerance`
 before each RNG toll check in the interruption system.
 
 The evaluator uses the existing :class:`SideModel` protocol for cheap
-inference. Results are cached per-guild with a configurable TTL so
-repeated interruptions within a short window don't trigger redundant
-model calls.
+inference. Each voice response cycle gets a fresh evaluation; the result
+is stored on the :class:`ResponseTracker` for the duration of that cycle.
 
 Design reference: ``future-features/interruption-flow.md``, lines 31-35.
 """
@@ -16,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -38,12 +36,10 @@ class MoodEvaluation:
     :param modifier: Float adjustment to ``interrupt_tolerance``,
         clamped to ``[-0.5, +0.5]``.
     :param reasoning: Raw side-model response (for logging/debugging).
-    :param timestamp: ``time.monotonic()`` value when evaluated.
     """
 
     modifier: float
     reasoning: str
-    timestamp: float
 
 
 # ---------------------------------------------------------------------------
@@ -136,10 +132,13 @@ def effective_tolerance(base: float, mood_modifier: float) -> float:
 class MoodEvaluator:
     """Evaluates the familiar's emotional state for tolerance drift.
 
+    Each call to :meth:`evaluate` makes a fresh side-model call. The
+    result is meant to be stored on the :class:`ResponseTracker` for
+    the duration of a single voice response cycle.
+
     :param side_model: Cheap model for evaluation.
     :param familiar_name: Character name for prompt context.
     :param character_card: Pre-loaded character card text.
-    :param cache_ttl_s: How long a cached evaluation stays valid (seconds).
     """
 
     def __init__(
@@ -148,29 +147,20 @@ class MoodEvaluator:
         side_model: SideModel,
         familiar_name: str,
         character_card: str,
-        cache_ttl_s: float = 30.0,
     ) -> None:
         self._side_model = side_model
         self._familiar_name = familiar_name
         self._character_card = character_card
-        self._cache_ttl_s = cache_ttl_s
-        self._cache: dict[int, MoodEvaluation] = {}
 
     async def evaluate(
         self,
-        guild_id: int,
         recent_context: str,
     ) -> MoodEvaluation:
-        """Evaluate mood, returning cached result if TTL not expired.
+        """Evaluate mood from recent conversation context.
 
-        :param guild_id: Discord guild id for cache partitioning.
         :param recent_context: Pre-formatted recent conversation text.
         :returns: A :class:`MoodEvaluation` with the modifier.
         """
-        cached = self.get_cached(guild_id)
-        if cached is not None:
-            return cached
-
         prompt = _MOOD_EVAL_PROMPT.format(
             familiar_name=self._familiar_name,
             character_card=self._character_card,
@@ -181,8 +171,7 @@ class MoodEvaluator:
             raw = await self._side_model.complete(prompt)
         except Exception:
             _logger.exception(
-                "Mood evaluation failed for guild %s; defaulting to 0.0",
-                guild_id,
+                "Mood evaluation failed; defaulting to 0.0",
             )
             raw = "0.0"
 
@@ -190,28 +179,11 @@ class MoodEvaluator:
         evaluation = MoodEvaluation(
             modifier=modifier,
             reasoning=raw,
-            timestamp=time.monotonic(),
         )
-        self._cache[guild_id] = evaluation
 
         _logger.debug(
-            "Mood evaluation guild=%s modifier=%.2f raw=%r",
-            guild_id,
+            "Mood evaluation modifier=%.2f raw=%r",
             modifier,
             raw[:120],
         )
         return evaluation
-
-    def get_cached(self, guild_id: int) -> MoodEvaluation | None:
-        """Return the cached evaluation if still within TTL, else ``None``."""
-        cached = self._cache.get(guild_id)
-        if cached is None:
-            return None
-        if time.monotonic() - cached.timestamp > self._cache_ttl_s:
-            del self._cache[guild_id]
-            return None
-        return cached
-
-    def invalidate(self, guild_id: int) -> None:
-        """Remove the cached evaluation for *guild_id*."""
-        self._cache.pop(guild_id, None)

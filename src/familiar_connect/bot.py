@@ -328,7 +328,6 @@ def _build_voice_response_handler(
                 familiar, voice_channel_id, channel_config.mode
             )
             evaluation = await familiar.mood_evaluator.evaluate(
-                guild_id=guild_id,
                 recent_context=recent,
             )
             tracker.mood_modifier = evaluation.modifier
