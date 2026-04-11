@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 
 import discord
 import pytest
@@ -416,7 +416,7 @@ class TestSubscriptionCommands:
             familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
             is not None
         )
-        ctx.respond.assert_called_once()
+        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
 
     def test_subscribe_text_persists_across_reload(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
@@ -448,6 +448,7 @@ class TestSubscriptionCommands:
             familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
             is None
         )
+        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
 
     def test_unsubscribe_text_clears_monitor_state(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
@@ -480,6 +481,7 @@ class TestVoiceSubscription:
         voice_channel = ctx.author.voice.channel
         voice_channel.connect.assert_called_once()
         assert familiar.subscriptions.voice_in_guild(999) is not None
+        ctx.followup.send.assert_called_once_with(ANY, ephemeral=True)
 
     def test_subscribe_my_voice_skips_transcription_when_no_transcriber(
         self,
@@ -549,6 +551,7 @@ class TestVoiceSubscription:
 
         ctx.voice_client.disconnect.assert_called_once()
         assert familiar.subscriptions.voice_in_guild(999) is None
+        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
 
     def test_unsubscribe_voice_stops_active_pipeline(self, tmp_path: Path) -> None:
         """Active voice pipeline is torn down before the voice client disconnects.
@@ -597,7 +600,7 @@ class TestChannelModeCommands:
         asyncio.run(set_channel_mode(ctx, familiar, ChannelMode.full_rp))
 
         assert familiar.channel_configs.get(channel_id=77).mode is ChannelMode.full_rp
-        ctx.respond.assert_called_once()
+        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
 
     def test_set_channel_mode_persists_across_reload(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
