@@ -108,6 +108,18 @@ async def subscribe_text(
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
 
+    guild = ctx.guild
+    channel = ctx.channel
+    if guild is not None and isinstance(channel, discord.TextChannel):
+        perms = channel.permissions_for(guild.me)
+        if not perms.view_channel or not perms.send_messages:
+            await ctx.respond(
+                "My powers don't extend to this channel"
+                " \N{EM DASH} I lack the permissions to speak here.",
+                ephemeral=True,
+            )
+            return
+
     familiar.subscriptions.add(
         channel_id=channel_id,
         kind=SubscriptionKind.text,
@@ -287,6 +299,17 @@ async def subscribe_my_voice(
     if ctx.voice_client is not None:
         await ctx.respond("I'm already in a voice channel.", ephemeral=True)
         return
+
+    guild = ctx.guild
+    if guild is not None:
+        perms = channel.permissions_for(guild.me)
+        if not perms.connect or not perms.speak:
+            await ctx.respond(
+                "I can't reach that voice channel"
+                " \N{EM DASH} I lack the permissions to enter and speak there.",
+                ephemeral=True,
+            )
+            return
 
     # Voice connection + DAVE handshake takes >3s, so defer.
     await ctx.defer()
