@@ -269,19 +269,33 @@ def _build_voice_response_handler(
         on_long_during_speaking=_on_long_during_speaking,
     )
 
-    async def _handle_voice_result(
+    # Voice debounce state: accumulate transcription results and only
+    # generate after lull_timeout seconds of silence.  Each new final
+    # result resets the timer so the familiar waits for the user to
+    # finish talking before responding.
+    pending_utterances: list[tuple[int, TranscriptionResult]] = []
+    lull_gen_task: asyncio.Task[None] | None = None
+
+    async def _generate_response(
         user_id: int,
-        result: TranscriptionResult,
+        combined_text: str,
     ) -> None:
+        """Run the full generation pipeline for accumulated voice input.
+
+        Called by :func:`_flush_pending` after the lull timer fires.
+        Waits for the tracker to become IDLE (in case a previous cycle
+        is still finishing), then claims it and runs the full
+        pipeline → LLM → TTS path.
+        """
         # Wait for the tracker to become IDLE before starting a new
         # response cycle.  Uses idle_event (set by reset(), cleared
         # by start_generating()) so concurrent handlers wake up
         # deterministically instead of polling.
         if tracker.state is not ResponseState.IDLE:
             _logger.info(
-                "Voice result while %s — waiting for current cycle: %r",
+                "Waiting for current cycle (%s) before generating: %r",
                 tracker.state.value,
-                result.text[:80],
+                combined_text[:80],
             )
             while tracker.state is not ResponseState.IDLE:
                 try:
@@ -290,7 +304,7 @@ def _build_voice_response_handler(
                     _logger.warning(
                         "Timed out waiting for IDLE (stuck in %s), dropping: %r",
                         tracker.state.value,
-                        result.text[:80],
+                        combined_text[:80],
                     )
                     return
 
@@ -317,7 +331,7 @@ def _build_voice_response_handler(
                 channel_id=voice_channel_id,
                 guild_id=guild_id,
                 speaker=safe_name,
-                utterance=result.text,
+                utterance=combined_text,
                 modality=Modality.voice,
                 budget_tokens=channel_config.budget_tokens,
                 deadline_s=channel_config.deadline_s,
@@ -375,7 +389,7 @@ def _build_voice_response_handler(
                 channel_id=voice_channel_id,
                 guild_id=guild_id,
                 role="user",
-                content=result.text,
+                content=combined_text,
                 speaker=safe_name,
                 mode=channel_config.mode,
             )
@@ -410,6 +424,60 @@ def _build_voice_response_handler(
         finally:
             # --- State machine: → IDLE ---
             tracker.reset()
+
+    async def _flush_pending() -> None:
+        """Drain the utterance buffer and generate a single response."""
+        if not pending_utterances:
+            return
+        utterances = list(pending_utterances)
+        pending_utterances.clear()
+
+        last_user_id = utterances[-1][0]
+        combined_text = " ".join(r.text for _, r in utterances)
+        _logger.info(
+            "Voice lull expired — generating from %d utterance(s): %r",
+            len(utterances),
+            combined_text[:120],
+        )
+        await _generate_response(last_user_id, combined_text)
+
+    async def _lull_then_generate() -> None:
+        """Wait for lull_timeout seconds of silence, then flush."""
+        nonlocal lull_gen_task
+        await asyncio.sleep(familiar.config.lull_timeout)
+        # Timer done — clear reference so new results don't cancel
+        # the generation phase that follows.
+        lull_gen_task = None
+        await _flush_pending()
+
+    async def _handle_voice_result(  # noqa: RUF029
+        user_id: int,
+        result: TranscriptionResult,
+    ) -> None:
+        """Buffer a transcription result and reset the lull timer.
+
+        Instead of generating immediately for every final result,
+        accumulate results and start a lull timer.  When the timer
+        fires (no new results for ``lull_timeout`` seconds), combine
+        all buffered text and generate a single response.  This ensures
+        the familiar waits for the user to finish talking before
+        responding, and keeps the tracker in IDLE during user speech so
+        the interruption detector can work properly.
+        """
+        nonlocal lull_gen_task
+
+        pending_utterances.append((user_id, result))
+        _logger.info(
+            "Buffered voice result from %s: %r (pending=%d)",
+            user_names.get(user_id, f"User-{user_id}"),
+            result.text[:80],
+            len(pending_utterances),
+        )
+
+        # Cancel existing lull timer and start a new one.
+        if lull_gen_task is not None:
+            lull_gen_task.cancel()
+        lull_gen_task = asyncio.create_task(_lull_then_generate())
 
     return _handle_voice_result, tracker, detector
 

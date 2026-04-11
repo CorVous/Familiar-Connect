@@ -323,7 +323,14 @@ class InterruptionDetector:
         :param timestamp: ``time.monotonic()`` value when speech started.
         """
         if self._tracker.state is ResponseState.IDLE:
+            _logger.debug("VAD SpeechStarted user=%d ignored (tracker IDLE)", user_id)
             return
+        _logger.debug(
+            "VAD SpeechStarted user=%d state=%s active_speakers=%s",
+            user_id,
+            self._tracker.state.value,
+            self._active_speakers,
+        )
         self._active_speakers.add(user_id)
         self._interrupter_ids.add(user_id)
         # Cancel pending lull — someone is talking again.
@@ -332,6 +339,11 @@ class InterruptionDetector:
             self._lull_task = None
         if self._speech_start_time is None:
             self._speech_start_time = timestamp
+            _logger.info(
+                "Interruption tracking started (user=%d, state=%s)",
+                user_id,
+                self._tracker.state.value,
+            )
             self._threshold_task = asyncio.create_task(self._threshold_check())
         elif self._threshold_passed and not self._yielded:
             # Threshold already passed but nobody was speaking when it
@@ -352,6 +364,7 @@ class InterruptionDetector:
         :param timestamp: ``time.monotonic()`` value when speech ended.
         """
         if self._tracker.state is ResponseState.IDLE:
+            _logger.debug("VAD UtteranceEnd user=%d ignored (tracker IDLE)", user_id)
             self._reset_accumulation()
             return
 
@@ -361,8 +374,14 @@ class InterruptionDetector:
         self._interrupter_ids.add(user_id)
         self._last_utterance_end_time = timestamp
         self._active_speakers.discard(user_id)
+        _logger.debug(
+            "VAD UtteranceEnd user=%d remaining_speakers=%s",
+            user_id,
+            self._active_speakers,
+        )
 
         if not self._active_speakers:
+            _logger.debug("All speakers silent — starting lull timer")
             self._start_lull_timer()
 
     # ----- internal timers -----
@@ -373,9 +392,18 @@ class InterruptionDetector:
         self._threshold_task = None
         self._threshold_passed = True
         if self._tracker.state is ResponseState.IDLE or self._speech_start_time is None:
+            _logger.debug("Threshold passed but tracker now IDLE — skipping moment 1")
             return
         if self._active_speakers:
+            _logger.info(
+                "Moment 1: threshold passed, active speakers=%s — firing toll check",
+                self._active_speakers,
+            )
             await self._fire_moment1()
+        else:
+            _logger.debug(
+                "Threshold passed but no active speakers — deferring moment 1"
+            )
         # If nobody is speaking, _fire_moment1 deferred to next
         # on_speech_started (via _threshold_passed flag).
 
@@ -407,6 +435,7 @@ class InterruptionDetector:
 
         if not self._yielded:
             # Moment 1 never fired or the familiar didn't yield.
+            _logger.debug("Lull expired but familiar did not yield — resetting")
             self._reset_accumulation()
             return
 
