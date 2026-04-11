@@ -127,7 +127,7 @@ async def subscribe_text(
     )
     name = getattr(ctx.channel, "name", str(channel_id))
     _logger.info("Subscribed to text channel: %s (%s)", name, channel_id)
-    await ctx.respond(f"Subscribed to text in **#{name}**.")
+    await ctx.respond(f"Subscribed to text in **#{name}**.", ephemeral=True)
 
 
 async def unsubscribe_text(
@@ -153,7 +153,7 @@ async def unsubscribe_text(
         kind=SubscriptionKind.text,
     )
     familiar.monitor.clear_channel(channel_id)
-    await ctx.respond("No longer listening here.")
+    await ctx.respond("No longer listening here.", ephemeral=True)
 
 
 def _build_voice_response_handler(
@@ -372,7 +372,7 @@ async def subscribe_my_voice(
             channel.id,
         )
 
-    await ctx.followup.send(f"Joined **{channel.name}**.")
+    await ctx.followup.send(f"Joined **{channel.name}**.", ephemeral=True)
 
 
 async def unsubscribe_voice(
@@ -408,7 +408,7 @@ async def unsubscribe_voice(
             kind=SubscriptionKind.voice,
         )
 
-    await ctx.respond("Left voice.")
+    await ctx.respond("Left voice.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +429,7 @@ async def set_channel_mode(
 
     familiar.channel_configs.set_mode(channel_id=channel_id, mode=mode)
     _logger.info("Channel %s mode = %s", channel_id, mode.value)
-    await ctx.respond(f"Channel mode set to **{mode.value}**.")
+    await ctx.respond(f"Channel mode set to **{mode.value}**.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
