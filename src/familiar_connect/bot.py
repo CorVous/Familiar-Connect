@@ -223,7 +223,7 @@ def _build_voice_response_handler(
     async def _on_short_during_speaking(_event: InterruptionEvent) -> None:  # noqa: RUF029
         """RNG toll check, then stop and resume or keep talking."""
         tol = effective_tolerance(
-            familiar.config.interrupt_tolerance, tracker.mood_modifier
+            familiar.config.interrupt_tolerance.tolerance, tracker.mood_modifier
         )
         if should_keep_talking(tol):
             _logger.info(
@@ -241,7 +241,7 @@ def _build_voice_response_handler(
     async def _on_long_during_speaking(_event: InterruptionEvent) -> None:  # noqa: RUF029
         """RNG toll check, then stop and regenerate or keep talking."""
         tol = effective_tolerance(
-            familiar.config.interrupt_tolerance, tracker.mood_modifier
+            familiar.config.interrupt_tolerance.tolerance, tracker.mood_modifier
         )
         if should_keep_talking(tol):
             _logger.info(

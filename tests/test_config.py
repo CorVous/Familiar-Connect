@@ -21,6 +21,7 @@ from familiar_connect.config import (
     CharacterConfig,
     ConfigError,
     Interjection,
+    InterruptTolerance,
     channel_config_for_mode,
     load_channel_config,
     load_character_config,
@@ -285,20 +286,52 @@ class TestCharacterConfigConversationFields:
 # ---------------------------------------------------------------------------
 
 
+class TestInterruptToleranceEnum:
+    def test_has_five_members(self) -> None:
+        assert len(list(InterruptTolerance)) == 5
+
+    def test_values(self) -> None:
+        assert InterruptTolerance.very_meek.value == "very_meek"
+        assert InterruptTolerance.meek.value == "meek"
+        assert InterruptTolerance.average.value == "average"
+        assert InterruptTolerance.stubborn.value == "stubborn"
+        assert InterruptTolerance.very_stubborn.value == "very_stubborn"
+
+    def test_tolerance_values_increase(self) -> None:
+        values = [t.tolerance for t in InterruptTolerance]
+        assert values == sorted(values)
+        assert all(0.0 < v < 1.0 for v in values)
+
+    def test_very_meek_tolerance(self) -> None:
+        assert InterruptTolerance.very_meek.tolerance == pytest.approx(0.1)
+
+    def test_meek_tolerance(self) -> None:
+        assert InterruptTolerance.meek.tolerance == pytest.approx(0.25)
+
+    def test_average_tolerance(self) -> None:
+        assert InterruptTolerance.average.tolerance == pytest.approx(0.4)
+
+    def test_stubborn_tolerance(self) -> None:
+        assert InterruptTolerance.stubborn.tolerance == pytest.approx(0.6)
+
+    def test_very_stubborn_tolerance(self) -> None:
+        assert InterruptTolerance.very_stubborn.tolerance == pytest.approx(0.8)
+
+
 class TestCharacterConfigInterruptionFields:
     def test_defaults_when_file_absent(self, tmp_path: Path) -> None:
         cfg = load_character_config(tmp_path / "no-such-file.toml")
-        assert cfg.interrupt_tolerance == 0.3  # noqa: RUF069
+        assert cfg.interrupt_tolerance is InterruptTolerance.average
         assert cfg.min_interruption_s == 1.5  # noqa: RUF069
         assert cfg.short_long_boundary_s == 4.0  # noqa: RUF069
 
     def test_reads_interrupt_tolerance_from_toml(self, tmp_path: Path) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            "[voice.interruption]\ninterrupt_tolerance = 0.7\n",
+            '[voice.interruption]\ninterrupt_tolerance = "stubborn"\n',
         )
         cfg = load_character_config(path)
-        assert cfg.interrupt_tolerance == 0.7  # noqa: RUF069
+        assert cfg.interrupt_tolerance is InterruptTolerance.stubborn
 
     def test_reads_min_interruption_s_from_toml(self, tmp_path: Path) -> None:
         path = tmp_path / "character.toml"
@@ -320,31 +353,31 @@ class TestCharacterConfigInterruptionFields:
         path = tmp_path / "character.toml"
         path.write_text(
             "[voice.interruption]\n"
-            "interrupt_tolerance = 0.5\n"
+            'interrupt_tolerance = "meek"\n'
             "min_interruption_s = 2.5\n"
             "short_long_boundary_s = 6.0\n",
         )
         cfg = load_character_config(path)
-        assert cfg.interrupt_tolerance == 0.5  # noqa: RUF069
+        assert cfg.interrupt_tolerance is InterruptTolerance.meek
         assert cfg.min_interruption_s == 2.5  # noqa: RUF069
         assert cfg.short_long_boundary_s == 6.0  # noqa: RUF069
 
-    def test_interrupt_tolerance_above_one_raises(self, tmp_path: Path) -> None:
+    def test_invalid_interrupt_tolerance_raises(self, tmp_path: Path) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[voice.interruption]\ninterrupt_tolerance = 1.5\n")
+        path.write_text('[voice.interruption]\ninterrupt_tolerance = "grumpy"\n')
         with pytest.raises(ConfigError, match="interrupt_tolerance"):
             load_character_config(path)
 
-    def test_interrupt_tolerance_below_zero_raises(self, tmp_path: Path) -> None:
+    def test_non_string_interrupt_tolerance_raises(self, tmp_path: Path) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[voice.interruption]\ninterrupt_tolerance = -0.1\n")
+        path.write_text("[voice.interruption]\ninterrupt_tolerance = 0.5\n")
         with pytest.raises(ConfigError, match="interrupt_tolerance"):
             load_character_config(path)
 
     def test_partial_section_uses_defaults_for_missing(self, tmp_path: Path) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[voice.interruption]\ninterrupt_tolerance = 0.5\n")
+        path.write_text('[voice.interruption]\ninterrupt_tolerance = "meek"\n')
         cfg = load_character_config(path)
-        assert cfg.interrupt_tolerance == 0.5  # noqa: RUF069
+        assert cfg.interrupt_tolerance is InterruptTolerance.meek
         assert cfg.min_interruption_s == 1.5  # noqa: RUF069
         assert cfg.short_long_boundary_s == 4.0  # noqa: RUF069

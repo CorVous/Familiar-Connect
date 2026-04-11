@@ -101,6 +101,41 @@ class Interjection(Enum):
         }[self]
 
 
+class InterruptTolerance(Enum):
+    """How stubbornly the familiar keeps talking when interrupted.
+
+    Controls the base probability of continuing to speak through a
+    user interruption. Higher tiers make the familiar harder to
+    interrupt. The mood evaluator can shift the effective tolerance
+    up or down at runtime.
+
+    | Value            | Base tolerance |
+    |------------------|---------------|
+    | ``very_meek``    | 0.10          |
+    | ``meek``         | 0.25          |
+    | ``average``      | 0.40          |
+    | ``stubborn``     | 0.60          |
+    | ``very_stubborn``| 0.80          |
+    """
+
+    very_meek = "very_meek"
+    meek = "meek"
+    average = "average"
+    stubborn = "stubborn"
+    very_stubborn = "very_stubborn"
+
+    @property
+    def tolerance(self) -> float:
+        """Base probability of keeping talking through an interruption."""
+        return {
+            InterruptTolerance.very_meek: 0.1,
+            InterruptTolerance.meek: 0.25,
+            InterruptTolerance.average: 0.4,
+            InterruptTolerance.stubborn: 0.6,
+            InterruptTolerance.very_stubborn: 0.8,
+        }[self]
+
+
 _DEFAULT_CHATTINESS = "Balanced — responds when the conversation is relevant"
 
 
@@ -145,9 +180,8 @@ class CharacterConfig:
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average
     lull_timeout: float = 2.0
-    interrupt_tolerance: float = 0.3
-    """Probability of continuing to talk when interrupted while speaking.
-    0.0 = always yields (meek), 1.0 = never yields (stubborn)."""
+    interrupt_tolerance: InterruptTolerance = InterruptTolerance.average
+    """How stubbornly the familiar keeps talking through interruptions."""
     min_interruption_s: float = 1.5
     """Minimum seconds of user speech before it counts as an interruption."""
     short_long_boundary_s: float = 4.0
@@ -312,13 +346,10 @@ def load_character_config(path: Path) -> CharacterConfig:
 
     voice_section = data.get("voice", {})
     interruption_section = voice_section.get("interruption", {})
-    interrupt_tolerance = float(interruption_section.get("interrupt_tolerance", 0.3))
-    if not 0.0 <= interrupt_tolerance <= 1.0:
-        msg = (
-            f"interrupt_tolerance must be between 0.0 and 1.0, "
-            f"got {interrupt_tolerance}"
-        )
-        raise ConfigError(msg)
+    interrupt_tolerance = _parse_interrupt_tolerance(
+        interruption_section.get("interrupt_tolerance"),
+        default=InterruptTolerance.average,
+    )
     min_interruption_s = float(interruption_section.get("min_interruption_s", 1.5))
     short_long_boundary_s = float(
         interruption_section.get("short_long_boundary_s", 4.0)
@@ -376,6 +407,24 @@ def _read_toml(path: Path) -> dict | None:
             return tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         msg = f"failed to parse TOML config at {path}: {exc}"
+        raise ConfigError(msg) from exc
+
+
+def _parse_interrupt_tolerance(
+    raw: object,
+    *,
+    default: InterruptTolerance,
+) -> InterruptTolerance:
+    if raw is None:
+        return default
+    if not isinstance(raw, str):
+        msg = f"interrupt_tolerance must be a string, got {type(raw).__name__}"
+        raise ConfigError(msg)
+    try:
+        return InterruptTolerance(raw)
+    except ValueError as exc:
+        valid = ", ".join(m.value for m in InterruptTolerance)
+        msg = f"unknown interrupt_tolerance tier {raw!r}; valid options: {valid}"
         raise ConfigError(msg) from exc
 
 
