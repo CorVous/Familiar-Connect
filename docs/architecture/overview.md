@@ -63,26 +63,29 @@ required (nothing runs without them), the rest are optional and the
 bot degrades gracefully when they are absent or unconfigured.
 
 ```mermaid
-architecture-beta
-    group runtime[Runtime]
-    service bot(server)[familiar connect] in runtime
+flowchart LR
+    subgraph required [Required]
+        direction TB
+        discord[Discord Gateway]
+        openrouter[OpenRouter LLM]
+    end
 
-    group required[Required]
-    service discord(internet)[Discord Gateway] in required
-    service openrouter(internet)[OpenRouter LLM] in required
+    bot([familiar-connect<br/>runtime])
 
-    group optional[Optional]
-    service cartesia(internet)[Cartesia TTS] in optional
-    service azure(internet)[Azure Speech] in optional
-    service deepgram(internet)[Deepgram STT] in optional
-    service twitch(internet)[Twitch EventSub] in optional
+    subgraph optional [Optional]
+        direction TB
+        cartesia[Cartesia TTS]
+        azure[Azure Speech]
+        deepgram[Deepgram STT]
+        twitch[Twitch EventSub]
+    end
 
-    bot:L -- R:discord
-    bot:R -- L:openrouter
-    bot:T -- B:cartesia
-    bot:T -- B:azure
-    bot:B -- T:deepgram
-    bot:B -- T:twitch
+    discord <--> bot
+    openrouter <--> bot
+    bot --> cartesia
+    bot --> azure
+    deepgram -.not yet wired.-> bot
+    twitch --> bot
 ```
 
 - **Discord Gateway** (required) — `DISCORD_TOKEN`. The bot has nothing
