@@ -463,14 +463,29 @@ def _build_voice_response_handler(
         """
         nonlocal lull_gen_task
 
+        speaker = user_names.get(user_id, f"User-{user_id}")
+
         if event_type == "SpeechStarted":
             debounce_speakers.add(user_id)
+            had_timer = lull_gen_task is not None
             # Someone started talking — cancel the lull timer.
             if lull_gen_task is not None:
                 lull_gen_task.cancel()
                 lull_gen_task = None
+            _logger.debug(
+                "VAD SpeechStarted from %s (active=%s, timer_cancelled=%s)",
+                speaker,
+                debounce_speakers,
+                had_timer,
+            )
         elif event_type == "UtteranceEnd":
             debounce_speakers.discard(user_id)
+            _logger.debug(
+                "VAD UtteranceEnd from %s (active=%s, pending=%d)",
+                speaker,
+                debounce_speakers,
+                len(pending_utterances),
+            )
             # Everyone stopped — start the lull timer if we have
             # buffered results.
             if not debounce_speakers and pending_utterances:
@@ -500,10 +515,14 @@ def _build_voice_response_handler(
             len(pending_utterances),
         )
 
-        # Fallback: if nobody is currently speaking (VAD already
-        # processed the UtteranceEnd before this result arrived),
-        # start the lull timer.
-        if not debounce_speakers and lull_gen_task is None:
+        # Each new transcript is direct evidence of recent speech.
+        # (Re)start the lull timer so the countdown runs from the
+        # latest result, not from a stale UtteranceEnd.  Without
+        # this reset, a timer started by an earlier event can fire
+        # before the next segment arrives during continuous speech.
+        if not debounce_speakers:
+            if lull_gen_task is not None:
+                lull_gen_task.cancel()
             lull_gen_task = asyncio.create_task(_lull_then_generate())
 
     return _handle_voice_result, tracker, detector, _on_vad_event

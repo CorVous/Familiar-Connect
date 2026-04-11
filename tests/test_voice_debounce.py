@@ -267,3 +267,41 @@ class TestVoiceDebounce:
         pipeline_mock = familiar.build_pipeline.return_value
         request = pipeline_mock.assemble.call_args[0][0]
         assert request.utterance == "hello how are you"
+
+    @pytest.mark.asyncio
+    async def test_successive_results_reset_lull_timer(self) -> None:
+        """Each new transcript resets the lull countdown.
+
+        Simulates continuous speech where Deepgram finalises segments
+        faster than the lull timeout.  Without timer-reset, the first
+        timer could fire before later segments arrive.
+        """
+        handler, _, _, _vad_cb, familiar = _build(lull_timeout=0.08)
+
+        r1 = TranscriptionResult(text="first", is_final=True, start=0.0, end=0.5)
+        await handler(42, r1)
+
+        # Wait less than lull_timeout, then send another result.
+        await asyncio.sleep(0.04)
+        familiar.llm_client.chat.assert_not_called()
+
+        r2 = TranscriptionResult(text="second", is_final=True, start=0.5, end=1.0)
+        await handler(42, r2)
+
+        # Wait less than lull_timeout again — timer was reset by r2.
+        await asyncio.sleep(0.04)
+        familiar.llm_client.chat.assert_not_called()
+
+        r3 = TranscriptionResult(text="third", is_final=True, start=1.0, end=1.5)
+        await handler(42, r3)
+
+        # Now wait for the full lull to expire after the LAST result.
+        await asyncio.sleep(0.15)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        # Single generation with all three segments.
+        familiar.llm_client.chat.assert_called_once()
+        pipeline_mock = familiar.build_pipeline.return_value
+        request = pipeline_mock.assemble.call_args[0][0]
+        assert request.utterance == "first second third"
