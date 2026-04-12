@@ -361,6 +361,7 @@ async def subscribe_my_voice(
             user_names=user_names,
             resolve_name=_resolve_from_channel,
             response_handler=response_handler,
+            lull_timeout=familiar.config.lull_timeout,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),

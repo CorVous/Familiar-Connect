@@ -24,6 +24,8 @@ from discord import utils
 from discord.errors import ConnectionClosed
 from discord.gateway import DiscordVoiceWebSocket
 
+from familiar_connect.voice_pipeline import get_pipeline
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -143,8 +145,29 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
             await self._handle_execute_transition(msg.get("d", {}))
         elif op == self.DAVE_PREPARE_EPOCH:
             await self._handle_prepare_epoch(msg.get("d", {}))
+        elif op == self.SPEAKING:
+            self._handle_speaking(msg.get("d", {}))
 
         await super().received_message(msg)
+
+    def _handle_speaking(self, data: Mapping[str, Any]) -> None:
+        """Op 5: forward Discord SPEAKING events to the active voice pipeline.
+
+        The ``user_id`` field is present in Discord voice gateway v4.
+        ``speaking`` is a bitmask (1 = microphone, 2 = soundshare,
+        4 = priority speaker); any non-zero value means the user is active.
+        The event is forwarded to the pipeline's ``speaking_queue`` so the
+        :class:`_LullCollator` can gate the per-user lull timer.
+        """
+        user_id_str = data.get("user_id")
+        if not user_id_str:
+            return
+        speaking_flags = int(data.get("speaking", 0))
+        is_speaking = speaking_flags != 0
+
+        pipeline = get_pipeline()
+        if pipeline is not None:
+            pipeline.speaking_queue.put_nowait((int(user_id_str), is_speaking))
 
     async def _handle_prepare_transition(self, data: Mapping[str, Any]) -> None:
         """Op 21: store pending transition; enable passthrough if downgrading."""
