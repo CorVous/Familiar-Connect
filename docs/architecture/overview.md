@@ -222,6 +222,50 @@ the event catalogue and slash command surface.
     [Context pipeline](context-pipeline.md) page for the full list
     of deferred items.
 
+## Resilience
+
+**Third-party service calls.** Service clients (`LLMClient`,
+`CartesiaTTSClient`, the Deepgram transcriber) raise on failure;
+callers decide the fallback. Every `except` clause on a service
+call enumerates its exception types — either directly (e.g.
+`(httpx.HTTPError, ValueError, KeyError)` for `LLMClient.chat`)
+or via a Protocol-declared type (e.g. `PreProcessorError` for
+pre-processors). No catch-all `except Exception:` is used on new
+code; contract violations surface loudly.
+
+- **Main reply failure (`bot.py`).** The main-prose `LLMClient.chat`
+  call in both the text and voice reply paths catches the closed
+  raise set `(httpx.HTTPError, ValueError, KeyError)`, logs a
+  warning, and returns silently. No apology text, no reaction, no
+  history write for the failed turn — the user sees nothing and
+  can simply retry. `LLMClient`'s own 120 s httpx timeout is the
+  ceiling; no extra `asyncio.timeout` wrapper is added because the
+  main reply is the one call for which a long wait is preferable
+  to a fallback.
+- **LLM retry policy.** `LLMClient` retries only on HTTP 429 with
+  exponential backoff (honouring `Retry-After` when present, up
+  to `_MAX_DELAY_S`). Every other failure — transport error,
+  non-2xx response, malformed payload — is the caller's
+  responsibility.
+- **TTS failure.** `CartesiaTTSClient.synthesize` raises on every
+  non-2xx response and on any transport error. The `bot.py` call
+  sites swallow TTS exceptions with `_logger.exception` so a
+  missing voice clip never blocks a text reply. The client itself
+  has no retry logic.
+- **Context pipeline pre-processors.** The pre-processor loop in
+  `ContextPipeline.assemble` catches the Protocol-declared
+  `PreProcessorError` only, logs a warning, and passes the last
+  successful request on to the next stage. Any other exception
+  escaping `PreProcessor.process` is a contract violation and
+  propagates out of the pipeline — this is intentional so bugs
+  surface loudly rather than being silently hidden.
+- **Context pipeline providers and post-processors.** Providers
+  run under a scoped `asyncio.TaskGroup` with per-provider
+  deadlines; misses are recorded as `"timeout"` / `"error"`
+  outcomes. Post-processors are each wrapped in a pass-through
+  `try/except` so a failing cleanup pass degrades to a no-op for
+  just that stage.
+
 ## Persistence
 
 - Raw transcripts of every conversation are stored verbatim in

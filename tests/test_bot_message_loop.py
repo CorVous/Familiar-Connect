@@ -27,9 +27,11 @@ from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 
 import discord
+import httpx
 import pytest
 
 from familiar_connect.bot import (
+    _build_voice_response_handler,
     _run_text_response,
     create_bot,
     on_message,
@@ -44,6 +46,7 @@ from familiar_connect.config import LLM_SLOT_NAMES, ChannelMode
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
+from familiar_connect.transcription import TranscriptionResult
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -84,6 +87,23 @@ class _StubLLMClient(LLMClient):
     async def chat(self, messages: list[Message]) -> Message:
         self.calls.append(messages)
         return Message(role="assistant", content=self.reply)
+
+
+class _RaisingLLMClient(LLMClient):
+    """LLMClient subclass whose ``chat`` always raises a configured exception.
+
+    Used by the main-reply resilience tests to simulate a failing
+    OpenRouter call without touching the network.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__(api_key="test-key", model="stub/test-model")
+        self._exc = exc
+        self.call_count = 0
+
+    async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
+        self.call_count += 1
+        raise self._exc
 
 
 def _make_llm_clients(reply: str = "I am here.") -> dict[str, LLMClient]:
@@ -789,3 +809,172 @@ class TestCreateBot:
         names = [cmd.name for cmd in bot.pending_application_commands]
         assert "awaken" not in names
         assert "sleep" not in names
+
+
+# ---------------------------------------------------------------------------
+# Main-reply resilience — failing LLMClient.chat does not poison the channel
+# ---------------------------------------------------------------------------
+
+
+def _make_http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    """Build a realistic ``httpx.HTTPStatusError`` for a synthetic response."""
+    request = httpx.Request("POST", "https://openrouter.test/api/v1/chat/completions")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(
+        f"{status_code} server error",
+        request=request,
+        response=response,
+    )
+
+
+class TestMainReplyResilience:
+    """A failing main-reply ``LLMClient.chat`` must not propagate.
+
+    The caller catches the closed raise set
+    ``(httpx.HTTPError, ValueError, KeyError)``, logs a warning, and
+    returns early — no post-processing, no history write, no Discord
+    send, no TTS. The Discord event callback stays alive for the next
+    message. History is left untouched so the user can simply retry.
+    """
+
+    def test_text_main_reply_llm_failure_does_not_crash(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """httpx.ConnectTimeout from the main LLM is caught and logged."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.imitate_voice
+        )
+        failing = _RaisingLLMClient(httpx.ConnectTimeout("boom"))
+        familiar.llm_clients["main_prose"] = failing
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with caplog.at_level("WARNING", logger="familiar_connect.bot"):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        # Main LLM was called exactly once and raised.
+        assert failing.call_count == 1
+        # No reply reached Discord.
+        channel.send.assert_not_called()
+        # No history was persisted for this failed turn.
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=12345, limit=10
+        )
+        assert turns == []
+        # A warning was logged naming the failure site.
+        assert any(
+            "main reply" in record.getMessage() and record.levelname == "WARNING"
+            for record in caplog.records
+        )
+
+    def test_text_main_reply_http_500_does_not_crash(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A 5xx HTTPStatusError from the main LLM is caught and logged."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.imitate_voice
+        )
+        failing = _RaisingLLMClient(_make_http_status_error(500))
+        familiar.llm_clients["main_prose"] = failing
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with caplog.at_level("WARNING", logger="familiar_connect.bot"):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        channel.send.assert_not_called()
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=12345, limit=10
+        )
+        assert turns == []
+        assert any(
+            "main reply" in record.getMessage() and record.levelname == "WARNING"
+            for record in caplog.records
+        )
+
+    def test_voice_main_reply_failure_does_not_crash(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failing main LLM on the voice path returns cleanly.
+
+        No TTS call, no history write, and the handler does not raise
+        — the transcriber's callback loop stays alive.
+        """
+        familiar = _make_familiar(tmp_path)
+        # No tts_client on the stub Familiar, so TTS is implicitly not
+        # exercised; the assertion is instead that we never reach it.
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        failing = _RaisingLLMClient(_make_http_status_error(503))
+        familiar.llm_clients["main_prose"] = failing
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        handler = _build_voice_response_handler(
+            vc=vc,
+            familiar=familiar,
+            voice_channel_id=9000,
+            guild_id=999,
+            user_names={42: "Alice"},
+        )
+        transcription = TranscriptionResult(
+            text="hello there",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        with caplog.at_level("WARNING", logger="familiar_connect.bot"):
+            asyncio.run(handler(42, transcription))
+
+        # Main LLM was invoked and raised.
+        assert failing.call_count == 1
+        # No audio was played (no TTS fan-out).
+        vc.play.assert_not_called()
+        # No history turns were written for the failed voice turn.
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=10
+        )
+        assert turns == []
+        # A warning was logged naming the failure site.
+        assert any(
+            "main reply" in record.getMessage() and record.levelname == "WARNING"
+            for record in caplog.records
+        )

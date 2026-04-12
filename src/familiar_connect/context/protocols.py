@@ -16,6 +16,17 @@ if TYPE_CHECKING:
     from familiar_connect.context.types import ContextRequest, Contribution
 
 
+class PreProcessorError(RuntimeError):
+    """Signals a ``PreProcessor.process`` failure the pipeline should isolate.
+
+    The :class:`PreProcessor` protocol permits ``process()`` to raise
+    this one type and no other. Any other exception escaping
+    ``process`` is a contract violation and will propagate out of the
+    pipeline — this is intentional so contract violations surface
+    loudly rather than being masked by a blanket ``except Exception``.
+    """
+
+
 @runtime_checkable
 class ContextProvider(Protocol):
     """Produces ``Contribution``s for a single pipeline run.
@@ -45,6 +56,13 @@ class PreProcessor(Protocol):
     to the request so downstream providers and the main LLM can see
     it. Pre-processors run sequentially in registration order; each
     one receives the previous one's output.
+
+    **Raise contract.** ``process`` may raise :class:`PreProcessorError`
+    to signal a failure it wants the pipeline to isolate (the pipeline
+    will log it at warning level and skip this processor, passing the
+    unmodified request to the next stage). Any other exception is a
+    protocol violation and will propagate out of
+    :meth:`ContextPipeline.assemble`.
     """
 
     id: str
