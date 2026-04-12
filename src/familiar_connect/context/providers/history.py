@@ -10,15 +10,16 @@ Step 6 of docs/architecture/context-pipeline.md. Reads turns from the
   conversations don't bleed into each other.
 - A ``history_summary`` Contribution containing a rolling summary of
   every turn the familiar has heard *globally* (across all channels)
-  except the most recent ``summary_lag`` turns, built by a cheap
-  :class:`SideModel` and cached in the store under ``familiar_id``.
-  The cache is keyed by ``last_summarised_id``; the summariser is
-  only re-invoked when enough new turns have arrived globally that
-  the cached watermark has fallen behind.
+  except the most recent ``summary_lag`` turns, built by the
+  ``history_summary`` slot's :class:`LLMClient` and cached in the
+  store under ``familiar_id``. The cache is keyed by
+  ``last_summarised_id``; the summariser is only re-invoked when
+  enough new turns have arrived globally that the cached watermark
+  has fallen behind.
 
 The provider has its own internal soft deadline for the summariser,
-shorter than the pipeline's per-provider deadline, so a slow side-
-model never costs us the recent-history layer. If the summariser
+shorter than the pipeline's per-provider deadline, so a slow LLM
+call never costs us the recent-history layer. If the summariser
 exceeds the soft deadline (or raises) and there is a stale cached
 summary, the stale value is returned. If neither path produces text,
 the provider returns just the recent layer and lets the pipeline
@@ -40,15 +41,16 @@ from typing import TYPE_CHECKING
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
+from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
-    from familiar_connect.context.side_model import SideModel
     from familiar_connect.context.types import ContextRequest
     from familiar_connect.history.store import (
         HistoryStore,
         HistoryTurn,
         OtherChannelInfo,
     )
+    from familiar_connect.llm import LLMClient
 
 
 _logger = logging.getLogger(__name__)
@@ -86,10 +88,10 @@ DEFAULT_DEADLINE_S = 15.0
 DEFAULT_SUMMARY_TIMEOUT_S = 12.0
 """Soft cap on the summariser sub-call. Strictly less than
 DEFAULT_DEADLINE_S so the recent-history layer always returns even
-when the cheap model stalls."""
+when the model stalls."""
 
-DEFAULT_MAX_SUMMARY_TOKENS = 256
-"""Approximate target length the summariser is asked to produce."""
+_MAX_SUMMARY_TOKENS_HINT = 256
+"""Approximate target length advertised to the summariser in the prompt."""
 
 _SUMMARY_PROMPT_TEMPLATE = (
     "Summarise the following conversation in at most {max_tokens} tokens. "
@@ -128,8 +130,9 @@ class HistoryProvider:
 
     :param store: The :class:`HistoryStore` to read turns from and
         cache summaries in.
-    :param side_model: The :class:`SideModel` used to build new
-        summaries when the cache is stale.
+    :param llm_client: The :class:`LLMClient` for the
+        ``history_summary`` slot, used to build new summaries when
+        the cache is stale.
     :param window_size: Number of recent turns *per channel* to
         surface verbatim. Defaults to ``DEFAULT_WINDOW_SIZE``.
     :param summary_lag: Number of most-recent-globally turns to
@@ -145,8 +148,6 @@ class HistoryProvider:
         filtering is applied (backwards-compatible default for
         existing callers and tests).
     :param summary_timeout_s: Soft cap on the summariser sub-call.
-    :param max_summary_tokens: Approximate target length for the
-        summariser's output.
     """
 
     id = "history"
@@ -156,23 +157,21 @@ class HistoryProvider:
         self,
         *,
         store: HistoryStore,
-        side_model: SideModel,
+        llm_client: LLMClient,
         window_size: int = DEFAULT_WINDOW_SIZE,
         summary_lag: int | None = None,
         mode: ChannelMode | None = None,
         summary_timeout_s: float = DEFAULT_SUMMARY_TIMEOUT_S,
-        max_summary_tokens: int = DEFAULT_MAX_SUMMARY_TOKENS,
     ) -> None:
         if window_size <= 0:
             msg = f"window_size must be > 0, got {window_size}"
             raise ValueError(msg)
         self._store = store
-        self._side_model = side_model
+        self._llm_client = llm_client
         self._window_size = window_size
         self._summary_lag = summary_lag if summary_lag is not None else window_size
         self._mode = mode
         self._summary_timeout_s = summary_timeout_s
-        self._max_summary_tokens = max_summary_tokens
 
     async def contribute(
         self,
@@ -273,13 +272,13 @@ class HistoryProvider:
             return ""
 
         prompt = _SUMMARY_PROMPT_TEMPLATE.format(
-            max_tokens=self._max_summary_tokens,
+            max_tokens=_MAX_SUMMARY_TOKENS_HINT,
             transcript=_render_turns(older),
         )
-        summary = await self._side_model.complete(
-            prompt,
-            max_tokens=self._max_summary_tokens,
+        reply = await self._llm_client.chat(
+            [Message(role="user", content=prompt)],
         )
+        summary = reply.content
         if not summary:
             return ""
 
@@ -389,10 +388,10 @@ class HistoryProvider:
             source_mode_desc=source_mode_desc,
             transcript=_render_turns(turns),
         )
-        summary = await self._side_model.complete(
-            prompt,
-            max_tokens=self._max_summary_tokens,
+        reply = await self._llm_client.chat(
+            [Message(role="user", content=prompt)],
         )
+        summary = reply.content
         if not summary:
             return ""
 

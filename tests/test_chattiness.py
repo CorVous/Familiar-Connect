@@ -27,6 +27,7 @@ from familiar_connect.chattiness import (
     is_direct_address,
 )
 from familiar_connect.config import Interjection
+from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -47,7 +48,7 @@ def _make_monitor(
     side_model_reply: str = "YES",
     on_respond: Callable[[int, list[BufferedMessage]], Awaitable[None]] | None = None,
 ) -> tuple[ConversationMonitor, list[tuple[int, list[BufferedMessage]]]]:
-    """Build a ConversationMonitor with a stub side model.
+    """Build a ConversationMonitor with a stub ``interjection_decision`` client.
 
     Returns the monitor and a list that records every ``on_respond`` call as
     ``(channel_id, buffer_snapshot)``.
@@ -59,8 +60,10 @@ def _make_monitor(
     ) -> None:
         calls.append((channel_id, list(buffer)))
 
-    side_model = MagicMock()
-    side_model.complete = AsyncMock(return_value=side_model_reply)
+    llm_client = MagicMock()
+    llm_client.chat = AsyncMock(
+        return_value=Message(role="assistant", content=side_model_reply),
+    )
 
     monitor = ConversationMonitor(
         familiar_name=familiar_name,
@@ -68,7 +71,7 @@ def _make_monitor(
         chattiness=chattiness,
         interjection=interjection,
         lull_timeout=lull_timeout,
-        side_model=side_model,
+        llm_client=llm_client,
         character_card="You are Aria.",
         on_respond=on_respond if on_respond is not None else _default_on_respond,
     )

@@ -133,7 +133,7 @@ Module: `familiar_connect.context.providers.history`.
 Reads from the existing text/voice history store and emits two contributions per call:
 
 - The last N turns verbatim (`Layer.recent_history`, high priority).
-- A `Layer.history_summary` contribution built from older turns via a cheap side-model.
+- A `Layer.history_summary` contribution built from older turns via the `history_summary` LLM slot.
 
 Summaries are cached in SQLite keyed by `(familiar_id, last_summarised_id)` — global per familiar, regardless of which channel each older turn happened in — so they are only regenerated when new turns have actually been added to the familiar's history. The recent rolling window is partitioned per channel; the rolling summary is global per familiar. Compression target is roughly 10:1.
 
@@ -147,7 +147,7 @@ Delivered in one commit on top of step 10:
 - **`familiar_connect.subscriptions`** — `SubscriptionRegistry` persisted to `data/familiars/<id>/subscriptions.toml`. Replaced the old single-slot `text_session` registry.
 - **`familiar_connect.channel_config`** — `ChannelConfigStore` with lazy per-channel TOML sidecars under `data/familiars/<id>/channels/`.
 - **`familiar_connect.context.render`** — `assemble_chat_messages` owns the SillyTavern-accurate `Layer.depth_inject` placement (insert at position-from-end of the full chat list, clamped to after the system prompt).
-- **`familiar_connect.familiar`** — `Familiar` dataclass bundles config, memory store, history store, side model, providers, processors, subscriptions, and channel configs. `Familiar.load_from_disk` is the sole constructor. `Familiar.build_pipeline(channel_config)` filters registered providers/processors per channel mode.
+- **`familiar_connect.familiar`** — `Familiar` dataclass bundles config, memory store, history store, per-slot `LLMClient`s (keyed by slot name), providers, processors, subscriptions, and channel configs. `Familiar.load_from_disk` is the sole constructor. `Familiar.build_pipeline(channel_config)` filters registered providers/processors per channel mode.
 - **`bot.py`** — `/awaken` and `/sleep` are gone; `/subscribe-text`, `/unsubscribe-text`, `/subscribe-my-voice`, `/unsubscribe-voice`, `/channel-full-rp`, `/channel-text-conversation-rp`, and `/channel-imitate-voice` replaced them. `on_message` routes every subscribed message through the pipeline, runs post-processors, persists both turns to `HistoryStore`, and fans out to TTS when a voice subscription exists in the same guild.
 - **`commands/run.py`** — selects the active familiar via `FAMILIAR_ID` env var (or `--familiar` flag), builds the `Familiar` bundle from disk, and hands it to `create_bot`.
 - **`ContextPipeline`** gained a `post_processors` parameter and a `run_post_processors` method; the bot calls it on the main LLM reply before TTS/history. Processors run in reverse registration order; a processor that raises is caught and its stage skipped.

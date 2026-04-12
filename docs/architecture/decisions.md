@@ -46,3 +46,20 @@ These are ideas that were seriously considered during planning and deliberately 
 **Why it's rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that principle, and the scale Familiar-Connect targets (one bot, N guilds, a single host, a learning project not headed for wide adoption) does not justify the operational or privacy cost. A plain-text memory directory plus a cheap search agent is strictly simpler and has the additional property that a human can `grep` and edit the familiar's memory directly. See [Memory](memory.md).
 
 This rejection also applies to **running a memory MCP server we own as a sidecar** for the bot's own internal use. MCP is useful when multiple separate agents need to share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle to manage). MCP stays on the table as a way to later *expose* Familiar-Connect's memory to external tools; it is not how Familiar-Connect consumes its own.
+
+## A single "side model" shared by every cheap call site
+
+**The idea:** Keep the earlier `main` / `side` LLM split — one `main` client for the spoken reply and one `side` client that every background task (stepped-thinking preprocessor, recast postprocessor, history summariser, content-search agent loop, interjection decider) routes through. Each site would just call `side_model.complete(prompt)` and share budget, temperature, and model with every other cheap call.
+
+**Why it's rejected:** Six call sites paid a real cost for sharing a single slot. Each one has a different latency/cost/quality profile:
+
+- `main_prose` wants a heavyweight model and warm temperature for reply quality.
+- `post_process_style` is a short rewrite that wants a cheap fast model with tight temperature.
+- `reasoning_context` is a hidden chain-of-thought that wants a model tuned for reasoning at low temperature.
+- `history_summary` wants determinism (low temperature) and a long context window.
+- `memory_search` runs a tool-calling loop and benefits from a model that follows structured prompts.
+- `interjection_decision` is a boolean classifier that wants the cheapest model on the menu.
+
+One "side" pool forced the operator to pick the lowest common denominator. Worse, the `SideModel` Protocol (`complete(prompt: str) -> str`) was sugar for a single-message chat call — a whole abstraction layer (Protocol, adapter, separate module, test module, cognitive "main vs side" distinction) paying for two lines of code. Splitting the slots into six named call sites on the per-familiar `character.toml` gave each site its own model / temperature knob, erased the `SideModel` adapter entirely (every site now holds an `LLMClient` and calls `.chat(messages)` directly), and moved LLM configuration from install-scoped `.env` to character-scoped TOML so swapping `FAMILIAR_ID` swaps the full configuration profile, not just the persona.
+
+All slots still share one `OPENROUTER_API_KEY` and the same process-wide rate-limit semaphore in `familiar_connect.llm.get_request_semaphore`, so splitting one client into six does not multiply concurrency against the OpenRouter key. See [Configuration model](configuration-model.md#per-call-site-llm-slots) for the final slot catalogue.

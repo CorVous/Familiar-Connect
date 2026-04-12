@@ -1,14 +1,15 @@
-"""ContentSearchProvider — the cheap-model memory search agent.
+"""ContentSearchProvider — the memory-search agent loop.
 
 Step 8 of docs/architecture/context-pipeline.md. The interesting one.
 
-Each :meth:`contribute` call hands a single :class:`SideModel` a small
-toolset scoped to one familiar's :class:`MemoryStore` —
-``list_dir``, ``glob``, ``grep``, ``read_file`` — and runs a bounded
-loop. The model decides which tools to call (or that it has enough
-context); the provider executes the calls against the store; the
-loop ends when the model emits an ``ANSWER:`` line, the iteration
-cap is hit, or the pipeline-level deadline expires.
+Each :meth:`contribute` call hands the ``memory_search`` slot's
+:class:`LLMClient` a small toolset scoped to one familiar's
+:class:`MemoryStore` — ``list_dir``, ``glob``, ``grep``,
+``read_file`` — and runs a bounded loop. The model decides which
+tools to call (or that it has enough context); the provider
+executes the calls against the store; the loop ends when the
+model emits an ``ANSWER:`` line, the iteration cap is hit, or the
+pipeline-level deadline expires.
 
 The first cut uses **structured prompting** rather than a real
 tool-call API: the prompt asks the model to reply with one of two
@@ -17,13 +18,10 @@ line shapes,
     TOOL: {"tool": "name", "args": {...}}
     ANSWER: <relevant context text>
 
-and the provider parses by line prefix. This keeps the
-:class:`SideModel` Protocol surface tiny (one method, ``complete``)
-and lets the loop logic be tested precisely with scripted stubs.
-A real ``chat_with_tools``-style API on :class:`SideModel` is a
-future drop-in; the provider's loop logic doesn't depend on which
-wire format the cheap model speaks, only on what comes back as
-text.
+and the provider parses by line prefix. A real
+``chat_with_tools``-style API is a future drop-in; the provider's
+loop logic doesn't depend on which wire format the model speaks,
+only on what comes back as text.
 
 Errors from the store (path traversal, size cap, missing file, …)
 are caught and fed back to the model as the tool's "result" string,
@@ -39,11 +37,12 @@ from typing import TYPE_CHECKING, Any
 
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
+from familiar_connect.llm import Message
 from familiar_connect.memory.store import MemoryStoreError
 
 if TYPE_CHECKING:
-    from familiar_connect.context.side_model import SideModel
     from familiar_connect.context.types import ContextRequest
+    from familiar_connect.llm import LLMClient
     from familiar_connect.memory.store import MemoryStore
 
 
@@ -62,21 +61,17 @@ DEFAULT_DEADLINE_S = 15.0
 """Hard cap the pipeline enforces on this provider's contribute() call.
 
 The provider's internal loop has its own iteration cap; the deadline
-exists so a runaway side-model never blocks the reply.
+exists so a runaway agent loop never blocks the reply.
 """
 
 DEFAULT_MAX_ITERATIONS = 5
-"""Maximum number of side-model calls per contribute() invocation.
+"""Maximum number of LLM calls per contribute() invocation.
 
 Hit when the model keeps emitting tool calls without ever returning
 an ANSWER. After the cap, the provider gives up and returns no
 contribution; the pipeline gets one fewer Contribution rather than
 a stalled reply.
 """
-
-DEFAULT_MAX_ANSWER_TOKENS = 512
-"""Approximate length the side-model is asked to target for its
-final ANSWER text."""
 
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -121,18 +116,17 @@ _TOOL_RESULT_PREFIX = "TOOL_RESULT"
 
 
 class ContentSearchProvider:
-    """ContextProvider that runs a tool-using cheap-model loop over a MemoryStore.
+    """ContextProvider that runs a tool-using agent loop over a MemoryStore.
 
     Conforms to the ContextProvider Protocol structurally — no
     inheritance required.
 
     :param store: The familiar's :class:`MemoryStore`.
-    :param side_model: The cheap :class:`SideModel` to drive the loop.
-    :param max_iterations: Maximum number of side-model calls per
+    :param llm_client: The :class:`LLMClient` for the
+        ``memory_search`` slot.
+    :param max_iterations: Maximum number of LLM calls per
         contribute() invocation. Defaults to
         :data:`DEFAULT_MAX_ITERATIONS`.
-    :param max_answer_tokens: Hint to the side-model for the
-        ANSWER's target length.
     """
 
     id = "content_search"
@@ -142,17 +136,15 @@ class ContentSearchProvider:
         self,
         *,
         store: MemoryStore,
-        side_model: SideModel,
+        llm_client: LLMClient,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
-        max_answer_tokens: int = DEFAULT_MAX_ANSWER_TOKENS,
     ) -> None:
         if max_iterations <= 0:
             msg = f"max_iterations must be > 0, got {max_iterations}"
             raise ValueError(msg)
         self._store = store
-        self._side_model = side_model
+        self._llm_client = llm_client
         self._max_iterations = max_iterations
-        self._max_answer_tokens = max_answer_tokens
 
     async def contribute(
         self,
@@ -177,11 +169,10 @@ class ContentSearchProvider:
                 scratchpad="\n".join(scratchpad) if scratchpad else "(none yet)",
             )
 
-            response = await self._side_model.complete(
-                prompt,
-                max_tokens=self._max_answer_tokens,
+            reply = await self._llm_client.chat(
+                [Message(role="user", content=prompt)],
             )
-            parsed = _parse_response(response)
+            parsed = _parse_response(reply.content)
 
             if parsed.kind == "answer":
                 return self._answer_to_contribution(parsed.text)
@@ -288,7 +279,7 @@ class ContentSearchProvider:
 
 
 class _ParsedResponse:
-    """Discriminated parse of a single side-model response.
+    """Discriminated parse of a single LLM response.
 
     ``kind`` is one of:
 

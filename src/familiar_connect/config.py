@@ -104,6 +104,52 @@ class Interjection(Enum):
 _DEFAULT_CHATTINESS = "Balanced — responds when the conversation is relevant"
 
 
+LLM_SLOT_NAMES: frozenset[str] = frozenset(
+    {
+        "main_prose",
+        "post_process_style",
+        "reasoning_context",
+        "history_summary",
+        "memory_search",
+        "interjection_decision",
+    },
+)
+"""Canonical set of LLM call-site slot names.
+
+Every LLM call site in the codebase resolves its ``LLMClient`` from
+:attr:`CharacterConfig.llm` by one of these names. A user's
+``character.toml`` may omit individual slots — missing slots inherit
+from ``data/familiars/_default/character.toml``. Adding a new call
+site means adding a name here, wiring it in the familiar bundle,
+and adding the default in ``_default/character.toml``.
+"""
+
+
+@dataclass(frozen=True)
+class LLMSlotConfig:
+    """Per-call-site LLM config loaded from a ``[llm.<slot>]`` TOML section.
+
+    :param model: OpenRouter-style model id (e.g. ``"z-ai/glm-5.1"``).
+    :param temperature: Sampling temperature. May be ``None`` if the
+        call site should rely on the provider's own default.
+    """
+
+    model: str
+    temperature: float | None = None
+
+
+@dataclass(frozen=True)
+class TTSConfig:
+    """Text-to-speech config loaded from the ``[tts]`` TOML section.
+
+    :param voice_id: Cartesia voice id. ``None`` means no TTS at all.
+    :param model: Cartesia model name (e.g. ``"sonic-3"``).
+    """
+
+    voice_id: str | None = None
+    model: str | None = None
+
+
 @dataclass(frozen=True)
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``.
@@ -125,12 +171,17 @@ class CharacterConfig:
     :param aliases: Additional names the familiar responds to (beyond
         the ``familiar_id``). Used for direct-address detection.
     :param chattiness: Free-text personality trait describing the
-        familiar's conversational disposition. Fed to the side model's
-        evaluation prompt.
+        familiar's conversational disposition. Fed to the interjection
+        monitor's evaluation prompt.
     :param interjection: Controls how long the familiar waits before
-        the side model is consulted during an active conversation.
+        the interjection monitor is consulted during an active
+        conversation.
     :param lull_timeout: Seconds of silence before the lull evaluation
         fires.
+    :param llm: ``slot_name -> LLMSlotConfig`` map for every LLM call
+        site. Populated by the loader; slots missing from the user's
+        ``character.toml`` fall back to ``_default/character.toml``.
+    :param tts: :class:`TTSConfig` for Cartesia voice output.
     """
 
     default_mode: ChannelMode = DEFAULT_CHANNEL_MODE
@@ -145,6 +196,8 @@ class CharacterConfig:
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average
     lull_timeout: float = 2.0
+    llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
+    tts: TTSConfig = field(default_factory=TTSConfig)
 
 
 @dataclass(frozen=True)
@@ -262,16 +315,45 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
 # ---------------------------------------------------------------------------
 
 
-def load_character_config(path: Path) -> CharacterConfig:
-    """Load a :class:`CharacterConfig` from *path*, or defaults if missing.
+def load_character_config(
+    path: Path,
+    *,
+    defaults_path: Path,
+) -> CharacterConfig:
+    """Load a :class:`CharacterConfig` from *path*, merged over *defaults_path*.
 
-    :raises ConfigError: If the file exists but is not valid TOML,
-        or references an unknown :class:`ChannelMode`.
+    The loader reads two TOML files and deep-merges the user's on top
+    of the default profile:
+
+    1. ``defaults_path`` — the repo's reference profile at
+       ``data/familiars/_default/character.toml``. **Required**:
+       missing or malformed raises :class:`ConfigError` because it's
+       a checked-in repo asset, not user data.
+    2. ``path`` — the active familiar's ``character.toml``. Missing
+       is fine (the defaults alone produce a valid config). Present
+       values override the defaults nested per-key, so a user who
+       only wants to tweak ``[llm.main_prose].model`` doesn't have
+       to restate the other five LLM slots.
+
+    :raises ConfigError: If the default profile is missing, either
+        file is invalid TOML, ``[llm.<slot>]`` names an unknown slot,
+        or any parsed value fails validation.
     """
-    data = _read_toml(path)
-    if data is None:
-        return CharacterConfig()
+    defaults_data = _read_toml(defaults_path)
+    if defaults_data is None:
+        msg = (
+            f"default character profile not found at {defaults_path}. "
+            "This file is a required repo asset — check your install."
+        )
+        raise ConfigError(msg)
 
+    target_data = _read_toml(path) or {}
+    merged = _deep_merge(defaults_data, target_data)
+    return _parse_character_config(merged)
+
+
+def _parse_character_config(data: dict) -> CharacterConfig:
+    """Build a :class:`CharacterConfig` from a merged TOML dict."""
     default_mode = _parse_mode(data.get("default_mode"), default=DEFAULT_CHANNEL_MODE)
 
     history_section = data.get("providers", {}).get("history", {})
@@ -303,6 +385,18 @@ def load_character_config(path: Path) -> CharacterConfig:
 
     lull_timeout = float(data.get("lull_timeout", 2.0))
 
+    llm_raw = data.get("llm", {})
+    if not isinstance(llm_raw, dict):
+        msg = f"[llm] must be a table, got {type(llm_raw).__name__}"
+        raise ConfigError(msg)
+    llm = _parse_llm_slots(llm_raw)
+
+    tts_raw = data.get("tts", {})
+    if not isinstance(tts_raw, dict):
+        msg = f"[tts] must be a table, got {type(tts_raw).__name__}"
+        raise ConfigError(msg)
+    tts = _parse_tts_config(tts_raw)
+
     return CharacterConfig(
         default_mode=default_mode,
         history_window_size=history_window_size,
@@ -313,6 +407,8 @@ def load_character_config(path: Path) -> CharacterConfig:
         chattiness=chattiness,
         interjection=interjection,
         lull_timeout=lull_timeout,
+        llm=llm,
+        tts=tts,
     )
 
 
@@ -353,6 +449,76 @@ def _read_toml(path: Path) -> dict | None:
     except tomllib.TOMLDecodeError as exc:
         msg = f"failed to parse TOML config at {path}: {exc}"
         raise ConfigError(msg) from exc
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Return a new dict with *override* layered on top of *base*.
+
+    Nested dicts are merged key-by-key; non-dict values (including
+    lists) are replaced wholesale. Neither input is mutated.
+    """
+    result: dict = {}
+    for key, base_value in base.items():
+        if key in override:
+            override_value = override[key]
+            if isinstance(base_value, dict) and isinstance(override_value, dict):
+                result[key] = _deep_merge(base_value, override_value)
+            else:
+                result[key] = override_value
+        else:
+            result[key] = base_value
+    result.update({k: v for k, v in override.items() if k not in base})
+    return result
+
+
+def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
+    """Parse and validate the ``[llm.*]`` section into typed slot configs."""
+    slots: dict[str, LLMSlotConfig] = {}
+    for name, section in raw.items():
+        if name not in LLM_SLOT_NAMES:
+            valid = ", ".join(sorted(LLM_SLOT_NAMES))
+            msg = f"unknown LLM slot {name!r}; valid slots: {valid}"
+            raise ConfigError(msg)
+        if not isinstance(section, dict):
+            msg = f"[llm.{name}] must be a table, got {type(section).__name__}"
+            raise ConfigError(msg)
+        model = section.get("model")
+        if not isinstance(model, str) or not model:
+            msg = f"[llm.{name}].model must be a non-empty string"
+            raise ConfigError(msg)
+        temperature_raw = section.get("temperature")
+        temperature: float | None
+        if temperature_raw is None:
+            temperature = None
+        elif isinstance(temperature_raw, (int, float)) and not isinstance(
+            temperature_raw,
+            bool,
+        ):
+            temperature = float(temperature_raw)
+            if not 0.0 <= temperature <= 2.0:
+                msg = f"[llm.{name}].temperature must be in [0, 2], got {temperature}"
+                raise ConfigError(msg)
+        else:
+            msg = (
+                f"[llm.{name}].temperature must be a number, "
+                f"got {type(temperature_raw).__name__}"
+            )
+            raise ConfigError(msg)
+        slots[name] = LLMSlotConfig(model=model, temperature=temperature)
+    return slots
+
+
+def _parse_tts_config(raw: dict) -> TTSConfig:
+    """Parse and validate the ``[tts]`` section into a typed config."""
+    voice_id = raw.get("voice_id")
+    if voice_id is not None and not isinstance(voice_id, str):
+        msg = f"[tts].voice_id must be a string, got {type(voice_id).__name__}"
+        raise ConfigError(msg)
+    model = raw.get("model")
+    if model is not None and not isinstance(model, str):
+        msg = f"[tts].model must be a string, got {type(model).__name__}"
+        raise ConfigError(msg)
+    return TTSConfig(voice_id=voice_id, model=model)
 
 
 def _parse_interjection(raw: object, *, default: Interjection) -> Interjection:

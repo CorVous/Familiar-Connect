@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 
@@ -39,14 +40,18 @@ from familiar_connect.bot import (
     unsubscribe_voice,
 )
 from familiar_connect.chattiness import BufferedMessage
-from familiar_connect.config import ChannelMode
+from familiar_connect.config import LLM_SLOT_NAMES, ChannelMode
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_PROFILE_PATH = (
+    _REPO_ROOT / "data" / "familiars" / "_default" / "character.toml"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +77,7 @@ class _StubLLMClient(LLMClient):
     """LLMClient subclass that records calls and returns a canned reply."""
 
     def __init__(self, reply: str = "I am here.") -> None:
-        super().__init__(api_key="test-key")
+        super().__init__(api_key="test-key", model="stub/test-model")
         self.reply = reply
         self.calls: list[list[Message]] = []
 
@@ -81,11 +86,27 @@ class _StubLLMClient(LLMClient):
         return Message(role="assistant", content=self.reply)
 
 
+def _make_llm_clients(reply: str = "I am here.") -> dict[str, LLMClient]:
+    """Return a ``slot_name -> LLMClient`` dict with a stub in every slot.
+
+    All slots share the same canned ``reply`` so a test that cares
+    about the end-to-end reply text can set it once and have the
+    recast post-processor (which would otherwise overwrite the
+    main-prose reply with its own stub response) return the same
+    text. Tests that care about a specific call site's behaviour
+    can still reach in through ``familiar.llm_clients[slot]``.
+    """
+    return {slot: _StubLLMClient(reply=reply) for slot in LLM_SLOT_NAMES}
+
+
 def _make_familiar(tmp_path: Path, *, reply: str = "I am here.") -> Familiar:
     root = tmp_path / "aria"
     root.mkdir()
-    llm = _StubLLMClient(reply=reply)
-    return Familiar.load_from_disk(root, llm_client=llm)
+    return Familiar.load_from_disk(
+        root,
+        llm_clients=_make_llm_clients(reply=reply),
+        defaults_path=_DEFAULT_PROFILE_PATH,
+    )
 
 
 def _make_message(
@@ -312,7 +333,7 @@ class TestOnRespond:
             )
         )
 
-        llm = familiar.llm_client
+        llm = familiar.llm_clients["main_prose"]
         assert isinstance(llm, _StubLLMClient)
         main_calls = [c for c in llm.calls if c and c[0].role == "system"]
         assert len(main_calls) == 1
@@ -446,7 +467,8 @@ class TestSubscriptionCommands:
         # Reload the Familiar bundle; the subscription should come back.
         reloaded = Familiar.load_from_disk(
             familiar.root,
-            llm_client=_StubLLMClient(),
+            llm_clients=_make_llm_clients(),
+            defaults_path=_DEFAULT_PROFILE_PATH,
         )
         assert (
             reloaded.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
@@ -721,7 +743,8 @@ class TestChannelModeCommands:
 
         reloaded = Familiar.load_from_disk(
             familiar.root,
-            llm_client=_StubLLMClient(),
+            llm_clients=_make_llm_clients(),
+            defaults_path=_DEFAULT_PROFILE_PATH,
         )
         cfg = reloaded.channel_configs.get(channel_id=77)
         assert cfg.mode is ChannelMode.imitate_voice

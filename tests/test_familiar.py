@@ -1,37 +1,37 @@
 """Red-first tests for the Familiar bundle type.
 
 ``Familiar.load_from_disk`` collects every runtime concern for one
-character — config, memory store, history store, side-model,
-subscription registry, channel config store, and the full set of
-providers/processors — into a single object that the bot layer
-holds for the lifetime of the process. There is exactly one
+character — config, memory store, history store, LLM clients (one per
+call-site slot), subscription registry, channel config store, and the
+full set of providers/processors — into a single object that the bot
+layer holds for the lifetime of the process. There is exactly one
 Familiar per install (see docs/architecture/configuration-model.md).
-
-Covers familiar_connect.familiar, which doesn't exist yet.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from familiar_connect.config import (
+    LLM_SLOT_NAMES,
     ChannelMode,
     CharacterConfig,
     channel_config_for_mode,
 )
-from familiar_connect.context.side_model import LLMSideModel
 from familiar_connect.familiar import Familiar
-from familiar_connect.llm import LLMClient
+
+from .conftest import build_fake_llm_clients
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-class _StubLLMClient(LLMClient):
-    """Minimal LLMClient stand-in — Familiar.load_from_disk doesn't call it."""
-
-    def __init__(self) -> None:
-        super().__init__(api_key="test-key")
+@pytest.fixture
+def llm_clients() -> dict:
+    """Return a full ``slot_name -> FakeLLMClient`` map for tests."""
+    return build_fake_llm_clients()
 
 
 # ---------------------------------------------------------------------------
@@ -40,45 +40,104 @@ class _StubLLMClient(LLMClient):
 
 
 class TestLoadFromDisk:
-    def test_id_is_folder_name(self, tmp_path: Path) -> None:
+    def test_id_is_folder_name(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert familiar.id == "aria"
 
-    def test_missing_character_toml_yields_defaults(self, tmp_path: Path) -> None:
+    def test_missing_character_toml_yields_defaults(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert isinstance(familiar.config, CharacterConfig)
 
-    def test_character_toml_is_read(self, tmp_path: Path) -> None:
+    def test_character_toml_is_read(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
         (root / "character.toml").write_text('default_mode = "full_rp"\n')
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert familiar.config.default_mode is ChannelMode.full_rp
 
-    def test_memory_directory_is_created(self, tmp_path: Path) -> None:
+    def test_memory_directory_is_created(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
-        Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert (root / "memory").is_dir()
 
-    def test_history_db_is_created(self, tmp_path: Path) -> None:
+    def test_history_db_is_created(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
-        Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert (root / "history.db").exists()
 
-    def test_modes_directory_is_created(self, tmp_path: Path) -> None:
+    def test_modes_directory_is_created(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         """``modes/`` holds per-mode instruction files; auto-created."""
         root = tmp_path / "aria"
         root.mkdir()
-        Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert (root / "modes").is_dir()
 
-    def test_providers_registered(self, tmp_path: Path) -> None:
+    def test_providers_registered(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         """Startup providers are wired in by default.
 
         ``history`` is now constructed per-turn in build_pipeline
@@ -86,76 +145,86 @@ class TestLoadFromDisk:
         """
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert set(familiar.providers.keys()) == {
             "character",
             "content_search",
         }
 
-    def test_processors_registered(self, tmp_path: Path) -> None:
+    def test_processors_registered(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         """Both first-party processors are wired in by default."""
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert "stepped_thinking" in familiar.pre_processors
         assert "recast" in familiar.post_processors
 
     def test_subscription_registry_is_empty_on_fresh_install(
         self,
         tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
     ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert list(familiar.subscriptions.all()) == []
 
     def test_channel_configs_fall_through_to_character_default(
         self,
         tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
     ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
         (root / "character.toml").write_text('default_mode = "imitate_voice"\n')
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         cfg = familiar.channel_configs.get(channel_id=42)
         assert cfg.mode is ChannelMode.imitate_voice
 
-    def test_side_model_falls_back_to_main_llm_when_no_side_client(
+    def test_llm_clients_is_held_on_bundle(
         self,
         tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
     ) -> None:
-        """Without a side_llm_client, LLMSideModel wraps the main client.
+        """The raw dict of clients is exposed for shutdown iteration.
 
-        This is the current production default — no
-        ``OPENROUTER_SIDE_MODEL`` env var means every side-model
-        call reuses the main (expensive) model.
+        ``commands/run.py`` iterates ``familiar.llm_clients.values()``
+        at shutdown to ``close()`` each pooled HTTP client, so the
+        full dict must round-trip unchanged.
         """
         root = tmp_path / "aria"
         root.mkdir()
-        main = _StubLLMClient()
-        familiar = Familiar.load_from_disk(root, llm_client=main)
-        assert isinstance(familiar.side_model, LLMSideModel)
-        # The adapter's internal client is the main one.
-        assert familiar.side_model.llm_client is main
-
-    def test_side_model_uses_side_client_when_provided(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A separate side_llm_client is preferred for side-model work."""
-        root = tmp_path / "aria"
-        root.mkdir()
-        main = _StubLLMClient()
-        side = _StubLLMClient()
         familiar = Familiar.load_from_disk(
             root,
-            llm_client=main,
-            side_llm_client=side,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
         )
-        assert isinstance(familiar.side_model, LLMSideModel)
-        assert familiar.side_model.llm_client is side
-        # The main LLMClient for the reply path is still the main one.
-        assert familiar.llm_client is main
+        assert familiar.llm_clients is llm_clients
+        assert set(familiar.llm_clients.keys()) == set(LLM_SLOT_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +236,16 @@ class TestBuildPipeline:
     def test_full_rp_pipeline_includes_every_first_party_component(
         self,
         tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
     ) -> None:
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         channel_cfg = channel_config_for_mode(ChannelMode.full_rp)
 
         pipeline = familiar.build_pipeline(channel_cfg)
@@ -179,11 +254,20 @@ class TestBuildPipeline:
         # we know the builder sets: the pipeline's internal list.)
         assert pipeline is not None
 
-    def test_imitate_voice_drops_stepped_thinking(self, tmp_path: Path) -> None:
+    def test_imitate_voice_drops_stepped_thinking(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
+    ) -> None:
         """Pre-processors are filtered against channel.preprocessors_enabled."""
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         voice_cfg = channel_config_for_mode(ChannelMode.imitate_voice)
 
         pipeline = familiar.build_pipeline(voice_cfg)
@@ -194,6 +278,8 @@ class TestBuildPipeline:
     def test_mode_instructions_provider_is_added_per_turn(
         self,
         tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
     ) -> None:
         """ModeInstructionProvider is constructed per call.
 
@@ -204,7 +290,11 @@ class TestBuildPipeline:
         """
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         # Not in the static registry.
         assert "mode_instructions" not in familiar.providers
 
@@ -217,11 +307,17 @@ class TestBuildPipeline:
     def test_history_provider_is_added_per_turn(
         self,
         tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
     ) -> None:
         """HistoryProvider is constructed per call with mode baked in."""
         root = tmp_path / "aria"
         root.mkdir()
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
         assert "history" not in familiar.providers
 
         pipeline = familiar.build_pipeline(
@@ -233,6 +329,8 @@ class TestBuildPipeline:
     def test_mode_instructions_provider_is_mode_scoped(
         self,
         tmp_path: Path,
+        default_profile_path: Path,
+        llm_clients: dict,
     ) -> None:
         """Different channel modes produce providers bound to different files."""
         root = tmp_path / "aria"
@@ -240,7 +338,11 @@ class TestBuildPipeline:
         (root / "modes").mkdir()
         (root / "modes" / "text_conversation_rp.md").write_text("chat-style")
         (root / "modes" / "full_rp.md").write_text("novel-style")
-        familiar = Familiar.load_from_disk(root, llm_client=_StubLLMClient())
+        familiar = Familiar.load_from_disk(
+            root,
+            llm_clients=llm_clients,
+            defaults_path=default_profile_path,
+        )
 
         text_pipeline = familiar.build_pipeline(
             channel_config_for_mode(ChannelMode.text_conversation_rp),

@@ -26,11 +26,13 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from familiar_connect.llm import Message
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.config import Interjection
-    from familiar_connect.context.side_model import SideModel
+    from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger(__name__)
 
@@ -189,7 +191,8 @@ class ConversationMonitor:
     Owned by :class:`Familiar` and called by ``bot.py`` for every
     message on a subscribed channel. Internally manages per-channel
     :class:`ChannelBuffer` state, evaluates the three triggers, and
-    invokes the ``on_respond`` callback when the side model says YES.
+    invokes the ``on_respond`` callback when the interjection slot
+    says YES.
 
     :param familiar_name: Primary name (folder id) of the familiar.
     :param aliases: Additional names that trigger direct-address detection.
@@ -197,10 +200,11 @@ class ConversationMonitor:
         evaluation prompt.
     :param interjection: Tier controlling the interjection check schedule.
     :param lull_timeout: Seconds of silence before the lull evaluation fires.
-    :param side_model: Cheap model used for YES/NO evaluation.
+    :param llm_client: :class:`LLMClient` for the
+        ``interjection_decision`` slot, used for YES/NO evaluation.
     :param character_card: Pre-loaded text from the familiar's
         ``memory/self/`` files, injected into every evaluation prompt.
-    :param on_respond: Async callback invoked when the side model says YES.
+    :param on_respond: Async callback invoked when the LLM says YES.
         Receives ``(channel_id, buffer_snapshot)``.
     """
 
@@ -211,7 +215,7 @@ class ConversationMonitor:
         chattiness: str,
         interjection: Interjection,
         lull_timeout: float,
-        side_model: SideModel,
+        llm_client: LLMClient,
         character_card: str,
         on_respond: Callable[[int, list[BufferedMessage]], Awaitable[None]],
     ) -> None:
@@ -220,7 +224,7 @@ class ConversationMonitor:
         self._chattiness = chattiness
         self._interjection = interjection
         self._lull_timeout = lull_timeout
-        self._side_model = side_model
+        self._llm_client = llm_client
         self._character_card = character_card
         self.on_respond = on_respond
         self._buffers: dict[int, ChannelBuffer] = {}
@@ -357,7 +361,7 @@ class ConversationMonitor:
         buf: ChannelBuffer,
         trigger_context: str | None,
     ) -> bool:
-        """Call the side model and return True if it responds YES."""
+        """Call the interjection LLM and return True if it responds YES."""
         if trigger_context is None:
             trigger_label = "lull"
         elif trigger_context.startswith("You were directly"):
@@ -401,14 +405,17 @@ class ConversationMonitor:
             )
 
         try:
-            response = await self._side_model.complete(prompt)
+            reply = await self._llm_client.chat(
+                [Message(role="user", content=prompt)],
+            )
         except Exception:
             _logger.exception(
-                "Side model evaluation failed for channel %s",
+                "Interjection LLM evaluation failed for channel %s",
                 channel_id,
             )
             return False
 
+        response = reply.content
         decision = "YES" in response.upper()
         _logger.debug(
             "evaluate channel=%s trigger=%s decision=%s raw=%r",

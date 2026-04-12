@@ -1,16 +1,17 @@
-"""SteppedThinkingPreProcessor — hidden chain-of-thought via a cheap model.
+"""SteppedThinkingPreProcessor — hidden chain-of-thought via the reasoning slot.
 
 Step 10 of docs/architecture/context-pipeline.md. Inspired by
 SillyTavern's ``st-stepped-thinking``.
 
-Calls a cheap :class:`SideModel` with a focused "think step by step
-about what the user is really asking for" prompt and stashes the
-result on the request's ``preprocessor_contributions`` tuple as a
-:class:`Contribution` at :data:`Layer.depth_inject`. The pipeline
-picks it up automatically alongside provider contributions when
-assembling the final budgeter input.
+Calls the ``reasoning_context`` slot's :class:`LLMClient` with a
+focused "think step by step about what the user is really asking
+for" prompt and stashes the result on the request's
+``preprocessor_contributions`` tuple as a :class:`Contribution` at
+:data:`Layer.depth_inject`. The pipeline picks it up automatically
+alongside provider contributions when assembling the final
+budgeter input.
 
-The processor is **failure-isolated**: a slow side-model, an
+The processor is **failure-isolated**: a slow LLM call, an
 exception, or an empty response all return the request *unchanged*.
 A pre-processor that's broken should never block the reply.
 
@@ -29,10 +30,11 @@ from typing import TYPE_CHECKING
 
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
+from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
-    from familiar_connect.context.side_model import SideModel
     from familiar_connect.context.types import ContextRequest
+    from familiar_connect.llm import LLMClient
 
 
 _logger = logging.getLogger(__name__)
@@ -47,11 +49,11 @@ lower than recent history (80) so the active conversation always
 wins."""
 
 DEFAULT_PROCESSOR_TIMEOUT_S = 9.0
-"""Soft cap on the side-model call. Strictly bounded so a stalled
-cheap model can never block the pipeline's pre-processor phase."""
+"""Soft cap on the reasoning LLM call. Strictly bounded so a
+stalled model can never block the pipeline's pre-processor phase."""
 
-DEFAULT_MAX_THINKING_TOKENS = 256
-"""Approximate target length for the stepped-thinking output."""
+_MAX_THINKING_TOKENS_HINT = 256
+"""Approximate target length advertised to the model via the prompt."""
 
 _PROMPT_TEMPLATE = """\
 You are about to help a familiar reply to a Discord message. Before
@@ -72,12 +74,10 @@ class SteppedThinkingPreProcessor:
     Conforms to the :class:`PreProcessor` Protocol structurally — no
     inheritance required.
 
-    :param side_model: The cheap :class:`SideModel` to use for the
-        thinking pass.
-    :param processor_timeout_s: Soft cap on the side-model call.
-        On timeout, the processor returns the request unchanged.
-    :param max_thinking_tokens: Approximate target length for the
-        thinking output.
+    :param llm_client: The :class:`LLMClient` for the
+        ``reasoning_context`` slot.
+    :param processor_timeout_s: Soft cap on the LLM call. On
+        timeout, the processor returns the request unchanged.
     """
 
     id = "stepped_thinking"
@@ -85,13 +85,11 @@ class SteppedThinkingPreProcessor:
     def __init__(
         self,
         *,
-        side_model: SideModel,
+        llm_client: LLMClient,
         processor_timeout_s: float = DEFAULT_PROCESSOR_TIMEOUT_S,
-        max_thinking_tokens: int = DEFAULT_MAX_THINKING_TOKENS,
     ) -> None:
-        self._side_model = side_model
+        self._llm_client = llm_client
         self._processor_timeout_s = processor_timeout_s
-        self._max_thinking_tokens = max_thinking_tokens
 
     async def process(self, request: ContextRequest) -> ContextRequest:
         """Run the thinking pass and append a Contribution if it succeeds.
@@ -102,30 +100,29 @@ class SteppedThinkingPreProcessor:
         prompt = _PROMPT_TEMPLATE.format(
             speaker=request.speaker or "(unknown)",
             utterance=request.utterance,
-            max_tokens=self._max_thinking_tokens,
+            max_tokens=_MAX_THINKING_TOKENS_HINT,
         )
 
         try:
             async with asyncio.timeout(self._processor_timeout_s):
-                response = await self._side_model.complete(
-                    prompt,
-                    max_tokens=self._max_thinking_tokens,
+                reply = await self._llm_client.chat(
+                    [Message(role="user", content=prompt)],
                 )
         except TimeoutError:
             _logger.warning(
-                "stepped_thinking: side-model timed out after %.3fs",
+                "stepped_thinking: LLM call timed out after %.3fs",
                 self._processor_timeout_s,
             )
             return request
         except Exception as exc:  # noqa: BLE001 — isolation by design
             _logger.warning(
-                "stepped_thinking: side-model raised %s: %s",
+                "stepped_thinking: LLM call raised %s: %s",
                 type(exc).__name__,
                 exc,
             )
             return request
 
-        clean = response.strip()
+        clean = reply.content.strip()
         if not clean:
             return request
 
