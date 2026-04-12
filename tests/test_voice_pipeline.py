@@ -596,13 +596,12 @@ class TestLullCollator:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_on_speaking_false_starts_lull_that_dispatches(self) -> None:
-        """SPEAKING=False → lull → dispatch window → handler called once."""
+    async def test_final_transcript_starts_lull_that_dispatches(self) -> None:
+        """is_final → lull → dispatch window → handler called once."""
         handler = AsyncMock()
         collator = self._collator(handler)
 
         collator.on_final_transcript(42, _make_result("hello"))
-        collator.on_speaking(42, is_speaking=False)
 
         await asyncio.sleep(self.WAIT)
 
@@ -617,8 +616,7 @@ class TestLullCollator:
         handler = AsyncMock()
         collator = self._collator(handler)
 
-        collator.on_final_transcript(42, _make_result("hello"))
-        collator.on_speaking(42, is_speaking=False)  # start lull
+        collator.on_final_transcript(42, _make_result("hello"))  # start lull
         collator.on_speaking(42, is_speaking=True)  # cancel everything
 
         await asyncio.sleep(self.WAIT)
@@ -750,16 +748,14 @@ class TestLullCollator:
         handler.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_speaking_false_after_true_restarts_full_chain(self) -> None:
-        """SPEAKING=True stops timers; SPEAKING=False starts fresh lull + window."""
+    async def test_speaking_true_then_new_transcript_restarts_chain(self) -> None:
+        """SPEAKING=True stops timers; next is_final starts a fresh lull + window."""
         handler = AsyncMock()
         collator = self._collator(handler)
 
         collator.on_final_transcript(42, _make_result("first"))
-        collator.on_speaking(42, is_speaking=False)  # start lull
         collator.on_speaking(42, is_speaking=True)  # cancel (user resumed)
         collator.on_final_transcript(42, _make_result("second"))
-        collator.on_speaking(42, is_speaking=False)  # restart lull
 
         await asyncio.sleep(self.WAIT)
 
@@ -774,8 +770,6 @@ class TestLullCollator:
 
         collator.on_final_transcript(1, _make_result("Alice says hello"))
         collator.on_final_transcript(2, _make_result("Bob says hi"))
-        collator.on_speaking(1, is_speaking=False)
-        collator.on_speaking(2, is_speaking=False)
 
         await asyncio.sleep(self.WAIT)
 
@@ -797,37 +791,31 @@ class TestLullCollator:
         await asyncio.sleep(self.WAIT)  # should complete without error
 
     # ------------------------------------------------------------------
-    # Regression: fallback must NOT fire while user is still speaking.
+    # Regression: continuous speech must collate into one dispatch.
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_transcript_while_speaking_does_not_start_fallback(self) -> None:
-        """is_final arriving while SPEAKING=True must not start a dispatch timer.
+    async def test_continuous_speech_collated_into_one_dispatch(self) -> None:
+        """All transcripts from a continuous speech session dispatch as one.
 
-        Bug: Discord sends SPEAKING=False during natural mid-sentence pauses
-        and SPEAKING=True when speech resumes.  After SPEAKING=True cancels
-        all timers, a subsequent is_final would previously trigger the
-        fallback dispatch window and fire mid-utterance.  The fix tracks
-        per-user speaking state and suppresses the fallback while the user
-        is known to be speaking.
+        Regression: Discord sends SPEAKING=False during natural mid-sentence
+        pauses and SPEAKING=True when speech resumes.  After SPEAKING=True
+        cancels all timers, a subsequent is_final used to trigger a fallback
+        dispatch window and fire mid-utterance.  The fix drives the lull
+        timer from is_final events so the timer resets on every transcript
+        and can only fire after lull_timeout of transcript silence.
         """
         handler = AsyncMock()
         collator = self._collator(handler)
 
-        # Simulate continuous speech: brief pause + resume
+        # Simulate continuous speech with a Discord mid-sentence pause
         collator.on_speaking(42, is_speaking=True)
         collator.on_final_transcript(42, _make_result("first half"))
-        collator.on_speaking(42, is_speaking=False)  # brief pause
-        collator.on_speaking(42, is_speaking=True)  # user resumed
+        collator.on_speaking(42, is_speaking=False)  # brief Discord pause (no-op)
+        collator.on_speaking(42, is_speaking=True)  # user resumed → cancel lull
         collator.on_final_transcript(42, _make_result("second half"))
 
-        await asyncio.sleep(self.WAIT)
-
-        # No dispatch yet — user is still speaking
-        handler.assert_not_awaited()
-
-        # Now user truly stops → lull → dispatch fires once, combined
-        collator.on_speaking(42, is_speaking=False)
+        # Both halves collated; exactly one dispatch fires after lull
         await asyncio.sleep(self.WAIT)
 
         handler.assert_awaited_once()
