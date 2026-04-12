@@ -53,6 +53,7 @@ from familiar_connect.voice.interruption import (
     ResponseState,
     ResponseTracker,
     should_keep_talking,
+    split_at_elapsed,
 )
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
@@ -209,7 +210,13 @@ def _build_voice_response_handler(
 
         Fires ``min_interruption_s`` after someone starts talking over
         the familiar.  Returns ``True`` if the familiar yields.
+
+        When yielding during SPEAKING, captures the playback position
+        and computes the partial text actually delivered so that
+        :func:`_generate_response` can persist only the spoken portion.
         """
+        nonlocal interrupted_reply
+
         base = familiar.config.interrupt_tolerance.tolerance
         mood = tracker.mood_modifier
         tol = effective_tolerance(base, mood)
@@ -227,6 +234,21 @@ def _build_voice_response_handler(
             mood,
             tol,
         )
+        # Capture the playback position *before* stopping so the
+        # elapsed-time measurement is as accurate as possible.
+        if tracker.state is ResponseState.SPEAKING:
+            elapsed_ms = tracker.stop_speaking()
+            delivered, _ = split_at_elapsed(
+                tracker.word_timestamps,
+                elapsed_ms,
+            )
+            interrupted_reply = delivered or ""
+            _logger.info(
+                "Yield during SPEAKING (elapsed=%.0fms): delivered %d chars of %d",
+                elapsed_ms,
+                len(interrupted_reply),
+                len(tracker.response_text or ""),
+            )
         if vc.is_playing():
             vc.stop()
         return True
@@ -256,7 +278,11 @@ def _build_voice_response_handler(
         )
 
     async def _on_long_during_speaking(event: InterruptionEvent) -> None:  # noqa: RUF029
-        """Long interruption resolved during speaking — regenerate."""
+        """Long interruption resolved during speaking.
+
+        History truncation was already handled at moment 1 (in
+        ``_on_interrupt_start``).  This handler logs the classification.
+        """
         _logger.info(
             "Long interruption resolved during speaking (%.1fs)",
             event.duration_s,
@@ -290,6 +316,11 @@ def _build_voice_response_handler(
     pending_deepgram_speakers: set[int] = set()
     deepgram_ready = asyncio.Event()
     deepgram_ready.set()  # Initially ready (no pending transcripts)
+
+    # Set by _on_long_during_speaking to the truncated text that was
+    # actually delivered before the interruption.  _generate_response
+    # checks this after playback to persist the right text.
+    interrupted_reply: str | None = None
 
     async def _generate_response(
         user_id: int,
@@ -367,9 +398,9 @@ def _build_voice_response_handler(
             reply_text = await pipeline.run_post_processors(reply.content, request)
             tracker.generation_complete(reply_text)
 
-            # Persist both turns *after* the LLM call so a mid-turn
-            # crash doesn't leave the store with a user turn but no
-            # reply.
+            # Persist the user turn now — the assistant turn is
+            # deferred until after playback so an interruption can
+            # truncate the stored text to what was actually spoken.
             familiar.history_store.append_turn(
                 familiar_id=familiar.id,
                 channel_id=voice_channel_id,
@@ -379,29 +410,46 @@ def _build_voice_response_handler(
                 speaker=safe_name,
                 mode=channel_config.mode,
             )
+
+            _logger.info("[Voice Response] %s", reply_text)
+
+            # Reset interrupted_reply before playback starts.
+            nonlocal interrupted_reply
+            interrupted_reply = None
+
+            if familiar.tts_client is not None:
+                tts_result = await familiar.tts_client.synthesize_with_timestamps(
+                    reply_text,
+                )
+                stereo = mono_to_stereo(tts_result.audio)
+                # Wait for any currently-playing audio to finish.
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                # --- State machine: GENERATING → SPEAKING ---
+                tracker.start_speaking(word_timestamps=tts_result.timestamps)
+                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+                # Wait for playback to finish (or interruption).
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+
+            # Persist assistant turn — use truncated text if
+            # interrupted, otherwise the full response.
+            stored_reply = (
+                interrupted_reply if interrupted_reply is not None else reply_text
+            )
             familiar.history_store.append_turn(
                 familiar_id=familiar.id,
                 channel_id=voice_channel_id,
                 guild_id=guild_id,
                 role="assistant",
-                content=reply_text,
+                content=stored_reply,
                 mode=channel_config.mode,
             )
-
-            _logger.info("[Voice Response] %s", reply_text)
-
-            if familiar.tts_client is not None:
-                pcm_mono = await familiar.tts_client.synthesize(reply_text)
-                stereo = mono_to_stereo(pcm_mono)
-                # Wait for any currently-playing audio to finish.
-                while vc.is_playing():  # noqa: ASYNC110
-                    await asyncio.sleep(0.1)
-                # --- State machine: GENERATING → SPEAKING ---
-                tracker.start_speaking()
-                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-                # Wait for playback to finish
-                while vc.is_playing():  # noqa: ASYNC110
-                    await asyncio.sleep(0.1)
+            if interrupted_reply is not None:
+                _logger.info(
+                    "[Voice Interrupted] stored partial: %s",
+                    stored_reply[:120],
+                )
         except asyncio.CancelledError:
             _logger.info("Voice generation cancelled by interruption")
             return
@@ -409,6 +457,7 @@ def _build_voice_response_handler(
             _logger.exception("Voice response handler failed")
         finally:
             # --- State machine: → IDLE ---
+            interrupted_reply = None
             tracker.reset()
 
     async def _flush_pending() -> None:

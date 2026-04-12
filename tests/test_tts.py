@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -15,6 +17,8 @@ from familiar_connect.tts import (
     DEFAULT_SAMPLE_RATE,
     DEFAULT_VOICE_ID,
     CartesiaTTSClient,
+    TTSResult,
+    WordTimestamp,
     create_tts_client_from_env,
 )
 
@@ -221,3 +225,163 @@ class TestCreateTTSClientFromEnv:
             pytest.raises(ValueError, match=r"CARTESIA_API_KEY"),
         ):
             create_tts_client_from_env()
+
+
+def _make_sse_chunk(
+    audio: bytes,
+    words: list[str],
+    starts: list[float],
+    ends: list[float],
+    *,
+    done: bool = False,
+) -> str:
+    """Build a Cartesia SSE data line."""
+    encoded = base64.b64encode(audio).decode()
+    payload = {
+        "status_code": 200 if done else 206,
+        "done": done,
+        "data": encoded,
+        "word_timestamps": {
+            "words": words,
+            "start": starts,
+            "end": ends,
+        },
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _make_sse_response(chunks: list[str], *, status_code: int = 200) -> Mock:
+    """Build a mock httpx.Response whose .text is an SSE stream."""
+    mock_resp = Mock(spec=httpx.Response)
+    mock_resp.status_code = status_code
+    mock_resp.is_success = True
+    mock_resp.text = "".join(chunks)
+    mock_resp.request = httpx.Request("POST", f"{CARTESIA_BASE_URL}/tts/sse")
+    return mock_resp
+
+
+class TestSynthesizeWithTimestamps:
+    @pytest.fixture
+    def client(self) -> CartesiaTTSClient:
+        return CartesiaTTSClient(api_key="test-key")
+
+    @pytest.mark.asyncio
+    async def test_returns_tts_result(self, client: CartesiaTTSClient) -> None:
+        """synthesize_with_timestamps returns a TTSResult."""
+        chunk = _make_sse_chunk(b"\x01\x02", ["Hello"], [0.0], [200.0], done=True)
+        mock_resp = _make_sse_response([chunk])
+        with patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)):
+            result = await client.synthesize_with_timestamps("Hello")
+        assert isinstance(result, TTSResult)
+
+    @pytest.mark.asyncio
+    async def test_audio_concatenated_from_chunks(
+        self, client: CartesiaTTSClient
+    ) -> None:
+        """Audio bytes from multiple SSE chunks are concatenated."""
+        c1 = _make_sse_chunk(b"\x01\x02", ["Hello"], [0.0], [200.0])
+        c2 = _make_sse_chunk(b"\x03\x04", ["world"], [200.0], [400.0], done=True)
+        mock_resp = _make_sse_response([c1, c2])
+        with patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)):
+            result = await client.synthesize_with_timestamps("Hello world")
+        assert result.audio == b"\x01\x02\x03\x04"
+
+    @pytest.mark.asyncio
+    async def test_timestamps_collected_across_chunks(
+        self, client: CartesiaTTSClient
+    ) -> None:
+        """Word timestamps from all chunks are collected in order."""
+        c1 = _make_sse_chunk(b"\x01", ["Hello"], [0.0], [200.0])
+        c2 = _make_sse_chunk(b"\x02", ["world"], [200.0], [400.0], done=True)
+        mock_resp = _make_sse_response([c1, c2])
+        with patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)):
+            result = await client.synthesize_with_timestamps("Hello world")
+        assert len(result.timestamps) == 2
+        assert result.timestamps[0] == WordTimestamp("Hello", 0.0, 200.0)
+        assert result.timestamps[1] == WordTimestamp("world", 200.0, 400.0)
+
+    @pytest.mark.asyncio
+    async def test_timestamps_ordered_by_start(self, client: CartesiaTTSClient) -> None:
+        """Timestamps are ordered by start_ms."""
+        chunk = _make_sse_chunk(
+            b"\x01\x02\x03",
+            ["one", "two", "three"],
+            [0.0, 100.0, 250.0],
+            [100.0, 250.0, 400.0],
+            done=True,
+        )
+        mock_resp = _make_sse_response([chunk])
+        with patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)):
+            result = await client.synthesize_with_timestamps("one two three")
+        starts = [ts.start_ms for ts in result.timestamps]
+        assert starts == sorted(starts)
+
+    @pytest.mark.asyncio
+    async def test_calls_sse_endpoint(self, client: CartesiaTTSClient) -> None:
+        """synthesize_with_timestamps posts to /tts/sse."""
+        chunk = _make_sse_chunk(b"\x01", ["Hi"], [0.0], [100.0], done=True)
+        mock_resp = _make_sse_response([chunk])
+        captured: list[str] = []
+
+        def _capture(url: str, *_a: object, **_kw: object) -> Mock:
+            captured.append(url)
+            return mock_resp
+
+        with patch.object(client, "_post", new=AsyncMock(side_effect=_capture)):
+            await client.synthesize_with_timestamps("Hi")
+        assert captured[0] == f"{CARTESIA_BASE_URL}/tts/sse"
+
+    @pytest.mark.asyncio
+    async def test_payload_includes_add_timestamps(
+        self, client: CartesiaTTSClient
+    ) -> None:
+        """The request payload includes add_timestamps=True."""
+        chunk = _make_sse_chunk(b"\x01", ["Hi"], [0.0], [100.0], done=True)
+        mock_resp = _make_sse_response([chunk])
+        captured_payload: list[dict[str, object]] = []
+
+        def _capture(
+            _url: str,
+            _headers: dict[str, str],
+            payload: dict[str, object],
+        ) -> Mock:
+            captured_payload.append(payload)
+            return mock_resp
+
+        with patch.object(
+            client,
+            "_post",
+            new=AsyncMock(side_effect=_capture),
+        ):
+            await client.synthesize_with_timestamps("Hi")
+        assert captured_payload[0].get("add_timestamps") is True
+
+    @pytest.mark.asyncio
+    async def test_raises_on_http_error(self, client: CartesiaTTSClient) -> None:
+        """synthesize_with_timestamps raises on non-2xx response."""
+        mock_resp = Mock(spec=httpx.Response)
+        mock_resp.status_code = 400
+        mock_resp.is_success = False
+        mock_resp.text = "Bad request"
+        mock_resp.request = httpx.Request("POST", f"{CARTESIA_BASE_URL}/tts/sse")
+        with (
+            patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await client.synthesize_with_timestamps("Hello")
+
+    @pytest.mark.asyncio
+    async def test_chunk_without_timestamps_skipped(
+        self, client: CartesiaTTSClient
+    ) -> None:
+        """Chunks missing word_timestamps still contribute audio."""
+        # Build a chunk without timestamps manually
+        encoded = base64.b64encode(b"\x01\x02").decode()
+        no_ts = f'data: {{"status_code": 206, "done": false, "data": "{encoded}"}}\n\n'
+        c2 = _make_sse_chunk(b"\x03", ["world"], [0.0], [200.0], done=True)
+        mock_resp = _make_sse_response([no_ts, c2])
+        with patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)):
+            result = await client.synthesize_with_timestamps("Hello world")
+        assert result.audio == b"\x01\x02\x03"
+        assert len(result.timestamps) == 1
+        assert result.timestamps[0].word == "world"

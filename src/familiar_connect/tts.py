@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import httpx
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data types for word-level timestamps (used by interruption system)
@@ -128,6 +133,57 @@ class CartesiaTTSClient:
                 msg, request=response.request, response=response
             )
         return response.content
+
+    async def synthesize_with_timestamps(self: Self, text: str) -> TTSResult:
+        """Synthesize *text* and return audio with word-level timestamps.
+
+        Uses Cartesia's SSE endpoint to retrieve both the raw PCM audio
+        and per-word timing information needed by the interruption system.
+
+        :param text: The text to synthesize.
+        :return: A :class:`TTSResult` with audio bytes and timestamps.
+        :raises httpx.HTTPStatusError: On a non-2xx response from Cartesia.
+        """
+        url = f"{self.base_url}/tts/sse"
+        headers = self.build_headers()
+        payload = self.build_payload(text)
+        payload["add_timestamps"] = True
+
+        response = await self._post(url, headers, payload)
+        if not response.is_success:
+            body = response.text
+            msg = f"Cartesia TTS request failed ({response.status_code}): {body}"
+            raise httpx.HTTPStatusError(
+                msg, request=response.request, response=response
+            )
+
+        audio_parts: list[bytes] = []
+        timestamps: list[WordTimestamp] = []
+
+        for line in response.text.splitlines():
+            if not line.startswith("data: "):
+                continue
+            try:
+                event = json.loads(line[6:])
+            except json.JSONDecodeError:
+                _logger.debug("Skipping malformed SSE line: %s", line[:80])
+                continue
+
+            # Decode and accumulate audio
+            if "data" in event:
+                audio_parts.append(base64.b64decode(event["data"]))
+
+            # Accumulate word timestamps
+            wt = event.get("word_timestamps")
+            if wt and "words" in wt:
+                for word, start, end in zip(
+                    wt["words"], wt["start"], wt["end"], strict=True
+                ):
+                    timestamps.append(
+                        WordTimestamp(word=word, start_ms=start, end_ms=end),
+                    )
+
+        return TTSResult(audio=b"".join(audio_parts), timestamps=timestamps)
 
 
 def create_tts_client_from_env() -> CartesiaTTSClient:
