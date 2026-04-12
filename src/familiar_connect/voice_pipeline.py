@@ -218,8 +218,10 @@ class _LullCollator:
         if is_speaking:
             self._audio_pending[user_id] = True
             self._cancel_all(user_id)
+            _logger.debug("[Lull] user=%d SPEAKING=True — reset", user_id)
         else:
             self._start_lull_timer(user_id)
+            _logger.debug("[Lull] user=%d SPEAKING=False — lull timer started", user_id)
 
     def on_final_transcript(
         self,
@@ -264,6 +266,12 @@ class _LullCollator:
     def _on_lull(self, user_id: int) -> None:
         """Lull elapsed — dispatch immediately or wait for pending audio."""
         self._lull_timers.pop(user_id, None)
+        _logger.info(
+            "[Lull] user=%d lull fired — texts=%r audio_pending=%s",
+            user_id,
+            self._pending_texts.get(user_id),
+            self._audio_pending.get(user_id),
+        )
         if self._pending_texts.get(user_id):
             self._dispatch(user_id)
         elif self._audio_pending.get(user_id):

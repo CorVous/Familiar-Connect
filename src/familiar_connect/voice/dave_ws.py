@@ -161,13 +161,22 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         """
         user_id_str = data.get("user_id")
         if not user_id_str:
+            _logger.debug("[Speaking] op 5 with no user_id: %s", data)
             return
         speaking_flags = int(data.get("speaking", 0))
         is_speaking = speaking_flags != 0
+        _logger.info(
+            "[Speaking] user_id=%s speaking=%s (flags=%d)",
+            user_id_str,
+            is_speaking,
+            speaking_flags,
+        )
 
         pipeline = get_pipeline()
         if pipeline is not None:
             pipeline.speaking_queue.put_nowait((int(user_id_str), is_speaking))
+        else:
+            _logger.debug("[Speaking] no active pipeline, event dropped")
 
     async def _handle_prepare_transition(self, data: Mapping[str, Any]) -> None:
         """Op 21: store pending transition; enable passthrough if downgrading."""
