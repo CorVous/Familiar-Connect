@@ -305,6 +305,30 @@ class TestTranscriptLogger:
         assert handler.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_collator_takes_precedence_over_response_handler(self) -> None:
+        """When a collator is set, is_final is routed to collator.on_final."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        collator = MagicMock()
+        collator.on_final = MagicMock()
+
+        pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=handler)
+        pipeline.collator = collator
+
+        result = TranscriptionResult(text="hello", is_final=True, start=0.0, end=1.0)
+        await shared_queue.put((42, result))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        collator.on_final.assert_called_once_with(42, result)
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_logger_not_blocked_by_slow_handler(self) -> None:
         """Logger keeps logging while the response handler is still running."""
         shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()

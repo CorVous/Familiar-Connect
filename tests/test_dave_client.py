@@ -18,6 +18,7 @@ class _TestClient(DaveVoiceClient):
         self.dave_session = None
         self.dave_protocol_version = 0
         self._dave_pending_transitions = {}
+        self._speaking_listener = None
         self._user = MagicMock(id=67890)
         self._channel = MagicMock(id=12345)
         self.ws = MagicMock()
@@ -143,6 +144,95 @@ def test_reinit_dave_session_falls_back_to_self_ws(
         DaveVoiceWebSocket.MLS_KEY_PACKAGE,
         b"kp-bytes",
     )
+
+
+# ---------------------------------------------------------------------------
+# SPEAKING listener
+# ---------------------------------------------------------------------------
+
+
+class TestSpeakingListener:
+    def test_set_speaking_listener_stores_callback(
+        self, client: DaveVoiceClient
+    ) -> None:
+        callback = MagicMock()
+        client.set_speaking_listener(callback)
+        assert client._speaking_listener is callback
+
+    def test_set_speaking_listener_none_clears(self, client: DaveVoiceClient) -> None:
+        client.set_speaking_listener(MagicMock())
+        client.set_speaking_listener(None)
+        assert client._speaking_listener is None
+
+    def test_hook_forwards_speaking_frame(self, client: DaveVoiceClient) -> None:
+        calls: list[tuple[int, bool]] = []
+        client.set_speaking_listener(lambda uid, sp: calls.append((uid, sp)))
+
+        msg = {"op": 5, "d": {"user_id": "555", "ssrc": 1, "speaking": 1}}
+        asyncio.new_event_loop().run_until_complete(
+            client._voice_ws_hook(MagicMock(), msg),
+        )
+        assert calls == [(555, True)]
+
+    def test_hook_translates_zero_speaking_to_false(
+        self, client: DaveVoiceClient
+    ) -> None:
+        calls: list[tuple[int, bool]] = []
+        client.set_speaking_listener(lambda uid, sp: calls.append((uid, sp)))
+
+        msg = {"op": 5, "d": {"user_id": "555", "ssrc": 1, "speaking": 0}}
+        asyncio.new_event_loop().run_until_complete(
+            client._voice_ws_hook(MagicMock(), msg),
+        )
+        assert calls == [(555, False)]
+
+    def test_hook_ignores_non_speaking_ops(self, client: DaveVoiceClient) -> None:
+        callback = MagicMock()
+        client.set_speaking_listener(callback)
+
+        msg = {"op": 8, "d": {"heartbeat_interval": 41250}}  # HELLO
+        asyncio.new_event_loop().run_until_complete(
+            client._voice_ws_hook(MagicMock(), msg),
+        )
+        callback.assert_not_called()
+
+    def test_hook_swallows_listener_exceptions(self, client: DaveVoiceClient) -> None:
+        def boom(_uid: int, _sp: bool) -> None:  # noqa: FBT001
+            msg = "listener failed"
+            raise RuntimeError(msg)
+
+        client.set_speaking_listener(boom)
+        msg = {"op": 5, "d": {"user_id": "555", "ssrc": 1, "speaking": 1}}
+        # Must not raise
+        asyncio.new_event_loop().run_until_complete(
+            client._voice_ws_hook(MagicMock(), msg),
+        )
+
+    def test_hook_ignores_malformed_frame(self, client: DaveVoiceClient) -> None:
+        callback = MagicMock()
+        client.set_speaking_listener(callback)
+
+        # Missing user_id
+        msg = {"op": 5, "d": {"ssrc": 1, "speaking": 1}}
+        asyncio.new_event_loop().run_until_complete(
+            client._voice_ws_hook(MagicMock(), msg),
+        )
+        callback.assert_not_called()
+
+    def test_connect_websocket_installs_hook(self, client: DaveVoiceClient) -> None:
+        """connect_websocket sets ws._hook to the client's SPEAKING forwarder."""
+        fake_ws = MagicMock()
+        fake_ws.secret_key = b"key"
+        fake_ws.poll_event = AsyncMock()
+
+        with patch.object(
+            DaveVoiceWebSocket,
+            "from_client",
+            new=AsyncMock(return_value=fake_ws),
+        ):
+            asyncio.new_event_loop().run_until_complete(client.connect_websocket())
+
+        assert fake_ws._hook == client._voice_ws_hook
 
 
 # ---------------------------------------------------------------------------

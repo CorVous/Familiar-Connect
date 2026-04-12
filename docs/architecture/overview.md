@@ -131,10 +131,32 @@ surface and channel-mode slash commands are documented in
 Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz →
 stream to Deepgram WebSocket (or feed chunks to faster-whisper).
 
-!!! warning "STT not yet wired into the reply path"
-    The transcription and voice-pipeline modules exist, but incoming
-    voice audio is not yet fed into the context pipeline. See
-    [Voice input](../roadmap/voice-input.md) for the roadmap entry.
+#### Voice lull collator
+
+Deepgram typically splits one natural utterance into several
+`is_final` results, so forwarding each fragment straight to the LLM
+produces multiple replies for a single human thought. The
+`VoiceLullCollator` (in `familiar_connect.voice.lull_collator`) sits
+between `voice_pipeline` and the response handler built by
+`_build_voice_response_handler`:
+
+- `is_final` transcripts are **buffered** per user.
+- Dispatch is **gated on Discord SPEAKING events**: the timer starts
+  at `SPEAKING=False` and restarts on every subsequent one; a
+  `SPEAKING=True` cancels a pending timer and any in-flight wait,
+  so a new burst never inherits state from the previous one.
+- After `lull_timeout` seconds of continuous silence the collator
+  joins the buffered text and invokes the response handler once.
+- If the lull fires before Deepgram has delivered the transcript for
+  the last audio burst, the collator waits on an `asyncio.Event`
+  (bounded by `dispatch_timeout`, default 10s) that `on_final`
+  signals — so dispatch fires the moment the transcript lands, not
+  after a guessed delay.
+
+Discord SPEAKING opcodes reach the collator through the voice
+WebSocket `_hook` callback installed by `DaveVoiceClient` during
+`connect_websocket`. `lull_timeout` comes from the familiar's
+`CharacterConfig.lull_timeout` (default 2.0s).
 
 ### AI response (OpenRouter)
 

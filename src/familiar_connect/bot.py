@@ -45,7 +45,7 @@ from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
-from familiar_connect.voice import DaveVoiceClient, RecordingSink
+from familiar_connect.voice import DaveVoiceClient, RecordingSink, VoiceLullCollator
 from familiar_connect.voice.audio import mono_to_stereo
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
@@ -371,11 +371,24 @@ async def subscribe_my_voice(
             user_names=user_names,
         )
 
+        # Collate multi-fragment Deepgram bursts into a single LLM turn,
+        # gated on Discord SPEAKING events. Deepgram often splits one
+        # utterance into several ``is_final`` results; the collator
+        # buffers them and dispatches after ``lull_timeout`` seconds of
+        # continuous SPEAKING=False.
+        collator = VoiceLullCollator(
+            response_handler,
+            lull_timeout=familiar.config.lull_timeout,
+        )
+        if isinstance(vc, DaveVoiceClient):
+            vc.set_speaking_listener(collator.on_speaking)
+
         pipeline = await start_pipeline(
             familiar.transcriber,
             user_names=user_names,
             resolve_name=_resolve_from_channel,
             response_handler=response_handler,
+            collator=collator,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),
@@ -413,6 +426,11 @@ async def unsubscribe_voice(
         if get_pipeline() is not None:
             if hasattr(vc, "recording") and vc.recording:
                 vc.stop_recording()
+            # Detach the collator's speaking listener before tearing
+            # down the pipeline so no late SPEAKING frame races with
+            # collator teardown.
+            if isinstance(vc, DaveVoiceClient):
+                vc.set_speaking_listener(None)
             await stop_pipeline()
             _logger.info("Stopped voice transcription pipeline")
         await vc.disconnect()

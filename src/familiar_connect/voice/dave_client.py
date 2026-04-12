@@ -19,10 +19,17 @@ from discord.sinks.core import RawData
 from familiar_connect.voice.dave_ws import DaveVoiceWebSocket
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
     from discord import Client
     from discord.abc import Connectable
 
 _logger = logging.getLogger(__name__)
+
+
+# Discord voice gateway SPEAKING opcode (see discord/gateway.py:788).
+_SPEAKING_OP: int = 5
 
 
 class DaveVoiceClient(VoiceClient):
@@ -34,6 +41,22 @@ class DaveVoiceClient(VoiceClient):
         self.dave_session: davey.DaveSession | None = None
         self.dave_protocol_version: int = 0
         self._dave_pending_transitions: dict[int, int] = {}
+        self._speaking_listener: Callable[[int, bool], None] | None = None
+
+    def set_speaking_listener(
+        self, listener: Callable[[int, bool], None] | None
+    ) -> None:
+        """Install a callback invoked for each Discord SPEAKING opcode.
+
+        The voice gateway sends SPEAKING frames as a user's microphone
+        state changes (``speaking`` is a bitfield; non-zero means the
+        user is sending audio). The listener is called with
+        ``(user_id, bool(speaking))`` after py-cord has updated its
+        internal ``ssrc_map``.
+
+        Pass ``None`` to remove the listener.
+        """
+        self._speaking_listener = listener
 
     async def connect_websocket(self) -> DaveVoiceWebSocket:
         """Create the DAVE-aware voice WebSocket and run the handshake.
@@ -44,6 +67,10 @@ class DaveVoiceClient(VoiceClient):
         protocol version.
         """
         ws = await DaveVoiceWebSocket.from_client(self)
+        # Install our SPEAKING hook. py-cord's voice WS calls ``_hook`` at
+        # the end of received_message() for every opcode, after the base
+        # class has handled it (so ssrc_map is already up-to-date).
+        ws._hook = self._voice_ws_hook  # noqa: SLF001 — py-cord's documented extension point; see DiscordVoiceWebSocket.__init__(hook=…)
         self._connected.clear()
         while ws.secret_key is None:
             await ws.poll_event()
@@ -53,6 +80,36 @@ class DaveVoiceClient(VoiceClient):
             await self._reinit_dave_session(ws)
 
         return ws
+
+    async def _voice_ws_hook(
+        self,
+        ws: DaveVoiceWebSocket,  # noqa: ARG002 — signature mandated by py-cord
+        msg: dict[str, Any],
+    ) -> None:
+        """Post-opcode hook — forwards SPEAKING frames to the listener.
+
+        py-cord's base ``DiscordVoiceWebSocket.received_message`` invokes
+        ``self._hook(self, msg)`` after every opcode (see
+        ``discord/gateway.py``). We listen for ``op == 5`` (SPEAKING)
+        and fan it out to the registered listener, if any. Errors in
+        the listener are logged and swallowed so a buggy listener can
+        never kill the voice WS.
+        """
+        if self._speaking_listener is None:
+            return
+        if msg.get("op") != _SPEAKING_OP:
+            return
+        data = msg.get("d") or {}
+        try:
+            user_id = int(data["user_id"])
+            speaking_flag = int(data.get("speaking", 0))
+        except (KeyError, TypeError, ValueError):
+            _logger.debug("Malformed SPEAKING frame: %r", data)
+            return
+        try:
+            self._speaking_listener(user_id, bool(speaking_flag))
+        except Exception:
+            _logger.exception("Speaking listener raised")
 
     async def _reinit_dave_session(self, ws: DaveVoiceWebSocket | None = None) -> None:
         """Create a fresh DaveSession and send our MLS key package.

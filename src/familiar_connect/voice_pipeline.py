@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
+    from familiar_connect.voice.lull_collator import VoiceLullCollator
 
 _logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class VoicePipeline:
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None
+    collator: VoiceLullCollator | None = None
     streams: dict[int, _UserStream] = field(default_factory=dict)
 
 
@@ -240,8 +242,13 @@ async def _transcript_logger(
 ) -> None:
     """Log transcription results with the speaker's display name.
 
-    Response handlers are fired as background tasks so the logger is
-    never blocked by slow LLM / TTS processing.
+    When a :class:`VoiceLullCollator` is configured, final transcripts
+    are routed through it so multiple ``is_final`` fragments within a
+    single SPEAKING burst collate into one downstream dispatch. When
+    no collator is set (e.g. tests, or a caller that wants raw
+    per-``is_final`` dispatch) the legacy path fires the response
+    handler directly as a background task so the logger is never
+    blocked by slow LLM / TTS processing.
     """
     pending: set[asyncio.Task[None]] = set()
     while True:
@@ -249,7 +256,9 @@ async def _transcript_logger(
         name = _get_user_name(pipeline, user_id)
         if result.is_final:
             _logger.info("[Transcription] %s: %s", name, result.text)
-            if pipeline.response_handler is not None:
+            if pipeline.collator is not None:
+                pipeline.collator.on_final(user_id, result)
+            elif pipeline.response_handler is not None:
                 task = asyncio.create_task(
                     _run_response_handler(
                         pipeline.response_handler,
@@ -275,6 +284,7 @@ async def start_pipeline(  # noqa: RUF029
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None,
+    collator: VoiceLullCollator | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -287,6 +297,12 @@ async def start_pipeline(  # noqa: RUF029
     :param response_handler: Optional async callback invoked with
         ``(user_id, result)`` for each final transcription. Used to
         trigger LLM + TTS responses.
+    :param collator: Optional :class:`VoiceLullCollator`. When set,
+        each ``is_final`` is routed into ``collator.on_final`` instead
+        of directly invoking ``response_handler`` — the collator calls
+        the handler itself after the SPEAKING-gated lull elapses. Its
+        lifecycle is owned by the pipeline: :func:`stop_pipeline`
+        closes it.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
@@ -304,6 +320,7 @@ async def start_pipeline(  # noqa: RUF029
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,
+        collator=collator,
     )
 
     pipeline.router_task = asyncio.create_task(
@@ -352,6 +369,10 @@ async def stop_pipeline() -> None:
         pipeline.logger_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await pipeline.logger_task
+
+    # Tear down the collator last so any in-flight wait task is cancelled.
+    if pipeline.collator is not None:
+        await pipeline.collator.close()
 
     clear_pipeline()
     _logger.info("Voice transcription pipeline stopped")
