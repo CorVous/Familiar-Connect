@@ -8,22 +8,26 @@ Lull collation
 --------------
 Rapid speech produces multiple Deepgram ``is_final`` results in quick
 succession.  Without collation each result would trigger a separate LLM
-call.  :class:`_LullCollator` fixes this by:
+call.  :class:`_LullCollator` fixes this with a two-tier timer driven
+exclusively by Discord SPEAKING gateway events:
 
-1. Buffering every ``is_final`` transcript per user.
-2. Starting (or resetting) a per-user lull timer on every ``is_final``.
-   As long as speech continues, Deepgram keeps emitting results and the
-   timer is deferred.
-3. When the user truly stops, results stop and the lull timer fires.
-4. The lull timer opens a short dispatch window to collect any
-   in-flight results from the async queue.
-5. When the window closes, all buffered texts are joined and the
-   response handler is called **exactly once**.
+1. **Lull timer** — ``SPEAKING=False`` starts (or resets) the per-user
+   lull countdown (``lull_timeout`` seconds, default 2 s).  If
+   ``SPEAKING=False`` fires again before the timer expires it is reset,
+   so the countdown only completes after ``lull_timeout`` seconds of
+   continuous Discord silence.  ``SPEAKING=True`` cancels the lull timer
+   immediately.
 
-Discord ``SPEAKING=True`` cancels all timers immediately so a stale
-window cannot fire mid-utterance when a new speech burst begins.
-``SPEAKING=False`` is a no-op — transcript silence is the authoritative
-"done speaking" signal.
+2. **Dispatch window** — When the lull fires it opens a short drain
+   window (``dispatch_grace`` seconds).  All Deepgram ``is_final``
+   results still in the async pipeline have this window to arrive.
+   When it closes every buffered text is joined into a single
+   :class:`TranscriptionResult` and the response handler is called
+   **exactly once**.
+
+Deepgram ``is_final`` events only **buffer** text; they do not affect
+timing.  Transcripts that arrive before a ``SPEAKING=False`` gates the
+lull are held in the buffer and included in the next dispatch window.
 """
 
 from __future__ import annotations
@@ -86,7 +90,7 @@ class VoicePipeline:
     logger_task: asyncio.Task[None] | None
     user_names: dict[int, str]
     speaking_monitor_task: asyncio.Task[None] | None = None
-    lull_timeout: float = 1.5
+    lull_timeout: float = 2.0
     resolve_name: Callable[[int], str | None] | None = None
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
@@ -153,33 +157,26 @@ def _get_user_name(pipeline: VoicePipeline, user_id: int) -> str:
 class _LullCollator:
     """Buffer per-user transcripts and dispatch one combined response after a lull.
 
-    Timer gating
-    ------------
-    The lull countdown is driven by **Deepgram** ``is_final`` events, not by
-    Discord SPEAKING events:
+    Two-tier timer driven by Discord SPEAKING events
+    -------------------------------------------------
+    * ``SPEAKING=False`` → :meth:`_start_lull_timer`: start (or reset) the
+      per-user lull countdown.  Every ``SPEAKING=False`` restarts the timer so
+      it only fires after ``lull_timeout`` seconds of continuous Discord silence.
+    * Lull fires → :meth:`_on_lull` → :meth:`_start_dispatch_timer`: open the
+      dispatch window.  All Deepgram ``is_final`` results still in-flight have
+      ``dispatch_grace`` seconds to arrive.
+    * Dispatch window fires → :meth:`_on_dispatch_expire` → :meth:`_dispatch`:
+      join all buffered texts and call the response handler **exactly once**.
+    * ``SPEAKING=True`` → :meth:`_cancel_all_timers`: cancel lull and dispatch.
 
-    * Each ``is_final`` transcript starts (or resets) the per-user lull timer.
-      As long as transcripts keep arriving the timer is never allowed to fire.
-    * When speech truly stops, ``is_final`` events stop and the timer expires.
+    Deepgram ``is_final`` events only buffer text; they do not affect timing.
+    Transcripts that arrive before or during the lull countdown are held in the
+    buffer and included in the next dispatch window.
 
-    Discord SPEAKING events still play a limited role:
-
-    * ``SPEAKING=True`` → cancel all timers immediately so a fresh burst of
-      speech cannot be dispatched mid-utterance by a stale window.
-    * ``SPEAKING=False`` → no-op; the lull is driven by transcript silence.
-
-    Dispatch window
-    ---------------
-    When the lull timer fires it opens a short *dispatch window*
-    (``dispatch_grace`` seconds).  All ``is_final`` transcripts that arrive
-    during this window are buffered.  When the window closes, every buffered
-    text is joined into a single :class:`TranscriptionResult` and the
-    response handler is called **exactly once**.
-
-    If an ``is_final`` arrives while the dispatch window is open it is
-    buffered silently — the window will collect it.  If it arrives after
-    both timers have closed, it starts a fresh lull countdown so no
-    transcript is ever silently dropped.
+    Note: :meth:`_cancel_all_timers` cannot stop tasks already created by
+    :meth:`_dispatch` — once ``asyncio.create_task`` is called the coroutine is
+    already queued.  The window is a single loop iteration so the risk of a
+    spurious dispatch is negligible.
     """
 
     def __init__(
@@ -201,70 +198,55 @@ class _LullCollator:
     def on_speaking(self, user_id: int, *, is_speaking: bool) -> None:
         """React to a Discord SPEAKING event for *user_id*.
 
-        ``is_speaking=True`` cancels all timers immediately — prevents a
-        stale lull or dispatch window from firing mid-utterance when a user
-        starts a new speech burst.
+        ``is_speaking=True`` cancels both the lull and dispatch timers so a
+        fresh speech burst cannot be dispatched mid-utterance by a stale window.
 
-        ``is_speaking=False`` is a no-op; the lull timer is driven by
-        Deepgram ``is_final`` transcripts, not by audio-silence detection.
+        ``is_speaking=False`` starts (or resets) the lull countdown.  The timer
+        resets on every call so it only fires after ``lull_timeout`` seconds of
+        continuous Discord silence.
         """
         if is_speaking:
             self._cancel_all_timers(user_id)
+        else:
+            self._start_lull_timer(user_id)
 
     def on_final_transcript(
         self,
         user_id: int,
         result: TranscriptionResult,
     ) -> None:
-        """Buffer a final Deepgram transcript and reset the lull countdown.
+        """Buffer a final Deepgram transcript.
 
-        Each call starts (or resets) the lull timer so the timer can only
-        fire after ``lull_timeout`` seconds of *transcript* silence — i.e.
-        after Deepgram stops emitting new ``is_final`` results.  This is more
-        reliable than Discord SPEAKING events, which fire during natural
-        mid-sentence pauses.
-
-        If the dispatch window is already open, the transcript is buffered
-        silently and the window collects it without restarting the countdown.
+        The transcript is appended to the per-user buffer.  Timer management
+        is handled entirely by Discord SPEAKING events — this method does
+        **not** start or reset any timer.  Transcripts received before the
+        first ``SPEAKING=False``, or during the lull countdown, are held in the
+        buffer and included in the next dispatch window.
         """
         self._pending_texts.setdefault(user_id, []).append(result.text)
-
-        # If the dispatch window is already collecting, let it finish.
-        if user_id in self._dispatch_timers:
-            return
-
-        # Start/reset the lull countdown.  As long as is_final events keep
-        # arriving, the timer is deferred and no dispatch fires.
-        self._start_lull_timer(user_id)
 
     # ------------------------------------------------------------------
     # Internal timer helpers
     # ------------------------------------------------------------------
 
     def _cancel_all_timers(self, user_id: int) -> None:
-        """Cancel both the lull timer and the dispatch window timer.
-
-        Note: this does not cancel tasks already created by :meth:`_dispatch`.
-        Once ``asyncio.create_task`` is called, the coroutine is queued in the
-        event loop and cannot be stopped here.  In practice the window between
-        task creation and handler execution is a single loop iteration, so the
-        chance of a spurious dispatch slipping through a ``SPEAKING=True`` cancel
-        is negligible.  Per-user task tracking would be needed to close this gap.
-        """
+        """Cancel both the lull timer and the dispatch window timer."""
         for timers in (self._lull_timers, self._dispatch_timers):
             handle = timers.pop(user_id, None)
             if handle is not None:
                 handle.cancel()
 
     def _start_lull_timer(self, user_id: int) -> None:
-        self._cancel_all_timers(user_id)
+        handle = self._lull_timers.pop(user_id, None)
+        if handle is not None:
+            handle.cancel()
         loop = asyncio.get_event_loop()
         self._lull_timers[user_id] = loop.call_later(
             self._lull_timeout, self._on_lull, user_id
         )
 
     def _on_lull(self, user_id: int) -> None:
-        """Handle lull timer expiry — open the dispatch window."""
+        """Lull elapsed — open the dispatch window."""
         self._lull_timers.pop(user_id, None)
         self._start_dispatch_timer(user_id)
 
@@ -469,7 +451,7 @@ async def start_pipeline(  # noqa: RUF029
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None,
-    lull_timeout: float = 1.5,
+    lull_timeout: float = 2.0,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -482,8 +464,10 @@ async def start_pipeline(  # noqa: RUF029
     :param response_handler: Optional async callback invoked with
         ``(user_id, result)`` for each collated voice turn after the lull
         timer fires.
-    :param lull_timeout: Seconds of silence (no SPEAKING events) before
-        the lull timer fires and a combined response is dispatched.
+    :param lull_timeout: Seconds of Discord silence (continuous
+        ``SPEAKING=False``) before the lull timer fires and a combined
+        response is dispatched.  Every ``SPEAKING=False`` resets this
+        countdown so mid-sentence pauses don't trigger early dispatch.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()

@@ -574,10 +574,9 @@ def _make_result(
 class TestLullCollator:
     """Unit tests for _LullCollator.
 
-    Timer constants are kept very small (0.01 s) and asyncio.sleep(0.15) gives
-    the event loop plenty of cycles to run call_later callbacks and any tasks
-    spawned by _dispatch.  Every collator is created with dispatch_grace=0.01
-    so tests don't have to sleep long.
+    Timer constants are kept very small (0.01 s) so tests complete quickly.
+    WAIT gives the event loop enough cycles for both the lull timer and the
+    dispatch window to fire, plus any async tasks they spawn.
     """
 
     TIMEOUT = 0.01  # lull timer
@@ -592,15 +591,31 @@ class TestLullCollator:
         )
 
     # ------------------------------------------------------------------
-    # Basic SPEAKING → lull → dispatch flow
+    # Discord-driven flow: SPEAKING=False → lull → dispatch
     # ------------------------------------------------------------------
 
+    def test_speaking_false_starts_lull_timer(self) -> None:
+        """SPEAKING=False starts the lull timer directly."""
+        collator = self._collator()
+        collator.on_speaking(42, is_speaking=False)
+        assert 42 in collator._lull_timers
+
+    def test_speaking_false_resets_existing_lull_timer(self) -> None:
+        """A second SPEAKING=False resets the running lull timer."""
+        collator = self._collator()
+        collator.on_speaking(42, is_speaking=False)
+        first_handle = collator._lull_timers[42]
+        collator.on_speaking(42, is_speaking=False)
+        second_handle = collator._lull_timers[42]
+        assert second_handle is not first_handle
+
     @pytest.mark.asyncio
-    async def test_final_transcript_starts_lull_that_dispatches(self) -> None:
-        """is_final → lull → dispatch window → handler called once."""
+    async def test_speaking_false_then_transcript_dispatches(self) -> None:
+        """SPEAKING=False → lull → dispatch window → handler called once."""
         handler = AsyncMock()
         collator = self._collator(handler)
 
+        collator.on_speaking(42, is_speaking=False)
         collator.on_final_transcript(42, _make_result("hello"))
 
         await asyncio.sleep(self.WAIT)
@@ -612,16 +627,56 @@ class TestLullCollator:
 
     @pytest.mark.asyncio
     async def test_on_speaking_true_cancels_all_timers(self) -> None:
-        """SPEAKING=True cancels both lull and dispatch-window timers."""
+        """SPEAKING=True cancels both the lull and dispatch-window timers."""
         handler = AsyncMock()
         collator = self._collator(handler)
 
-        collator.on_final_transcript(42, _make_result("hello"))  # start lull
+        collator.on_speaking(42, is_speaking=False)  # start lull
         collator.on_speaking(42, is_speaking=True)  # cancel everything
 
         await asyncio.sleep(self.WAIT)
 
         handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transcript_during_lull_buffered_until_dispatch(self) -> None:
+        """Transcript during lull countdown is buffered, not dispatched early."""
+        handler = AsyncMock()
+        # Use a long lull so we can inspect state before it fires
+        collator = _LullCollator(
+            lull_timeout=self.WAIT * 10,
+            response_handler=handler,  # ty: ignore[invalid-argument-type]
+            dispatch_grace=self.GRACE,
+        )
+        collator.on_speaking(42, is_speaking=False)
+        collator.on_final_transcript(42, _make_result("text"))
+
+        # Dispatch window must NOT have opened yet — lull is still counting down
+        assert 42 not in collator._dispatch_timers
+        await asyncio.sleep(self.WAIT)
+        handler.assert_not_awaited()
+
+    # ------------------------------------------------------------------
+    # Transcripts buffer until next Discord-gated window
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_transcript_before_speaking_event_dispatched_with_next_window(
+        self,
+    ) -> None:
+        """Transcript that arrives before SPEAKING=False is included in the window."""
+        handler = AsyncMock()
+        collator = self._collator(handler)
+
+        # Transcript arrives first (no SPEAKING event yet)
+        collator.on_final_transcript(42, _make_result("early text"))
+        # SPEAKING=False gates the window
+        collator.on_speaking(42, is_speaking=False)
+
+        await asyncio.sleep(self.WAIT)
+
+        handler.assert_awaited_once()
+        assert handler.call_args[0][1].text == "early text"
 
     # ------------------------------------------------------------------
     # Collation: multiple transcripts → one response
@@ -635,6 +690,7 @@ class TestLullCollator:
 
         collator.on_final_transcript(42, _make_result("Hello"))
         collator.on_final_transcript(42, _make_result("world"))
+        collator.on_speaking(42, is_speaking=False)  # gate the lull
 
         await asyncio.sleep(self.WAIT)
 
@@ -682,47 +738,51 @@ class TestLullCollator:
         assert handler.call_args[0][1].text == "one two three"
 
     # ------------------------------------------------------------------
-    # Late / orphan transcripts
+    # Transcripts with no active timer are held for next window
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_transcript_after_both_windows_closed_still_dispatched(self) -> None:
-        """Transcript arriving after both windows closed reopens the dispatch window.
+    async def test_transcript_with_no_timer_held_for_next_speaking_false(
+        self,
+    ) -> None:
+        """Transcript with no timer buffers and dispatches on the next SPEAKING=False.
 
-        Covers the fallback path in on_final_transcript: if an is_final arrives
-        with no timers running it starts a fresh lull countdown rather than being
-        silently dropped.
+        This covers the scenario where the bot joined mid-session and missed
+        early SPEAKING events.  Transcripts are never dropped — they wait for
+        the next lull window.
         """
         handler = AsyncMock()
         collator = self._collator(handler)
 
-        # Open the dispatch window directly with no buffered text, then let it close.
+        # Dispatch window closes with nothing buffered
         collator._on_lull(42)
-        await asyncio.sleep(self.WAIT)  # dispatch window expires, nothing dispatched
+        await asyncio.sleep(self.WAIT)
         handler.assert_not_awaited()
 
-        # Late transcript arrives — starts a new lull countdown
+        # Transcript arrives with no timer active — just buffers
         collator.on_final_transcript(42, _make_result("late text"))
+        # SPEAKING=False gates the lull that drains the buffer
+        collator.on_speaking(42, is_speaking=False)
         await asyncio.sleep(self.WAIT)
 
         handler.assert_awaited_once()
         assert handler.call_args[0][1].text == "late text"
 
     @pytest.mark.asyncio
-    async def test_multiple_late_transcripts_still_collated_into_one(self) -> None:
-        """Multiple transcripts arriving with no active timer are collated into one."""
+    async def test_multiple_no_timer_transcripts_collated_on_speaking_false(
+        self,
+    ) -> None:
+        """Multiple transcripts with no timer are all collated on SPEAKING=False."""
         handler = AsyncMock()
         collator = self._collator(handler)
 
-        # Two transcripts arrive in quick succession with no prior state.
-        # The first starts the lull timer; the second resets it — both are
-        # in the buffer when the timer eventually fires.
-        collator.on_final_transcript(42, _make_result("late one"))
-        collator.on_final_transcript(42, _make_result("late two"))
+        collator.on_final_transcript(42, _make_result("one"))
+        collator.on_final_transcript(42, _make_result("two"))
+        collator.on_speaking(42, is_speaking=False)
         await asyncio.sleep(self.WAIT)
 
         handler.assert_awaited_once()
-        assert handler.call_args[0][1].text == "late one late two"
+        assert handler.call_args[0][1].text == "one two"
 
     # ------------------------------------------------------------------
     # Timer interaction
@@ -748,14 +808,16 @@ class TestLullCollator:
         handler.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_speaking_true_then_new_transcript_restarts_chain(self) -> None:
-        """SPEAKING=True stops timers; next is_final starts a fresh lull + window."""
+    async def test_speaking_true_then_speaking_false_restarts_chain(self) -> None:
+        """SPEAKING=True stops timers; next SPEAKING=False starts a fresh lull."""
         handler = AsyncMock()
         collator = self._collator(handler)
 
+        collator.on_speaking(42, is_speaking=False)  # lull started
         collator.on_final_transcript(42, _make_result("first"))
-        collator.on_speaking(42, is_speaking=True)  # cancel (user resumed)
+        collator.on_speaking(42, is_speaking=True)  # user resumed → cancel lull
         collator.on_final_transcript(42, _make_result("second"))
+        collator.on_speaking(42, is_speaking=False)  # user stopped again → new lull
 
         await asyncio.sleep(self.WAIT)
 
@@ -769,7 +831,9 @@ class TestLullCollator:
         collator = self._collator(handler)
 
         collator.on_final_transcript(1, _make_result("Alice says hello"))
+        collator.on_speaking(1, is_speaking=False)
         collator.on_final_transcript(2, _make_result("Bob says hi"))
+        collator.on_speaking(2, is_speaking=False)
 
         await asyncio.sleep(self.WAIT)
 
@@ -787,6 +851,7 @@ class TestLullCollator:
             dispatch_grace=self.GRACE,
         )
         collator.on_final_transcript(42, _make_result("ignored"))
+        collator.on_speaking(42, is_speaking=False)
         await asyncio.sleep(self.WAIT)  # should complete without error
 
     # ------------------------------------------------------------------
@@ -797,12 +862,10 @@ class TestLullCollator:
     async def test_continuous_speech_collated_into_one_dispatch(self) -> None:
         """All transcripts from a continuous speech session dispatch as one.
 
-        Regression: Discord sends SPEAKING=False during natural mid-sentence
-        pauses and SPEAKING=True when speech resumes.  After SPEAKING=True
-        cancels all timers, a subsequent is_final used to trigger a fallback
-        dispatch window and fire mid-utterance.  The fix drives the lull
-        timer from is_final events so the timer resets on every transcript
-        and can only fire after lull_timeout of transcript silence.
+        Discord sends SPEAKING=False during natural mid-sentence pauses and
+        SPEAKING=True when speech resumes.  SPEAKING=False resets the lull
+        timer, so mid-sentence pauses just restart the countdown.  Only when
+        the user truly stops and the lull runs to completion does dispatch fire.
         """
         handler = AsyncMock()
         collator = self._collator(handler)
@@ -810,9 +873,10 @@ class TestLullCollator:
         # Simulate continuous speech with a Discord mid-sentence pause
         collator.on_speaking(42, is_speaking=True)
         collator.on_final_transcript(42, _make_result("first half"))
-        collator.on_speaking(42, is_speaking=False)  # brief Discord pause (no-op)
+        collator.on_speaking(42, is_speaking=False)  # brief pause → lull reset
         collator.on_speaking(42, is_speaking=True)  # user resumed → cancel lull
         collator.on_final_transcript(42, _make_result("second half"))
+        collator.on_speaking(42, is_speaking=False)  # user truly stopped → lull fires
 
         # Both halves collated; exactly one dispatch fires after lull
         await asyncio.sleep(self.WAIT)
