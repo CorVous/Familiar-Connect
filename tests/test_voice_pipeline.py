@@ -635,7 +635,6 @@ class TestLullCollator:
 
         collator.on_final_transcript(42, _make_result("Hello"))
         collator.on_final_transcript(42, _make_result("world"))
-        collator.on_speaking(42, is_speaking=False)
 
         await asyncio.sleep(self.WAIT)
 
@@ -690,17 +689,19 @@ class TestLullCollator:
     async def test_transcript_after_both_windows_closed_still_dispatched(self) -> None:
         """Transcript arriving after both windows closed reopens the dispatch window.
 
-        Covers the fallback path in on_final_transcript.
+        Covers the fallback path in on_final_transcript: if an is_final arrives
+        with no timers running it starts a fresh lull countdown rather than being
+        silently dropped.
         """
         handler = AsyncMock()
         collator = self._collator(handler)
 
-        # Let lull fire and dispatch window close with no text
-        collator.on_speaking(42, is_speaking=False)
-        await asyncio.sleep(self.WAIT)  # both timers expired, nothing dispatched
+        # Open the dispatch window directly with no buffered text, then let it close.
+        collator._on_lull(42)
+        await asyncio.sleep(self.WAIT)  # dispatch window expires, nothing dispatched
         handler.assert_not_awaited()
 
-        # Late transcript arrives — fallback starts a new dispatch window
+        # Late transcript arrives — starts a new lull countdown
         collator.on_final_transcript(42, _make_result("late text"))
         await asyncio.sleep(self.WAIT)
 
@@ -709,18 +710,17 @@ class TestLullCollator:
 
     @pytest.mark.asyncio
     async def test_multiple_late_transcripts_still_collated_into_one(self) -> None:
-        """Multiple transcripts arriving after both windows closed are collated."""
+        """Multiple transcripts arriving with no active timer are collated into one."""
         handler = AsyncMock()
         collator = self._collator(handler)
 
-        collator.on_speaking(42, is_speaking=False)
-        await asyncio.sleep(self.WAIT)  # both windows close, no text
-
+        # Two transcripts arrive in quick succession with no prior state.
+        # The first starts the lull timer; the second resets it — both are
+        # in the buffer when the timer eventually fires.
         collator.on_final_transcript(42, _make_result("late one"))
         collator.on_final_transcript(42, _make_result("late two"))
         await asyncio.sleep(self.WAIT)
 
-        # Still only ONE dispatch, both texts joined
         handler.assert_awaited_once()
         assert handler.call_args[0][1].text == "late one late two"
 
@@ -787,7 +787,6 @@ class TestLullCollator:
             dispatch_grace=self.GRACE,
         )
         collator.on_final_transcript(42, _make_result("ignored"))
-        collator.on_speaking(42, is_speaking=False)
         await asyncio.sleep(self.WAIT)  # should complete without error
 
     # ------------------------------------------------------------------

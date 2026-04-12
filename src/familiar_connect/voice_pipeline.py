@@ -242,7 +242,15 @@ class _LullCollator:
     # ------------------------------------------------------------------
 
     def _cancel_all_timers(self, user_id: int) -> None:
-        """Cancel both the lull timer and the dispatch window timer."""
+        """Cancel both the lull timer and the dispatch window timer.
+
+        Note: this does not cancel tasks already created by :meth:`_dispatch`.
+        Once ``asyncio.create_task`` is called, the coroutine is queued in the
+        event loop and cannot be stopped here.  In practice the window between
+        task creation and handler execution is a single loop iteration, so the
+        chance of a spurious dispatch slipping through a ``SPEAKING=True`` cancel
+        is negligible.  Per-user task tracking would be needed to close this gap.
+        """
         for timers in (self._lull_timers, self._dispatch_timers):
             handle = timers.pop(user_id, None)
             if handle is not None:
