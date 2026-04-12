@@ -796,6 +796,43 @@ class TestLullCollator:
         collator.on_speaking(42, is_speaking=False)
         await asyncio.sleep(self.WAIT)  # should complete without error
 
+    # ------------------------------------------------------------------
+    # Regression: fallback must NOT fire while user is still speaking.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_transcript_while_speaking_does_not_start_fallback(self) -> None:
+        """is_final arriving while SPEAKING=True must not start a dispatch timer.
+
+        Bug: Discord sends SPEAKING=False during natural mid-sentence pauses
+        and SPEAKING=True when speech resumes.  After SPEAKING=True cancels
+        all timers, a subsequent is_final would previously trigger the
+        fallback dispatch window and fire mid-utterance.  The fix tracks
+        per-user speaking state and suppresses the fallback while the user
+        is known to be speaking.
+        """
+        handler = AsyncMock()
+        collator = self._collator(handler)
+
+        # Simulate continuous speech: brief pause + resume
+        collator.on_speaking(42, is_speaking=True)
+        collator.on_final_transcript(42, _make_result("first half"))
+        collator.on_speaking(42, is_speaking=False)  # brief pause
+        collator.on_speaking(42, is_speaking=True)  # user resumed
+        collator.on_final_transcript(42, _make_result("second half"))
+
+        await asyncio.sleep(self.WAIT)
+
+        # No dispatch yet — user is still speaking
+        handler.assert_not_awaited()
+
+        # Now user truly stops → lull → dispatch fires once, combined
+        collator.on_speaking(42, is_speaking=False)
+        await asyncio.sleep(self.WAIT)
+
+        handler.assert_awaited_once()
+        assert handler.call_args[0][1].text == "first half second half"
+
 
 # ---------------------------------------------------------------------------
 # Phase 9: _speaking_monitor

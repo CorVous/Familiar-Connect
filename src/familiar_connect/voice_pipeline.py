@@ -182,6 +182,7 @@ class _LullCollator:
         self._pending_texts: dict[int, list[str]] = {}
         self._lull_timers: dict[int, asyncio.TimerHandle] = {}
         self._dispatch_timers: dict[int, asyncio.TimerHandle] = {}
+        self._is_speaking: dict[int, bool] = {}
         self._pending_tasks: set[asyncio.Task[None]] = set()
 
     def on_speaking(self, user_id: int, *, is_speaking: bool) -> None:
@@ -190,6 +191,7 @@ class _LullCollator:
         * ``is_speaking=True``  → user is talking; cancel all timers.
         * ``is_speaking=False`` → user stopped; start lull countdown.
         """
+        self._is_speaking[user_id] = is_speaking
         if is_speaking:
             self._cancel_all_timers(user_id)
         else:
@@ -202,11 +204,23 @@ class _LullCollator:
     ) -> None:
         """Buffer a final Deepgram transcript for *user_id*.
 
-        If no timer of any kind is running (e.g., the dispatch window
-        already closed before this transcript arrived), the dispatch window
-        is restarted so the transcript is not silently dropped.
+        If the user is known to be currently speaking (most recent SPEAKING
+        event was True), the transcript is buffered silently — no timer is
+        started.  Discord sends spurious SPEAKING=False events during natural
+        mid-sentence pauses, so firing a fallback dispatch timer here would
+        incorrectly dispatch mid-utterance.
+
+        If the user is *not* currently speaking and no timer is running
+        (e.g., both the lull and dispatch windows already closed before this
+        late transcript arrived), the dispatch window is restarted so the
+        transcript is not silently dropped.
         """
         self._pending_texts.setdefault(user_id, []).append(result.text)
+
+        # While the user is actively speaking, just buffer — the lull timer
+        # will be started by the next SPEAKING=False event.
+        if self._is_speaking.get(user_id):
+            return
 
         # Fallback: reopen the dispatch window for orphaned late transcripts.
         if user_id not in self._lull_timers and user_id not in self._dispatch_timers:
