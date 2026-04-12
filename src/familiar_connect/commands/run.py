@@ -16,12 +16,11 @@ if TYPE_CHECKING:
 import discord
 
 from familiar_connect.bot import create_bot
-from familiar_connect.config import ConfigError
-from familiar_connect.context.side_model import LLMSideModel
+from familiar_connect.config import ConfigError, load_character_config
 from familiar_connect.familiar import Familiar
-from familiar_connect.llm import create_client_from_env, create_side_client_from_env
+from familiar_connect.llm import create_llm_clients
 from familiar_connect.transcription import create_transcriber_from_env
-from familiar_connect.tts import create_tts_client_from_env
+from familiar_connect.tts import create_tts_client
 
 _logger = logging.getLogger(__name__)
 
@@ -89,12 +88,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     try:
         await bot.start(token)
     finally:
-        await familiar.llm_client.close()
-        if (
-            isinstance(familiar.side_model, LLMSideModel)
-            and familiar.side_model.llm_client is not familiar.llm_client
-        ):
-            await familiar.side_model.llm_client.close()
+        for client in familiar.llm_clients.values():
+            await client.close()
 
 
 _OPUS_FALLBACK_PATHS = [
@@ -159,30 +154,39 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("%s", exc)
         return 1
 
+    # Load the merged character config first so both the LLM client
+    # factory and the TTS client factory have access to per-slot
+    # model selections and the [tts] voice id / model.
+    defaults_path = familiar_root.parent / "_default" / "character.toml"
     try:
-        llm_client = create_client_from_env()
-    except ValueError as exc:
-        _logger.error("LLM client unavailable: %s", exc)
+        character_config = load_character_config(
+            familiar_root / "character.toml",
+            defaults_path=defaults_path,
+        )
+    except ConfigError as exc:
+        _logger.error("Failed to load familiar config: %s", exc)
         return 1
 
-    side_llm_client = create_side_client_from_env()
-    if side_llm_client is None:
-        _logger.info(
-            "No OPENROUTER_SIDE_MODEL set — side-model work (stepped "
-            "thinking, recast, history summary, content search) will "
-            "reuse the main model. Set OPENROUTER_SIDE_MODEL to a "
-            "cheaper/faster model to avoid paying main-model price "
-            "for sub-tasks.",
-        )
-    else:
-        _logger.info(
-            "Side-model calls will use %s (separate from main model %s).",
-            side_llm_client.model,
-            llm_client.model,
-        )
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        _logger.error("OPENROUTER_API_KEY environment variable is required")
+        return 1
 
     try:
-        tts_client = create_tts_client_from_env()
+        llm_clients = create_llm_clients(api_key, character_config)
+    except KeyError as exc:
+        _logger.error(
+            "Character config is missing LLM slot %s — check "
+            "data/familiars/_default/character.toml",
+            exc,
+        )
+        return 1
+
+    try:
+        tts_client = create_tts_client(
+            voice_id=character_config.tts.voice_id or "",
+            model=character_config.tts.model or "",
+        )
     except ValueError as exc:
         _logger.warning("TTS client unavailable: %s", exc)
         tts_client = None
@@ -196,9 +200,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         familiar = Familiar.load_from_disk(
             familiar_root,
-            llm_client=llm_client,
+            llm_clients=llm_clients,
             tts_client=tts_client,
-            side_llm_client=side_llm_client,
             transcriber=transcriber,
         )
     except ConfigError as exc:

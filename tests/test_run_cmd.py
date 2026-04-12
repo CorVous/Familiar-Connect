@@ -17,6 +17,21 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _fake_character_config() -> MagicMock:
+    """Return a stand-in CharacterConfig for run() plumbing tests.
+
+    ``run()`` passes this object through to :func:`create_llm_clients`,
+    :func:`create_tts_client`, and :meth:`Familiar.load_from_disk`, all
+    of which are themselves patched in these tests — so the attribute
+    surface the mock needs only covers the one accessor ``run()``
+    itself uses (``tts.voice_id`` / ``tts.model``).
+    """
+    config = MagicMock(name="character_config")
+    config.tts.voice_id = "test-voice-id"
+    config.tts.model = "test-model"
+    return config
+
+
 def test_run_subcommand_registered() -> None:
     """The 'run' subcommand is recognized by the CLI parser."""
     parser = create_parser()
@@ -55,6 +70,24 @@ def test_run_missing_familiar_folder_returns_error(tmp_path: Path) -> None:
         patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
     ):
         result = run(args)
+    assert result == 1
+
+
+def test_run_missing_api_key_returns_error(tmp_path: Path) -> None:
+    """When OPENROUTER_API_KEY is missing, run returns 1 after loading config."""
+    (tmp_path / "aria").mkdir()
+    args = argparse.Namespace(familiar="aria")
+
+    with (
+        patch.dict("os.environ", {"DISCORD_BOT": "fake-token"}, clear=True),
+        patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+        patch(
+            "familiar_connect.commands.run.load_character_config",
+            return_value=_fake_character_config(),
+        ),
+    ):
+        result = run(args)
+
     assert result == 1
 
 
@@ -183,25 +216,45 @@ class TestLoadOpus:
 
 
 def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
-    """run() builds a Familiar from disk and hands it to _async_main."""
+    """run() builds a Familiar from disk and hands it to _async_main.
+
+    The new load order is: config → llm_clients → tts_client →
+    transcriber → Familiar.load_from_disk. Every disk / network
+    dependency is patched, so the test only pins the plumbing.
+    """
     (tmp_path / "aria").mkdir()
     args = argparse.Namespace(familiar="aria")
     sentinel_coro = MagicMock(name="coroutine")
 
+    env = {
+        "DISCORD_BOT": "fake-token",
+        "OPENROUTER_API_KEY": "sk-test",
+    }
     with (
-        patch.dict("os.environ", {"DISCORD_BOT": "fake-token"}, clear=True),
+        patch.dict("os.environ", env, clear=True),
         patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
         patch(
-            "familiar_connect.commands.run.create_client_from_env",
-            return_value=MagicMock(),
+            "familiar_connect.commands.run.load_character_config",
+            return_value=_fake_character_config(),
         ),
         patch(
-            "familiar_connect.commands.run.create_tts_client_from_env",
+            "familiar_connect.commands.run.create_llm_clients",
+            return_value={"main_prose": MagicMock()},
+        ),
+        patch(
+            "familiar_connect.commands.run.create_tts_client",
             return_value=None,
         ),
         patch(
             "familiar_connect.commands.run.create_transcriber_from_env",
             return_value=None,
+        ),
+        patch(
+            "familiar_connect.commands.run.Familiar.load_from_disk",
+            return_value=MagicMock(
+                id="aria",
+                config=MagicMock(default_mode=MagicMock(value="full_rp")),
+            ),
         ),
         patch("familiar_connect.commands.run.load_opus"),
         patch(
@@ -219,6 +272,66 @@ def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
     call_args = mock_async_main.call_args
     assert call_args[0][0] == "fake-token"
     mock_run.assert_called_once_with(sentinel_coro)
+
+
+def test_run_loads_config_before_building_clients(tmp_path: Path) -> None:
+    """The config must be loaded first so ``create_llm_clients`` can see it.
+
+    Pins the "config → clients" order in :func:`run` — flipping
+    them would mean building clients with no character config in
+    hand, and the failure would only surface at runtime.
+    """
+    (tmp_path / "aria").mkdir()
+    args = argparse.Namespace(familiar="aria")
+    fake_config = _fake_character_config()
+
+    env = {
+        "DISCORD_BOT": "fake-token",
+        "OPENROUTER_API_KEY": "sk-test",
+    }
+    with (
+        patch.dict("os.environ", env, clear=True),
+        patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+        patch(
+            "familiar_connect.commands.run.load_character_config",
+            return_value=fake_config,
+        ) as mock_load_config,
+        patch(
+            "familiar_connect.commands.run.create_llm_clients",
+            return_value={"main_prose": MagicMock()},
+        ) as mock_create_llm,
+        patch(
+            "familiar_connect.commands.run.create_tts_client",
+            return_value=None,
+        ),
+        patch(
+            "familiar_connect.commands.run.create_transcriber_from_env",
+            return_value=None,
+        ),
+        patch(
+            "familiar_connect.commands.run.Familiar.load_from_disk",
+            return_value=MagicMock(
+                id="aria",
+                config=MagicMock(default_mode=MagicMock(value="full_rp")),
+            ),
+        ),
+        patch("familiar_connect.commands.run.load_opus"),
+        patch(
+            "familiar_connect.commands.run._async_main",
+            new_callable=MagicMock,
+            return_value=MagicMock(name="coroutine"),
+        ),
+        patch("familiar_connect.commands.run.asyncio.run"),
+    ):
+        run(args)
+
+    # ``load_character_config`` is called; its return value is passed
+    # into ``create_llm_clients`` as the second positional argument.
+    mock_load_config.assert_called_once()
+    mock_create_llm.assert_called_once()
+    llm_call = mock_create_llm.call_args
+    assert llm_call.args[0] == "sk-test"
+    assert llm_call.args[1] is fake_config
 
 
 # ---------------------------------------------------------------------------
@@ -244,19 +357,23 @@ class TestRunTranscriberIntegration:
         args = argparse.Namespace(familiar="aria")
         mock_transcriber = MagicMock(name="transcriber")
 
+        env = {
+            "DISCORD_BOT": "fake-token",
+            "OPENROUTER_API_KEY": "sk-test",
+        }
         with (
-            patch.dict("os.environ", {"DISCORD_BOT": "fake-token"}, clear=True),
+            patch.dict("os.environ", env, clear=True),
             patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
             patch(
-                "familiar_connect.commands.run.create_client_from_env",
-                return_value=MagicMock(),
+                "familiar_connect.commands.run.load_character_config",
+                return_value=_fake_character_config(),
             ),
             patch(
-                "familiar_connect.commands.run.create_side_client_from_env",
-                return_value=None,
+                "familiar_connect.commands.run.create_llm_clients",
+                return_value={"main_prose": MagicMock()},
             ),
             patch(
-                "familiar_connect.commands.run.create_tts_client_from_env",
+                "familiar_connect.commands.run.create_tts_client",
                 return_value=None,
             ),
             patch(
@@ -291,19 +408,23 @@ class TestRunTranscriberIntegration:
         (tmp_path / "aria").mkdir()
         args = argparse.Namespace(familiar="aria")
 
+        env = {
+            "DISCORD_BOT": "fake-token",
+            "OPENROUTER_API_KEY": "sk-test",
+        }
         with (
-            patch.dict("os.environ", {"DISCORD_BOT": "fake-token"}, clear=True),
+            patch.dict("os.environ", env, clear=True),
             patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
             patch(
-                "familiar_connect.commands.run.create_client_from_env",
-                return_value=MagicMock(),
+                "familiar_connect.commands.run.load_character_config",
+                return_value=_fake_character_config(),
             ),
             patch(
-                "familiar_connect.commands.run.create_side_client_from_env",
-                return_value=None,
+                "familiar_connect.commands.run.create_llm_clients",
+                return_value={"main_prose": MagicMock()},
             ),
             patch(
-                "familiar_connect.commands.run.create_tts_client_from_env",
+                "familiar_connect.commands.run.create_tts_client",
                 return_value=None,
             ),
             patch(

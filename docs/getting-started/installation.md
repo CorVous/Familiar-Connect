@@ -13,7 +13,10 @@
 
 ## Environment variables
 
-Create a `.env` in the repo root (loaded automatically on startup):
+Create a `.env` in the repo root (loaded automatically on startup).
+Only install-wide secrets and the active-familiar selector live here;
+everything tunable about the familiar — LLM model per call site, TTS
+voice, chattiness — lives in `data/familiars/<id>/character.toml`.
 
 ```bash
 # required
@@ -23,30 +26,35 @@ OPENROUTER_API_KEY=<openrouter key>
 # pick the familiar to load (or pass --familiar on the CLI)
 FAMILIAR_ID=aria
 
-# optional overrides for the main reply-path model
-OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
-OPENROUTER_TEMPERATURE=0.8
-
-# optional — cheaper model used for side-model work.
-# Stepped thinking, recast, history summary, and content search all
-# run through the side model slot. If you leave this unset, those
-# calls reuse OPENROUTER_MODEL — which works but can be slow and
-# expensive, especially because the content-search agent runs up to
-# 5 side-model calls per turn. Set it to a fast, cheap model to blunt
-# the cost hit.
-OPENROUTER_SIDE_MODEL=openai/gpt-4o-mini
-OPENROUTER_SIDE_TEMPERATURE=0.5
-
-# optional — voice output
+# optional — voice output secret. Voice id and model are now part of
+# character.toml under [tts], not .env.
 CARTESIA_API_KEY=<cartesia key>
-CARTESIA_VOICE_ID=<voice id>
-CARTESIA_MODEL=sonic-english
+
+# optional — Deepgram transcription secret (voice channels only)
+DEEPGRAM_API_KEY=<deepgram key>
 ```
 
-### Picking a side model
+### Per-familiar model choice
 
-The side model is used for focused sub-tasks where accuracy matters
-less than latency and cost. Good starting points:
+LLM model selection is per-call-site and lives in the familiar's
+`character.toml` under one `[llm.<slot>]` table per call site:
+`main_prose`, `post_process_style`, `reasoning_context`,
+`history_summary`, `memory_search`, and `interjection_decision`.
+
+The checked-in reference profile at
+`data/familiars/_default/character.toml` fills in every slot with
+sensible defaults. A user's own `character.toml` only needs to
+override the fields it wants to change — missing slots inherit from
+the default profile on load. Copy the default to start a new
+familiar:
+
+```bash
+cp -r data/familiars/_default data/familiars/my-familiar
+# then edit data/familiars/my-familiar/character.toml
+```
+
+Good slot-level starting points for cheap / fast models (everything
+except `main_prose`):
 
 - `openai/gpt-4o-mini` — cheapest OpenAI, fast, honours the `name`
   field, strong structured-output for the content-search TOOL/ANSWER
@@ -56,8 +64,7 @@ less than latency and cost. Good starting points:
 - `meta-llama/llama-3.1-8b-instruct` — very cheap via OpenRouter,
   decent for simple summarisation.
 
-The startup log prints which side model is in use on every launch, or
-warns if you left it unset.
+The startup log prints each slot's resolved model on every launch.
 
 ## Start
 

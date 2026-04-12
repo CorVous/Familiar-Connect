@@ -3,16 +3,16 @@
 Step 10 of docs/architecture/context-pipeline.md. Inspired by
 SillyTavern's ``recast-post-processing``.
 
-Takes the main LLM's reply text and runs a cheap :class:`SideModel`
-with a focused rewrite prompt — tighten tone, strip formatting
-artefacts, and (for voice turns) rewrite for spoken delivery. The
-modality on the :class:`ContextRequest` controls which prompt
-variant is used.
+Takes the main LLM's reply text and runs the ``post_process_style``
+slot's :class:`LLMClient` with a focused rewrite prompt — tighten
+tone, strip formatting artefacts, and (for voice turns) rewrite for
+spoken delivery. The modality on the :class:`ContextRequest`
+controls which prompt variant is used.
 
-The processor is **failure-isolated**: a slow side-model, an
-exception, or an empty / whitespace-only response all return the
-*original* reply unchanged. A broken cleanup pass should never
-break the user-facing reply.
+The processor is **failure-isolated**: a slow model, an exception,
+or an empty / whitespace-only response all return the *original*
+reply unchanged. A broken cleanup pass should never break the
+user-facing reply.
 """
 
 from __future__ import annotations
@@ -22,23 +22,19 @@ import logging
 from typing import TYPE_CHECKING
 
 from familiar_connect.context.types import Modality
+from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
-    from familiar_connect.context.side_model import SideModel
     from familiar_connect.context.types import ContextRequest
+    from familiar_connect.llm import LLMClient
 
 
 _logger = logging.getLogger(__name__)
 
 
 DEFAULT_PROCESSOR_TIMEOUT_S = 9.0
-"""Soft cap on the side-model call. Strictly bounded so a stalled
-cheap model can never block the post-processing phase."""
-
-DEFAULT_MAX_RECAST_TOKENS = 512
-"""Approximate target length for the recast output. Should be at
-least as large as the typical main-reply length so the processor
-isn't accidentally truncating things."""
+"""Soft cap on the recast LLM call. Strictly bounded so a stalled
+model can never block the post-processing phase."""
 
 _TEXT_PROMPT_TEMPLATE = """\
 Rewrite the following reply for clarity and tone. Keep the same
@@ -66,17 +62,15 @@ Spoken reply:"""
 
 
 class RecastPostProcessor:
-    """PostProcessor that runs a cheap-model cleanup pass on the LLM reply.
+    """PostProcessor that runs a focused cleanup pass on the LLM reply.
 
     Conforms to the :class:`PostProcessor` Protocol structurally —
     no inheritance required.
 
-    :param side_model: The cheap :class:`SideModel` to use for the
-        rewrite.
-    :param processor_timeout_s: Soft cap on the side-model call.
-        On timeout, the processor returns the original reply.
-    :param max_recast_tokens: Approximate target length for the
-        cleaned-up reply.
+    :param llm_client: The :class:`LLMClient` for the
+        ``post_process_style`` slot.
+    :param processor_timeout_s: Soft cap on the LLM call. On
+        timeout, the processor returns the original reply.
     """
 
     id = "recast"
@@ -84,13 +78,11 @@ class RecastPostProcessor:
     def __init__(
         self,
         *,
-        side_model: SideModel,
+        llm_client: LLMClient,
         processor_timeout_s: float = DEFAULT_PROCESSOR_TIMEOUT_S,
-        max_recast_tokens: int = DEFAULT_MAX_RECAST_TOKENS,
     ) -> None:
-        self._side_model = side_model
+        self._llm_client = llm_client
         self._processor_timeout_s = processor_timeout_s
-        self._max_recast_tokens = max_recast_tokens
 
     async def process(
         self,
@@ -107,25 +99,24 @@ class RecastPostProcessor:
 
         try:
             async with asyncio.timeout(self._processor_timeout_s):
-                response = await self._side_model.complete(
-                    prompt,
-                    max_tokens=self._max_recast_tokens,
+                reply = await self._llm_client.chat(
+                    [Message(role="user", content=prompt)],
                 )
         except TimeoutError:
             _logger.warning(
-                "recast: side-model timed out after %.3fs",
+                "recast: LLM call timed out after %.3fs",
                 self._processor_timeout_s,
             )
             return reply_text
         except Exception as exc:  # noqa: BLE001 — isolation by design
             _logger.warning(
-                "recast: side-model raised %s: %s",
+                "recast: LLM call raised %s: %s",
                 type(exc).__name__,
                 exc,
             )
             return reply_text
 
-        clean = response.strip()
+        clean = reply.content.strip()
         if not clean:
             return reply_text
         return clean

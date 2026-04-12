@@ -11,30 +11,68 @@ The bot's configuration surface is split into two levels.
 
 ### 1. Bot instance config
 
-The secrets and global knobs the host machine needs to run the bot at all. Set by the **admin**, never exposed through Discord.
+The secrets and install selector the host machine needs to run the bot at all. Set by the **admin**, never exposed through Discord.
 
-- Discord bot token
-- OpenRouter API key (and any other LLM provider tokens)
-- Cartesia / Azure / Fish API keys for TTS
-- Deepgram API key for STT
-- Twitch client ID and OAuth token
+- `DISCORD_BOT` — Discord bot token
+- `OPENROUTER_API_KEY` — single key shared across every LLM call site
+- `CARTESIA_API_KEY` — Cartesia TTS key
+- `DEEPGRAM_API_KEY` — Deepgram STT key (optional, not yet wired)
+- Twitch client ID and OAuth token (optional)
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
-- Default model overrides, default temperature, default budget caps
-- Storage roots (e.g. `data/`)
+
+Model choices, temperatures, and TTS voice are **not** here — those live on the per-familiar `character.toml` so swapping `FAMILIAR_ID` swaps the full configuration profile, not just the persona.
 
 **Where it lives:** environment variables and / or a `.env` file. Never checked into git. Never editable from inside Discord. See [Installation](../getting-started/installation.md) for the full env var list.
 
 ### 2. Character config
 
-Per-familiar configuration. The persona, behaviour knobs, and pluggable component selection for the single familiar this install runs.
+Per-familiar configuration. The persona, behaviour knobs, pluggable component selection, and **every LLM model / temperature choice** for the single familiar this install runs.
 
 - **Persona** — character card fields, unpacked into `memory/self/*.md` by `familiar_connect.bootstrap.unpack_character` (see [Bootstrapping](../guides/bootstrapping.md)).
 - **Memory directory** — `memory/`, owned by `MemoryStore`. See [Memory](memory.md).
 - **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
+- **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.
+- **TTS voice** — `[tts]` section carries `voice_id` and `model` for the Cartesia client.
 - **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`.
 - **Subscriptions** — which Discord channels the bot listens in, written to `subscriptions.toml` by `/subscribe-text` and `/subscribe-my-voice`.
 
 **Where it lives:** `data/familiars/<familiar_id>/`. One folder per character. Only one runs at a time in any given process.
+
+### Per-call-site LLM slots
+
+Every LLM call site in the bot has its own slot, each independently configurable:
+
+| Slot | Purpose |
+|---|---|
+| `main_prose` | The familiar's spoken reply to a Discord message |
+| `post_process_style` | Rewrites a reply for tone / voice delivery (`RecastPostProcessor`) |
+| `reasoning_context` | Hidden chain-of-thought before replying (`SteppedThinkingPreProcessor`) |
+| `history_summary` | Summarizes own-channel and cross-channel history (`HistoryProvider`) |
+| `memory_search` | Agentic memory/lore retrieval loop (`ContentSearchProvider`) |
+| `interjection_decision` | Decides whether to proactively join a conversation (`ConversationMonitor`) |
+
+Each slot takes the same shape in `character.toml`:
+
+```toml
+[llm.main_prose]
+model       = "z-ai/glm-5.1"
+temperature = 0.7
+
+[llm.post_process_style]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.5
+```
+
+All six clients share the same `OPENROUTER_API_KEY` and the process-wide rate-limit semaphore in `familiar_connect.llm.get_request_semaphore`, so splitting a single "side" pool into six call sites does not multiply concurrency against the OpenRouter rate limit.
+
+### Default profile
+
+A reference familiar lives at `data/familiars/_default/` and is checked into the repo. It contains a `character.toml` with every configurable option filled in and serves two purposes:
+
+1. **Fallback source.** When loading a user's familiar, any `[llm.<slot>]` section (or `[tts]` field) missing from the user's `character.toml` falls back to the corresponding value in `_default/character.toml`. No hardcoded defaults live in Python — the default profile is the single source of truth for fallback values.
+2. **Documentation-by-example.** A new operator copies `_default/` to `data/familiars/my-familiar/` and edits from there.
+
+The leading underscore is a convention to keep `FAMILIAR_ID=_default` from being a meaningful selection. `.gitignore` contains a `!data/familiars/_default/` exception so the default profile is checked in while user data stays ignored.
 
 ## One active familiar per process
 

@@ -43,7 +43,6 @@ from familiar_connect.context.providers.history import HistoryProvider
 from familiar_connect.context.providers.mode_instructions import (
     ModeInstructionProvider,
 )
-from familiar_connect.context.side_model import LLMSideModel
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.memory.store import MemoryStore
 from familiar_connect.subscriptions import SubscriptionRegistry
@@ -57,7 +56,6 @@ if TYPE_CHECKING:
         PostProcessor,
         PreProcessor,
     )
-    from familiar_connect.context.side_model import SideModel
     from familiar_connect.llm import LLMClient
     from familiar_connect.transcription import DeepgramTranscriber
     from familiar_connect.tts import CartesiaTTSClient
@@ -76,18 +74,16 @@ class Familiar:
         ``<root>/memory``.
     :param history_store: The :class:`HistoryStore` backed by
         ``<root>/history.db``.
-    :param llm_client: The main LLM client. The pipeline itself
-        does not call it — the bot layer does — but it's held here
-        so every caller has a single handle.
+    :param llm_clients: ``slot_name -> LLMClient`` map, one entry
+        per :data:`familiar_connect.config.LLM_SLOT_NAMES`. Holds
+        every client the bundle needs so shutdown can iterate and
+        ``close()`` all of them.
     :param tts_client: Optional TTS client for voice output.
     :param transcriber: Optional Deepgram transcriber template used
         by the voice-subscription path to drive per-user speech-to-
         text streams. When ``None``, ``/subscribe-my-voice`` still
         joins the voice channel and plays TTS, but no incoming
         audio is transcribed.
-    :param side_model: The cheap model used by providers and
-        processors. Defaults to a :class:`LLMSideModel` adapter
-        over ``llm_client``.
     :param providers: ``id -> ContextProvider`` map of every
         registered provider, filtered per-turn via
         :meth:`build_pipeline`.
@@ -102,10 +98,9 @@ class Familiar:
     config: CharacterConfig
     memory_store: MemoryStore
     history_store: HistoryStore
-    llm_client: LLMClient
+    llm_clients: dict[str, LLMClient]
     tts_client: CartesiaTTSClient | None
     transcriber: DeepgramTranscriber | None
-    side_model: SideModel
     providers: dict[str, ContextProvider]
     pre_processors: dict[str, PreProcessor]
     post_processors: dict[str, PostProcessor]
@@ -125,38 +120,45 @@ class Familiar:
         cls,
         root: Path,
         *,
-        llm_client: LLMClient,
+        llm_clients: dict[str, LLMClient],
         tts_client: CartesiaTTSClient | None = None,
-        side_llm_client: LLMClient | None = None,
         transcriber: DeepgramTranscriber | None = None,
+        defaults_path: Path | None = None,
     ) -> Familiar:
         """Build a Familiar bundle from the on-disk ``data/familiars/<id>/`` layout.
 
-        - ``character.toml`` is loaded if present (defaults otherwise).
+        - ``character.toml`` is loaded (merged over
+          ``data/familiars/_default/character.toml``).
         - ``memory/`` is created if missing.
         - ``history.db`` is opened (and created if missing).
         - ``subscriptions.toml`` is loaded if present.
         - ``channels/`` is created if missing.
 
-        :param llm_client: The main reply-path :class:`LLMClient`.
+        :param llm_clients: ``slot_name -> LLMClient`` map built by
+            :func:`familiar_connect.llm.create_llm_clients`. Must
+            contain one client per
+            :data:`familiar_connect.config.LLM_SLOT_NAMES`.
         :param tts_client: Optional Cartesia TTS client for voice
             output.
-        :param side_llm_client: Optional cheap :class:`LLMClient` used
-            exclusively for side-model work (stepped thinking, recast,
-            history summary, content search). When ``None`` (the
-            default), side-model calls reuse the main ``llm_client`` —
-            which works but pays main-model price for every sub-task.
-            Set ``OPENROUTER_SIDE_MODEL`` and pass the result of
-            :func:`familiar_connect.llm.create_side_client_from_env`
-            to use a cheaper model.
         :param transcriber: Optional Deepgram transcriber template
             used by ``/subscribe-my-voice`` to drive per-user
             speech-to-text streams. When ``None``, the voice
             subscription still joins the channel and plays TTS but
             no audio is transcribed.
+        :param defaults_path: Override for the default character
+            profile path. Production leaves this ``None``, which
+            resolves ``root.parent / "_default" / "character.toml"``.
+            Tests pass the checked-in default profile directly so
+            they don't have to stage a sibling ``_default/`` folder
+            in ``tmp_path``.
         """
         familiar_id = root.name
-        character_config = load_character_config(root / "character.toml")
+        if defaults_path is None:
+            defaults_path = root.parent / "_default" / "character.toml"
+        character_config = load_character_config(
+            root / "character.toml",
+            defaults_path=defaults_path,
+        )
 
         memory_root = root / "memory"
         memory_root.mkdir(parents=True, exist_ok=True)
@@ -164,20 +166,22 @@ class Familiar:
 
         history_store = HistoryStore(root / "history.db")
 
-        side_model: SideModel = LLMSideModel(side_llm_client or llm_client)
-
         providers: dict[str, ContextProvider] = {
             "character": CharacterProvider(memory_store),
             "content_search": ContentSearchProvider(
                 store=memory_store,
-                side_model=side_model,
+                llm_client=llm_clients["memory_search"],
             ),
         }
         pre_processors: dict[str, PreProcessor] = {
-            "stepped_thinking": SteppedThinkingPreProcessor(side_model=side_model),
+            "stepped_thinking": SteppedThinkingPreProcessor(
+                llm_client=llm_clients["reasoning_context"],
+            ),
         }
         post_processors: dict[str, PostProcessor] = {
-            "recast": RecastPostProcessor(side_model=side_model),
+            "recast": RecastPostProcessor(
+                llm_client=llm_clients["post_process_style"],
+            ),
         }
 
         subscriptions = SubscriptionRegistry(root / "subscriptions.toml")
@@ -216,7 +220,7 @@ class Familiar:
             chattiness=character_config.chattiness,
             interjection=character_config.interjection,
             lull_timeout=character_config.lull_timeout,
-            side_model=side_model,
+            llm_client=llm_clients["interjection_decision"],
             character_card=character_card,
             on_respond=_noop_respond,
         )
@@ -227,10 +231,9 @@ class Familiar:
             config=character_config,
             memory_store=memory_store,
             history_store=history_store,
-            llm_client=llm_client,
+            llm_clients=llm_clients,
             tts_client=tts_client,
             transcriber=transcriber,
-            side_model=side_model,
             providers=providers,
             pre_processors=pre_processors,
             post_processors=post_processors,
@@ -264,7 +267,7 @@ class Familiar:
             active_providers.append(
                 HistoryProvider(
                     store=self.history_store,
-                    side_model=self.side_model,
+                    llm_client=self.llm_clients["history_summary"],
                     window_size=self.config.history_window_size,
                     mode=channel_config.mode,
                 ),

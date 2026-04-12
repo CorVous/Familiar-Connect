@@ -145,22 +145,27 @@ inline in the bot loop. The LLM client (`familiar_connect.llm`) only
 speaks to OpenRouter; it is deliberately unaware of where its messages
 came from so the pipeline can be tested and extended in isolation.
 
-- **Provider:** OpenRouter. Default model `openai/gpt-4o`, overridable
-  per familiar via config and via `OPENROUTER_MODEL`.
+- **Provider:** OpenRouter. Model selection is per-call-site and per
+  familiar — set individually in `character.toml` under
+  `[llm.main_prose]`, `[llm.post_process_style]`,
+  `[llm.reasoning_context]`, `[llm.history_summary]`,
+  `[llm.memory_search]`, and `[llm.interjection_decision]`.
 - **Streaming:** Responses are streamed so the TTS path can start
   speaking before the full reply arrives.
-- **Cheap side-model slot:** A smaller, faster model (e.g.
-  `openai/gpt-4o-mini`) is made available to providers and processors
-  for focused sub-tasks — summarisation, lorebook management, stepped
-  thinking, recast-style cleanup — without inflating the main call.
+- **Per-call-site slots:** Each provider/processor holds its own
+  `LLMClient` drawn from the slot it owns, so a familiar can pin a
+  cheap model (e.g. `openai/gpt-4o-mini`) on the cheap slots while
+  still using a heavyweight model on `main_prose`. The process-wide
+  rate-limit semaphore is shared across every slot.
 
 ### Context pipeline
 
 Everything upstream of the OpenRouter call — character cards, system
-prompt assembly, memory retrieval, conversation history, cheap
-side-model calls — is assembled by a single **context pipeline** that
-runs as a scoped `asyncio.TaskGroup` on every reply. The pipeline is
-the architectural backbone for all "AI behaviour knobs" in the bot.
+prompt assembly, memory retrieval, conversation history, and the
+cheap side calls each call site makes from its own `LLMClient` slot
+— is assembled by a single **context pipeline** that runs as a
+scoped `asyncio.TaskGroup` on every reply. The pipeline is the
+architectural backbone for all "AI behaviour knobs" in the bot.
 
 See [Context pipeline](context-pipeline.md) for the full design and
 step-by-step implementation history, and [Memory](memory.md) for the

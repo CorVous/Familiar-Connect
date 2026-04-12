@@ -4,9 +4,9 @@ Step 6 of docs/architecture/context-pipeline.md. Reads turns from the
 HistoryStore for the request's ``(familiar_id, channel_id)`` and
 emits one recent_history Contribution containing the most recent N
 turns *in this channel*, and — when there are enough older turns
-*globally* — emits a second history_summary Contribution from a
-cheap SideModel, cached in the store under ``familiar_id`` so we
-don't pay for the same prefix twice.
+*globally* — emits a second history_summary Contribution from the
+``history_summary`` slot's :class:`LLMClient`, cached in the store
+under ``familiar_id`` so we don't pay for the same prefix twice.
 
 The recent window is partitioned per channel; the rolling summary is
 global per familiar.
@@ -35,6 +35,7 @@ from familiar_connect.context.types import (
     Modality,
 )
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.llm import LLMClient, Message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,10 +80,8 @@ def _seed(store: HistoryStore, n: int, *, channel_id: int = _CHANNEL) -> None:
         )
 
 
-class _StubSideModel:
-    """Scripted SideModel for deterministic provider tests."""
-
-    id = "stub"
+class _StubLLMClient(LLMClient):
+    """Scripted :class:`LLMClient` for deterministic provider tests."""
 
     def __init__(
         self,
@@ -91,23 +90,26 @@ class _StubSideModel:
         delay_s: float = 0.0,
         exc: Exception | None = None,
     ) -> None:
+        super().__init__(api_key="stub-test-key", model="stub/test-model")
         self._response = response
         self._delay_s = delay_s
         self._exc = exc
-        self.calls: list[str] = []
+        self.calls: list[list[Message]] = []
 
-    async def complete(
-        self,
-        prompt: str,
-        *,
-        max_tokens: int = 256,  # noqa: ARG002
-    ) -> str:
-        self.calls.append(prompt)
+    async def chat(self, messages: list[Message]) -> Message:
+        self.calls.append(list(messages))
         if self._delay_s > 0:
             await asyncio.sleep(self._delay_s)
         if self._exc is not None:
             raise self._exc
-        return self._response
+        return Message(role="assistant", content=self._response)
+
+    async def close(self) -> None:  # pragma: no cover — no resources
+        return
+
+    def prompt_at(self, index: int) -> str:
+        """Return the user-message text of the chat call at *index*."""
+        return self.calls[index][0].content
 
 
 @pytest.fixture
@@ -123,12 +125,12 @@ def store(tmp_path: Path) -> HistoryStore:
 
 class TestConstructionAndProtocol:
     def test_id_and_deadline(self, store: HistoryStore) -> None:
-        provider = HistoryProvider(store=store, side_model=_StubSideModel())
+        provider = HistoryProvider(store=store, llm_client=_StubLLMClient())
         assert provider.id == "history"
         assert provider.deadline_s > 0
 
     def test_conforms_to_context_provider_protocol(self, store: HistoryStore) -> None:
-        provider = HistoryProvider(store=store, side_model=_StubSideModel())
+        provider = HistoryProvider(store=store, llm_client=_StubLLMClient())
         assert isinstance(provider, ContextProvider)
 
 
@@ -140,15 +142,15 @@ class TestConstructionAndProtocol:
 class TestRecentHistorySlice:
     @pytest.mark.asyncio
     async def test_empty_history_yields_nothing(self, store: HistoryStore) -> None:
-        provider = HistoryProvider(store=store, side_model=_StubSideModel())
+        provider = HistoryProvider(store=store, llm_client=_StubLLMClient())
         contributions = await provider.contribute(_request())
         assert contributions == []
 
     @pytest.mark.asyncio
     async def test_under_window_returns_only_recent(self, store: HistoryStore) -> None:
         _seed(store, 3)
-        side = _StubSideModel()
-        provider = HistoryProvider(store=store, side_model=side, window_size=20)
+        side = _StubLLMClient()
+        provider = HistoryProvider(store=store, llm_client=side, window_size=20)
 
         contributions = await provider.contribute(_request())
 
@@ -165,8 +167,8 @@ class TestRecentHistorySlice:
     @pytest.mark.asyncio
     async def test_recent_text_includes_speakers(self, store: HistoryStore) -> None:
         _seed(store, 2)
-        side = _StubSideModel()
-        provider = HistoryProvider(store=store, side_model=side)
+        side = _StubLLMClient()
+        provider = HistoryProvider(store=store, llm_client=side)
         (recent,) = await provider.contribute(_request())
         # Speaker name appears for user turns; assistant turns are still labelled.
         assert "Alice" in recent.text
@@ -183,8 +185,8 @@ class TestSummaryPath:
         self, store: HistoryStore
     ) -> None:
         _seed(store, 25)
-        side = _StubSideModel(response="early-conversation summary")
-        provider = HistoryProvider(store=store, side_model=side, window_size=10)
+        side = _StubLLMClient(response="early-conversation summary")
+        provider = HistoryProvider(store=store, llm_client=side, window_size=10)
 
         contributions = await provider.contribute(_request())
 
@@ -192,7 +194,7 @@ class TestSummaryPath:
         assert layers == {Layer.recent_history, Layer.history_summary}
         assert len(side.calls) == 1
         # The summariser was given the *older* turns, not the recent window.
-        prompt = side.calls[0]
+        prompt = side.prompt_at(0)
         assert "turn 0" in prompt
         assert "turn 14" in prompt
         assert "turn 15" not in prompt  # in the recent window now
@@ -204,8 +206,8 @@ class TestSummaryPath:
     @pytest.mark.asyncio
     async def test_fresh_cache_is_reused(self, store: HistoryStore) -> None:
         _seed(store, 25)
-        side = _StubSideModel(response="cached summary")
-        provider = HistoryProvider(store=store, side_model=side, window_size=10)
+        side = _StubLLMClient(response="cached summary")
+        provider = HistoryProvider(store=store, llm_client=side, window_size=10)
 
         # First call writes the cache.
         await provider.contribute(_request())
@@ -220,8 +222,8 @@ class TestSummaryPath:
     @pytest.mark.asyncio
     async def test_stale_cache_is_regenerated(self, store: HistoryStore) -> None:
         _seed(store, 25)
-        side = _StubSideModel(response="first")
-        provider = HistoryProvider(store=store, side_model=side, window_size=10)
+        side = _StubLLMClient(response="first")
+        provider = HistoryProvider(store=store, llm_client=side, window_size=10)
 
         await provider.contribute(_request())  # caches "first"
         assert len(side.calls) == 1
@@ -256,8 +258,8 @@ class TestSummariserFailures:
         self, store: HistoryStore
     ) -> None:
         _seed(store, 25)
-        side = _StubSideModel(exc=RuntimeError("kaboom"))
-        provider = HistoryProvider(store=store, side_model=side, window_size=10)
+        side = _StubLLMClient(exc=RuntimeError("kaboom"))
+        provider = HistoryProvider(store=store, llm_client=side, window_size=10)
 
         contributions = await provider.contribute(_request())
 
@@ -271,10 +273,10 @@ class TestSummariserFailures:
     ) -> None:
         _seed(store, 25)
         # 2-second delay against a 0.05-second internal soft deadline.
-        side = _StubSideModel(delay_s=2.0)
+        side = _StubLLMClient(delay_s=2.0)
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=10,
             summary_timeout_s=0.05,
         )
@@ -297,8 +299,8 @@ class TestSummariserFailures:
         """
         _seed(store, 25)
         # First, populate the cache with a fast side-model.
-        fast = _StubSideModel(response="cached value")
-        provider = HistoryProvider(store=store, side_model=fast, window_size=10)
+        fast = _StubLLMClient(response="cached value")
+        provider = HistoryProvider(store=store, llm_client=fast, window_size=10)
         await provider.contribute(_request())
 
         # Add more turns and switch to a slow side-model.
@@ -311,10 +313,10 @@ class TestSummariserFailures:
                 speaker="Alice",
             )
 
-        slow = _StubSideModel(response="never returned", delay_s=2.0)
+        slow = _StubLLMClient(response="never returned", delay_s=2.0)
         provider2 = HistoryProvider(
             store=store,
-            side_model=slow,
+            llm_client=slow,
             window_size=10,
             summary_timeout_s=0.05,
         )
@@ -363,10 +365,10 @@ class TestModeFilteredRecentWindow:
         _seed_with_mode(store, 3, mode=ChannelMode.full_rp)
         _seed_with_mode(store, 3, mode=ChannelMode.imitate_voice)
 
-        side = _StubSideModel()
+        side = _StubLLMClient()
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=20,
             mode=ChannelMode.full_rp,
         )
@@ -384,10 +386,10 @@ class TestModeFilteredRecentWindow:
         _seed_with_mode(store, 25, mode=ChannelMode.full_rp, channel_id=_CHANNEL)
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=999)
 
-        side = _StubSideModel(response="channel summary")
+        side = _StubLLMClient(response="channel summary")
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=10,
             mode=ChannelMode.full_rp,
         )
@@ -402,7 +404,7 @@ class TestModeFilteredRecentWindow:
         assert len(side.calls) == 2
         # The first call is the within-channel summary — verify it
         # doesn't contain the other channel's turns.
-        prompt = side.calls[0]
+        prompt = side.prompt_at(0)
         assert "Summarise the following" in prompt
         # The summary should come from the within-channel older turns only.
         assert summary.text == "channel summary"
@@ -422,10 +424,10 @@ class TestCrossContextContributions:
         _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
-        side = _StubSideModel(response="Meanwhile in the RP scene...")
+        side = _StubLLMClient(response="Meanwhile in the RP scene...")
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=20,
             mode=ChannelMode.text_conversation_rp,
         )
@@ -450,10 +452,10 @@ class TestCrossContextContributions:
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=200)
 
-        side = _StubSideModel(response="Meanwhile in text chat...")
+        side = _StubLLMClient(response="Meanwhile in text chat...")
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=20,
             mode=ChannelMode.full_rp,
         )
@@ -480,10 +482,10 @@ class TestCrossContextContributions:
         _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
-        side = _StubSideModel(response="cached cross summary")
+        side = _StubLLMClient(response="cached cross summary")
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=20,
             mode=ChannelMode.text_conversation_rp,
         )
@@ -491,13 +493,15 @@ class TestCrossContextContributions:
         await provider.contribute(_request(channel_id=100))
         call_count_after_first = len(side.calls)
 
-        # Second call should reuse the cache — no new side-model calls
-        # for the cross-context summary.
+        # Second call should reuse the cache — no new LLM calls for
+        # the cross-context summary.
         await provider.contribute(_request(channel_id=100))
+        new_calls = side.calls[call_count_after_first:]
         cross_calls = [
-            c
-            for c in side.calls[call_count_after_first:]
-            if "cross" in c.lower() or "meanwhile" in c.lower()
+            messages
+            for messages in new_calls
+            if "cross" in messages[0].content.lower()
+            or "meanwhile" in messages[0].content.lower()
         ]
         assert cross_calls == []
 
@@ -509,10 +513,10 @@ class TestCrossContextContributions:
         _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
-        side = _StubSideModel(exc=RuntimeError("kaboom"))
+        side = _StubLLMClient(exc=RuntimeError("kaboom"))
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=20,
             mode=ChannelMode.text_conversation_rp,
         )
@@ -530,10 +534,10 @@ class TestCrossContextContributions:
         """Single-channel familiars produce no cross-context contributions."""
         _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
 
-        side = _StubSideModel(response="should not appear")
+        side = _StubLLMClient(response="should not appear")
         provider = HistoryProvider(
             store=store,
-            side_model=side,
+            llm_client=side,
             window_size=20,
             mode=ChannelMode.text_conversation_rp,
         )

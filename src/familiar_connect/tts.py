@@ -13,8 +13,6 @@ if TYPE_CHECKING:
 
 CARTESIA_BASE_URL = "https://api.cartesia.ai"
 CARTESIA_API_VERSION = "2024-06-10"
-DEFAULT_MODEL = "sonic-3"
-DEFAULT_VOICE_ID = "999df508-4de5-40a7-8bd3-8c12f678c284"
 DEFAULT_SAMPLE_RATE = 48000  # Hz — matches Discord's native rate
 
 
@@ -30,8 +28,8 @@ class CartesiaTTSClient:
         self: Self,
         *,
         api_key: str,
-        voice_id: str = DEFAULT_VOICE_ID,
-        model: str = DEFAULT_MODEL,
+        voice_id: str,
+        model: str,
         base_url: str = CARTESIA_BASE_URL,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
     ) -> None:
@@ -98,20 +96,28 @@ class CartesiaTTSClient:
         return response.content
 
 
-def create_tts_client_from_env() -> CartesiaTTSClient:
-    """Create a :class:`CartesiaTTSClient` from environment variables.
+def create_tts_client(voice_id: str, model: str) -> CartesiaTTSClient:
+    """Create a :class:`CartesiaTTSClient` from character-config values.
 
-    Required: ``CARTESIA_API_KEY``
-    Optional: ``CARTESIA_VOICE_ID``, ``CARTESIA_MODEL``
+    The voice and model are per-familiar concerns and live in the
+    character's ``[tts]`` TOML section; only ``CARTESIA_API_KEY``
+    stays at the environment-variable level because it's a secret
+    scoped to the host machine.
 
-    :raises ValueError: If ``CARTESIA_API_KEY`` is not set.
+    :param voice_id: Cartesia voice id (character.toml ``[tts].voice_id``).
+    :param model: Cartesia model name (character.toml ``[tts].model``).
+    :raises ValueError: If ``CARTESIA_API_KEY`` is not set or either
+        argument is empty.
     """
     api_key = os.environ.get("CARTESIA_API_KEY")
     if not api_key:
         msg = "CARTESIA_API_KEY environment variable is required"
         raise ValueError(msg)
-
-    voice_id = os.environ.get("CARTESIA_VOICE_ID") or DEFAULT_VOICE_ID
-    model = os.environ.get("CARTESIA_MODEL") or DEFAULT_MODEL
+    if not voice_id:
+        msg = "TTS voice_id is required (set [tts].voice_id in character.toml)"
+        raise ValueError(msg)
+    if not model:
+        msg = "TTS model is required (set [tts].model in character.toml)"
+        raise ValueError(msg)
 
     return CartesiaTTSClient(api_key=api_key, voice_id=voice_id, model=model)

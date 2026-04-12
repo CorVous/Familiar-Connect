@@ -20,5 +20,10 @@ src/*/_version.py
 # mkdocs build output
 site/
 
-# Familiar Data
-data/familiars/
+# Familiar Data — every per-user familiar is ignored, but the
+# checked-in default profile at data/familiars/_default/ is not.
+# Git won't descend into an ignored directory, so the rules below
+# match individual folders under data/familiars/ rather than the
+# parent itself.
+data/familiars/*
+!data/familiars/_default/

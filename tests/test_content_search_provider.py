@@ -10,11 +10,8 @@ returns an ``ANSWER:`` and the provider wraps it as a Contribution.
 The first cut uses **structured prompting** rather than a real
 tool-call API: the model is asked to emit either ``TOOL: {...}`` or
 ``ANSWER: ...`` lines and the provider parses by line prefix. This
-keeps the SideModel Protocol surface tiny and lets the loop logic
-be tested with scripted stubs.
-
-Covers familiar_connect.context.providers.content_search, which
-doesn't exist yet.
+keeps the LLM interface surface tiny and lets the loop logic be
+tested with scripted stubs.
 """
 
 from __future__ import annotations
@@ -34,6 +31,7 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
+from familiar_connect.llm import LLMClient, Message
 from familiar_connect.memory.store import MemoryStore
 
 if TYPE_CHECKING:
@@ -68,33 +66,37 @@ def store(tmp_path: Path) -> MemoryStore:
     return MemoryStore(tmp_path / "memory")
 
 
-class _ScriptedSideModel:
-    """SideModel stub that returns a queue of canned responses.
+class _ScriptedLLMClient(LLMClient):
+    """LLMClient stub that returns a queue of canned responses.
 
-    Each call to complete() pops the next canned string from the
-    front of the queue. Captured prompts are kept for assertion.
+    Each call to :meth:`chat` pops the next canned string from the
+    front of the queue and wraps it in an assistant :class:`Message`.
+    Captured message lists are kept for assertion. Inherits from
+    :class:`LLMClient` so it is structurally and nominally a drop-in
+    replacement at call sites typed as ``LLMClient``.
     """
 
-    id = "scripted"
-
     def __init__(self, responses: list[str]) -> None:
+        super().__init__(api_key="scripted-test-key", model="scripted/test-model")
         self._responses = list(responses)
-        self.calls: list[str] = []
+        self.calls: list[list[Message]] = []
 
-    async def complete(
-        self,
-        prompt: str,
-        *,
-        max_tokens: int = 256,  # noqa: ARG002
-    ) -> str:
-        self.calls.append(prompt)
+    async def chat(self, messages: list[Message]) -> Message:
+        self.calls.append(list(messages))
         if not self._responses:
             msg = (
-                "scripted side-model ran out of responses; "
-                f"prompts so far: {len(self.calls)}"
+                "scripted LLM client ran out of responses; "
+                f"chats so far: {len(self.calls)}"
             )
             raise RuntimeError(msg)
-        return self._responses.pop(0)
+        return Message(role="assistant", content=self._responses.pop(0))
+
+    async def close(self) -> None:  # pragma: no cover — no resources
+        return
+
+    def prompt_at(self, index: int) -> str:
+        """Return the user-message text of the chat call at *index*."""
+        return self.calls[index][0].content
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +106,12 @@ class _ScriptedSideModel:
 
 class TestConstructionAndProtocol:
     def test_id_and_deadline(self, store: MemoryStore) -> None:
-        provider = ContentSearchProvider(store=store, side_model=_ScriptedSideModel([]))
+        provider = ContentSearchProvider(store=store, llm_client=_ScriptedLLMClient([]))
         assert provider.id == "content_search"
         assert provider.deadline_s > 0
 
     def test_conforms_to_context_provider_protocol(self, store: MemoryStore) -> None:
-        provider = ContentSearchProvider(store=store, side_model=_ScriptedSideModel([]))
+        provider = ContentSearchProvider(store=store, llm_client=_ScriptedLLMClient([]))
         assert isinstance(provider, ContextProvider)
 
 
@@ -123,8 +125,8 @@ class TestImmediateAnswer:
     async def test_immediate_answer_yields_contribution(
         self, store: MemoryStore
     ) -> None:
-        side = _ScriptedSideModel(["ANSWER: Aria knows Alice from last Tuesday."])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        side = _ScriptedLLMClient(["ANSWER: Aria knows Alice from last Tuesday."])
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
@@ -141,8 +143,8 @@ class TestImmediateAnswer:
     async def test_empty_answer_yields_no_contribution(
         self, store: MemoryStore
     ) -> None:
-        side = _ScriptedSideModel(["ANSWER:"])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        side = _ScriptedLLMClient(["ANSWER:"])
+        provider = ContentSearchProvider(store=store, llm_client=side)
         contributions = await provider.contribute(_request())
         assert contributions == []
 
@@ -150,8 +152,8 @@ class TestImmediateAnswer:
     async def test_whitespace_only_answer_yields_no_contribution(
         self, store: MemoryStore
     ) -> None:
-        side = _ScriptedSideModel(["ANSWER:    \n   "])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        side = _ScriptedLLMClient(["ANSWER:    \n   "])
+        provider = ContentSearchProvider(store=store, llm_client=side)
         assert await provider.contribute(_request()) == []
 
 
@@ -164,11 +166,11 @@ class TestSingleToolCall:
     @pytest.mark.asyncio
     async def test_grep_then_answer(self, store: MemoryStore) -> None:
         store.write_file("people/alice.md", "She likes ska music and old citadels.")
-        side = _ScriptedSideModel([
+        side = _ScriptedLLMClient([
             'TOOL: {"tool": "grep", "args": {"pattern": "ska"}}',
             "ANSWER: Alice likes ska music.",
         ])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
@@ -177,54 +179,54 @@ class TestSingleToolCall:
         assert len(side.calls) == 2
         # The second prompt fed back the grep result, so it should mention
         # the file the hit came from.
-        assert "people/alice.md" in side.calls[1]
+        assert "people/alice.md" in side.prompt_at(1)
 
     @pytest.mark.asyncio
     async def test_read_file_then_answer(self, store: MemoryStore) -> None:
         store.write_file("notes.md", "Aria's favourite tea is jasmine.")
-        side = _ScriptedSideModel([
+        side = _ScriptedLLMClient([
             'TOOL: {"tool": "read_file", "args": {"path": "notes.md"}}',
             "ANSWER: Aria likes jasmine tea.",
         ])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
         assert len(contributions) == 1
         assert "jasmine tea" in contributions[0].text
         # Second prompt should contain the file content from the tool result.
-        assert "jasmine" in side.calls[1]
+        assert "jasmine" in side.prompt_at(1)
 
     @pytest.mark.asyncio
     async def test_list_dir_then_answer(self, store: MemoryStore) -> None:
         store.write_file("people/alice.md", "x")
         store.write_file("people/bob.md", "y")
-        side = _ScriptedSideModel([
+        side = _ScriptedLLMClient([
             'TOOL: {"tool": "list_dir", "args": {"path": "people"}}',
             "ANSWER: Aria has files on Alice and Bob.",
         ])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
         assert len(contributions) == 1
         # The list_dir result fed back to the model includes both names.
-        assert "alice.md" in side.calls[1]
-        assert "bob.md" in side.calls[1]
+        assert "alice.md" in side.prompt_at(1)
+        assert "bob.md" in side.prompt_at(1)
 
     @pytest.mark.asyncio
     async def test_glob_then_answer(self, store: MemoryStore) -> None:
         store.write_file("people/alice.md", "x")
         store.write_file("topics/ska.md", "y")
-        side = _ScriptedSideModel([
+        side = _ScriptedLLMClient([
             'TOOL: {"tool": "glob", "args": {"pattern": "**/*.md"}}',
             "ANSWER: Aria has people and topics directories.",
         ])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        provider = ContentSearchProvider(store=store, llm_client=side)
         contributions = await provider.contribute(_request())
         assert len(contributions) == 1
-        assert "people/alice.md" in side.calls[1]
-        assert "topics/ska.md" in side.calls[1]
+        assert "people/alice.md" in side.prompt_at(1)
+        assert "topics/ska.md" in side.prompt_at(1)
 
 
 # ---------------------------------------------------------------------------
@@ -239,12 +241,12 @@ class TestMultiStepLoop:
             "people/alice.md",
             "She loves ska. Last Tuesday we argued about Madness vs the Specials.",
         )
-        side = _ScriptedSideModel([
+        side = _ScriptedLLMClient([
             'TOOL: {"tool": "list_dir", "args": {"path": "people"}}',
             'TOOL: {"tool": "read_file", "args": {"path": "people/alice.md"}}',
             "ANSWER: Alice argued about ska bands last Tuesday.",
         ])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
@@ -266,8 +268,8 @@ class TestIterationCap:
         """A model that never emits ANSWER is cut off cleanly."""
         store.write_file("notes.md", "x")
         forever = ['TOOL: {"tool": "list_dir", "args": {}}'] * 10
-        side = _ScriptedSideModel(forever)
-        provider = ContentSearchProvider(store=store, side_model=side, max_iterations=3)
+        side = _ScriptedLLMClient(forever)
+        provider = ContentSearchProvider(store=store, llm_client=side, max_iterations=3)
 
         contributions = await provider.contribute(_request())
 
@@ -282,35 +284,35 @@ class TestErrorRecovery:
         self, store: MemoryStore
     ) -> None:
         store.write_file("notes.md", "kept")
-        side = _ScriptedSideModel([
+        side = _ScriptedLLMClient([
             'TOOL: {"tool": "read_file", "args": {"path": "../escape.md"}}',
             'TOOL: {"tool": "read_file", "args": {"path": "notes.md"}}',
             "ANSWER: Recovered after the bad path.",
         ])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
         assert len(contributions) == 1
         assert "Recovered" in contributions[0].text
         # The second prompt should reflect the error from the first call.
-        assert "error" in side.calls[1].lower()
+        assert "error" in side.prompt_at(1).lower()
         # The third prompt should contain the recovered file content.
-        assert "kept" in side.calls[2]
+        assert "kept" in side.prompt_at(2)
 
     @pytest.mark.asyncio
     async def test_unknown_tool_returns_error_result(self, store: MemoryStore) -> None:
-        side = _ScriptedSideModel([
+        side = _ScriptedLLMClient([
             'TOOL: {"tool": "delete_universe", "args": {}}',
             "ANSWER: I gave up on that one.",
         ])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
         assert len(contributions) == 1
-        assert "error" in side.calls[1].lower()
-        assert "delete_universe" in side.calls[1]
+        assert "error" in side.prompt_at(1).lower()
+        assert "delete_universe" in side.prompt_at(1)
 
     @pytest.mark.asyncio
     async def test_malformed_tool_call_treated_as_final_answer(
@@ -321,8 +323,8 @@ class TestErrorRecovery:
         Rather than failing hard — the model said something, we
         surface it.
         """
-        side = _ScriptedSideModel(["I'm not following the format. Just text."])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        side = _ScriptedLLMClient(["I'm not following the format. Just text."])
+        provider = ContentSearchProvider(store=store, llm_client=side)
 
         contributions = await provider.contribute(_request())
 
@@ -340,26 +342,26 @@ class TestInitialPromptContent:
     async def test_user_utterance_is_in_initial_prompt(
         self, store: MemoryStore
     ) -> None:
-        side = _ScriptedSideModel(["ANSWER: noted"])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        side = _ScriptedLLMClient(["ANSWER: noted"])
+        provider = ContentSearchProvider(store=store, llm_client=side)
         await provider.contribute(_request(utterance="tell me about ska"))
-        assert "tell me about ska" in side.calls[0]
+        assert "tell me about ska" in side.prompt_at(0)
 
     @pytest.mark.asyncio
     async def test_speaker_name_is_in_initial_prompt(self, store: MemoryStore) -> None:
-        side = _ScriptedSideModel(["ANSWER: noted"])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        side = _ScriptedLLMClient(["ANSWER: noted"])
+        provider = ContentSearchProvider(store=store, llm_client=side)
         await provider.contribute(_request())
         # Speaker is "Alice" by default in _request().
-        assert "Alice" in side.calls[0]
+        assert "Alice" in side.prompt_at(0)
 
     @pytest.mark.asyncio
     async def test_tool_descriptions_appear_in_initial_prompt(
         self, store: MemoryStore
     ) -> None:
-        side = _ScriptedSideModel(["ANSWER: noted"])
-        provider = ContentSearchProvider(store=store, side_model=side)
+        side = _ScriptedLLMClient(["ANSWER: noted"])
+        provider = ContentSearchProvider(store=store, llm_client=side)
         await provider.contribute(_request())
-        prompt = side.calls[0]
+        prompt = side.prompt_at(0)
         for tool in ("list_dir", "glob", "grep", "read_file"):
             assert tool in prompt, f"{tool} missing from initial prompt"

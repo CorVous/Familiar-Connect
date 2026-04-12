@@ -218,7 +218,7 @@ def _build_voice_response_handler(
             ),
         )
 
-        reply = await familiar.llm_client.chat(messages)
+        reply = await familiar.llm_clients["main_prose"].chat(messages)
         reply_text = await pipeline.run_post_processors(reply.content, request)
 
         # Persist both turns *after* the LLM call so a mid-turn crash
@@ -469,7 +469,7 @@ async def _run_text_response(
     )
 
     async with channel.typing():
-        reply = await familiar.llm_client.chat(messages)
+        reply = await familiar.llm_clients["main_prose"].chat(messages)
 
     reply_text = await pipeline.run_post_processors(reply.content, request)
 

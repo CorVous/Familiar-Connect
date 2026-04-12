@@ -1,13 +1,17 @@
 """Tests for the LLM client (OpenRouter integration)."""
 
+from __future__ import annotations
+
 import asyncio
 import os
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
 
 import familiar_connect.llm as llm_module
+from familiar_connect.config import LLM_SLOT_NAMES, load_character_config
 from familiar_connect.llm import (
     _MAX_DELAY_S,
     _MAX_RETRIES,
@@ -15,9 +19,11 @@ from familiar_connect.llm import (
     Message,
     SystemPromptLayers,
     build_system_prompt,
-    create_client_from_env,
-    create_side_client_from_env,
+    create_llm_clients,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # --- Message dataclass ---
 
@@ -142,16 +148,10 @@ class TestMultiUserMessages:
 
 
 class TestLLMClient:
-    def test_init_requires_api_key(self) -> None:
-        """Client requires an API key."""
-        client = LLMClient(api_key="test-key")
+    def test_init_stores_api_key(self) -> None:
+        """Client stores the API key it was constructed with."""
+        client = LLMClient(api_key="test-key", model="openai/gpt-4o")
         assert client.api_key == "test-key"
-
-    def test_init_default_model(self) -> None:
-        """Client has a sensible default model."""
-        client = LLMClient(api_key="test-key")
-        assert client.model is not None
-        assert isinstance(client.model, str)
 
     def test_init_custom_model(self) -> None:
         """Client accepts a custom model override."""
@@ -160,17 +160,21 @@ class TestLLMClient:
 
     def test_init_default_base_url(self) -> None:
         """Client defaults to OpenRouter's API URL."""
-        client = LLMClient(api_key="test-key")
+        client = LLMClient(api_key="test-key", model="openai/gpt-4o")
         assert "openrouter.ai" in client.base_url
 
     def test_init_custom_base_url(self) -> None:
         """Client accepts a custom base URL for testing or alternative endpoints."""
-        client = LLMClient(api_key="test-key", base_url="https://custom.api/v1")
+        client = LLMClient(
+            api_key="test-key",
+            model="openai/gpt-4o",
+            base_url="https://custom.api/v1",
+        )
         assert client.base_url == "https://custom.api/v1"
 
     def test_builds_request_headers(self) -> None:
         """Request headers include Authorization and required OpenRouter headers."""
-        client = LLMClient(api_key="sk-or-test-123")
+        client = LLMClient(api_key="sk-or-test-123", model="openai/gpt-4o")
         headers = client.build_headers()
         assert headers["Authorization"] == "Bearer sk-or-test-123"
         assert "Content-Type" in headers
@@ -188,7 +192,11 @@ class TestLLMClient:
 
     def test_payload_includes_temperature(self) -> None:
         """Temperature parameter is passed through to the payload."""
-        client = LLMClient(api_key="test-key", temperature=0.7)
+        client = LLMClient(
+            api_key="test-key",
+            model="openai/gpt-4o",
+            temperature=0.7,
+        )
         messages = [Message(role="user", content="Hi", name="Alice")]
         payload = client.build_payload(messages)
         assert payload["temperature"] == pytest.approx(0.7)
@@ -323,108 +331,97 @@ class TestLLMClientChat:
             await client.chat(sample_messages)
 
 
-# --- Factory from environment ---
+# --- Per-slot factory ---
 
 
-class TestCreateClientFromEnv:
-    def test_creates_client_from_env_vars(self) -> None:
-        """Factory reads OPENROUTER_API_KEY and optional overrides from env."""
-        env = {
-            "OPENROUTER_API_KEY": "sk-or-test-abc",
-            "OPENROUTER_MODEL": "anthropic/claude-sonnet-4",
-            "OPENROUTER_TEMPERATURE": "0.5",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_client_from_env()
+class TestCreateLLMClients:
+    """:func:`create_llm_clients` builds one client per LLM slot."""
 
-        assert client.api_key == "sk-or-test-abc"
-        assert client.model == "anthropic/claude-sonnet-4"
-        assert client.temperature == pytest.approx(0.5)
+    def test_returns_one_client_per_slot(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Every slot in ``LLM_SLOT_NAMES`` appears in the output dict."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        assert set(clients.keys()) == set(LLM_SLOT_NAMES)
 
-    def test_uses_defaults_when_optional_vars_missing(self) -> None:
-        """Factory uses default model and no temperature when env vars are absent."""
-        env = {"OPENROUTER_API_KEY": "sk-or-test-abc"}
-        with patch.dict(os.environ, env, clear=False):
-            # Remove optional vars if they happen to be set
-            os.environ.pop("OPENROUTER_MODEL", None)
-            os.environ.pop("OPENROUTER_TEMPERATURE", None)
-            client = create_client_from_env()
+    def test_each_client_carries_its_slot_model(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Per-slot ``model`` from the config is passed to each client."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        for slot_name, client in clients.items():
+            assert client.model == cfg.llm[slot_name].model
 
-        assert client.api_key == "sk-or-test-abc"
-        assert "openrouter.ai" in client.base_url
-        assert client.temperature is None
+    def test_each_client_carries_its_slot_temperature(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Per-slot ``temperature`` from the config is passed to each client."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        for slot_name, client in clients.items():
+            assert client.temperature == cfg.llm[slot_name].temperature
 
-    def test_raises_when_api_key_missing(self) -> None:
-        """Factory raises a clear error when OPENROUTER_API_KEY is not set."""
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            pytest.raises(ValueError, match=r"OPENROUTER_API_KEY"),
-        ):
-            create_client_from_env()
+    def test_all_clients_share_api_key(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Every slot reuses the single ``OPENROUTER_API_KEY`` value."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        for client in clients.values():
+            assert client.api_key == "sk-or-test-abc"
 
+    def test_user_override_changes_only_that_slot(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Overriding one slot in the user file doesn't leak into others."""
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.main_prose]\nmodel = "user/custom-prose"\ntemperature = 0.9\n',
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        assert clients["main_prose"].model == "user/custom-prose"
+        assert clients["main_prose"].temperature == pytest.approx(0.9)
+        # Other slots still carry the default profile's values.
+        assert clients["post_process_style"].model != "user/custom-prose"
 
-# --- Factory for the side-model client ---
-
-
-class TestCreateSideClientFromEnv:
-    def test_returns_none_when_side_model_env_var_is_unset(self) -> None:
-        """Unset OPENROUTER_SIDE_MODEL falls back to reusing the main client.
-
-        The factory signals that fallback with a ``None`` return — the
-        caller decides what to do (today, ``Familiar.load_from_disk``
-        wraps the main ``LLMClient`` instead).
-        """
-        env = {"OPENROUTER_API_KEY": "sk-or-test-abc"}
-        with patch.dict(os.environ, env, clear=True):
-            assert create_side_client_from_env() is None
-
-    def test_returns_none_when_api_key_missing(self) -> None:
-        """No API key means no client at all — no point returning one."""
-        with patch.dict(os.environ, {}, clear=True):
-            assert create_side_client_from_env() is None
-
-    def test_creates_client_with_side_model(self) -> None:
-        """With OPENROUTER_SIDE_MODEL set, returns a separate LLMClient."""
-        env = {
-            "OPENROUTER_API_KEY": "sk-or-test-abc",
-            "OPENROUTER_SIDE_MODEL": "openai/gpt-4o-mini",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            client = create_side_client_from_env()
-
-        assert client is not None
-        assert client.api_key == "sk-or-test-abc"
-        assert client.model == "openai/gpt-4o-mini"
-
-    def test_side_model_client_uses_side_temperature_override(self) -> None:
-        """Optional OPENROUTER_SIDE_TEMPERATURE overrides the main temperature."""
-        env = {
-            "OPENROUTER_API_KEY": "sk-or-test-abc",
-            "OPENROUTER_SIDE_MODEL": "openai/gpt-4o-mini",
-            "OPENROUTER_SIDE_TEMPERATURE": "0.2",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            client = create_side_client_from_env()
-
-        assert client is not None
-        assert client.temperature == pytest.approx(0.2)
-
-    def test_side_model_is_independent_of_main_model(self) -> None:
-        """Main and side model factories return clients with different models."""
-        env = {
-            "OPENROUTER_API_KEY": "sk-or-test-abc",
-            "OPENROUTER_MODEL": "openai/gpt-4o",
-            "OPENROUTER_SIDE_MODEL": "openai/gpt-4o-mini",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            main = create_client_from_env()
-            side = create_side_client_from_env()
-
-        assert side is not None
-        assert main.model == "openai/gpt-4o"
-        assert side.model == "openai/gpt-4o-mini"
-        # Distinct instances — the main LLMClient is not reused.
-        assert main is not side
+    def test_returns_distinct_client_instances(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Each slot gets its own :class:`LLMClient`, not a shared instance."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        instances = list(clients.values())
+        assert len({id(c) for c in instances}) == len(instances)
 
 
 # --- Integration-style test with full prompt assembly ---
@@ -476,7 +473,7 @@ def _reset_semaphore() -> None:
 class TestRetryLogic:
     @pytest.fixture
     def client(self) -> LLMClient:
-        return LLMClient(api_key="test-key")
+        return LLMClient(api_key="test-key", model="openai/gpt-4o")
 
     @pytest.mark.asyncio
     async def test_post_retries_on_429_then_succeeds(self, client: LLMClient) -> None:
@@ -592,7 +589,7 @@ class TestConnectionPooling:
     @pytest.mark.asyncio
     async def test_reuses_http_client_across_calls(self) -> None:
         """_get_http() returns the same client instance on repeated calls."""
-        client = LLMClient(api_key="test-key")
+        client = LLMClient(api_key="test-key", model="openai/gpt-4o")
         http1 = client._get_http()
         http2 = client._get_http()
         assert http1 is http2
@@ -601,7 +598,7 @@ class TestConnectionPooling:
     @pytest.mark.asyncio
     async def test_close_shuts_down_http_client(self) -> None:
         """close() calls aclose() on the underlying httpx client."""
-        client = LLMClient(api_key="test-key")
+        client = LLMClient(api_key="test-key", model="openai/gpt-4o")
         http = client._get_http()
         with patch.object(http, "aclose", new_callable=AsyncMock) as mock_aclose:
             await client.close()
@@ -631,7 +628,7 @@ class TestConcurrencySemaphore:
                 200, json={}, request=httpx.Request("POST", "http://x")
             )
 
-        client = LLMClient(api_key="test-key")
+        client = LLMClient(api_key="test-key", model="openai/gpt-4o")
         with patch.object(client, "_get_http") as mock_get_http:
             mock_get_http.return_value.post = slow_post
             tasks = [client._post("http://x", {}, {}) for _ in range(8)]
@@ -645,13 +642,25 @@ class TestConcurrencySemaphore:
 
 _has_api_key = bool(os.environ.get("OPENROUTER_API_KEY"))
 
+_LIVE_MODEL = "z-ai/glm-4.7-flash"
+
+
+def _live_client() -> LLMClient:
+    """Build a real :class:`LLMClient` from the process environment.
+
+    The live test bypasses :func:`create_llm_clients` because it
+    needs to run without a parsed :class:`CharacterConfig` in hand.
+    """
+    api_key = os.environ["OPENROUTER_API_KEY"]
+    return LLMClient(api_key=api_key, model=_LIVE_MODEL)
+
 
 @pytest.mark.skipif(not _has_api_key, reason="OPENROUTER_API_KEY not set")
 class TestOpenRouterLive:
     @pytest.mark.asyncio
     async def test_live_chat_returns_response(self) -> None:
         """Send a real request to OpenRouter and verify the response shape."""
-        client = create_client_from_env()
+        client = _live_client()
         messages = [
             Message(role="system", content="Reply with only the word 'pong'."),
             Message(role="user", content="ping", name="Tester"),
@@ -664,7 +673,7 @@ class TestOpenRouterLive:
     @pytest.mark.asyncio
     async def test_live_multi_user_chat(self) -> None:
         """Send a multi-user conversation to OpenRouter and get a reply."""
-        client = create_client_from_env()
+        client = _live_client()
         messages = [
             Message(
                 role="system",

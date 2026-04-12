@@ -1,0 +1,74 @@
+# Default familiar profile — checked into the repo.
+#
+# This file is the single source of truth for configuration defaults.
+# When another familiar's `character.toml` omits a field (or a whole
+# [llm.*] or [tts] section), the loader falls back to the value here.
+#
+# New familiars should copy this file as a starting template:
+#
+#     cp -r data/familiars/_default data/familiars/my-familiar
+#     # then edit data/familiars/my-familiar/character.toml
+#
+# The leading underscore in the folder name is a convention: it marks
+# the directory as a reference, not a runnable familiar. Do not set
+# FAMILIAR_ID=_default.
+
+# --- Persona and behaviour -------------------------------------------------
+
+default_mode  = "text_conversation_rp"
+display_tz    = "UTC"
+aliases       = []
+chattiness    = "Balanced — responds when the conversation is relevant"
+interjection  = "average"
+lull_timeout  = 2.0
+
+[providers.history]
+window_size = 20
+
+[layers.depth_inject]
+position = 0
+role     = "system"
+
+# --- Text-to-speech (formerly CARTESIA_VOICE_ID / CARTESIA_MODEL) ----------
+
+[tts]
+voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
+model    = "sonic-3"
+
+# --- LLM slots -------------------------------------------------------------
+#
+# Every LLM call site in the codebase has its own slot here. Each slot
+# carries its own model and temperature so a familiar can trade off cost,
+# latency, and quality per call site independently.
+#
+# Unset slots in a familiar's own character.toml inherit from this file.
+
+# Main reply path: the familiar's spoken reply to a Discord message.
+[llm.main_prose]
+model       = "z-ai/glm-5.1"
+temperature = 0.7
+
+# Recast post-processor: rewrite the reply for tone or spoken delivery.
+[llm.post_process_style]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.5
+
+# Stepped-thinking pre-processor: hidden chain-of-thought before replying.
+[llm.reasoning_context]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.3
+
+# History provider: summarise own-channel and cross-channel history.
+[llm.history_summary]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.4
+
+# Content-search provider: agentic memory / lore retrieval loop.
+[llm.memory_search]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.4
+
+# Chattiness monitor: decide whether to proactively join a conversation.
+[llm.interjection_decision]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.5

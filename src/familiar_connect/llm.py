@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import httpx
 
+from familiar_connect.config import LLM_SLOT_NAMES
+
 if TYPE_CHECKING:
     from typing import Any, Self
+
+    from familiar_connect.config import CharacterConfig
 
 _logger = logging.getLogger(__name__)
 
@@ -30,7 +33,6 @@ def sanitize_name(name: str) -> str | None:
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "openai/gpt-4o"
 
 # --- Retry / concurrency constants ---
 
@@ -114,7 +116,7 @@ class LLMClient:
         self: Self,
         *,
         api_key: str,
-        model: str = DEFAULT_MODEL,
+        model: str,
         base_url: str = OPENROUTER_BASE_URL,
         temperature: float | None = None,
     ) -> None:
@@ -215,61 +217,41 @@ class LLMClient:
         return Message(role=reply["role"], content=reply["content"])
 
 
-def create_client_from_env() -> LLMClient:
-    """Create an LLMClient from environment variables.
+def create_llm_clients(
+    api_key: str,
+    character_config: CharacterConfig,
+) -> dict[str, LLMClient]:
+    """Build one :class:`LLMClient` per call-site slot on *character_config*.
 
-    Required: OPENROUTER_API_KEY
-    Optional: OPENROUTER_MODEL, OPENROUTER_TEMPERATURE
+    Every slot in :data:`familiar_connect.config.LLM_SLOT_NAMES` must
+    appear in ``character_config.llm`` (the loader guarantees this by
+    merging over ``_default/character.toml``). The returned dict is
+    keyed by slot name and each client carries the slot's own
+    ``model`` and ``temperature``.
 
-    :raises ValueError: If OPENROUTER_API_KEY is not set.
+    All clients share the same API key and the process-wide rate-limit
+    semaphore in :func:`get_request_semaphore`, so splitting one
+    ``side`` client into five does not multiply concurrency against
+    the OpenRouter rate limit.
+
+    :param api_key: ``OPENROUTER_API_KEY`` value. Callers pull this
+        from the environment themselves so the factory stays pure.
+    :param character_config: Parsed :class:`CharacterConfig` whose
+        ``llm`` dict holds one :class:`LLMSlotConfig` per slot.
+    :return: ``slot_name -> LLMClient`` map, one entry per slot name.
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        msg = "OPENROUTER_API_KEY environment variable is required"
-        raise ValueError(msg)
-
-    model = os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL)
-
-    temperature: float | None = None
-    raw_temp = os.environ.get("OPENROUTER_TEMPERATURE")
-    if raw_temp is not None:
-        temperature = float(raw_temp)
-
-    return LLMClient(api_key=api_key, model=model, temperature=temperature)
-
-
-def create_side_client_from_env() -> LLMClient | None:
-    """Create a side-model LLMClient from environment variables, or None.
-
-    The context pipeline's providers and processors call a
-    :class:`~familiar_connect.context.side_model.SideModel` for
-    focused sub-tasks (stepped thinking, recast, history summary,
-    content search). Those calls are designed to run against a
-    cheaper, faster model than the main reply path so they don't
-    inflate the main call's cost and latency.
-
-    If ``OPENROUTER_SIDE_MODEL`` is set, this returns a fresh
-    :class:`LLMClient` configured against it — the caller wraps it
-    in :class:`~familiar_connect.context.side_model.LLMSideModel`
-    for the side-model slot. If it isn't set, the function returns
-    ``None`` so the caller can fall back to reusing the main
-    :class:`LLMClient` (today's default behaviour, flagged loud at
-    startup).
-
-    Required: ``OPENROUTER_API_KEY`` (same as the main factory).
-    Optional: ``OPENROUTER_SIDE_MODEL``, ``OPENROUTER_SIDE_TEMPERATURE``.
-    """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return None
-
-    model = os.environ.get("OPENROUTER_SIDE_MODEL")
-    if not model:
-        return None
-
-    temperature: float | None = None
-    raw_temp = os.environ.get("OPENROUTER_SIDE_TEMPERATURE")
-    if raw_temp is not None:
-        temperature = float(raw_temp)
-
-    return LLMClient(api_key=api_key, model=model, temperature=temperature)
+    clients: dict[str, LLMClient] = {}
+    for slot_name in LLM_SLOT_NAMES:
+        slot = character_config.llm[slot_name]
+        clients[slot_name] = LLMClient(
+            api_key=api_key,
+            model=slot.model,
+            temperature=slot.temperature,
+        )
+        _logger.info(
+            "LLM slot %s -> model=%s temperature=%s",
+            slot_name,
+            slot.model,
+            slot.temperature,
+        )
+    return clients

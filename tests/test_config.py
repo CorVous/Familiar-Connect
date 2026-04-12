@@ -16,6 +16,7 @@ import pytest
 
 from familiar_connect.config import (
     DEFAULT_CHANNEL_MODE,
+    LLM_SLOT_NAMES,
     ChannelConfig,
     ChannelMode,
     CharacterConfig,
@@ -128,45 +129,156 @@ class TestModeDefaults:
 
 
 class TestLoadCharacterConfig:
-    def test_missing_file_returns_defaults(self, tmp_path: Path) -> None:
-        cfg = load_character_config(tmp_path / "does-not-exist.toml")
+    def test_missing_file_returns_defaults(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        cfg = load_character_config(
+            tmp_path / "does-not-exist.toml",
+            defaults_path=default_profile_path,
+        )
         assert isinstance(cfg, CharacterConfig)
         assert cfg.default_mode is DEFAULT_CHANNEL_MODE
 
-    def test_reads_default_mode_from_toml(self, tmp_path: Path) -> None:
+    def test_reads_default_mode_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text('default_mode = "full_rp"\n')
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.default_mode is ChannelMode.full_rp
 
-    def test_reads_history_window_size(self, tmp_path: Path) -> None:
+    def test_reads_history_window_size(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
             "[providers.history]\nwindow_size = 42\n",
         )
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.history_window_size == 42
 
-    def test_reads_depth_inject_position(self, tmp_path: Path) -> None:
+    def test_reads_depth_inject_position(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
             '[layers.depth_inject]\nposition = 4\nrole = "user"\n',
         )
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.depth_inject_position == 4
         assert cfg.depth_inject_role == "user"
 
-    def test_unknown_mode_string_raises(self, tmp_path: Path) -> None:
+    def test_unknown_mode_string_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text('default_mode = "chaos"\n')
         with pytest.raises(ConfigError, match="chaos"):
-            load_character_config(path)
+            load_character_config(path, defaults_path=default_profile_path)
 
-    def test_malformed_toml_raises(self, tmp_path: Path) -> None:
+    def test_malformed_toml_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text("this is = = not toml\n")
         with pytest.raises(ConfigError):
-            load_character_config(path)
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_missing_defaults_file_raises(self, tmp_path: Path) -> None:
+        target = tmp_path / "character.toml"
+        target.write_text("")
+        with pytest.raises(ConfigError, match="default character profile"):
+            load_character_config(
+                target,
+                defaults_path=tmp_path / "missing-defaults.toml",
+            )
+
+    def test_user_slot_override_wins_over_defaults(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.main_prose]\nmodel = "user/custom-model"\ntemperature = 0.9\n',
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        # Overridden slot reflects the user value.
+        assert cfg.llm["main_prose"].model == "user/custom-model"
+        assert cfg.llm["main_prose"].temperature == 0.9  # noqa: RUF069
+        # Untouched slots still come from the default profile.
+        assert "reasoning_context" in cfg.llm
+        assert cfg.llm["reasoning_context"].model
+
+    def test_unknown_llm_slot_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.nonexistent]\nmodel = "foo/bar"\n')
+        with pytest.raises(ConfigError, match="unknown LLM slot"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_llm_slot_requires_non_empty_model(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.main_prose]\nmodel = ""\n')
+        with pytest.raises(ConfigError, match="must be a non-empty string"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_llm_slot_temperature_out_of_range_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.main_prose]\nmodel = "user/m"\ntemperature = 5.0\n',
+        )
+        with pytest.raises(ConfigError, match=r"temperature must be in"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tts_section_parsed(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[tts]\nvoice_id = "user-voice"\nmodel = "sonic-4"\n',
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.voice_id == "user-voice"
+        assert cfg.tts.model == "sonic-4"
+
+    def test_defaults_populate_every_llm_slot(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """An empty user file must still produce a fully-populated llm dict."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert set(cfg.llm.keys()) == set(LLM_SLOT_NAMES)
+        for slot in LLM_SLOT_NAMES:
+            assert cfg.llm[slot].model  # non-empty
 
 
 # ---------------------------------------------------------------------------
@@ -229,52 +341,87 @@ class TestInterjectionEnum:
 
 
 class TestCharacterConfigConversationFields:
-    def test_defaults_when_file_absent(self, tmp_path: Path) -> None:
-        cfg = load_character_config(tmp_path / "no-such-file.toml")
+    def test_defaults_when_file_absent(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        cfg = load_character_config(
+            tmp_path / "no-such-file.toml",
+            defaults_path=default_profile_path,
+        )
         assert cfg.aliases == []
         assert cfg.chattiness == "Balanced — responds when the conversation is relevant"
         assert cfg.interjection is Interjection.average
         assert cfg.lull_timeout == 2.0  # noqa: RUF069
 
-    def test_reads_aliases_from_toml(self, tmp_path: Path) -> None:
+    def test_reads_aliases_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text('aliases = ["aria", "ari"]\n')
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.aliases == ["aria", "ari"]
 
-    def test_empty_aliases_list(self, tmp_path: Path) -> None:
+    def test_empty_aliases_list(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text("aliases = []\n")
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.aliases == []
 
-    def test_reads_chattiness_from_toml(self, tmp_path: Path) -> None:
+    def test_reads_chattiness_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text('chattiness = "Shy and reserved"\n')
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.chattiness == "Shy and reserved"
 
-    def test_reads_interjection_from_toml(self, tmp_path: Path) -> None:
+    def test_reads_interjection_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text('interjection = "eager"\n')
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.interjection is Interjection.eager
 
-    def test_reads_lull_timeout_from_toml(self, tmp_path: Path) -> None:
+    def test_reads_lull_timeout_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text("lull_timeout = 5.0\n")
-        cfg = load_character_config(path)
+        cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.lull_timeout == 5.0  # noqa: RUF069
 
-    def test_unknown_interjection_value_raises(self, tmp_path: Path) -> None:
+    def test_unknown_interjection_value_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         path = tmp_path / "character.toml"
         path.write_text('interjection = "obnoxious"\n')
         with pytest.raises(ConfigError, match="obnoxious"):
-            load_character_config(path)
+            load_character_config(path, defaults_path=default_profile_path)
 
-    def test_all_interjection_tiers_load_from_toml(self, tmp_path: Path) -> None:
+    def test_all_interjection_tiers_load_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
         for tier in Interjection:
             path = tmp_path / f"character_{tier.value}.toml"
             path.write_text(f'interjection = "{tier.value}"\n')
-            cfg = load_character_config(path)
+            cfg = load_character_config(path, defaults_path=default_profile_path)
             assert cfg.interjection is tier
