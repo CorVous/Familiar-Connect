@@ -142,6 +142,7 @@ def _make_pipeline_stub(
     user_names: dict[int, str],
     resolve_name: Callable[[int], str | None] | None = None,
     response_handler: object = None,
+    lull_timeout: float = 0.8,
 ) -> VoicePipeline:
     """Create a minimal VoicePipeline for transcript logger tests."""
     return VoicePipeline(
@@ -153,6 +154,7 @@ def _make_pipeline_stub(
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,  # ty: ignore[invalid-argument-type]
+        lull_timeout=lull_timeout,
     )
 
 
@@ -246,22 +248,29 @@ class TestTranscriptLogger:
 
     @pytest.mark.asyncio
     async def test_response_handler_called_for_final(self) -> None:
-        """response_handler is awaited for final transcriptions."""
+        """response_handler is awaited after the lull timer fires."""
         shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
         handler = AsyncMock()
-        pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=handler)
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.05
+        )
 
-        result = TranscriptionResult(text="hello", is_final=True, start=0.0, end=1.0)
-        await shared_queue.put((42, result))
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="hello", is_final=True, start=0.0, end=1.0),
+        ))
 
         with patch("familiar_connect.voice_pipeline._logger"):
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.12)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-        handler.assert_awaited_once_with(42, result)
+        handler.assert_awaited_once()
+        call_user_id, call_result = handler.call_args[0]
+        assert call_user_id == 42
+        assert call_result.text == "hello"
 
     @pytest.mark.asyncio
     async def test_response_handler_not_called_for_interim(self) -> None:
@@ -287,8 +296,11 @@ class TestTranscriptLogger:
         """An error in response_handler is logged but doesn't kill the logger."""
         shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
         handler = AsyncMock(side_effect=RuntimeError("llm failed"))
-        pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=handler)
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.05
+        )
 
+        # Both results arrive before the lull fires — they are collated into one call.
         r1 = TranscriptionResult(text="first", is_final=True, start=0.0, end=1.0)
         r2 = TranscriptionResult(text="second", is_final=True, start=1.0, end=2.0)
         await shared_queue.put((42, r1))
@@ -296,17 +308,17 @@ class TestTranscriptLogger:
 
         with patch("familiar_connect.voice_pipeline._logger"):
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.12)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-        # Both were attempted despite the first failing
-        assert handler.await_count == 2
+        # Collated into one call; handler failing doesn't crash the logger.
+        assert handler.await_count == 1
 
     @pytest.mark.asyncio
     async def test_logger_not_blocked_by_slow_handler(self) -> None:
-        """Logger keeps logging while the response handler is still running."""
+        """Logger logs both results immediately; handler is called once (collated)."""
         shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
 
         # Handler that blocks for a long time
@@ -320,7 +332,9 @@ class TestTranscriptLogger:
             handler_entered.set()
             await handler_release.wait()
 
-        pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=_slow_handler)
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=_slow_handler, lull_timeout=0.05
+        )
 
         r1 = TranscriptionResult(text="first", is_final=True, start=0.0, end=1.0)
         r2 = TranscriptionResult(text="second", is_final=True, start=1.0, end=2.0)
@@ -330,12 +344,8 @@ class TestTranscriptLogger:
         with patch("familiar_connect.voice_pipeline._logger") as mock_logger:
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
 
-            # Wait for handler to start processing r1
-            await asyncio.wait_for(handler_entered.wait(), timeout=1.0)
-            # Give logger a moment to process r2 while handler is blocked
-            await asyncio.sleep(0.05)
-
-            # BOTH transcriptions should be logged even though handler is stuck
+            # Both results are logged immediately regardless of the timer.
+            await asyncio.sleep(0.02)
             info_calls = [
                 c
                 for c in mock_logger.info.call_args_list
@@ -343,11 +353,223 @@ class TestTranscriptLogger:
             ]
             assert len(info_calls) == 2
 
+            # After the lull fires, the merged handler call begins.
+            await asyncio.wait_for(handler_entered.wait(), timeout=1.0)
+
             handler_release.set()
             await asyncio.sleep(0.05)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+
+    # ------------------------------------------------------------------
+    # Collation / lull-timer tests
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_response_handler_not_called_immediately_on_final(self) -> None:
+        """Handler is NOT called right away — lull timer must expire first."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.5
+        )
+
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="hi", is_final=True, start=0.0, end=0.5),
+        ))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+            await asyncio.sleep(0.05)  # Well within lull_timeout=0.5
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lull_timer_fires_response_after_silence(self) -> None:
+        """Single is_final result → one handler call after lull_timeout elapses."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.05
+        )
+
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="hello", is_final=True, start=0.0, end=1.0),
+        ))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+            await asyncio.sleep(0.12)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        handler.assert_awaited_once()
+        _, call_result = handler.call_args[0]
+        assert call_result.text == "hello"
+
+    @pytest.mark.asyncio
+    async def test_multiple_finals_within_lull_collated_into_one_call(self) -> None:
+        """Three rapid is_final results → one handler call with merged text."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.05
+        )
+
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="Hello,", is_final=True, start=0.0, end=0.5),
+        ))
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="how are", is_final=True, start=0.5, end=1.0),
+        ))
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="you doing?", is_final=True, start=1.0, end=1.8),
+        ))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+            await asyncio.sleep(0.12)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        handler.assert_awaited_once()
+        _, call_result = handler.call_args[0]
+        assert call_result.text == "Hello, how are you doing?"
+
+    @pytest.mark.asyncio
+    async def test_lull_resets_on_each_final(self) -> None:
+        """A second is_final arriving within the lull window resets the timer."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.06
+        )
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+
+            # First result — starts the 60ms lull timer.
+            await shared_queue.put((
+                42,
+                TranscriptionResult(text="one", is_final=True, start=0.0, end=0.5),
+            ))
+            # Wait 40ms (within the 60ms lull), then send the second result.
+            await asyncio.sleep(0.04)
+            await shared_queue.put((
+                42,
+                TranscriptionResult(text="two", is_final=True, start=0.5, end=1.0),
+            ))
+            # 40ms later — the reset timer has NOT fired yet.
+            await asyncio.sleep(0.04)
+            assert handler.await_count == 0
+
+            # Wait past the reset lull (another 40ms).
+            await asyncio.sleep(0.04)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        handler.assert_awaited_once()
+        _, call_result = handler.call_args[0]
+        assert call_result.text == "one two"
+
+    @pytest.mark.asyncio
+    async def test_different_users_have_independent_lull_timers(self) -> None:
+        """Two users each get their own lull timer and separate handler calls."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice", 99: "Bob"}, response_handler=handler, lull_timeout=0.05
+        )
+
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="hello", is_final=True, start=0.0, end=0.5),
+        ))
+        await shared_queue.put((
+            99,
+            TranscriptionResult(text="hi there", is_final=True, start=0.0, end=0.7),
+        ))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+            await asyncio.sleep(0.12)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert handler.await_count == 2
+        user_ids = {call[0][0] for call in handler.call_args_list}
+        assert user_ids == {42, 99}
+
+    @pytest.mark.asyncio
+    async def test_merged_result_fields(self) -> None:
+        """Merged TranscriptionResult has correct start, end, confidence, and text."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.05
+        )
+
+        await shared_queue.put((
+            42,
+            TranscriptionResult(
+                text="part one", is_final=True, start=1.0, end=2.0, confidence=0.9
+            ),
+        ))
+        await shared_queue.put((
+            42,
+            TranscriptionResult(
+                text="part two", is_final=True, start=2.0, end=3.5, confidence=0.95
+            ),
+        ))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+            await asyncio.sleep(0.12)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        _, merged = handler.call_args[0]
+        assert merged.text == "part one part two"
+        assert merged.start == pytest.approx(1.0)
+        assert merged.end == pytest.approx(3.5)
+        assert merged.confidence == pytest.approx(0.95)
+        assert merged.is_final is True
+
+    @pytest.mark.asyncio
+    async def test_no_call_when_no_response_handler(self) -> None:
+        """No crash when response_handler is None and lull fires."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=None, lull_timeout=0.05
+        )
+
+        await shared_queue.put((
+            42,
+            TranscriptionResult(text="hello", is_final=True, start=0.0, end=1.0),
+        ))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+            await asyncio.sleep(0.12)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        # No assertion needed — just verifying no exception was raised.
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +675,73 @@ class TestAudioRouter:
         assert 99 in pipeline.streams
         assert template.clone.call_count == 2
 
+    @pytest.mark.asyncio
+    async def test_audio_router_cancels_lull_on_speaking_start(self) -> None:
+        """Router cancels a pending lull handle when speech resumes after silence."""
+        tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        template = _make_template()
+        pipeline = VoicePipeline(
+            template=template,
+            tagged_audio_queue=tagged_queue,
+            shared_transcript_queue=shared_queue,
+            router_task=MagicMock(),
+            logger_task=MagicMock(),
+            user_names={},
+        )
+
+        # Inject a fake pending lull handle for user 42.
+        fake_handle = MagicMock()
+        pipeline.lull_handles[42] = fake_handle
+
+        # Send audio after a gap longer than the silence threshold.
+        # The router starts with no prior audio time, so the initial gap is huge.
+        await tagged_queue.put((42, b"\x01"))
+
+        task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        fake_handle.cancel.assert_called_once()
+        assert pipeline.lull_handles.get(42) is None
+
+    @pytest.mark.asyncio
+    async def test_audio_router_does_not_cancel_lull_for_continuous_audio(self) -> None:
+        """Continuous audio (gap < threshold) does not cancel an absent lull handle."""
+        tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        template = _make_template()
+        pipeline = VoicePipeline(
+            template=template,
+            tagged_audio_queue=tagged_queue,
+            shared_transcript_queue=shared_queue,
+            router_task=MagicMock(),
+            logger_task=MagicMock(),
+            user_names={},
+        )
+
+        # First packet — establishes last_audio_time.
+        await tagged_queue.put((42, b"\x01"))
+        task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
+        await asyncio.sleep(0.02)
+
+        # Inject handle AFTER first packet has been processed.
+        fake_handle = MagicMock()
+        pipeline.lull_handles[42] = fake_handle
+
+        # Second packet arrives immediately (gap << threshold).
+        await tagged_queue.put((42, b"\x02"))
+        await asyncio.sleep(0.02)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The gap was tiny — handle should NOT have been cancelled.
+        fake_handle.cancel.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Phase 7: start_pipeline / stop_pipeline
@@ -502,6 +791,26 @@ class TestStartPipeline:
         try:
             with pytest.raises(PipelineError):
                 await start_pipeline(template, {})
+        finally:
+            await stop_pipeline()
+
+    @pytest.mark.asyncio
+    async def test_lull_timeout_stored_on_pipeline(self) -> None:
+        """start_pipeline stores a custom lull_timeout on the pipeline."""
+        template = _make_template()
+        pipeline = await start_pipeline(template, {}, lull_timeout=1.5)
+        try:
+            assert pipeline.lull_timeout == pytest.approx(1.5)
+        finally:
+            await stop_pipeline()
+
+    @pytest.mark.asyncio
+    async def test_lull_timeout_default(self) -> None:
+        """start_pipeline defaults lull_timeout to 0.8 seconds."""
+        template = _make_template()
+        pipeline = await start_pipeline(template, {})
+        try:
+            assert pipeline.lull_timeout == pytest.approx(0.8)
         finally:
             await stop_pipeline()
 
