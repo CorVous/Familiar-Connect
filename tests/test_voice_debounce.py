@@ -581,11 +581,13 @@ def _make_tts_familiar(
     reply_text: str = "hello world how are you",
     interrupt_tolerance: InterruptTolerance = InterruptTolerance.meek,
     min_interruption_s: float = 0.05,
+    short_long_boundary_s: float = 4.0,
 ) -> MagicMock:
     """Build a Familiar mock with a TTS client that returns timestamps."""
     familiar = _make_familiar_mock(lull_timeout=lull_timeout)
     familiar.config.interrupt_tolerance = interrupt_tolerance
     familiar.config.min_interruption_s = min_interruption_s
+    familiar.config.short_long_boundary_s = short_long_boundary_s
 
     words = reply_text.split()
     timestamps = _make_tts_timestamps(words)
@@ -607,6 +609,7 @@ def _build_with_tts(
     lull_timeout: float = 0.05,
     reply_text: str = "hello world how are you",
     min_interruption_s: float = 0.05,
+    short_long_boundary_s: float = 4.0,
 ) -> tuple[Any, Any, Any, Any, Any, MagicMock, MagicMock]:
     """Build handler + mocks with TTS enabled.
 
@@ -616,6 +619,7 @@ def _build_with_tts(
         lull_timeout=lull_timeout,
         reply_text=reply_text,
         min_interruption_s=min_interruption_s,
+        short_long_boundary_s=short_long_boundary_s,
     )
     vc = MagicMock()
     # is_playing starts False, will be controlled per test
@@ -639,6 +643,15 @@ class TestInterruptedHistoryTruncation:
         with patch(
             "familiar_connect.bot.assemble_chat_messages",
             return_value=[Message(role="user", content="hi")],
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _always_yield(self) -> Iterator[None]:  # type: ignore[misc]
+        """Force the familiar to always yield on interruption."""
+        with patch(
+            "familiar_connect.bot.should_keep_talking",
+            return_value=False,
         ):
             yield
 
@@ -672,8 +685,8 @@ class TestInterruptedHistoryTruncation:
         assert assistant_calls[0].kwargs["content"] == reply
 
     @pytest.mark.asyncio
-    async def test_interrupted_response_stores_partial_text(self) -> None:
-        """An interrupted response persists only the delivered portion."""
+    async def test_long_interrupt_stores_partial_text(self) -> None:
+        """A long interruption persists only the delivered portion."""
         reply = "hello world how are you"
         (
             handler,
@@ -687,6 +700,8 @@ class TestInterruptedHistoryTruncation:
             reply_text=reply,
             lull_timeout=0.05,
             min_interruption_s=0.05,
+            # Very low boundary so the interrupt is classified as LONG.
+            short_long_boundary_s=0.01,
         )
 
         # Gate so we can control the SPEAKING phase.
@@ -705,12 +720,7 @@ class TestInterruptedHistoryTruncation:
 
         tracker.start_speaking = _mock_start_speaking  # type: ignore[assignment]
 
-        # is_playing() returns False initially (no previous audio),
-        # True once vc.play() is called.  vc.stop() resets it.
-        def _is_playing() -> bool:
-            return playback_active
-
-        vc.is_playing = _is_playing
+        vc.is_playing = lambda: playback_active
 
         def _stop() -> None:
             nonlocal playback_active
@@ -731,11 +741,19 @@ class TestInterruptedHistoryTruncation:
         await asyncio.wait_for(playback_started.wait(), timeout=2.0)
         assert tracker.state is ResponseState.SPEAKING
 
-        # Simulate an interruption by another user.
-        # The detector fires moment 1 after min_interruption_s.
-        detector.on_speech_started(99, asyncio.get_event_loop().time())
+        # Simulate an interruption — complete lifecycle.
+        t0 = asyncio.get_event_loop().time()
+        detector.on_speech_started(99, t0)
 
         # Wait for moment 1 to fire (min_interruption_s = 0.05).
+        await asyncio.sleep(0.08)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        # Interrupter stops — duration (~0.08s) > boundary (0.01s) → LONG.
+        await detector.on_utterance_end(99, "", asyncio.get_event_loop().time())
+
+        # Wait for lull timer → moment 2.
         await asyncio.sleep(0.10)
         for _ in range(20):
             await asyncio.sleep(0)
@@ -773,6 +791,7 @@ class TestInterruptedHistoryTruncation:
             reply_text=reply,
             lull_timeout=0.05,
             min_interruption_s=0.05,
+            short_long_boundary_s=0.01,
         )
 
         playback_started = asyncio.Event()
@@ -805,8 +824,13 @@ class TestInterruptedHistoryTruncation:
         await handler(42, r1)
         await asyncio.wait_for(playback_started.wait(), timeout=2.0)
 
-        # Interrupt — moment 1 fires and calls vc.stop().
-        detector.on_speech_started(99, asyncio.get_event_loop().time())
+        # Complete interruption lifecycle (long).
+        t0 = asyncio.get_event_loop().time()
+        detector.on_speech_started(99, t0)
+        await asyncio.sleep(0.08)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await detector.on_utterance_end(99, "", asyncio.get_event_loop().time())
         await asyncio.sleep(0.10)
         for _ in range(20):
             await asyncio.sleep(0)
@@ -821,3 +845,106 @@ class TestInterruptedHistoryTruncation:
         user_calls = [c for c in append_calls if c.kwargs.get("role") == "user"]
         assert len(user_calls) == 1
         assert user_calls[0].kwargs["content"] == "hey"
+
+    @pytest.mark.asyncio
+    async def test_short_interrupt_resumes_and_stores_full_text(self) -> None:
+        """A short interruption resumes remaining text and stores full reply."""
+        reply = "hello world how are you"
+        (
+            handler,
+            tracker,
+            detector,
+            _vad_cb,
+            _dg_cb,
+            familiar,
+            vc,
+        ) = _build_with_tts(
+            reply_text=reply,
+            lull_timeout=0.05,
+            min_interruption_s=0.05,
+            # High boundary so the interrupt is classified as SHORT.
+            short_long_boundary_s=10.0,
+        )
+
+        playback_started = asyncio.Event()
+        play_count = 0
+        playback_active = False
+        original_start_speaking = tracker.start_speaking
+        original_resume_speaking = tracker.resume_speaking
+
+        def _mock_start_speaking(
+            word_timestamps: list[WordTimestamp] | None = None,
+        ) -> None:
+            nonlocal playback_active, play_count
+            original_start_speaking(word_timestamps=word_timestamps)
+            playback_active = True
+            play_count += 1
+            playback_started.set()
+
+        def _mock_resume_speaking(
+            word_timestamps: list[WordTimestamp] | None = None,
+        ) -> None:
+            nonlocal play_count
+            original_resume_speaking(word_timestamps=word_timestamps)
+            play_count += 1
+
+        tracker.start_speaking = _mock_start_speaking  # type: ignore[assignment]
+        tracker.resume_speaking = _mock_resume_speaking  # type: ignore[assignment]
+
+        # First play → stays active (interrupted by vc.stop).
+        # Second play (resume) → completes immediately.
+        def _is_playing() -> bool:
+            return playback_active
+
+        vc.is_playing = _is_playing
+
+        def _stop() -> None:
+            nonlocal playback_active
+            playback_active = False
+
+        vc.stop = _stop
+
+        # vc.play on resume segment completes instantly
+        # (playback_active stays False after vc.stop).
+
+        r1 = TranscriptionResult(
+            text="hey",
+            is_final=True,
+            start=0.0,
+            end=0.5,
+        )
+        await handler(42, r1)
+        await asyncio.wait_for(playback_started.wait(), timeout=2.0)
+        assert tracker.state is ResponseState.SPEAKING
+
+        # Interrupt — moment 1 fires, familiar yields, vc.stop().
+        t0 = asyncio.get_event_loop().time()
+        detector.on_speech_started(99, t0)
+        await asyncio.sleep(0.08)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        # Interrupter stops — short duration.
+        await detector.on_utterance_end(99, "", asyncio.get_event_loop().time())
+
+        # Wait for lull → moment 2 classifies as short → resume.
+        await asyncio.sleep(0.15)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        # Let everything settle.
+        await asyncio.sleep(0.10)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        # TTS was called twice: once for full text, once for remaining.
+        synth = familiar.tts_client.synthesize_with_timestamps
+        assert synth.call_count == 2
+
+        # Full reply text persisted in history.
+        append_calls = familiar.history_store.append_turn.call_args_list
+        assistant_calls = [
+            c for c in append_calls if c.kwargs.get("role") == "assistant"
+        ]
+        assert len(assistant_calls) == 1
+        assert assistant_calls[0].kwargs["content"] == reply

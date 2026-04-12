@@ -192,6 +192,22 @@ class ResponseTracker:
         self.word_timestamps = word_timestamps or []
         self.playback_start_time = time.monotonic()
 
+    def resume_speaking(
+        self,
+        word_timestamps: list[WordTimestamp] | None = None,
+    ) -> None:
+        """Resume speaking after a short interruption.
+
+        Resets the word timestamps and playback start time while
+        staying in SPEAKING state.  A subsequent :meth:`stop_speaking`
+        call will measure elapsed time from the new start.
+        """
+        if self.state is not ResponseState.SPEAKING:
+            msg = f"Cannot resume speaking from state {self.state.value}"
+            raise RuntimeError(msg)
+        self.word_timestamps = word_timestamps or []
+        self.playback_start_time = time.monotonic()
+
     def stop_speaking(self) -> float:
         """Stop playback and return elapsed milliseconds.
 

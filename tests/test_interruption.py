@@ -313,6 +313,33 @@ class TestResponseTracker:
         tracker.reset()
         assert tracker.idle_event.is_set()
 
+    def test_resume_speaking_stays_in_speaking(self) -> None:
+        tracker = ResponseTracker()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+        tracker.start_speaking()
+        new_ts = [WordTimestamp(word="remaining", start_ms=0.0, end_ms=500.0)]
+        tracker.resume_speaking(word_timestamps=new_ts)
+        assert tracker.state is ResponseState.SPEAKING
+        assert tracker.word_timestamps == new_ts
+        assert tracker.playback_start_time is not None
+
+    def test_resume_speaking_resets_playback_start_time(self) -> None:
+        tracker = ResponseTracker()
+        task = AsyncMock()  # type: ignore[arg-type]
+        tracker.start_generating(task)
+        tracker.start_speaking()
+        first_start = tracker.playback_start_time
+        assert first_start is not None
+        tracker.resume_speaking()
+        assert tracker.playback_start_time is not None
+        assert tracker.playback_start_time >= first_start
+
+    def test_resume_speaking_from_non_speaking_raises(self) -> None:
+        tracker = ResponseTracker()
+        with pytest.raises(RuntimeError, match="Cannot resume speaking"):
+            tracker.resume_speaking()
+
 
 # ---------------------------------------------------------------------------
 # Step 7 — InterruptionDetector
