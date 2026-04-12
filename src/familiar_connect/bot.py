@@ -38,6 +38,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import discord
+import httpx
 
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
@@ -230,7 +231,21 @@ def _build_voice_response_handler(
             ),
         )
 
-        reply = await familiar.llm_clients["main_prose"].chat(messages)
+        # Main reply isolation: catch the closed raise set of
+        # ``LLMClient.chat`` — httpx transport/status errors, plus the
+        # ``ValueError`` / ``KeyError`` branches in ``llm.chat`` for
+        # malformed payloads. Log and return cleanly so the transcriber
+        # callback stays alive for the next utterance. No TTS, no
+        # history write, no post-processing on failure.
+        try:
+            reply = await familiar.llm_clients["main_prose"].chat(messages)
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            _logger.warning(
+                "main reply (voice): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return
         reply_text = await pipeline.run_post_processors(reply.content, request)
 
         # Persist both turns *after* the LLM call so a mid-turn crash
@@ -508,8 +523,23 @@ async def _run_text_response(
         ),
     )
 
+    # Main reply isolation: catch the closed raise set of
+    # ``LLMClient.chat`` — ``httpx.HTTPError`` covers transport /
+    # status / timeout; ``ValueError`` and ``KeyError`` cover the
+    # no-choices / malformed-payload branches inside ``llm.chat``.
+    # On failure, return without writing history, without post-
+    # processing, without a Discord send, and without TTS fan-out.
+    # The user sees silence and can simply retry.
     async with channel.typing():
-        reply = await familiar.llm_clients["main_prose"].chat(messages)
+        try:
+            reply = await familiar.llm_clients["main_prose"].chat(messages)
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            _logger.warning(
+                "main reply (text): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return
 
     reply_text = await pipeline.run_post_processors(reply.content, request)
 

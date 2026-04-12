@@ -377,6 +377,21 @@ class TestConversationMonitorInterjection:
 
 
 class TestSideModelEvaluation:
+    def test_evaluation_sends_system_and_user_messages(self) -> None:
+        """The LLM call uses a system message for structured output control."""
+        monitor, _ = _make_monitor(side_model_reply="YES")
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+            )
+        )
+        llm_client = monitor._llm_client
+        messages = llm_client.chat.call_args.args[0]  # ty: ignore[unresolved-attribute]
+        assert len(messages) == 2
+        assert messages[0].role == "system"
+        assert "one word" in messages[0].content.lower()
+        assert messages[1].role == "user"
+
     def test_yes_response_calls_on_respond(self) -> None:
         monitor, calls = _make_monitor(side_model_reply="YES")
         asyncio.run(
@@ -397,6 +412,37 @@ class TestSideModelEvaluation:
 
     def test_yes_lowercase_accepted(self) -> None:
         monitor, calls = _make_monitor(side_model_reply="yes, I want to respond")
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+            )
+        )
+        assert len(calls) == 1
+
+    def test_prose_without_yes_is_rejected(self) -> None:
+        """A character-prose reply that doesn't start with YES is treated as NO.
+
+        Regression test for the bug where the interjection LLM
+        responded in character (e.g. "The bells on my scarf are
+        jingling...") and the monitor incorrectly let it pass when
+        "YES" appeared as a substring, or incorrectly rejected it
+        even though the model clearly intended to engage.
+        """
+        monitor, calls = _make_monitor(
+            side_model_reply=(
+                "The bells on my scarf are jingling quite loudly in response to that!"
+            ),
+        )
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+            )
+        )
+        assert len(calls) == 0
+
+    def test_yes_with_trailing_punctuation_accepted(self) -> None:
+        """``YES.`` or ``YES!`` should still be accepted."""
+        monitor, calls = _make_monitor(side_model_reply="YES.")
         asyncio.run(
             monitor.on_message(
                 channel_id=1, speaker="Alice", text="aria?", is_mention=False

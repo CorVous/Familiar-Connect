@@ -128,52 +128,57 @@ def _interjection_interval(tier: Interjection, check_count: int) -> int:
 # Prompt assembly
 # ---------------------------------------------------------------------------
 
+_EVALUATION_SYSTEM_PROMPT = """\
+You are a conversation monitor. Your ONLY job is to decide whether \
+{familiar_name} should respond. Reply with EXACTLY one word: YES or NO. \
+Do not reply in character. Do not explain your reasoning. \
+Do not include punctuation. One word only."""
+
 _LULL_PROMPT = """\
-You are {familiar_name}.
+Character: {familiar_name}
 
 {character_card}
 
-Your conversational personality: {chattiness}
+Conversational personality: {chattiness}
 
-Here is a summary of the recent conversation:
+Recent conversation summary:
 {conversation_summary}
 
-The following messages were just said:
+Recent messages:
 {buffer}
 
-Would you like to respond to this conversation? Answer YES or NO."""
+There has been a pause in the conversation. Should {familiar_name} respond?"""
 
 _DIRECT_ADDRESS_PROMPT = """\
-You are {familiar_name}.
+Character: {familiar_name}
 
 {character_card}
 
-Your conversational personality: {chattiness}
+Conversational personality: {chattiness}
 
-Here is a summary of the recent conversation:
+Recent conversation summary:
 {conversation_summary}
 
-The following messages were just said:
+Recent messages:
 {buffer}
 
-You were directly addressed in the conversation. Would you like to respond? \
-Answer YES or NO."""
+{familiar_name} was directly addressed. Should {familiar_name} respond?"""
 
 _INTERJECTION_PROMPT = """\
-You are {familiar_name}.
+Character: {familiar_name}
 
 {character_card}
 
-Your conversational personality: {chattiness}
+Conversational personality: {chattiness}
 
-Here is a summary of the recent conversation:
+Recent conversation summary:
 {conversation_summary}
 
-The following messages were just said:
+Recent messages:
 {buffer}
 
-{message_count} messages have been said without you speaking. Would you like \
-to interject? Answer YES or NO."""
+{message_count} messages have been said without {familiar_name} speaking. \
+Should {familiar_name} interject?"""
 
 
 def _format_buffer(buffer: list[BufferedMessage]) -> str:
@@ -378,35 +383,33 @@ class ConversationMonitor:
         )
 
         buffer_text = _format_buffer(buf.buffer)
+        fmt = {
+            "familiar_name": self._familiar_name,
+            "character_card": self._character_card,
+            "chattiness": self._chattiness,
+            "conversation_summary": "",
+            "buffer": buffer_text,
+        }
         if trigger_label == "lull":
-            prompt = _LULL_PROMPT.format(
-                familiar_name=self._familiar_name,
-                character_card=self._character_card,
-                chattiness=self._chattiness,
-                conversation_summary="",
-                buffer=buffer_text,
-            )
+            user_prompt = _LULL_PROMPT.format(**fmt)
         elif trigger_label == "direct_address":
-            prompt = _DIRECT_ADDRESS_PROMPT.format(
-                familiar_name=self._familiar_name,
-                character_card=self._character_card,
-                chattiness=self._chattiness,
-                conversation_summary="",
-                buffer=buffer_text,
-            )
+            user_prompt = _DIRECT_ADDRESS_PROMPT.format(**fmt)
         else:
-            prompt = _INTERJECTION_PROMPT.format(
-                familiar_name=self._familiar_name,
-                character_card=self._character_card,
-                chattiness=self._chattiness,
-                conversation_summary="",
-                buffer=buffer_text,
+            user_prompt = _INTERJECTION_PROMPT.format(
+                **fmt,
                 message_count=buf.message_counter,
             )
 
+        system_prompt = _EVALUATION_SYSTEM_PROMPT.format(
+            familiar_name=self._familiar_name,
+        )
+
         try:
             reply = await self._llm_client.chat(
-                [Message(role="user", content=prompt)],
+                [
+                    Message(role="system", content=system_prompt),
+                    Message(role="user", content=user_prompt),
+                ],
             )
         except Exception:
             _logger.exception(
@@ -416,7 +419,13 @@ class ConversationMonitor:
             return False
 
         response = reply.content
-        decision = "YES" in response.upper()
+        # Check the first token for an affirmative. The system prompt
+        # asks for exactly one word, but some models add punctuation
+        # or a short prefix — stripping to the first token is robust
+        # against both.
+        stripped = response.strip()
+        first_word = stripped.split()[0].upper().rstrip(".,!") if stripped else ""
+        decision = first_word == "YES"
         _logger.debug(
             "evaluate channel=%s trigger=%s decision=%s raw=%r",
             channel_id,

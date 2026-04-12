@@ -30,6 +30,7 @@ from familiar_connect.context.protocols import (
     ContextProvider,
     PostProcessor,
     PreProcessor,
+    PreProcessorError,
 )
 from familiar_connect.context.types import (
     ContextRequest,
@@ -123,6 +124,20 @@ class _ContributingPreProcessor:
                 self._contribution,
             ),
         )
+
+
+class _FailingPreProcessor:
+    """Pre-processor whose ``process`` raises a configurable exception."""
+
+    def __init__(self, processor_id: str, exc: Exception) -> None:
+        self.id = processor_id
+        self._exc = exc
+
+    async def process(
+        self,
+        request: ContextRequest,  # noqa: ARG002
+    ) -> ContextRequest:
+        raise self._exc
 
 
 class _RecordingPostProcessor:
@@ -498,3 +513,74 @@ class TestPostProcessors:
         # and sees the untransformed text.
         assert post.seen == ["hi"]
         assert result == "hi|tag"
+
+
+# ---------------------------------------------------------------------------
+# Pre-processor isolation — Protocol-declared PreProcessorError is caught
+# ---------------------------------------------------------------------------
+
+
+class TestPreProcessorIsolation:
+    """Isolate pre-processors that raise ``PreProcessorError``; propagate the rest.
+
+    Any other exception type is treated as a contract violation and
+    propagates out of ``assemble`` — a future refactor that broadens
+    the caught type to ``Exception`` will break the second test.
+    """
+
+    @pytest.mark.asyncio
+    async def test_assemble_continues_when_preprocessor_raises_preprocessor_error(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A pre-processor that raises ``PreProcessorError`` is skipped.
+
+        The following pre-processor still runs and sees the *unmodified*
+        upstream request (i.e. it does not see any partial mutation
+        from the raising processor), and ``assemble`` still returns a
+        valid ``PipelineOutput``. A warning is logged with the
+        processor id.
+        """
+        bad = _FailingPreProcessor("bad", PreProcessorError("nope"))
+        downstream = _StubPreProcessor("downstream", "after-bad")
+        provider = _StubProvider("p", [])
+
+        pipeline = ContextPipeline(
+            providers=[provider],
+            pre_processors=[bad, downstream],
+        )
+
+        with caplog.at_level("WARNING", logger="familiar_connect.context.pipeline"):
+            result = await pipeline.assemble(_make_request(), budget_by_layer={})
+
+        # Pipeline ran to completion and the downstream pre-processor's
+        # mutation is visible on the final request.
+        assert isinstance(result, PipelineOutput)
+        assert result.request.utterance == "after-bad"
+        # The downstream processor saw the upstream request unchanged —
+        # the raising processor did not corrupt the chain.
+        assert provider.last_request is not None
+        assert provider.last_request.utterance == "after-bad"
+
+        # A warning was logged naming the raising processor.
+        assert any(
+            "bad" in record.getMessage() and record.levelname == "WARNING"
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_assemble_propagates_contract_violations(self) -> None:
+        """A non-``PreProcessorError`` raise from a pre-processor crashes the pipeline.
+
+        This pins the "contract violations surface loudly" guarantee:
+        a future refactor that broadens the pipeline catch to
+        ``Exception`` would break this test.
+        """
+        bad = _FailingPreProcessor("bad", RuntimeError("kaboom"))
+        pipeline = ContextPipeline(
+            providers=[_StubProvider("p", [])],
+            pre_processors=[bad],
+        )
+
+        with pytest.raises(RuntimeError, match="kaboom"):
+            await pipeline.assemble(_make_request(), budget_by_layer={})

@@ -177,6 +177,48 @@ class TestCartesiaTTSClientSynthesize:
         ):
             await client.synthesize("Hello")
 
+    @pytest.mark.asyncio
+    async def test_synthesize_raises_on_5xx(self, client: CartesiaTTSClient) -> None:
+        """synthesize() raises HTTPStatusError on a 5xx response.
+
+        Pins the contract the bot.py TTS callers rely on: the client
+        raises, the caller swallows. Any future refactor that turns
+        this into a silent return would break the tests that expect
+        TTS failures to be logged via the bot-layer try/except.
+        """
+        mock_resp = Mock(spec=httpx.Response)
+        mock_resp.status_code = 503
+        mock_resp.is_success = False
+        mock_resp.text = "upstream voice model unavailable"
+        mock_resp.request = httpx.Request("POST", f"{CARTESIA_BASE_URL}/tts/bytes")
+
+        with (
+            patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)),
+            pytest.raises(httpx.HTTPStatusError, match=r"503"),
+        ):
+            await client.synthesize("Hello")
+
+    @pytest.mark.asyncio
+    async def test_synthesize_raises_on_timeout(
+        self, client: CartesiaTTSClient
+    ) -> None:
+        """A transport-level ``ReadTimeout`` propagates to the caller unchanged.
+
+        The internal ``_post`` helper uses ``httpx.AsyncClient`` with a
+        60 s timeout; when that fires, the exception is raised straight
+        through. This test pins that behaviour so bot.py's TTS
+        ``try/except`` clauses have a tested guarantee to anchor to.
+        """
+        with (
+            patch.object(
+                client,
+                "_post",
+                new=AsyncMock(side_effect=httpx.ReadTimeout("deadline exceeded")),
+            ),
+            pytest.raises(httpx.ReadTimeout, match=r"deadline exceeded"),
+        ):
+            await client.synthesize("Hello")
+
 
 class TestCreateTTSClient:
     def test_creates_client_from_character_config(self) -> None:

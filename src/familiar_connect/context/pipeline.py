@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from familiar_connect.context.budget import Budgeter, BudgetResult
+from familiar_connect.context.protocols import PreProcessorError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -111,10 +112,25 @@ class ContextPipeline:
         :param budget_by_layer: Per-layer token budgets to hand to the
             budgeter.
         """
-        # 1. Pre-processors run sequentially; each sees the previous one's output.
+        # 1. Pre-processors run sequentially; each sees the previous one's
+        # output. A pre-processor that raises ``PreProcessorError`` is
+        # skipped — ``processed`` is not updated, so the next stage sees
+        # the last successful value. Any other exception escapes this
+        # loop and crashes the pipeline: that is a Protocol-contract
+        # violation and is intentionally surfaced loudly rather than
+        # silently masked by a blanket ``except``.
         processed = request
         for pre in self._pre_processors:
-            processed = await pre.process(processed)
+            try:
+                processed = await pre.process(processed)
+            except PreProcessorError as exc:
+                _logger.warning(
+                    "pre-processor %s raised %s: %s; skipping",
+                    pre.id,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
 
         # 2. Providers fan out concurrently under a single TaskGroup.
         outcomes = await self._run_providers(processed)
