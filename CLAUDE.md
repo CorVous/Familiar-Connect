@@ -33,10 +33,17 @@ Always follow red/green TDD:
 5. Run `uv run pytest` to run tests
 6. If the change touched any of:
    - environment variables or config keys
-   - CLI flags or slash commands
    - on-disk layout under `data/familiars/`
    - architecture (providers, processors, pipeline, memory, history)
 
    update the matching page under `docs/` **in the same commit**, then run
    `uv run mkdocs build --strict` locally. `tests/test_docs.py` will fail
-   CI if documented env vars or slash commands have drifted from code.
+   CI if documented env vars have drifted from code.
+
+   CLI flags and slash-command descriptions don't need a manual doc
+   edit: the `docs/hooks/cli_reference.py` mkdocs hook inlines them
+   from `bot.py` and `cli.py` at build time. Still run
+   `uv run mkdocs build --strict` after touching those, and if you
+   add a *new* slash command or CLI subcommand, check that it shows
+   up in the rendered `getting-started/slash-commands.md` /
+   `getting-started/installation.md` pages.
