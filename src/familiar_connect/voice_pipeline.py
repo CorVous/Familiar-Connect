@@ -190,37 +190,24 @@ async def _create_user_stream(
     )
 
 
-_VOICE_ACTIVITY_SILENCE_THRESHOLD = 0.3
-"""Seconds of silence after which incoming audio is treated as a new speaking bout.
-
-Discord delivers audio packets roughly every 20ms when a user is speaking.  If
-more than this many seconds have elapsed since the last packet for a user, the
-next packet is considered the start of a new speaking bout and any pending lull
-evaluation is cancelled to avoid responding mid-utterance.
-"""
-
-
 async def _audio_router(
     tagged_queue: asyncio.Queue[tuple[int, bytes]],
     pipeline: VoicePipeline,
 ) -> None:
     """Route tagged audio to per-user streams, creating them on demand."""
     chunks_routed = 0
-    last_audio_time: dict[int, float] = {}
-    loop = asyncio.get_event_loop()
     while True:
         user_id, data = await tagged_queue.get()
 
-        # VAD: if this user was silent for longer than the threshold, they have
-        # restarted speaking.  Cancel any pending lull so we don't fire a
-        # response mid-utterance.
-        now = loop.time()
-        if now - last_audio_time.get(user_id, 0.0) > _VOICE_ACTIVITY_SILENCE_THRESHOLD:
-            handle = pipeline.lull_handles.get(user_id)
-            if handle is not None:
-                handle.cancel()
-                pipeline.lull_handles[user_id] = None
-        last_audio_time[user_id] = now
+        # VAD: Discord only delivers packets for actively-speaking users, so
+        # any packet is proof the user is currently talking.  Cancel any
+        # pending lull for this user to avoid firing a response mid-utterance
+        # (e.g. after a Deepgram is_final chunk but before they've actually
+        # stopped).
+        handle = pipeline.lull_handles.get(user_id)
+        if handle is not None:
+            handle.cancel()
+            pipeline.lull_handles[user_id] = None
 
         if user_id not in pipeline.streams:
             name = _get_user_name(pipeline, user_id)

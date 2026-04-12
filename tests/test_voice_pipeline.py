@@ -708,8 +708,15 @@ class TestAudioRouter:
         assert pipeline.lull_handles.get(42) is None
 
     @pytest.mark.asyncio
-    async def test_audio_router_does_not_cancel_lull_for_continuous_audio(self) -> None:
-        """Continuous audio (gap < threshold) does not cancel an absent lull handle."""
+    async def test_audio_router_cancels_lull_on_every_packet(self) -> None:
+        """Every audio packet cancels any pending lull, including continuous audio.
+
+        Discord's voice gateway only forwards packets for actively-speaking users,
+        so any packet — even one arriving milliseconds after the previous — is
+        proof the user is still talking.  The router must cancel the lull
+        unconditionally so a mid-utterance Deepgram ``is_final`` cannot fire a
+        response while the user is still speaking.
+        """
         tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
         shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
         template = _make_template()
@@ -722,16 +729,17 @@ class TestAudioRouter:
             user_names={},
         )
 
-        # First packet — establishes last_audio_time.
+        # First packet — gets the user's stream created.
         await tagged_queue.put((42, b"\x01"))
         task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
         await asyncio.sleep(0.02)
 
-        # Inject handle AFTER first packet has been processed.
+        # Inject handle AFTER first packet has been processed — simulates a
+        # Deepgram is_final arriving mid-utterance while the user keeps talking.
         fake_handle = MagicMock()
         pipeline.lull_handles[42] = fake_handle
 
-        # Second packet arrives immediately (gap << threshold).
+        # Second packet arrives immediately (continuous speech).
         await tagged_queue.put((42, b"\x02"))
         await asyncio.sleep(0.02)
 
@@ -739,8 +747,10 @@ class TestAudioRouter:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        # The gap was tiny — handle should NOT have been cancelled.
-        fake_handle.cancel.assert_not_called()
+        # Even with tiny gap, the handle must be cancelled — continuous audio
+        # still means the user is speaking.
+        fake_handle.cancel.assert_called_once()
+        assert pipeline.lull_handles.get(42) is None
 
 
 # ---------------------------------------------------------------------------
