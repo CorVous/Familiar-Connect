@@ -154,14 +154,18 @@ class _LullCollator:
 
     The lull timer is driven exclusively by Discord SPEAKING events:
 
-    * :meth:`on_speaking` with ``is_speaking=True``  → cancel timer.
-    * :meth:`on_speaking` with ``is_speaking=False`` → start countdown.
+    * :meth:`on_speaking` with ``is_speaking=True``  → cancel all timers.
+    * :meth:`on_speaking` with ``is_speaking=False`` → start lull countdown.
 
-    Deepgram ``is_final`` transcripts are buffered via
-    :meth:`on_final_transcript`.  They are only dispatched after the lull
-    timer fires.  If the timer fires before a transcript arrives, the
-    ``lull_fired`` flag is set and the next transcript triggers an
-    immediate dispatch.
+    When the lull timer fires it opens a short *dispatch window*
+    (``dispatch_grace`` seconds).  All Deepgram ``is_final`` transcripts
+    that arrive during this window are buffered.  When the window closes,
+    every buffered text is joined into a single :class:`TranscriptionResult`
+    and the response handler is called **exactly once**.
+
+    If a transcript arrives after both the lull timer and dispatch window
+    have already expired, :meth:`on_final_transcript` restarts the dispatch
+    window so no transcript is ever silently dropped.
     """
 
     def __init__(
@@ -170,22 +174,24 @@ class _LullCollator:
         response_handler: (
             Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
         ),
+        dispatch_grace: float = 0.5,
     ) -> None:
         self._lull_timeout = lull_timeout
+        self._dispatch_grace = dispatch_grace
         self._response_handler = response_handler
         self._pending_texts: dict[int, list[str]] = {}
         self._lull_timers: dict[int, asyncio.TimerHandle] = {}
-        self._lull_fired: dict[int, bool] = {}
+        self._dispatch_timers: dict[int, asyncio.TimerHandle] = {}
         self._pending_tasks: set[asyncio.Task[None]] = set()
 
     def on_speaking(self, user_id: int, *, is_speaking: bool) -> None:
-        """Update lull timer based on Discord voice activity for *user_id*.
+        """Update timers based on Discord voice activity for *user_id*.
 
-        * ``is_speaking=True``  → user is talking; cancel timer.
-        * ``is_speaking=False`` → user stopped; start countdown.
+        * ``is_speaking=True``  → user is talking; cancel all timers.
+        * ``is_speaking=False`` → user stopped; start lull countdown.
         """
         if is_speaking:
-            self._cancel_lull_timer(user_id)
+            self._cancel_all_timers(user_id)
         else:
             self._start_lull_timer(user_id)
 
@@ -196,60 +202,67 @@ class _LullCollator:
     ) -> None:
         """Buffer a final Deepgram transcript for *user_id*.
 
-        If the lull has already fired (user was silent before this
-        transcript arrived), dispatch immediately.  Otherwise just
-        accumulate — the lull timer will trigger dispatch later.
+        If no timer of any kind is running (e.g., the dispatch window
+        already closed before this transcript arrived), the dispatch window
+        is restarted so the transcript is not silently dropped.
         """
         self._pending_texts.setdefault(user_id, []).append(result.text)
 
-        if self._lull_fired.pop(user_id, False):
-            # Lull fired while waiting for transcript — dispatch now.
-            self._dispatch(user_id, last_result=result)
+        # Fallback: reopen the dispatch window for orphaned late transcripts.
+        if user_id not in self._lull_timers and user_id not in self._dispatch_timers:
+            self._start_dispatch_timer(user_id)
 
     # ------------------------------------------------------------------
     # Internal timer helpers
     # ------------------------------------------------------------------
 
-    def _cancel_lull_timer(self, user_id: int) -> None:
-        handle = self._lull_timers.pop(user_id, None)
-        if handle is not None:
-            handle.cancel()
-        self._lull_fired.pop(user_id, None)
+    def _cancel_all_timers(self, user_id: int) -> None:
+        """Cancel both the lull timer and the dispatch window timer."""
+        for timers in (self._lull_timers, self._dispatch_timers):
+            handle = timers.pop(user_id, None)
+            if handle is not None:
+                handle.cancel()
 
     def _start_lull_timer(self, user_id: int) -> None:
-        self._cancel_lull_timer(user_id)
+        self._cancel_all_timers(user_id)
         loop = asyncio.get_event_loop()
         self._lull_timers[user_id] = loop.call_later(
             self._lull_timeout, self._on_lull, user_id
         )
 
     def _on_lull(self, user_id: int) -> None:
-        """Handle lull timer expiry for *user_id*."""
+        """Handle lull timer expiry — open the dispatch window."""
         self._lull_timers.pop(user_id, None)
-        if self._pending_texts.get(user_id):
-            self._dispatch(user_id, last_result=None)
-        else:
-            # No transcript yet; mark as fired so the next one dispatches.
-            self._lull_fired[user_id] = True
+        self._start_dispatch_timer(user_id)
 
-    def _dispatch(
-        self,
-        user_id: int,
-        last_result: TranscriptionResult | None,
-    ) -> None:
+    def _start_dispatch_timer(self, user_id: int) -> None:
+        """Open (or reopen) the dispatch window for *user_id*."""
+        handle = self._dispatch_timers.pop(user_id, None)
+        if handle is not None:
+            handle.cancel()
+        loop = asyncio.get_event_loop()
+        self._dispatch_timers[user_id] = loop.call_later(
+            self._dispatch_grace, self._on_dispatch_expire, user_id
+        )
+
+    def _on_dispatch_expire(self, user_id: int) -> None:
+        """Dispatch window closed — combine all buffered text and fire once."""
+        self._dispatch_timers.pop(user_id, None)
+        if self._pending_texts.get(user_id):
+            self._dispatch(user_id)
+
+    def _dispatch(self, user_id: int) -> None:
         """Combine buffered texts and schedule a response handler task."""
         texts = self._pending_texts.pop(user_id, [])
-        self._lull_fired.pop(user_id, None)
         if not texts or self._response_handler is None:
             return
 
         combined = TranscriptionResult(
             text=" ".join(texts),
             is_final=True,
-            start=last_result.start if last_result is not None else 0.0,
-            end=last_result.end if last_result is not None else 0.0,
-            confidence=last_result.confidence if last_result is not None else 0.0,
-            speaker=last_result.speaker if last_result is not None else None,
+            start=0.0,
+            end=0.0,
+            confidence=0.0,
         )
         task = asyncio.create_task(
             _run_response_handler(self._response_handler, user_id, combined),
