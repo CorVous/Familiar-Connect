@@ -6,11 +6,15 @@ produces one LLM turn per fragment, so a user saying "uh… hey Aria,
 what's the weather?" may trigger two or three replies for one thought.
 
 This collator buffers ``is_final`` text per user and dispatches only
-after :attr:`lull_timeout` seconds of continuous Discord silence
-(``SPEAKING=False``). It also covers the race where the lull timer
-fires while Deepgram has yet to emit the ``is_final`` for the most
-recent audio burst: a bounded wait (:attr:`dispatch_timeout`) blocks
-on an :class:`asyncio.Event` that the ``on_final`` handler signals.
+after :attr:`lull_timeout` seconds of continuous silence. The lull
+timer is (re)started on ``SPEAKING=False`` **and** on every
+``is_final`` arrival — Discord does not reliably emit
+``speaking: 0`` for remote users, so transcript gaps alone must be
+enough to trigger dispatch. It also covers the race where the lull
+timer fires while Deepgram has yet to emit the ``is_final`` for the
+most recent audio burst: a bounded wait (:attr:`dispatch_timeout`)
+blocks on an :class:`asyncio.Event` that the ``on_final`` handler
+signals.
 
 State is entirely per-user. Discord SPEAKING=True is a hard reset that
 cancels the lull timer and any in-flight wait task so a fresh burst
@@ -97,6 +101,7 @@ class VoiceLullCollator:
         self._users: dict[int, _UserState] = {}
         # Strong refs to dispatch tasks so they aren't GC'd mid-flight.
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
+        self._closed: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,19 +116,15 @@ class VoiceLullCollator:
         so the collator dispatches after :attr:`lull_timeout` seconds
         of continuous silence.
         """
+        if self._closed:
+            return
         state = self._users.setdefault(user_id, _UserState())
         if speaking:
             state.audio_pending = True
             self._cancel_lull_timer(state)
             self._cancel_wait_task(state)
         else:
-            self._cancel_lull_timer(state)
-            loop = asyncio.get_event_loop()
-            state.lull_timer = loop.call_later(
-                self._lull_timeout,
-                self._on_lull_fired,
-                user_id,
-            )
+            self._restart_lull_timer(user_id, state)
 
     def on_final(self, user_id: int, result: TranscriptionResult) -> None:
         """Handle a Deepgram ``is_final`` transcript for *user_id*.
@@ -133,12 +134,21 @@ class VoiceLullCollator:
         :meth:`_wait_and_dispatch` coroutine currently blocked waiting
         for a trailing transcript.
         """
+        if self._closed:
+            return
         state = self._users.setdefault(user_id, _UserState())
         if result.text:
             state.pending_texts.append(result.text)
         state.audio_pending = False
         if state.waiting_event is not None:
             state.waiting_event.set()
+            # The wait task will dispatch as soon as it wakes; don't also
+            # schedule the lull timer from under it.
+            return
+        # Discord doesn't reliably send SPEAKING=False for remote users.
+        # Treat every is_final as a "possibly paused" signal so a gap in
+        # transcripts is enough to trigger dispatch on its own.
+        self._restart_lull_timer(user_id, state)
 
     async def close(self) -> None:
         """Cancel all pending timers and wait tasks.
@@ -146,6 +156,7 @@ class VoiceLullCollator:
         Called by :func:`voice_pipeline.stop_pipeline` during teardown.
         Safe to call multiple times.
         """
+        self._closed = True
         # Snapshot wait tasks before cancellation so we can await them
         # below (``_cancel_wait_task`` nulls the field).
         tasks = [s.wait_task for s in self._users.values() if s.wait_task is not None]
@@ -161,6 +172,16 @@ class VoiceLullCollator:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _restart_lull_timer(self, user_id: int, state: _UserState) -> None:
+        """Cancel any pending lull timer and schedule a fresh one."""
+        self._cancel_lull_timer(state)
+        loop = asyncio.get_event_loop()
+        state.lull_timer = loop.call_later(
+            self._lull_timeout,
+            self._on_lull_fired,
+            user_id,
+        )
 
     def _cancel_lull_timer(self, state: _UserState) -> None:
         if state.lull_timer is not None:

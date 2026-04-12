@@ -147,25 +147,30 @@ class TestSpeakingTrueHardReset:
 
     @pytest.mark.asyncio
     async def test_speaking_true_cancels_running_wait_task(self) -> None:
-        """SPEAKING=True during a wait task cancels it — no stale dispatch."""
+        """SPEAKING=True during a wait task cancels it — no wait-task dispatch.
+
+        A late ``is_final`` may still start a fresh transcript-gap timer
+        (see :class:`TestTranscriptOnlyDispatch`), but the cancelled wait
+        task itself never fires.
+        """
         downstream = AsyncMock()
-        collator = VoiceLullCollator(
-            downstream, lull_timeout=0.05, dispatch_timeout=1.0
-        )
+        collator = VoiceLullCollator(downstream, lull_timeout=0.2, dispatch_timeout=1.0)
 
         # Enter the wait-for-final branch (audio_pending=True, no text).
         collator.on_speaking(42, True)
         collator.on_speaking(42, False)
-        await asyncio.sleep(0.1)  # let lull fire → wait task running
+        await asyncio.sleep(0.25)  # let lull fire → wait task running
 
         # Hard reset before the is_final arrives
         collator.on_speaking(42, True)
         await asyncio.sleep(0.05)
 
-        # Even if the late is_final arrives, nothing dispatches yet —
-        # the wait task has been cancelled.
-        collator.on_final(42, _final("stale"))
-        await asyncio.sleep(0.1)
+        # The cancelled wait task has not fired — no dispatch yet.
+        downstream.assert_not_awaited()
+
+        # SPEAKING=True again (still no SPEAKING=False, no is_final) —
+        # audio_pending stays True, no timer runs.
+        await asyncio.sleep(0.3)
         downstream.assert_not_awaited()
 
 
@@ -217,3 +222,58 @@ class TestNeither:
         collator.on_speaking(42, False)
         await asyncio.sleep(0.15)
         downstream.assert_not_awaited()
+
+
+class TestTranscriptOnlyDispatch:
+    """Discord does not reliably emit SPEAKING=False for remote users.
+
+    The collator must still dispatch after ``lull_timeout`` seconds of
+    transcript silence, using each ``is_final`` arrival as an implicit
+    "possibly paused" signal that (re)starts the lull timer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_without_speaking_false_dispatches_after_lull(
+        self,
+    ) -> None:
+        """is_final + no SPEAKING=False → dispatch after lull_timeout."""
+        downstream = AsyncMock()
+        collator = VoiceLullCollator(
+            downstream, lull_timeout=0.05, dispatch_timeout=1.0
+        )
+
+        # SPEAKING=True arrives, a transcript lands, and Discord never
+        # bothers to send SPEAKING=False.
+        collator.on_speaking(42, True)
+        collator.on_final(42, _final("hi"))
+
+        await asyncio.sleep(0.15)
+
+        downstream.assert_awaited_once()
+        user_id, result = downstream.await_args.args  # ty: ignore[unresolved-attribute]
+        assert user_id == 42
+        assert result.text == "hi"
+
+    @pytest.mark.asyncio
+    async def test_two_finals_restart_timer_and_fuse(self) -> None:
+        """Back-to-back is_finals restart the timer and fuse into one reply."""
+        downstream = AsyncMock()
+        collator = VoiceLullCollator(downstream, lull_timeout=0.1, dispatch_timeout=1.0)
+
+        collator.on_speaking(42, True)
+        collator.on_final(42, _final("one"))
+        # Second is_final arrives before the first one's lull would fire;
+        # it must restart the timer, not leave the stale one running.
+        await asyncio.sleep(0.05)
+        collator.on_final(42, _final("two"))
+
+        # Sleep past where the first is_final's original timer would have
+        # fired, but before the restarted timer would fire.
+        await asyncio.sleep(0.08)
+        downstream.assert_not_awaited()
+
+        # Now sleep past the restarted timer.
+        await asyncio.sleep(0.1)
+        downstream.assert_awaited_once()
+        _, result = downstream.await_args.args  # ty: ignore[unresolved-attribute]
+        assert result.text == "one two"

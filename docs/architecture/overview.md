@@ -141,10 +141,14 @@ between `voice_pipeline` and the response handler built by
 `_build_voice_response_handler`:
 
 - `is_final` transcripts are **buffered** per user.
-- Dispatch is **gated on Discord SPEAKING events**: the timer starts
-  at `SPEAKING=False` and restarts on every subsequent one; a
-  `SPEAKING=True` cancels a pending timer and any in-flight wait,
-  so a new burst never inherits state from the previous one.
+- The lull timer is (re)started on `SPEAKING=False` **and** on every
+  `is_final` arrival. Discord's voice gateway does not reliably emit
+  `speaking: 0` for remote users, so a gap in transcripts is the
+  primary signal that the user has paused; `SPEAKING=False`, when it
+  arrives, is a secondary hint that simply supersedes the transcript-
+  driven timer. A `SPEAKING=True` cancels a pending timer and any
+  in-flight wait, so a new burst never inherits state from the
+  previous one.
 - After `lull_timeout` seconds of continuous silence the collator
   joins the buffered text and invokes the response handler once.
 - If the lull fires before Deepgram has delivered the transcript for
