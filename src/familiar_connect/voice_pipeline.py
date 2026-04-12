@@ -262,9 +262,13 @@ async def _transcript_logger(
     finalizations don't produce duplicate LLM requests.
 
     The per-user lull timer handles live on ``pipeline.lull_handles`` so
-    that :func:`_audio_router` can cancel them when new audio arrives
-    (Discord VAD signal), preventing a response from firing while the
-    user is still speaking.
+    they can be cancelled from two places while the user is still
+    speaking:
+
+    * :func:`_audio_router` on every audio packet (Discord gateway VAD).
+    * This logger on every interim result (Deepgram ASR-level VAD on the
+      real audio content — survives Discord's Opus DTX silence
+      suppression).
     """
     pending: set[asyncio.Task[None]] = set()
     buffer: dict[int, list[TranscriptionResult]] = {}
@@ -307,6 +311,18 @@ async def _transcript_logger(
             )
         else:
             _logger.debug("[Transcription interim] %s: %s", name, result.text)
+            # Interim result = Deepgram is actively transcribing speech, so
+            # the user is still talking.  Cancel any pending lull so a
+            # mid-utterance is_final can't fire a response.  Discord's own
+            # gateway VAD uses Opus DTX and drops silent frames, so audio-
+            # packet arrival alone is an unreliable "still speaking" signal
+            # during brief mid-sentence pauses; interim results use
+            # Deepgram's ASR-level VAD on the real audio content, which is
+            # the authoritative signal.
+            existing = pipeline.lull_handles.get(user_id)
+            if existing is not None:
+                existing.cancel()
+                pipeline.lull_handles[user_id] = None
 
 
 # ---------------------------------------------------------------------------

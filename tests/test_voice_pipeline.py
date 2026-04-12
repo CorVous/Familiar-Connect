@@ -571,6 +571,60 @@ class TestTranscriptLogger:
                 await task
         # No assertion needed — just verifying no exception was raised.
 
+    @pytest.mark.asyncio
+    async def test_interim_result_cancels_pending_lull(self) -> None:
+        """An interim (is_final=False) result cancels the pending lull timer.
+
+        During continuous speech Deepgram emits interim results many times per
+        second.  Any interim arrival means the user is still talking, so the
+        lull timer set by a prior is_final must be cancelled — otherwise a
+        mid-utterance is_final would let the lull fire during a brief
+        Discord-gateway silence gap (Opus DTX) and produce a response before
+        the user has actually stopped.
+        """
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        handler = AsyncMock()
+        pipeline = _make_pipeline_stub(
+            {42: "Alice"}, response_handler=handler, lull_timeout=0.05
+        )
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+
+            # is_final → lull timer armed for 50 ms.
+            await shared_queue.put((
+                42,
+                TranscriptionResult(text="part one", is_final=True, start=0.0, end=0.5),
+            ))
+            # Interim arrives 20 ms later — user still talking.  Cancels lull.
+            await asyncio.sleep(0.02)
+            await shared_queue.put((
+                42,
+                TranscriptionResult(
+                    text="part one and", is_final=False, start=0.0, end=0.7
+                ),
+            ))
+            # Wait past the original 50 ms lull.  Since the interim cancelled
+            # it, the handler must NOT have fired yet.
+            await asyncio.sleep(0.06)
+            assert handler.await_count == 0
+            assert pipeline.lull_handles.get(42) is None
+
+            # A second is_final then natural silence → merged response fires.
+            await shared_queue.put((
+                42,
+                TranscriptionResult(text="part two", is_final=True, start=0.5, end=1.2),
+            ))
+            await asyncio.sleep(0.12)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        handler.assert_awaited_once()
+        _, merged = handler.call_args[0]
+        assert merged.text == "part one part two"
+
 
 # ---------------------------------------------------------------------------
 # Phase 6: Audio router
