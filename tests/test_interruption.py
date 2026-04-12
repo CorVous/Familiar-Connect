@@ -288,13 +288,6 @@ class TestResponseTracker:
         assert tracker.playback_start_time is None
         assert tracker.mood_modifier == 0.0  # noqa: RUF069
 
-    def test_silence_event_cleared_on_start_generating(self) -> None:
-        tracker = ResponseTracker()
-        tracker.silence_event.set()
-        task = AsyncMock()  # type: ignore[arg-type]
-        tracker.start_generating(task)
-        assert not tracker.silence_event.is_set()
-
     def test_idle_event_set_initially(self) -> None:
         tracker = ResponseTracker()
         assert tracker.idle_event.is_set()
@@ -410,7 +403,7 @@ class TestInterruptionDetector:
         detector, _tracker, on_start, *mocks = self._make_detector()
         detector.on_speech_started(user_id=1, timestamp=0.0)
         await self._tick()
-        await detector.on_utterance_end(user_id=1, transcript="hey", timestamp=2.0)
+        await detector.on_utterance_end(user_id=1, timestamp=2.0)
         await self._tick()
         on_start.assert_not_called()
         for mock in mocks:
@@ -450,7 +443,7 @@ class TestInterruptionDetector:
         on_start.assert_called_once()
 
         # UtteranceEnd + lull should not dispatch moment 2.
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=12.0)
         await self._tick()
         for mock in mocks:
             mock.assert_not_called()
@@ -465,7 +458,7 @@ class TestInterruptionDetector:
         tracker.start_generating(task)
 
         detector.on_speech_started(user_id=1, timestamp=10.0)
-        await detector.on_utterance_end(user_id=1, transcript="mm", timestamp=11.0)
+        await detector.on_utterance_end(user_id=1, timestamp=11.0)
         # Lull fires (0.0 delay) before threshold (1.5s) — resets.
         await self._tick()
         on_start.assert_not_called()
@@ -486,7 +479,7 @@ class TestInterruptionDetector:
         await self._tick()  # moment 1
         on_start.assert_called_once()
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=12.0)
         await self._tick()  # lull → short (2.0 < 4.0)
         on_short_gen.assert_called_once()
         on_long_gen.assert_not_called()
@@ -502,7 +495,7 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=1, timestamp=10.0)
         await self._tick()
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=15.0)
+        await detector.on_utterance_end(user_id=1, timestamp=15.0)
         await self._tick()  # lull → long (5.0 >= 4.0)
         on_long_gen.assert_called_once()
         on_short_gen.assert_not_called()
@@ -519,7 +512,7 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=1, timestamp=10.0)
         await self._tick()
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=12.0)
         await self._tick()
         on_short_speak.assert_called_once()
         on_long_speak.assert_not_called()
@@ -536,7 +529,7 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=1, timestamp=10.0)
         await self._tick()
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=15.0)
+        await detector.on_utterance_end(user_id=1, timestamp=15.0)
         await self._tick()
         on_long_speak.assert_called_once()
         on_short_speak.assert_not_called()
@@ -552,7 +545,7 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=1, timestamp=10.0)
         await self._tick()  # moment 1 captures SPEAKING
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=12.0)
         await self._tick()
         on_short_speak.assert_called_once()
 
@@ -568,12 +561,12 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=2, timestamp=10.2)
         await self._tick()  # moment 1
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=11.0)
+        await detector.on_utterance_end(user_id=1, timestamp=11.0)
         await self._tick()
         # User 2 still talking — no dispatch yet.
         on_short_gen.assert_not_called()
 
-        await detector.on_utterance_end(user_id=2, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=2, timestamp=12.0)
         await self._tick()  # all silent, lull fires
         on_short_gen.assert_called_once()
 
@@ -586,11 +579,11 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=1, timestamp=10.0)
         await self._tick()  # moment 1
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=12.0)
         # Lull timer started — speech resumes before it fires.
         detector.on_speech_started(user_id=1, timestamp=12.1)
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=15.0)
+        await detector.on_utterance_end(user_id=1, timestamp=15.0)
         await self._tick()  # lull → long (15.0 - 10.0 = 5.0)
         on_long_gen.assert_called_once()
         event = on_long_gen.call_args[0][0]
@@ -606,12 +599,10 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=2, timestamp=10.5)
         await self._tick()  # moment 1
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=11.5)
-        await detector.on_utterance_end(user_id=2, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=11.5)
+        await detector.on_utterance_end(user_id=2, timestamp=12.0)
         await self._tick()  # lull fires
         on_short_gen.assert_called_once()
-        event = on_short_gen.call_args[0][0]
-        assert event.interrupter_ids == frozenset({1, 2})
 
     @pytest.mark.asyncio
     async def test_duration_from_first_speech_to_last_utterance(self) -> None:
@@ -622,7 +613,7 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=1, timestamp=10.0)
         await self._tick()
 
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=13.0)
+        await detector.on_utterance_end(user_id=1, timestamp=13.0)
         await self._tick()
         event = on_short_gen.call_args[0][0]
         assert event.duration_s == pytest.approx(3.0)
@@ -633,7 +624,7 @@ class TestInterruptionDetector:
         task = AsyncMock()  # type: ignore[arg-type]
         tracker.start_generating(task)
 
-        await detector.on_utterance_end(user_id=1, transcript="hey", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=12.0)
         await self._tick()
         on_start.assert_not_called()
         for mock in mocks:
@@ -649,7 +640,7 @@ class TestInterruptionDetector:
         # First interruption
         detector.on_speech_started(user_id=1, timestamp=10.0)
         await self._tick()
-        await detector.on_utterance_end(user_id=1, transcript="", timestamp=12.0)
+        await detector.on_utterance_end(user_id=1, timestamp=12.0)
         await self._tick()
         on_short_gen.assert_called_once()
 
@@ -657,8 +648,6 @@ class TestInterruptionDetector:
         detector.on_speech_started(user_id=3, timestamp=15.0)
         await self._tick()
         assert on_start.call_count == 2
-        await detector.on_utterance_end(user_id=3, transcript="", timestamp=17.0)
+        await detector.on_utterance_end(user_id=3, timestamp=17.0)
         await self._tick()
         assert on_short_gen.call_count == 2
-        event = on_short_gen.call_args[0][0]
-        assert event.interrupter_ids == frozenset({3})

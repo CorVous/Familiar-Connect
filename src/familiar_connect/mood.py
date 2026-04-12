@@ -110,21 +110,6 @@ def parse_mood_modifier(raw: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Pure helper
-# ---------------------------------------------------------------------------
-
-
-def effective_tolerance(base: float, mood_modifier: float) -> float:
-    """Compute the effective interrupt tolerance after mood drift.
-
-    :param base: The character's base ``interrupt_tolerance`` (0.0-1.0).
-    :param mood_modifier: The mood evaluator's output (-0.5 to +0.5).
-    :returns: Clamped result in ``[0.0, 1.0]``.
-    """
-    return max(0.0, min(1.0, base + mood_modifier))
-
-
-# ---------------------------------------------------------------------------
 # MoodEvaluator
 # ---------------------------------------------------------------------------
 

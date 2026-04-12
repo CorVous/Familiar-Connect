@@ -751,7 +751,7 @@ class TestInterruptedHistoryTruncation:
             await asyncio.sleep(0)
 
         # Interrupter stops — duration (~0.08s) > boundary (0.01s) → LONG.
-        await detector.on_utterance_end(99, "", asyncio.get_event_loop().time())
+        await detector.on_utterance_end(99, asyncio.get_event_loop().time())
 
         # Wait for lull timer → moment 2.
         await asyncio.sleep(0.10)
@@ -830,7 +830,7 @@ class TestInterruptedHistoryTruncation:
         await asyncio.sleep(0.08)
         for _ in range(20):
             await asyncio.sleep(0)
-        await detector.on_utterance_end(99, "", asyncio.get_event_loop().time())
+        await detector.on_utterance_end(99, asyncio.get_event_loop().time())
         await asyncio.sleep(0.10)
         for _ in range(20):
             await asyncio.sleep(0)
@@ -925,7 +925,7 @@ class TestInterruptedHistoryTruncation:
             await asyncio.sleep(0)
 
         # Interrupter stops — short duration.
-        await detector.on_utterance_end(99, "", asyncio.get_event_loop().time())
+        await detector.on_utterance_end(99, asyncio.get_event_loop().time())
 
         # Wait for lull → moment 2 classifies as short → resume.
         await asyncio.sleep(0.15)

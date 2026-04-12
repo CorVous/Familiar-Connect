@@ -43,7 +43,6 @@ from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
-from familiar_connect.mood import effective_tolerance
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
@@ -221,20 +220,17 @@ def _build_voice_response_handler(
 
         base = familiar.config.interrupt_tolerance.tolerance
         mood = tracker.mood_modifier
-        tol = effective_tolerance(base, mood)
-        if should_keep_talking(tol):
+        if should_keep_talking(base, mood):
             _logger.info(
-                "Interruption: pushing through (base=%.2f mood=%+.2f tol=%.2f)",
+                "Interruption: pushing through (base=%.2f mood=%+.2f)",
                 base,
                 mood,
-                tol,
             )
             return False
         _logger.info(
-            "Interruption: yielding (base=%.2f mood=%+.2f tol=%.2f)",
+            "Interruption: yielding (base=%.2f mood=%+.2f)",
             base,
             mood,
-            tol,
         )
         # Capture the playback position *before* stopping so the
         # elapsed-time measurement is as accurate as possible.

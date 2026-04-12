@@ -5,9 +5,8 @@ future-features/interruption-flow.md lines 31-35.
 
 Steps covered:
   1. parse_mood_modifier() — robust float extraction from LLM output
-  2. effective_tolerance() — pure tolerance+modifier combiner
-  3. MoodEvaluation dataclass
-  4. MoodEvaluator — side-model integration, error handling
+  2. MoodEvaluation dataclass
+  3. MoodEvaluator — side-model integration, error handling
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import pytest
 from familiar_connect.mood import (
     MoodEvaluation,
     MoodEvaluator,
-    effective_tolerance,
     parse_mood_modifier,
 )
 
@@ -74,29 +72,7 @@ class TestParseMoodModifier:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — effective_tolerance
-# ---------------------------------------------------------------------------
-
-
-class TestEffectiveTolerance:
-    def test_base_plus_positive_modifier(self) -> None:
-        assert effective_tolerance(0.3, 0.2) == pytest.approx(0.5)
-
-    def test_base_plus_negative_modifier(self) -> None:
-        assert effective_tolerance(0.3, -0.2) == pytest.approx(0.1)
-
-    def test_clamps_to_zero(self) -> None:
-        assert effective_tolerance(0.1, -0.5) == pytest.approx(0.0)
-
-    def test_clamps_to_one(self) -> None:
-        assert effective_tolerance(0.8, 0.5) == pytest.approx(1.0)
-
-    def test_zero_modifier_passthrough(self) -> None:
-        assert effective_tolerance(0.3, 0.0) == pytest.approx(0.3)
-
-
-# ---------------------------------------------------------------------------
-# Step 3 — MoodEvaluation dataclass
+# Step 2 — MoodEvaluation dataclass
 # ---------------------------------------------------------------------------
 
 
@@ -113,7 +89,7 @@ class TestMoodEvaluation:
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — MoodEvaluator
+# Step 3 — MoodEvaluator
 # ---------------------------------------------------------------------------
 
 

@@ -160,7 +160,6 @@ class ResponseTracker:
     response_text: str | None = None
     word_timestamps: list[WordTimestamp] = field(default_factory=list)
     playback_start_time: float | None = None
-    silence_event: asyncio.Event = field(default_factory=asyncio.Event)
     idle_event: asyncio.Event = field(default_factory=_idle_event_factory)
     """Set when IDLE, cleared when GENERATING. Use for waiting."""
     mood_modifier: float = 0.0
@@ -173,7 +172,6 @@ class ResponseTracker:
             raise RuntimeError(msg)
         self.state = ResponseState.GENERATING
         self.generation_task = task
-        self.silence_event.clear()
         self.idle_event.clear()
 
     def generation_complete(self, text: str) -> None:
@@ -228,7 +226,6 @@ class ResponseTracker:
         self.response_text = None
         self.word_timestamps = []
         self.playback_start_time = None
-        self.silence_event.clear()
         self.mood_modifier = 0.0
         self.idle_event.set()
 
@@ -242,10 +239,7 @@ class ResponseTracker:
 class InterruptionEvent:
     """An interruption that has been detected and classified."""
 
-    kind: InterruptionKind
     duration_s: float
-    transcript: str
-    interrupter_ids: frozenset[int]
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +310,6 @@ class InterruptionDetector:
         # Interruption accumulation state
         self._speech_start_time: float | None = None
         self._last_utterance_end_time: float | None = None
-        self._interrupter_ids: set[int] = set()
         self._active_speakers: set[int] = set()
 
         # Phase tracking
@@ -348,7 +341,6 @@ class InterruptionDetector:
             self._active_speakers,
         )
         self._active_speakers.add(user_id)
-        self._interrupter_ids.add(user_id)
         # Cancel pending lull — someone is talking again.
         if self._lull_task is not None:
             self._lull_task.cancel()
@@ -369,14 +361,11 @@ class InterruptionDetector:
     async def on_utterance_end(
         self,
         user_id: int,
-        transcript: str,  # noqa: ARG002
         timestamp: float,
     ) -> None:
         """Record the end of user speech and start the lull timer if all silent.
 
         :param user_id: The speaking user's id.
-        :param transcript: What the user said (unused — real transcripts
-            arrive via the transcription pipeline).
         :param timestamp: ``time.monotonic()`` value when speech ended.
         """
         if self._tracker.state is ResponseState.IDLE:
@@ -387,7 +376,6 @@ class InterruptionDetector:
         if self._speech_start_time is None:
             return
 
-        self._interrupter_ids.add(user_id)
         self._last_utterance_end_time = timestamp
         self._active_speakers.discard(user_id)
         _logger.debug(
@@ -471,10 +459,7 @@ class InterruptionDetector:
             return
 
         event = InterruptionEvent(
-            kind=kind,
             duration_s=duration_s,
-            transcript="",
-            interrupter_ids=frozenset(self._interrupter_ids),
         )
         state = self._state_at_interrupt
         self._reset_accumulation()
@@ -494,7 +479,6 @@ class InterruptionDetector:
         """Clear the in-progress interruption tracking state."""
         self._speech_start_time = None
         self._last_utterance_end_time = None
-        self._interrupter_ids.clear()
         self._active_speakers.clear()
         self._threshold_passed = False
         self._moment1_in_progress = False
@@ -506,3 +490,6 @@ class InterruptionDetector:
         if self._lull_task is not None:
             self._lull_task.cancel()
             self._lull_task = None
+        if self._deferred_moment1 is not None:
+            self._deferred_moment1.cancel()
+            self._deferred_moment1 = None

@@ -274,7 +274,6 @@ async def _vad_dispatcher(
         elif event.event_type == "UtteranceEnd":
             await detector.on_utterance_end(
                 user_id=user_id,
-                transcript="",
                 timestamp=now,
             )
 
