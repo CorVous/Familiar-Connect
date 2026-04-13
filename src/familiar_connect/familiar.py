@@ -30,6 +30,7 @@ from familiar_connect.context.providers.mode_instructions import (
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.memory.store import MemoryStore
 from familiar_connect.subscriptions import SubscriptionRegistry
+from familiar_connect.voice.interruption import ResponseTrackerRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,6 +68,12 @@ class Familiar:
     subscriptions: SubscriptionRegistry
     channel_configs: ChannelConfigStore
     monitor: ConversationMonitor
+    tracker_registry: ResponseTrackerRegistry = field(
+        default_factory=ResponseTrackerRegistry,
+    )
+    """Per-guild :class:`ResponseTracker` lookup used by the voice
+    interruption state machine. Populated lazily on first voice reply.
+    """
     extras: dict[str, object] = field(default_factory=dict)
     """scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet"""
@@ -150,6 +157,7 @@ class Familiar:
         async def _noop_respond(
             channel_id: int,
             buffer: object,
+            trigger: object,
         ) -> None:
             """Act as a no-op until create_bot wires the real callback."""
 
