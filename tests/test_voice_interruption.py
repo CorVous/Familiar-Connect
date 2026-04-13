@@ -624,42 +624,68 @@ class TestInterruptionDetectorPreExistingSpeech:
         assert not scheduler.has_pending(detector._on_min_crossed)
 
 
-class TestInterruptionDetectorAbortOnIdle:
-    def test_returning_to_idle_cancels_timers_and_drops_burst(
+class TestInterruptionDetectorIdleTransition:
+    def test_speaking_to_idle_preserves_burst_and_lull_timer(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        # Familiar stops speaking (SPEAKING → IDLE) mid-burst — all
-        # interruption timers must be cancelled and no classification
-        # emitted.
+        # The familiar finishing playback mid-interruption must not
+        # erase the interruption — the lull timer keeps running and
+        # the burst classifies normally, labelled "during SPEAKING".
         detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
         tracker = registry.get(1)
         tracker.transition(ResponseState.SPEAKING)
         detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        assert scheduler.has_pending(detector._finalize_burst)
+        tracker.transition(ResponseState.IDLE)
+        # Lull timer survives the transition.
+        assert scheduler.has_pending(detector._finalize_burst)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            scheduler.fire_for(detector._finalize_burst)
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
+        assert len(msgs) == 1
+        assert "during SPEAKING" in msgs[0]
+        assert "by user=42" in msgs[0]
+
+    def test_generating_to_idle_aborts_burst(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Familiar abandons generation (e.g., interjection eval said
+        # NO). Nothing to interrupt — abort and emit no classification.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.transition(ResponseState.GENERATING)
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
         clock.advance(1.0)
         detector.on_voice_activity(42, VoiceActivityEvent.ended)
-        # Lull timer is armed at this point.
         assert scheduler.has_pending(detector._finalize_burst)
         with caplog.at_level(
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             tracker.transition(ResponseState.IDLE)
-        # Both timers should now be cancelled.
         assert not scheduler.has_pending(detector._finalize_burst)
         assert not scheduler.has_pending(detector._on_min_crossed)
-        # And no classification log should have been emitted.
         assert not any("interruption:" in r.message for r in caplog.records)
 
-    def test_idle_during_active_speech_cancels_min_timer(
+    def test_generating_to_idle_with_active_speech_cancels_min_timer(
         self,
     ) -> None:
-        # Tracker goes IDLE while user is still actively speaking —
-        # the pending min timer must be cancelled and the burst dropped.
+        # Same abort behaviour while a user is still actively speaking:
+        # no pending timers should survive GENERATING → IDLE.
         detector, registry, _clock, scheduler = _make_detector(
             min_s=2.0, boundary_s=30.0
         )
         tracker = registry.get(1)
-        tracker.transition(ResponseState.SPEAKING)
+        tracker.transition(ResponseState.GENERATING)
         detector.on_voice_activity(42, VoiceActivityEvent.started)
         assert scheduler.has_pending(detector._on_min_crossed)
         tracker.transition(ResponseState.IDLE)
