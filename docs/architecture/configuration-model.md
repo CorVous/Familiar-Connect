@@ -33,7 +33,7 @@ Per-familiar configuration. The persona, behaviour knobs, pluggable component se
 - **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
 - **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.
 - **TTS voice** — `[tts]` section carries `voice_id` and `model` for the Cartesia client.
-- **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`.
+- **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`. Channels with no sidecar fall back by **subscription kind**: voice subscriptions default to `imitate_voice` (so `/subscribe-my-voice` on a fresh channel lands on the low-latency tuning profile automatically), while text subscriptions fall back to `character.default_mode`.
 - **Subscriptions** — which Discord channels the bot listens in, written to `subscriptions.toml` by `/subscribe-text` and `/subscribe-my-voice`.
 
 **Where it lives:** `data/familiars/<familiar_id>/`. One folder per character. Only one runs at a time in any given process.

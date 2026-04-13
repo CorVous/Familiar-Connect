@@ -14,6 +14,12 @@ The channel-mode commands map to config names: `/channel-full-rp` sets
 `text_conversation_rp`, and `/channel-imitate-voice` sets
 `imitate_voice` (tight budget, low TTFB).
 
+A voice channel first reached via `/subscribe-my-voice` defaults to
+`imitate_voice` automatically — there's no need to also run
+`/channel-imitate-voice` unless you later want to switch profiles.
+Text channels without a sidecar fall back to the character's
+`default_mode` instead.
+
 See also the [Twitch guide](../guides/twitch.md) for the `/twitch *`
 command surface.
 

@@ -192,7 +192,10 @@ def _build_voice_response_handler(
         speaker = user_names.get(user_id, f"User-{user_id}")
         safe_name = sanitize_name(speaker) or speaker
 
-        channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
+        channel_config = familiar.channel_configs.get(
+            channel_id=voice_channel_id,
+            kind=SubscriptionKind.voice,
+        )
         request = ContextRequest(
             familiar_id=familiar.id,
             channel_id=voice_channel_id,
@@ -502,7 +505,10 @@ async def _run_text_response(
     :param familiar: The active :class:`Familiar` bundle.
     :param channel: Discord text channel to send the reply to.
     """
-    channel_config = familiar.channel_configs.get(channel_id=channel_id)
+    channel_config = familiar.channel_configs.get(
+        channel_id=channel_id,
+        kind=SubscriptionKind.text,
+    )
 
     request = ContextRequest(
         familiar_id=familiar.id,
