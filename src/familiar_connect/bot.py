@@ -12,7 +12,7 @@ import asyncio
 import dataclasses
 import io
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
 import httpx
@@ -28,8 +28,7 @@ from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-    from typing import Any
+    from collections.abc import Awaitable, Callable
 
     from familiar_connect.chattiness import BufferedMessage
     from familiar_connect.context.pipeline import ProviderOutcome
@@ -128,132 +127,135 @@ async def unsubscribe_text(
     await ctx.respond("No longer listening here.", ephemeral=True)
 
 
-# voice interjection not yet implemented — consult interjection_decision
-# LLM before replying, matching ConversationMonitor gate on text channels;
-# see ConversationMonitor._check_interjection in chattiness.py
-def _build_voice_response_handler(
-    *,
-    vc: discord.VoiceClient,
-    familiar: Familiar,
-    voice_channel_id: int,
+async def _run_voice_response(
+    channel_id: int,
     guild_id: int | None,
-    user_names: dict[int, str],
-) -> Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]]:
-    """Build async callback for each final voice transcription.
+    speaker: str,
+    utterance: str,
+    buffer: list[BufferedMessage],
+    familiar: Familiar,
+    vc: discord.VoiceClient,
+) -> None:
+    """Run full pipeline → LLM → TTS path for a voice channel.
 
-    Routes voice turns through the same :class:`ContextPipeline` as text:
-    assemble request → render → LLM → post-processors → history → TTS.
+    Called by ``on_respond`` when :class:`ConversationMonitor` decides
+    the familiar should speak. Mirrors :func:`_run_text_response`;
+    voice uses :attr:`Modality.voice` and trims LLM-calling providers
+    and processors for lower latency. Persists every buffered user
+    utterance in order, then the assistant reply, so the history
+    store reflects the full conversation.
     """
+    channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
-    async def _handle_voice_result(
-        user_id: int,
-        result: TranscriptionResult,
-    ) -> None:
-        # resolve speaker display name; falls back to ``User-<id>``
-        # when voice_pipeline's name resolver hasn't seen this user yet
-        speaker = user_names.get(user_id, f"User-{user_id}")
-        safe_name = sanitize_name(speaker) or speaker
+    # disable LLM-calling providers and processors for voice to reduce
+    # real-time latency; remove this replace() call to re-enable
+    channel_config = dataclasses.replace(
+        channel_config,
+        providers_enabled=channel_config.providers_enabled
+        - {
+            "content_search",
+            "history",
+        },
+        preprocessors_enabled=frozenset(),
+        postprocessors_enabled=frozenset(),
+    )
 
-        channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
+    request = ContextRequest(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        speaker=speaker,
+        utterance=utterance,
+        modality=Modality.voice,
+        budget_tokens=channel_config.budget_tokens,
+        deadline_s=channel_config.deadline_s,
+        pending_turns=tuple(
+            PendingTurn(speaker=m.speaker, text=m.text) for m in buffer
+        ),
+    )
 
-        # disable LLM-calling providers and processors for voice to reduce
-        # real-time latency; remove this replace() call to re-enable
-        channel_config = dataclasses.replace(
-            channel_config,
-            providers_enabled=channel_config.providers_enabled
-            - {
-                "content_search",
-                "history",
-            },
-            preprocessors_enabled=frozenset(),
-            postprocessors_enabled=frozenset(),
+    pipeline = familiar.build_pipeline(channel_config)
+    pipeline_output = await pipeline.assemble(
+        request,
+        budget_by_layer=channel_config.budget_by_layer,
+    )
+    _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
+
+    messages = assemble_chat_messages(
+        pipeline_output,
+        store=familiar.history_store,
+        history_window_size=familiar.config.history_window_size,
+        depth_inject_position=familiar.config.depth_inject_position,
+        depth_inject_role=familiar.config.depth_inject_role,
+        mode=channel_config.mode,
+        display_tz=familiar.config.display_tz,
+    )
+
+    _logger.info(
+        "LLM request channel=%s (voice) messages=%d, %d new:\n%s",
+        channel_id,
+        len(messages),
+        len(request.pending_turns) if request.pending_turns else 1,
+        "\n".join(
+            f"  [{pt.speaker or '?'}]: "
+            f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
+            for pt in request.pending_turns
         )
+        if request.pending_turns
+        else (
+            f"  [{request.speaker or '?'}]: "
+            f"{request.utterance[:200]}{'…' if len(request.utterance) > 200 else ''}"
+        ),
+    )
 
-        request = ContextRequest(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            speaker=safe_name,
-            utterance=result.text,
-            modality=Modality.voice,
-            budget_tokens=channel_config.budget_tokens,
-            deadline_s=channel_config.deadline_s,
+    # main reply isolation: catch ``LLMClient.chat`` raise set
+    # (transport, status, malformed payload) and return cleanly so
+    # the monitor callback stays alive for the next utterance
+    try:
+        reply = await familiar.llm_clients["main_prose"].chat(messages)
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        _logger.warning(
+            "main reply (voice): %s: %s",
+            type(exc).__name__,
+            exc,
         )
+        return
+    reply_text = await pipeline.run_post_processors(reply.content, request)
 
-        pipeline = familiar.build_pipeline(channel_config)
-        pipeline_output = await pipeline.assemble(
-            request,
-            budget_by_layer=channel_config.budget_by_layer,
-        )
-        _log_pipeline_outcomes(voice_channel_id, pipeline_output.outcomes)
-
-        messages = assemble_chat_messages(
-            pipeline_output,
-            store=familiar.history_store,
-            history_window_size=familiar.config.history_window_size,
-            depth_inject_position=familiar.config.depth_inject_position,
-            depth_inject_role=familiar.config.depth_inject_role,
-            mode=channel_config.mode,
-            display_tz=familiar.config.display_tz,
-        )
-
-        _logger.info(
-            "LLM request channel=%s (voice) messages=%d, 1 new:\n  [%s]: %s",
-            voice_channel_id,
-            len(messages),
-            request.speaker or "?",
-            (request.utterance[:200] + "…")
-            if len(request.utterance) > 200
-            else request.utterance,
-        )
-
-        # main reply isolation: catch ``LLMClient.chat`` raise set
-        # (transport, status, malformed payload) and return cleanly
-        try:
-            reply = await familiar.llm_clients["main_prose"].chat(messages)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            _logger.warning(
-                "main reply (voice): %s: %s",
-                type(exc).__name__,
-                exc,
-            )
-            return
-        reply_text = await pipeline.run_post_processors(reply.content, request)
-
-        # persist both turns after LLM call so a crash never leaves
-        # an orphaned user turn with no reply
+    # persist every buffered user utterance then the assistant reply
+    # after the LLM call so a crash never leaves an orphaned user
+    # turn with no reply; mirrors _run_text_response
+    for msg in buffer:
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
-            channel_id=voice_channel_id,
+            channel_id=channel_id,
             guild_id=guild_id,
             role="user",
-            content=result.text,
-            speaker=safe_name,
+            content=msg.text,
+            speaker=msg.speaker,
             mode=channel_config.mode,
         )
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            role="assistant",
-            content=reply_text,
-            mode=channel_config.mode,
-        )
+    familiar.history_store.append_turn(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        role="assistant",
+        content=reply_text,
+        mode=channel_config.mode,
+    )
 
-        _logger.info("[Voice Response] %s", reply_text)
+    _logger.info("[Voice Response] %s", reply_text)
 
-        if familiar.tts_client is not None:
-            try:
-                pcm_mono = await familiar.tts_client.synthesize(reply_text)
-                stereo = mono_to_stereo(pcm_mono)
-                # wait for current audio to finish (poll — no event available)
-                while vc.is_playing():  # noqa: ASYNC110
-                    await asyncio.sleep(0.1)
-                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            except Exception:
-                _logger.exception("Voice response TTS failed")
-
-    return _handle_voice_result
+    if familiar.tts_client is not None:
+        try:
+            pcm_mono = await familiar.tts_client.synthesize(reply_text)
+            stereo = mono_to_stereo(pcm_mono)
+            # wait for current audio to finish (poll — no event available)
+            while vc.is_playing():  # noqa: ASYNC110
+                await asyncio.sleep(0.1)
+            vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+        except Exception:
+            _logger.exception("Voice response TTS failed")
 
 
 async def subscribe_my_voice(
@@ -262,8 +264,12 @@ async def subscribe_my_voice(
 ) -> None:
     """Join caller's voice channel and register a voice subscription.
 
-    Starts per-user transcription pipeline when ``familiar.transcriber``
-    is configured; without it, joins for TTS playback only.
+    When ``familiar.transcriber`` is set, starts a per-user Deepgram
+    pipeline, debounces finals through :class:`VoiceLullMonitor`, and
+    feeds merged utterances into :attr:`Familiar.monitor` so voice
+    turns share the same ``ConversationMonitor`` gate as text. On
+    YES, the monitor dispatches via ``voice_response_handlers`` in
+    :attr:`Familiar.extras`. Without a transcriber, joins for TTS only.
     """
     author = ctx.author
     if not isinstance(author, discord.Member) or author.voice is None:
@@ -323,6 +329,8 @@ async def subscribe_my_voice(
 
     if familiar.transcriber is not None:
         user_names = {m.id: m.display_name for m in channel.members}
+        voice_channel_id = channel.id
+        voice_guild_id = ctx.guild_id
 
         def _resolve_from_channel(user_id: int) -> str | None:
             for member in channel.members:
@@ -330,21 +338,68 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        voice_response_handler = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=channel.id,
-            guild_id=ctx.guild_id,
-            user_names=user_names,
+        # Register a per-voice-channel response handler on the familiar.
+        # The ``on_respond`` callback built in ``create_bot`` looks this
+        # up by channel id and dispatches here when the
+        # ``ConversationMonitor`` decides the familiar should speak on
+        # this voice channel. Captures ``vc`` so the same voice client
+        # connection handles playback for the life of the subscription.
+        async def _voice_response_handler(
+            channel_id: int,
+            buffer: list[BufferedMessage],
+        ) -> None:
+            if not buffer:
+                return
+            last = buffer[-1]
+            await _run_voice_response(
+                channel_id=channel_id,
+                guild_id=voice_guild_id,
+                speaker=last.speaker,
+                utterance=last.text,
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+            )
+
+        voice_response_handlers = cast(
+            "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
+            familiar.extras.setdefault("voice_response_handlers", {}),
         )
+        voice_response_handlers[voice_channel_id] = _voice_response_handler
+
+        # Debounce Deepgram finals into one utterance per speaker turn,
+        # then hand the merged transcript to the ConversationMonitor —
+        # exactly the same entry point text channels use. The monitor
+        # runs direct-address detection on the transcript text, counter-
+        # based interjection checks, and a silence-based conversational
+        # lull gate. On YES, ``_voice_response_handler`` fires via
+        # ``on_respond``.
+        async def _deliver_to_monitor(
+            user_id: int,
+            merged: TranscriptionResult,
+        ) -> None:
+            raw_name = user_names.get(user_id, f"User-{user_id}")
+            safe_name = sanitize_name(raw_name) or raw_name
+            await familiar.monitor.on_message(
+                channel_id=voice_channel_id,
+                speaker=safe_name,
+                text=merged.text,
+                is_mention=False,
+                # The voice pipeline already debounced silence via
+                # VoiceLullMonitor, so this call is itself the lull.
+                # Tell the monitor not to start another lull timer.
+                is_lull_endpoint=True,
+            )
 
         # debounce per-final Deepgram fragments into a single utterance
         # via VoiceLullMonitor; fires after voice_lull_timeout of silence
         lull_monitor = VoiceLullMonitor(
             lull_timeout=familiar.config.voice_lull_timeout,
             user_silence_s=0.2,
-            on_utterance_complete=voice_response_handler,
-        )  # voice_lull_timeout, not text_lull_timeout — voice uses pure debounce
+            on_utterance_complete=_deliver_to_monitor,
+        )  # voice_lull_timeout is endpointing only; the conversational
+        # lull (side-model YES/NO gate) is governed by text_lull_timeout
+        # inside ConversationMonitor.
         familiar.extras["voice_lull_monitor"] = lull_monitor
 
         async def _route_transcript_to_monitor(  # noqa: RUF029
@@ -403,6 +458,16 @@ async def unsubscribe_voice(
         await vc.disconnect()
 
     if sub is not None:
+        # Drop the per-channel voice response dispatch and clear any
+        # monitor state for this voice channel so a later re-subscribe
+        # starts fresh (and so a lull timer doesn't fire into a dead
+        # voice client).
+        voice_response_handlers = cast(
+            "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
+            familiar.extras.get("voice_response_handlers", {}),
+        )
+        voice_response_handlers.pop(sub.channel_id, None)
+        familiar.monitor.clear_channel(sub.channel_id)
         familiar.subscriptions.remove(
             channel_id=sub.channel_id,
             kind=SubscriptionKind.voice,
@@ -625,6 +690,20 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         channel_id: int,
         buffer: list[BufferedMessage],
     ) -> None:
+        # Voice dispatch first: if this channel has a voice response
+        # handler registered by subscribe_my_voice, hand the buffer to
+        # it. This is how the ConversationMonitor gate (direct address,
+        # interjection check, conversational lull) reaches the voice
+        # path now that voice shares the same monitor as text.
+        voice_handlers = cast(
+            "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
+            familiar.extras.get("voice_response_handlers", {}),
+        )
+        voice_handler = voice_handlers.get(channel_id)
+        if voice_handler is not None:
+            await voice_handler(channel_id, buffer)
+            return
+
         channel = bot.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
             return

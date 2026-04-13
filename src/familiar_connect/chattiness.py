@@ -194,11 +194,18 @@ class ConversationMonitor:
         text: str,
         *,
         is_mention: bool,
+        is_lull_endpoint: bool = False,
     ) -> None:
-        """Process incoming message on a subscribed channel."""
+        """Process incoming message on a subscribed channel.
+
+        ``is_lull_endpoint=True`` (voice path) means the caller has
+        already debounced silence via ``voice_lull_timeout``; the
+        monitor skips its own timer and runs the lull evaluation
+        inline if no higher-priority trigger fires.
+        """
         buf = self._get_or_create_buffer(channel_id)
 
-        # 1. cancel existing lull timer (restarted below)
+        # 1. cancel existing lull timer (restarted below on text path)
         self._cancel_lull_timer(buf)
 
         # 2. append to buffer and increment counter
@@ -243,8 +250,17 @@ class ConversationMonitor:
                     self._interjection, buf.check_count
                 )
 
-        # 5. start new lull timer
-        self._start_lull_timer(channel_id, buf)
+        # 5. conversational lull
+        if is_lull_endpoint:
+            # voice path: caller already debounced silence, so this
+            # call is itself the lull — evaluate inline without a timer
+            async with buf.lock:
+                yes = await self._evaluate(channel_id, buf, trigger_context=None)
+                if yes:
+                    await self._fire_respond(channel_id, buf)
+        else:
+            # text path: wait ``lull_timeout`` seconds for more messages
+            self._start_lull_timer(channel_id, buf)
 
     def clear_channel(self, channel_id: int) -> None:
         """Remove all state for *channel_id*, cancelling pending lull timer."""
@@ -279,7 +295,7 @@ class ConversationMonitor:
 
     def _schedule_lull_evaluation(self, channel_id: int) -> None:
         """Sync callback from call_later — schedules the async evaluation."""
-        _logger.info("text lull expired channel=%s", channel_id)
+        _logger.info("conversational lull expired channel=%s", channel_id)
         loop = asyncio.get_event_loop()
         task = loop.create_task(self._run_lull_evaluation(channel_id))
         # strong ref prevents GC before completion; done-callback cleans up
@@ -359,11 +375,12 @@ class ConversationMonitor:
         stripped = response.strip()
         first_word = stripped.split()[0].upper().rstrip(".,!") if stripped else ""
         decision = first_word == "YES"
-        _logger.debug(
-            "evaluate channel=%s trigger=%s decision=%s raw=%r",
+        _logger.info(
+            "interjection channel=%s trigger=%s decision=%s msgs=%d raw=%r",
             channel_id,
             trigger_label,
             "YES" if decision else "NO",
+            buf.message_counter,
             response[:120],
         )
         return decision

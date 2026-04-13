@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 
 import discord
@@ -31,8 +31,8 @@ import httpx
 import pytest
 
 from familiar_connect.bot import (
-    _build_voice_response_handler,
     _run_text_response,
+    _run_voice_response,
     create_bot,
     on_message,
     set_channel_mode,
@@ -47,6 +47,7 @@ from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.voice_lull import VoiceLullMonitor
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -514,22 +515,22 @@ class TestOnRespond:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
 
-        handler = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=9000,
-            guild_id=999,
-            user_names={42: "Alice"},
-        )
-        transcription = TranscriptionResult(
-            text="hello world",
-            is_final=True,
-            start=0.0,
-            end=1.0,
-        )
+        buffer = [
+            BufferedMessage(speaker="Alice", text="hello world", timestamp=0.0),
+        ]
 
         with caplog.at_level("INFO", logger="familiar_connect.bot"):
-            asyncio.run(handler(42, transcription))
+            asyncio.run(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hello world",
+                    buffer=buffer,
+                    familiar=familiar,
+                    vc=vc,
+                )
+            )
 
         llm_records = [r for r in caplog.records if "LLM request" in r.getMessage()]
         assert len(llm_records) == 1
@@ -1030,22 +1031,20 @@ class TestMainReplyResilience:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
 
-        handler = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=9000,
-            guild_id=999,
-            user_names={42: "Alice"},
-        )
-        transcription = TranscriptionResult(
-            text="hello there",
-            is_final=True,
-            start=0.0,
-            end=1.0,
-        )
+        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
 
         with caplog.at_level("WARNING", logger="familiar_connect.bot"):
-            asyncio.run(handler(42, transcription))
+            asyncio.run(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hello there",
+                    buffer=buffer,
+                    familiar=familiar,
+                    vc=vc,
+                )
+            )
 
         # Main LLM was invoked and raised.
         assert failing.call_count == 1
@@ -1098,25 +1097,25 @@ class TestVoicePreProcessorsSuppressed:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
 
-        handler = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=9000,
-            guild_id=999,
-            user_names={42: "Alice"},
-        )
-        transcription = TranscriptionResult(
-            text="hello there",
-            is_final=True,
-            start=0.0,
-            end=1.0,
-        )
+        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
 
-        asyncio.run(handler(42, transcription))
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hello there",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+            )
+        )
 
         # No LLM slot beyond main_prose should have been touched.
-        # interjection_decision is included: voice interjection is wired but
-        # currently disabled via _VOICE_INTERJECTION_ENABLED = False.
+        # interjection_decision is excluded from _run_voice_response —
+        # the YES/NO gate fires upstream in ConversationMonitor, before
+        # the voice response path runs. This assertion covers the
+        # response path alone, where the side-model must not be called.
         llm_only_slots = (
             "reasoning_context",
             "post_process_style",
@@ -1128,3 +1127,236 @@ class TestVoicePreProcessorsSuppressed:
             client = familiar.llm_clients[slot]
             assert isinstance(client, _StubLLMClient)
             assert client.calls == [], f"Expected no calls on {slot!r}"
+
+
+# ---------------------------------------------------------------------------
+# Voice routes through ConversationMonitor
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceInterjectionRouting:
+    """Voice utterances flow through the same ConversationMonitor as text.
+
+    Pins the design decision that voice turns get a YES/NO side-model
+    gate (direct address, counter-based interjection, conversational
+    lull) before the response pipeline runs, mirroring text behaviour.
+    """
+
+    def test_voice_lull_merged_utterance_routed_to_monitor(
+        self, tmp_path: Path
+    ) -> None:
+        """VoiceLullMonitor fires → ConversationMonitor.on_message(voice_id, …).
+
+        The merged transcript lands at the monitor with the voice
+        channel id, the speaker's sanitised display name, and
+        ``is_mention=False``. The monitor's own direct-address scan
+        picks up name/alias hits from the transcript text.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        monitor_spy = AsyncMock()
+        familiar.monitor.on_message = monitor_spy  # ty: ignore[invalid-assignment]
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        lull_monitor = familiar.extras["voice_lull_monitor"]
+        assert isinstance(lull_monitor, VoiceLullMonitor)
+        # Reach in to the lull monitor's private hand-off: we only want
+        # to verify the subscribe wiring, not re-simulate Deepgram.
+        merged = TranscriptionResult(
+            text="hello there",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        async def _fire() -> None:
+            await lull_monitor._on_utterance_complete(42, merged)
+
+        asyncio.run(_fire())
+
+        monitor_spy.assert_called_once()
+        kwargs = monitor_spy.call_args.kwargs
+        assert kwargs["channel_id"] == 9000
+        assert kwargs["text"] == "hello there"
+        assert kwargs["is_mention"] is False
+        # Voice already debounced silence — monitor must not start its
+        # own (text) lull timer for voice channels.
+        assert kwargs["is_lull_endpoint"] is True
+
+    def test_subscribe_my_voice_registers_voice_response_handler(
+        self, tmp_path: Path
+    ) -> None:
+        """A per-channel voice response handler is stashed on familiar.extras."""
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        handlers = cast("dict[int, Any]", familiar.extras["voice_response_handlers"])
+        assert 9000 in handlers
+        assert callable(handlers[9000])
+
+    def test_unsubscribe_voice_drops_response_handler_and_monitor_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Cleanup removes the dispatch entry and clears monitor state."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        # Pretend we had wired everything up previously.
+        familiar.extras["voice_response_handlers"] = {9000: AsyncMock()}
+        clear_spy = MagicMock()
+        familiar.monitor.clear_channel = clear_spy  # ty: ignore[invalid-assignment]
+        ctx = _make_voice_ctx(already_connected=True)
+
+        asyncio.run(unsubscribe_voice(ctx, familiar))
+
+        handlers = cast("dict[int, Any]", familiar.extras["voice_response_handlers"])
+        assert 9000 not in handlers
+        clear_spy.assert_called_once_with(9000)
+
+    def test_on_respond_dispatches_to_voice_handler(self, tmp_path: Path) -> None:
+        """create_bot's on_respond hands voice channels to the voice handler.
+
+        When a voice-channel handler is registered in
+        ``familiar.extras["voice_response_handlers"]``, the
+        ``on_respond`` callback routes there instead of attempting the
+        text-channel path.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        voice_handler = AsyncMock()
+        familiar.extras["voice_response_handlers"] = {9000: voice_handler}
+
+        bot = create_bot(familiar)
+        del bot  # we only need the side-effect: monitor.on_respond installed
+
+        buffer = [BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)]
+
+        async def _invoke() -> None:
+            await familiar.monitor.on_respond(9000, buffer)
+
+        asyncio.run(_invoke())
+
+        voice_handler.assert_called_once()
+        args, _ = voice_handler.call_args
+        assert args[0] == 9000
+        assert args[1] == buffer
+
+    def test_on_respond_text_channel_bypasses_voice_handler_lookup(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression guard: text channels are unaffected by voice wiring.
+
+        A text channel id that is NOT in ``voice_response_handlers``
+        must still reach ``_run_text_response`` exactly as before.
+        Covers the case where a single familiar has both a voice
+        subscription (populates the handlers dict) and a text
+        subscription.
+        """
+        familiar = _make_familiar(tmp_path, reply="Hello.")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        # A voice handler is registered for the voice channel only.
+        familiar.extras["voice_response_handlers"] = {9000: AsyncMock()}
+
+        text_channel = _make_channel(12345)
+
+        with patch(
+            "familiar_connect.bot._run_text_response", new_callable=AsyncMock
+        ) as text_spy:
+            bot = create_bot(familiar)
+            # bot.get_channel returns our fake text channel for this id.
+            bot.get_channel = MagicMock(  # ty: ignore[invalid-assignment]
+                return_value=text_channel,
+            )
+
+            buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+            async def _invoke() -> None:
+                await familiar.monitor.on_respond(12345, buffer)
+
+            asyncio.run(_invoke())
+
+        text_spy.assert_called_once()
+        kwargs = text_spy.call_args.kwargs
+        assert kwargs["channel_id"] == 12345
+        assert kwargs["channel"] is text_channel
+        # The voice handler was NOT invoked.
+        voice_handlers = cast(
+            "dict[int, Any]", familiar.extras["voice_response_handlers"]
+        )
+        voice_handlers[9000].assert_not_called()
+
+    def test_run_voice_response_persists_all_buffered_turns(
+        self, tmp_path: Path
+    ) -> None:
+        """Every utterance in the buffer is persisted, then the reply.
+
+        Parallels TestOnRespond.test_multiple_buffered_messages_all_persisted
+        for voice.
+        """
+        familiar = _make_familiar(tmp_path, reply="Sure thing.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+        buffer = [
+            BufferedMessage(speaker="Alice", text="hey", timestamp=0.0),
+            BufferedMessage(speaker="Bob", text="what's up", timestamp=1.0),
+            BufferedMessage(speaker="Alice", text="aria you there", timestamp=2.0),
+        ]
+
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="aria you there",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+            )
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=10
+        )
+        # 3 user turns + 1 assistant reply
+        assert len(turns) == 4
+        assert [t.role for t in turns] == ["user", "user", "user", "assistant"]
+        assert [t.content for t in turns] == [
+            "hey",
+            "what's up",
+            "aria you there",
+            "Sure thing.",
+        ]
