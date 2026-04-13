@@ -539,8 +539,8 @@ class TestLullTimer:
         # exactly 0 fires so far (second timer hasn't expired yet)
         assert len(calls) == 0
 
-    def test_lull_expiry_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
-        """_schedule_lull_evaluation emits a DEBUG log when the lull timer fires."""
+    def test_lull_expiry_logs_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        """_schedule_lull_evaluation emits an INFO log when the lull timer fires."""
         monitor, _ = _make_monitor(
             lull_timeout=0.05,
             interjection=Interjection.very_quiet,
@@ -554,13 +554,13 @@ class TestLullTimer:
                     channel_id=1, speaker="Bob", text="hello", is_mention=False
                 )
             )
-            with caplog.at_level(logging.DEBUG, logger="familiar_connect.chattiness"):
+            with caplog.at_level(logging.INFO, logger="familiar_connect.chattiness"):
                 loop.run_until_complete(asyncio.sleep(0.15))
         finally:
             loop.close()
 
         assert any(
-            r.levelno == logging.DEBUG and "text lull expired" in r.message
+            r.levelno == logging.INFO and "text lull expired" in r.message
             for r in caplog.records
         )
 
