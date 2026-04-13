@@ -16,6 +16,7 @@ Steps covered:
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,6 +32,8 @@ from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +538,31 @@ class TestLullTimer:
         # Only the second timer should fire eventually — here we just verify
         # exactly 0 fires so far (second timer hasn't expired yet)
         assert len(calls) == 0
+
+    def test_lull_expiry_logs_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        """_schedule_lull_evaluation emits an INFO log when the lull timer fires."""
+        monitor, _ = _make_monitor(
+            lull_timeout=0.05,
+            interjection=Interjection.very_quiet,
+            side_model_reply="NO",
+        )
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                monitor.on_message(
+                    channel_id=1, speaker="Bob", text="hello", is_mention=False
+                )
+            )
+            with caplog.at_level(logging.INFO, logger="familiar_connect.chattiness"):
+                loop.run_until_complete(asyncio.sleep(0.15))
+        finally:
+            loop.close()
+
+        assert any(
+            r.levelno == logging.INFO and "text lull expired" in r.message
+            for r in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
