@@ -192,6 +192,15 @@ The prompt pressure also builds naturally: by check 5 on a `very_quiet` familiar
 - Check count resets to 0 (so the step-down curve restarts from the tier's starting interval).
 - Lull timer is cancelled.
 
+### Voice gate
+
+Voice channels use a narrower path: `ConversationMonitor.evaluate_voice_utterance(channel_id, speaker, text)` is called for every merged utterance produced by `VoiceLullMonitor` (the voice handler in `bot.py` makes the call).
+
+- **No counter-based deferral.** `VoiceLullMonitor` already debounces mid-sentence fragments into a single utterance, so voice runs the `interjection_decision` LLM on every call — the text counter / step-down curve does not apply.
+- **Prompt selection.** `is_direct_address()` scans the merged transcript for the familiar's name/aliases. A match routes through the direct-address prompt; otherwise the interjection prompt is used (with a message count reflecting the per-channel buffer).
+- **Buffer retention on NO.** The buffer is kept so the next utterance accumulates conversational context for the next evaluation. The voice handler calls `reset_channel_buffer(channel_id)` only after a successful YES response has been persisted to history.
+- **No `on_respond` fan-out.** The voice handler owns the response pipeline directly, so the monitor does not invoke its `on_respond` callback on the voice path — the handler uses the YES/NO return value to decide whether to proceed.
+
 ### On direct address (regardless of evaluation result)
 
 Same resets as a successful response: buffer cleared, counter reset, check count reset, lull timer cancelled.

@@ -579,3 +579,139 @@ class TestClearChannel:
     def test_clear_nonexistent_channel_is_noop(self) -> None:
         monitor, _ = _make_monitor()
         monitor.clear_channel(999)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Voice utterance gate
+# ---------------------------------------------------------------------------
+
+
+class TestConversationMonitorVoice:
+    """evaluate_voice_utterance: per-utterance YES/NO gate for voice turns.
+
+    VoiceLullMonitor already debounces, so voice skips the counter-based
+    deferral that ``on_message`` uses for text and runs ``_evaluate`` on
+    every utterance. The caller (bot.py voice handler) is responsible for
+    running the response pipeline on YES and calling
+    ``reset_channel_buffer`` after it finishes.
+    """
+
+    def test_voice_utterance_yes_returns_true(self) -> None:
+        monitor, _ = _make_monitor(side_model_reply="YES")
+        result = asyncio.run(
+            monitor.evaluate_voice_utterance(
+                channel_id=1, speaker="Alice", text="how are you"
+            )
+        )
+        assert result is True
+
+    def test_voice_utterance_no_returns_false(self) -> None:
+        monitor, _ = _make_monitor(side_model_reply="NO")
+        result = asyncio.run(
+            monitor.evaluate_voice_utterance(
+                channel_id=1, speaker="Alice", text="how are you"
+            )
+        )
+        assert result is False
+
+    def test_voice_utterance_does_not_fire_on_respond(self) -> None:
+        """The voice caller owns the pipeline; monitor must not fire on_respond."""
+        monitor, calls = _make_monitor(side_model_reply="YES")
+        asyncio.run(
+            monitor.evaluate_voice_utterance(
+                channel_id=1, speaker="Alice", text="hey aria"
+            )
+        )
+        assert calls == []
+
+    def test_voice_utterance_buffers_message(self) -> None:
+        monitor, _ = _make_monitor(side_model_reply="NO")
+        asyncio.run(
+            monitor.evaluate_voice_utterance(
+                channel_id=1, speaker="Alice", text="hello there"
+            )
+        )
+        buf = monitor._buffers[1]
+        assert len(buf.buffer) == 1
+        assert buf.buffer[0].speaker == "Alice"
+        assert buf.buffer[0].text == "hello there"
+
+    def test_voice_utterance_buffer_accumulates_on_no(self) -> None:
+        """Consecutive NO verdicts keep the buffer so later evals see context."""
+        monitor, _ = _make_monitor(side_model_reply="NO")
+        asyncio.run(
+            monitor.evaluate_voice_utterance(
+                channel_id=1, speaker="Alice", text="first"
+            )
+        )
+        asyncio.run(
+            monitor.evaluate_voice_utterance(channel_id=1, speaker="Bob", text="second")
+        )
+        buf = monitor._buffers[1]
+        assert [m.text for m in buf.buffer] == ["first", "second"]
+
+    def test_voice_utterance_no_counter_deferral(self) -> None:
+        """Every voice utterance runs _evaluate — no counter-based skipping."""
+        monitor, _ = _make_monitor(
+            interjection=Interjection.very_quiet,  # starting_interval = 15
+            side_model_reply="NO",
+        )
+        for i in range(3):
+            asyncio.run(
+                monitor.evaluate_voice_utterance(
+                    channel_id=1, speaker="Bob", text=f"msg {i}"
+                )
+            )
+        # Even at very_quiet tier, each voice utterance calls the LLM.
+        assert monitor._llm_client.chat.call_count == 3  # ty: ignore[unresolved-attribute]
+
+    def test_voice_utterance_uses_direct_address_prompt_when_name_present(
+        self,
+    ) -> None:
+        """Name/alias in the utterance routes through the direct-address prompt."""
+        monitor, _ = _make_monitor(side_model_reply="YES")
+        asyncio.run(
+            monitor.evaluate_voice_utterance(
+                channel_id=1, speaker="Alice", text="hey aria, you there?"
+            )
+        )
+        llm_client = monitor._llm_client
+        user_msg = llm_client.chat.call_args.args[0][1]  # ty: ignore[unresolved-attribute]
+        assert "directly addressed" in user_msg.content.lower()
+
+    def test_voice_utterance_uses_interjection_prompt_when_not_addressed(
+        self,
+    ) -> None:
+        monitor, _ = _make_monitor(side_model_reply="NO")
+        asyncio.run(
+            monitor.evaluate_voice_utterance(
+                channel_id=1, speaker="Alice", text="the weather is nice"
+            )
+        )
+        llm_client = monitor._llm_client
+        user_msg = llm_client.chat.call_args.args[0][1]  # ty: ignore[unresolved-attribute]
+        # The interjection prompt talks about messages without speaking.
+        assert "without" in user_msg.content.lower()
+
+    def test_reset_channel_buffer_clears_state(self) -> None:
+        monitor, _ = _make_monitor(side_model_reply="NO")
+        asyncio.run(
+            monitor.evaluate_voice_utterance(channel_id=7, speaker="Alice", text="one")
+        )
+        asyncio.run(
+            monitor.evaluate_voice_utterance(channel_id=7, speaker="Bob", text="two")
+        )
+        buf = monitor._buffers[7]
+        assert len(buf.buffer) == 2
+        assert buf.message_counter == 2
+
+        monitor.reset_channel_buffer(7)
+
+        buf = monitor._buffers[7]
+        assert buf.buffer == []
+        assert buf.message_counter == 0
+        assert buf.check_count == 0
+
+    def test_reset_channel_buffer_on_unknown_channel_is_noop(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.reset_channel_buffer(999)  # should not raise

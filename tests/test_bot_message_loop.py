@@ -943,6 +943,10 @@ class TestMainReplyResilience:
         )
         failing = _RaisingLLMClient(_make_http_status_error(503))
         familiar.llm_clients["main_prose"] = failing
+        # Voice now passes through the interjection gate; force YES so the
+        # test actually reaches the failing main_prose call.
+        familiar.llm_clients["interjection_decision"] = _StubLLMClient(reply="YES")
+        familiar.monitor._llm_client = familiar.llm_clients["interjection_decision"]
 
         vc = MagicMock(spec=discord.VoiceClient)
         vc.play = MagicMock()
@@ -1016,6 +1020,11 @@ class TestVoicePreProcessorsSuppressed:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
 
+        # Voice turns run through the interjection gate, which calls
+        # interjection_decision. Force a YES so the rest of the pipeline runs.
+        familiar.llm_clients["interjection_decision"] = _StubLLMClient(reply="YES")
+        familiar.monitor._llm_client = familiar.llm_clients["interjection_decision"]
+
         handler = _build_voice_response_handler(
             vc=vc,
             familiar=familiar,
@@ -1032,17 +1041,131 @@ class TestVoicePreProcessorsSuppressed:
 
         asyncio.run(handler(42, transcription))
 
-        # No LLM slot beyond main_prose should have been touched.
-        # interjection_decision is included: voice interjection is wired but
-        # currently disabled via _VOICE_INTERJECTION_ENABLED = False.
+        # Voice skips expensive pre/post-processor slots and context-provider
+        # LLMs. The interjection_decision slot IS called (this is the gate);
+        # it is intentionally excluded from the suppression list.
         llm_only_slots = (
             "reasoning_context",
             "post_process_style",
             "memory_search",
             "history_summary",
-            "interjection_decision",
         )
         for slot in llm_only_slots:
             client = familiar.llm_clients[slot]
             assert isinstance(client, _StubLLMClient)
             assert client.calls == [], f"Expected no calls on {slot!r}"
+
+
+# ---------------------------------------------------------------------------
+# Voice interjection gate
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceInterjectionGate:
+    """Voice turns must pass through the interjection_decision gate.
+
+    Parity with text: ``ConversationMonitor.evaluate_voice_utterance`` is
+    consulted before the pipeline runs. A NO verdict skips main_prose, TTS,
+    and history writes; a YES verdict runs the pipeline and resets the
+    monitor's per-channel buffer.
+    """
+
+    def test_voice_handler_skips_pipeline_on_interjection_no(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=9000, mode=ChannelMode.imitate_voice
+        )
+        # Force the gate to decline.
+        familiar.llm_clients["interjection_decision"] = _StubLLMClient(reply="NO")
+        familiar.monitor._llm_client = familiar.llm_clients["interjection_decision"]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        handler = _build_voice_response_handler(
+            vc=vc,
+            familiar=familiar,
+            voice_channel_id=9000,
+            guild_id=999,
+            user_names={42: "Alice"},
+        )
+        transcription = TranscriptionResult(
+            text="just chatting among ourselves",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        asyncio.run(handler(42, transcription))
+
+        # main_prose must not be called when the gate says NO.
+        main = familiar.llm_clients["main_prose"]
+        assert isinstance(main, _StubLLMClient)
+        assert main.calls == []
+
+        # No TTS fan-out, no history writes.
+        vc.play.assert_not_called()
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=10
+        )
+        assert turns == []
+
+        # Buffer retains the declined utterance so the next eval has context.
+        buf = familiar.monitor._buffers[9000]
+        assert [m.text for m in buf.buffer] == ["just chatting among ourselves"]
+
+    def test_voice_handler_runs_pipeline_on_interjection_yes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=9000, mode=ChannelMode.imitate_voice
+        )
+        familiar.llm_clients["interjection_decision"] = _StubLLMClient(reply="YES")
+        familiar.monitor._llm_client = familiar.llm_clients["interjection_decision"]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        handler = _build_voice_response_handler(
+            vc=vc,
+            familiar=familiar,
+            voice_channel_id=9000,
+            guild_id=999,
+            user_names={42: "Alice"},
+        )
+        transcription = TranscriptionResult(
+            text="hello there",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        asyncio.run(handler(42, transcription))
+
+        # main_prose runs on YES.
+        main = familiar.llm_clients["main_prose"]
+        assert isinstance(main, _StubLLMClient)
+        assert len(main.calls) == 1
+
+        # Both history turns persisted.
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=10
+        )
+        assert len(turns) == 2
+
+        # Monitor buffer reset after the successful response.
+        buf = familiar.monitor._buffers.get(9000)
+        assert buf is None or buf.buffer == []

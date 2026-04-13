@@ -159,11 +159,6 @@ async def unsubscribe_text(
     await ctx.respond("No longer listening here.", ephemeral=True)
 
 
-# VOICE INTERJECTION (not yet implemented): the familiar should eventually
-# consult the interjection_decision LLM before replying to each voice
-# utterance, matching the ConversationMonitor gate used on text channels.
-# See ConversationMonitor._check_interjection in chattiness.py for the
-# prompt/YES-NO pattern to follow when wiring this up.
 def _build_voice_response_handler(
     *,
     vc: discord.VoiceClient,
@@ -185,6 +180,12 @@ def _build_voice_response_handler(
     text turns get. The earlier PR #17 implementation stashed voice
     history in a closure-local ``list[Message]`` that bypassed the
     pipeline entirely; that stub is replaced by this handler.
+
+    Each utterance is first gated by
+    :meth:`ConversationMonitor.evaluate_voice_utterance`, which runs
+    the ``interjection_decision`` LLM slot. A NO verdict skips the
+    pipeline, TTS, and history writes — matching the ``chattiness``
+    personality filter that text channels get.
     """
 
     async def _handle_voice_result(
@@ -197,6 +198,25 @@ def _build_voice_response_handler(
         # rather than ``None``.
         speaker = user_names.get(user_id, f"User-{user_id}")
         safe_name = sanitize_name(speaker) or speaker
+
+        # VOICE INTERJECTION GATE: consult the interjection_decision LLM
+        # before running the main pipeline, matching the text gate in
+        # ConversationMonitor.on_message. Every utterance is evaluated —
+        # VoiceLullMonitor already debounces fragments, so there is no
+        # counter-based deferral. A NO verdict preserves the buffer so
+        # later utterances accumulate conversational context.
+        should_respond = await familiar.monitor.evaluate_voice_utterance(
+            channel_id=voice_channel_id,
+            speaker=safe_name,
+            text=result.text,
+        )
+        if not should_respond:
+            _logger.info(
+                "[Voice] interjection_decision=NO channel=%s speaker=%s",
+                voice_channel_id,
+                safe_name,
+            )
+            return
 
         channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
 
@@ -293,6 +313,11 @@ def _build_voice_response_handler(
             content=reply_text,
             mode=channel_config.mode,
         )
+
+        # Drop the accumulated buffer now that the familiar has spoken, so
+        # the next evaluation starts fresh. Mirrors _reset_buffer() in the
+        # text path after on_respond fires.
+        familiar.monitor.reset_channel_buffer(voice_channel_id)
 
         _logger.info("[Voice Response] %s", reply_text)
 

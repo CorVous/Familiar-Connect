@@ -307,6 +307,56 @@ class ConversationMonitor:
         # 5. Start new lull timer
         self._start_lull_timer(channel_id, buf)
 
+    async def evaluate_voice_utterance(
+        self,
+        channel_id: int,
+        speaker: str,
+        text: str,
+    ) -> bool:
+        """Buffer a voice utterance and decide whether the familiar responds.
+
+        The voice gate mirrors the text interjection gate but skips
+        counter-based deferral: :class:`VoiceLullMonitor` already debounces
+        mid-sentence fragments, so every merged utterance runs one
+        evaluation against the accumulated per-channel buffer.
+
+        On a YES verdict, the **caller** (``bot.py`` voice handler) runs
+        the response pipeline and must call :meth:`reset_channel_buffer`
+        after it completes. On NO, the buffer is retained so later
+        evaluations see conversational context.
+
+        Direct-address detection reuses :func:`is_direct_address`; voice
+        has no ``is_mention`` equivalent so it is always False.
+        """
+        buf = self._get_or_create_buffer(channel_id)
+        buf.buffer.append(
+            BufferedMessage(speaker=speaker, text=text, timestamp=time.monotonic())
+        )
+        buf.message_counter += 1
+
+        if is_direct_address(
+            text, self._familiar_name, self._aliases, is_mention=False
+        ):
+            trigger = "You were directly addressed in the conversation."
+        else:
+            trigger = (
+                f"{buf.message_counter} messages have been said without you speaking."
+            )
+
+        async with buf.lock:
+            return await self._evaluate(channel_id, buf, trigger_context=trigger)
+
+    def reset_channel_buffer(self, channel_id: int) -> None:
+        """Clear buffer + counters for *channel_id*.
+
+        Called by the voice handler after a YES verdict and a successful
+        response so the next utterance starts with a fresh buffer. No-op if
+        the channel has no state.
+        """
+        buf = self._buffers.get(channel_id)
+        if buf is not None:
+            self._reset_buffer(buf)
+
     def clear_channel(self, channel_id: int) -> None:
         """Remove all state for *channel_id*.
 

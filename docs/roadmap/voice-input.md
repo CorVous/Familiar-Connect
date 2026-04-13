@@ -2,8 +2,8 @@
 
 Everything the bot needs to handle incoming audio on the reply path, plus a few adjacent concerns about text and image input that arrive *during* a voice session.
 
-!!! info "Status: Design"
-    `/subscribe-my-voice` ships today. It joins the caller's voice channel and keeps the PCM sink open for TTS replies, but **incoming audio is not yet wired into the context pipeline** — this is the last step-7 deferral from the [Context pipeline](../architecture/context-pipeline.md) branch.
+!!! info "Status: Implemented (interjection gate wired)"
+    `/subscribe-my-voice` joins the caller's voice channel, streams PCM into Deepgram, debounces fragments through `VoiceLullMonitor`, and now runs each merged utterance through `ConversationMonitor.evaluate_voice_utterance` before invoking the main pipeline. A NO verdict from the `interjection_decision` LLM skips the pipeline, TTS, and history writes — voice now honours the familiar's `chattiness` personality the same way text does. Barge-in / interruption handling ([Interruption flow](interruption-flow.md)) remains deferred.
 
 ## Motivation
 
@@ -14,7 +14,7 @@ The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` o
 ### STT → pipeline wiring
 
 - The voice subscription already maintains a PCM audio stream per speaker in the channel. That stream becomes the input to an STT client (Deepgram websocket in the first pass).
-- Each finalised transcript is built into a `ContextRequest(modality="voice", speaker=..., utterance=..., ...)` and handed to the same `ConversationMonitor` text messages go through (see [Conversation flow](conversation-flow.md)).
+- Each finalised, lull-merged transcript is passed to `ConversationMonitor.evaluate_voice_utterance(channel_id, speaker, text)` which appends to the per-channel buffer and runs the `interjection_decision` LLM with the same prompts text channels use. On YES the voice handler builds a `ContextRequest(modality="voice", speaker=..., utterance=..., ...)` and runs the main pipeline; on NO the pipeline is skipped and the buffer is retained so later utterances accumulate context (see [Conversation flow](conversation-flow.md)).
 - The reply flows back through the pipeline, is sent to Discord as a text message in the voice channel's paired text channel, and fans out to TTS when a voice subscription exists in the same guild.
 - Per-speaker streams are kept separate so the transcription attribution matches who actually spoke, not "the channel."
 
