@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -1124,3 +1125,320 @@ class TestSpeakingTransitionStampsPlaybackStart:
         t.playback_start_time = 100.0
         t.transition(ResponseState.IDLE)
         assert t.playback_start_time is None
+
+
+# ---------------------------------------------------------------------------
+# Step 11 — Short interruption during SPEAKING (yield + push-through)
+# ---------------------------------------------------------------------------
+
+
+class _FakeVC:
+    """Minimal VoiceClient stand-in for Step 11 dispatch tests."""
+
+    def __init__(self, *, playing: bool = True) -> None:
+        self.playing = playing
+        self.stopped = False
+
+    def is_playing(self) -> bool:
+        return self.playing
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.playing = False
+
+
+def _make_detector_with_callbacks(
+    *,
+    guild_id: int = 1,
+    min_s: float = 1.5,
+    boundary_s: float = 4.0,
+    lull_s: float = 5.0,
+    base_tolerance: float = 0.30,
+    rng: Callable[[], float] | None = None,
+    on_short_yield_resume: Callable | None = None,
+    on_push_through_transcript: Callable | None = None,
+) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
+    registry = ResponseTrackerRegistry()
+    clock = _FakeClock()
+    scheduler = _FakeScheduler()
+    if rng is None:
+        rng = lambda: 0.99  # noqa: E731
+    detector = InterruptionDetector(
+        tracker_registry=registry,
+        guild_id=guild_id,
+        min_interruption_s=min_s,
+        short_long_boundary_s=boundary_s,
+        lull_timeout_s=lull_s,
+        base_tolerance=base_tolerance,
+        clock=clock,
+        scheduler=scheduler,
+        rng=rng,
+        on_short_yield_resume=on_short_yield_resume,
+        on_push_through_transcript=on_push_through_transcript,
+    )
+    return detector, registry, clock, scheduler
+
+
+class TestStep11ShortSpeakingDispatch:
+    """Step 11: short interruption during SPEAKING drives yield or push-through."""
+
+    # ------------------------------------------------------------------
+    # Moment 1: min crossed → vc.stop() / no-op
+    # ------------------------------------------------------------------
+
+    def test_short_speaking_yield_stops_vc(self) -> None:
+        # roll=0.99 > base=0.10 → keep=False → yield → vc.stop()
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.10, rng=lambda: 0.99
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is True
+
+    def test_short_speaking_push_through_does_not_stop_vc(self) -> None:
+        # roll=0.01 < base=0.99 → keep=True → push-through → vc untouched
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.99, rng=lambda: 0.01
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is False
+
+    def test_very_meek_tolerance_yields(self) -> None:
+        # base=0.10, roll=0.99 → 0.99 ≥ 0.10 → keep=False → yield
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.10, rng=lambda: 0.99
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is True
+
+    def test_very_stubborn_tolerance_keeps_talking(self) -> None:
+        # base=0.60, roll=0.01 → 0.01 < 0.60 → keep=True → push-through
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.60, rng=lambda: 0.01
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is False
+
+    def test_unsolicited_bias_shifts_roll_to_keep(self) -> None:
+        # base=0.30, is_unsolicited=True → effective=0.65.
+        # roll=0.50: 0.50 < 0.65 → keep (would yield at 0.30 without bias).
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.30, rng=lambda: 0.50
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+        tracker.is_unsolicited = True
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is False  # bias pushed past roll → keep
+
+    def test_interruption_elapsed_ms_stored_on_tracker_on_yield(self) -> None:
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.10, rng=lambda: 0.99
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = 10.0
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+        clock.now = 11.5  # 1.5s elapsed
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        # elapsed = (now - playback_start) * 1000 = 1.5s * 1000 = 1500ms
+        assert tracker.interruption_elapsed_ms is not None
+        assert tracker.interruption_elapsed_ms == pytest.approx(
+            (clock.now - 10.0) * 1000, abs=1.0
+        )
+
+    def test_interruption_elapsed_ms_cleared_on_idle(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        t.state = ResponseState.SPEAKING
+        t.interruption_elapsed_ms = 1200.0
+        t.transition(ResponseState.IDLE)
+        assert t.interruption_elapsed_ms is None
+
+    # ------------------------------------------------------------------
+    # Lull confirmed → dispatch resume or push-through
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_short_speaking_yield_resumes_from_word_boundary(self) -> None:
+        # 3 words; elapsed_ms = 1500ms lands between word 1 (end 300ms)
+        # and word 2 (start 1600ms) → remaining = ["world", "bye"].
+        resumed: list[list[WordTimestamp]] = []
+
+        async def _capture_resume(remaining: list[WordTimestamp]) -> None:  # noqa: RUF029
+            resumed.append(remaining)
+
+        fake_vc = _FakeVC()
+        ts = [
+            WordTimestamp("hello", 0.0, 300.0),
+            WordTimestamp("world", 1600.0, 2000.0),
+            WordTimestamp("bye", 2100.0, 2400.0),
+        ]
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,
+            rng=lambda: 0.99,
+            on_short_yield_resume=_capture_resume,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = 0.0  # clock starts at 0.0
+        tracker.timestamps = ts
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # Burst starts at clock=0.0; advance 1.5s then fire min timer.
+        # elapsed_ms = (1.5 - 0.0) * 1000 = 1500ms → after "hello"
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        # Burst ends, lull fires as short (1.5s < 4.0s boundary)
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        await asyncio.sleep(0)  # yield to let the created task run
+
+        assert len(resumed) == 1
+        assert [w.word for w in resumed[0]] == ["world", "bye"]
+
+    def test_short_speaking_push_through_transcript_appended(self) -> None:
+        pushed: list[tuple[int, str]] = []
+
+        def _capture_push(user_id: int, transcript: str) -> None:
+            pushed.append((user_id, transcript))
+
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,  # very stubborn — keeps talking
+            rng=lambda: 0.01,
+            on_push_through_transcript=_capture_push,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # Burst starts at clock=0.0; transcript arrives during burst
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey wait")
+        clock.advance(1.5)  # min crossed (effective = 1.5 >= 1.5)
+        scheduler.fire_for(detector._on_min_crossed)  # keep=True → no stop
+
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert pushed == [(42, "hey wait")]
+
+    def test_yield_dispatch_only_on_short_not_long(self) -> None:
+        # Yield at min, burst ends up long → on_short_yield_resume NOT called
+        resumed: list[object] = []
+
+        async def _capture_resume(remaining: list[WordTimestamp]) -> None:  # noqa: RUF029
+            resumed.append(remaining)
+
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,
+            rng=lambda: 0.99,
+            on_short_yield_resume=_capture_resume,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # Min crossed → yield
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        # Burst continues → long (4.0s total ≥ boundary 4.0)
+        clock.advance(2.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert resumed == []
+
+    def test_on_transcript_ignored_before_burst(self) -> None:
+        pushed: list[tuple[int, str]] = []
+
+        def _capture_push(user_id: int, transcript: str) -> None:
+            pushed.append((user_id, transcript))
+
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,
+            rng=lambda: 0.01,
+            on_push_through_transcript=_capture_push,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        fake_vc = _FakeVC()
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # transcript before burst starts
+        detector.on_transcript(42, "pre-burst noise")
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        # only the empty transcript from during the burst
+        assert pushed == []

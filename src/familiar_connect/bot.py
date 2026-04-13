@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
+    from familiar_connect.tts import WordTimestamp
 
 _logger = logging.getLogger(__name__)
 
@@ -471,11 +472,53 @@ async def subscribe_my_voice(
                 if tracker.state is ResponseState.GENERATING:
                     tracker.transition(ResponseState.IDLE)
 
+        # Step 11 dispatch callbacks. On short+yield: re-synth the remaining
+        # words (captured at stop-time) and resume playback. On push-through:
+        # write the interrupter's transcript to history so it's not lost.
+
+        async def _on_short_yield_resume(remaining: list[WordTimestamp]) -> None:
+            t = familiar.tracker_registry.get(
+                voice_guild_id if voice_guild_id is not None else 0
+            )
+            # If a new response started before the lull confirmed, skip.
+            if t.state is not ResponseState.IDLE or familiar.tts_client is None:
+                return
+            remaining_text = " ".join(ts.word for ts in remaining)
+            if not remaining_text.strip():
+                return
+            try:
+                tts_result = await familiar.tts_client.synthesize(remaining_text)
+                stereo = mono_to_stereo(tts_result.audio)
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                t.transition(ResponseState.SPEAKING)
+                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+            except Exception:
+                _logger.exception("Voice resume TTS failed")
+            t.transition(ResponseState.IDLE)
+
+        def _on_push_through_transcript(user_id: int, transcript: str) -> None:
+            if not transcript.strip():
+                return
+            raw_name = user_names.get(user_id, f"User-{user_id}")
+            safe_name = sanitize_name(raw_name) or raw_name
+            ch_cfg = familiar.channel_configs.get(channel_id=voice_channel_id)
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=voice_channel_id,
+                guild_id=voice_guild_id,
+                role="user",
+                content=transcript,
+                speaker=safe_name,
+                mode=ch_cfg.mode,
+            )
+
         # Per-guild interruption detector. Consumes Discord voice-activity
         # events from the lull monitor (no separate Deepgram VAD path)
         # and classifies bursts as discarded/short/long relative to the
-        # current ResponseTracker state. Detect-only for now — dispatch
-        # lands in later steps.
+        # current ResponseTracker state.
         interruption_detector = InterruptionDetector(
             tracker_registry=familiar.tracker_registry,
             guild_id=voice_guild_id if voice_guild_id is not None else 0,
@@ -483,6 +526,8 @@ async def subscribe_my_voice(
             short_long_boundary_s=familiar.config.short_long_boundary_s,
             lull_timeout_s=familiar.config.voice_lull_timeout,
             base_tolerance=(familiar.config.interrupt_tolerance.base_probability),
+            on_short_yield_resume=_on_short_yield_resume,
+            on_push_through_transcript=_on_push_through_transcript,
         )
         familiar.extras["interruption_detector"] = interruption_detector
 
@@ -504,6 +549,7 @@ async def subscribe_my_voice(
             result: TranscriptionResult,
         ) -> None:
             lull_monitor.on_transcript(user_id, result)
+            interruption_detector.on_transcript(user_id, result.text)
 
         pipeline = await start_pipeline(
             familiar.transcriber,

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
     import discord
 
@@ -90,6 +90,7 @@ class ResponseTracker:
     response_text: str | None = None
     timestamps: list[WordTimestamp] = field(default_factory=list)
     playback_start_time: float | None = None
+    interruption_elapsed_ms: float | None = None
     vc: discord.VoiceClient | None = None
     is_unsolicited: bool = False
     mood_modifier: float = 0.0
@@ -133,6 +134,7 @@ class ResponseTracker:
             self.response_text = None
             self.timestamps = []
             self.playback_start_time = None
+            self.interruption_elapsed_ms = None
             self.is_unsolicited = False
             self.mood_modifier = 0.0
         elif new_state is ResponseState.SPEAKING:
@@ -352,6 +354,10 @@ class InterruptionDetector:
         clock: Callable[[], float] | None = None,
         scheduler: Callable[[float, Callable[[], None]], _Cancelable] | None = None,
         rng: Callable[[], float] | None = None,
+        on_short_yield_resume: (
+            Callable[[list[WordTimestamp]], Coroutine[Any, Any, None]] | None
+        ) = None,
+        on_push_through_transcript: Callable[[int, str], None] | None = None,
     ) -> None:
         self._tracker_registry = tracker_registry
         self._guild_id = guild_id
@@ -362,6 +368,8 @@ class InterruptionDetector:
         self._clock = clock if clock is not None else time.monotonic
         self._scheduler = scheduler
         self._rng = rng
+        self._on_short_yield_resume = on_short_yield_resume
+        self._on_push_through_transcript = on_push_through_transcript
 
         # Users currently speaking, tracked regardless of tracker
         # state. This lets us retroactively start a burst when the
@@ -389,6 +397,17 @@ class InterruptionDetector:
         self._min_handle: _Cancelable | None = None
         # Latch so the min-crossed log fires at most once per burst.
         self._min_logged: bool = False
+        # Transcript text accumulated from Deepgram finals during the burst.
+        # Used by the push-through path to write the interrupter's words to
+        # history at finalize time.
+        self._burst_transcript: str = ""
+        # Timestamps of the remaining (not-yet-played) words captured at
+        # stop-time on a yield. Stored here so finalize can dispatch even
+        # after the tracker has transitioned to IDLE and cleared its own
+        # timestamps field.
+        self._remaining_timestamps: list[WordTimestamp] = []  # type: ignore[type-arg]
+        # True when _maybe_log_min_crossed stopped the vc this burst.
+        self._did_yield: bool = False
 
         # Register as an observer on the guild's tracker so state
         # transitions can retroactively start / abort bursts.
@@ -484,6 +503,22 @@ class InterruptionDetector:
             self._start_burst(starter)
             self._maybe_log_min_crossed()
 
+    def on_transcript(self, _user_id: int, text: str) -> None:
+        """Accumulate Deepgram final text during an active burst.
+
+        Wire alongside :meth:`on_voice_activity` from the voice pipeline's
+        transcript handler so the interrupter's words are available at
+        :meth:`_finalize_burst` time. Text is ignored when no burst is
+        in progress (i.e., between turns or during ``IDLE``).
+        """
+        if self._burst_started_at is None or not text:
+            return
+        self._burst_transcript = (
+            (self._burst_transcript + " " + text).strip()
+            if self._burst_transcript
+            else text
+        )
+
     def _start_burst(self, starter_id: int) -> None:
         """Begin a new burst attributed to *starter_id*."""
         self._burst_started_at = self._clock()
@@ -509,6 +544,9 @@ class InterruptionDetector:
         self._burst_starter_id = None
         self._burst_latest_state = None
         self._min_logged = False
+        self._burst_transcript = ""
+        self._remaining_timestamps = []
+        self._did_yield = False
 
     def _schedule(self, delay: float, callback: Callable[[], None]) -> _Cancelable:
         scheduler = self._scheduler
@@ -589,13 +627,23 @@ class InterruptionDetector:
             state.value,
         )
         self._min_logged = True
-        # Moment 1: burst crossed ``min`` while the familiar is
-        # speaking. Roll against the effective tolerance so operators
-        # can see yield-vs-push-through decisions in the log. Dispatch
-        # on the outcome lands in Step 11; today this is observational.
+        # Moment 1: burst crossed ``min`` while speaking. Roll to decide
+        # yield vs. push-through. On yield: stop playback immediately and
+        # capture the remaining timestamps so finalize can re-synth them
+        # even after the tracker has returned to IDLE.
         if state is ResponseState.SPEAKING:
             tracker = self._tracker_registry.get(self._guild_id)
-            tracker.should_keep_talking(self._base_tolerance, rng=self._rng)
+            keep = tracker.should_keep_talking(self._base_tolerance, rng=self._rng)
+            if not keep:
+                if tracker.vc is not None and tracker.vc.is_playing():
+                    tracker.vc.stop()
+                if tracker.playback_start_time is not None:
+                    elapsed_ms = (self._clock() - tracker.playback_start_time) * 1000
+                    tracker.interruption_elapsed_ms = elapsed_ms
+                    _, self._remaining_timestamps = split_at_elapsed(
+                        tracker.timestamps, elapsed_ms
+                    )
+                self._did_yield = True
 
     def _current_tracker_state(self) -> ResponseState | None:
         """State to report in interruption logs.
@@ -616,12 +664,19 @@ class InterruptionDetector:
         last_ended_at = self._burst_last_ended_at
         starter_id = self._burst_starter_id
         state = self._current_tracker_state()
+        # Snapshot Step 11 fields before reset.
+        burst_transcript = self._burst_transcript
+        remaining = self._remaining_timestamps
+        did_yield = self._did_yield
         # Reset regardless; a new burst starts from a clean slate.
         self._burst_started_at = None
         self._burst_last_ended_at = None
         self._burst_starter_id = None
         self._burst_latest_state = None
         self._min_logged = False
+        self._burst_transcript = ""
+        self._remaining_timestamps = []
+        self._did_yield = False
         if started_at is None or last_ended_at is None or starter_id is None:
             return
         if state is None:
@@ -641,6 +696,24 @@ class InterruptionDetector:
             starter_id,
             state.value,
         )
+        # Step 11 dispatch: short interruption during SPEAKING.
+        if (
+            classification is InterruptionClass.short
+            and state is ResponseState.SPEAKING
+        ):
+            _logger.info(
+                "dispatch: short@SPEAKING → %s speaker=%s",
+                "yield+resume" if did_yield else "push-through",
+                starter_id,
+            )
+            if did_yield:
+                cb = self._on_short_yield_resume
+                if cb is not None and remaining:
+                    asyncio.create_task(cb(remaining))  # noqa: RUF006
+            else:
+                cb2 = self._on_push_through_transcript
+                if cb2 is not None and burst_transcript:
+                    cb2(starter_id, burst_transcript)
 
     def _classify(self, duration: float) -> InterruptionClass:
         if duration < self._min_interruption_s:
