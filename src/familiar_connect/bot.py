@@ -353,7 +353,7 @@ async def subscribe_my_voice(
             return
 
     # Voice connection + DAVE handshake takes >3s, so defer.
-    await ctx.defer()
+    await ctx.defer(ephemeral=True)
     try:
         vc = await channel.connect(cls=DaveVoiceClient)
     except Exception:
