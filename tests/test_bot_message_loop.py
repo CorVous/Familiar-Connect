@@ -978,3 +978,64 @@ class TestMainReplyResilience:
             "main reply" in record.getMessage() and record.levelname == "WARNING"
             for record in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Voice pre/post-processor suppression
+# ---------------------------------------------------------------------------
+
+
+class TestVoicePreProcessorsSuppressed:
+    """Voice turns must not invoke preprocessing or postprocessing LLMs.
+
+    stepped_thinking (reasoning_context) and recast (post_process_style)
+    are disabled for voice to reduce real-time latency. This test pins
+    that contract so it cannot be silently regressed.
+    """
+
+    def test_voice_handler_does_not_call_reasoning_context_or_post_process_style(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Neither side-model slot is called when handling a voice turn.
+
+        Uses full_rp mode — which normally enables both stepped_thinking
+        (preprocessor) and recast (postprocessor) — so the suppression is
+        confirmed against the most permissive baseline.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        # full_rp enables preprocessors_enabled={"stepped_thinking"} and
+        # postprocessors_enabled={"recast"} — worst-case baseline.
+        familiar.channel_configs.set_mode(channel_id=9000, mode=ChannelMode.full_rp)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        handler = _build_voice_response_handler(
+            vc=vc,
+            familiar=familiar,
+            voice_channel_id=9000,
+            guild_id=999,
+            user_names={42: "Alice"},
+        )
+        transcription = TranscriptionResult(
+            text="hello there",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        asyncio.run(handler(42, transcription))
+
+        # Neither preprocessing LLM slot should have been touched.
+        reasoning = familiar.llm_clients["reasoning_context"]
+        assert isinstance(reasoning, _StubLLMClient)
+        assert reasoning.calls == []
+
+        post_process = familiar.llm_clients["post_process_style"]
+        assert isinstance(post_process, _StubLLMClient)
+        assert post_process.calls == []

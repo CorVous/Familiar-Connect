@@ -33,6 +33,7 @@ process runs exactly one active character.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import logging
 from typing import TYPE_CHECKING
@@ -193,6 +194,18 @@ def _build_voice_response_handler(
         safe_name = sanitize_name(speaker) or speaker
 
         channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
+
+        # VOICE: Pre- and post-processors are disabled for voice turns to reduce
+        # real-time latency. stepped_thinking (reasoning_context LLM) adds
+        # chain-of-thought overhead; recast (post_process_style LLM) rewrites
+        # text destined for TTS rather than screen reading.
+        # To re-enable: remove this dataclasses.replace() call and its comment.
+        channel_config = dataclasses.replace(
+            channel_config,
+            preprocessors_enabled=frozenset(),
+            postprocessors_enabled=frozenset(),
+        )
+
         request = ContextRequest(
             familiar_id=familiar.id,
             channel_id=voice_channel_id,
