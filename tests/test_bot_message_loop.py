@@ -41,12 +41,13 @@ from familiar_connect.bot import (
     unsubscribe_text,
     unsubscribe_voice,
 )
-from familiar_connect.chattiness import BufferedMessage
+from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
 from familiar_connect.config import LLM_SLOT_NAMES, ChannelMode
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.voice.interruption import ResponseState
 from familiar_connect.voice_lull import VoiceLullMonitor
 
 if TYPE_CHECKING:
@@ -105,6 +106,31 @@ class _RaisingLLMClient(LLMClient):
     async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
         self.call_count += 1
         raise self._exc
+
+
+class _SlowLLMClient(LLMClient):
+    """LLMClient whose ``chat`` blocks until ``release`` is set.
+
+    Used by the cancellable-generation tests to observe the tracker
+    while the LLM call is mid-flight and to exercise the cancel path
+    without racing against the stub's return.
+    """
+
+    def __init__(self, reply: str = "I am here.") -> None:
+        super().__init__(api_key="test-key", model="stub/test-model")
+        self.reply = reply
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.was_cancelled = False
+
+    async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.was_cancelled = True
+            raise
+        return Message(role="assistant", content=self.reply)
 
 
 def _make_llm_clients(reply: str = "I am here.") -> dict[str, LLMClient]:
@@ -529,6 +555,7 @@ class TestOnRespond:
                     buffer=buffer,
                     familiar=familiar,
                     vc=vc,
+                    trigger=ResponseTrigger.direct_address,
                 )
             )
 
@@ -1043,6 +1070,7 @@ class TestMainReplyResilience:
                     buffer=buffer,
                     familiar=familiar,
                     vc=vc,
+                    trigger=ResponseTrigger.direct_address,
                 )
             )
 
@@ -1108,6 +1136,7 @@ class TestVoicePreProcessorsSuppressed:
                 buffer=buffer,
                 familiar=familiar,
                 vc=vc,
+                trigger=ResponseTrigger.direct_address,
             )
         )
 
@@ -1257,7 +1286,9 @@ class TestVoiceInterjectionRouting:
         buffer = [BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)]
 
         async def _invoke() -> None:
-            await familiar.monitor.on_respond(9000, buffer)
+            await familiar.monitor.on_respond(
+                9000, buffer, ResponseTrigger.direct_address
+            )
 
         asyncio.run(_invoke())
 
@@ -1265,6 +1296,7 @@ class TestVoiceInterjectionRouting:
         args, _ = voice_handler.call_args
         assert args[0] == 9000
         assert args[1] == buffer
+        assert args[2] is ResponseTrigger.direct_address
 
     def test_on_respond_text_channel_bypasses_voice_handler_lookup(
         self, tmp_path: Path
@@ -1301,7 +1333,9 @@ class TestVoiceInterjectionRouting:
             buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
             async def _invoke() -> None:
-                await familiar.monitor.on_respond(12345, buffer)
+                await familiar.monitor.on_respond(
+                    12345, buffer, ResponseTrigger.direct_address
+                )
 
             asyncio.run(_invoke())
 
@@ -1345,6 +1379,7 @@ class TestVoiceInterjectionRouting:
                 buffer=buffer,
                 familiar=familiar,
                 vc=vc,
+                trigger=ResponseTrigger.direct_address,
             )
         )
 
@@ -1360,3 +1395,104 @@ class TestVoiceInterjectionRouting:
             "aria you there",
             "Sure thing.",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Cancellable LLM generation (Step 7 of the voice-interruption plan)
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceGenerationCancellation:
+    """The voice LLM call is exposed as a cancellable task on the tracker.
+
+    Step 7 introduces ``tracker.generation_task`` so later steps can
+    cancel mid-generation on a long interruption. No caller cancels
+    yet; this class pins the plumbing contract.
+    """
+
+    def test_generation_task_cleared_after_normal_completion(
+        self, tmp_path: Path
+    ) -> None:
+        """A successful voice turn leaves ``generation_task = None``."""
+        familiar = _make_familiar(tmp_path, reply="Sure thing.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hey",
+                buffer=[BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.generation_task is None
+        assert tracker.state is ResponseState.IDLE
+
+    def test_cancelling_generation_task_mid_flight_exits_cleanly(
+        self, tmp_path: Path
+    ) -> None:
+        """Cancelling ``tracker.generation_task`` aborts the voice turn.
+
+        The LLM ``chat`` coroutine sees ``CancelledError`` (so no wasted
+        tokens), ``_run_voice_response`` returns without raising,
+        nothing is persisted to history, no audio is played, and the
+        tracker returns to ``IDLE``.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        async def _run() -> None:
+            task = asyncio.create_task(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hey",
+                    buffer=[
+                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
+                    ],
+                    familiar=familiar,
+                    vc=vc,
+                    trigger=ResponseTrigger.direct_address,
+                )
+            )
+            # Wait until the chat coroutine is parked inside the LLM.
+            await slow_client.started.wait()
+            tracker = familiar.tracker_registry.get(999)
+            assert tracker.generation_task is not None
+            assert not tracker.generation_task.done()
+            assert tracker.state is ResponseState.GENERATING
+            tracker.generation_task.cancel()
+            await task  # Must return without raising.
+
+        asyncio.run(_run())
+
+        tracker = familiar.tracker_registry.get(999)
+        assert slow_client.was_cancelled
+        assert tracker.generation_task is None
+        assert tracker.state is ResponseState.IDLE
+        # No TTS, no history writes.
+        vc.play.assert_not_called()
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=10
+        )
+        assert turns == []

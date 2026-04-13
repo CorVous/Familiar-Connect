@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from familiar_connect.transcription import TranscriptionResult
@@ -26,6 +27,22 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 _logger = logging.getLogger(__name__)
+
+
+class VoiceActivityEvent(Enum):
+    """Per-user speaking transitions derived from Discord audio frames.
+
+    Surfaced by :class:`VoiceLullMonitor` so consumers (today: the
+    :class:`InterruptionDetector` in
+    :mod:`familiar_connect.voice.interruption`) can react to voice
+    activity without being a parallel consumer of audio frames.
+    """
+
+    started = "started"
+    """First audio frame after a quiet period — user began speaking."""
+
+    ended = "ended"
+    """Per-user silence watchdog fired — user stopped speaking."""
 
 
 class VoiceLullMonitor:
@@ -42,6 +59,12 @@ class VoiceLullMonitor:
         whose text is the space-joined concatenation of all buffered
         finals; ``primary_user_id`` is the speaker of the most recent
         final.
+    :param on_voice_activity: Optional sync callback invoked with
+        ``(user_id, event)`` whenever a user transitions into or out
+        of speaking. Derived from ``on_audio`` arrivals and the
+        per-user silence watchdog. Used by the
+        :class:`InterruptionDetector` to react to mid-response speech
+        without subscribing to raw audio frames itself.
     """
 
     def __init__(
@@ -50,10 +73,12 @@ class VoiceLullMonitor:
         lull_timeout: float,
         user_silence_s: float,
         on_utterance_complete: Callable[[int, TranscriptionResult], Awaitable[None]],
+        on_voice_activity: Callable[[int, VoiceActivityEvent], None] | None = None,
     ) -> None:
         self._lull_timeout = lull_timeout
         self._user_silence_s = user_silence_s
         self._on_utterance_complete = on_utterance_complete
+        self._on_voice_activity = on_voice_activity
 
         # Per-user silence watchdogs. A handle in this dict means the
         # user is currently speaking (as far as we can tell from audio
@@ -116,6 +141,12 @@ class VoiceLullMonitor:
         existing = self._speaking.get(user_id)
         if existing is not None:
             existing.cancel()
+        else:
+            # Transition silent → speaking. Surface as a voice-activity
+            # event for the InterruptionDetector and log so operators
+            # can see speech-start latency in the bot logs.
+            _logger.info("voice activity user=%s event=started", user_id)
+            self._emit_activity(user_id, VoiceActivityEvent.started)
         loop = asyncio.get_event_loop()
         self._speaking[user_id] = loop.call_later(
             self._user_silence_s,
@@ -126,9 +157,28 @@ class VoiceLullMonitor:
     def _on_user_silent(self, user_id: int) -> None:
         """Sync callback: user's silence watchdog fired."""
         self._speaking.pop(user_id, None)
+        _logger.info("voice activity user=%s event=ended", user_id)
+        self._emit_activity(user_id, VoiceActivityEvent.ended)
         # If everyone is silent and we have something to say, arm the lull.
         if not self._speaking and self._finals:
             self._arm_lull()
+
+    def _emit_activity(self, user_id: int, event: VoiceActivityEvent) -> None:
+        """Forward a voice-activity event to the optional subscriber.
+
+        Errors in the subscriber are caught + logged so a misbehaving
+        consumer can't break the lull state machine.
+        """
+        if self._on_voice_activity is None:
+            return
+        try:
+            self._on_voice_activity(user_id, event)
+        except Exception:
+            _logger.exception(
+                "on_voice_activity callback failed for user=%s event=%s",
+                user_id,
+                event.value,
+            )
 
     def _arm_lull(self) -> None:
         self._cancel_lull()

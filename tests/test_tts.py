@@ -1,18 +1,24 @@
-"""Tests for the Cartesia TTS client."""
+"""Tests for the Cartesia TTS client (streaming WebSocket, word timestamps)."""
 
 from __future__ import annotations
 
+import base64
+import json
 import os
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
-import httpx
+import aiohttp
 import pytest
 
 from familiar_connect.tts import (
     CARTESIA_API_VERSION,
     CARTESIA_BASE_URL,
+    CARTESIA_WS_URL,
     DEFAULT_SAMPLE_RATE,
     CartesiaTTSClient,
+    TTSResult,
+    WordTimestamp,
     create_tts_client,
 )
 
@@ -35,81 +41,136 @@ def _client(
     )
 
 
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+
+class TestWordTimestamp:
+    def test_fields(self) -> None:
+        ts = WordTimestamp(word="hello", start_ms=0.0, end_ms=420.0)
+        assert ts.word == "hello"
+        assert ts.start_ms == 0.0  # noqa: RUF069
+        assert ts.end_ms == 420.0  # noqa: RUF069
+
+
+class TestTTSResult:
+    def test_audio_only_default_empty_timestamps(self) -> None:
+        result = TTSResult(audio=b"\x00\x01")
+        assert result.audio == b"\x00\x01"
+        assert result.timestamps == []
+
+    def test_with_timestamps(self) -> None:
+        ts = [WordTimestamp("hi", 0.0, 200.0)]
+        result = TTSResult(audio=b"\x00", timestamps=ts)
+        assert result.timestamps == ts
+
+
+# ---------------------------------------------------------------------------
+# Client construction and payload shape
+# ---------------------------------------------------------------------------
+
+
 class TestCartesiaTTSClient:
     def test_init_stores_api_key(self) -> None:
-        """Client stores the provided API key."""
         client = _client()
         assert client.api_key == "test-key"
 
     def test_init_stores_model(self) -> None:
-        """Client stores the provided model."""
         client = _client(model="sonic-3")
         assert client.model == "sonic-3"
 
     def test_init_stores_voice_id(self) -> None:
-        """Client stores the provided voice ID."""
         client = _client(voice_id="custom-uuid-1234")
         assert client.voice_id == "custom-uuid-1234"
 
     def test_init_default_sample_rate(self) -> None:
-        """Client defaults to 48000 Hz (Discord native rate)."""
         client = _client()
         assert client.sample_rate == DEFAULT_SAMPLE_RATE
         assert client.sample_rate == 48000
 
-    def test_init_custom_model(self) -> None:
-        """Client accepts a custom model override."""
-        client = _client(model="sonic-turbo")
-        assert client.model == "sonic-turbo"
-
     def test_init_default_base_url(self) -> None:
-        """Client defaults to the Cartesia API URL."""
         client = _client()
         assert client.base_url == CARTESIA_BASE_URL
-        assert "cartesia.ai" in client.base_url
 
-    def test_builds_request_headers(self) -> None:
-        """Headers include X-API-Key, Cartesia-Version, and Content-Type."""
-        client = _client(api_key="sk-cartesia-test-123")
+    def test_init_default_ws_url(self) -> None:
+        client = _client()
+        assert client.ws_url == CARTESIA_WS_URL
+        assert client.ws_url.startswith("wss://")
+
+    def test_build_ws_url_includes_auth_query(self) -> None:
+        client = _client(api_key="sk-cart-test-123")
+        url = client.build_ws_url()
+        assert url.startswith(CARTESIA_WS_URL + "?")
+        assert "api_key=sk-cart-test-123" in url
+        assert f"cartesia_version={CARTESIA_API_VERSION}" in url
+
+    def test_build_headers_for_rest(self) -> None:
+        client = _client(api_key="sk-cart-test-123")
         headers = client.build_headers()
-        assert headers["X-API-Key"] == "sk-cartesia-test-123"
+        assert headers["X-API-Key"] == "sk-cart-test-123"
         assert headers["Cartesia-Version"] == CARTESIA_API_VERSION
         assert headers["Content-Type"] == "application/json"
 
-    def test_builds_payload_structure(self) -> None:
-        """Payload has model_id, transcript, voice, and output_format keys."""
+    def test_payload_structure(self) -> None:
         client = _client()
-        payload = client.build_payload("Hello, world!")
-        assert "model_id" in payload
+        payload = client.build_payload("Hello, world!", context_id="ctx-1")
+        assert payload["context_id"] == "ctx-1"
         assert payload["transcript"] == "Hello, world!"
-        assert "voice" in payload
-        assert "output_format" in payload
+        assert payload["model_id"] == _TEST_MODEL
+        assert payload["voice"]["mode"] == "id"
+        assert payload["voice"]["id"] == _TEST_VOICE_ID
+        assert payload["add_timestamps"] is True
+        assert payload["continue"] is False
 
-    def test_payload_uses_raw_pcm_s16le(self) -> None:
-        """Output format uses raw container and pcm_s16le encoding."""
-        client = _client()
-        payload = client.build_payload("test")
+    def test_payload_output_format(self) -> None:
+        client = _client(sample_rate=22050)
+        payload = client.build_payload("test", context_id="ctx")
         fmt = payload["output_format"]
         assert fmt["container"] == "raw"
         assert fmt["encoding"] == "pcm_s16le"
+        assert fmt["sample_rate"] == 22050
 
-    def test_payload_uses_configured_sample_rate(self) -> None:
-        """Sample rate in the payload matches the client's sample_rate."""
-        client = _client(sample_rate=22050)
-        payload = client.build_payload("test")
-        assert payload["output_format"]["sample_rate"] == 22050
 
-    def test_payload_uses_configured_voice_id(self) -> None:
-        """Voice ID in the payload matches the client's voice_id."""
-        client = _client(voice_id="my-voice-abc")
-        payload = client.build_payload("test")
-        assert payload["voice"]["id"] == "my-voice-abc"
+# ---------------------------------------------------------------------------
+# WebSocket streaming
+# ---------------------------------------------------------------------------
 
-    def test_payload_voice_uses_id_mode(self) -> None:
-        """Voice section uses mode=id for voice selection."""
-        client = _client()
-        payload = client.build_payload("test")
-        assert payload["voice"]["mode"] == "id"
+
+def _text_msg(obj: dict[str, Any]) -> Mock:
+    msg = Mock(spec=aiohttp.WSMessage)
+    msg.type = aiohttp.WSMsgType.TEXT
+    msg.data = json.dumps(obj)
+    return msg
+
+
+class _FakeWS:
+    """Mock aiohttp WebSocket that yields a pre-scripted list of events."""
+
+    closed = False
+
+    def __init__(self, events: list[Mock]) -> None:
+        self._events = list(events)
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_json(self, obj: dict[str, Any]) -> None:
+        self.sent.append(obj)
+
+    def __aiter__(self) -> _FakeWS:
+        return self
+
+    async def __anext__(self) -> Mock:
+        if not self._events:
+            raise StopAsyncIteration
+        return self._events.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _fake_ws(events: list[Mock]) -> _FakeWS:
+    """Build a mock aiohttp WebSocket that yields *events*."""
+    return _FakeWS(events)
 
 
 class TestCartesiaTTSClientSynthesize:
@@ -117,124 +178,173 @@ class TestCartesiaTTSClientSynthesize:
     def client(self) -> CartesiaTTSClient:
         return _client()
 
-    def _make_mock_response(
-        self,
-        content: bytes = b"\x00\x01\x02\x03",
-        *,
-        status_code: int = 200,
-        raise_error: Exception | None = None,
-    ) -> Mock:
-        mock_resp = Mock(spec=httpx.Response)
-        mock_resp.status_code = status_code
-        mock_resp.content = content
-        if raise_error:
-            mock_resp.raise_for_status.side_effect = raise_error
-        return mock_resp
-
     @pytest.mark.asyncio
-    async def test_synthesize_returns_bytes(self, client: CartesiaTTSClient) -> None:
-        """synthesize() returns the raw bytes from the API response."""
-        pcm_bytes = b"\x10\x20\x30\x40"
-        mock_resp = self._make_mock_response(content=pcm_bytes)
-
-        with patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)):
+    async def test_returns_tts_result(self, client: CartesiaTTSClient) -> None:
+        pcm = b"\x10\x20\x30\x40"
+        events = [
+            _text_msg({"type": "chunk", "data": base64.b64encode(pcm).decode()}),
+            _text_msg({"type": "done"}),
+        ]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
             result = await client.synthesize("Hello")
-
-        assert result == pcm_bytes
+        assert isinstance(result, TTSResult)
+        assert result.audio == pcm
+        assert result.timestamps == []
 
     @pytest.mark.asyncio
-    async def test_synthesize_calls_correct_endpoint(
-        self, client: CartesiaTTSClient
+    async def test_concatenates_multiple_chunks(
+        self,
+        client: CartesiaTTSClient,
     ) -> None:
-        """synthesize() posts to {base_url}/tts/bytes."""
-        mock_resp = self._make_mock_response()
-        captured_url: list[str] = []
+        a = b"\xaa" * 4
+        b = b"\xbb" * 4
+        events = [
+            _text_msg({"type": "chunk", "data": base64.b64encode(a).decode()}),
+            _text_msg({"type": "chunk", "data": base64.b64encode(b).decode()}),
+            _text_msg({"type": "done"}),
+        ]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            result = await client.synthesize("Hi")
+        assert result.audio == a + b
 
-        def fake_post(url: str, _headers: dict, _payload: dict) -> Mock:
-            captured_url.append(url)
-            return mock_resp
+    @pytest.mark.asyncio
+    async def test_parses_word_timestamps_seconds_to_ms(
+        self,
+        client: CartesiaTTSClient,
+    ) -> None:
+        events = [
+            _text_msg({"type": "chunk", "data": base64.b64encode(b"\x00").decode()}),
+            _text_msg(
+                {
+                    "type": "timestamps",
+                    "word_timestamps": {
+                        "words": ["Hello", "world"],
+                        "start": [0.0, 0.5],
+                        "end": [0.42, 0.9],
+                    },
+                },
+            ),
+            _text_msg({"type": "done"}),
+        ]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            result = await client.synthesize("Hello world")
+        assert result.timestamps == [
+            WordTimestamp("Hello", 0.0, 420.0),
+            WordTimestamp("world", 500.0, 900.0),
+        ]
 
-        with patch.object(client, "_post", side_effect=fake_post):
+    @pytest.mark.asyncio
+    async def test_multiple_timestamp_events_accumulate(
+        self,
+        client: CartesiaTTSClient,
+    ) -> None:
+        events = [
+            _text_msg(
+                {
+                    "type": "timestamps",
+                    "word_timestamps": {
+                        "words": ["A"],
+                        "start": [0.0],
+                        "end": [0.1],
+                    },
+                },
+            ),
+            _text_msg(
+                {
+                    "type": "timestamps",
+                    "word_timestamps": {
+                        "words": ["B"],
+                        "start": [0.1],
+                        "end": [0.2],
+                    },
+                },
+            ),
+            _text_msg({"type": "done"}),
+        ]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            result = await client.synthesize("A B")
+        assert [t.word for t in result.timestamps] == ["A", "B"]
+
+    @pytest.mark.asyncio
+    async def test_sends_request_payload(self, client: CartesiaTTSClient) -> None:
+        events = [_text_msg({"type": "done"})]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
             await client.synthesize("Hello")
-
-        assert len(captured_url) == 1
-        assert captured_url[0] == f"{CARTESIA_BASE_URL}/tts/bytes"
+        assert len(fake_ws.sent) == 1
+        payload = fake_ws.sent[0]
+        assert payload["transcript"] == "Hello"
+        assert payload["add_timestamps"] is True
+        assert payload["continue"] is False
+        assert "context_id" in payload
 
     @pytest.mark.asyncio
-    async def test_synthesize_raises_on_http_error_with_body(
-        self, client: CartesiaTTSClient
-    ) -> None:
-        """synthesize() raises HTTPStatusError including the response body."""
-        mock_resp = Mock(spec=httpx.Response)
-        mock_resp.status_code = 400
-        mock_resp.is_success = False
-        mock_resp.text = "Invalid request: voice ID must not be empty"
-        mock_resp.request = httpx.Request("POST", f"{CARTESIA_BASE_URL}/tts/bytes")
-
+    async def test_error_event_raises(self, client: CartesiaTTSClient) -> None:
+        events = [
+            _text_msg(
+                {"type": "error", "error": "voice id unknown", "status_code": 400},
+            ),
+        ]
+        fake_ws = _fake_ws(events)
         with (
-            patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)),
-            pytest.raises(httpx.HTTPStatusError, match=r"voice ID must not be empty"),
+            patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)),
+            pytest.raises(RuntimeError, match="voice id unknown"),
         ):
             await client.synthesize("Hello")
 
     @pytest.mark.asyncio
-    async def test_synthesize_raises_on_5xx(self, client: CartesiaTTSClient) -> None:
-        """synthesize() raises HTTPStatusError on a 5xx response.
-
-        Pins the contract the bot.py TTS callers rely on: the client
-        raises, the caller swallows. Any future refactor that turns
-        this into a silent return would break the tests that expect
-        TTS failures to be logged via the bot-layer try/except.
-        """
-        mock_resp = Mock(spec=httpx.Response)
-        mock_resp.status_code = 503
-        mock_resp.is_success = False
-        mock_resp.text = "upstream voice model unavailable"
-        mock_resp.request = httpx.Request("POST", f"{CARTESIA_BASE_URL}/tts/bytes")
-
+    async def test_unexpected_close_raises(
+        self,
+        client: CartesiaTTSClient,
+    ) -> None:
+        closed_msg = Mock(spec=aiohttp.WSMessage)
+        closed_msg.type = aiohttp.WSMsgType.CLOSED
+        fake_ws = _fake_ws([closed_msg])
         with (
-            patch.object(client, "_post", new=AsyncMock(return_value=mock_resp)),
-            pytest.raises(httpx.HTTPStatusError, match=r"503"),
+            patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)),
+            pytest.raises(RuntimeError, match="closed unexpectedly"),
         ):
             await client.synthesize("Hello")
 
     @pytest.mark.asyncio
-    async def test_synthesize_raises_on_timeout(
-        self, client: CartesiaTTSClient
+    async def test_connect_failure_propagates(
+        self,
+        client: CartesiaTTSClient,
     ) -> None:
-        """A transport-level ``ReadTimeout`` propagates to the caller unchanged.
-
-        The internal ``_post`` helper uses ``httpx.AsyncClient`` with a
-        60 s timeout; when that fires, the exception is raised straight
-        through. This test pins that behaviour so bot.py's TTS
-        ``try/except`` clauses have a tested guarantee to anchor to.
-        """
         with (
             patch.object(
                 client,
-                "_post",
-                new=AsyncMock(side_effect=httpx.ReadTimeout("deadline exceeded")),
+                "_ws_connect",
+                new=AsyncMock(
+                    side_effect=aiohttp.ClientError("dns failure"),
+                ),
             ),
-            pytest.raises(httpx.ReadTimeout, match=r"deadline exceeded"),
+            pytest.raises(aiohttp.ClientError, match="dns failure"),
         ):
             await client.synthesize("Hello")
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
 
 
 class TestCreateTTSClient:
     def test_creates_client_from_character_config(self) -> None:
-        """Factory reads CARTESIA_API_KEY and takes voice/model as params."""
         with patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}):
             client = create_tts_client(
                 voice_id="some-voice-uuid",
                 model="sonic-turbo",
             )
-
         assert client.api_key == "sk-cart-test-abc"
         assert client.voice_id == "some-voice-uuid"
         assert client.model == "sonic-turbo"
 
     def test_raises_when_api_key_missing(self) -> None:
-        """Factory raises a clear error when CARTESIA_API_KEY is not set."""
         with (
             patch.dict(os.environ, {}, clear=True),
             pytest.raises(ValueError, match=r"CARTESIA_API_KEY"),
@@ -242,7 +352,6 @@ class TestCreateTTSClient:
             create_tts_client(voice_id="v", model="m")
 
     def test_raises_when_voice_id_empty(self) -> None:
-        """Factory raises when voice_id is empty (required character.toml field)."""
         with (
             patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}),
             pytest.raises(ValueError, match=r"voice_id"),
@@ -250,7 +359,6 @@ class TestCreateTTSClient:
             create_tts_client(voice_id="", model="sonic-3")
 
     def test_raises_when_model_empty(self) -> None:
-        """Factory raises when model is empty (required character.toml field)."""
         with (
             patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}),
             pytest.raises(ValueError, match=r"model"),
