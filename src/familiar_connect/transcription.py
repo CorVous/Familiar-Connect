@@ -101,6 +101,14 @@ class DeepgramTranscriber:
         # finishes. Bounded by :attr:`_PENDING_AUDIO_MAX_BYTES`.
         self._pending_audio: deque[bytes] = deque()
         self._pending_audio_bytes: int = 0
+        # Audio successfully sent to the current ws since the last
+        # is_final Results. Replayed to the new socket on reconnect so
+        # an utterance whose bytes made it to the old socket — but
+        # whose transcription hadn't come back before the server-side
+        # rotation closed the ws — still gets recognised. Cleared on
+        # each is_final Results to avoid double-transcription.
+        self._recent_audio: deque[bytes] = deque()
+        self._recent_audio_bytes: int = 0
         # Serialises ``send_audio`` against ``_reconnect`` so the ws
         # swap + buffer flush happens atomically w.r.t. concurrent
         # sends from ``_audio_pump``. Without this, the event loop can
@@ -253,6 +261,11 @@ class DeepgramTranscriber:
                 # False. Buffer the bytes so _reconnect can flush them to
                 # the new socket instead of dropping them in _audio_pump.
                 self._buffer_pending_audio(data)
+                return
+            # Record successful sends so we can replay them to the
+            # new socket if Deepgram rotates before emitting a final
+            # Results frame for this utterance.
+            self._record_recent_audio(data)
 
     def _buffer_pending_audio(self: Self, data: bytes) -> None:
         """Append *data* to the pending-audio buffer.
@@ -268,6 +281,21 @@ class DeepgramTranscriber:
         ):
             evicted = self._pending_audio.popleft()
             self._pending_audio_bytes -= len(evicted)
+
+    def _record_recent_audio(self: Self, data: bytes) -> None:
+        """Record a successfully-sent chunk for possible replay.
+
+        Evicts the oldest frames when the buffer exceeds
+        :attr:`_RECENT_AUDIO_MAX_BYTES`.
+        """
+        self._recent_audio.append(data)
+        self._recent_audio_bytes += len(data)
+        while (
+            self._recent_audio_bytes > self._RECENT_AUDIO_MAX_BYTES
+            and self._recent_audio
+        ):
+            evicted = self._recent_audio.popleft()
+            self._recent_audio_bytes -= len(evicted)
 
     async def _flush_pending_audio(
         self: Self, ws: aiohttp.ClientWebSocketResponse
@@ -324,6 +352,10 @@ class DeepgramTranscriber:
     # window comfortably, bounded so a persistently dead socket can't
     # grow the buffer without limit.
     _PENDING_AUDIO_MAX_BYTES: int = 2_000_000
+    # ~3 s of 48 kHz mono s16le. Big enough to cover a short
+    # utterance interrupted mid-flight by Deepgram's rotation, small
+    # enough that the inevitable replay overlap stays brief.
+    _RECENT_AUDIO_MAX_BYTES: int = 288_000
 
     async def _keepalive_loop(self: Self) -> None:
         """Send periodic KeepAlive frames to prevent Deepgram's idle timeout.
@@ -386,6 +418,25 @@ class DeepgramTranscriber:
             self._session = new_session
             self._ws = new_ws
             _logger.info("Deepgram WebSocket reconnected")
+            # Replay in-flight audio (bytes we already sent to the
+            # old socket but that weren't acknowledged by a final
+            # Results frame before it closed) before flushing the
+            # pending buffer, so Deepgram sees the audio in the
+            # order the microphone produced it.
+            if self._recent_audio:
+                replayed = 0
+                for chunk in list(self._recent_audio):
+                    try:
+                        await new_ws.send_bytes(chunk)
+                    except Exception:
+                        _logger.debug("Failed to replay recent audio", exc_info=True)
+                        break
+                    replayed += len(chunk)
+                if replayed:
+                    _logger.info(
+                        "Replayed %d bytes of in-flight audio to new Deepgram socket",
+                        replayed,
+                    )
             if self._pending_audio:
                 flushed = await self._flush_pending_audio(new_ws)
                 if flushed:
@@ -400,6 +451,11 @@ class DeepgramTranscriber:
     ) -> None:
         """Read messages from the WebSocket, reconnecting on drops."""
         consecutive_reconnects = 0
+        # Track whether the current utterance (bounded by SpeechStarted
+        # / UtteranceEnd) produced any non-empty final transcript. Lets
+        # us flag utterances that Deepgram's VAD detected but its ASR
+        # silently dropped — distinct from client-side audio loss.
+        utterance_had_final_transcript = False
 
         while consecutive_reconnects <= self._MAX_RECONNECTS:
             if self._ws is None:
@@ -416,12 +472,27 @@ class DeepgramTranscriber:
                         result = self._parse_response(data)
                         if result is not None:
                             await output.put(result)
-                    elif msg_type in {"SpeechStarted", "UtteranceEnd"}:
-                        # VAD events: useful at INFO so operators can
-                        # confirm Deepgram is hearing speech after a
-                        # session rotation. Low-frequency enough not to
-                        # be noisy.
-                        _logger.info("[Deepgram] %s", msg_type)
+                            if result.is_final:
+                                utterance_had_final_transcript = True
+                                # Deepgram acknowledged this span; drop
+                                # the replay buffer so a subsequent
+                                # rotation doesn't re-submit already-
+                                # transcribed audio.
+                                self._recent_audio.clear()
+                                self._recent_audio_bytes = 0
+                    elif msg_type == "SpeechStarted":
+                        utterance_had_final_transcript = False
+                        _logger.info("[Deepgram] SpeechStarted")
+                    elif msg_type == "UtteranceEnd":
+                        if not utterance_had_final_transcript:
+                            _logger.warning(
+                                "[Deepgram] UtteranceEnd with no final "
+                                "transcript — Deepgram heard speech "
+                                "but produced no recognisable text."
+                            )
+                        else:
+                            _logger.info("[Deepgram] UtteranceEnd")
+                        utterance_had_final_transcript = False
                     else:
                         _logger.debug(
                             "[Deepgram] %s: %s",

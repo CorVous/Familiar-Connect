@@ -514,23 +514,36 @@ class TestDeepgramTranscriberLifecycle:
 
             assert queue.empty()
 
+    @staticmethod
+    def _text_msg(payload: dict[str, object]) -> MagicMock:
+        ws_msg = MagicMock()
+        ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
+        ws_msg.data = json.dumps(payload)
+        return ws_msg
+
     @pytest.mark.asyncio
-    async def test_vad_events_logged_at_info(
+    async def test_vad_events_logged_at_info_when_transcription_happens(
         self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """SpeechStarted and UtteranceEnd surface at INFO.
+        """SpeechStarted and UtteranceEnd surface at INFO on a healthy utterance.
 
-        These VAD events are operator-visible confirmation that
-        Deepgram is actually hearing speech on the current socket —
-        especially useful for diagnosing a post-rotation stream.
+        ``SpeechStarted → final Results → UtteranceEnd`` is the normal
+        case; both VAD events should log at INFO so operators can
+        confirm Deepgram is hearing speech on the current socket.
         """
-        msgs: list[object] = []
-        for msg_type in ("SpeechStarted", "UtteranceEnd"):
-            ws_msg = MagicMock()
-            ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
-            ws_msg.data = json.dumps({"type": msg_type})
-            msgs.append(ws_msg)
-
+        msgs: list[object] = [
+            self._text_msg({"type": "SpeechStarted"}),
+            self._text_msg({
+                "type": "Results",
+                "is_final": True,
+                "channel": {
+                    "alternatives": [{"transcript": "hello", "confidence": 0.9}]
+                },
+                "start": 0.0,
+                "duration": 0.5,
+            }),
+            self._text_msg({"type": "UtteranceEnd"}),
+        ]
         ws_mock = self._make_ws_mock(messages=msgs)
 
         with (
@@ -552,6 +565,40 @@ class TestDeepgramTranscriberLifecycle:
             assert all(r.levelno == logging.INFO for r in matches), (
                 f"{expected} should log at INFO"
             )
+
+    @pytest.mark.asyncio
+    async def test_utterance_end_without_final_transcript_logs_warning(
+        self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``SpeechStarted → UtteranceEnd`` with no Results logs WARNING.
+
+        This is the diagnostic for Deepgram-side dropped utterances:
+        its VAD heard speech but the ASR produced no recognisable
+        text. Without this log the drop is invisible and looks like a
+        client-side bug.
+        """
+        msgs: list[object] = [
+            self._text_msg({"type": "SpeechStarted"}),
+            self._text_msg({"type": "UtteranceEnd"}),
+        ]
+        ws_mock = self._make_ws_mock(messages=msgs)
+
+        with (
+            patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)),
+            caplog.at_level(logging.DEBUG, logger="familiar_connect.transcription"),
+        ):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+        matches = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "UtteranceEnd with no final transcript" in r.getMessage()
+        ]
+        assert matches, "expected a WARNING for UtteranceEnd without Results"
 
     @pytest.mark.asyncio
     async def test_metadata_logged_at_debug(
@@ -716,7 +763,11 @@ class TestDeepgramReconnect:
                 finally:
                     client._send_lock.release()
                 await task
-                ws_mock.send_bytes.assert_called_once_with(b"\x01")
+                # Once the lock is released, send_audio completes the
+                # underlying send. (The receive loop may later replay
+                # the same chunk on its own reconnect — we only care
+                # that the first send went through post-release.)
+                ws_mock.send_bytes.assert_any_call(b"\x01")
             finally:
                 await client.stop()
 
@@ -742,6 +793,168 @@ class TestDeepgramReconnect:
                 assert list(client._pending_audio) == [b"\x02" * 4, b"\x03" * 4]
             finally:
                 await client.stop()
+
+    @staticmethod
+    def _text_msg(payload: dict[str, object]) -> MagicMock:
+        ws_msg = MagicMock()
+        ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
+        ws_msg.data = json.dumps(payload)
+        return ws_msg
+
+    @pytest.mark.asyncio
+    async def test_recent_audio_replayed_on_reconnect(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Audio sent to the old ws is replayed after a session rotation.
+
+        Regression: ``send_audio`` used to return as soon as the bytes
+        left the process; if Deepgram's server-side session rotation
+        closed the old ws before it emitted a final Results for those
+        bytes, the utterance was lost. The replay buffer records every
+        successful send and resubmits it to the new socket.
+        """
+        ws1 = _make_long_lived_ws_mock()
+        ws2 = _make_long_lived_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await client.send_audio(b"AAA")
+                ws1.send_bytes.assert_called_once_with(b"AAA")
+                assert list(client._recent_audio) == [b"AAA"]
+                # Simulate the server-side rotation: mark the old ws
+                # closed (so _reconnect doesn't try to close it) and
+                # drive the reconnect directly.
+                ws1.closed = True
+                await client._reconnect()
+            finally:
+                await client.stop()
+
+        ws2.send_bytes.assert_any_call(b"AAA")
+
+    @pytest.mark.asyncio
+    async def test_recent_audio_cleared_on_final_results(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """A final Results frame clears the replay buffer.
+
+        Once Deepgram has acknowledged an utterance, replaying its
+        audio on the next reconnect would double-transcribe it.
+        """
+        final_msg = self._text_msg({
+            "type": "Results",
+            "is_final": True,
+            "channel": {"alternatives": [{"transcript": "hello", "confidence": 0.9}]},
+            "start": 0.0,
+            "duration": 0.5,
+        })
+        ws1 = self._make_ws_mock(messages=[final_msg])
+        ws2 = _make_long_lived_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            # Pre-populate the replay buffer as if an earlier send had
+            # gone through on ws1 before start().
+            client._recent_audio.append(b"AAA")
+            client._recent_audio_bytes = 3
+
+            await client.start(queue)
+            await asyncio.sleep(0.2)
+            try:
+                assert not client._recent_audio
+                assert client._recent_audio_bytes == 0
+                # Nothing in the replay buffer when _reconnect ran, so
+                # ws2 should never have received the stale chunk.
+                for call in ws2.send_bytes.call_args_list:
+                    assert call.args[0] != b"AAA"
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_recent_audio_not_cleared_on_interim_results(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Interim (non-final) Results leave the replay buffer intact."""
+        interim_msg = self._text_msg({
+            "type": "Results",
+            "is_final": False,
+            "channel": {"alternatives": [{"transcript": "hel", "confidence": 0.9}]},
+            "start": 0.0,
+            "duration": 0.2,
+        })
+        ws = _make_long_lived_ws_mock()
+        ws.__aiter__ = MagicMock(return_value=_AsyncIter([interim_msg]))
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await client.send_audio(b"AAA")
+                await asyncio.sleep(0.1)
+                assert list(client._recent_audio) == [b"AAA"]
+                assert client._recent_audio_bytes == 3
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_recent_audio_buffer_is_bounded(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """The replay buffer evicts the oldest frames when over cap."""
+        client._RECENT_AUDIO_MAX_BYTES = 8
+
+        ws = _make_long_lived_ws_mock()
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                for i in range(4):
+                    await client.send_audio(bytes([i]) * 4)
+                assert client._recent_audio_bytes <= 8
+                assert list(client._recent_audio) == [b"\x02" * 4, b"\x03" * 4]
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_replay_precedes_pending_flush_on_reconnect(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Replayed (already-sent) audio reaches the new ws before pending audio.
+
+        Deepgram's VAD rejects out-of-order audio on a fresh session,
+        so the two buffers must flush in the order the microphone
+        produced them: recent (in-flight on old ws) then pending (not
+        yet on the wire when the old ws died).
+        """
+        ws1 = _make_long_lived_ws_mock()
+        ws2 = _make_long_lived_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                # AAA goes cleanly onto ws1 and is recorded for replay.
+                await client.send_audio(b"AAA")
+                assert list(client._recent_audio) == [b"AAA"]
+                # Then ws1 "closes"; BBB is deferred into _pending_audio.
+                ws1.closed = True
+                await client.send_audio(b"BBB")
+                assert list(client._pending_audio) == [b"BBB"]
+                # Rotation fires; replay + flush should drain both in
+                # order into ws2.
+                await client._reconnect()
+            finally:
+                await client.stop()
+
+        sent_on_ws2 = [call.args[0] for call in ws2.send_bytes.call_args_list]
+        assert b"AAA" in sent_on_ws2
+        assert b"BBB" in sent_on_ws2
+        assert sent_on_ws2.index(b"AAA") < sent_on_ws2.index(b"BBB")
 
     @pytest.mark.asyncio
     async def test_normal_close_logs_at_info_level(
