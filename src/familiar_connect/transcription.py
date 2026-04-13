@@ -26,6 +26,23 @@ DEFAULT_LANGUAGE = "en"
 
 
 # ---------------------------------------------------------------------------
+# VAD event
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class VadEvent:
+    """A voice-activity event emitted by Deepgram.
+
+    ``SpeechStarted`` or ``UtteranceEnd``.
+
+    :param event_type: One of ``"SpeechStarted"`` or ``"UtteranceEnd"``.
+    """
+
+    event_type: str
+
+
+# ---------------------------------------------------------------------------
 # Transcription result
 # ---------------------------------------------------------------------------
 
@@ -182,11 +199,19 @@ class DeepgramTranscriber:
         """Open a WebSocket connection. Extracted for testability."""
         return await session.ws_connect(url, headers=headers)
 
-    async def start(self: Self, output: asyncio.Queue[TranscriptionResult]) -> None:
+    async def start(
+        self: Self,
+        output: asyncio.Queue[TranscriptionResult],
+        vad_queue: asyncio.Queue[VadEvent] | None = None,
+    ) -> None:
         """Connect to Deepgram and begin receiving transcription results.
 
         :param output: Queue where parsed :class:`TranscriptionResult` objects
             are placed as they arrive from Deepgram.
+        :param vad_queue: Optional queue for :class:`VadEvent` objects
+            (``SpeechStarted`` / ``UtteranceEnd``).  When provided, VAD
+            events from Deepgram are routed here in addition to the normal
+            transcription results.
         """
         url = self.build_ws_url()
         _logger.info("Connecting to Deepgram: %s", url)
@@ -197,7 +222,7 @@ class DeepgramTranscriber:
             self.build_headers(),
         )
         _logger.info("Deepgram WebSocket connected (status=%s)", self._ws.close_code)
-        self._receive_task = asyncio.create_task(self._receive_loop(output))
+        self._receive_task = asyncio.create_task(self._receive_loop(output, vad_queue))
 
     async def send_audio(self: Self, data: bytes) -> None:
         """Send raw PCM audio bytes to the Deepgram WebSocket.
@@ -263,6 +288,7 @@ class DeepgramTranscriber:
     async def _receive_loop(
         self: Self,
         output: asyncio.Queue[TranscriptionResult],
+        vad_queue: asyncio.Queue[VadEvent] | None = None,
     ) -> None:
         """Read messages from the WebSocket, reconnecting on drops."""
         consecutive_reconnects = 0
@@ -280,6 +306,14 @@ class DeepgramTranscriber:
                             await output.put(result)
                             # Got real data — reset reconnect counter.
                             consecutive_reconnects = 0
+                    elif msg_type in {"SpeechStarted", "UtteranceEnd"}:
+                        if vad_queue is not None:
+                            await vad_queue.put(VadEvent(event_type=msg_type))
+                        _logger.info(
+                            "[Deepgram] %s: %s",
+                            msg_type,
+                            msg.data[:200],
+                        )
                     else:
                         _logger.info(
                             "[Deepgram] %s: %s",

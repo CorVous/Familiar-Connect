@@ -189,9 +189,6 @@ class CharacterConfig:
     depth_inject_position: int = 0
     depth_inject_role: str = "system"
     display_tz: str = "UTC"
-    """IANA timezone name for rendering timestamps in ``text_conversation_rp``
-    mode (e.g. ``"America/New_York"``). Defaults to UTC. Loaded from
-    ``display_tz`` in ``character.toml``."""
     aliases: list[str] = field(default_factory=list)
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average

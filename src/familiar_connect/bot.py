@@ -33,6 +33,8 @@ process runs exactly one active character.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import enum
 import io
 import logging
 from typing import TYPE_CHECKING
@@ -92,6 +94,58 @@ def _log_pipeline_outcomes(
             outcome.status,
             outcome.duration_s,
         )
+
+
+# ---------------------------------------------------------------------------
+# Voice response state machine
+# ---------------------------------------------------------------------------
+
+
+class ResponseState(enum.Enum):
+    """The phases of a voice response lifecycle relevant to debounce."""
+
+    IDLE = "idle"
+    """Not generating. The lull timer may be running."""
+
+    GENERATING = "generating"
+    """LLM call is in-flight. New speech is buffered, not acted upon."""
+
+
+def _idle_event_factory() -> asyncio.Event:
+    """Create an :class:`asyncio.Event` that starts **set** (IDLE)."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
+@dataclasses.dataclass
+class ResponseTracker:
+    """Per-guild state machine for the voice debounce lifecycle.
+
+    :attr:`idle_event` is **set** when IDLE and **cleared** when
+    GENERATING so concurrent handlers can ``await idle_event.wait()``.
+    """
+
+    state: ResponseState = ResponseState.IDLE
+    generation_task: asyncio.Task[object] | None = None
+    idle_event: asyncio.Event = dataclasses.field(
+        default_factory=_idle_event_factory,
+    )
+
+    def start_generating(self, task: asyncio.Task[object]) -> None:
+        """Transition IDLE → GENERATING."""
+        if self.state is not ResponseState.IDLE:
+            msg = f"Cannot start generating from state {self.state.value}"
+            raise RuntimeError(msg)
+        self.state = ResponseState.GENERATING
+        self.generation_task = task
+        self.idle_event.clear()
+
+    def reset(self) -> None:
+        """Return to IDLE and clear transient state."""
+        self.state = ResponseState.IDLE
+        self.generation_task = None
+        self.idle_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -164,125 +218,335 @@ def _build_voice_response_handler(
     voice_channel_id: int,
     guild_id: int | None,
     user_names: dict[int, str],
-) -> Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]]:
-    """Build the async callback invoked for each final voice transcription.
+) -> tuple[
+    Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]],
+    ResponseTracker,
+    Callable[[int, str], None],
+    Callable[[int, str], None],
+]:
+    """Build the debounced voice response handler and its VAD callbacks.
 
-    Routes voice turns through the **same** :class:`ContextPipeline`
-    the text loop uses: assemble a :class:`ContextRequest` with
-    :attr:`Modality.voice` and the voice channel's id, run the
-    pipeline, render, call the main LLM, run post-processors,
-    persist to :class:`HistoryStore`, fan out to TTS.
+    Routes accumulated voice utterances through the :class:`ContextPipeline`
+    after a configurable lull timeout, preventing premature generation on
+    partial transcripts.
 
-    This is the only way voice turns get the same memory search,
-    history summary, speaker prefixing, and mode instructions that
-    text turns get. The earlier PR #17 implementation stashed voice
-    history in a closure-local ``list[Message]`` that bypassed the
-    pipeline entirely; that stub is replaced by this handler.
+    Returns ``(handler, tracker, vad_callback, deepgram_vad_callback)``:
+
+    - *handler* — async callback for each final transcription result.
+    - *tracker* — per-guild :class:`ResponseTracker` (IDLE/GENERATING).
+    - *vad_callback* — sync callback for Discord audio packet timing
+      events (``SpeechStarted`` / ``UtteranceEnd``). Gates the lull
+      timer so it only runs when no speakers are active.
+    - *deepgram_vad_callback* — sync callback for Deepgram
+      ``UtteranceEnd`` events. Used to wait for in-transit transcripts
+      before generating.
     """
+    tracker = ResponseTracker()
 
-    async def _handle_voice_result(
+    # Voice debounce state: accumulate transcription results and only
+    # generate after lull_timeout seconds of silence.  Uses VAD events
+    # to track active speakers so the timer only runs when nobody is
+    # talking — this prevents premature generation when Deepgram
+    # finalises a segment while the user is still mid-sentence.
+    pending_utterances: list[tuple[int, TranscriptionResult]] = []
+    lull_gen_task: asyncio.Task[None] | None = None
+    debounce_speakers: set[int] = set()
+
+    # Deepgram flush gate: after the lull timer fires, wait for
+    # Deepgram to confirm all in-transit transcriptions have been
+    # delivered (via UtteranceEnd) before generating.  Prevents
+    # generating before a slow final transcript arrives.
+    pending_deepgram_speakers: set[int] = set()
+    deepgram_ready = asyncio.Event()
+    deepgram_ready.set()  # Initially ready (no pending transcripts)
+
+    async def _generate_response(
         user_id: int,
-        result: TranscriptionResult,
+        combined_text: str,
     ) -> None:
-        # Resolve the speaker's display name. ``user_names`` is mutated
-        # by voice_pipeline's name resolver when a late joiner shows up,
-        # so a lookup failure falls back to a stable ``User-<id>`` form
-        # rather than ``None``.
-        speaker = user_names.get(user_id, f"User-{user_id}")
-        safe_name = sanitize_name(speaker) or speaker
+        """Run the full generation pipeline for accumulated voice input.
 
-        channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
-        request = ContextRequest(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            speaker=safe_name,
-            utterance=result.text,
-            modality=Modality.voice,
-            budget_tokens=channel_config.budget_tokens,
-            deadline_s=channel_config.deadline_s,
-        )
-
-        pipeline = familiar.build_pipeline(channel_config)
-        pipeline_output = await pipeline.assemble(
-            request,
-            budget_by_layer=channel_config.budget_by_layer,
-        )
-        _log_pipeline_outcomes(voice_channel_id, pipeline_output.outcomes)
-
-        messages = assemble_chat_messages(
-            pipeline_output,
-            store=familiar.history_store,
-            history_window_size=familiar.config.history_window_size,
-            depth_inject_position=familiar.config.depth_inject_position,
-            depth_inject_role=familiar.config.depth_inject_role,
-            mode=channel_config.mode,
-            display_tz=familiar.config.display_tz,
-        )
-
-        _logger.info(
-            "LLM request channel=%s (voice) messages=%d:\n%s",
-            voice_channel_id,
-            len(messages),
-            "\n".join(
-                f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
-                f"{m.content[:200]}{'…' if len(m.content) > 200 else ''}"
-                for m in messages
-            ),
-        )
-
-        # Main reply isolation: catch the closed raise set of
-        # ``LLMClient.chat`` — httpx transport/status errors, plus the
-        # ``ValueError`` / ``KeyError`` branches in ``llm.chat`` for
-        # malformed payloads. Log and return cleanly so the transcriber
-        # callback stays alive for the next utterance. No TTS, no
-        # history write, no post-processing on failure.
+        Called by :func:`_flush_pending` after the lull timer fires.
+        The tracker is already in GENERATING state (set by
+        :func:`_lull_then_generate` when the lull expired).
+        """
         try:
-            reply = await familiar.llm_clients["main_prose"].chat(messages)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            _logger.warning(
-                "main reply (voice): %s: %s",
-                type(exc).__name__,
-                exc,
+            speaker = user_names.get(user_id, f"User-{user_id}")
+            safe_name = sanitize_name(speaker) or speaker
+
+            channel_config = familiar.channel_configs.get(
+                channel_id=voice_channel_id,
             )
-            return
-        reply_text = await pipeline.run_post_processors(reply.content, request)
+            request = ContextRequest(
+                familiar_id=familiar.id,
+                channel_id=voice_channel_id,
+                guild_id=guild_id,
+                speaker=safe_name,
+                utterance=combined_text,
+                modality=Modality.voice,
+                budget_tokens=channel_config.budget_tokens,
+                deadline_s=channel_config.deadline_s,
+            )
 
-        # Persist both turns *after* the LLM call so a mid-turn crash
-        # doesn't leave the store with a user turn but no reply.
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            role="user",
-            content=result.text,
-            speaker=safe_name,
-            mode=channel_config.mode,
-        )
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            role="assistant",
-            content=reply_text,
-            mode=channel_config.mode,
-        )
+            pipeline = familiar.build_pipeline(channel_config)
+            pipeline_output = await pipeline.assemble(
+                request,
+                budget_by_layer=channel_config.budget_by_layer,
+            )
+            _log_pipeline_outcomes(voice_channel_id, pipeline_output.outcomes)
 
-        _logger.info("[Voice Response] %s", reply_text)
+            messages = assemble_chat_messages(
+                pipeline_output,
+                store=familiar.history_store,
+                history_window_size=familiar.config.history_window_size,
+                depth_inject_position=familiar.config.depth_inject_position,
+                depth_inject_role=familiar.config.depth_inject_role,
+                mode=channel_config.mode,
+                display_tz=familiar.config.display_tz,
+            )
 
-        if familiar.tts_client is not None:
+            _logger.info(
+                "LLM request channel=%s (voice) messages=%d:\n%s",
+                voice_channel_id,
+                len(messages),
+                "\n".join(
+                    f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
+                    f"{m.content[:200]}{'…' if len(m.content) > 200 else ''}"
+                    for m in messages
+                ),
+            )
+
+            # Main reply isolation: catch the closed raise set of
+            # ``LLMClient.chat`` — httpx transport/status errors, plus the
+            # ``ValueError`` / ``KeyError`` branches in ``llm.chat`` for
+            # malformed payloads. Log and return cleanly so the transcriber
+            # callback stays alive for the next utterance. No TTS, no
+            # history write, no post-processing on failure.
             try:
+                reply = await familiar.llm_clients["main_prose"].chat(messages)
+            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                _logger.warning(
+                    "main reply (voice): %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                return
+            reply_text = await pipeline.run_post_processors(reply.content, request)
+
+            # Persist both turns *after* the LLM call so a mid-turn
+            # crash doesn't leave the store with a user turn but no
+            # reply.
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=voice_channel_id,
+                guild_id=guild_id,
+                role="user",
+                content=combined_text,
+                speaker=safe_name,
+                mode=channel_config.mode,
+            )
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=voice_channel_id,
+                guild_id=guild_id,
+                role="assistant",
+                content=reply_text,
+                mode=channel_config.mode,
+            )
+
+            _logger.info("[Voice Response] %s", reply_text)
+
+            if familiar.tts_client is not None:
                 pcm_mono = await familiar.tts_client.synthesize(reply_text)
                 stereo = mono_to_stereo(pcm_mono)
-                # Wait for any currently-playing audio to finish.
-                # vc.is_playing() is a third-party poll; no event available.
                 while vc.is_playing():  # noqa: ASYNC110
                     await asyncio.sleep(0.1)
                 vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            except Exception:
-                _logger.exception("Voice response TTS failed")
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            _logger.info("Voice generation cancelled")
+            return
+        except Exception:
+            _logger.exception("Voice response handler failed")
+        finally:
+            tracker.reset()
 
-    return _handle_voice_result
+    async def _flush_pending() -> None:
+        """Drain the utterance buffer and generate a single response."""
+        if not pending_utterances:
+            return
+        utterances = list(pending_utterances)
+        pending_utterances.clear()
+
+        last_user_id = utterances[-1][0]
+        combined_text = " ".join(r.text for _, r in utterances)
+        _logger.info(
+            "Voice lull expired — generating from %d utterance(s): %r",
+            len(utterances),
+            combined_text[:120],
+        )
+        await _generate_response(last_user_id, combined_text)
+
+    async def _lull_then_generate() -> None:
+        """Wait for lull_timeout seconds of silence, then flush.
+
+        After the lull timer expires, immediately transitions to
+        GENERATING so new speech is buffered rather than cancelling
+        the in-progress generation.  The task is cancellable during
+        the sleep phase; during the Deepgram wait phase cancellation
+        resets the tracker back to IDLE.
+        """
+        nonlocal lull_gen_task
+        try:
+            await asyncio.sleep(familiar.config.lull_timeout)
+
+            # --- State machine: IDLE → GENERATING ---
+            # Committed to generating once Deepgram confirms.
+            current = asyncio.current_task()
+            if current is not None:
+                tracker.start_generating(current)
+
+            # Wait for Deepgram to confirm all transcriptions flushed.
+            if not deepgram_ready.is_set():
+                _logger.info(
+                    "Lull expired, waiting for Deepgram to flush (pending=%s)",
+                    pending_deepgram_speakers,
+                )
+                try:
+                    await asyncio.wait_for(deepgram_ready.wait(), timeout=5.0)
+                except TimeoutError:
+                    _logger.warning(
+                        "Timed out waiting for Deepgram flush, "
+                        "generating anyway (pending=%s)",
+                        pending_deepgram_speakers,
+                    )
+                    pending_deepgram_speakers.clear()
+                    deepgram_ready.set()
+        except asyncio.CancelledError:
+            # If we were already GENERATING (cancelled during flush
+            # wait), roll back to IDLE so the next cycle can start.
+            if tracker.state is ResponseState.GENERATING:
+                tracker.reset()
+            return
+        # Past the cancellable phases — clear reference so new
+        # results don't cancel the generation phase that follows.
+        lull_gen_task = None
+        await _flush_pending()
+
+        # Check for utterances that arrived during generation.
+        # If new speech was buffered while we were busy, kick off
+        # another cycle.
+        if (
+            pending_utterances
+            and not debounce_speakers
+            and tracker.state is ResponseState.IDLE
+        ):
+            lull_gen_task = asyncio.create_task(_lull_then_generate())
+
+    def _on_vad_event(user_id: int, event_type: str) -> None:
+        """Track active speakers for VAD-gated debounce.
+
+        Called by the voice pipeline for every ``SpeechStarted`` /
+        ``UtteranceEnd`` event from Discord audio packet timing,
+        regardless of tracker state.
+        """
+        nonlocal lull_gen_task
+
+        speaker = user_names.get(user_id, f"User-{user_id}")
+
+        if event_type == "SpeechStarted":
+            debounce_speakers.add(user_id)
+            # Mark that Deepgram has pending audio for this user.
+            pending_deepgram_speakers.add(user_id)
+            deepgram_ready.clear()
+            had_timer = lull_gen_task is not None
+            # Someone started talking — cancel the lull timer,
+            # but only if we haven't committed to generating yet.
+            if lull_gen_task is not None and tracker.state is ResponseState.IDLE:
+                lull_gen_task.cancel()
+                lull_gen_task = None
+            _logger.debug(
+                "VAD SpeechStarted from %s (active=%s, timer_cancelled=%s)",
+                speaker,
+                debounce_speakers,
+                had_timer and tracker.state is ResponseState.IDLE,
+            )
+        elif event_type == "UtteranceEnd":
+            debounce_speakers.discard(user_id)
+            _logger.debug(
+                "VAD UtteranceEnd from %s (active=%s, pending=%d)",
+                speaker,
+                debounce_speakers,
+                len(pending_utterances),
+            )
+            # Everyone stopped — start the lull timer if we have
+            # buffered results and aren't already generating.
+            if (
+                not debounce_speakers
+                and pending_utterances
+                and tracker.state is ResponseState.IDLE
+            ):
+                if lull_gen_task is not None:
+                    lull_gen_task.cancel()
+                lull_gen_task = asyncio.create_task(_lull_then_generate())
+
+    async def _handle_voice_result(  # noqa: RUF029
+        user_id: int,
+        result: TranscriptionResult,
+    ) -> None:
+        """Buffer a transcription result for VAD-gated debounce.
+
+        Results are accumulated in ``pending_utterances``.  The lull
+        timer is started by :func:`_on_vad_event` when all speakers
+        stop.  As a fallback (in case VAD events arrive out of order
+        or are missing), a timer is also started here when no speakers
+        are currently active.
+        """
+        nonlocal lull_gen_task
+
+        pending_utterances.append((user_id, result))
+        _logger.info(
+            "Buffered voice result from %s: %r (pending=%d)",
+            user_names.get(user_id, f"User-{user_id}"),
+            result.text[:80],
+            len(pending_utterances),
+        )
+
+        # Each new transcript is direct evidence of recent speech.
+        # (Re)start the lull timer so the countdown runs from the
+        # latest result, not from a stale UtteranceEnd.  Only
+        # start/restart the timer if we're still IDLE — once
+        # GENERATING, new speech is buffered for the next cycle.
+        if not debounce_speakers and tracker.state is ResponseState.IDLE:
+            if lull_gen_task is not None:
+                lull_gen_task.cancel()
+            lull_gen_task = asyncio.create_task(_lull_then_generate())
+
+    def _on_deepgram_vad(user_id: int, event_type: str) -> None:
+        """Track Deepgram transcription flush state.
+
+        Called by the voice pipeline for Deepgram ``UtteranceEnd``
+        events.  When all pending speakers have been flushed,
+        ``deepgram_ready`` is set so the lull gate can proceed to
+        generation.
+        """
+        if event_type == "UtteranceEnd":
+            pending_deepgram_speakers.discard(user_id)
+            if not pending_deepgram_speakers:
+                deepgram_ready.set()
+            _logger.debug(
+                "Deepgram UtteranceEnd for %s (pending_deepgram=%s)",
+                user_names.get(user_id, f"User-{user_id}"),
+                pending_deepgram_speakers,
+            )
+
+    return (
+        _handle_voice_result,
+        tracker,
+        _on_vad_event,
+        _on_deepgram_vad,
+    )
 
 
 async def subscribe_my_voice(
@@ -363,7 +627,7 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        response_handler = _build_voice_response_handler(
+        response_handler, _tracker, vad_cb, dg_vad_cb = _build_voice_response_handler(
             vc=vc,
             familiar=familiar,
             voice_channel_id=channel.id,
@@ -376,6 +640,8 @@ async def subscribe_my_voice(
             user_names=user_names,
             resolve_name=_resolve_from_channel,
             response_handler=response_handler,
+            vad_callback=vad_cb,
+            deepgram_vad_callback=dg_vad_cb,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),

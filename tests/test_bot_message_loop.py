@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
@@ -924,7 +925,8 @@ class TestMainReplyResilience:
             for record in caplog.records
         )
 
-    def test_voice_main_reply_failure_does_not_crash(
+    @pytest.mark.asyncio
+    async def test_voice_main_reply_failure_does_not_crash(
         self,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
@@ -935,6 +937,8 @@ class TestMainReplyResilience:
         — the transcriber's callback loop stays alive.
         """
         familiar = _make_familiar(tmp_path)
+        # Use a very short lull so the test doesn't take 2 seconds.
+        familiar.config = dataclasses.replace(familiar.config, lull_timeout=0.05)
         # No tts_client on the stub Familiar, so TTS is implicitly not
         # exercised; the assertion is instead that we never reach it.
         familiar.subscriptions.add(
@@ -947,7 +951,7 @@ class TestMainReplyResilience:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
 
-        handler = _build_voice_response_handler(
+        handler, *_ = _build_voice_response_handler(
             vc=vc,
             familiar=familiar,
             voice_channel_id=9000,
@@ -962,7 +966,11 @@ class TestMainReplyResilience:
         )
 
         with caplog.at_level("WARNING", logger="familiar_connect.bot"):
-            asyncio.run(handler(42, transcription))
+            await handler(42, transcription)
+            # Wait for the lull timer to fire and generation to complete.
+            await asyncio.sleep(0.2)
+            for _ in range(10):
+                await asyncio.sleep(0)
 
         # Main LLM was invoked and raised.
         assert failing.call_count == 1

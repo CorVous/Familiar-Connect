@@ -17,9 +17,72 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from typing import Any
 
-    from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
+    from familiar_connect.transcription import (
+        DeepgramTranscriber,
+        TranscriptionResult,
+        VadEvent,
+    )
 
 _logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Discord audio activity tracking
+# ---------------------------------------------------------------------------
+
+DISCORD_SILENCE_S: float = 0.3
+"""Seconds without audio packets before a user is considered silent.
+
+Discord sends audio at ~20 ms intervals.  300 ms bridges natural
+micro-pauses between words while still detecting actual silence
+quickly enough to start the debounce lull countdown.
+"""
+
+
+class AudioActivityTracker:
+    """Track per-user voice activity from Discord audio packet timing.
+
+    Fires ``SpeechStarted`` when audio first arrives for a user, and
+    ``UtteranceEnd`` after *silence_s* seconds without audio.  Each
+    user is tracked independently so overlapping speakers are handled
+    correctly.
+
+    This replaces Deepgram's server-side VAD for debounce purposes —
+    Discord packet timing is immediate (no WebSocket round-trip).
+    """
+
+    def __init__(
+        self,
+        *,
+        callback: Callable[[int, str], None],
+        silence_s: float = DISCORD_SILENCE_S,
+    ) -> None:
+        self._silence_s = silence_s
+        self._callback = callback
+        self._timers: dict[int, asyncio.TimerHandle] = {}
+        self._loop = asyncio.get_running_loop()
+
+    def on_audio(self, user_id: int) -> None:
+        """Notify that an audio chunk arrived from *user_id*."""
+        if user_id not in self._timers:
+            # First audio from this user (or first since UtteranceEnd).
+            self._callback(user_id, "SpeechStarted")
+        else:
+            # Still speaking — cancel the pending silence timer.
+            self._timers[user_id].cancel()
+
+        # (Re)start the silence countdown.
+        def _on_silence(uid: int = user_id) -> None:
+            self._timers.pop(uid, None)
+            self._callback(uid, "UtteranceEnd")
+
+        self._timers[user_id] = self._loop.call_later(self._silence_s, _on_silence)
+
+    def cancel_all(self) -> None:
+        """Cancel all pending silence timers (used during shutdown)."""
+        for handle in self._timers.values():
+            handle.cancel()
+        self._timers.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +108,8 @@ class _UserStream:
     transcript_queue: asyncio.Queue[TranscriptionResult]
     pump_task: asyncio.Task[None]
     forwarder_task: asyncio.Task[None]
+    vad_queue: asyncio.Queue[VadEvent] | None = None
+    vad_forwarder_task: asyncio.Task[None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +132,10 @@ class VoicePipeline:
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None
     streams: dict[int, _UserStream] = field(default_factory=dict)
+    shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
+    vad_callback: Callable[[int, str], None] | None = None
+    deepgram_vad_callback: Callable[[int, str], None] | None = None
+    vad_dispatcher_task: asyncio.Task[None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -163,26 +232,68 @@ async def _transcript_forwarder(
         await shared_queue.put((user_id, result))
 
 
+async def _vad_forwarder(
+    user_id: int,
+    user_queue: asyncio.Queue[VadEvent],
+    shared_queue: asyncio.Queue[tuple[int, VadEvent]],
+) -> None:
+    """Tag per-user Deepgram VAD events with user_id onto the shared queue."""
+    while True:
+        event = await user_queue.get()
+        await shared_queue.put((user_id, event))
+
+
+async def _vad_dispatcher(
+    shared_queue: asyncio.Queue[tuple[int, VadEvent]],
+    deepgram_vad_callback: Callable[[int, str], None] | None = None,
+) -> None:
+    """Read tagged Deepgram VAD events and forward to *deepgram_vad_callback*.
+
+    Used to notify the transcription flush gate (in ``bot.py``) when all
+    in-transit Deepgram transcriptions have been delivered, so the lull
+    debounce can proceed to generation.
+    """
+    while True:
+        user_id, event = await shared_queue.get()
+        if deepgram_vad_callback is not None:
+            deepgram_vad_callback(user_id, event.event_type)
+
+
 async def _create_user_stream(
     user_id: int,
     template: DeepgramTranscriber,
     shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]],
+    shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None,
 ) -> _UserStream:
     """Create and start a per-user transcription stream."""
     transcriber = template.clone()
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
     transcript_queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
-    await transcriber.start(transcript_queue)
+
+    vad_queue: asyncio.Queue[VadEvent] | None = None
+    if shared_vad_queue is not None:
+        vad_queue = asyncio.Queue()
+
+    await transcriber.start(transcript_queue, vad_queue=vad_queue)
     pump_task = asyncio.create_task(_audio_pump(audio_queue, transcriber))
     forwarder_task = asyncio.create_task(
         _transcript_forwarder(user_id, transcript_queue, shared_queue)
     )
+
+    vad_forwarder_task: asyncio.Task[None] | None = None
+    if vad_queue is not None and shared_vad_queue is not None:
+        vad_forwarder_task = asyncio.create_task(
+            _vad_forwarder(user_id, vad_queue, shared_vad_queue)
+        )
+
     return _UserStream(
         transcriber=transcriber,
         audio_queue=audio_queue,
         transcript_queue=transcript_queue,
         pump_task=pump_task,
         forwarder_task=forwarder_task,
+        vad_queue=vad_queue,
+        vad_forwarder_task=vad_forwarder_task,
     )
 
 
@@ -190,31 +301,53 @@ async def _audio_router(
     tagged_queue: asyncio.Queue[tuple[int, bytes]],
     pipeline: VoicePipeline,
 ) -> None:
-    """Route tagged audio to per-user streams, creating them on demand."""
+    """Route tagged audio to per-user streams, creating them on demand.
+
+    When a ``vad_callback`` is configured, an :class:`AudioActivityTracker`
+    fires ``SpeechStarted`` / ``UtteranceEnd`` events based on Discord
+    audio packet timing — faster and more reliable than Deepgram's
+    server-side VAD for debounce purposes.
+    """
+    activity_tracker: AudioActivityTracker | None = None
+    if pipeline.vad_callback is not None:
+        activity_tracker = AudioActivityTracker(
+            callback=pipeline.vad_callback,
+        )
+
     chunks_routed = 0
-    while True:
-        user_id, data = await tagged_queue.get()
-        if user_id not in pipeline.streams:
-            name = _get_user_name(pipeline, user_id)
-            _logger.info(
-                "[Router] Creating transcription stream for %s (id=%d)",
-                name,
-                user_id,
-            )
-            stream = await _create_user_stream(
-                user_id,
-                pipeline.template,
-                pipeline.shared_transcript_queue,
-            )
-            pipeline.streams[user_id] = stream
-        await pipeline.streams[user_id].audio_queue.put(data)
-        chunks_routed += 1
-        if chunks_routed % 500 == 1:
-            _logger.debug(
-                "[Router] Routed %d chunks total (%d active streams)",
-                chunks_routed,
-                len(pipeline.streams),
-            )
+    try:
+        while True:
+            user_id, data = await tagged_queue.get()
+
+            # Discord voice activity tracking for debounce.
+            if activity_tracker is not None:
+                activity_tracker.on_audio(user_id)
+
+            if user_id not in pipeline.streams:
+                name = _get_user_name(pipeline, user_id)
+                _logger.info(
+                    "[Router] Creating transcription stream for %s (id=%d)",
+                    name,
+                    user_id,
+                )
+                stream = await _create_user_stream(
+                    user_id,
+                    pipeline.template,
+                    pipeline.shared_transcript_queue,
+                    shared_vad_queue=pipeline.shared_vad_queue,
+                )
+                pipeline.streams[user_id] = stream
+            await pipeline.streams[user_id].audio_queue.put(data)
+            chunks_routed += 1
+            if chunks_routed % 500 == 1:
+                _logger.debug(
+                    "[Router] Routed %d chunks total (%d active streams)",
+                    chunks_routed,
+                    len(pipeline.streams),
+                )
+    finally:
+        if activity_tracker is not None:
+            activity_tracker.cancel_all()
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +408,8 @@ async def start_pipeline(  # noqa: RUF029
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None,
+    vad_callback: Callable[[int, str], None] | None = None,
+    deepgram_vad_callback: Callable[[int, str], None] | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -287,12 +422,25 @@ async def start_pipeline(  # noqa: RUF029
     :param response_handler: Optional async callback invoked with
         ``(user_id, result)`` for each final transcription. Used to
         trigger LLM + TTS responses.
+    :param vad_callback: Optional sync callback invoked with
+        ``(user_id, event_type)`` for voice activity events.  Driven
+        by Discord audio packet timing via :class:`AudioActivityTracker`
+        for lower latency than Deepgram VAD.
+    :param deepgram_vad_callback: Optional sync callback invoked with
+        ``(user_id, event_type)`` for Deepgram VAD events.  Used by
+        the transcription flush gate to know when all in-transit
+        transcriptions have been delivered.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
     shared_transcript_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = (
         asyncio.Queue()
     )
+
+    # Deepgram VAD queue — needed when deepgram_vad_callback is set.
+    shared_vad_queue: asyncio.Queue[tuple[int, VadEvent]] | None = None
+    if deepgram_vad_callback is not None:
+        shared_vad_queue = asyncio.Queue()
 
     # We create a placeholder pipeline first so the router can reference it.
     pipeline = VoicePipeline(
@@ -304,6 +452,9 @@ async def start_pipeline(  # noqa: RUF029
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,
+        shared_vad_queue=shared_vad_queue,
+        vad_callback=vad_callback,
+        deepgram_vad_callback=deepgram_vad_callback,
     )
 
     pipeline.router_task = asyncio.create_task(
@@ -312,6 +463,11 @@ async def start_pipeline(  # noqa: RUF029
     pipeline.logger_task = asyncio.create_task(
         _transcript_logger(shared_transcript_queue, pipeline)
     )
+
+    if shared_vad_queue is not None:
+        pipeline.vad_dispatcher_task = asyncio.create_task(
+            _vad_dispatcher(shared_vad_queue, deepgram_vad_callback)
+        )
 
     set_pipeline(pipeline)
     _logger.info("Voice transcription pipeline started")
@@ -326,6 +482,10 @@ async def _stop_user_stream(stream: _UserStream) -> None:
         await stream.pump_task
     with contextlib.suppress(asyncio.CancelledError):
         await stream.forwarder_task
+    if stream.vad_forwarder_task is not None:
+        stream.vad_forwarder_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stream.vad_forwarder_task
     await stream.transcriber.stop()
 
 
@@ -352,6 +512,11 @@ async def stop_pipeline() -> None:
         pipeline.logger_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await pipeline.logger_task
+
+    if pipeline.vad_dispatcher_task is not None:
+        pipeline.vad_dispatcher_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pipeline.vad_dispatcher_task
 
     clear_pipeline()
     _logger.info("Voice transcription pipeline stopped")
