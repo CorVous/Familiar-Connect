@@ -278,7 +278,8 @@ class ConversationMonitor:
         )
 
     def _schedule_lull_evaluation(self, channel_id: int) -> None:
-        """Sync callback from call_later — schedules async evaluation."""
+        """Sync callback from call_later — schedules the async evaluation."""
+        _logger.info("text lull expired channel=%s", channel_id)
         loop = asyncio.get_event_loop()
         task = loop.create_task(self._run_lull_evaluation(channel_id))
         # strong ref prevents GC before completion; done-callback cleans up

@@ -198,14 +198,13 @@ def _build_voice_response_handler(
         )
 
         _logger.info(
-            "LLM request channel=%s (voice) messages=%d:\n%s",
+            "LLM request channel=%s (voice) messages=%d, 1 new:\n  [%s]: %s",
             voice_channel_id,
             len(messages),
-            "\n".join(
-                f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
-                f"{m.content[:200]}{'…' if len(m.content) > 200 else ''}"
-                for m in messages
-            ),
+            request.speaker or "?",
+            (request.utterance[:200] + "…")
+            if len(request.utterance) > 200
+            else request.utterance,
         )
 
         # main reply isolation: catch ``LLMClient.chat`` raise set
@@ -488,15 +487,25 @@ async def _run_text_response(
         display_tz=familiar.config.display_tz,
     )
 
+    n_new = len(request.pending_turns) if request.pending_turns else 1
+    batch = (
+        "\n".join(
+            f"  [{pt.speaker or '?'}]: "
+            f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
+            for pt in request.pending_turns
+        )
+        if request.pending_turns
+        else (
+            f"  [{request.speaker or '?'}]: "
+            f"{request.utterance[:200]}{'…' if len(request.utterance) > 200 else ''}"
+        )
+    )
     _logger.info(
-        "LLM request channel=%s messages=%d:\n%s",
+        "LLM request channel=%s messages=%d, %d new:\n%s",
         channel_id,
         len(messages),
-        "\n".join(
-            f"  [{m.role}]{f' ({m.name})' if m.name else ''}: "
-            f"{m.content[:200]}{'…' if len(m.content) > 200 else ''}"
-            for m in messages
-        ),
+        n_new,
+        batch,
     )
 
     # main reply isolation: catch ``LLMClient.chat`` raise set;
