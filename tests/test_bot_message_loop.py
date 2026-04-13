@@ -1181,6 +1181,55 @@ class TestVoiceInterjectionRouting:
         assert args[0] == 9000
         assert args[1] == buffer
 
+    def test_on_respond_text_channel_bypasses_voice_handler_lookup(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression guard: text channels are unaffected by voice wiring.
+
+        A text channel id that is NOT in ``voice_response_handlers``
+        must still reach ``_run_text_response`` exactly as before.
+        Covers the case where a single familiar has both a voice
+        subscription (populates the handlers dict) and a text
+        subscription.
+        """
+        familiar = _make_familiar(tmp_path, reply="Hello.")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        # A voice handler is registered for the voice channel only.
+        familiar.extras["voice_response_handlers"] = {9000: AsyncMock()}
+
+        text_channel = _make_channel(12345)
+
+        with patch(
+            "familiar_connect.bot._run_text_response", new_callable=AsyncMock
+        ) as text_spy:
+            bot = create_bot(familiar)
+            # bot.get_channel returns our fake text channel for this id.
+            bot.get_channel = MagicMock(  # ty: ignore[invalid-assignment]
+                return_value=text_channel,
+            )
+
+            buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+            async def _invoke() -> None:
+                await familiar.monitor.on_respond(12345, buffer)
+
+            asyncio.run(_invoke())
+
+        text_spy.assert_called_once()
+        kwargs = text_spy.call_args.kwargs
+        assert kwargs["channel_id"] == 12345
+        assert kwargs["channel"] is text_channel
+        # The voice handler was NOT invoked.
+        voice_handlers = cast(
+            "dict[int, Any]", familiar.extras["voice_response_handlers"]
+        )
+        voice_handlers[9000].assert_not_called()
+
     def test_run_voice_response_persists_all_buffered_turns(
         self, tmp_path: Path
     ) -> None:
