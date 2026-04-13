@@ -917,3 +917,52 @@ class TestFullRpGapBreadcrumbs:
 
         breadcrumbs = [m for m in messages[1:-1] if m.role == "system"]
         assert breadcrumbs == []
+
+
+class TestInterruptionContext:
+    """``ContextRequest.interruption_context`` renders as a system note.
+
+    Plumbing for Step 8 of the voice-interruption plan. The long-
+    interruption handlers (GENERATING and SPEAKING) populate the
+    field with a note like ``Alice interrupted while you were forming
+    a response. They said: "wait actually"`` so the regenerated reply
+    can acknowledge the cutoff. The field is optional — when ``None``
+    the renderer produces the same message list as before.
+    """
+
+    def test_field_defaults_to_none(self) -> None:
+        request = _request()
+        assert request.interruption_context is None
+
+    def test_none_produces_no_extra_system_message(self, tmp_path: Path) -> None:
+        store = HistoryStore(tmp_path / "history.db")
+        request = _request(interruption_context=None)
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(output, store=store)
+        # system preamble + final user turn.
+        assert [m.role for m in messages] == ["system", "user"]
+
+    def test_empty_string_produces_no_extra_system_message(
+        self, tmp_path: Path
+    ) -> None:
+        store = HistoryStore(tmp_path / "history.db")
+        request = _request(interruption_context="")
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(output, store=store)
+        assert [m.role for m in messages] == ["system", "user"]
+
+    def test_text_inserts_system_note_before_final_user_turn(
+        self, tmp_path: Path
+    ) -> None:
+        store = HistoryStore(tmp_path / "history.db")
+        note = (
+            "Alice interrupted while you were forming a response. "
+            'They said: "wait actually"'
+        )
+        request = _request(interruption_context=note)
+        output = _pipeline_output(request=request)
+        messages = assemble_chat_messages(output, store=store)
+        # system preamble + interruption note + final user turn.
+        assert [m.role for m in messages] == ["system", "system", "user"]
+        assert messages[1].content == note
+        assert messages[-1].role == "user"
