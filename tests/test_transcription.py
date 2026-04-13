@@ -401,6 +401,35 @@ class TestDeepgramTranscriberLifecycle:
                 await client.stop()
 
     @pytest.mark.asyncio
+    async def test_send_audio_buffers_on_connection_reset(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """send_audio() buffers bytes when send_bytes raises ConnectionResetError.
+
+        This covers the race where ``ws.closed`` is still ``False`` but
+        the underlying transport is already closing, so ``send_bytes``
+        raises ``ClientConnectionResetError`` ("Cannot write to closing
+        transport"). The bytes must be buffered, not dropped.
+        """
+        ws_mock = self._make_ws_mock()
+        ws_mock.closed = False
+        ws_mock.send_bytes = AsyncMock(
+            side_effect=ConnectionResetError("Cannot write to closing transport")
+        )
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                # Should NOT raise — the reset is swallowed and the
+                # bytes are moved into the pending-audio buffer.
+                await client.send_audio(b"\x00\x01")
+                assert list(client._pending_audio) == [b"\x00\x01"]
+                assert client._pending_audio_bytes == 2
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
     async def test_stop_sends_close_stream(self, client: DeepgramTranscriber) -> None:
         """stop() sends the CloseStream message and closes the WebSocket."""
         ws_mock = self._make_ws_mock()

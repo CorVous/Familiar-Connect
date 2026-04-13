@@ -218,6 +218,13 @@ class DeepgramTranscriber:
         :attr:`_PENDING_AUDIO_MAX_BYTES`; when it overflows the oldest
         frames are evicted so we retain the most recent audio.
 
+        A :class:`ConnectionResetError` (including aiohttp's
+        :class:`ClientConnectionResetError`) can also be raised by
+        ``send_bytes`` when the transport is closing but
+        ``ws.closed`` has not yet flipped to ``True``. That race is
+        treated the same as a closed socket: the bytes are buffered
+        so the upcoming reconnect can flush them.
+
         :raises RuntimeError: If called before :meth:`start`.
         """
         if self._ws is None:
@@ -226,7 +233,13 @@ class DeepgramTranscriber:
         if self._ws.closed:
             self._buffer_pending_audio(data)
             return
-        await self._ws.send_bytes(data)
+        try:
+            await self._ws.send_bytes(data)
+        except ConnectionResetError:
+            # Race: the transport is closing but ws.closed is still
+            # False. Buffer the bytes so _reconnect can flush them to
+            # the new socket instead of dropping them in _audio_pump.
+            self._buffer_pending_audio(data)
 
     def _buffer_pending_audio(self: Self, data: bytes) -> None:
         """Append *data* to the pending-audio buffer.
