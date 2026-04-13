@@ -197,50 +197,74 @@ class _FakeClock:
 
 
 class _FakeHandle:
-    def __init__(self, scheduler: _FakeScheduler) -> None:
-        self._scheduler = scheduler
+    def __init__(
+        self,
+        scheduler: _FakeScheduler,
+        callback: Callable[[], None],
+    ) -> None:
+        self.scheduler = scheduler
+        self.callback = callback
         self.cancelled = False
 
     def cancel(self) -> None:
         self.cancelled = True
-        self._scheduler.pending = None
 
 
 class _FakeScheduler:
-    """Synchronous scheduler stub for the detector's lull timer.
+    """Synchronous scheduler stub for the detector's timers.
 
-    Only one pending callback at a time — matches how the detector
-    uses it (the lull handle is re-armed/cancelled, never doubled up).
+    Holds a list of pending callbacks (the detector may have both a
+    min-threshold timer and a lull-finalize timer armed simultaneously).
+    Tests fire specific callbacks via :meth:`fire_for` or the next
+    live one via :meth:`fire_next`.
     """
 
     def __init__(self) -> None:
-        self.pending: tuple[float, _FakeHandle, Callable[[], None]] | None = None
+        self.pending: list[_FakeHandle] = []
 
     def __call__(
         self,
         delay: float,
         callback: Callable[[], None],
     ) -> _FakeHandle:
-        handle = _FakeHandle(self)
-        self.pending = (delay, handle, callback)
+        del delay
+        handle = _FakeHandle(self, callback)
+        self.pending.append(handle)
         return handle
 
-    def fire(self) -> None:
-        """Invoke the pending callback as if the timer expired."""
-        pending = self.pending
-        if pending is None:
-            msg = "no pending callback"
+    def _live(self) -> list[_FakeHandle]:
+        return [h for h in self.pending if not h.cancelled]
+
+    def fire_for(self, callback: Callable[[], None]) -> None:
+        """Fire the pending callback with identity ``callback``."""
+        for handle in self._live():
+            if handle.callback == callback:
+                handle.cancelled = True
+                handle.callback()
+                return
+        msg = f"no pending callback matching {callback!r}"
+        raise RuntimeError(msg)
+
+    def fire_next(self) -> None:
+        """Fire the oldest live pending callback."""
+        live = self._live()
+        if not live:
+            msg = "no pending callbacks"
             raise RuntimeError(msg)
-        _delay, handle, cb = pending
-        if handle.cancelled:
-            msg = "pending callback was cancelled"
-            raise RuntimeError(msg)
-        self.pending = None
-        cb()
+        handle = live[0]
+        handle.cancelled = True
+        handle.callback()
+
+    @property
+    def live_count(self) -> int:
+        return len(self._live())
 
     @property
     def is_armed(self) -> bool:
-        return self.pending is not None
+        return self.live_count > 0
+
+    def has_pending(self, callback: Callable[[], None]) -> bool:
+        return any(h.callback == callback for h in self._live())
 
 
 def _make_detector(
@@ -294,7 +318,7 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(0.5)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()  # lull timer expires
+            scheduler.fire_for(detector._finalize_burst)  # lull timer expires
         msgs = [
             r.message
             for r in caplog.records
@@ -316,7 +340,7 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()
+            scheduler.fire_for(detector._finalize_burst)
         msgs = [
             r.message
             for r in caplog.records
@@ -338,7 +362,7 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()
+            scheduler.fire_for(detector._finalize_burst)
         msgs = [
             r.message
             for r in caplog.records
@@ -366,14 +390,14 @@ class TestInterruptionDetectorMultiUser:
             clock.advance(0.5)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             # User 43 still speaking — no lull arming yet.
-            assert not scheduler.is_armed
+            assert not scheduler.has_pending(detector._finalize_burst)
             msgs_during = [
                 r.message for r in caplog.records if "interruption:" in r.message
             ]
             assert msgs_during == []
             clock.advance(1.5)
             detector.on_voice_activity(43, VoiceActivityEvent.ended)
-            scheduler.fire()
+            scheduler.fire_for(detector._finalize_burst)
 
         msgs = [
             r.message
@@ -406,14 +430,14 @@ class TestInterruptionDetectorLullAggregation:
             clock.advance(1.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             # Lull timer now armed — intra-lull pause begins.
-            assert scheduler.is_armed
+            assert scheduler.has_pending(detector._finalize_burst)
             clock.advance(0.5)  # short gap, well under lull_timeout_s
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             # New speech cancels the lull timer.
-            assert not scheduler.is_armed
+            assert not scheduler.has_pending(detector._finalize_burst)
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()  # now the full lull expires
+            scheduler.fire_for(detector._finalize_burst)  # now the full lull expires
 
         msgs = [
             r.message
@@ -440,12 +464,12 @@ class TestInterruptionDetectorLullAggregation:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()  # first burst classified
+            scheduler.fire_for(detector._finalize_burst)  # first burst classified
             clock.advance(10.0)
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()  # second burst classified
+            scheduler.fire_for(detector._finalize_burst)  # second burst classified
 
         msgs = [
             r.message
@@ -476,7 +500,7 @@ class TestInterruptionDetectorStateSnapshot:
             tracker.state = ResponseState.SPEAKING  # state changed mid-burst
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()
+            scheduler.fire_for(detector._finalize_burst)
 
         msgs = [
             r.message
@@ -488,11 +512,13 @@ class TestInterruptionDetectorStateSnapshot:
 
 
 class TestInterruptionDetectorMinThresholdLog:
-    def test_discarded_burst_does_not_log_min_crossed(
+    def test_burst_ending_before_min_does_not_log(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, clock, scheduler = _make_detector(
+        # Burst ends before the min timer fires — the pending timer
+        # gets cancelled at finalize; no log.
+        detector, registry, _clock, scheduler = _make_detector(
             min_s=2.0, boundary_s=30.0
         )
         registry.get(1).state = ResponseState.SPEAKING
@@ -500,16 +526,15 @@ class TestInterruptionDetectorMinThresholdLog:
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             detector.on_voice_activity(42, VoiceActivityEvent.started)
-            clock.advance(0.5)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()
+            scheduler.fire_for(detector._finalize_burst)
         assert not any("min threshold crossed" in r.message for r in caplog.records)
 
-    def test_short_burst_logs_min_crossed(
+    def test_still_speaking_at_min_fires_log(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, clock, scheduler = _make_detector(
+        detector, registry, _clock, scheduler = _make_detector(
             min_s=2.0, boundary_s=30.0
         )
         registry.get(1).state = ResponseState.SPEAKING
@@ -517,16 +542,56 @@ class TestInterruptionDetectorMinThresholdLog:
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             detector.on_voice_activity(42, VoiceActivityEvent.started)
-            clock.advance(3.0)
-            detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            scheduler.fire()
+            # Min timer fires in real time while user is still speaking.
+            scheduler.fire_for(detector._on_min_crossed)
         crossed = [
             r.message for r in caplog.records if "min threshold crossed" in r.message
         ]
         assert len(crossed) == 1
-        assert "3.00s" in crossed[0]
-        assert "min=2.00s" in crossed[0]
-        assert "SPEAKING" in crossed[0]
+        assert "during SPEAKING" in crossed[0]
+        # No duration should be emitted — the log is about the
+        # crossing event itself, not a measured duration.
+        assert "s)" not in crossed[0]
+        assert "min=" not in crossed[0]
+
+    def test_min_fires_while_silent_does_not_log(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Speaker went quiet before the min timer expired — at fire
+        # time there's no active speech so the burst hasn't crossed.
+        detector, registry, _clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            # Min timer is still pending (lull arming doesn't cancel
+            # it); fire it directly.
+            scheduler.fire_for(detector._on_min_crossed)
+        assert not any("min threshold crossed" in r.message for r in caplog.records)
+
+    def test_finalize_cancels_pending_min_timer(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # If the lull finalizes the burst before the min timer has
+        # fired, the min timer is cancelled — it should not log later.
+        detector, registry, _clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            scheduler.fire_for(detector._finalize_burst)
+        assert not scheduler.has_pending(detector._on_min_crossed)
+        assert not any("min threshold crossed" in r.message for r in caplog.records)
 
 
 class TestInterruptionClassEnum:

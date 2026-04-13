@@ -245,6 +245,11 @@ class InterruptionDetector:
         # Pending finalize timer. Armed when everyone goes quiet,
         # cancelled on any new ``started`` event within the same lull.
         self._lull_handle: _Cancelable | None = None
+        # Pending min-threshold timer. Armed at burst start for
+        # ``min_interruption_s`` seconds; fires exactly once to log
+        # that the noise floor was crossed (if anyone is still
+        # speaking at that moment). Cancelled on burst finalize.
+        self._min_handle: _Cancelable | None = None
 
     def on_voice_activity(
         self,
@@ -267,6 +272,11 @@ class InterruptionDetector:
             if self._burst_started_at is None:
                 self._burst_started_at = self._clock()
                 self._burst_state = tracker.state
+                # Arm the min-crossed timer once per burst. Fires in
+                # real time at exactly ``min_interruption_s`` after
+                # first speech, letting operators see the threshold
+                # crossing as it happens rather than only at finalize.
+                self._arm_min_timer()
             self._speaking.add(user_id)
             return
 
@@ -285,22 +295,56 @@ class InterruptionDetector:
         self._burst_last_ended_at = self._clock()
         self._arm_lull()
 
-    def _arm_lull(self) -> None:
-        self._cancel_lull()
+    def _schedule(self, delay: float, callback: Callable[[], None]) -> _Cancelable:
         scheduler = self._scheduler
         if scheduler is None:
             loop = asyncio.get_event_loop()
             scheduler = loop.call_later
-        self._lull_handle = scheduler(self._lull_timeout_s, self._finalize_burst)
+        return scheduler(delay, callback)
+
+    def _arm_lull(self) -> None:
+        self._cancel_lull()
+        self._lull_handle = self._schedule(self._lull_timeout_s, self._finalize_burst)
 
     def _cancel_lull(self) -> None:
         if self._lull_handle is not None:
             self._lull_handle.cancel()
             self._lull_handle = None
 
+    def _arm_min_timer(self) -> None:
+        self._cancel_min_timer()
+        self._min_handle = self._schedule(
+            self._min_interruption_s,
+            self._on_min_crossed,
+        )
+
+    def _cancel_min_timer(self) -> None:
+        if self._min_handle is not None:
+            self._min_handle.cancel()
+            self._min_handle = None
+
+    def _on_min_crossed(self) -> None:
+        """Fire the min-threshold log if the burst is still live.
+
+        The burst is "live" if at least one user is actively speaking
+        at this moment — i.e., the speech has continued past
+        ``min_interruption_s`` without a silence gap long enough to
+        disqualify it. If the speaker went quiet before the threshold
+        fired, the burst hasn't crossed yet and may end up discarded;
+        we stay silent in that case.
+        """
+        self._min_handle = None
+        if not self._speaking or self._burst_state is None:
+            return
+        _logger.info(
+            "interruption: min threshold crossed during %s",
+            self._burst_state.value,
+        )
+
     def _finalize_burst(self) -> None:
         """Classify + log the accumulated burst. Invoked by the lull timer."""
         self._lull_handle = None
+        self._cancel_min_timer()
         started_at = self._burst_started_at
         last_ended_at = self._burst_last_ended_at
         observed = self._burst_state
@@ -316,17 +360,6 @@ class InterruptionDetector:
         duration = last_ended_at - started_at
 
         classification = self._classify(duration)
-        # Separate info log for the min-threshold crossing so operators
-        # can see "this burst is no longer back-channel noise" as a
-        # distinct event from the short/long classification. Only fires
-        # when the burst survives the noise floor.
-        if duration >= self._min_interruption_s:
-            _logger.info(
-                "interruption: min threshold crossed (%.2fs, min=%.2fs) during %s",
-                duration,
-                self._min_interruption_s,
-                observed.value,
-            )
         _logger.info(
             "interruption: %s (%.2fs) during %s",
             classification.value,
