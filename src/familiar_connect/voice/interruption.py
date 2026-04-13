@@ -80,6 +80,13 @@ class ResponseTracker:
     def transition(self, new_state: ResponseState) -> None:
         """Move to *new_state* and log the transition at INFO.
 
+        Same-state transitions are silently ignored. This matters for
+        the voice lull path: the voice pipeline transitions to
+        ``GENERATING`` before the side-model YES/NO eval, and on YES
+        :func:`_run_voice_response` also transitions to ``GENERATING``
+        — making the call a no-op keeps the log honest instead of
+        showing a spurious ``GENERATING→GENERATING`` line.
+
         The method is deliberately permissive — it does not enforce a
         strict state graph because the real constraints (must cancel the
         task before leaving ``GENERATING``, must ``vc.stop()`` before
@@ -88,6 +95,8 @@ class ResponseTracker:
         the log line makes unexpected sequences easy to spot.
         """
         old = self.state
+        if old is new_state:
+            return
         self.state = new_state
         _logger.info(
             "tracker guild=%s state: %s→%s (unsolicited=%s)",

@@ -97,6 +97,30 @@ class TestResponseTrackerTransition:
             for rec in caplog.records
         )
 
+    def test_same_state_transition_is_silent_noop(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # YES path on voice lull: voice pipeline marks GENERATING for
+        # the eval, then _run_voice_response also marks GENERATING.
+        # The second call must not log a spurious GENERATING→GENERATING.
+        t = ResponseTracker(guild_id=1)
+        t.transition(ResponseState.GENERATING)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            t.transition(ResponseState.GENERATING)
+        assert not any("GENERATING→GENERATING" in rec.message for rec in caplog.records)
+        assert t.state is ResponseState.GENERATING
+
+    def test_same_state_idle_does_not_clear_scratch(self) -> None:
+        # An idempotent IDLE transition shouldn't wipe scratch fields
+        # (it was already idle — there's no per-response state to reset).
+        t = ResponseTracker(guild_id=1)
+        t.response_text = "preserved"
+        t.transition(ResponseState.IDLE)
+        assert t.response_text == "preserved"
+
     def test_transition_log_includes_unsolicited_flag(
         self,
         caplog: pytest.LogCaptureFixture,

@@ -408,16 +408,37 @@ async def subscribe_my_voice(
         ) -> None:
             raw_name = user_names.get(user_id, f"User-{user_id}")
             safe_name = sanitize_name(raw_name) or raw_name
-            await familiar.monitor.on_message(
-                channel_id=voice_channel_id,
-                speaker=safe_name,
-                text=merged.text,
-                is_mention=False,
-                # The voice pipeline already debounced silence via
-                # VoiceLullMonitor, so this call is itself the lull.
-                # Tell the monitor not to start another lull timer.
-                is_lull_endpoint=True,
+            # Voice lull dispatch: mark the tracker as GENERATING for the
+            # duration of the side-model YES/NO eval so an interruption
+            # that arrives while the familiar is "thinking about whether
+            # to speak" is detectable. On YES, ``_run_voice_response``
+            # also transitions to GENERATING (no-op) and continues into
+            # SPEAKING/IDLE on its own. On NO, no on_respond fires, so
+            # the tracker is still GENERATING when we get back here and
+            # we transition it back to IDLE.
+            tracker = familiar.tracker_registry.get(
+                voice_guild_id if voice_guild_id is not None else 0,
             )
+            tracker.is_unsolicited = True  # lull is always unsolicited
+            tracker.transition(ResponseState.GENERATING)
+            try:
+                await familiar.monitor.on_message(
+                    channel_id=voice_channel_id,
+                    speaker=safe_name,
+                    text=merged.text,
+                    is_mention=False,
+                    # The voice pipeline already debounced silence via
+                    # VoiceLullMonitor, so this call is itself the lull.
+                    # Tell the monitor not to start another lull timer.
+                    is_lull_endpoint=True,
+                )
+            finally:
+                # If the side-model said NO, no on_respond fired, the
+                # tracker is still GENERATING — revert to IDLE so the
+                # next turn starts clean. If YES, _run_voice_response
+                # has already cycled the tracker through SPEAKING→IDLE.
+                if tracker.state is ResponseState.GENERATING:
+                    tracker.transition(ResponseState.IDLE)
 
         # debounce per-final Deepgram fragments into a single utterance
         # via VoiceLullMonitor; fires after voice_lull_timeout of silence
