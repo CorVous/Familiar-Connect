@@ -33,8 +33,8 @@ voice_lull_timeout = 5.0
 
 [voice.interruption]
 interrupt_tolerance   = "average"   # very_meek | meek | average | stubborn | very_stubborn
-min_interruption_s    = 1.5         # back-channel filter threshold
-short_long_boundary_s = 4.0         # short (polite pause) vs. long (regen)
+min_interruption_s    = 2.0         # back-channel filter threshold
+short_long_boundary_s = 30.0        # short (polite pause) vs. long (regen)
 
 [providers.history]
 window_size = 20

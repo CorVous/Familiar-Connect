@@ -252,8 +252,8 @@ class CharacterConfig:
     text_lull_timeout: float = 10.0
     voice_lull_timeout: float = 5.0
     interrupt_tolerance: InterruptTolerance = InterruptTolerance.average
-    min_interruption_s: float = 1.5
-    short_long_boundary_s: float = 4.0
+    min_interruption_s: float = 2.0
+    short_long_boundary_s: float = 30.0
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
 
@@ -628,7 +628,7 @@ def _parse_voice_interruption(
             )
             raise ConfigError(msg) from exc
 
-    min_raw = raw.get("min_interruption_s", 1.5)
+    min_raw = raw.get("min_interruption_s", 2.0)
     if not isinstance(min_raw, (int, float)) or isinstance(min_raw, bool):
         msg = (
             "[voice.interruption].min_interruption_s must be a number, "
@@ -643,7 +643,7 @@ def _parse_voice_interruption(
         )
         raise ConfigError(msg)
 
-    boundary_raw = raw.get("short_long_boundary_s", 4.0)
+    boundary_raw = raw.get("short_long_boundary_s", 30.0)
     if not isinstance(boundary_raw, (int, float)) or isinstance(boundary_raw, bool):
         msg = (
             "[voice.interruption].short_long_boundary_s must be a number, "
