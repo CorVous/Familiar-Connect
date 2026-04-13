@@ -167,6 +167,14 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("Failed to load familiar config: %s", exc)
         return 1
 
+    _logger.info(
+        "voice.interruption: tolerance=%s(%.2f) min=%.1fs boundary=%.1fs",
+        character_config.interrupt_tolerance.value,
+        character_config.interrupt_tolerance.base_probability,
+        character_config.min_interruption_s,
+        character_config.short_long_boundary_s,
+    )
+
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         _logger.error("OPENROUTER_API_KEY environment variable is required")
