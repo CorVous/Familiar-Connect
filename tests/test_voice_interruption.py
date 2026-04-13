@@ -481,23 +481,24 @@ class TestInterruptionDetectorLullAggregation:
         assert "long" in msgs[1]
 
 
-class TestInterruptionDetectorStateSnapshot:
-    def test_records_state_at_burst_start(
+class TestInterruptionDetectorStateUpgrade:
+    def test_generating_to_speaking_midburst_is_reported_as_speaking(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        # If state transitions during the burst, the classification
-        # should report the state observed when the burst began.
+        # A burst that begins in GENERATING but continues through the
+        # familiar's SPEAKING transition should be classified as a
+        # SPEAKING interruption — the state is resolved at log time.
         detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
         tracker = registry.get(1)
-        tracker.state = ResponseState.GENERATING
+        tracker.transition(ResponseState.GENERATING)
 
         with caplog.at_level(
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(1.0)
-            tracker.state = ResponseState.SPEAKING  # state changed mid-burst
+            tracker.transition(ResponseState.SPEAKING)
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
@@ -508,7 +509,161 @@ class TestInterruptionDetectorStateSnapshot:
             if "interruption:" in r.message and "min threshold" not in r.message
         ]
         assert len(msgs) == 1
-        assert "GENERATING" in msgs[0]
+        assert "during SPEAKING" in msgs[0]
+        assert "GENERATING" not in msgs[0]
+
+
+class TestInterruptionDetectorStarterUser:
+    def test_classification_log_includes_starter_user_id(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
+        assert len(msgs) == 1
+        assert "by user=42" in msgs[0]
+
+    def test_min_crossed_log_includes_starter_user_id(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            scheduler.fire_for(detector._on_min_crossed)
+        crossed = [
+            r.message for r in caplog.records if "min threshold crossed" in r.message
+        ]
+        assert len(crossed) == 1
+        assert "by user=42" in crossed[0]
+
+    def test_starter_is_first_speaker_even_with_multiple_users(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(0.5)
+            detector.on_voice_activity(43, VoiceActivityEvent.started)
+            clock.advance(1.5)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            detector.on_voice_activity(43, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
+        assert len(msgs) == 1
+        assert "by user=42" in msgs[0]
+        assert "user=43" not in msgs[0]
+
+
+class TestInterruptionDetectorPreExistingSpeech:
+    def test_speech_carrying_into_generating_starts_burst(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # User begins speaking while the tracker is IDLE. When the
+        # tracker transitions to GENERATING (e.g., a voice-lull
+        # interject kicks in), the detector retroactively starts a
+        # burst so the speech counts as a GENERATING interruption.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        # User 42 starts talking during IDLE — detector sees the event
+        # but doesn't open a burst yet.
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not scheduler.has_pending(detector._finalize_burst)
+        # Tracker transitions to GENERATING while user is still speaking.
+        tracker.transition(ResponseState.GENERATING)
+        clock.advance(2.0)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
+        assert len(msgs) == 1
+        assert "during GENERATING" in msgs[0]
+        assert "by user=42" in msgs[0]
+
+    def test_no_burst_started_when_idle_transition_has_no_speakers(
+        self,
+    ) -> None:
+        # IDLE → GENERATING with nobody talking: don't spuriously
+        # create a burst.
+        detector, registry, _clock, scheduler = _make_detector()
+        registry.get(1).transition(ResponseState.GENERATING)
+        assert not scheduler.has_pending(detector._finalize_burst)
+        assert not scheduler.has_pending(detector._on_min_crossed)
+
+
+class TestInterruptionDetectorAbortOnIdle:
+    def test_returning_to_idle_cancels_timers_and_drops_burst(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Familiar stops speaking (SPEAKING → IDLE) mid-burst — all
+        # interruption timers must be cancelled and no classification
+        # emitted.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.transition(ResponseState.SPEAKING)
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Lull timer is armed at this point.
+        assert scheduler.has_pending(detector._finalize_burst)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            tracker.transition(ResponseState.IDLE)
+        # Both timers should now be cancelled.
+        assert not scheduler.has_pending(detector._finalize_burst)
+        assert not scheduler.has_pending(detector._on_min_crossed)
+        # And no classification log should have been emitted.
+        assert not any("interruption:" in r.message for r in caplog.records)
+
+    def test_idle_during_active_speech_cancels_min_timer(
+        self,
+    ) -> None:
+        # Tracker goes IDLE while user is still actively speaking —
+        # the pending min timer must be cancelled and the burst dropped.
+        detector, registry, _clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        tracker = registry.get(1)
+        tracker.transition(ResponseState.SPEAKING)
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert scheduler.has_pending(detector._on_min_crossed)
+        tracker.transition(ResponseState.IDLE)
+        assert not scheduler.has_pending(detector._on_min_crossed)
 
 
 class TestInterruptionDetectorMinThresholdLog:
