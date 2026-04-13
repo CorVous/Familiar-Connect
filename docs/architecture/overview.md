@@ -146,7 +146,8 @@ came from so the pipeline can be tested and extended in isolation.
   familiar — set individually in `character.toml` under
   `[llm.main_prose]`, `[llm.post_process_style]`,
   `[llm.reasoning_context]`, `[llm.history_summary]`,
-  `[llm.memory_search]`, and `[llm.interjection_decision]`.
+  `[llm.memory_search]`, `[llm.interjection_decision]`,
+  and `[llm.mood_eval]`.
 - **Streaming:** Responses are streamed so the TTS path can start
   speaking before the full reply arrives.
 - **Per-call-site slots:** Each provider/processor holds its own
