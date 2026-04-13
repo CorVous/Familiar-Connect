@@ -575,6 +575,7 @@ class TestVoiceSubscription:
         voice_channel = ctx.author.voice.channel
         voice_channel.connect.assert_called_once()
         assert familiar.subscriptions.voice_in_guild(999) is not None
+        ctx.defer.assert_called_once_with(ephemeral=True)
         ctx.followup.send.assert_called_once_with(ANY, ephemeral=True)
 
     def test_subscribe_my_voice_skips_transcription_when_no_transcriber(
