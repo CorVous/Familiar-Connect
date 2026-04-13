@@ -47,6 +47,13 @@ pushing through, while leaving room for ``very_meek`` + negative mood
 to still yield cleanly."""
 
 
+def _make_set_event() -> asyncio.Event:
+    """Return a pre-set :class:`asyncio.Event` (delivery gate default)."""
+    e = asyncio.Event()
+    e.set()
+    return e
+
+
 class ResponseState(Enum):
     """Where the familiar sits in the voice-reply lifecycle."""
 
@@ -98,6 +105,11 @@ class ResponseTracker:
     # start bursts (pre-existing speech carrying into GENERATING) and
     # abort bursts when the familiar returns to IDLE.
     on_state_change: Callable[[ResponseState], None] | None = None
+    # Step 9: gates TTS delivery during a short interruption while
+    # GENERATING. Starts set (unblocked); cleared by the detector when
+    # a burst begins during GENERATING; set again when the burst ends.
+    # Always reset to set on IDLE so the next turn starts unblocked.
+    delivery_gate: asyncio.Event = field(default_factory=_make_set_event)
 
     def transition(self, new_state: ResponseState) -> None:
         """Move to *new_state* and log the transition at INFO.
@@ -135,6 +147,7 @@ class ResponseTracker:
             self.playback_start_time = None
             self.is_unsolicited = False
             self.mood_modifier = 0.0
+            self.delivery_gate.set()
         elif new_state is ResponseState.SPEAKING:
             # Stamp the wall clock at the moment audio begins so
             # Step 11's yield path can compute elapsed_ms without
@@ -495,6 +508,14 @@ class InterruptionDetector:
         # the observer, so reading here keeps them working.
         if tracker.state is not ResponseState.IDLE:
             self._burst_latest_state = tracker.state
+        # Step 9: clear delivery gate when burst starts during GENERATING
+        # so TTS waits until the burst ends.
+        if tracker.state is ResponseState.GENERATING:
+            tracker.delivery_gate.clear()
+            _logger.info(
+                "dispatch: burst@GENERATING gate cleared speaker=%s",
+                starter_id,
+            )
         # Arm the min-crossed timer. Fires in real time at
         # ``min_interruption_s`` after burst start — the earliest
         # moment the accumulated duration can cross the threshold.
@@ -641,6 +662,19 @@ class InterruptionDetector:
             starter_id,
             state.value,
         )
+        # Step 9: release the delivery gate for any burst that occurred
+        # during GENERATING. For short/discarded the gate was cleared at
+        # burst start; set it now so TTS can proceed. For long, Step 8
+        # (future) will cancel the task before the gate matters — the
+        # IDLE transition also resets it as a safety net.
+        if state is ResponseState.GENERATING:
+            tracker = self._tracker_registry.get(self._guild_id)
+            tracker.delivery_gate.set()
+            if classification is InterruptionClass.short:
+                _logger.info(
+                    "dispatch: short@GENERATING → gate released speaker=%s",
+                    starter_id,
+                )
 
     def _classify(self, duration: float) -> InterruptionClass:
         if duration < self._min_interruption_s:

@@ -292,6 +292,12 @@ async def _run_voice_response(
 
     _logger.info("[Voice Response] %s", reply_text)
 
+    # Step 9: if a short interruption is in progress while we were
+    # generating, wait for the user to finish before starting TTS.
+    # The delivery gate is set by default and cleared/re-set by the
+    # InterruptionDetector; on IDLE reset it is always set.
+    await tracker.delivery_gate.wait()
+
     if familiar.tts_client is not None:
         try:
             tts_result = await familiar.tts_client.synthesize(reply_text)

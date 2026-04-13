@@ -47,6 +47,7 @@ from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.tts import TTSResult
 from familiar_connect.voice.interruption import ResponseState
 from familiar_connect.voice_lull import VoiceLullMonitor
 
@@ -1496,3 +1497,145 @@ class TestVoiceGenerationCancellation:
             familiar_id=familiar.id, channel_id=9000, limit=10
         )
         assert turns == []
+
+
+class TestDeliveryGate:
+    """Step 9: short interruption during GENERATING pauses TTS delivery.
+
+    The delivery gate is an asyncio.Event on the tracker (starts set).
+    When cleared, _run_voice_response blocks before TTS synthesis. When
+    set again (lull confirmed), delivery proceeds normally.
+    """
+
+    def test_short_interruption_during_generating_pauses_then_delivers(
+        self, tmp_path: Path
+    ) -> None:
+        """TTS is not called while gate is cleared; called after gate is set."""
+        familiar = _make_familiar(tmp_path, reply="Here I am.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient(reply="Here I am.")
+        familiar.llm_clients["main_prose"] = slow_client
+
+        mock_tts: Any = AsyncMock()
+        mock_tts.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00" * 4, timestamps=[])
+        )
+        familiar.tts_client = mock_tts
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        async def _run() -> None:
+            voice_task = asyncio.create_task(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hey",
+                    buffer=[
+                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
+                    ],
+                    familiar=familiar,
+                    vc=vc,
+                    trigger=ResponseTrigger.direct_address,
+                )
+            )
+            # Wait until LLM is running.
+            await slow_client.started.wait()
+            tracker = familiar.tracker_registry.get(999)
+            # Simulate a short interruption: gate cleared.
+            tracker.delivery_gate.clear()
+            # Release the LLM (generation completes).
+            slow_client.release.set()
+            # Yield enough ticks for the task to reach delivery_gate.wait().
+            for _ in range(20):
+                await asyncio.sleep(0)
+            # TTS should be blocked — gate still cleared.
+            mock_tts.synthesize.assert_not_called()
+            # Release the gate (lull confirmed).
+            tracker.delivery_gate.set()
+            await voice_task
+
+        asyncio.run(_run())
+
+        # After gate release, TTS and playback should have happened.
+        mock_tts.synthesize.assert_called_once_with("Here I am.")
+        vc.play.assert_called_once()
+
+    def test_short_interruption_during_generating_does_not_cancel_task(
+        self, tmp_path: Path
+    ) -> None:
+        """Clearing the delivery gate never cancels the generation task."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        async def _run() -> None:
+            voice_task = asyncio.create_task(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hey",
+                    buffer=[
+                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
+                    ],
+                    familiar=familiar,
+                    vc=vc,
+                    trigger=ResponseTrigger.direct_address,
+                )
+            )
+            await slow_client.started.wait()
+            tracker = familiar.tracker_registry.get(999)
+            # Simulate gate clear (short interruption) — task must keep running.
+            tracker.delivery_gate.clear()
+            assert tracker.generation_task is not None
+            assert not tracker.generation_task.done()
+            # Release LLM and gate.
+            slow_client.release.set()
+            tracker.delivery_gate.set()
+            await voice_task
+
+        asyncio.run(_run())
+
+        assert not slow_client.was_cancelled
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.state is ResponseState.IDLE
+
+    def test_delivery_gate_set_after_normal_voice_response(
+        self, tmp_path: Path
+    ) -> None:
+        """Normal (no-interruption) turns leave the gate set."""
+        familiar = _make_familiar(tmp_path, reply="All good.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hey",
+                buffer=[BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.delivery_gate.is_set()

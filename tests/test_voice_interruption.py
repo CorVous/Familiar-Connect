@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -58,6 +59,10 @@ class TestResponseTrackerDefaults:
         t = ResponseTracker(guild_id=42)
         assert t.mood_modifier == 0.0  # noqa: RUF069
 
+    def test_new_tracker_delivery_gate_is_set(self) -> None:
+        t = ResponseTracker(guild_id=42)
+        assert t.delivery_gate.is_set()
+
 
 class TestResponseTrackerTransition:
     def test_transition_updates_state(self) -> None:
@@ -80,6 +85,13 @@ class TestResponseTrackerTransition:
         assert t.playback_start_time is None
         assert t.is_unsolicited is False
         assert t.mood_modifier == 0.0  # noqa: RUF069
+
+    def test_transition_to_idle_sets_delivery_gate(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        t.state = ResponseState.SPEAKING
+        t.delivery_gate.clear()  # simulate gate cleared mid-response
+        t.transition(ResponseState.IDLE)
+        assert t.delivery_gate.is_set()
 
     def test_transition_from_idle_to_generating_preserves_unsolicited_flag(
         self,
@@ -1124,3 +1136,97 @@ class TestSpeakingTransitionStampsPlaybackStart:
         t.playback_start_time = 100.0
         t.transition(ResponseState.IDLE)
         assert t.playback_start_time is None
+
+
+class TestDeliveryGate:
+    """Step 9: gate-based delivery pause for short bursts during GENERATING.
+
+    When a burst starts while the tracker is GENERATING, the delivery
+    gate is cleared so TTS waits. When the burst finalises as short (or
+    discarded), the gate is set so TTS proceeds. The generation task is
+    never cancelled.
+    """
+
+    def test_start_burst_during_generating_clears_gate(self) -> None:
+        detector, registry, _clock, _sched = _make_detector()
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not tracker.delivery_gate.is_set()
+
+    def test_start_burst_during_speaking_does_not_touch_gate(self) -> None:
+        detector, registry, _clock, _sched = _make_detector()
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.delivery_gate.clear()  # pre-clear to detect spurious set
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        # Gate should stay cleared — speaking path doesn't manage the gate.
+        assert not tracker.delivery_gate.is_set()
+
+    def test_finalize_short_burst_during_generating_sets_gate(self) -> None:
+        # short_long_boundary_s=4.0 so 2s burst is short
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not tracker.delivery_gate.is_set()  # gate cleared at burst start
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.delivery_gate.is_set()  # gate released at finalization
+
+    def test_finalize_discarded_burst_during_generating_sets_gate(self) -> None:
+        # Discard trivial bursts too so delivery isn't blocked.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not tracker.delivery_gate.is_set()
+        clock.advance(0.3)  # sub-min → discarded
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.delivery_gate.is_set()
+
+    def test_finalize_short_burst_during_generating_logs_gate_released(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        msgs = [r.message for r in caplog.records]
+        assert any("short@GENERATING" in m and "gate released" in m for m in msgs)
+
+    def test_short_interruption_during_generating_does_not_cancel_task(
+        self,
+    ) -> None:
+        """Short bursts never touch the generation task."""
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+
+        async def _noop() -> None:
+            await asyncio.sleep(100)
+
+        loop = asyncio.new_event_loop()
+        try:
+            task: asyncio.Task[None] = loop.create_task(_noop())
+            tracker.generation_task = task  # type: ignore[assignment]
+
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+
+            assert not task.cancelled()
+            assert not task.done()
+        finally:
+            task.cancel()
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+            loop.close()
