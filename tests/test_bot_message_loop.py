@@ -1032,11 +1032,14 @@ class TestVoicePreProcessorsSuppressed:
         asyncio.run(handler(42, transcription))
 
         # No LLM slot beyond main_prose should have been touched.
+        # interjection_decision is included: voice interjection is wired but
+        # currently disabled via _VOICE_INTERJECTION_ENABLED = False.
         llm_only_slots = (
             "reasoning_context",
             "post_process_style",
             "memory_search",
             "history_summary",
+            "interjection_decision",
         )
         for slot in llm_only_slots:
             client = familiar.llm_clients[slot]

@@ -159,6 +159,15 @@ async def unsubscribe_text(
     await ctx.respond("No longer listening here.", ephemeral=True)
 
 
+# VOICE INTERJECTION (disabled): when True the familiar will consult the
+# interjection_decision LLM before replying to each voice utterance,
+# matching the ConversationMonitor gate used on text channels.
+# To enable: set this to True and implement the decision call in
+# _handle_voice_result below (see ConversationMonitor._check_interjection
+# in chattiness.py for the prompt/YES-NO pattern to follow).
+_VOICE_INTERJECTION_ENABLED: bool = False
+
+
 def _build_voice_response_handler(
     *,
     vc: discord.VoiceClient,
@@ -212,6 +221,13 @@ def _build_voice_response_handler(
             preprocessors_enabled=frozenset(),
             postprocessors_enabled=frozenset(),
         )
+
+        # Interjection gate (currently disabled — see _VOICE_INTERJECTION_ENABLED).
+        # When enabled this block should call familiar.monitor's interjection_decision
+        # LLM with the utterance and return early without generating a reply if the
+        # model says NO, mirroring ConversationMonitor._check_interjection().
+        if _VOICE_INTERJECTION_ENABLED:  # pragma: no cover
+            pass  # implement voice interjection decision here
 
         request = ContextRequest(
             familiar_id=familiar.id,
