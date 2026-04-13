@@ -2,8 +2,15 @@
 
 How the familiar decides **whether** and **when** to speak in a conversation it hasn't been directly addressed in.
 
-!!! info "Status: Design"
-    Not yet shipped. Today the bot responds to **every** message on a subscribed channel — `bot.py:on_message` goes straight from subscription check to context pipeline to LLM call. There is no decision gate. This page describes the gate we want to build.
+!!! info "Status: Shipped"
+    The monitor is wired for both **text** and **voice** channels.
+    `bot.py:on_message` routes text messages through
+    `familiar.monitor.on_message`; `subscribe_my_voice` debounces
+    Deepgram finals through `VoiceLullMonitor` and then hands the
+    merged utterance to the **same** monitor with the voice channel
+    id. On a YES decision, the monitor's `on_respond` callback
+    dispatches to `_run_text_response` or `_run_voice_response` based
+    on whether a voice handler is registered for the channel.
 
 ## Motivation
 
@@ -79,7 +86,7 @@ Seconds of silence on a **text** channel before the lull evaluation fires. Text-
 
 Seconds of channel-wide silence after which a buffered voice utterance is handed to the response pipeline. Acts as a debounce on Deepgram's per-final transcript stream so the bot only responds once the speaker has actually paused, rather than on every mid-sentence fragment.
 
-Silence is detected Discord-natively: every inbound audio frame routed through the voice pipeline resets per-user silence watchdogs inside `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`). When every user has been quiet for longer than `user_silence_s` (200 ms) *and* there is at least one buffered final, the lull timer starts; on expiry the concatenated text is sent to `_handle_voice_result` via `on_utterance_complete`. Unlike the text lull, there is no side-model yes/no gate — voice lull is pure debounce.
+Silence is detected Discord-natively: every inbound audio frame routed through the voice pipeline resets per-user silence watchdogs inside `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`). When every user has been quiet for longer than `user_silence_s` (200 ms) *and* there is at least one buffered final, the lull timer starts; on expiry the concatenated text is handed to `ConversationMonitor.on_message` as one utterance, keyed by the voice channel id. **`voice_lull_timeout` is endpointing only** — the side-model YES/NO gate (direct address, counter-based interjection, conversational lull) is governed by `text_lull_timeout` inside `ConversationMonitor`, just as it is for text.
 
 **Default:** `5.0`
 
