@@ -93,6 +93,7 @@ class DeepgramTranscriber:
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._receive_task: asyncio.Task[None] | None = None
+        self._keepalive_task: asyncio.Task[None] | None = None
 
     def build_ws_url(self: Self) -> str:
         """Build the Deepgram WebSocket URL with query parameters."""
@@ -198,6 +199,7 @@ class DeepgramTranscriber:
         )
         _logger.info("Deepgram WebSocket connected (status=%s)", self._ws.close_code)
         self._receive_task = asyncio.create_task(self._receive_loop(output))
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
     async def send_audio(self: Self, data: bytes) -> None:
         """Send raw PCM audio bytes to the Deepgram WebSocket.
@@ -217,6 +219,12 @@ class DeepgramTranscriber:
 
     async def stop(self: Self) -> None:
         """Gracefully close the Deepgram connection."""
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._keepalive_task
+            self._keepalive_task = None
+
         if self._ws is not None and not self._ws.closed:
             with contextlib.suppress(Exception):
                 await self._ws.send_json({"type": "CloseStream"})
@@ -236,6 +244,27 @@ class DeepgramTranscriber:
 
     _MAX_RECONNECTS: int = 5
     _RECONNECT_DELAY: float = 1.0
+    _KEEPALIVE_INTERVAL: float = 5.0
+
+    async def _keepalive_loop(self: Self) -> None:
+        """Send periodic KeepAlive frames to prevent Deepgram's idle timeout.
+
+        Deepgram closes streaming connections after ~10 seconds of silence.
+        During bot processing (LLM, TTS) the pump has no user audio to
+        forward, so without a keepalive the connection is torn down and
+        the transcriber enters a reconnect loop that can exhaust
+        :attr:`_MAX_RECONNECTS`.
+
+        The loop re-reads :attr:`_ws` on each tick so it transparently
+        follows reconnects initiated by :meth:`_reconnect`.
+        """
+        while True:
+            await asyncio.sleep(self._KEEPALIVE_INTERVAL)
+            ws = self._ws
+            if ws is None or ws.closed:
+                continue
+            with contextlib.suppress(Exception):
+                await ws.send_json({"type": "KeepAlive"})
 
     async def _reconnect(self: Self) -> None:
         """Re-establish the Deepgram WebSocket connection.
