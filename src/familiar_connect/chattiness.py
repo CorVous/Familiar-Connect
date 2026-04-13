@@ -31,14 +31,10 @@ _logger = logging.getLogger(__name__)
 
 
 class ResponseTrigger(Enum):
-    """Why the conversation monitor decided the familiar should respond.
+    """Which gate fired: direct_address, interjection, or lull.
 
-    Passed to ``on_respond`` so downstream code (specifically the voice
-    interruption state machine) can tell invited speech (``direct_address``)
-    apart from unsolicited speech (``interjection``, ``lull``). Unsolicited
-    triggers get a positive bias on the interrupt-tolerance RNG so the
-    familiar tends to push through interruptions of its own self-started
-    remarks rather than yielding immediately.
+    Voice interruption state machine uses ``is_unsolicited`` to bias
+    interrupt-tolerance RNG toward pushing through self-started remarks.
     """
 
     direct_address = "direct_address"
@@ -179,12 +175,8 @@ def _format_buffer(buffer: list[BufferedMessage]) -> str:
 class ConversationMonitor:
     """Gates whether and when the familiar speaks.
 
-    Manages per-channel :class:`ChannelBuffer` state, evaluates three
-    triggers, invokes ``on_respond`` when interjection LLM says YES.
-    The callback receives ``(channel_id, buffer_snapshot, trigger)``
-    where ``trigger`` is a :class:`ResponseTrigger` describing which
-    gate fired. Voice code uses ``trigger.is_unsolicited`` to bias the
-    interrupt-tolerance RNG on its :class:`ResponseTracker`.
+    Per-channel :class:`ChannelBuffer` state, three triggers,
+    ``on_respond(channel_id, snapshot, trigger)`` callback.
     """
 
     def __init__(
@@ -225,12 +217,11 @@ class ConversationMonitor:
         is_mention: bool,
         is_lull_endpoint: bool = False,
     ) -> None:
-        """Process incoming message on a subscribed channel.
+        """Process incoming message on subscribed channel.
 
-        ``is_lull_endpoint=True`` (voice path) means the caller has
-        already debounced silence via ``voice_lull_timeout``; the
-        monitor skips its own timer and runs the lull evaluation
-        inline if no higher-priority trigger fires.
+        When ``is_lull_endpoint=True`` (voice path), caller already
+        debounced silence; monitor evaluates lull inline instead of
+        starting its own timer.
         """
         buf = self._get_or_create_buffer(channel_id)
 
@@ -327,7 +318,7 @@ class ConversationMonitor:
         )
 
     def _schedule_lull_evaluation(self, channel_id: int) -> None:
-        """Sync callback from call_later — schedules the async evaluation."""
+        """Sync callback from call_later — schedules async evaluation."""
         _logger.info("conversational lull expired channel=%s", channel_id)
         loop = asyncio.get_event_loop()
         task = loop.create_task(self._run_lull_evaluation(channel_id))

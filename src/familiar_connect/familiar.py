@@ -72,12 +72,9 @@ class Familiar:
     tracker_registry: ResponseTrackerRegistry = field(
         default_factory=ResponseTrackerRegistry,
     )
-    """Per-guild :class:`ResponseTracker` lookup used by the voice
-    interruption state machine. Populated lazily on first voice reply.
-    """
+    """Per-guild :class:`ResponseTracker` lookup; lazy-created."""
     mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
-    """Per-response mood modifier source. Stubbed to ``0.0`` until
-    Step 13 replaces it with a real side-model call."""
+    """Per-response mood modifier (stub: ``0.0``)."""
     extras: dict[str, object] = field(default_factory=dict)
     """scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet"""

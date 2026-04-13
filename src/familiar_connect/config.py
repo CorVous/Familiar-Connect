@@ -75,20 +75,9 @@ class Interjection(Enum):
 
 
 class InterruptTolerance(Enum):
-    """How stubborn the familiar is when interrupted mid-speech (voice only).
+    """Base probability of pushing through a mid-speech interruption (voice).
 
-    Base probability of *continuing to talk* when a user interrupts during
-    SPEAKING. The mood evaluator adds an ephemeral modifier on top of this
-    base; responses begun from the chattiness/interjection path also get a
-    positive bias so unsolicited remarks tend to push through.
-
-    | Tier            | Base probability |
-    |-----------------|------------------|
-    | ``very_meek``     | 0.10           |
-    | ``meek``          | 0.20           |
-    | ``average``       | 0.30           |
-    | ``stubborn``      | 0.45           |
-    | ``very_stubborn`` | 0.60           |
+    Mood modifier and unsolicited bias added on top at runtime.
     """
 
     very_meek = "very_meek"
@@ -155,12 +144,6 @@ class CharacterConfig:
         evaluation prompt.
     :param text_lull_timeout: text-only; voice uses ``voice_lull_timeout``.
     :param voice_lull_timeout: debounce for Deepgram final-transcript stream.
-    :param interrupt_tolerance: voice-only; probability of pushing through
-        a mid-speech interruption. See :class:`InterruptTolerance`.
-    :param min_interruption_s: voice-only; minimum continuous user speech
-        before a burst counts as an interruption.
-    :param short_long_boundary_s: voice-only; threshold separating short
-        (polite pause) from long (cancel/regen) interruptions.
     """
 
     default_mode: ChannelMode = DEFAULT_CHANNEL_MODE

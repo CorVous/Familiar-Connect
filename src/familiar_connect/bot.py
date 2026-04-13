@@ -138,27 +138,12 @@ async def _run_voice_response(
     vc: discord.VoiceClient,
     trigger: ResponseTrigger,
 ) -> None:
-    """Run full pipeline → LLM → TTS path for a voice channel.
-
-    Called by ``on_respond`` when :class:`ConversationMonitor` decides
-    the familiar should speak. Mirrors :func:`_run_text_response`;
-    voice uses :attr:`Modality.voice` and trims LLM-calling providers
-    and processors for lower latency. Persists every buffered user
-    utterance in order, then the assistant reply, so the history
-    store reflects the full conversation.
-    """
-    # Resolve the per-guild response tracker and mark this response with
-    # the trigger's unsolicited flag. The tracker drives the voice
-    # interruption state machine; for Step 3 it is observational only —
-    # we log the IDLE→GENERATING→SPEAKING→IDLE lifecycle so operators
-    # can see that solicited vs. unsolicited replies are tagged right
-    # before any interruption logic is wired up.
+    """Run full pipeline → LLM → TTS path for voice channel."""
+    # resolve per-guild response tracker; mark unsolicited flag
     tracker = familiar.tracker_registry.get(guild_id if guild_id is not None else 0)
     tracker.vc = vc
     tracker.is_unsolicited = trigger.is_unsolicited
-    # Cache the mood modifier for the whole turn — should_keep_talking
-    # at Moment 1 must use the same value the tracker saw at generation
-    # start, not re-roll mid-response.
+    # cache mood modifier for whole turn (no mid-response re-roll)
     tracker.mood_modifier = familiar.mood_evaluator.evaluate()
     tracker.transition(ResponseState.GENERATING)
 
@@ -225,15 +210,7 @@ async def _run_voice_response(
         ),
     )
 
-    # main reply isolation: catch ``LLMClient.chat`` raise set
-    # (transport, status, malformed payload) and return cleanly so
-    # the monitor callback stays alive for the next utterance.
-    #
-    # Step 7: the chat call runs as a cancellable asyncio.Task parked
-    # on ``tracker.generation_task`` so a later long-interruption
-    # handler can call ``tracker.generation_task.cancel()`` to abort
-    # mid-generation without wasting tokens. No caller cancels yet —
-    # this is plumbing for Steps 8 and 12.
+    # cancellable generation task; parked on tracker for interruption path
     generation_task = asyncio.create_task(
         familiar.llm_clients["main_prose"].chat(messages),
     )
@@ -244,11 +221,10 @@ async def _run_voice_response(
         tracker.generation_task = None
         current = asyncio.current_task()
         if current is not None and current.cancelling() > 0:
-            # The outer task was cancelled from above — propagate so
-            # we don't swallow someone else's cancellation.
+            # outer task cancelled from above — propagate
             tracker.transition(ResponseState.IDLE)
             raise
-        # The generation task itself was cancelled (interruption path).
+        # generation task cancelled (interruption path)
         _logger.info(
             "voice generation cancelled channel=%s",
             channel_id,
@@ -268,9 +244,7 @@ async def _run_voice_response(
     reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 
-    # persist every buffered user utterance then the assistant reply
-    # after the LLM call so a crash never leaves an orphaned user
-    # turn with no reply; mirrors _run_text_response
+    # persist buffered user utterances then assistant reply
     for msg in buffer:
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
@@ -297,17 +271,12 @@ async def _run_voice_response(
             tts_result = await familiar.tts_client.synthesize(reply_text)
             tracker.timestamps = list(tts_result.timestamps)
             stereo = mono_to_stereo(tts_result.audio)
-            # Wait for any currently-playing audio to finish.
-            # vc.is_playing() is a third-party poll; no event available.
+            # wait for current audio to finish (poll — no event available)
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
             tracker.transition(ResponseState.SPEAKING)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            # Poll playback to completion so the IDLE transition is
-            # observable in the log and the tracker state reflects
-            # reality for the next turn. No interruption dispatch yet
-            # (Step 3 is observational); later steps will replace this
-            # poll with a state-machine-aware loop.
+            # poll playback to completion for IDLE transition
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
         except Exception:
@@ -321,12 +290,9 @@ async def subscribe_my_voice(
 ) -> None:
     """Join caller's voice channel and register a voice subscription.
 
-    When ``familiar.transcriber`` is set, starts a per-user Deepgram
-    pipeline, debounces finals through :class:`VoiceLullMonitor`, and
-    feeds merged utterances into :attr:`Familiar.monitor` so voice
-    turns share the same ``ConversationMonitor`` gate as text. On
-    YES, the monitor dispatches via ``voice_response_handlers`` in
-    :attr:`Familiar.extras`. Without a transcriber, joins for TTS only.
+    When ``familiar.transcriber`` is set, starts per-user Deepgram
+    pipeline → :class:`VoiceLullMonitor` → ``ConversationMonitor``
+    (same gate as text). Without transcriber, joins for TTS only.
     """
     author = ctx.author
     if not isinstance(author, discord.Member) or author.voice is None:
@@ -395,12 +361,7 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        # Register a per-voice-channel response handler on the familiar.
-        # The ``on_respond`` callback built in ``create_bot`` looks this
-        # up by channel id and dispatches here when the
-        # ``ConversationMonitor`` decides the familiar should speak on
-        # this voice channel. Captures ``vc`` so the same voice client
-        # connection handles playback for the life of the subscription.
+        # per-voice-channel response handler; dispatched by on_respond
         async def _voice_response_handler(
             channel_id: int,
             buffer: list[BufferedMessage],
@@ -426,27 +387,15 @@ async def subscribe_my_voice(
         )
         voice_response_handlers[voice_channel_id] = _voice_response_handler
 
-        # Debounce Deepgram finals into one utterance per speaker turn,
-        # then hand the merged transcript to the ConversationMonitor —
-        # exactly the same entry point text channels use. The monitor
-        # runs direct-address detection on the transcript text, counter-
-        # based interjection checks, and a silence-based conversational
-        # lull gate. On YES, ``_voice_response_handler`` fires via
-        # ``on_respond``.
+        # deliver debounced transcript to ConversationMonitor
         async def _deliver_to_monitor(
             user_id: int,
             merged: TranscriptionResult,
         ) -> None:
             raw_name = user_names.get(user_id, f"User-{user_id}")
             safe_name = sanitize_name(raw_name) or raw_name
-            # Voice lull dispatch: mark the tracker as GENERATING for the
-            # duration of the side-model YES/NO eval so an interruption
-            # that arrives while the familiar is "thinking about whether
-            # to speak" is detectable. On YES, ``_run_voice_response``
-            # also transitions to GENERATING (no-op) and continues into
-            # SPEAKING/IDLE on its own. On NO, no on_respond fires, so
-            # the tracker is still GENERATING when we get back here and
-            # we transition it back to IDLE.
+            # mark GENERATING during side-model eval; reverted to IDLE
+            # in finally block if monitor says NO
             tracker = familiar.tracker_registry.get(
                 voice_guild_id if voice_guild_id is not None else 0,
             )
@@ -458,24 +407,16 @@ async def subscribe_my_voice(
                     speaker=safe_name,
                     text=merged.text,
                     is_mention=False,
-                    # The voice pipeline already debounced silence via
-                    # VoiceLullMonitor, so this call is itself the lull.
-                    # Tell the monitor not to start another lull timer.
+                    # already debounced by VoiceLullMonitor; skip lull timer
                     is_lull_endpoint=True,
                 )
             finally:
-                # If the side-model said NO, no on_respond fired, the
-                # tracker is still GENERATING — revert to IDLE so the
-                # next turn starts clean. If YES, _run_voice_response
-                # has already cycled the tracker through SPEAKING→IDLE.
+                # revert to IDLE if monitor said NO (on YES,
+                # _run_voice_response already cycled to IDLE)
                 if tracker.state is ResponseState.GENERATING:
                     tracker.transition(ResponseState.IDLE)
 
-        # Per-guild interruption detector. Consumes Discord voice-activity
-        # events from the lull monitor (no separate Deepgram VAD path)
-        # and classifies bursts as discarded/short/long relative to the
-        # current ResponseTracker state. Detect-only for now — dispatch
-        # lands in later steps.
+        # per-guild interruption detector (detect-only for now)
         interruption_detector = InterruptionDetector(
             tracker_registry=familiar.tracker_registry,
             guild_id=voice_guild_id if voice_guild_id is not None else 0,
@@ -494,9 +435,8 @@ async def subscribe_my_voice(
             user_silence_s=0.2,
             on_utterance_complete=_deliver_to_monitor,
             on_voice_activity=interruption_detector.on_voice_activity,
-        )  # voice_lull_timeout is endpointing only; the conversational
-        # lull (side-model YES/NO gate) is governed by text_lull_timeout
-        # inside ConversationMonitor.
+        )  # voice_lull_timeout = endpointing; conversational lull governed
+        # by text_lull_timeout inside ConversationMonitor
         familiar.extras["voice_lull_monitor"] = lull_monitor
 
         async def _route_transcript_to_monitor(  # noqa: RUF029
@@ -556,10 +496,7 @@ async def unsubscribe_voice(
         await vc.disconnect()
 
     if sub is not None:
-        # Drop the per-channel voice response dispatch and clear any
-        # monitor state for this voice channel so a later re-subscribe
-        # starts fresh (and so a lull timer doesn't fire into a dead
-        # voice client).
+        # drop voice dispatch + monitor state for clean re-subscribe
         voice_response_handlers = cast(
             "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
             familiar.extras.get("voice_response_handlers", {}),
@@ -789,11 +726,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         buffer: list[BufferedMessage],
         trigger: ResponseTrigger,
     ) -> None:
-        # Voice dispatch first: if this channel has a voice response
-        # handler registered by subscribe_my_voice, hand the buffer to
-        # it. This is how the ConversationMonitor gate (direct address,
-        # interjection check, conversational lull) reaches the voice
-        # path now that voice shares the same monitor as text.
+        # voice dispatch first — shared ConversationMonitor gate
         voice_handlers = cast(
             "dict[int, Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]]]",  # noqa: E501
             familiar.extras.get("voice_response_handlers", {}),
