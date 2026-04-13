@@ -515,6 +515,45 @@ class TestDeepgramTranscriberLifecycle:
             assert queue.empty()
 
     @pytest.mark.asyncio
+    async def test_vad_events_logged_at_info(
+        self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SpeechStarted and UtteranceEnd surface at INFO.
+
+        These VAD events are operator-visible confirmation that
+        Deepgram is actually hearing speech on the current socket —
+        especially useful for diagnosing a post-rotation stream.
+        """
+        msgs: list[object] = []
+        for msg_type in ("SpeechStarted", "UtteranceEnd"):
+            ws_msg = MagicMock()
+            ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
+            ws_msg.data = json.dumps({"type": msg_type})
+            msgs.append(ws_msg)
+
+        ws_mock = self._make_ws_mock(messages=msgs)
+
+        with (
+            patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)),
+            caplog.at_level(logging.DEBUG, logger="familiar_connect.transcription"),
+        ):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+        for expected in ("SpeechStarted", "UtteranceEnd"):
+            matches = [
+                r
+                for r in caplog.records
+                if expected in r.getMessage() and "[Deepgram]" in r.getMessage()
+            ]
+            assert matches, f"expected a [Deepgram] {expected} log line"
+            assert all(r.levelno == logging.INFO for r in matches), (
+                f"{expected} should log at INFO"
+            )
+
+    @pytest.mark.asyncio
     async def test_metadata_logged_at_debug(
         self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -646,6 +685,40 @@ class TestDeepgramReconnect:
         ws2.send_bytes.assert_any_call(b"\x01\x02")
         assert client._pending_audio_bytes == 0
         assert not client._pending_audio
+
+    @pytest.mark.asyncio
+    async def test_send_audio_blocks_while_send_lock_is_held(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """send_audio respects ``_send_lock``.
+
+        ``_reconnect`` holds this lock across the ws swap and buffer
+        flush so that concurrent ``send_audio`` calls from the audio
+        pump cannot slip a fresh ``send_bytes`` between the swap and
+        the flush (which would make Deepgram receive
+        ``[fresh, buffered…]`` out of order and silently reject the
+        stream as non-speech).
+        """
+        ws_mock = self._make_ws_mock()
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                # Simulate reconnect holding the lock across its
+                # critical section.
+                await client._send_lock.acquire()
+                try:
+                    task = asyncio.create_task(client.send_audio(b"\x01"))
+                    await asyncio.sleep(0.05)
+                    assert not task.done(), "send_audio must wait on _send_lock"
+                    ws_mock.send_bytes.assert_not_called()
+                finally:
+                    client._send_lock.release()
+                await task
+                ws_mock.send_bytes.assert_called_once_with(b"\x01")
+            finally:
+                await client.stop()
 
     @pytest.mark.asyncio
     async def test_pending_audio_buffer_is_bounded(

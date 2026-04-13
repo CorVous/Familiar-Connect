@@ -101,6 +101,14 @@ class DeepgramTranscriber:
         # finishes. Bounded by :attr:`_PENDING_AUDIO_MAX_BYTES`.
         self._pending_audio: deque[bytes] = deque()
         self._pending_audio_bytes: int = 0
+        # Serialises ``send_audio`` against ``_reconnect`` so the ws
+        # swap + buffer flush happens atomically w.r.t. concurrent
+        # sends from ``_audio_pump``. Without this, the event loop can
+        # interleave a fresh ``send_bytes`` between the ws swap and
+        # the flush, so Deepgram receives the new stream's audio out
+        # of order (fresh chunk, then stale buffered chunks) and its
+        # VAD rejects the mix as non-speech.
+        self._send_lock: asyncio.Lock = asyncio.Lock()
 
     def build_ws_url(self: Self) -> str:
         """Build the Deepgram WebSocket URL with query parameters."""
@@ -230,16 +238,21 @@ class DeepgramTranscriber:
         if self._ws is None:
             msg = "Transcriber is not connected — call start() first"
             raise RuntimeError(msg)
-        if self._ws.closed:
-            self._buffer_pending_audio(data)
-            return
-        try:
-            await self._ws.send_bytes(data)
-        except ConnectionResetError:
-            # Race: the transport is closing but ws.closed is still
-            # False. Buffer the bytes so _reconnect can flush them to
-            # the new socket instead of dropping them in _audio_pump.
-            self._buffer_pending_audio(data)
+        # Serialise with ``_reconnect`` so the ws swap + buffer flush
+        # appear atomic to audio_pump. Otherwise we can ship fresh
+        # audio to the new socket before the stale buffered chunks,
+        # which Deepgram's VAD sees as a non-speech burst.
+        async with self._send_lock:
+            if self._ws is None or self._ws.closed:
+                self._buffer_pending_audio(data)
+                return
+            try:
+                await self._ws.send_bytes(data)
+            except ConnectionResetError:
+                # Race: the transport is closing but ws.closed is still
+                # False. Buffer the bytes so _reconnect can flush them to
+                # the new socket instead of dropping them in _audio_pump.
+                self._buffer_pending_audio(data)
 
     def _buffer_pending_audio(self: Self, data: bytes) -> None:
         """Append *data* to the pending-audio buffer.
@@ -331,7 +344,12 @@ class DeepgramTranscriber:
         """Re-establish the Deepgram WebSocket connection.
 
         Closes the old session and opens a fresh one so ``send_audio``
-        and the receive loop can continue transparently.
+        and the receive loop can continue transparently. The ws swap
+        and the buffer flush are performed under ``_send_lock`` so
+        that concurrent ``send_audio`` calls from the audio pump can't
+        interleave fresh audio with stale buffered chunks — Deepgram's
+        VAD on a fresh session rejects out-of-order audio as
+        non-speech, which silently suppresses transcription.
         """
         # Tear down old connection.
         if self._ws is not None and not self._ws.closed:
@@ -340,26 +358,36 @@ class DeepgramTranscriber:
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
-        # Open a new connection.
-        self._session = aiohttp.ClientSession()
+        # Open a new connection outside the lock so network latency
+        # doesn't block the audio pump any longer than necessary.
+        new_session = aiohttp.ClientSession()
         url = self.build_ws_url()
-        self._ws = await self._ws_connect(
-            self._session,
-            url,
-            self.build_headers(),
-        )
-        _logger.info("Deepgram WebSocket reconnected")
+        try:
+            new_ws = await self._ws_connect(
+                new_session,
+                url,
+                self.build_headers(),
+            )
+        except BaseException:
+            # Don't leak the half-constructed session if ws_connect
+            # raises (including asyncio.CancelledError from stop()).
+            with contextlib.suppress(Exception):
+                await new_session.close()
+            raise
 
-        # Flush any audio that arrived while the socket was closed so the
-        # user's first utterance after a server-side session rotation is
-        # not lost.
-        if self._pending_audio:
-            flushed = await self._flush_pending_audio(self._ws)
-            if flushed:
-                _logger.info(
-                    "Flushed %d buffered audio bytes to new Deepgram socket",
-                    flushed,
-                )
+        # Atomically swap the new socket in and drain the pending
+        # buffer before any other coroutine can call send_audio.
+        async with self._send_lock:
+            self._session = new_session
+            self._ws = new_ws
+            _logger.info("Deepgram WebSocket reconnected")
+            if self._pending_audio:
+                flushed = await self._flush_pending_audio(new_ws)
+                if flushed:
+                    _logger.info(
+                        "Flushed %d buffered audio bytes to new Deepgram socket",
+                        flushed,
+                    )
 
     async def _receive_loop(
         self: Self,
@@ -381,6 +409,12 @@ class DeepgramTranscriber:
                             await output.put(result)
                             # Got real data — reset reconnect counter.
                             consecutive_reconnects = 0
+                    elif msg_type in {"SpeechStarted", "UtteranceEnd"}:
+                        # VAD events: useful at INFO so operators can
+                        # confirm Deepgram is hearing speech after a
+                        # session rotation. Low-frequency enough not to
+                        # be noisy.
+                        _logger.info("[Deepgram] %s", msg_type)
                     else:
                         _logger.debug(
                             "[Deepgram] %s: %s",
