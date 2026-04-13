@@ -200,7 +200,7 @@ class CharacterConfig:
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average
     text_lull_timeout: float = 10.0
-    voice_lull_timeout: float = 2.0
+    voice_lull_timeout: float = 5.0
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
 
@@ -389,7 +389,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     )
 
     text_lull_timeout = float(data.get("text_lull_timeout", 10.0))
-    voice_lull_timeout = float(data.get("voice_lull_timeout", 2.0))
+    voice_lull_timeout = float(data.get("voice_lull_timeout", 5.0))
 
     llm_raw = data.get("llm", {})
     if not isinstance(llm_raw, dict):

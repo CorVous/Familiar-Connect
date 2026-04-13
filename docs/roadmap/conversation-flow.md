@@ -34,7 +34,7 @@ aliases = ["aria", "ari"]
 chattiness = "Curious and opinionated, but knows when to let others have their moment"
 interjection = "average"
 text_lull_timeout = 10.0
-voice_lull_timeout = 2.0
+voice_lull_timeout = 5.0
 ```
 
 ### `aliases: list[str]`
@@ -81,7 +81,7 @@ Seconds of channel-wide silence after which a buffered voice utterance is handed
 
 Silence is detected Discord-natively: every inbound audio frame routed through the voice pipeline resets per-user silence watchdogs inside `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`). When every user has been quiet for longer than `user_silence_s` (200 ms) *and* there is at least one buffered final, the lull timer starts; on expiry the concatenated text is sent to `_handle_voice_result` via `on_utterance_complete`. Unlike the text lull, there is no side-model yes/no gate — voice lull is pure debounce.
 
-**Default:** `2.0`
+**Default:** `5.0`
 
 ## Sketch
 

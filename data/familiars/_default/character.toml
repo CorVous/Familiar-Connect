@@ -21,7 +21,7 @@ aliases       = []
 chattiness    = "Balanced — responds when the conversation is relevant"
 interjection  = "average"
 text_lull_timeout  = 10.0
-voice_lull_timeout = 2.0
+voice_lull_timeout = 5.0
 
 [providers.history]
 window_size = 20
