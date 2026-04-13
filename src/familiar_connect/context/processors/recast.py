@@ -1,18 +1,11 @@
 """RecastPostProcessor — focused cleanup pass on the main LLM reply.
 
-Step 10 of docs/architecture/context-pipeline.md. Inspired by
-SillyTavern's ``recast-post-processing``.
+Runs the ``post_process_style`` slot's LLMClient with a rewrite
+prompt — tighten tone, strip formatting artefacts, rewrite for spoken
+delivery when modality is voice.
 
-Takes the main LLM's reply text and runs the ``post_process_style``
-slot's :class:`LLMClient` with a focused rewrite prompt — tighten
-tone, strip formatting artefacts, and (for voice turns) rewrite for
-spoken delivery. The modality on the :class:`ContextRequest`
-controls which prompt variant is used.
-
-The processor is **failure-isolated**: a slow model, an exception,
-or an empty / whitespace-only response all return the *original*
-reply unchanged. A broken cleanup pass should never break the
-user-facing reply.
+Failure-isolated: timeout, exception, or empty response all return the
+original reply unchanged. See docs/architecture/context-pipeline.md.
 """
 
 from __future__ import annotations
@@ -62,16 +55,7 @@ Spoken reply:"""
 
 
 class RecastPostProcessor:
-    """PostProcessor that runs a focused cleanup pass on the LLM reply.
-
-    Conforms to the :class:`PostProcessor` Protocol structurally —
-    no inheritance required.
-
-    :param llm_client: The :class:`LLMClient` for the
-        ``post_process_style`` slot.
-    :param processor_timeout_s: Soft cap on the LLM call. On
-        timeout, the processor returns the original reply.
-    """
+    """PostProcessor that runs a focused cleanup pass on the LLM reply."""
 
     id = "recast"
 

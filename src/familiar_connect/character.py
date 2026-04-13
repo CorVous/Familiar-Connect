@@ -1,13 +1,8 @@
 """Character Card V3 loader.
 
-Parses a TavernAI Character Card V3 embedded in a PNG file.
-The card is stored in a tEXt chunk with keyword ``ccv3`` (case-insensitive)
-as base64-encoded JSON matching the chara_card_v3 spec.
-
-Only V3 cards are supported. Passing a V2-only card raises CharacterCardError
-with a clear message rather than silently falling back.
-
-No third-party dependencies — uses stdlib only (struct, base64, json).
+Parses TavernAI V3 card from PNG tEXt chunk (keyword ``ccv3``,
+base64-encoded JSON). V2-only cards raise :class:`CharacterCardError`.
+Stdlib only (struct, base64, json).
 """
 
 from __future__ import annotations
@@ -68,15 +63,15 @@ def load_card(source: bytes | PathLike) -> CharacterCard:
 
 
 def _parse_png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
-    """Return a list of (chunk_type, chunk_data) pairs from PNG bytes.
+    """Extract (chunk_type, chunk_data) pairs from PNG bytes.
 
-    :raises CharacterCardError: If the data is not a valid PNG.
+    :raises CharacterCardError: If data is not valid PNG.
     """
     if not data.startswith(_PNG_SIGNATURE):
         msg = "Not a PNG file (invalid signature)"
         raise CharacterCardError(msg)
 
-    offset = 8  # skip 8-byte signature
+    offset = 8  # skip 8-byte PNG signature
     chunks: list[tuple[bytes, bytes]] = []
 
     while offset < len(data):
@@ -99,16 +94,12 @@ def _parse_png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
 
 
 def _extract_card(chunks: list[tuple[bytes, bytes]]) -> CharacterCard:
-    """Find a V3 character card in the PNG chunks and parse it.
+    """Find and parse V3 card from PNG chunks.
 
-    Accepts two V3 storage formats used by SillyTavern:
-    - tEXt keyword ``ccv3``: pure V3 encoding
-    - tEXt keyword ``chara`` with ``"spec": "chara_card_v3"`` in the JSON:
-      backward-compatible V3 (SillyTavern's default export format)
-
-    Raises CharacterCardError if no V3 card is found.
+    Accepts ``ccv3`` (pure V3) and ``chara`` with
+    ``spec: chara_card_v3`` (SillyTavern default).
     """
-    chara_text: str | None = None  # raw text from a 'chara' chunk, if any
+    chara_text: str | None = None  # raw text from 'chara' chunk, if any
 
     for chunk_type, chunk_data in chunks:
         if chunk_type != b"tEXt":
@@ -122,13 +113,13 @@ def _extract_card(chunks: list[tuple[bytes, bytes]]) -> CharacterCard:
         text = chunk_data[sep + 1 :].decode("latin-1", errors="replace")
 
         if keyword.lower() == "ccv3":
-            # Pure V3 chunk — use immediately.
+            # pure V3 chunk — use immediately
             return _parse_v3_json(text)
 
         if keyword.lower() == "chara":
             chara_text = text
 
-    # Fall back to 'chara' chunk if its JSON declares V3.
+    # fall back to 'chara' chunk if its JSON declares V3
     if chara_text is not None:
         return _parse_v3_json(chara_text)
 
@@ -140,9 +131,9 @@ def _extract_card(chunks: list[tuple[bytes, bytes]]) -> CharacterCard:
 
 
 def _parse_v3_json(encoded_text: str) -> CharacterCard:
-    """Base64-decode and parse the V3 card JSON.
+    """Decode base64 and parse V3 card JSON.
 
-    :raises CharacterCardError: If decoding, parsing, or spec validation fails.
+    :raises CharacterCardError: If decode, parse, or spec validation fails.
     """
     try:
         raw_json = base64.b64decode(encoded_text.encode("latin-1")).decode("utf-8")

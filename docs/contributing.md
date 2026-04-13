@@ -1,10 +1,10 @@
 # Contributing
 
-Development workflow and expectations for anyone — including future me — working on Familiar-Connect.
+Development workflow and expectations for anyone working on Familiar-Connect.
 
 ## Environment setup
 
-Dependencies are managed with [uv](https://docs.astral.sh/uv/). Before anything else, make sure your `uv` is current:
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). Make sure `uv` is current before anything else:
 
 ```bash
 uv self update
@@ -40,7 +40,7 @@ uv run ty check               # type-check
 uv run pytest                 # run the suite
 ```
 
-These are cheap and fast on a clean working tree. If any of them fail locally, CI will fail the same way — fix the root cause before pushing rather than bypassing a check.
+These are cheap and fast on a clean working tree. If any fail locally, CI will fail the same way — fix the root cause before pushing.
 
 ## Ruff `banned-api` rule: bootstrap → runtime is one-way
 

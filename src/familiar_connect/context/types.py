@@ -1,9 +1,4 @@
-"""Typed data structures for the context pipeline.
-
-Small, immutable-ish records the rest of the pipeline passes around.
-Kept deliberately boring — no behaviour beyond construction — so tests
-against them are cheap and the shape can be reasoned about at a glance.
-"""
+"""Typed data structures for the context pipeline."""
 
 from __future__ import annotations
 
@@ -12,11 +7,10 @@ from enum import Enum
 
 
 class Layer(Enum):
-    """The layers that make up the assembled system prompt.
+    """Layers of the assembled system prompt.
 
-    Order here is *not* priority order — priority is carried on each
-    ``Contribution`` — but the members are listed in a natural top-to-
-    bottom reading order for the assembled prompt.
+    Order here is not priority order (priority lives on Contribution);
+    members are listed in top-to-bottom reading order.
     """
 
     core = "core"
@@ -58,11 +52,9 @@ class Modality(Enum):
 class Contribution:
     """A single piece of content a provider wants to inject.
 
-    ``priority`` is a within-layer ordering hint; higher wins under
-    budget pressure. ``estimated_tokens`` is the provider's best guess
-    and is re-counted by the budgeter before final assembly. ``source``
-    is a short human-readable identifier used for logging and the
-    monitoring dashboard.
+    ``priority``: within-layer ordering hint, higher wins under budget
+    pressure. ``estimated_tokens``: provider's best guess, re-counted
+    by the budgeter before final assembly.
     """
 
     layer: Layer
@@ -87,45 +79,16 @@ class PendingTurn:
 
 @dataclass(frozen=True)
 class ContextRequest:
-    """The input to a single run of the context pipeline.
+    """Input to a single pipeline run.
 
-    One of these is built per incoming event (user utterance, Twitch
-    event, chattiness-triggered interjection). The pipeline's providers
-    each read it, produce a list of ``Contribution``s, and the budgeter
-    merges everything into the final ``SystemPromptLayers``.
+    Built per incoming event (user utterance, Twitch event, chattiness
+    interjection). See ``docs/architecture/configuration-model.md``
+    for how ``familiar_id`` / ``channel_id`` / ``guild_id`` partition
+    data.
 
-    A Familiar-Connect install runs exactly one familiar at a time —
-    see ``docs/architecture/configuration-model.md``. ``familiar_id``
-    therefore identifies which character folder on disk is active;
-    ``channel_id`` partitions the per-conversation recent history
-    window so two simultaneous conversations don't bleed into each
-    other; ``guild_id`` is observability only.
-
-    :param familiar_id: Which familiar is replying. Matches the folder
-        name under ``data/familiars/``.
-    :param channel_id: Discord channel id (text or voice). Used as
-        the partition key for the per-conversation recent history
-        window.
-    :param guild_id: Discord guild (server) id where this turn
-        happened. Observability and routing only — never used as a
-        partition key for memory or history. ``None`` is permitted
-        for non-Discord events (e.g. Twitch).
-    :param speaker: Display name of whoever triggered this turn, or
-        ``None`` for system-generated turns like Twitch events.
-    :param utterance: The triggering text. For voice this is the final
-        transcription; for text it is the message content.
-    :param modality: Whether this turn will be delivered via voice or
-        text. Providers and processors can branch on this.
-    :param budget_tokens: Total budget for the assembled system prompt.
-    :param deadline_s: Hard wall-clock deadline for the whole pipeline,
-        in seconds. Providers that miss it are dropped, not awaited.
-    :param preprocessor_contributions: Tuple of :class:`Contribution`
-        objects accumulated by pre-processors as they run. The
-        pipeline merges these into the budgeter input alongside
-        provider contributions, so a pre-processor can carry its own
-        output forward without becoming a provider. Defaults to the
-        empty tuple; pre-processors append by constructing a fresh
-        request via :func:`dataclasses.replace`.
+    :param preprocessor_contributions: accumulated by pre-processors;
+        merged into budgeter input alongside provider contributions.
+        Pre-processors append via ``dataclasses.replace``.
     """
 
     familiar_id: str

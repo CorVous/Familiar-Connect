@@ -1,15 +1,8 @@
 """Per-channel configuration store.
 
-Owns ``data/familiars/<id>/channels/`` and the ``/channel-*`` slash
-commands that flip a channel's :class:`ChannelMode`. Sidecars are
-loaded lazily on first reference and cached; the bot calls
-:meth:`ChannelConfigStore.get` on every incoming message, so the
-cache is important — but there are at most tens of channels, so the
-map can stay resident.
-
-Unknown channels fall through to the character-level default from
-:class:`CharacterConfig.default_mode`, so a fresh channel the user
-``/subscribe-text``s in just works with sane defaults.
+Owns ``data/familiars/<id>/channels/`` TOML sidecars. Lazy-loaded,
+cached (at most tens of channels). Unknown channels fall through to
+``CharacterConfig.default_mode``.
 """
 
 from __future__ import annotations
@@ -32,14 +25,7 @@ if TYPE_CHECKING:
 
 
 class ChannelConfigStore:
-    """Lazy loader + writer for per-channel TOML sidecars.
-
-    :param root: Directory under which ``<channel_id>.toml`` files
-        live. Typically ``data/familiars/<id>/channels/``.
-    :param character: The loaded :class:`CharacterConfig`, used as
-        the fallback for channels that don't have a sidecar of
-        their own.
-    """
+    """Lazy loader + writer for per-channel TOML sidecars."""
 
     def __init__(self, *, root: Path, character: CharacterConfig) -> None:
         self._root = root
@@ -47,15 +33,7 @@ class ChannelConfigStore:
         self._cache: dict[int, ChannelConfig] = {}
 
     def get(self, *, channel_id: int) -> ChannelConfig:
-        """Return the :class:`ChannelConfig` for *channel_id*.
-
-        Order of resolution:
-
-        1. In-memory cache hit → return it.
-        2. Sidecar on disk → load, cache, return.
-        3. No sidecar → fall back to ``character.default_mode`` via
-           :func:`channel_config_for_mode`; cache and return.
-        """
+        """Resolve config: cache → sidecar → character default."""
         cached = self._cache.get(channel_id)
         if cached is not None:
             return cached
@@ -69,12 +47,9 @@ class ChannelConfigStore:
         return loaded
 
     def set_mode(self, *, channel_id: int, mode: ChannelMode) -> ChannelConfig:
-        """Persist *mode* for *channel_id* and return the resulting config.
+        """Write minimal sidecar and return resulting config.
 
-        Writes the sidecar as a minimal ``mode = "..."`` file. Any
-        hand-edited overrides present in the existing sidecar are
-        **overwritten** — if that becomes a problem, a later
-        iteration can round-trip unknown keys.
+        Overwrites any hand-edited overrides in existing sidecar.
         """
         sidecar = self._sidecar_path(channel_id)
         sidecar.parent.mkdir(parents=True, exist_ok=True)

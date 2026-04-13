@@ -1,32 +1,17 @@
-"""ContentSearchProvider — the memory-search agent loop.
+"""ContentSearchProvider — memory-search agent loop.
 
-Step 8 of docs/architecture/context-pipeline.md. The interesting one.
+Hands the ``memory_search`` slot's LLMClient a small toolset
+(``list_dir``, ``glob``, ``grep``, ``read_file``) scoped to one
+familiar's MemoryStore and runs a bounded loop. Ends when the model
+emits ``ANSWER:``, the iteration cap is hit, or the pipeline deadline
+expires.
 
-Each :meth:`contribute` call hands the ``memory_search`` slot's
-:class:`LLMClient` a small toolset scoped to one familiar's
-:class:`MemoryStore` — ``list_dir``, ``glob``, ``grep``,
-``read_file`` — and runs a bounded loop. The model decides which
-tools to call (or that it has enough context); the provider
-executes the calls against the store; the loop ends when the
-model emits an ``ANSWER:`` line, the iteration cap is hit, or the
-pipeline-level deadline expires.
+Currently uses structured prompting (``TOOL:``/``ANSWER:`` line
+prefixes) rather than a real tool-call API; the loop logic is
+wire-format-agnostic.
 
-The first cut uses **structured prompting** rather than a real
-tool-call API: the prompt asks the model to reply with one of two
-line shapes,
-
-    TOOL: {"tool": "name", "args": {...}}
-    ANSWER: <relevant context text>
-
-and the provider parses by line prefix. A real
-``chat_with_tools``-style API is a future drop-in; the provider's
-loop logic doesn't depend on which wire format the model speaks,
-only on what comes back as text.
-
-Errors from the store (path traversal, size cap, missing file, …)
-are caught and fed back to the model as the tool's "result" string,
-so the model can recover by trying a different path. The pipeline-
-level deadline is enforced upstream by ``ContextPipeline``.
+Store errors are fed back as the tool's result string so the model
+can recover. See docs/architecture/context-pipeline.md.
 """
 
 from __future__ import annotations
@@ -116,18 +101,7 @@ _TOOL_RESULT_PREFIX = "TOOL_RESULT"
 
 
 class ContentSearchProvider:
-    """ContextProvider that runs a tool-using agent loop over a MemoryStore.
-
-    Conforms to the ContextProvider Protocol structurally — no
-    inheritance required.
-
-    :param store: The familiar's :class:`MemoryStore`.
-    :param llm_client: The :class:`LLMClient` for the
-        ``memory_search`` slot.
-    :param max_iterations: Maximum number of LLM calls per
-        contribute() invocation. Defaults to
-        :data:`DEFAULT_MAX_ITERATIONS`.
-    """
+    """ContextProvider that runs a tool-using agent loop over a MemoryStore."""
 
     id = "content_search"
     deadline_s = DEFAULT_DEADLINE_S
@@ -219,13 +193,10 @@ class ContentSearchProvider:
         ]
 
     def _execute_tool(self, tool_name: str, args: dict[str, Any]) -> str:
-        """Run *tool_name* with *args* against the store, return a result string.
+        """Run *tool_name* against the store; return a result string, never raises.
 
-        Returns a short, model-readable serialisation of either the
-        tool's output or the error message — never raises. The
-        provider's loop feeds the returned string back into the next
-        prompt as the tool's "result," so any error becomes a piece
-        of context the model can react to.
+        Errors become model-readable result strings so the agent loop
+        can recover.
         """
         try:
             if tool_name == "list_dir":
@@ -281,14 +252,7 @@ class ContentSearchProvider:
 class _ParsedResponse:
     """Discriminated parse of a single LLM response.
 
-    ``kind`` is one of:
-
-    - ``"tool"`` — the model emitted a TOOL line; ``tool``, ``args``,
-      and ``raw`` are populated.
-    - ``"answer"`` — the model emitted an ANSWER line; ``text`` is
-      populated.
-    - ``"fallback"`` — the model emitted neither prefix; ``text`` is
-      the entire response, treated as a final answer.
+    ``kind``: ``"tool"`` | ``"answer"`` | ``"fallback"``.
     """
 
     __slots__ = ("args", "kind", "raw", "text", "tool")
@@ -312,7 +276,7 @@ class _ParsedResponse:
 def _parse_response(response: str) -> _ParsedResponse:
     stripped = response.strip()
 
-    # ANSWER comes first because it's also the fallback shape.
+    # ANSWER first because it's also the fallback shape
     if stripped.startswith(_ANSWER_LINE_PREFIX):
         text = stripped[len(_ANSWER_LINE_PREFIX) :]
         return _ParsedResponse(kind="answer", text=text)

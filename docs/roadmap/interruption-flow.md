@@ -1,11 +1,10 @@
 # Voice Interruption Flow
 
 !!! info "Status: Design — not committed"
-    Ported from an earlier design PR. The mechanism is scoped
-    specifically to voice channels as written, but latency and
-    interruption handling is a spectrum that spans both voice and
-    text modalities, so a modality-agnostic version of this design
-    may be preferable. Revisit the scope before implementation — see
+    Ported from an earlier design PR. Scoped to voice channels as
+    written, but a modality-agnostic version may be preferable since
+    latency and interruption handling spans both voice and text.
+    Revisit scope before implementation — see
     [Voice input](voice-input.md) and
     [Conversation flow](conversation-flow.md) for the adjacent
     designs this one touches.

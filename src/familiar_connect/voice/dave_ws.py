@@ -29,26 +29,26 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Binary frame header: [seq: uint16BE][op: uint8][payload...]
+# binary frame header: [seq: uint16BE][op: uint8][payload...]
 _BINARY_HEADER_STRUCT = struct.Struct(">HB")
-# Transition ID prefix on ops 29 and 30: [transition_id: uint16BE]
+# transition ID prefix on ops 29 and 30: [transition_id: uint16BE]
 _TRANSITION_ID_STRUCT = struct.Struct(">H")
 
 
 class DaveVoiceWebSocket(DiscordVoiceWebSocket):
     """Voice WebSocket with DAVE protocol support."""
 
-    # Declared for type-checkers; the base class sets these at runtime.
+    # declared for type-checkers; base class sets these at runtime
     _connection: Any
     gateway: str
 
-    # DAVE opcodes (JSON)
+    # dave opcodes (JSON)
     DAVE_PREPARE_TRANSITION = 21
     DAVE_EXECUTE_TRANSITION = 22
     DAVE_TRANSITION_READY = 23
     DAVE_PREPARE_EPOCH = 24
 
-    # DAVE/MLS opcodes (Binary)
+    # dave/MLS opcodes (binary)
     MLS_EXTERNAL_SENDER = 25
     MLS_KEY_PACKAGE = 26
     MLS_PROPOSALS = 27
@@ -57,14 +57,12 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
     MLS_WELCOME = 30
     MLS_INVALID_COMMIT_WELCOME = 31
 
-    # --- IDENTIFY with DAVE version ---
+    # --- identify with DAVE version ---
 
     async def identify(self) -> None:
-        """Send IDENTIFY advertising DAVE protocol support.
+        """Send IDENTIFY with ``max_dave_protocol_version``.
 
-        Without ``max_dave_protocol_version``, Discord's voice gateway
-        assumes the client has no E2EE support and closes the connection
-        with code 4017 as of March 2026.
+        Without it Discord's voice gateway closes with 4017 (no E2EE).
         """
         state = self._connection
         payload = {
@@ -79,13 +77,13 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         }
         await self.send_as_json(payload)
 
-    # --- Polling with binary support ---
+    # --- polling with binary support ---
 
     async def poll_event(self) -> None:
-        """Receive next WebSocket frame, dispatching binary and text.
+        """Receive next WS frame, dispatching binary and text.
 
-        py-cord's implementation only handles TEXT frames, so DAVE binary
-        opcodes would otherwise be silently dropped.
+        py-cord only handles TEXT; without this override DAVE binary
+        opcodes are silently dropped.
         """
         msg = await asyncio.wait_for(self.ws.receive(), timeout=30.0)
         if msg.type is aiohttp.WSMsgType.TEXT:
@@ -104,12 +102,10 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
             raise ConnectionClosed(self.ws, shard_id=None, code=self._close_code)
 
     async def _dispatch_binary_frame(self, raw: bytes) -> None:
-        """Parse a DAVE binary frame and dispatch to received_binary_message.
+        """Parse DAVE binary frame, update ``seq_ack``, dispatch.
 
-        Binary frames carry a sequence number in the first two bytes that
-        must update ``seq_ack`` so py-cord's heartbeat can acknowledge it.
-        Without this, the gateway treats the connection as desynced and
-        eventually closes it (which leads to a reconnect storm).
+        seq_ack must track binary frames or the gateway desyncs and
+        closes the connection (reconnect storm).
         """
         if len(raw) < _BINARY_HEADER_STRUCT.size:
             _logger.warning("Voice binary frame too short: %d bytes", len(raw))
@@ -119,20 +115,17 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         payload = raw[_BINARY_HEADER_STRUCT.size :]
         await self.received_binary_message(op, payload)
 
-    # --- JSON message handling (DAVE extensions) ---
+    # --- JSON message handling (dave extensions) ---
 
     async def received_message(self, msg: Mapping[str, Any]) -> None:
-        """Handle JSON voice gateway messages, including DAVE opcodes.
+        """Handle JSON voice gateway messages including DAVE opcodes.
 
-        super().received_message() is always called so that py-cord can update
-        its ``seq_ack`` counter (used for buffered resume) on every message,
-        including DAVE-specific opcodes that the base class doesn't know about.
+        Always calls super() so py-cord updates ``seq_ack`` for resume.
         """
         op = msg.get("op")
         if op == self.SESSION_DESCRIPTION:
-            # Read dave_protocol_version before super() processes the message,
-            # so connect_websocket can call _reinit_dave_session() immediately after
-            # the secret_key is set — i.e. before binary MLS messages arrive.
+            # read dave_protocol_version before super() so _reinit_dave_session()
+            # can run before binary MLS messages arrive
             data = msg.get("d") or {}
             version = int(data.get("dave_protocol_version", 0))
             self._connection.dave_protocol_version = version
@@ -181,12 +174,10 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         )
 
     async def _handle_prepare_epoch(self, data: Mapping[str, Any]) -> None:
-        """Op 24: reinit DaveSession for new MLS group at epoch 1.
+        """Op 24: reinit DaveSession at epoch 1 if none exists.
 
-        Only initializes when no session exists yet. If SESSION_DESCRIPTION
-        already triggered initialization via connect_websocket, this is a
-        no-op — sending a second MLS_KEY_PACKAGE would desync the MLS state
-        and cause the server to close the connection.
+        No-op when SESSION_DESCRIPTION already initialized — a second
+        MLS_KEY_PACKAGE would desync and close the connection.
         """
         epoch = int(data.get("epoch", 0))
         protocol_version = int(data.get("protocol_version", 0))
@@ -195,7 +186,7 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
             conn.dave_protocol_version = protocol_version
             await conn._reinit_dave_session()  # noqa: SLF001 — the WS layer drives session lifecycle; _reinit_dave_session is a semi-internal hook shared between these two companion classes
 
-    # --- Binary message handling ---
+    # --- binary message handling ---
 
     async def received_binary_message(self, op: int, data: bytes) -> None:
         """Dispatch a DAVE binary opcode to its handler."""
@@ -211,7 +202,7 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
             _logger.debug("Unhandled DAVE binary opcode %d (%d bytes)", op, len(data))
 
     async def _handle_external_sender(self, data: bytes) -> None:
-        """Op 25: install the voice gateway's MLS external sender credential."""
+        """Op 25: install MLS external sender credential."""
         session = self._connection.dave_session
         if session is None:
             _logger.warning("MLS_EXTERNAL_SENDER received with no dave_session")
@@ -306,18 +297,14 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         })
         await self._connection._reinit_dave_session()  # noqa: SLF001 — recovery path; DaveVoiceWebSocket triggers session reinitialization on the owning DaveVoiceClient by design
 
-    # --- Binary send helper ---
+    # --- binary send helper ---
 
     async def send_dave_binary(self, op: int, payload: bytes) -> None:
-        """Frame and send a DAVE binary opcode.
+        """Send ``[op: uint8][payload...]``.
 
-        Format: ``[op: uint8][payload...]``.
-
-        Note: only *received* binary frames carry the 2-byte sequence
-        prefix; outbound frames omit it (matching the discord.py reference
-        implementation in PR #10300). Sending a 2-byte zero prefix shifts
-        the opcode and corrupts the payload, which the gateway responds to
-        by closing the connection (observed as close code 4005).
+        Outbound frames omit the 2-byte seq prefix that *received*
+        frames carry. Adding it shifts the opcode and triggers
+        close code 4005.
         """
         frame = bytes([op]) + payload
         await self.ws.send_bytes(frame)

@@ -1,13 +1,13 @@
 # Voice input
 
-Everything the bot needs to handle incoming audio on the reply path, plus a few adjacent concerns about text and image input that arrive *during* a voice session.
+What the bot needs to handle incoming audio on the reply path, plus adjacent concerns about text and image input during a voice session.
 
 !!! info "Status: Design"
     `/subscribe-my-voice` ships today. It joins the caller's voice channel and keeps the PCM sink open for TTS replies, but **incoming audio is not yet wired into the context pipeline** — this is the last step-7 deferral from the [Context pipeline](../architecture/context-pipeline.md) branch.
 
 ## Motivation
 
-The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` or `"text"`), providers and processors can branch on it, and the budget / channel-mode tables already distinguish `imitate_voice` from the text modes. What's missing is the actual plumbing from Deepgram (or whichever STT provider) back into `ContextPipeline.run()`. Once that lands, voice input is a first-class peer of text input, and everything downstream (history, memory writes, conversation flow) just works.
+The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` or `"text"`), providers and processors can branch on it, and the budget / channel-mode tables already distinguish `imitate_voice` from the text modes. What's missing is the plumbing from Deepgram (or whichever STT provider) back into `ContextPipeline.run()`. Once that lands, voice input is a first-class peer of text input, and everything downstream (history, memory writes, conversation flow) just works.
 
 ## Sketch
 

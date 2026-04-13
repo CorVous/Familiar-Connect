@@ -1,27 +1,16 @@
 """SillyTavern lorebook / world-info importer.
 
-Step 9 of docs/architecture/context-pipeline.md. Reads a SillyTavern
-lorebook JSON and writes one Markdown file per entry into a
-subdirectory of a familiar's :class:`MemoryStore` (default
-``lore/imported/``). Each output file is plain Markdown with the
-entry's comment as the H1, the trigger keywords as a blockquoted
-bulleted list at the top (kept for human reference; the runtime
-never reads them at search time), and the entry body as the
-content.
+See ``docs/architecture/context-pipeline.md``. Reads lorebook JSON,
+writes one Markdown file per entry into ``lore/imported/`` (default).
+Each file: H1 = comment, blockquoted keywords (human reference only),
+body = content.
 
-Once imported, the files are indistinguishable from any other
-Markdown in the memory directory — the agentic
-:class:`ContentSearchProvider` finds them via grep just like
-anything else. There is no runtime keyword walker, no World Info
-trigger logic, and no special-cased data path. Imports are a
-one-shot translation, not an ongoing dependency.
+Post-import files are plain Markdown — ContentSearchProvider finds
+them via grep like anything else. No runtime keyword walker.
 
-The importer is non-fatal at the entry level: malformed entries,
-oversized entries, and entries that would overwrite an existing
-file (without ``force=True``) are recorded in
-:class:`ImportResult`'s ``errors`` / ``skipped`` lists rather than
-aborting the whole import. Top-level errors (unreadable file,
-invalid JSON, missing ``entries`` field) raise
+Non-fatal at entry level: bad/oversized/conflicting entries go to
+:attr:`ImportResult.errors` / :attr:`ImportResult.skipped`. Top-level
+failures (bad file, bad JSON, missing ``entries``) raise
 :class:`LorebookImportError`.
 """
 
@@ -47,19 +36,12 @@ _MAX_SLUG_LENGTH = 50
 
 
 class LorebookImportError(Exception):
-    """Top-level failure during import — bad source, bad JSON, bad shape."""
+    """Top-level import failure — bad source, JSON, or shape."""
 
 
 @dataclass
 class ImportResult:
-    """Per-import outcome record.
-
-    :param written: Relative paths of files actually created.
-    :param skipped: Relative paths that already existed and were left
-        untouched (because ``force=False``).
-    :param errors: Human-readable per-entry error messages. Each entry
-        that couldn't be imported produces exactly one string here.
-    """
+    """Per-import outcome: written paths, skipped paths, error messages."""
 
     written: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
@@ -73,26 +55,12 @@ def import_silly_tavern_lorebook(
     target_dir: str = _DEFAULT_TARGET_DIR,
     force: bool = False,
 ) -> ImportResult:
-    """Import a SillyTavern lorebook into *store*.
+    """Import lorebook entries as Markdown files into *store*.
 
-    :param store: The familiar's :class:`MemoryStore`.
-    :param source: One of:
+    *source* may be a parsed dict, raw JSON bytes/str, or a Path.
+    *force* overwrites existing files; otherwise they go to ``skipped``.
 
-        - an already-parsed lorebook ``dict``,
-        - raw JSON ``bytes`` or ``str``,
-        - a :class:`Path` (or path string) pointing to a JSON file on
-          disk.
-    :param target_dir: Relative subdirectory under the store root to
-        write the imported files into. Defaults to ``lore/imported``.
-        Must not escape the store root — path-traversal attempts
-        propagate as :class:`MemoryStorePathError`.
-    :param force: If ``True``, existing files at the destination paths
-        are overwritten. If ``False`` (the default), they are left
-        untouched and recorded in :attr:`ImportResult.skipped`.
-    :return: A populated :class:`ImportResult`.
-    :raises LorebookImportError: If the source can't be loaded, the
-        JSON can't be parsed, or the document doesn't have a
-        well-formed ``entries`` field.
+    :raises LorebookImportError: Bad source, invalid JSON, or missing ``entries``.
     """
     book = _load_source(source)
     entries = _coerce_entries(book)
@@ -123,9 +91,8 @@ def import_silly_tavern_lorebook(
         rel_path = f"{target_dir.rstrip('/')}/{slug}.md"
         markdown = _render_markdown(label=label, content=content, entry=raw_entry)
 
-        # _file_exists() lets MemoryStorePathError propagate naturally;
-        # a malformed target_dir is a programmer error, not a per-entry
-        # recoverable failure.
+        # _file_exists() lets MemoryStorePathError propagate — malformed
+        # target_dir is a programmer error, not per-entry recoverable
         if not force and _file_exists(store, rel_path):
             result.skipped.append(rel_path)
             continue
@@ -133,9 +100,7 @@ def import_silly_tavern_lorebook(
         try:
             store.write_file(rel_path, markdown, source=_AUDIT_SOURCE)
         except MemoryStoreError as exc:
-            # Path-traversal is the one store error that escapes the
-            # per-entry recoverable bucket — re-raise so the caller sees
-            # the real reason their target_dir was rejected.
+            # path-traversal escapes per-entry recovery — re-raise
             if isinstance(exc, MemoryStorePathError):
                 raise
             result.errors.append(f"{label}: {type(exc).__name__}: {exc}")
@@ -174,8 +139,7 @@ def _load_source(
         return _parse_json_text(text)
 
     if isinstance(source, str):
-        # Heuristic: a string starting with whitespace then '{' or '[' is
-        # raw JSON; anything else is treated as a path.
+        # heuristic: starts with '{' or '[' → raw JSON; else path
         stripped = source.lstrip()
         if stripped.startswith(("{", "[")):
             return _parse_json_text(source)
@@ -198,19 +162,13 @@ def _parse_json_text(text: str) -> dict[str, Any]:
 
 
 def _coerce_entries(book: dict[str, Any]) -> list[Any]:
-    """Return a list of raw entry values, *unvalidated*.
-
-    Per-entry shape validation happens later in the main loop, so a
-    single bad entry can be recorded as an error without aborting
-    the whole import.
-    """
+    """Extract raw entry list (unvalidated). Per-entry validation is deferred."""
     if "entries" not in book:
         msg = "lorebook is missing the 'entries' field"
         raise LorebookImportError(msg)
     raw = book["entries"]
     if isinstance(raw, dict):
-        # SillyTavern's default export uses string keys "0", "1", … as
-        # the dict shape; the values are the actual entries.
+        # SillyTavern exports dict with string keys "0", "1", …
         return list(raw.values())
     if isinstance(raw, list):
         return list(raw)
@@ -224,7 +182,7 @@ def _coerce_entries(book: dict[str, Any]) -> list[Any]:
 
 
 class _EntryShapeError(ValueError):
-    """An entry was missing required fields. Caught and recorded."""
+    """Entry missing required fields. Caught and recorded."""
 
     def __init__(self, label: str, message: str) -> None:
         super().__init__(message)
@@ -232,7 +190,7 @@ class _EntryShapeError(ValueError):
 
 
 def _entry_label(entry: dict[str, Any]) -> str:
-    """Return a human-readable label for *entry* (used as the H1)."""
+    """Human-readable label for *entry* (used as H1)."""
     comment = entry.get("comment")
     if isinstance(comment, str) and comment.strip():
         return comment.strip()
@@ -269,7 +227,7 @@ _SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
 def _slugify(text: str) -> str:
-    """Lowercase, strip non-ASCII-alnum, collapse to single hyphens."""
+    """Lowercase, strip non-alnum, collapse to single hyphens."""
     lowered = text.lower()
     # Replace any run of non-alnum with a single hyphen.
     slug = _SLUG_NON_ALNUM.sub("-", lowered).strip("-")
@@ -321,17 +279,10 @@ def _render_markdown(
 
 
 def _file_exists(store: MemoryStore, rel_path: str) -> bool:
-    """Return True if a file at *rel_path* already exists in the store.
-
-    Uses :meth:`MemoryStore.read_file` as the exists-check so the
-    path-traversal validation in the store's resolver still applies.
-    A "not found" error returns False; any other store error
-    propagates.
-    """
+    """Exists-check via ``read_file`` (preserves traversal safety)."""
     try:
         store.read_file(rel_path)
     except MemoryStorePathError:
-        # Path-traversal: re-raise so the caller surfaces the real reason.
         raise
     except MemoryStoreError:
         return False

@@ -1,6 +1,6 @@
 # Web search
 
-Let the familiar search the web to answer questions about current events, look up facts, fetch patch notes, and anything else that requires knowledge that isn't in its memory directory or in the model's training data.
+Let the familiar search the web for current events, facts, patch notes, and anything else not covered by its memory directory or the model's training data.
 
 !!! info "Status: Research"
     Not yet shipped and mostly in the research phase. The design goal is that web search lands as *another context provider* in the pipeline — not as a special code path.
@@ -9,7 +9,7 @@ Let the familiar search the web to answer questions about current events, look u
 
 The context pipeline is already provider-shaped: `CharacterProvider`, `HistoryProvider`, and `ContentSearchProvider` compose concurrently under a per-turn deadline. A web search provider slots into the same shape — it takes a `ContextRequest`, does its work, and returns `Contribution`s. Everything downstream (the budgeter, the renderer, the post-processors) is agnostic to where the content came from.
 
-The hard problems for this feature aren't orchestration — they're *which API to use*, *how to prevent prompt injection from the open web*, and *how much control the operator needs over what the familiar is allowed to look up*.
+The hard problems aren't orchestration — they're *which API to use*, *how to prevent prompt injection from the open web*, and *how much control the operator needs over what the familiar can look up*.
 
 ## Things to research
 

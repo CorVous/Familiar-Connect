@@ -23,10 +23,9 @@ _NAME_ALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def sanitize_name(name: str) -> str | None:
-    """Return a name safe for the OpenAI name field, or None if empty after sanitizing.
+    """Sanitize *name* for OpenAI name field, or ``None`` if empty after cleanup.
 
-    The API requires names matching ^[a-zA-Z0-9_-]{1,64}$.
-    Spaces and unsupported chars are replaced with underscores.
+    Requires ``^[a-zA-Z0-9_-]{1,64}$``; unsupported chars replaced with underscores.
     """
     sanitized = _NAME_ALLOWED.sub("_", name)[:64].strip("_")
     return sanitized or None
@@ -47,10 +46,9 @@ _request_semaphore: asyncio.Semaphore | None = None
 def get_request_semaphore(
     max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
 ) -> asyncio.Semaphore:
-    """Return the module-level semaphore, creating it on first call.
+    """Return module-level semaphore, creating on first call.
 
-    Must be called inside a running event loop. The semaphore is shared
-    across all :class:`LLMClient` instances because the bottleneck is
+    Shared across all :class:`LLMClient` instances — bottleneck is
     the OpenRouter API key's rate limit, not any single client.
     """
     global _request_semaphore  # noqa: PLW0603
@@ -77,13 +75,9 @@ class Message:
 
 @dataclass
 class SystemPromptLayers:
-    """The five layers that compose the system prompt per the plan.
+    """Layers composing the system prompt.
 
-    1. Core instructions and safety rails
-    2. Character card (personality, speech patterns, backstory)
-    3. Retrieved RAG context
-    4. Conversation summary
-    5. Recent message history (kept separate as messages, not in system prompt)
+    ``recent_history`` is kept as separate messages, not in system prompt.
     """
 
     core_instructions: str
@@ -127,13 +121,13 @@ class LLMClient:
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
-        """Return the shared HTTP client, creating it lazily."""
+        """Lazily create and return shared HTTP client."""
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=120.0)
         return self._http
 
     async def close(self: Self) -> None:
-        """Shut down the underlying HTTP connection pool."""
+        """Shut down HTTP connection pool."""
         if self._http is not None:
             await self._http.aclose()
             self._http = None
@@ -172,7 +166,7 @@ class LLMClient:
             if response.status_code != 429:
                 return response
 
-            # Last attempt — don't sleep, just return the 429.
+            # last attempt — don't sleep, just return the 429
             if attempt == _MAX_RETRIES:
                 break
 
@@ -194,7 +188,7 @@ class LLMClient:
             )
             await asyncio.sleep(delay)
 
-        # All retries exhausted — caller's raise_for_status() will handle it.
+        # all retries exhausted — caller's raise_for_status() will handle it
         assert response is not None  # noqa: S101 — loop always runs at least once
         return response
 
@@ -221,24 +215,10 @@ def create_llm_clients(
     api_key: str,
     character_config: CharacterConfig,
 ) -> dict[str, LLMClient]:
-    """Build one :class:`LLMClient` per call-site slot on *character_config*.
+    """Build one :class:`LLMClient` per call-site slot.
 
-    Every slot in :data:`familiar_connect.config.LLM_SLOT_NAMES` must
-    appear in ``character_config.llm`` (the loader guarantees this by
-    merging over ``_default/character.toml``). The returned dict is
-    keyed by slot name and each client carries the slot's own
-    ``model`` and ``temperature``.
-
-    All clients share the same API key and the process-wide rate-limit
-    semaphore in :func:`get_request_semaphore`, so splitting one
-    ``side`` client into five does not multiply concurrency against
-    the OpenRouter rate limit.
-
-    :param api_key: ``OPENROUTER_API_KEY`` value. Callers pull this
-        from the environment themselves so the factory stays pure.
-    :param character_config: Parsed :class:`CharacterConfig` whose
-        ``llm`` dict holds one :class:`LLMSlotConfig` per slot.
-    :return: ``slot_name -> LLMClient`` map, one entry per slot name.
+    All clients share one API key and the process-wide rate-limit
+    semaphore in :func:`get_request_semaphore`.
     """
     clients: dict[str, LLMClient] = {}
     for slot_name in LLM_SLOT_NAMES:

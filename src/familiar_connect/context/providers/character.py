@@ -1,16 +1,11 @@
 """CharacterProvider — surfaces the familiar's ``self/`` files.
 
-Step 5 of docs/architecture/context-pipeline.md. Reads every Markdown
-file directly inside ``self/`` in the familiar's :class:`MemoryStore`
-and emits one :class:`Contribution` per non-empty file at high
-priority on :data:`Layer.character`. The provider is always on — if
-the familiar has no character description, it returns an empty list,
-which the budgeter and pipeline handle naturally.
+Reads every Markdown file directly inside ``self/`` in the familiar's
+MemoryStore and emits one Contribution per non-empty file at high
+priority on ``Layer.character``. Returns an empty list when the
+familiar has no character description.
 
-The provider is bound to a single :class:`MemoryStore` at
-construction. The orchestrating bot is responsible for instantiating
-one provider per familiar and registering it with the per-familiar
-:class:`ContextPipeline`.
+See docs/architecture/context-pipeline.md.
 """
 
 from __future__ import annotations
@@ -43,11 +38,7 @@ _SELF_DIR = "self"
 
 
 class CharacterProvider:
-    """ContextProvider that surfaces files under ``self/``.
-
-    Conforms to the ContextProvider Protocol structurally — no
-    inheritance required.
-    """
+    """ContextProvider that surfaces files under ``self/``."""
 
     id = "character"
     deadline_s = _DEADLINE_S

@@ -4,7 +4,7 @@ These are ideas that were seriously considered during planning and deliberately 
 
 ## Bridging to a running SillyTavern instance
 
-**The idea:** Run SillyTavern as a side-car process and route Familiar-Connect's context assembly and/or generation through it. The appeal was obvious — SillyTavern has a large, mature extension ecosystem (World Info, stepped thinking, recast post-processing, TunnelVision RAG, and many more) and reusing it directly would short-circuit a great deal of work.
+**The idea:** Run SillyTavern as a side-car process and route Familiar-Connect's context assembly and/or generation through it. SillyTavern has a large, mature extension ecosystem (World Info, stepped thinking, recast post-processing, TunnelVision RAG, and many more) and reusing it directly would short-circuit a great deal of work.
 
 **Why it's rejected:**
 
@@ -19,7 +19,7 @@ These are ideas that were seriously considered during planning and deliberately 
 
 **The idea:** A more aggressive variant of the bridge — actually load each SillyTavern extension we want by spinning up a headless Chromium with ST inside it, intercept the LLM call, and pass results back over CDP.
 
-**Why it's rejected:** Listed separately because it's tempting in its own right. It still falls to all the latency, fragility, multi-guild, and concurrency-fit problems above, *and* it adds Chromium to the runtime. The cost of maintaining the glue layer would dwarf the cost of porting the two or three extensions we actually want.
+**Why it's rejected:** It still falls to all the latency, fragility, multi-guild, and concurrency-fit problems above, *and* it adds Chromium to the runtime. The cost of maintaining the glue layer would dwarf the cost of porting the two or three extensions we actually want.
 
 ## Adopting a large LLM orchestration framework as runtime
 

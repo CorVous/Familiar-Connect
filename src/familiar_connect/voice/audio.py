@@ -10,15 +10,9 @@ DISCORD_FRAME_SIZE = 3840
 
 
 def mono_to_stereo(data: bytes) -> bytes:
-    """Convert mono 16-bit PCM to stereo by duplicating each sample.
+    """Duplicate each 16-bit sample into L+R, producing 2x output.
 
-    Each 2-byte (16-bit little-endian) sample from *data* is written twice —
-    once for the left channel and once for the right — producing an output
-    buffer twice the length of the input.
-
-    :param data: Mono 16-bit signed little-endian PCM bytes.
-    :return: Stereo 16-bit PCM bytes (interleaved L/R pairs).
-    :raises ValueError: If *data* has an odd number of bytes (not valid 16-bit PCM).
+    :raises ValueError: If *data* has odd length.
     """
     if len(data) % 2 != 0:
         msg = f"PCM data length must be even, got {len(data)}"
@@ -34,14 +28,9 @@ def mono_to_stereo(data: bytes) -> bytes:
 
 
 def stereo_to_mono(data: bytes) -> bytes:
-    """Convert stereo 16-bit PCM to mono by averaging left and right channels.
+    """Average L+R int16 samples into mono, producing 0.5x output.
 
-    Each 4-byte stereo frame (2 bytes left + 2 bytes right) is reduced to a
-    single 2-byte mono sample by averaging the two int16 values.
-
-    :param data: Stereo 16-bit signed little-endian PCM bytes.
-    :return: Mono 16-bit PCM bytes (half the length of input).
-    :raises ValueError: If *data* length is not divisible by 4 (not valid stereo).
+    :raises ValueError: If *data* length not divisible by 4.
     """
     if len(data) % 4 != 0:
         msg = f"Stereo PCM data length must be divisible by 4, got {len(data)}"
