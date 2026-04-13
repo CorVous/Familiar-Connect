@@ -24,7 +24,12 @@ from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
-from familiar_connect.voice.interruption import InterruptionDetector, ResponseState
+from familiar_connect.voice.interruption import (
+    InterruptionClass,
+    InterruptionDetector,
+    ResponseState,
+    split_at_elapsed,
+)
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
@@ -35,8 +40,14 @@ if TYPE_CHECKING:
     from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
+    from familiar_connect.tts import WordTimestamp
 
 _logger = logging.getLogger(__name__)
+
+
+def _timestamps_to_text(timestamps: list[WordTimestamp]) -> str:
+    """Join word timestamps into a space-separated string."""
+    return " ".join(ts.word for ts in timestamps)
 
 
 async def _recording_finished_callback(  # noqa: RUF029
@@ -268,9 +279,9 @@ async def _run_voice_response(
     reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 
-    # persist every buffered user utterance then the assistant reply
-    # after the LLM call so a crash never leaves an orphaned user
-    # turn with no reply; mirrors _run_text_response
+    # Persist user turns now (crash safety — user context preserved even
+    # if TTS fails). Assistant turn is written after playback so the
+    # Step 12 yield path can record only the delivered portion.
     for msg in buffer:
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
@@ -281,14 +292,6 @@ async def _run_voice_response(
             speaker=msg.speaker,
             mode=channel_config.mode,
         )
-    familiar.history_store.append_turn(
-        familiar_id=familiar.id,
-        channel_id=channel_id,
-        guild_id=guild_id,
-        role="assistant",
-        content=reply_text,
-        mode=channel_config.mode,
-    )
 
     _logger.info("[Voice Response] %s", reply_text)
 
@@ -303,15 +306,121 @@ async def _run_voice_response(
                 await asyncio.sleep(0.1)
             tracker.transition(ResponseState.SPEAKING)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            # Poll playback to completion so the IDLE transition is
-            # observable in the log and the tracker state reflects
-            # reality for the next turn. No interruption dispatch yet
-            # (Step 3 is observational); later steps will replace this
-            # poll with a state-machine-aware loop.
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
+            # If an interrupt yield was triggered (Steps 11/12), wait for
+            # the burst to finalize so we know the classification.
+            interrupt_event = tracker.interrupt_event
+            if interrupt_event is not None:
+                await interrupt_event.wait()
+            # Step 12: long-SPEAKING yield — write partial history and
+            # re-generate with interruption context.
+            if tracker.interrupt_classification is InterruptionClass.long:
+                elapsed_ms = tracker.interruption_elapsed_ms or 0.0
+                delivered_ts, _ = split_at_elapsed(tracker.timestamps, elapsed_ms)
+                delivered_text = _timestamps_to_text(delivered_ts)
+                familiar.history_store.append_turn(
+                    familiar_id=familiar.id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    role="assistant",
+                    content=delivered_text,
+                    mode=channel_config.mode,
+                )
+                interruption_note = (
+                    f'You were speaking and said: "{delivered_text}". '
+                    f"{tracker.interrupt_starter_name} interrupted you. "
+                    f'They said: "{tracker.interrupt_transcript}"'
+                )
+                _logger.info(
+                    "dispatch: long@SPEAKING → regen speaker=%s",
+                    tracker.interrupt_starter_name,
+                )
+                regen_request = dataclasses.replace(
+                    request, interruption_context=interruption_note
+                )
+                tracker.transition(ResponseState.IDLE)
+                tracker.transition(ResponseState.GENERATING)
+                regen_pipeline = familiar.build_pipeline(channel_config)
+                regen_output = await regen_pipeline.assemble(
+                    regen_request,
+                    budget_by_layer=channel_config.budget_by_layer,
+                )
+                regen_messages = assemble_chat_messages(
+                    regen_output,
+                    store=familiar.history_store,
+                    history_window_size=familiar.config.history_window_size,
+                    depth_inject_position=familiar.config.depth_inject_position,
+                    depth_inject_role=familiar.config.depth_inject_role,
+                    mode=channel_config.mode,
+                    display_tz=familiar.config.display_tz,
+                )
+                regen_task = asyncio.create_task(
+                    familiar.llm_clients["main_prose"].chat(regen_messages),
+                )
+                tracker.generation_task = regen_task
+                try:
+                    regen_reply = await regen_task
+                except asyncio.CancelledError:
+                    tracker.generation_task = None
+                    tracker.transition(ResponseState.IDLE)
+                    return
+                except (httpx.HTTPError, ValueError, KeyError) as exc:
+                    tracker.generation_task = None
+                    _logger.warning(
+                        "regen reply (long@SPEAKING): %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    tracker.transition(ResponseState.IDLE)
+                    return
+                tracker.generation_task = None
+                regen_text = await regen_pipeline.run_post_processors(
+                    regen_reply.content, regen_request
+                )
+                familiar.history_store.append_turn(
+                    familiar_id=familiar.id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    role="assistant",
+                    content=regen_text,
+                    mode=channel_config.mode,
+                )
+                _logger.info("[Voice Regen Response] %s", regen_text)
+                regen_tts = await familiar.tts_client.synthesize(regen_text)
+                tracker.timestamps = list(regen_tts.timestamps)
+                regen_stereo = mono_to_stereo(regen_tts.audio)
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                tracker.transition(ResponseState.SPEAKING)
+                vc.play(discord.PCMAudio(io.BytesIO(regen_stereo)))
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                tracker.transition(ResponseState.IDLE)
+                return
+            # Normal completion or short yield (Step 11) — full text.
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                role="assistant",
+                content=reply_text,
+                mode=channel_config.mode,
+            )
         except Exception:
             _logger.exception("Voice response TTS failed")
+            tracker.transition(ResponseState.IDLE)
+            return
+    else:
+        # No TTS client — write full assistant turn immediately.
+        familiar.history_store.append_turn(
+            familiar_id=familiar.id,
+            channel_id=channel_id,
+            guild_id=guild_id,
+            role="assistant",
+            content=reply_text,
+            mode=channel_config.mode,
+        )
     tracker.transition(ResponseState.IDLE)
 
 
@@ -483,6 +592,7 @@ async def subscribe_my_voice(
             short_long_boundary_s=familiar.config.short_long_boundary_s,
             lull_timeout_s=familiar.config.voice_lull_timeout,
             base_tolerance=(familiar.config.interrupt_tolerance.base_probability),
+            name_resolver=lambda uid: user_names.get(uid, f"User-{uid}"),
         )
         familiar.extras["interruption_detector"] = interruption_detector
 
@@ -504,6 +614,8 @@ async def subscribe_my_voice(
             result: TranscriptionResult,
         ) -> None:
             lull_monitor.on_transcript(user_id, result)
+            if result.is_final:
+                interruption_detector.on_transcript(user_id, result.text)
 
         pipeline = await start_pipeline(
             familiar.transcriber,

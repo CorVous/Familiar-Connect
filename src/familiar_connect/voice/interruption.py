@@ -98,6 +98,14 @@ class ResponseTracker:
     # start bursts (pre-existing speech carrying into GENERATING) and
     # abort bursts when the familiar returns to IDLE.
     on_state_change: Callable[[ResponseState], None] | None = None
+    # Step 12 — long-SPEAKING-yield scratch. Set by InterruptionDetector
+    # at Moment 1 (yield) and finalization; awaited + consumed by
+    # _run_voice_response.
+    interruption_elapsed_ms: float | None = None
+    interrupt_event: asyncio.Event | None = None
+    interrupt_classification: InterruptionClass | None = None
+    interrupt_transcript: str = ""
+    interrupt_starter_name: str = ""
 
     def transition(self, new_state: ResponseState) -> None:
         """Move to *new_state* and log the transition at INFO.
@@ -135,6 +143,12 @@ class ResponseTracker:
             self.playback_start_time = None
             self.is_unsolicited = False
             self.mood_modifier = 0.0
+            # Step 12 yield scratch
+            self.interruption_elapsed_ms = None
+            self.interrupt_event = None
+            self.interrupt_classification = None
+            self.interrupt_transcript = ""
+            self.interrupt_starter_name = ""
         elif new_state is ResponseState.SPEAKING:
             # Stamp the wall clock at the moment audio begins so
             # Step 11's yield path can compute elapsed_ms without
@@ -352,6 +366,7 @@ class InterruptionDetector:
         clock: Callable[[], float] | None = None,
         scheduler: Callable[[float, Callable[[], None]], _Cancelable] | None = None,
         rng: Callable[[], float] | None = None,
+        name_resolver: Callable[[int], str] | None = None,
     ) -> None:
         self._tracker_registry = tracker_registry
         self._guild_id = guild_id
@@ -362,6 +377,11 @@ class InterruptionDetector:
         self._clock = clock if clock is not None else time.monotonic
         self._scheduler = scheduler
         self._rng = rng
+        self._name_resolver = name_resolver
+        # Transcript accumulated from finals during the active burst.
+        self._burst_transcript: str = ""
+        # True when should_keep_talking() returned False at Moment 1.
+        self._moment1_yield: bool = False
 
         # Users currently speaking, tracked regardless of tracker
         # state. This lets us retroactively start a burst when the
@@ -500,6 +520,18 @@ class InterruptionDetector:
         # moment the accumulated duration can cross the threshold.
         self._arm_min_timer()
 
+    def on_transcript(self, user_id: int, text: str) -> None:  # noqa: ARG002
+        """Accumulate *text* into the burst transcript when a burst is active.
+
+        Call for every Deepgram final during a voice session. Text from
+        finals that arrive outside an active burst is ignored; only text
+        that overlaps with a burst feeds the interruption context note.
+        ``user_id`` is accepted for API consistency and future filtering.
+        """
+        if self._burst_started_at is not None:
+            sep = " " if self._burst_transcript else ""
+            self._burst_transcript += sep + text
+
     def _abort_burst(self) -> None:
         """Cancel timers and reset burst scratch without classifying."""
         self._cancel_lull()
@@ -509,6 +541,8 @@ class InterruptionDetector:
         self._burst_starter_id = None
         self._burst_latest_state = None
         self._min_logged = False
+        self._burst_transcript = ""
+        self._moment1_yield = False
 
     def _schedule(self, delay: float, callback: Callable[[], None]) -> _Cancelable:
         scheduler = self._scheduler
@@ -589,13 +623,28 @@ class InterruptionDetector:
             state.value,
         )
         self._min_logged = True
-        # Moment 1: burst crossed ``min`` while the familiar is
-        # speaking. Roll against the effective tolerance so operators
-        # can see yield-vs-push-through decisions in the log. Dispatch
-        # on the outcome lands in Step 11; today this is observational.
+        # Moment 1: burst crossed ``min`` while the familiar is speaking.
+        # Roll against effective tolerance; on yield, stop playback and
+        # record elapsed so the long-SPEAKING-yield path (Step 12) can
+        # compute the delivered portion.
         if state is ResponseState.SPEAKING:
             tracker = self._tracker_registry.get(self._guild_id)
-            tracker.should_keep_talking(self._base_tolerance, rng=self._rng)
+            keep = tracker.should_keep_talking(self._base_tolerance, rng=self._rng)
+            if not keep:
+                elapsed_ms = (
+                    self._clock() - (tracker.playback_start_time or 0.0)
+                ) * 1000.0
+                tracker.interruption_elapsed_ms = elapsed_ms
+                starter = self._burst_starter_id
+                tracker.interrupt_starter_name = (
+                    self._name_resolver(starter)
+                    if self._name_resolver is not None and starter is not None
+                    else f"User {starter}"
+                )
+                if tracker.vc is not None:
+                    tracker.vc.stop()
+                tracker.interrupt_event = asyncio.Event()
+                self._moment1_yield = True
 
     def _current_tracker_state(self) -> ResponseState | None:
         """State to report in interruption logs.
@@ -616,12 +665,17 @@ class InterruptionDetector:
         last_ended_at = self._burst_last_ended_at
         starter_id = self._burst_starter_id
         state = self._current_tracker_state()
+        moment1_yield = self._moment1_yield
+        # Snapshot transcript before reset; passed to tracker below.
+        burst_transcript = self._burst_transcript
         # Reset regardless; a new burst starts from a clean slate.
         self._burst_started_at = None
         self._burst_last_ended_at = None
         self._burst_starter_id = None
         self._burst_latest_state = None
         self._min_logged = False
+        self._burst_transcript = ""
+        self._moment1_yield = False
         if started_at is None or last_ended_at is None or starter_id is None:
             return
         if state is None:
@@ -641,6 +695,14 @@ class InterruptionDetector:
             starter_id,
             state.value,
         )
+        # Step 12: if yield was decided at Moment 1, deliver classification
+        # and transcript to the tracker so _run_voice_response can dispatch.
+        if moment1_yield:
+            tracker = self._tracker_registry.get(self._guild_id)
+            tracker.interrupt_classification = classification
+            tracker.interrupt_transcript = burst_transcript
+            if tracker.interrupt_event is not None:
+                tracker.interrupt_event.set()
 
     def _classify(self, duration: float) -> InterruptionClass:
         if duration < self._min_interruption_s:

@@ -246,7 +246,7 @@ toll: base=0.30 mood=+0.00 unsolicited=+0.00 effective=0.30 roll=0.71 → yield
 - Once user is quiet, re-synthesize `remaining` and resume playback.
 - History records the **full** response text (not just the delivered portion).
 
-### Long interruption + yielded (Step 12 — pending)
+### Long interruption + yielded (Step 12)
 
 - Compute `delivered_text` from word timestamps.
 - Build a new `ContextRequest`:
