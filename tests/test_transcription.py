@@ -450,6 +450,36 @@ class TestDeepgramTranscriberLifecycle:
 
             assert queue.empty()
 
+    @pytest.mark.asyncio
+    async def test_utterance_end_puts_sentinel_on_queue(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """UtteranceEnd messages emit a sentinel result with is_utterance_end=True."""
+        utterance_end_response = json.dumps({
+            "type": "UtteranceEnd",
+            "channel": [0, 1],
+            "last_word_end": 1.5,
+        })
+
+        ws_msg = MagicMock()
+        ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
+        ws_msg.data = utterance_end_response
+
+        ws_mock = self._make_ws_mock(messages=[ws_msg])
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            assert not queue.empty()
+            sentinel = queue.get_nowait()
+            assert sentinel.is_utterance_end is True
+            assert not sentinel.text
+            assert sentinel.is_final is False
+
 
 class TestDeepgramReconnect:
     """Tests for automatic WebSocket reconnection."""

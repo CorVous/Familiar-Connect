@@ -319,6 +319,30 @@ class TestTranscriptLogger:
 
         collator.on_final_transcript.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_utterance_end_triggers_lull_timer(self) -> None:
+        """UtteranceEnd sentinel calls on_speaking(False), starting the lull timer."""
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        pipeline = _make_pipeline_stub({42: "Alice"})
+        collator = self._make_mock_collator()
+
+        sentinel = TranscriptionResult(
+            text="", is_final=False, start=0.0, end=0.0, is_utterance_end=True
+        )
+        await shared_queue.put((42, sentinel))
+
+        with patch("familiar_connect.voice_pipeline._logger"):
+            task = asyncio.create_task(
+                _transcript_logger(shared_queue, pipeline, collator)
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        collator.on_speaking.assert_called_once_with(42, is_speaking=False)
+        collator.on_final_transcript.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Phase 6: Audio router

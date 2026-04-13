@@ -40,6 +40,7 @@ class TranscriptionResult:
     end: float
     confidence: float = 0.0
     speaker: int | None = None
+    is_utterance_end: bool = False
 
     def to_message(self: Self, speaker_names: dict[int, str] | None = None) -> Message:
         """Convert to an LLM Message.
@@ -280,6 +281,21 @@ class DeepgramTranscriber:
                             await output.put(result)
                             # Got real data — reset reconnect counter.
                             consecutive_reconnects = 0
+                    elif msg_type == "UtteranceEnd":
+                        await output.put(
+                            TranscriptionResult(
+                                text="",
+                                is_final=False,
+                                start=0.0,
+                                end=0.0,
+                                is_utterance_end=True,
+                            )
+                        )
+                        _logger.info(
+                            "[Deepgram] %s: %s",
+                            msg_type,
+                            msg.data[:200],
+                        )
                     else:
                         _logger.info(
                             "[Deepgram] %s: %s",

@@ -447,7 +447,10 @@ async def _transcript_logger(
     while True:
         user_id, result = await shared_queue.get()
         name = _get_user_name(pipeline, user_id)
-        if result.is_final:
+        if result.is_utterance_end:
+            _logger.debug("[Lull] user=%d UtteranceEnd — starting lull timer", user_id)
+            collator.on_speaking(user_id, is_speaking=False)
+        elif result.is_final:
             _logger.info("[Transcription] %s: %s", name, result.text)
             collator.on_final_transcript(user_id, result)
         else:
