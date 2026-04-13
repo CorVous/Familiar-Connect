@@ -74,6 +74,41 @@ class Interjection(Enum):
         }[self]
 
 
+class InterruptTolerance(Enum):
+    """How stubborn the familiar is when interrupted mid-speech (voice only).
+
+    Base probability of *continuing to talk* when a user interrupts during
+    SPEAKING. The mood evaluator adds an ephemeral modifier on top of this
+    base; responses begun from the chattiness/interjection path also get a
+    positive bias so unsolicited remarks tend to push through.
+
+    | Tier            | Base probability |
+    |-----------------|------------------|
+    | ``very_meek``     | 0.10           |
+    | ``meek``          | 0.20           |
+    | ``average``       | 0.30           |
+    | ``stubborn``      | 0.45           |
+    | ``very_stubborn`` | 0.60           |
+    """
+
+    very_meek = "very_meek"
+    meek = "meek"
+    average = "average"
+    stubborn = "stubborn"
+    very_stubborn = "very_stubborn"
+
+    @property
+    def base_probability(self) -> float:
+        """Probability of continuing to talk when interrupted, before bias."""
+        return {
+            InterruptTolerance.very_meek: 0.10,
+            InterruptTolerance.meek: 0.20,
+            InterruptTolerance.average: 0.30,
+            InterruptTolerance.stubborn: 0.45,
+            InterruptTolerance.very_stubborn: 0.60,
+        }[self]
+
+
 _DEFAULT_CHATTINESS = "Balanced — responds when the conversation is relevant"
 
 
@@ -120,6 +155,12 @@ class CharacterConfig:
         evaluation prompt.
     :param text_lull_timeout: text-only; voice uses ``voice_lull_timeout``.
     :param voice_lull_timeout: debounce for Deepgram final-transcript stream.
+    :param interrupt_tolerance: voice-only; probability of pushing through
+        a mid-speech interruption. See :class:`InterruptTolerance`.
+    :param min_interruption_s: voice-only; minimum continuous user speech
+        before a burst counts as an interruption.
+    :param short_long_boundary_s: voice-only; threshold separating short
+        (polite pause) from long (cancel/regen) interruptions.
     """
 
     default_mode: ChannelMode = DEFAULT_CHANNEL_MODE
@@ -135,6 +176,9 @@ class CharacterConfig:
     interjection: Interjection = Interjection.average
     text_lull_timeout: float = 10.0
     voice_lull_timeout: float = 5.0
+    interrupt_tolerance: InterruptTolerance = InterruptTolerance.average
+    min_interruption_s: float = 1.5
+    short_long_boundary_s: float = 4.0
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
 
@@ -289,6 +333,21 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     text_lull_timeout = float(data.get("text_lull_timeout", 10.0))
     voice_lull_timeout = float(data.get("voice_lull_timeout", 5.0))
 
+    voice_raw = data.get("voice", {})
+    if not isinstance(voice_raw, dict):
+        msg = f"[voice] must be a table, got {type(voice_raw).__name__}"
+        raise ConfigError(msg)
+    interruption_raw = voice_raw.get("interruption", {})
+    if not isinstance(interruption_raw, dict):
+        msg = (
+            f"[voice.interruption] must be a table, "
+            f"got {type(interruption_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    interrupt_tolerance, min_interruption_s, short_long_boundary_s = (
+        _parse_voice_interruption(interruption_raw)
+    )
+
     llm_raw = data.get("llm", {})
     if not isinstance(llm_raw, dict):
         msg = f"[llm] must be a table, got {type(llm_raw).__name__}"
@@ -312,6 +371,9 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         interjection=interjection,
         text_lull_timeout=text_lull_timeout,
         voice_lull_timeout=voice_lull_timeout,
+        interrupt_tolerance=interrupt_tolerance,
+        min_interruption_s=min_interruption_s,
+        short_long_boundary_s=short_long_boundary_s,
         llm=llm,
         tts=tts,
     )
@@ -419,6 +481,69 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         msg = f"[tts].model must be a string, got {type(model).__name__}"
         raise ConfigError(msg)
     return TTSConfig(voice_id=voice_id, model=model)
+
+
+def _parse_voice_interruption(
+    raw: dict,
+) -> tuple[InterruptTolerance, float, float]:
+    """Parse the ``[voice.interruption]`` TOML table.
+
+    Returns ``(tolerance, min_interruption_s, short_long_boundary_s)``. Any
+    missing key falls back to the :class:`CharacterConfig` defaults
+    (``average`` / 1.5 / 4.0).
+    """
+    tolerance_raw = raw.get("interrupt_tolerance")
+    if tolerance_raw is None:
+        tolerance = InterruptTolerance.average
+    elif not isinstance(tolerance_raw, str):
+        msg = (
+            "[voice.interruption].interrupt_tolerance must be a string, "
+            f"got {type(tolerance_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    else:
+        try:
+            tolerance = InterruptTolerance(tolerance_raw)
+        except ValueError as exc:
+            valid = ", ".join(t.value for t in InterruptTolerance)
+            msg = (
+                f"unknown interrupt_tolerance tier {tolerance_raw!r}; "
+                f"valid options: {valid}"
+            )
+            raise ConfigError(msg) from exc
+
+    min_raw = raw.get("min_interruption_s", 1.5)
+    if not isinstance(min_raw, (int, float)) or isinstance(min_raw, bool):
+        msg = (
+            "[voice.interruption].min_interruption_s must be a number, "
+            f"got {type(min_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    min_interruption_s = float(min_raw)
+    if min_interruption_s < 0:
+        msg = (
+            "[voice.interruption].min_interruption_s must be non-negative, "
+            f"got {min_interruption_s}"
+        )
+        raise ConfigError(msg)
+
+    boundary_raw = raw.get("short_long_boundary_s", 4.0)
+    if not isinstance(boundary_raw, (int, float)) or isinstance(boundary_raw, bool):
+        msg = (
+            "[voice.interruption].short_long_boundary_s must be a number, "
+            f"got {type(boundary_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    short_long_boundary_s = float(boundary_raw)
+    if short_long_boundary_s <= min_interruption_s:
+        msg = (
+            "[voice.interruption].short_long_boundary_s "
+            f"({short_long_boundary_s}) must exceed min_interruption_s "
+            f"({min_interruption_s})"
+        )
+        raise ConfigError(msg)
+
+    return tolerance, min_interruption_s, short_long_boundary_s
 
 
 def _parse_interjection(raw: object, *, default: Interjection) -> Interjection:

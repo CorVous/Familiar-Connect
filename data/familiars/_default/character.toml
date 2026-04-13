@@ -23,6 +23,19 @@ interjection  = "average"
 text_lull_timeout  = 10.0
 voice_lull_timeout = 5.0
 
+# --- Voice interruption handling (voice channels only) --------------------
+#
+# When the familiar is speaking or generating and a user starts talking,
+# the interruption detector classifies by duration and dispatches to the
+# appropriate handler. `interrupt_tolerance` controls the probability of
+# pushing through a short interruption mid-speech (higher = more
+# stubborn). See docs/roadmap/interruption-flow.md.
+
+[voice.interruption]
+interrupt_tolerance   = "average"   # very_meek | meek | average | stubborn | very_stubborn
+min_interruption_s    = 1.5         # back-channel filter threshold
+short_long_boundary_s = 4.0         # short (polite pause) vs. long (regen)
+
 [providers.history]
 window_size = 20
 
