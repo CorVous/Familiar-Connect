@@ -1031,11 +1031,14 @@ class TestVoicePreProcessorsSuppressed:
 
         asyncio.run(handler(42, transcription))
 
-        # Neither preprocessing LLM slot should have been touched.
-        reasoning = familiar.llm_clients["reasoning_context"]
-        assert isinstance(reasoning, _StubLLMClient)
-        assert reasoning.calls == []
-
-        post_process = familiar.llm_clients["post_process_style"]
-        assert isinstance(post_process, _StubLLMClient)
-        assert post_process.calls == []
+        # No LLM slot beyond main_prose should have been touched.
+        llm_only_slots = (
+            "reasoning_context",
+            "post_process_style",
+            "memory_search",
+            "history_summary",
+        )
+        for slot in llm_only_slots:
+            client = familiar.llm_clients[slot]
+            assert isinstance(client, _StubLLMClient)
+            assert client.calls == [], f"Expected no calls on {slot!r}"

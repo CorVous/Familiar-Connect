@@ -199,9 +199,16 @@ def _build_voice_response_handler(
         # real-time latency. stepped_thinking (reasoning_context LLM) adds
         # chain-of-thought overhead; recast (post_process_style LLM) rewrites
         # text destined for TTS rather than screen reading.
+        # Providers that make their own LLM calls (content_search → memory_search,
+        # history → history_summary) are also stripped for the same reason.
         # To re-enable: remove this dataclasses.replace() call and its comment.
         channel_config = dataclasses.replace(
             channel_config,
+            providers_enabled=channel_config.providers_enabled
+            - {
+                "content_search",
+                "history",
+            },
             preprocessors_enabled=frozenset(),
             postprocessors_enabled=frozenset(),
         )
