@@ -22,6 +22,7 @@ from familiar_connect.config import (
     CharacterConfig,
     ConfigError,
     Interjection,
+    InterruptTolerance,
     channel_config_for_mode,
     load_channel_config,
     load_character_config,
@@ -425,6 +426,131 @@ class TestCharacterConfigConversationFields:
             path.write_text(f'interjection = "{tier.value}"\n')
             cfg = load_character_config(path, defaults_path=default_profile_path)
             assert cfg.interjection is tier
+
+
+# InterruptTolerance enum and [voice.interruption] TOML section
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptToleranceEnum:
+    def test_has_five_tiers(self) -> None:
+        assert len(list(InterruptTolerance)) == 5
+
+    def test_tier_values(self) -> None:
+        assert InterruptTolerance("very_meek") is InterruptTolerance.very_meek
+        assert InterruptTolerance("meek") is InterruptTolerance.meek
+        assert InterruptTolerance("average") is InterruptTolerance.average
+        assert InterruptTolerance("stubborn") is InterruptTolerance.stubborn
+        assert InterruptTolerance("very_stubborn") is InterruptTolerance.very_stubborn
+
+    def test_base_probabilities(self) -> None:
+        assert InterruptTolerance.very_meek.base_probability == 0.10  # noqa: RUF069
+        assert InterruptTolerance.meek.base_probability == 0.20  # noqa: RUF069
+        assert InterruptTolerance.average.base_probability == 0.30  # noqa: RUF069
+        assert InterruptTolerance.stubborn.base_probability == 0.45  # noqa: RUF069
+        assert InterruptTolerance.very_stubborn.base_probability == 0.60  # noqa: RUF069
+
+
+class TestVoiceInterruptionConfig:
+    def test_defaults_when_section_absent(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        cfg = load_character_config(
+            tmp_path / "no-such-file.toml",
+            defaults_path=default_profile_path,
+        )
+        assert cfg.interrupt_tolerance is InterruptTolerance.average
+        assert cfg.min_interruption_s == 2.0  # noqa: RUF069
+        assert cfg.short_long_boundary_s == 30.0  # noqa: RUF069
+
+    def test_reads_tolerance_tier(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[voice.interruption]\ninterrupt_tolerance = "stubborn"\n',
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.interrupt_tolerance is InterruptTolerance.stubborn
+
+    def test_reads_min_interruption(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\nmin_interruption_s = 2.25\n",
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.min_interruption_s == 2.25  # noqa: RUF069
+
+    def test_reads_short_long_boundary(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\nshort_long_boundary_s = 6.0\n",
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.short_long_boundary_s == 6.0  # noqa: RUF069
+
+    def test_unknown_tolerance_tier_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[voice.interruption]\ninterrupt_tolerance = "defiant"\n',
+        )
+        with pytest.raises(ConfigError, match="defiant"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_all_tolerance_tiers_load_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        for tier in InterruptTolerance:
+            path = tmp_path / f"character_{tier.value}.toml"
+            path.write_text(
+                f'[voice.interruption]\ninterrupt_tolerance = "{tier.value}"\n',
+            )
+            cfg = load_character_config(path, defaults_path=default_profile_path)
+            assert cfg.interrupt_tolerance is tier
+
+    def test_negative_min_interruption_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\nmin_interruption_s = -1.0\n",
+        )
+        with pytest.raises(ConfigError, match="min_interruption_s"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_boundary_must_exceed_min(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[voice.interruption]\n"
+            "min_interruption_s = 3.0\n"
+            "short_long_boundary_s = 2.0\n",
+        )
+        with pytest.raises(ConfigError, match="short_long_boundary_s"):
+            load_character_config(path, defaults_path=default_profile_path)
 
 
 # ---------------------------------------------------------------------------

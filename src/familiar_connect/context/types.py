@@ -105,3 +105,6 @@ class ContextRequest:
     user turns instead of the single ``utterance``. The last entry
     should match ``utterance`` / ``speaker``."""
     preprocessor_contributions: tuple[Contribution, ...] = ()
+    interruption_context: str | None = None
+    """System note for voice interruptions; rendered before final user
+    turn. ``None`` (default) = no note."""

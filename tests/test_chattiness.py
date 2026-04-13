@@ -24,6 +24,7 @@ from familiar_connect.chattiness import (
     BufferedMessage,
     ChannelBuffer,
     ConversationMonitor,
+    ResponseTrigger,
     _interjection_interval,
     is_direct_address,
 )
@@ -49,19 +50,26 @@ def _make_monitor(
     interjection: Interjection = Interjection.average,
     lull_timeout: float = 100.0,  # large default so lull never fires unintentionally
     side_model_reply: str = "YES",
-    on_respond: Callable[[int, list[BufferedMessage]], Awaitable[None]] | None = None,
-) -> tuple[ConversationMonitor, list[tuple[int, list[BufferedMessage]]]]:
+    on_respond: (
+        Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]] | None
+    ) = None,
+) -> tuple[
+    ConversationMonitor,
+    list[tuple[int, list[BufferedMessage], ResponseTrigger]],
+]:
     """Build a ConversationMonitor with a stub ``interjection_decision`` client.
 
     Returns the monitor and a list that records every ``on_respond`` call as
-    ``(channel_id, buffer_snapshot)``.
+    ``(channel_id, buffer_snapshot, trigger)``.
     """
-    calls: list[tuple[int, list[BufferedMessage]]] = []
+    calls: list[tuple[int, list[BufferedMessage], ResponseTrigger]] = []
 
     async def _default_on_respond(  # noqa: RUF029
-        channel_id: int, buffer: list[BufferedMessage]
+        channel_id: int,
+        buffer: list[BufferedMessage],
+        trigger: ResponseTrigger,
     ) -> None:
-        calls.append((channel_id, list(buffer)))
+        calls.append((channel_id, list(buffer), trigger))
 
     llm_client = MagicMock()
     llm_client.chat = AsyncMock(
@@ -370,8 +378,8 @@ class TestConversationMonitorInterjection:
                     channel_id=2, speaker="Carol", text=f"msg {i}", is_mention=False
                 )
             )
-        assert sum(1 for cid, _ in calls if cid == 1) == 1
-        assert sum(1 for cid, _ in calls if cid == 2) == 0
+        assert sum(1 for call in calls if call[0] == 1) == 1
+        assert sum(1 for call in calls if call[0] == 2) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +411,50 @@ class TestSideModelEvaluation:
             )
         )
         assert len(calls) == 1
+
+    def test_direct_address_trigger_is_direct_address(self) -> None:
+        monitor, calls = _make_monitor(side_model_reply="YES")
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+            )
+        )
+        assert len(calls) == 1
+        assert calls[0][2] is ResponseTrigger.direct_address
+        assert calls[0][2].is_unsolicited is False
+
+    def test_interjection_trigger_is_unsolicited(self) -> None:
+        monitor, calls = _make_monitor(
+            interjection=Interjection.very_eager, side_model_reply="YES"
+        )
+        # very_eager's starting_interval is 3 — three non-address messages.
+        for i in range(3):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=1,
+                    speaker="Alice",
+                    text=f"msg {i}",
+                    is_mention=False,
+                )
+            )
+        assert len(calls) == 1
+        assert calls[0][2] is ResponseTrigger.interjection
+        assert calls[0][2].is_unsolicited is True
+
+    def test_lull_endpoint_trigger_is_lull(self) -> None:
+        monitor, calls = _make_monitor(side_model_reply="YES")
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1,
+                speaker="Alice",
+                text="some thought",
+                is_mention=False,
+                is_lull_endpoint=True,
+            )
+        )
+        assert len(calls) == 1
+        assert calls[0][2] is ResponseTrigger.lull
+        assert calls[0][2].is_unsolicited is True
 
     def test_no_response_does_not_call_on_respond(self) -> None:
         monitor, calls = _make_monitor(side_model_reply="NO")
@@ -474,9 +526,109 @@ class TestSideModelEvaluation:
         )
         # very_eager threshold = 3 → fires on 3rd message
         assert len(calls) == 1
-        _, buf_snapshot = calls[0]
+        _, buf_snapshot, _ = calls[0]
         assert len(buf_snapshot) == 3
         assert buf_snapshot[0].speaker == "Alice"
+
+    def test_lull_endpoint_evaluates_inline_without_starting_timer(self) -> None:
+        """Voice path: ``is_lull_endpoint=True`` runs the lull eval inline.
+
+        The voice pipeline already debounced silence via
+        ``VoiceLullMonitor``; the conversation monitor must not start
+        its own (text) lull timer or wait further. Passing
+        ``is_lull_endpoint=True`` should evaluate immediately and skip
+        the timer.
+        """
+        monitor, calls = _make_monitor(
+            lull_timeout=100.0,  # would never fire in test if started
+            interjection=Interjection.very_quiet,  # counter threshold far away
+            side_model_reply="YES",
+        )
+        asyncio.run(
+            monitor.on_message(
+                channel_id=99,
+                speaker="Alice",
+                text="hey there",
+                is_mention=False,
+                is_lull_endpoint=True,
+            )
+        )
+        # Inline lull eval said YES → on_respond fired exactly once.
+        assert len(calls) == 1
+        # No pending lull timer left behind.
+        buf = monitor._buffers.get(99)
+        assert buf is None or buf.lull_timer_handle is None
+
+    def test_lull_endpoint_no_response_does_not_start_timer(self) -> None:
+        """``is_lull_endpoint=True`` + NO must not leave a timer armed."""
+        monitor, calls = _make_monitor(
+            lull_timeout=100.0,
+            interjection=Interjection.very_quiet,
+            side_model_reply="NO",
+        )
+        asyncio.run(
+            monitor.on_message(
+                channel_id=99,
+                speaker="Alice",
+                text="hey there",
+                is_mention=False,
+                is_lull_endpoint=True,
+            )
+        )
+        assert len(calls) == 0
+        buf = monitor._buffers[99]
+        assert buf.lull_timer_handle is None
+
+    def test_yes_decision_logged_at_info(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Log the YES interjection decision at INFO.
+
+        Operators need to see in real time whether the familiar chose
+        to respond.
+        """
+        monitor, _ = _make_monitor(side_model_reply="YES")
+        with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=42, speaker="Alice", text="aria?", is_mention=False
+                )
+            )
+        matches = [
+            r
+            for r in caplog.records
+            if r.name == "familiar_connect.chattiness"
+            and r.levelname == "INFO"
+            and "interjection" in r.getMessage()
+        ]
+        assert len(matches) == 1
+        msg = matches[0].getMessage()
+        assert "decision=YES" in msg
+        assert "channel=42" in msg
+        assert "trigger=direct_address" in msg
+
+    def test_no_decision_logged_at_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Log NO decisions at INFO too.
+
+        Operators need to see the familiar choosing to stay silent, not
+        just when it speaks.
+        """
+        monitor, _ = _make_monitor(side_model_reply="NO")
+        with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=7, speaker="Alice", text="aria?", is_mention=False
+                )
+            )
+        matches = [
+            r
+            for r in caplog.records
+            if r.name == "familiar_connect.chattiness"
+            and r.levelname == "INFO"
+            and "interjection" in r.getMessage()
+        ]
+        assert len(matches) == 1
+        assert "decision=NO" in matches[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +712,7 @@ class TestLullTimer:
             loop.close()
 
         assert any(
-            r.levelno == logging.INFO and "text lull expired" in r.message
+            r.levelno == logging.INFO and "conversational lull expired" in r.message
             for r in caplog.records
         )
 

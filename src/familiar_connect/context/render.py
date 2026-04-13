@@ -238,7 +238,14 @@ def assemble_chat_messages(
                 Message(role=turn.role, content=content, name=None),
             )
 
-    # 3. pending user turns — falls back to single trigger utterance
+    # 3. interruption-context note (voice long-interruption path)
+    interruption_note = (request.interruption_context or "").strip()
+    if interruption_note:
+        messages.append(
+            Message(role="system", content=interruption_note),
+        )
+
+    # 4. pending user turns — falls back to single trigger utterance
     # when none provided (voice path, tests, etc.)
     if request.pending_turns:
         messages.extend(
@@ -258,7 +265,7 @@ def assemble_chat_messages(
             ),
         )
 
-    # 4. depth-inject at position-from-end; values larger than the
+    # 5. depth-inject at position-from-end; values larger than the
     # chat buffer clamp to just after the system prompt
     depth_text = by_layer.get(Layer.depth_inject, "").strip()
     if depth_text:

@@ -31,7 +31,9 @@ from familiar_connect.history.store import HistoryStore
 from familiar_connect.memory.scheduler import MemoryWriterScheduler
 from familiar_connect.memory.store import MemoryStore
 from familiar_connect.memory.writer import MemoryWriter
+from familiar_connect.mood import MoodEvaluator
 from familiar_connect.subscriptions import SubscriptionRegistry
+from familiar_connect.voice.interruption import ResponseTrackerRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,6 +72,12 @@ class Familiar:
     channel_configs: ChannelConfigStore
     monitor: ConversationMonitor
     memory_writer_scheduler: MemoryWriterScheduler
+    tracker_registry: ResponseTrackerRegistry = field(
+        default_factory=ResponseTrackerRegistry,
+    )
+    """Per-guild :class:`ResponseTracker` lookup; lazy-created."""
+    mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
+    """Per-response mood modifier (stub: ``0.0``)."""
     extras: dict[str, object] = field(default_factory=dict)
     """scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet"""
@@ -153,6 +161,7 @@ class Familiar:
         async def _noop_respond(
             channel_id: int,
             buffer: object,
+            trigger: object,
         ) -> None:
             """Act as a no-op until create_bot wires the real callback."""
 

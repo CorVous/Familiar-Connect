@@ -12,7 +12,7 @@ import asyncio
 import dataclasses
 import io
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
 import httpx
@@ -24,14 +24,14 @@ from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
+from familiar_connect.voice.interruption import InterruptionDetector, ResponseState
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-    from typing import Any
+    from collections.abc import Awaitable, Callable
 
-    from familiar_connect.chattiness import BufferedMessage
+    from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
     from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
@@ -129,133 +129,161 @@ async def unsubscribe_text(
     await ctx.respond("No longer listening here.", ephemeral=True)
 
 
-# voice interjection not yet implemented — consult interjection_decision
-# LLM before replying, matching ConversationMonitor gate on text channels;
-# see ConversationMonitor._check_interjection in chattiness.py
-def _build_voice_response_handler(
-    *,
-    vc: discord.VoiceClient,
-    familiar: Familiar,
-    voice_channel_id: int,
+async def _run_voice_response(
+    channel_id: int,
     guild_id: int | None,
-    user_names: dict[int, str],
-) -> Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]]:
-    """Build async callback for each final voice transcription.
+    speaker: str,
+    utterance: str,
+    buffer: list[BufferedMessage],
+    familiar: Familiar,
+    vc: discord.VoiceClient,
+    trigger: ResponseTrigger,
+) -> None:
+    """Run full pipeline → LLM → TTS path for voice channel."""
+    # resolve per-guild response tracker; mark unsolicited flag
+    tracker = familiar.tracker_registry.get(guild_id if guild_id is not None else 0)
+    tracker.vc = vc
+    tracker.is_unsolicited = trigger.is_unsolicited
+    # cache mood modifier for whole turn (no mid-response re-roll)
+    tracker.mood_modifier = familiar.mood_evaluator.evaluate()
+    tracker.transition(ResponseState.GENERATING)
 
-    Routes voice turns through the same :class:`ContextPipeline` as text:
-    assemble request → render → LLM → post-processors → history → TTS.
-    """
+    channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
-    async def _handle_voice_result(
-        user_id: int,
-        result: TranscriptionResult,
-    ) -> None:
-        # resolve speaker display name; falls back to ``User-<id>``
-        # when voice_pipeline's name resolver hasn't seen this user yet
-        speaker = user_names.get(user_id, f"User-{user_id}")
-        safe_name = sanitize_name(speaker) or speaker
+    # disable LLM-calling providers and processors for voice to reduce
+    # real-time latency; remove this replace() call to re-enable
+    channel_config = dataclasses.replace(
+        channel_config,
+        providers_enabled=channel_config.providers_enabled
+        - {
+            "content_search",
+            "history",
+        },
+        preprocessors_enabled=frozenset(),
+        postprocessors_enabled=frozenset(),
+    )
 
-        channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
+    request = ContextRequest(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        speaker=speaker,
+        utterance=utterance,
+        modality=Modality.voice,
+        budget_tokens=channel_config.budget_tokens,
+        deadline_s=channel_config.deadline_s,
+        pending_turns=tuple(
+            PendingTurn(speaker=m.speaker, text=m.text) for m in buffer
+        ),
+    )
 
-        # disable LLM-calling providers and processors for voice to reduce
-        # real-time latency; remove this replace() call to re-enable
-        channel_config = dataclasses.replace(
-            channel_config,
-            providers_enabled=channel_config.providers_enabled
-            - {
-                "content_search",
-                "history",
-            },
-            preprocessors_enabled=frozenset(),
-            postprocessors_enabled=frozenset(),
+    pipeline = familiar.build_pipeline(channel_config)
+    pipeline_output = await pipeline.assemble(
+        request,
+        budget_by_layer=channel_config.budget_by_layer,
+    )
+    _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
+
+    messages = assemble_chat_messages(
+        pipeline_output,
+        store=familiar.history_store,
+        history_window_size=familiar.config.history_window_size,
+        depth_inject_position=familiar.config.depth_inject_position,
+        depth_inject_role=familiar.config.depth_inject_role,
+        mode=channel_config.mode,
+        display_tz=familiar.config.display_tz,
+    )
+
+    _logger.info(
+        "LLM request channel=%s (voice) messages=%d, %d new:\n%s",
+        channel_id,
+        len(messages),
+        len(request.pending_turns) if request.pending_turns else 1,
+        "\n".join(
+            f"  [{pt.speaker or '?'}]: "
+            f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
+            for pt in request.pending_turns
         )
+        if request.pending_turns
+        else (
+            f"  [{request.speaker or '?'}]: "
+            f"{request.utterance[:200]}{'…' if len(request.utterance) > 200 else ''}"
+        ),
+    )
 
-        request = ContextRequest(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            speaker=safe_name,
-            utterance=result.text,
-            modality=Modality.voice,
-            budget_tokens=channel_config.budget_tokens,
-            deadline_s=channel_config.deadline_s,
-        )
-
-        pipeline = familiar.build_pipeline(channel_config)
-        pipeline_output = await pipeline.assemble(
-            request,
-            budget_by_layer=channel_config.budget_by_layer,
-        )
-        _log_pipeline_outcomes(voice_channel_id, pipeline_output.outcomes)
-
-        messages = assemble_chat_messages(
-            pipeline_output,
-            store=familiar.history_store,
-            history_window_size=familiar.config.history_window_size,
-            depth_inject_position=familiar.config.depth_inject_position,
-            depth_inject_role=familiar.config.depth_inject_role,
-            mode=channel_config.mode,
-            display_tz=familiar.config.display_tz,
-        )
-
+    # cancellable generation task; parked on tracker for interruption path
+    generation_task = asyncio.create_task(
+        familiar.llm_clients["main_prose"].chat(messages),
+    )
+    tracker.generation_task = generation_task
+    try:
+        reply = await generation_task
+    except asyncio.CancelledError:
+        tracker.generation_task = None
+        current = asyncio.current_task()
+        if current is not None and current.cancelling() > 0:
+            # outer task cancelled from above — propagate
+            tracker.transition(ResponseState.IDLE)
+            raise
+        # generation task cancelled (interruption path)
         _logger.info(
-            "LLM request channel=%s (voice) messages=%d, 1 new:\n  [%s]: %s",
-            voice_channel_id,
-            len(messages),
-            request.speaker or "?",
-            (request.utterance[:200] + "…")
-            if len(request.utterance) > 200
-            else request.utterance,
+            "voice generation cancelled channel=%s",
+            channel_id,
         )
+        tracker.transition(ResponseState.IDLE)
+        return
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        tracker.generation_task = None
+        _logger.warning(
+            "main reply (voice): %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        tracker.transition(ResponseState.IDLE)
+        return
+    tracker.generation_task = None
+    reply_text = await pipeline.run_post_processors(reply.content, request)
+    tracker.response_text = reply_text
 
-        # main reply isolation: catch ``LLMClient.chat`` raise set
-        # (transport, status, malformed payload) and return cleanly
-        try:
-            reply = await familiar.llm_clients["main_prose"].chat(messages)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            _logger.warning(
-                "main reply (voice): %s: %s",
-                type(exc).__name__,
-                exc,
-            )
-            return
-        reply_text = await pipeline.run_post_processors(reply.content, request)
-
-        # persist both turns after LLM call so a crash never leaves
-        # an orphaned user turn with no reply
+    # persist buffered user utterances then assistant reply
+    for msg in buffer:
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
-            channel_id=voice_channel_id,
+            channel_id=channel_id,
             guild_id=guild_id,
             role="user",
-            content=result.text,
-            speaker=safe_name,
+            content=msg.text,
+            speaker=msg.speaker,
             mode=channel_config.mode,
         )
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=voice_channel_id,
-            guild_id=guild_id,
-            role="assistant",
-            content=reply_text,
-            mode=channel_config.mode,
-        )
-        await familiar.memory_writer_scheduler.notify_turn()
+    familiar.history_store.append_turn(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        role="assistant",
+        content=reply_text,
+        mode=channel_config.mode,
+    )
+    await familiar.memory_writer_scheduler.notify_turn()
 
-        _logger.info("[Voice Response] %s", reply_text)
+    _logger.info("[Voice Response] %s", reply_text)
 
-        if familiar.tts_client is not None:
-            try:
-                pcm_mono = await familiar.tts_client.synthesize(reply_text)
-                stereo = mono_to_stereo(pcm_mono)
-                # wait for current audio to finish (poll — no event available)
-                while vc.is_playing():  # noqa: ASYNC110
-                    await asyncio.sleep(0.1)
-                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            except Exception:
-                _logger.exception("Voice response TTS failed")
-
-    return _handle_voice_result
+    if familiar.tts_client is not None:
+        try:
+            tts_result = await familiar.tts_client.synthesize(reply_text)
+            tracker.timestamps = list(tts_result.timestamps)
+            stereo = mono_to_stereo(tts_result.audio)
+            # wait for current audio to finish (poll — no event available)
+            while vc.is_playing():  # noqa: ASYNC110
+                await asyncio.sleep(0.1)
+            tracker.transition(ResponseState.SPEAKING)
+            vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+            # poll playback to completion for IDLE transition
+            while vc.is_playing():  # noqa: ASYNC110
+                await asyncio.sleep(0.1)
+        except Exception:
+            _logger.exception("Voice response TTS failed")
+    tracker.transition(ResponseState.IDLE)
 
 
 async def subscribe_my_voice(
@@ -264,8 +292,9 @@ async def subscribe_my_voice(
 ) -> None:
     """Join caller's voice channel and register a voice subscription.
 
-    Starts per-user transcription pipeline when ``familiar.transcriber``
-    is configured; without it, joins for TTS playback only.
+    When ``familiar.transcriber`` is set, starts per-user Deepgram
+    pipeline → :class:`VoiceLullMonitor` → ``ConversationMonitor``
+    (same gate as text). Without transcriber, joins for TTS only.
     """
     author = ctx.author
     if not isinstance(author, discord.Member) or author.voice is None:
@@ -317,14 +346,16 @@ async def subscribe_my_voice(
 
     if familiar.tts_client is not None:
         try:
-            pcm_mono = await familiar.tts_client.synthesize("Hello!")
-            stereo = mono_to_stereo(pcm_mono)
+            tts_result = await familiar.tts_client.synthesize("Hello!")
+            stereo = mono_to_stereo(tts_result.audio)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
         except Exception:
             _logger.exception("Opening greeting TTS failed")
 
     if familiar.transcriber is not None:
         user_names = {m.id: m.display_name for m in channel.members}
+        voice_channel_id = channel.id
+        voice_guild_id = ctx.guild_id
 
         def _resolve_from_channel(user_id: int) -> str | None:
             for member in channel.members:
@@ -332,21 +363,82 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        voice_response_handler = _build_voice_response_handler(
-            vc=vc,
-            familiar=familiar,
-            voice_channel_id=channel.id,
-            guild_id=ctx.guild_id,
-            user_names=user_names,
+        # per-voice-channel response handler; dispatched by on_respond
+        async def _voice_response_handler(
+            channel_id: int,
+            buffer: list[BufferedMessage],
+            trigger: ResponseTrigger,
+        ) -> None:
+            if not buffer:
+                return
+            last = buffer[-1]
+            await _run_voice_response(
+                channel_id=channel_id,
+                guild_id=voice_guild_id,
+                speaker=last.speaker,
+                utterance=last.text,
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=trigger,
+            )
+
+        voice_response_handlers = cast(
+            "dict[int, Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]]]",  # noqa: E501
+            familiar.extras.setdefault("voice_response_handlers", {}),
         )
+        voice_response_handlers[voice_channel_id] = _voice_response_handler
+
+        # deliver debounced transcript to ConversationMonitor
+        async def _deliver_to_monitor(
+            user_id: int,
+            merged: TranscriptionResult,
+        ) -> None:
+            raw_name = user_names.get(user_id, f"User-{user_id}")
+            safe_name = sanitize_name(raw_name) or raw_name
+            # mark GENERATING during side-model eval; reverted to IDLE
+            # in finally block if monitor says NO
+            tracker = familiar.tracker_registry.get(
+                voice_guild_id if voice_guild_id is not None else 0,
+            )
+            tracker.is_unsolicited = True  # lull is always unsolicited
+            tracker.transition(ResponseState.GENERATING)
+            try:
+                await familiar.monitor.on_message(
+                    channel_id=voice_channel_id,
+                    speaker=safe_name,
+                    text=merged.text,
+                    is_mention=False,
+                    # already debounced by VoiceLullMonitor; skip lull timer
+                    is_lull_endpoint=True,
+                )
+            finally:
+                # revert to IDLE if monitor said NO (on YES,
+                # _run_voice_response already cycled to IDLE)
+                if tracker.state is ResponseState.GENERATING:
+                    tracker.transition(ResponseState.IDLE)
+
+        # per-guild interruption detector (detect-only for now)
+        interruption_detector = InterruptionDetector(
+            tracker_registry=familiar.tracker_registry,
+            guild_id=voice_guild_id if voice_guild_id is not None else 0,
+            min_interruption_s=familiar.config.min_interruption_s,
+            short_long_boundary_s=familiar.config.short_long_boundary_s,
+            lull_timeout_s=familiar.config.voice_lull_timeout,
+            base_tolerance=(familiar.config.interrupt_tolerance.base_probability),
+        )
+        familiar.extras["interruption_detector"] = interruption_detector
 
         # debounce per-final Deepgram fragments into a single utterance
         # via VoiceLullMonitor; fires after voice_lull_timeout of silence
+
         lull_monitor = VoiceLullMonitor(
             lull_timeout=familiar.config.voice_lull_timeout,
             user_silence_s=0.2,
-            on_utterance_complete=voice_response_handler,
-        )  # voice_lull_timeout, not text_lull_timeout — voice uses pure debounce
+            on_utterance_complete=_deliver_to_monitor,
+            on_voice_activity=interruption_detector.on_voice_activity,
+        )  # voice_lull_timeout = endpointing; conversational lull governed
+        # by text_lull_timeout inside ConversationMonitor
         familiar.extras["voice_lull_monitor"] = lull_monitor
 
         async def _route_transcript_to_monitor(  # noqa: RUF029
@@ -402,9 +494,17 @@ async def unsubscribe_voice(
         lull_monitor = familiar.extras.pop("voice_lull_monitor", None)
         if isinstance(lull_monitor, VoiceLullMonitor):
             lull_monitor.clear()
+        familiar.extras.pop("interruption_detector", None)
         await vc.disconnect()
 
     if sub is not None:
+        # drop voice dispatch + monitor state for clean re-subscribe
+        voice_response_handlers = cast(
+            "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
+            familiar.extras.get("voice_response_handlers", {}),
+        )
+        voice_response_handlers.pop(sub.channel_id, None)
+        familiar.monitor.clear_channel(sub.channel_id)
         familiar.subscriptions.remove(
             channel_id=sub.channel_id,
             kind=SubscriptionKind.voice,
@@ -560,8 +660,8 @@ async def _run_text_response(
         vc = guild.voice_client
         if vc is not None and not vc.is_playing():
             try:
-                pcm_mono = await familiar.tts_client.synthesize(reply_text)
-                stereo = mono_to_stereo(pcm_mono)
+                tts_result = await familiar.tts_client.synthesize(reply_text)
+                stereo = mono_to_stereo(tts_result.audio)
                 vc.play(discord.PCMAudio(io.BytesIO(stereo)))
             except Exception:
                 _logger.exception("TTS synthesis failed")
@@ -629,7 +729,18 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     async def _on_respond(
         channel_id: int,
         buffer: list[BufferedMessage],
+        trigger: ResponseTrigger,
     ) -> None:
+        # voice dispatch first — shared ConversationMonitor gate
+        voice_handlers = cast(
+            "dict[int, Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]]]",  # noqa: E501
+            familiar.extras.get("voice_response_handlers", {}),
+        )
+        voice_handler = voice_handlers.get(channel_id)
+        if voice_handler is not None:
+            await voice_handler(channel_id, buffer, trigger)
+            return
+
         channel = bot.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
             return
