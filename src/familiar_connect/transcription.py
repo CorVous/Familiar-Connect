@@ -222,7 +222,7 @@ class DeepgramTranscriber:
 
     _MAX_RECONNECTS: int = 5
     _RECONNECT_DELAY: float = 1.0
-    _KEEPALIVE_INTERVAL: float = 5.0
+    _KEEPALIVE_INTERVAL: float = 3.0
 
     async def _keepalive_loop(self: Self) -> None:
         """Periodic KeepAlive to prevent Deepgram's ~10s idle timeout.
