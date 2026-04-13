@@ -47,6 +47,7 @@ from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
+from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
@@ -363,7 +364,7 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        response_handler = _build_voice_response_handler(
+        voice_response_handler = _build_voice_response_handler(
             vc=vc,
             familiar=familiar,
             voice_channel_id=channel.id,
@@ -371,11 +372,30 @@ async def subscribe_my_voice(
             user_names=user_names,
         )
 
+        # Wrap the response handler in a VoiceLullMonitor so per-final
+        # Deepgram fragments are debounced into a single utterance. The
+        # monitor fires ``voice_response_handler`` once, with merged
+        # text, after ``voice_lull_timeout`` seconds of Discord-reported
+        # silence (see voice_lull.py).
+        lull_monitor = VoiceLullMonitor(
+            lull_timeout=familiar.config.voice_lull_timeout,
+            user_silence_s=0.2,
+            on_utterance_complete=voice_response_handler,
+        )
+        familiar.extras["voice_lull_monitor"] = lull_monitor
+
+        async def _route_transcript_to_monitor(  # noqa: RUF029
+            user_id: int,
+            result: TranscriptionResult,
+        ) -> None:
+            lull_monitor.on_transcript(user_id, result)
+
         pipeline = await start_pipeline(
             familiar.transcriber,
             user_names=user_names,
             resolve_name=_resolve_from_channel,
-            response_handler=response_handler,
+            response_handler=_route_transcript_to_monitor,
+            on_audio=lull_monitor.on_audio,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),
@@ -415,6 +435,9 @@ async def unsubscribe_voice(
                 vc.stop_recording()
             await stop_pipeline()
             _logger.info("Stopped voice transcription pipeline")
+        lull_monitor = familiar.extras.pop("voice_lull_monitor", None)
+        if isinstance(lull_monitor, VoiceLullMonitor):
+            lull_monitor.clear()
         await vc.disconnect()
 
     if sub is not None:
