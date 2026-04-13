@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -292,6 +293,34 @@ class _AsyncIter:
             raise StopAsyncIteration from None
 
 
+def _make_long_lived_ws_mock() -> MagicMock:
+    """Build a mock WebSocket whose async iterator blocks forever.
+
+    Used as the post-reconnect socket in tests that only care about
+    what happened up to and during the reconnect — the loop is
+    eventually cancelled by ``client.stop()``.
+    """
+    ws = MagicMock()
+    ws.send_bytes = AsyncMock()
+    ws.send_json = AsyncMock()
+    ws.close = AsyncMock()
+    ws.closed = False
+    ws.close_code = None
+
+    pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
+
+    class _Never:
+        def __aiter__(self) -> _Never:
+            return self
+
+        async def __anext__(self) -> object:
+            await pending  # waits until the test cancels via stop()
+            raise StopAsyncIteration
+
+    ws.__aiter__ = MagicMock(return_value=_Never())
+    return ws
+
+
 class TestDeepgramTranscriberLifecycle:
     """Tests for start/send_audio/stop WebSocket lifecycle."""
 
@@ -348,10 +377,14 @@ class TestDeepgramTranscriberLifecycle:
             await client.send_audio(b"\x00\x01")
 
     @pytest.mark.asyncio
-    async def test_send_audio_skips_when_ws_closed(
+    async def test_send_audio_buffers_when_ws_closed(
         self, client: DeepgramTranscriber
     ) -> None:
-        """send_audio() silently returns when the WebSocket is already closed."""
+        """send_audio() buffers bytes when the WebSocket is already closed.
+
+        The bytes are not sent to the closed socket but are retained in
+        the pending-audio buffer so the next reconnect can flush them.
+        """
         ws_mock = self._make_ws_mock()
         ws_mock.closed = True
 
@@ -359,9 +392,11 @@ class TestDeepgramTranscriberLifecycle:
             queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
             await client.start(queue)
             try:
-                # Should NOT raise — just returns silently.
+                # Should NOT raise and should NOT send on the closed ws.
                 await client.send_audio(b"\x00\x01")
                 ws_mock.send_bytes.assert_not_called()
+                assert list(client._pending_audio) == [b"\x00\x01"]
+                assert client._pending_audio_bytes == 2
             finally:
                 await client.stop()
 
@@ -450,6 +485,46 @@ class TestDeepgramTranscriberLifecycle:
 
             assert queue.empty()
 
+    @pytest.mark.asyncio
+    async def test_metadata_logged_at_debug(
+        self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Metadata frames are logged at DEBUG, not INFO.
+
+        Deepgram emits a Metadata frame on every server-side session
+        rotation. Logging its raw JSON at INFO level was noisy and made
+        it look like transcription had failed.
+        """
+        metadata_response = json.dumps({
+            "type": "Metadata",
+            "request_id": "abc123",
+            "duration": 34.25,
+        })
+
+        ws_msg = MagicMock()
+        ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
+        ws_msg.data = metadata_response
+
+        ws_mock = self._make_ws_mock(messages=[ws_msg])
+
+        with (
+            patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)),
+            caplog.at_level(logging.DEBUG, logger="familiar_connect.transcription"),
+        ):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+        metadata_records = [
+            r for r in caplog.records if "[Deepgram] Metadata" in r.getMessage()
+        ]
+        assert metadata_records, "expected the Metadata frame to be logged"
+        for record in metadata_records:
+            assert record.levelno == logging.DEBUG, (
+                f"Metadata should log at DEBUG, got {record.levelname}"
+            )
+
 
 class TestDeepgramReconnect:
     """Tests for automatic WebSocket reconnection."""
@@ -510,6 +585,121 @@ class TestDeepgramReconnect:
             await client.stop()
 
         ws2.send_bytes.assert_called_once_with(b"\x01\x02")
+
+    @pytest.mark.asyncio
+    async def test_audio_sent_while_closed_is_buffered_and_flushed(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Audio buffered while the ws was closed is flushed after reconnect.
+
+        This is the regression test for the "first utterance after a
+        long silence is lost" bug: when Deepgram rotates the session,
+        audio sent during the reconnect gap must not be dropped.
+        """
+        ws1 = self._make_ws_mock()
+        ws1.closed = True  # Emulate: socket closed before reconnect fires.
+        ws2 = _make_long_lived_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+
+            # Buffer audio while ws1 is the active (but closed) socket —
+            # before the receive loop has had a chance to swap in ws2.
+            await client.send_audio(b"\x01\x02")
+            assert client._pending_audio_bytes == 2
+
+            # Let the receive loop detect the close, reconnect, and flush.
+            await asyncio.sleep(0.3)
+            await client.stop()
+
+        ws2.send_bytes.assert_any_call(b"\x01\x02")
+        assert client._pending_audio_bytes == 0
+        assert not client._pending_audio
+
+    @pytest.mark.asyncio
+    async def test_pending_audio_buffer_is_bounded(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """The pending-audio buffer evicts the oldest frames when over cap."""
+        client._PENDING_AUDIO_MAX_BYTES = 8
+
+        ws = self._make_ws_mock()
+        ws.closed = True
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                # Push 16 bytes (four 4-byte chunks) into the buffer.
+                for i in range(4):
+                    await client.send_audio(bytes([i]) * 4)
+                # Cap is 8 so only the last two chunks should survive.
+                assert client._pending_audio_bytes <= 8
+                assert list(client._pending_audio) == [b"\x02" * 4, b"\x03" * 4]
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_normal_close_logs_at_info_level(
+        self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """close_code=1000 (Deepgram session rotation) logs at INFO, not WARNING."""
+        ws1 = self._make_ws_mock()
+        ws1.close_code = 1000
+        ws2 = _make_long_lived_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with (
+            patch.object(client, "_ws_connect", new=connect_mock),
+            caplog.at_level(logging.DEBUG, logger="familiar_connect.transcription"),
+        ):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.3)
+            await client.stop()
+
+        rotated = [r for r in caplog.records if "session rotated" in r.getMessage()]
+        assert rotated, "expected a 'session rotated' log line for close_code=1000"
+        for record in rotated:
+            assert record.levelno == logging.INFO
+        # And no WARNING about the routine rotation.
+        warnings_about_close = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "Deepgram WebSocket closed" in r.getMessage()
+        ]
+        assert warnings_about_close == []
+
+    @pytest.mark.asyncio
+    async def test_abnormal_close_still_logs_warning(
+        self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unexpected close codes (e.g. 1006) still surface as WARNING."""
+        ws1 = self._make_ws_mock()
+        ws1.close_code = 1006
+        ws2 = _make_long_lived_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with (
+            patch.object(client, "_ws_connect", new=connect_mock),
+            caplog.at_level(logging.DEBUG, logger="familiar_connect.transcription"),
+        ):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.3)
+            await client.stop()
+
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "Deepgram WebSocket closed" in r.getMessage()
+            and "close_code=1006" in r.getMessage()
+        ]
+        assert warnings, "expected a WARNING for close_code=1006"
 
     @pytest.mark.asyncio
     async def test_gives_up_after_max_reconnects(

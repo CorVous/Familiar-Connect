@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
@@ -94,6 +95,12 @@ class DeepgramTranscriber:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._receive_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        # Audio sent while the WebSocket is closed (e.g. between a
+        # server-side session rotation and the reconnect completing) is
+        # buffered here and flushed to the new socket once ``_reconnect``
+        # finishes. Bounded by :attr:`_PENDING_AUDIO_MAX_BYTES`.
+        self._pending_audio: deque[bytes] = deque()
+        self._pending_audio_bytes: int = 0
 
     def build_ws_url(self: Self) -> str:
         """Build the Deepgram WebSocket URL with query parameters."""
@@ -204,9 +211,12 @@ class DeepgramTranscriber:
     async def send_audio(self: Self, data: bytes) -> None:
         """Send raw PCM audio bytes to the Deepgram WebSocket.
 
-        Silently returns if the WebSocket has already been closed (e.g.
-        server-side disconnect). This avoids noisy errors when Deepgram
-        terminates the connection while audio is still flowing.
+        If the WebSocket has already been closed (e.g. server-side
+        session rotation), the bytes are buffered in
+        :attr:`_pending_audio` and flushed to the new socket once
+        :meth:`_reconnect` succeeds. The buffer is bounded by
+        :attr:`_PENDING_AUDIO_MAX_BYTES`; when it overflows the oldest
+        frames are evicted so we retain the most recent audio.
 
         :raises RuntimeError: If called before :meth:`start`.
         """
@@ -214,8 +224,42 @@ class DeepgramTranscriber:
             msg = "Transcriber is not connected — call start() first"
             raise RuntimeError(msg)
         if self._ws.closed:
+            self._buffer_pending_audio(data)
             return
         await self._ws.send_bytes(data)
+
+    def _buffer_pending_audio(self: Self, data: bytes) -> None:
+        """Append *data* to the pending-audio buffer.
+
+        Evicts the oldest frames when the buffer exceeds
+        :attr:`_PENDING_AUDIO_MAX_BYTES`.
+        """
+        self._pending_audio.append(data)
+        self._pending_audio_bytes += len(data)
+        while (
+            self._pending_audio_bytes > self._PENDING_AUDIO_MAX_BYTES
+            and self._pending_audio
+        ):
+            evicted = self._pending_audio.popleft()
+            self._pending_audio_bytes -= len(evicted)
+
+    async def _flush_pending_audio(
+        self: Self, ws: aiohttp.ClientWebSocketResponse
+    ) -> int:
+        """Send buffered audio frames to *ws*. Returns the number of bytes flushed."""
+        flushed = 0
+        while self._pending_audio:
+            chunk = self._pending_audio.popleft()
+            self._pending_audio_bytes -= len(chunk)
+            try:
+                await ws.send_bytes(chunk)
+            except Exception:
+                # Drop the remainder; the receive loop will either
+                # recover on the next iteration or give up cleanly.
+                _logger.debug("Failed to flush buffered audio chunk", exc_info=True)
+                break
+            flushed += len(chunk)
+        return flushed
 
     async def stop(self: Self) -> None:
         """Gracefully close the Deepgram connection."""
@@ -243,8 +287,12 @@ class DeepgramTranscriber:
             self._session = None
 
     _MAX_RECONNECTS: int = 5
-    _RECONNECT_DELAY: float = 1.0
+    _RECONNECT_DELAY: float = 0.1
     _KEEPALIVE_INTERVAL: float = 5.0
+    # ~20 s of 48 kHz mono s16le — large enough to cover a reconnect
+    # window comfortably, bounded so a persistently dead socket can't
+    # grow the buffer without limit.
+    _PENDING_AUDIO_MAX_BYTES: int = 2_000_000
 
     async def _keepalive_loop(self: Self) -> None:
         """Send periodic KeepAlive frames to prevent Deepgram's idle timeout.
@@ -289,6 +337,17 @@ class DeepgramTranscriber:
         )
         _logger.info("Deepgram WebSocket reconnected")
 
+        # Flush any audio that arrived while the socket was closed so the
+        # user's first utterance after a server-side session rotation is
+        # not lost.
+        if self._pending_audio:
+            flushed = await self._flush_pending_audio(self._ws)
+            if flushed:
+                _logger.info(
+                    "Flushed %d buffered audio bytes to new Deepgram socket",
+                    flushed,
+                )
+
     async def _receive_loop(
         self: Self,
         output: asyncio.Queue[TranscriptionResult],
@@ -310,7 +369,7 @@ class DeepgramTranscriber:
                             # Got real data — reset reconnect counter.
                             consecutive_reconnects = 0
                     else:
-                        _logger.info(
+                        _logger.debug(
                             "[Deepgram] %s: %s",
                             msg_type,
                             msg.data[:200],
@@ -328,12 +387,22 @@ class DeepgramTranscriber:
 
             close_code = self._ws.close_code if self._ws else None
             consecutive_reconnects += 1
-            _logger.warning(
-                "Deepgram WebSocket closed (close_code=%s), reconnecting (%d/%d)…",
-                close_code,
-                consecutive_reconnects,
-                self._MAX_RECONNECTS,
-            )
+            if close_code == 1000:
+                # 1000 is the standard WebSocket "normal closure" code.
+                # Deepgram emits it when rotating long-lived streaming
+                # sessions server-side; it is expected, not an error.
+                _logger.info(
+                    "Deepgram session rotated (close_code=1000), reconnecting (%d/%d)…",
+                    consecutive_reconnects,
+                    self._MAX_RECONNECTS,
+                )
+            else:
+                _logger.warning(
+                    "Deepgram WebSocket closed (close_code=%s), reconnecting (%d/%d)…",
+                    close_code,
+                    consecutive_reconnects,
+                    self._MAX_RECONNECTS,
+                )
 
             try:
                 await asyncio.sleep(self._RECONNECT_DELAY)
