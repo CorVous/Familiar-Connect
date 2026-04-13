@@ -436,6 +436,10 @@ async def subscribe_my_voice(
                 speaker=safe_name,
                 text=merged.text,
                 is_mention=False,
+                # The voice pipeline already debounced silence via
+                # VoiceLullMonitor, so this call is itself the lull.
+                # Tell the monitor not to start another lull timer.
+                is_lull_endpoint=True,
             )
 
         lull_monitor = VoiceLullMonitor(

@@ -478,6 +478,55 @@ class TestSideModelEvaluation:
         assert len(buf_snapshot) == 3
         assert buf_snapshot[0].speaker == "Alice"
 
+    def test_lull_endpoint_evaluates_inline_without_starting_timer(self) -> None:
+        """Voice path: ``is_lull_endpoint=True`` runs the lull eval inline.
+
+        The voice pipeline already debounced silence via
+        ``VoiceLullMonitor``; the conversation monitor must not start
+        its own (text) lull timer or wait further. Passing
+        ``is_lull_endpoint=True`` should evaluate immediately and skip
+        the timer.
+        """
+        monitor, calls = _make_monitor(
+            lull_timeout=100.0,  # would never fire in test if started
+            interjection=Interjection.very_quiet,  # counter threshold far away
+            side_model_reply="YES",
+        )
+        asyncio.run(
+            monitor.on_message(
+                channel_id=99,
+                speaker="Alice",
+                text="hey there",
+                is_mention=False,
+                is_lull_endpoint=True,
+            )
+        )
+        # Inline lull eval said YES → on_respond fired exactly once.
+        assert len(calls) == 1
+        # No pending lull timer left behind.
+        buf = monitor._buffers.get(99)
+        assert buf is None or buf.lull_timer_handle is None
+
+    def test_lull_endpoint_no_response_does_not_start_timer(self) -> None:
+        """``is_lull_endpoint=True`` + NO must not leave a timer armed."""
+        monitor, calls = _make_monitor(
+            lull_timeout=100.0,
+            interjection=Interjection.very_quiet,
+            side_model_reply="NO",
+        )
+        asyncio.run(
+            monitor.on_message(
+                channel_id=99,
+                speaker="Alice",
+                text="hey there",
+                is_mention=False,
+                is_lull_endpoint=True,
+            )
+        )
+        assert len(calls) == 0
+        buf = monitor._buffers[99]
+        assert buf.lull_timer_handle is None
+
     def test_yes_decision_logged_at_info(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:

@@ -1190,6 +1190,9 @@ class TestVoiceInterjectionRouting:
         assert kwargs["channel_id"] == 9000
         assert kwargs["text"] == "hello there"
         assert kwargs["is_mention"] is False
+        # Voice already debounced silence — monitor must not start its
+        # own (text) lull timer for voice channels.
+        assert kwargs["is_lull_endpoint"] is True
 
     def test_subscribe_my_voice_registers_voice_response_handler(
         self, tmp_path: Path

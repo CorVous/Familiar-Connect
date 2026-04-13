@@ -86,7 +86,9 @@ Seconds of silence on a **text** channel before the lull evaluation fires. Text-
 
 Seconds of channel-wide silence after which a buffered voice utterance is handed to the response pipeline. Acts as a debounce on Deepgram's per-final transcript stream so the bot only responds once the speaker has actually paused, rather than on every mid-sentence fragment.
 
-Silence is detected Discord-natively: every inbound audio frame routed through the voice pipeline resets per-user silence watchdogs inside `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`). When every user has been quiet for longer than `user_silence_s` (200 ms) *and* there is at least one buffered final, the lull timer starts; on expiry the concatenated text is handed to `ConversationMonitor.on_message` as one utterance, keyed by the voice channel id. **`voice_lull_timeout` is endpointing only** — the side-model YES/NO gate (direct address, counter-based interjection, conversational lull) is governed by `text_lull_timeout` inside `ConversationMonitor`, just as it is for text.
+Silence is detected Discord-natively: every inbound audio frame routed through the voice pipeline resets per-user silence watchdogs inside `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`). When every user has been quiet for longer than `user_silence_s` (200 ms) *and* there is at least one buffered final, the lull timer starts; on expiry the concatenated text is handed to `ConversationMonitor.on_message` as one utterance, keyed by the voice channel id and flagged with `is_lull_endpoint=True`.
+
+For voice, **`voice_lull_timeout` is the only conversational pause** — the monitor treats each merged voice utterance as itself the endpoint of a lull, so the side-model YES/NO gate fires inline rather than waiting an additional `text_lull_timeout`. Direct address and counter-based interjection still fire on each merged utterance as they do for text.
 
 **Default:** `5.0`
 

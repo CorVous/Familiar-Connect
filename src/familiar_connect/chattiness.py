@@ -246,20 +246,29 @@ class ConversationMonitor:
         text: str,
         *,
         is_mention: bool,
+        is_lull_endpoint: bool = False,
     ) -> None:
         """Process an incoming message on a subscribed channel.
 
         Called by ``bot.py:on_message`` for every non-bot message on a
-        subscribed text channel.
+        subscribed text channel, and by the voice pipeline for each
+        merged voice utterance.
 
         :param channel_id: Discord channel id.
         :param speaker: Sanitised display name of the author.
         :param text: Raw message content.
         :param is_mention: Whether the Discord message @mentions the bot.
+        :param is_lull_endpoint: When True, the caller has already
+            established a conversational pause before this call (the
+            voice pipeline's per-channel ``voice_lull_timeout``
+            debounce). The monitor skips its own lull timer and, if no
+            higher-priority trigger fires, runs the lull evaluation
+            inline so voice doesn't double-debounce.
         """
         buf = self._get_or_create_buffer(channel_id)
 
-        # 1. Cancel the existing lull timer (we'll restart it below)
+        # 1. Cancel the existing lull timer (we'll restart it below
+        #    on the text path; voice never starts one)
         self._cancel_lull_timer(buf)
 
         # 2. Append to buffer and increment counter
@@ -304,8 +313,19 @@ class ConversationMonitor:
                     self._interjection, buf.check_count
                 )
 
-        # 5. Start new lull timer
-        self._start_lull_timer(channel_id, buf)
+        # 5. Conversational lull
+        if is_lull_endpoint:
+            # Voice path: the voice pipeline already debounced silence,
+            # so this call IS the lull. Evaluate inline instead of
+            # starting another timer.
+            async with buf.lock:
+                yes = await self._evaluate(channel_id, buf, trigger_context=None)
+                if yes:
+                    await self._fire_respond(channel_id, buf)
+        else:
+            # Text path: silence is detected by waiting for no further
+            # messages for ``lull_timeout`` seconds.
+            self._start_lull_timer(channel_id, buf)
 
     def clear_channel(self, channel_id: int) -> None:
         """Remove all state for *channel_id*.
