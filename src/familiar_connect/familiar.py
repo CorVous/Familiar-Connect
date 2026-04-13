@@ -1,27 +1,11 @@
 """Runtime bundle for the single active character.
 
-Per ``docs/architecture/configuration-model.md``, a Familiar-Connect
-process runs exactly one character at a time. Multiple character
-folders may coexist under ``data/familiars/``; ``FAMILIAR_ID`` at
-startup selects which one this process actually loads. The
-:class:`Familiar` dataclass is the runtime singleton that carries
-every concern tied to that active character: its config, its
-memory store, its history store, its registered providers /
-processors, its subscription registry, and its per-channel config
-store.
+One process runs one character (selected by ``FAMILIAR_ID``).
+:class:`Familiar` carries config, memory store, history store,
+registered providers/processors, subscriptions, and channel configs.
 
-:meth:`Familiar.load_from_disk` walks a character's folder under
-``data/familiars/<id>/`` and builds the whole bundle in one pass.
-It's the only constructor callers should use; the dataclass is
-mostly transparent so tests can still mint minimal fakes when they
-need to.
-
-The bundle also exposes :meth:`build_pipeline`, which constructs a
-per-turn :class:`ContextPipeline` from the channel's active
-:class:`ChannelConfig`. Building the pipeline per turn (rather than
-holding a single pipeline across turns) lets the set of providers
-and processors vary per channel mode without fancy filtering inside
-the pipeline itself.
+- :meth:`load_from_disk` — sole constructor; walks ``data/familiars/<id>/``
+- :meth:`build_pipeline` — per-turn :class:`ContextPipeline` filtered by channel mode
 """
 
 from __future__ import annotations
@@ -63,34 +47,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class Familiar:
-    """Runtime bundle for the one character this install is running.
+    """Runtime bundle for one character.
 
-    :param id: Folder name under ``data/familiars/``. Used as the
-        ``familiar_id`` on :class:`ContextRequest`.
-    :param root: The character's root directory on disk.
-    :param config: Parsed :class:`CharacterConfig` (defaults if the
-        sidecar is missing).
-    :param memory_store: The :class:`MemoryStore` rooted at
-        ``<root>/memory``.
-    :param history_store: The :class:`HistoryStore` backed by
-        ``<root>/history.db``.
-    :param llm_clients: ``slot_name -> LLMClient`` map, one entry
-        per :data:`familiar_connect.config.LLM_SLOT_NAMES`. Holds
-        every client the bundle needs so shutdown can iterate and
-        ``close()`` all of them.
-    :param tts_client: Optional TTS client for voice output.
-    :param transcriber: Optional Deepgram transcriber template used
-        by the voice-subscription path to drive per-user speech-to-
-        text streams. When ``None``, ``/subscribe-my-voice`` still
-        joins the voice channel and plays TTS, but no incoming
-        audio is transcribed.
-    :param providers: ``id -> ContextProvider`` map of every
-        registered provider, filtered per-turn via
-        :meth:`build_pipeline`.
-    :param pre_processors: ``id -> PreProcessor`` map.
-    :param post_processors: ``id -> PostProcessor`` map.
-    :param subscriptions: Persistent subscription registry.
-    :param channel_configs: Per-channel config store.
+    :param transcriber: when ``None``, voice subscription joins for TTS
+        playback only — no incoming audio is transcribed.
     """
 
     id: str
@@ -108,8 +68,8 @@ class Familiar:
     channel_configs: ChannelConfigStore
     monitor: ConversationMonitor
     extras: dict[str, object] = field(default_factory=dict)
-    """Scratch space for later additions (e.g. Twitch client) that don't
-    justify a dedicated field yet."""
+    """scratch space for later additions (e.g. Twitch client) that don't
+    justify a dedicated field yet"""
 
     # ------------------------------------------------------------------
     # Construction
@@ -125,32 +85,13 @@ class Familiar:
         transcriber: DeepgramTranscriber | None = None,
         defaults_path: Path | None = None,
     ) -> Familiar:
-        """Build a Familiar bundle from the on-disk ``data/familiars/<id>/`` layout.
+        """Build Familiar bundle from on-disk ``data/familiars/<id>/`` layout.
 
-        - ``character.toml`` is loaded (merged over
-          ``data/familiars/_default/character.toml``).
-        - ``memory/`` is created if missing.
-        - ``history.db`` is opened (and created if missing).
-        - ``subscriptions.toml`` is loaded if present.
-        - ``channels/`` is created if missing.
+        Loads ``character.toml`` (merged over defaults), opens stores,
+        registers providers/processors, builds :class:`ConversationMonitor`.
 
-        :param llm_clients: ``slot_name -> LLMClient`` map built by
-            :func:`familiar_connect.llm.create_llm_clients`. Must
-            contain one client per
-            :data:`familiar_connect.config.LLM_SLOT_NAMES`.
-        :param tts_client: Optional Cartesia TTS client for voice
-            output.
-        :param transcriber: Optional Deepgram transcriber template
-            used by ``/subscribe-my-voice`` to drive per-user
-            speech-to-text streams. When ``None``, the voice
-            subscription still joins the channel and plays TTS but
-            no audio is transcribed.
-        :param defaults_path: Override for the default character
-            profile path. Production leaves this ``None``, which
-            resolves ``root.parent / "_default" / "character.toml"``.
-            Tests pass the checked-in default profile directly so
-            they don't have to stage a sibling ``_default/`` folder
-            in ``tmp_path``.
+        :param defaults_path: override for default profile path; tests
+            pass this to avoid staging a sibling ``_default/`` folder.
         """
         familiar_id = root.name
         if defaults_path is None:
@@ -192,16 +133,14 @@ class Familiar:
             character=character_config,
         )
 
-        # modes/ holds per-mode static instruction files; it's created
-        # on first boot so users can drop <mode>.md files into it
-        # without having to mkdir themselves. ModeInstructionProvider
-        # resolves files relative to this directory per turn.
+        # modes/ holds per-mode static instruction files; created on
+        # first boot so users can drop <mode>.md files without mkdir.
+        # ModeInstructionProvider resolves files here per turn.
         modes_root = root / "modes"
         modes_root.mkdir(parents=True, exist_ok=True)
 
-        # Pre-load character card text from memory/self/*.md files so the
-        # monitor has it ready for evaluation prompts without hitting disk
-        # per evaluation.
+        # pre-load character card text from memory/self/*.md so the
+        # monitor has it ready without hitting disk per evaluation
         self_dir = memory_root / "self"
         character_card = ""
         if self_dir.exists():
@@ -247,16 +186,10 @@ class Familiar:
     # ------------------------------------------------------------------
 
     def build_pipeline(self, channel_config: ChannelConfig) -> ContextPipeline:
-        """Return a :class:`ContextPipeline` filtered for the given channel.
+        """Return :class:`ContextPipeline` filtered for *channel_config*.
 
-        Most providers are registered once on the Familiar at
-        startup and filtered per turn by id. A small set of providers
-        depends on the channel's :class:`ChannelMode` and is
-        constructed fresh per turn with the mode baked in —
-        :class:`ModeInstructionProvider` is the only one today, but
-        the branch here is the sanctioned place to add future
-        mode-scoped providers without leaking ``ChannelMode`` into
-        :class:`ContextRequest`.
+        Per-turn providers (e.g. :class:`ModeInstructionProvider`) are
+        constructed fresh with the channel's mode baked in.
         """
         active_providers: list[ContextProvider] = [
             self.providers[pid]

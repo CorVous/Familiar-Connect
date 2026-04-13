@@ -1,35 +1,18 @@
 """HistoryProvider — sliding window of recent turns + rolling summary.
 
-Step 6 of docs/architecture/context-pipeline.md. Reads turns from the
-:class:`HistoryStore` for the request's
-``(familiar_id, channel_id)`` and emits up to two contributions:
+Emits up to two contributions per request:
 
-- A ``recent_history`` Contribution containing the most recent N
-  turns *in this channel* rendered as a single block of text. The
-  recent window is partitioned per channel so two simultaneous
-  conversations don't bleed into each other.
-- A ``history_summary`` Contribution containing a rolling summary of
-  every turn the familiar has heard *globally* (across all channels)
-  except the most recent ``summary_lag`` turns, built by the
-  ``history_summary`` slot's :class:`LLMClient` and cached in the
-  store under ``familiar_id``. The cache is keyed by
-  ``last_summarised_id``; the summariser is only re-invoked when
-  enough new turns have arrived globally that the cached watermark
-  has fallen behind.
+- ``recent_history`` — most recent N turns *per channel*, rendered as text.
+- ``history_summary`` — rolling LLM-built summary of older turns *globally*,
+  cached by ``last_summarised_id`` and rebuilt only when stale.
 
-The provider has its own internal soft deadline for the summariser,
-shorter than the pipeline's per-provider deadline, so a slow LLM
-call never costs us the recent-history layer. If the summariser
-exceeds the soft deadline (or raises) and there is a stale cached
-summary, the stale value is returned. If neither path produces text,
-the provider returns just the recent layer and lets the pipeline
-move on.
+Soft deadline on the summariser (shorter than the pipeline deadline) ensures
+the recent-history layer always returns even when the model stalls. On
+timeout or error, falls back to stale cache, then to nothing.
 
-The split between per-channel recent window and per-familiar global
-summary is the "hybrid" option from
-``docs/architecture/configuration-model.md``, picked specifically
-because it forces multi-channel scalability to be a first-class
-concern from day one.
+See docs/architecture/context-pipeline.md and
+docs/architecture/configuration-model.md for the hybrid per-channel /
+per-familiar design rationale.
 """
 
 from __future__ import annotations
@@ -125,29 +108,13 @@ _CROSS_CONTEXT_PROMPT_TEMPLATE = (
 class HistoryProvider:
     """ContextProvider that surfaces recent turns + a rolling summary.
 
-    Conforms to the ContextProvider Protocol structurally — no
-    inheritance required.
+    ``window_size`` controls per-channel recent turns. ``summary_lag``
+    (defaults to ``window_size``) excludes the N most-recent-globally
+    turns from the summary, so single-channel scenarios produce zero
+    overlap between recent and summary layers.
 
-    :param store: The :class:`HistoryStore` to read turns from and
-        cache summaries in.
-    :param llm_client: The :class:`LLMClient` for the
-        ``history_summary`` slot, used to build new summaries when
-        the cache is stale.
-    :param window_size: Number of recent turns *per channel* to
-        surface verbatim. Defaults to ``DEFAULT_WINDOW_SIZE``.
-    :param summary_lag: Number of most-recent-globally turns to
-        exclude from the summary content. Defaults to ``window_size``,
-        which means the summary covers everything older than the
-        global rolling window. Setting it equal to ``window_size``
-        also means single-channel scenarios produce zero overlap
-        between the recent layer and the summary layer.
-    :param mode: The :class:`ChannelMode` this provider instance is
-        scoped to. One provider is constructed per turn inside
-        :meth:`Familiar.build_pipeline`, so the mode is fixed for
-        the lifetime of the provider. When ``None``, no mode
-        filtering is applied (backwards-compatible default for
-        existing callers and tests).
-    :param summary_timeout_s: Soft cap on the summariser sub-call.
+    Constructed per turn with a fixed ``mode``; ``None`` disables mode
+    filtering (backwards-compatible default).
     """
 
     id = "history"
@@ -197,22 +164,22 @@ class HistoryProvider:
             channel_id=request.channel_id,
         )
         if latest is None:
-            # No global history at all — nothing to surface, anywhere.
+            # no global history at all — nothing to surface
             return []
 
         contributions: list[Contribution] = []
         if recent:
             contributions.append(self._recent_contribution(recent))
 
-        # Only build a summary if there's enough global history that
-        # at least one turn lives outside the rolling-window region.
+        # only build a summary if at least one turn lives outside the
+        # rolling-window region
         if latest > self._summary_lag:
             target_max_id = latest - self._summary_lag
             summary_text = await self._fetch_or_build_summary(request, target_max_id)
             if summary_text:
                 contributions.append(self._summary_contribution(summary_text))
 
-        # Cross-context: summarise activity in other channels.
+        # cross-context: summarise activity in other channels
         if self._mode is not None:
             cross = await self._build_cross_context_contributions(request)
             contributions.extend(cross)
@@ -235,9 +202,8 @@ class HistoryProvider:
         if cached is not None and cached.last_summarised_id >= target_max_id:
             return cached.summary_text
 
-        # Cache is missing or stale: try to (re)build it under the soft
-        # deadline. On any failure, fall back to whatever the cache has —
-        # better stale than nothing.
+        # cache missing or stale — rebuild under soft deadline; on any
+        # failure, fall back to whatever the cache has
         try:
             async with asyncio.timeout(self._summary_timeout_s):
                 return await self._build_summary(request, target_max_id)
@@ -282,7 +248,7 @@ class HistoryProvider:
         if not summary:
             return ""
 
-        # Update the cache so future calls reuse this work.
+        # update cache so future calls reuse this work
         self._store.put_summary(
             familiar_id=request.familiar_id,
             channel_id=request.channel_id,
@@ -346,7 +312,7 @@ class HistoryProvider:
         if cached is not None and cached.source_last_id >= info.latest_id:
             return cached.summary_text
 
-        # Cache miss or stale — build via side model.
+        # cache miss or stale — build via side model
         try:
             async with asyncio.timeout(self._summary_timeout_s):
                 return await self._build_cross_context(request, info, viewer_mode_desc)

@@ -17,12 +17,10 @@ _logger = logging.getLogger(__name__)
 
 
 class RecordingSink(Sink):
-    """A Sink that converts stereo PCM to mono and queues it for transcription.
+    """Stereo-to-mono conversion + thread-safe queue bridge for transcription.
 
-    py-cord's ``VoiceClient.start_recording`` calls :meth:`write` from a
-    background thread. This sink bridges to the asyncio event loop using
-    :meth:`loop.call_soon_threadsafe` so the transcription pipeline can
-    consume audio from an :class:`asyncio.Queue`.
+    py-cord calls :meth:`write` from a background thread;
+    ``call_soon_threadsafe`` pushes to the asyncio queue.
     """
 
     def __init__(
@@ -38,16 +36,14 @@ class RecordingSink(Sink):
 
     @staticmethod
     def stereo_to_mono(data: bytes) -> bytes:
-        """Delegate to the audio module for testability."""
+        """Delegate to audio module for testability."""
         return stereo_to_mono(data)
 
     @Filters.container
     def write(self: Self, data: bytes, user: int) -> None:
-        """Convert stereo PCM to mono and push ``(user, mono)`` to the queue.
+        """Convert stereo to mono, push ``(user, mono)`` to queue.
 
-        Called from py-cord's recording thread — must not use ``await``.
-        The tuple allows the asyncio-side audio router to attribute audio
-        to the correct Discord user.
+        Called from py-cord's recording thread — must not ``await``.
         """
         mono = self.stereo_to_mono(data)
         _logger.debug(
@@ -59,8 +55,8 @@ class RecordingSink(Sink):
         self._loop.call_soon_threadsafe(self._audio_queue.put_nowait, (user, mono))
 
     def cleanup(self: Self) -> None:
-        """Signal that recording has finished."""
+        """Signal recording finished."""
         self.finished = True
 
     def format_audio(self: Self, audio: object) -> None:
-        """No-op — this sink does not write audio to files."""
+        """No-op — sink does not write audio to files."""

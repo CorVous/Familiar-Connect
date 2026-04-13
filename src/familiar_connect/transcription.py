@@ -32,7 +32,7 @@ DEFAULT_LANGUAGE = "en"
 
 @dataclass
 class TranscriptionResult:
-    """A single transcription result from the Deepgram streaming API."""
+    """Single Deepgram streaming transcription result."""
 
     text: str
     is_final: bool
@@ -42,12 +42,7 @@ class TranscriptionResult:
     speaker: int | None = None
 
     def to_message(self: Self, speaker_names: dict[int, str] | None = None) -> Message:
-        """Convert to an LLM Message.
-
-        Content is prefixed with '[Voice] ' so the model can identify the
-        source. The message name is resolved from *speaker_names* when a
-        speaker ID is present, otherwise defaults to 'Voice'.
-        """
+        """Convert to LLM Message. Prefixes content with ``[Voice]``."""
         name = "Voice"
         if self.speaker is not None and speaker_names is not None:
             name = speaker_names.get(self.speaker, "Voice")
@@ -60,12 +55,7 @@ class TranscriptionResult:
 
 
 class DeepgramTranscriber:
-    """Client for streaming audio to Deepgram and receiving transcriptions.
-
-    Connects to Deepgram's WebSocket streaming API, sends raw PCM audio
-    frames, and outputs :class:`TranscriptionResult` objects to an
-    ``asyncio.Queue``.
-    """
+    """Stream PCM audio to Deepgram, output :class:`TranscriptionResult` via queue."""
 
     def __init__(
         self: Self,
@@ -96,7 +86,7 @@ class DeepgramTranscriber:
         self._keepalive_task: asyncio.Task[None] | None = None
 
     def build_ws_url(self: Self) -> str:
-        """Build the Deepgram WebSocket URL with query parameters."""
+        """Deepgram WebSocket URL with query parameters."""
         params: dict[str, str] = {
             "model": self.model,
             "language": self.language,
@@ -112,15 +102,11 @@ class DeepgramTranscriber:
         return f"{DEEPGRAM_WS_URL}?{urlencode(params)}"
 
     def build_headers(self: Self) -> dict[str, str]:
-        """Build HTTP headers for the Deepgram WebSocket connection."""
+        """Auth headers for Deepgram WebSocket."""
         return {"Authorization": f"Token {self.api_key}"}
 
     def clone(self: Self) -> DeepgramTranscriber:
-        """Create a new transcriber with the same configuration.
-
-        Useful for spawning per-user streams that share the same API key
-        and Deepgram settings but maintain independent WebSocket connections.
-        """
+        """Create transcriber with same config, independent WS connection."""
         return DeepgramTranscriber(
             api_key=self.api_key,
             model=self.model,
@@ -134,11 +120,7 @@ class DeepgramTranscriber:
         )
 
     def _parse_response(self: Self, data: dict[str, Any]) -> TranscriptionResult | None:
-        """Parse a Deepgram JSON response into a TranscriptionResult.
-
-        Returns ``None`` for non-Results messages, empty transcripts, or
-        responses with no alternatives.
-        """
+        """Parse Deepgram response. Returns ``None`` for non-results or empty."""
         if data.get("type") != "Results":
             return None
 
@@ -152,7 +134,7 @@ class DeepgramTranscriber:
         if not transcript:
             return None
 
-        # Extract speaker from the first word if diarization is active.
+        # extract speaker from first word if diarization is active
         speaker: int | None = None
         words = best.get("words", [])
         if words and "speaker" in words[0]:
@@ -180,7 +162,7 @@ class DeepgramTranscriber:
         url: str,
         headers: dict[str, str],
     ) -> aiohttp.ClientWebSocketResponse:
-        """Open a WebSocket connection. Extracted for testability."""
+        """Open WS connection. Extracted for testability."""
         return await session.ws_connect(url, headers=headers)
 
     async def start(self: Self, output: asyncio.Queue[TranscriptionResult]) -> None:
@@ -202,11 +184,7 @@ class DeepgramTranscriber:
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
     async def send_audio(self: Self, data: bytes) -> None:
-        """Send raw PCM audio bytes to the Deepgram WebSocket.
-
-        Silently returns if the WebSocket has already been closed (e.g.
-        server-side disconnect). This avoids noisy errors when Deepgram
-        terminates the connection while audio is still flowing.
+        """Send PCM bytes. Silent no-op if WS already closed.
 
         :raises RuntimeError: If called before :meth:`start`.
         """
@@ -218,7 +196,7 @@ class DeepgramTranscriber:
         await self._ws.send_bytes(data)
 
     async def stop(self: Self) -> None:
-        """Gracefully close the Deepgram connection."""
+        """Gracefully close Deepgram connection."""
         if self._keepalive_task is not None:
             self._keepalive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -247,16 +225,9 @@ class DeepgramTranscriber:
     _KEEPALIVE_INTERVAL: float = 5.0
 
     async def _keepalive_loop(self: Self) -> None:
-        """Send periodic KeepAlive frames to prevent Deepgram's idle timeout.
+        """Periodic KeepAlive to prevent Deepgram's ~10s idle timeout.
 
-        Deepgram closes streaming connections after ~10 seconds of silence.
-        During bot processing (LLM, TTS) the pump has no user audio to
-        forward, so without a keepalive the connection is torn down and
-        the transcriber enters a reconnect loop that can exhaust
-        :attr:`_MAX_RECONNECTS`.
-
-        The loop re-reads :attr:`_ws` on each tick so it transparently
-        follows reconnects initiated by :meth:`_reconnect`.
+        Re-reads ``_ws`` each tick to follow reconnects transparently.
         """
         while True:
             await asyncio.sleep(self._KEEPALIVE_INTERVAL)
@@ -267,19 +238,15 @@ class DeepgramTranscriber:
                 await ws.send_json({"type": "KeepAlive"})
 
     async def _reconnect(self: Self) -> None:
-        """Re-establish the Deepgram WebSocket connection.
-
-        Closes the old session and opens a fresh one so ``send_audio``
-        and the receive loop can continue transparently.
-        """
-        # Tear down old connection.
+        """Close old session, open fresh one transparently."""
+        # tear down old connection
         if self._ws is not None and not self._ws.closed:
             with contextlib.suppress(Exception):
                 await self._ws.close()
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
-        # Open a new connection.
+        # open new connection
         self._session = aiohttp.ClientSession()
         url = self.build_ws_url()
         self._ws = await self._ws_connect(
@@ -307,7 +274,7 @@ class DeepgramTranscriber:
                         result = self._parse_response(data)
                         if result is not None:
                             await output.put(result)
-                            # Got real data — reset reconnect counter.
+                            # got real data — reset reconnect counter
                             consecutive_reconnects = 0
                     else:
                         _logger.info(
@@ -354,12 +321,9 @@ class DeepgramTranscriber:
 
 
 def create_transcriber_from_env() -> DeepgramTranscriber:
-    """Create a :class:`DeepgramTranscriber` from environment variables.
+    """Create from env vars (``DEEPGRAM_API_KEY`` required).
 
-    Required: ``DEEPGRAM_API_KEY``
-    Optional: ``DEEPGRAM_MODEL``, ``DEEPGRAM_LANGUAGE``
-
-    :raises ValueError: If ``DEEPGRAM_API_KEY`` is not set.
+    :raises ValueError: If ``DEEPGRAM_API_KEY`` not set.
     """
     api_key = os.environ.get("DEEPGRAM_API_KEY")
     if not api_key:

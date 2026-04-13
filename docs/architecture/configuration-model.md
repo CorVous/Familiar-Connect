@@ -5,7 +5,7 @@ The bot's configuration surface is split into two levels.
 !!! success "Status: Implemented"
     The two-level model, per-channel TOML sidecars, `SubscriptionRegistry`, and all `/subscribe-*` / `/channel-*` slash commands ship today.
 
-**Who runs this bot.** Familiar-Connect targets a single admin running the bot on their own machine. Earlier drafts of this spec envisioned multiple Discord users each managing their own familiars through slash commands; that ambition has been dropped. "Single operator" does *not* mean "single character" — the same install can hold multiple character folders under `data/familiars/<id>/`, and the operator flips between them by changing `FAMILIAR_ID` and restarting (or by running multiple processes in parallel, each with its own `FAMILIAR_ID`).
+**Who runs this bot.** Familiar-Connect targets a single admin running the bot on their own machine. "Single operator" does *not* mean "single character" — the same install can hold multiple character folders under `data/familiars/<id>/`, and the operator flips between them by changing `FAMILIAR_ID` and restarting (or by running multiple processes in parallel, each with its own `FAMILIAR_ID`).
 
 ## The two levels
 
@@ -108,7 +108,7 @@ data/
         └── history.db               # SQLite HistoryStore
 ```
 
-**Why TOML:** human-and-machine-readable matches the same principle the memory directory commits to. A user can edit their character's config in any text editor; the bot loads it on startup or on the next mutation. No schema migrations, no opaque blob format.
+**Why TOML:** human-and-machine-readable, matching the memory directory's plain-text principle. A user can edit their character's config in any text editor; the bot loads it on startup or on the next mutation. No schema migrations, no opaque blob format.
 
 **Why filesystem and not SQLite:** see [Design decisions](decisions.md) for the broader local-first principle. Per-character config is the kind of thing a user might want to back up, share, or version-control on their own; a filesystem layout makes that trivial.
 

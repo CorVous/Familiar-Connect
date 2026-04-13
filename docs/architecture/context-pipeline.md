@@ -1,6 +1,6 @@
 # Context Pipeline
 
-The context pipeline is the single path between "something happened" and "call the LLM" for both the text and voice code paths. Providers assemble contributions concurrently, a budgeter packs them into layered system-prompt slots, the LLM is called, and post-processors run over the reply before it reaches TTS or Discord.
+The context pipeline is the single path between "something happened" and "call the LLM" for both text and voice. Providers assemble contributions concurrently, a budgeter packs them into layered system-prompt slots, the LLM is called, and post-processors run over the reply before it reaches TTS or Discord.
 
 !!! success "Status: Implemented"
     Steps 1–10 below have all shipped. The pipeline, memory store, character unpacker, lorebook importer, providers (`CharacterProvider`, `HistoryProvider`, `ContentSearchProvider`), and both initial processors (`SteppedThinkingPreProcessor`, `RecastPostProcessor`) are in place and individually toggleable per familiar and per modality.
@@ -40,7 +40,7 @@ did return.
 
 ## Working assumptions
 
-- **Concurrency stack: `asyncio` + `asyncio.TaskGroup`.** The codebase is asyncio-native top to bottom.
+- **Concurrency: `asyncio` + `asyncio.TaskGroup`** throughout.
 - **No new long-running dependencies** (no vector DB, no memory daemon, no MCP sidecar for our own memory).
 - **No third-party state services** (no mem0, no Zep, no hosted vector DB, no OpenAI embeddings in the first pass).
 - **Memory source of truth is the per-familiar plain-text directory.** See [Memory](memory.md).

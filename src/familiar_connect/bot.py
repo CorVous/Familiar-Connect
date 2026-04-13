@@ -1,33 +1,9 @@
 """Discord bot factory, slash commands, and pipeline-routed message loop.
 
-Step 7 of ``docs/architecture/context-pipeline.md``, plus the
-post-merge voice transcription wiring from PR #17. Replaces the
-single-slot ``TextSession``/``/awaken`` surface with:
-
-- A multi-channel :class:`SubscriptionRegistry` persisted to disk.
-- Explicit ``/subscribe-text``, ``/subscribe-my-voice``,
-  ``/unsubscribe-text``, ``/unsubscribe-voice`` commands.
-- Three per-channel mode commands (``/channel-full-rp``,
-  ``/channel-text-conversation-rp``, ``/channel-imitate-voice``)
-  that flip the :class:`ChannelMode` stored in the channel's
-  TOML sidecar.
-- ``on_message`` that routes every subscribed text message through
-  the :class:`ContextPipeline`, lets registered pre/post processors
-  run, and persists user + assistant turns to
-  :class:`HistoryStore`.
-- ``/subscribe-my-voice`` that, when the familiar has a
-  :class:`DeepgramTranscriber` configured, starts a per-user
-  transcription pipeline and routes every final transcription
-  through the **same** :class:`ContextPipeline` text uses. Voice
-  turns land in the :class:`HistoryStore` with ``role="user"``,
-  a sanitised speaker name, and the channel id of the voice
-  channel — so voice and text share memory, speaker prefixing,
-  history summaries, and every other pipeline output without the
-  voice path carrying its own state.
-
-The bot owns a single :class:`Familiar` bundle for the lifetime of
-the process — per ``docs/architecture/configuration-model.md`` one
-process runs exactly one active character.
+- subscription + channel-mode slash command surface
+- ``on_message`` routes subscribed text through :class:`ContextPipeline`
+- voice transcription pipeline shares the same context path as text
+- single :class:`Familiar` bundle per process lifetime
 """
 
 from __future__ import annotations
@@ -67,12 +43,9 @@ async def _recording_finished_callback(  # noqa: RUF029
     sink: discord.sinks.Sink,
     *args: object,
 ) -> None:
-    """No-op callback required by py-cord's ``start_recording`` API.
+    """no-op coroutine required by py-cord's ``start_recording`` API.
 
-    Must be a coroutine even though it awaits nothing — py-cord
-    awaits this callback internally when a recording ends. Cleanup
-    is handled by :func:`stop_pipeline` inside
-    :func:`unsubscribe_voice`, not here.
+    py-cord awaits this internally; cleanup lives in :func:`unsubscribe_voice`.
     """
     del sink, args
 
@@ -81,11 +54,7 @@ def _log_pipeline_outcomes(
     channel_id: int,
     outcomes: list[ProviderOutcome],
 ) -> None:
-    """Emit a structured log entry per provider outcome.
-
-    Kept tiny so the dashboard-backing work can later hook the same
-    call site without having to parse the bot's freeform logs.
-    """
+    """Emit structured log entry per provider outcome."""
     for outcome in outcomes:
         _logger.info(
             "pipeline channel=%s provider=%s status=%s duration=%.3fs",
@@ -159,11 +128,9 @@ async def unsubscribe_text(
     await ctx.respond("No longer listening here.", ephemeral=True)
 
 
-# VOICE INTERJECTION (not yet implemented): the familiar should eventually
-# consult the interjection_decision LLM before replying to each voice
-# utterance, matching the ConversationMonitor gate used on text channels.
-# See ConversationMonitor._check_interjection in chattiness.py for the
-# prompt/YES-NO pattern to follow when wiring this up.
+# voice interjection not yet implemented — consult interjection_decision
+# LLM before replying, matching ConversationMonitor gate on text channels;
+# see ConversationMonitor._check_interjection in chattiness.py
 def _build_voice_response_handler(
     *,
     vc: discord.VoiceClient,
@@ -172,41 +139,25 @@ def _build_voice_response_handler(
     guild_id: int | None,
     user_names: dict[int, str],
 ) -> Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]]:
-    """Build the async callback invoked for each final voice transcription.
+    """Build async callback for each final voice transcription.
 
-    Routes voice turns through the **same** :class:`ContextPipeline`
-    the text loop uses: assemble a :class:`ContextRequest` with
-    :attr:`Modality.voice` and the voice channel's id, run the
-    pipeline, render, call the main LLM, run post-processors,
-    persist to :class:`HistoryStore`, fan out to TTS.
-
-    This is the only way voice turns get the same memory search,
-    history summary, speaker prefixing, and mode instructions that
-    text turns get. The earlier PR #17 implementation stashed voice
-    history in a closure-local ``list[Message]`` that bypassed the
-    pipeline entirely; that stub is replaced by this handler.
+    Routes voice turns through the same :class:`ContextPipeline` as text:
+    assemble request → render → LLM → post-processors → history → TTS.
     """
 
     async def _handle_voice_result(
         user_id: int,
         result: TranscriptionResult,
     ) -> None:
-        # Resolve the speaker's display name. ``user_names`` is mutated
-        # by voice_pipeline's name resolver when a late joiner shows up,
-        # so a lookup failure falls back to a stable ``User-<id>`` form
-        # rather than ``None``.
+        # resolve speaker display name; falls back to ``User-<id>``
+        # when voice_pipeline's name resolver hasn't seen this user yet
         speaker = user_names.get(user_id, f"User-{user_id}")
         safe_name = sanitize_name(speaker) or speaker
 
         channel_config = familiar.channel_configs.get(channel_id=voice_channel_id)
 
-        # VOICE: Pre- and post-processors are disabled for voice turns to reduce
-        # real-time latency. stepped_thinking (reasoning_context LLM) adds
-        # chain-of-thought overhead; recast (post_process_style LLM) rewrites
-        # text destined for TTS rather than screen reading.
-        # Providers that make their own LLM calls (content_search → memory_search,
-        # history → history_summary) are also stripped for the same reason.
-        # To re-enable: remove this dataclasses.replace() call and its comment.
+        # disable LLM-calling providers and processors for voice to reduce
+        # real-time latency; remove this replace() call to re-enable
         channel_config = dataclasses.replace(
             channel_config,
             providers_enabled=channel_config.providers_enabled
@@ -256,12 +207,8 @@ def _build_voice_response_handler(
             else request.utterance,
         )
 
-        # Main reply isolation: catch the closed raise set of
-        # ``LLMClient.chat`` — httpx transport/status errors, plus the
-        # ``ValueError`` / ``KeyError`` branches in ``llm.chat`` for
-        # malformed payloads. Log and return cleanly so the transcriber
-        # callback stays alive for the next utterance. No TTS, no
-        # history write, no post-processing on failure.
+        # main reply isolation: catch ``LLMClient.chat`` raise set
+        # (transport, status, malformed payload) and return cleanly
         try:
             reply = await familiar.llm_clients["main_prose"].chat(messages)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -273,8 +220,8 @@ def _build_voice_response_handler(
             return
         reply_text = await pipeline.run_post_processors(reply.content, request)
 
-        # Persist both turns *after* the LLM call so a mid-turn crash
-        # doesn't leave the store with a user turn but no reply.
+        # persist both turns after LLM call so a crash never leaves
+        # an orphaned user turn with no reply
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
             channel_id=voice_channel_id,
@@ -299,8 +246,7 @@ def _build_voice_response_handler(
             try:
                 pcm_mono = await familiar.tts_client.synthesize(reply_text)
                 stereo = mono_to_stereo(pcm_mono)
-                # Wait for any currently-playing audio to finish.
-                # vc.is_playing() is a third-party poll; no event available.
+                # wait for current audio to finish (poll — no event available)
                 while vc.is_playing():  # noqa: ASYNC110
                     await asyncio.sleep(0.1)
                 vc.play(discord.PCMAudio(io.BytesIO(stereo)))
@@ -314,14 +260,10 @@ async def subscribe_my_voice(
     ctx: discord.ApplicationContext,
     familiar: Familiar,
 ) -> None:
-    """Join the caller's voice channel and register a voice subscription.
+    """Join caller's voice channel and register a voice subscription.
 
-    When ``familiar.transcriber`` is configured, this also starts a
-    per-user Deepgram transcription pipeline and wires every final
-    transcription through the ContextPipeline via
-    :func:`_build_voice_response_handler`. Without a transcriber the
-    bot still joins the channel and plays TTS but does not react to
-    incoming speech.
+    Starts per-user transcription pipeline when ``familiar.transcriber``
+    is configured; without it, joins for TTS playback only.
     """
     author = ctx.author
     if not isinstance(author, discord.Member) or author.voice is None:
@@ -351,7 +293,7 @@ async def subscribe_my_voice(
             )
             return
 
-    # Voice connection + DAVE handshake takes >3s, so defer.
+    # voice connection + DAVE handshake takes >3s, so defer
     await ctx.defer(ephemeral=True)
     try:
         vc = await channel.connect(cls=DaveVoiceClient)
@@ -396,11 +338,8 @@ async def subscribe_my_voice(
             user_names=user_names,
         )
 
-        # Wrap the response handler in a VoiceLullMonitor so per-final
-        # Deepgram fragments are debounced into a single utterance. The
-        # monitor fires ``voice_response_handler`` once, with merged
-        # text, after ``voice_lull_timeout`` seconds of Discord-reported
-        # silence (see voice_lull.py).
+        # debounce per-final Deepgram fragments into a single utterance
+        # via VoiceLullMonitor; fires after voice_lull_timeout of silence
         lull_monitor = VoiceLullMonitor(
             lull_timeout=familiar.config.voice_lull_timeout,
             user_silence_s=0.2,
@@ -452,8 +391,7 @@ async def unsubscribe_voice(
         return
 
     if vc is not None:
-        # Stop the transcription pipeline first so audio chunks stop
-        # flowing into a voice client that's about to disconnect.
+        # stop transcription first so audio stops flowing before disconnect
         if get_pipeline() is not None:
             if hasattr(vc, "recording") and vc.recording:
                 vc.stop_recording()
@@ -508,23 +446,13 @@ async def _run_text_response(
     familiar: Familiar,
     channel: discord.TextChannel,
 ) -> None:
-    """Execute the full pipeline → LLM → reply path for a text channel.
+    """Full pipeline → LLM → reply path for a text channel.
 
-    Called by the ``on_respond`` callback built in :func:`create_bot`
-    when the :class:`ConversationMonitor` decides the familiar should
-    speak. Persists all buffered user messages to history (in order)
-    and then the assistant reply, so the history store has a complete
-    record of the conversation even though some messages were buffered
-    before the pipeline ran.
+    Persists all buffered user messages to history (in order), then
+    the assistant reply.
 
-    :param channel_id: Discord channel id.
-    :param guild_id: Discord guild id, or ``None`` for DMs.
-    :param speaker: Sanitised display name of the triggering speaker.
-    :param utterance: Text of the most recent (trigger) message.
-    :param buffer: All messages accumulated since the last response,
-        including the trigger. Persisted to history after the LLM call.
-    :param familiar: The active :class:`Familiar` bundle.
-    :param channel: Discord text channel to send the reply to.
+    :param buffer: messages accumulated since last response, including
+        trigger; persisted after LLM call.
     """
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
@@ -580,13 +508,8 @@ async def _run_text_response(
         batch,
     )
 
-    # Main reply isolation: catch the closed raise set of
-    # ``LLMClient.chat`` — ``httpx.HTTPError`` covers transport /
-    # status / timeout; ``ValueError`` and ``KeyError`` cover the
-    # no-choices / malformed-payload branches inside ``llm.chat``.
-    # On failure, return without writing history, without post-
-    # processing, without a Discord send, and without TTS fan-out.
-    # The user sees silence and can simply retry.
+    # main reply isolation: catch ``LLMClient.chat`` raise set;
+    # on failure return silently (no history write, no TTS)
     async with channel.typing():
         try:
             reply = await familiar.llm_clients["main_prose"].chat(messages)
@@ -600,9 +523,8 @@ async def _run_text_response(
 
     reply_text = await pipeline.run_post_processors(reply.content, request)
 
-    # Persist all buffered user turns, then the assistant reply. Done
-    # after the LLM call so a mid-request crash doesn't leave an
-    # orphaned user turn with no reply.
+    # persist buffered user turns then assistant reply (after LLM
+    # call so a crash never leaves an orphaned user turn)
     for msg in buffer:
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
@@ -624,8 +546,7 @@ async def _run_text_response(
 
     await channel.send(reply_text)
 
-    # TTS fan-out: if a voice sub exists in this guild and a voice
-    # client is connected, speak the same reply the text channel saw.
+    # TTS fan-out: speak reply in voice if a voice sub exists in guild
     guild = getattr(channel, "guild", None)
     if (
         familiar.tts_client is not None
@@ -648,19 +569,7 @@ async def _run_text_response(
 
 
 async def on_message(message: discord.Message, familiar: Familiar) -> None:
-    """Hand an incoming Discord message to the conversation monitor.
-
-    The monitor decides whether and when the familiar responds. If it
-    does, the ``on_respond`` callback (wired up in :func:`create_bot`)
-    calls :func:`_run_text_response` with the buffered messages.
-
-    Flow:
-
-    1. Ignore bot messages.
-    2. Look up the text subscription for this channel; return if absent.
-    3. Detect whether the bot itself is @mentioned.
-    4. Delegate to :attr:`familiar.monitor.on_message`.
-    """
+    """Route incoming Discord message to the conversation monitor."""
     if message.author.bot:
         return
 
@@ -695,13 +604,10 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
 
 
 def create_bot(familiar: Familiar) -> discord.Bot:
-    """Create and configure the Discord bot bound to *familiar*.
+    """Create Discord bot bound to *familiar*.
 
-    Registers the full subscription + channel-mode slash command
-    surface and wires ``on_message`` to the monitor-routed handler.
-    Also builds and installs the ``on_respond`` callback on the
-    :class:`ConversationMonitor` so pipeline responses can reach
-    Discord channels.
+    Registers slash commands and wires ``on_message`` + ``on_respond``
+    callback on :class:`ConversationMonitor`.
     """
     intents = discord.Intents.default()
     intents.voice_states = True
@@ -709,14 +615,12 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     intents.messages = True
     bot = discord.Bot(intents=intents)
 
-    # Store bot.user in extras once the bot is ready so on_message can
-    # detect @mentions by comparing against bot.user in message.mentions.
+    # stash bot.user for @mention detection in on_message
     @bot.event
     async def on_ready() -> None:  # noqa: RUF029
         familiar.extras["bot_user"] = bot.user
 
-    # Build the on_respond callback that drives the full pipeline path.
-    # Captured variables: bot (for channel lookup) and familiar.
+    # on_respond callback: drives full pipeline path
     async def _on_respond(
         channel_id: int,
         buffer: list[BufferedMessage],

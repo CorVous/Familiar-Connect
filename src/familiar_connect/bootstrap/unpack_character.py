@@ -1,21 +1,14 @@
 """Unpack a CharacterCard into a MemoryStore's ``self/`` directory.
 
-Step 4 of docs/architecture/context-pipeline.md. On familiar creation
-the loaded :class:`~familiar_connect.character.CharacterCard` is
-walked field by field; each non-empty field becomes a Markdown file
-under ``self/`` in the familiar's :class:`MemoryStore`. Empty fields
-produce no file at all — there is never an empty placeholder on disk.
+See ``docs/architecture/context-pipeline.md``. Each non-empty card
+field becomes a Markdown file under ``self/``; empty fields produce
+no file.
 
-The unpacker is **idempotent**: re-unpacking the same card is a
-no-op. Re-unpacking a card whose contents differ from what is already
-on disk raises :class:`CharacterUnpackError` unless the caller passes
-``overwrite=True``. Under overwrite, only the fields that actually
-changed are rewritten — and a field that has become empty is removed
-from disk so the on-disk shape always reflects the current card.
-
-The unpacker writes through the store, so every change goes through
-the store's path-traversal safety, atomic write, and audit log
-machinery automatically.
+Idempotent: re-unpacking identical card is a no-op. Differing
+on-disk content raises :class:`CharacterUnpackError` unless
+``overwrite=True``, in which case only changed fields are rewritten
+and newly-empty fields are removed. All writes go through the
+store's safety / atomic-write / audit machinery.
 """
 
 from __future__ import annotations
@@ -29,9 +22,8 @@ if TYPE_CHECKING:
     from familiar_connect.memory.store import MemoryStore
 
 
-# Mapping from CharacterCard attribute name to its filename under ``self/``.
-# Order is the canonical order we walk the card and the order in which
-# returned paths appear, so callers (and tests) get a predictable list.
+# mapping from CharacterCard attr to filename under ``self/``.
+# order is canonical — callers and tests get a predictable list
 _FIELD_FILES: tuple[tuple[str, str], ...] = (
     ("name", "self/name.md"),
     ("description", "self/description.md"),
@@ -48,11 +40,7 @@ _AUDIT_SOURCE = "character_card_unpacker"
 
 
 class CharacterUnpackError(Exception):
-    """Raised when an unpack would change existing on-disk content.
-
-    Specifically: a field's on-disk content differs from the value in
-    the new card, and the caller did not pass ``overwrite=True``.
-    """
+    """On-disk content differs from card and ``overwrite=True`` not set."""
 
 
 def unpack_character(
@@ -61,18 +49,11 @@ def unpack_character(
     *,
     overwrite: bool = False,
 ) -> list[str]:
-    """Write *card*'s non-empty fields into ``store``'s ``self/`` directory.
+    """Write non-empty card fields into ``self/`` directory.
 
-    :param store: The familiar's :class:`MemoryStore`.
-    :param card: A loaded :class:`CharacterCard`.
-    :param overwrite: If ``True``, replace differing on-disk content
-        and remove files for fields that have become empty. If
-        ``False`` (the default) and the card differs from what's on
-        disk, raise :class:`CharacterUnpackError`.
-    :return: List of relative paths that were actually written this
-        call. Empty when the unpack was a no-op.
-    :raises CharacterUnpackError: If a difference is detected and
-        ``overwrite`` is ``False``.
+    :return: Relative paths actually written (empty when no-op).
+    :raises CharacterUnpackError: If on-disk content differs and
+        *overwrite* is False.
     """
     written: list[str] = []
     differences: list[str] = []
@@ -82,18 +63,16 @@ def unpack_character(
         existed, existing = _read_or_missing(store, rel_path)
 
         if not existed:
-            # First write of this field. Always allowed; nothing to overwrite.
+            # first write — always allowed
             if new_value:
                 store.write_file(rel_path, new_value, source=_AUDIT_SOURCE)
                 written.append(rel_path)
             continue
 
         if new_value == existing:
-            # On-disk content already matches the card. No-op.
             continue
 
-        # On-disk content disagrees with the card. This is an
-        # overwrite — gate it on the explicit flag.
+        # on-disk differs — gate on explicit flag
         if not overwrite:
             differences.append(rel_path)
             continue
@@ -116,11 +95,7 @@ def unpack_character(
 
 
 def _read_or_missing(store: MemoryStore, rel_path: str) -> tuple[bool, str]:
-    """Return ``(existed, content)`` for *rel_path* in *store*.
-
-    Distinguishes "file doesn't exist" from "file exists but is empty",
-    so the caller can tell a first write from an overwrite.
-    """
+    """Return ``(existed, content)``. Distinguishes missing from empty."""
     try:
         return True, store.read_file(rel_path)
     except MemoryStoreError:
@@ -128,14 +103,10 @@ def _read_or_missing(store: MemoryStore, rel_path: str) -> tuple[bool, str]:
 
 
 def _delete_if_present(store: MemoryStore, rel_path: str) -> None:
-    """Remove a file inside the store, if it exists.
+    """Remove file via store's path resolver (traversal safety).
 
-    Goes through the store's path resolver so traversal safety still
-    applies. Currently uses a direct unlink because the public
-    :class:`MemoryStore` API doesn't expose a delete method yet —
-    that's a small, local extension we may want to land separately.
+    Uses direct unlink — MemoryStore has no public delete yet.
     """
-    # Use the store's resolver so the path is validated against the root.
     resolved = store._resolve(rel_path)  # noqa: SLF001
     if resolved.exists() and resolved.is_file():
         resolved.unlink()
