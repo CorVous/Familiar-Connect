@@ -48,13 +48,14 @@ from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
+from familiar_connect.voice.interruption import ResponseState
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from familiar_connect.chattiness import BufferedMessage
+    from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
     from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
@@ -166,6 +167,7 @@ async def _run_voice_response(
     buffer: list[BufferedMessage],
     familiar: Familiar,
     vc: discord.VoiceClient,
+    trigger: ResponseTrigger,
 ) -> None:
     """Execute the full pipeline → LLM → TTS path for a voice channel.
 
@@ -182,6 +184,17 @@ async def _run_voice_response(
     on the :class:`ContextRequest` plus the latency-focused trimming
     of providers and processors (see ``dataclasses.replace`` below).
     """
+    # Resolve the per-guild response tracker and mark this response with
+    # the trigger's unsolicited flag. The tracker drives the voice
+    # interruption state machine; for Step 3 it is observational only —
+    # we log the IDLE→GENERATING→SPEAKING→IDLE lifecycle so operators
+    # can see that solicited vs. unsolicited replies are tagged right
+    # before any interruption logic is wired up.
+    tracker = familiar.tracker_registry.get(guild_id if guild_id is not None else 0)
+    tracker.vc = vc
+    tracker.is_unsolicited = trigger.is_unsolicited
+    tracker.transition(ResponseState.GENERATING)
+
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
     # VOICE: Pre- and post-processors are disabled for voice turns to reduce
@@ -264,8 +277,10 @@ async def _run_voice_response(
             type(exc).__name__,
             exc,
         )
+        tracker.transition(ResponseState.IDLE)
         return
     reply_text = await pipeline.run_post_processors(reply.content, request)
+    tracker.response_text = reply_text
 
     # Persist all buffered user utterances, then the assistant reply.
     # Done after the LLM call so a mid-request crash doesn't leave an
@@ -294,14 +309,24 @@ async def _run_voice_response(
     if familiar.tts_client is not None:
         try:
             tts_result = await familiar.tts_client.synthesize(reply_text)
+            tracker.timestamps = list(tts_result.timestamps)
             stereo = mono_to_stereo(tts_result.audio)
             # Wait for any currently-playing audio to finish.
             # vc.is_playing() is a third-party poll; no event available.
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
+            tracker.transition(ResponseState.SPEAKING)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+            # Poll playback to completion so the IDLE transition is
+            # observable in the log and the tracker state reflects
+            # reality for the next turn. No interruption dispatch yet
+            # (Step 3 is observational); later steps will replace this
+            # poll with a state-machine-aware loop.
+            while vc.is_playing():  # noqa: ASYNC110
+                await asyncio.sleep(0.1)
         except Exception:
             _logger.exception("Voice response TTS failed")
+    tracker.transition(ResponseState.IDLE)
 
 
 async def subscribe_my_voice(
@@ -398,6 +423,7 @@ async def subscribe_my_voice(
         async def _voice_response_handler(
             channel_id: int,
             buffer: list[BufferedMessage],
+            trigger: ResponseTrigger,
         ) -> None:
             if not buffer:
                 return
@@ -410,10 +436,11 @@ async def subscribe_my_voice(
                 buffer=buffer,
                 familiar=familiar,
                 vc=vc,
+                trigger=trigger,
             )
 
         voice_response_handlers = cast(
-            "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
+            "dict[int, Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]]]",  # noqa: E501
             familiar.extras.setdefault("voice_response_handlers", {}),
         )
         voice_response_handlers[voice_channel_id] = _voice_response_handler
@@ -773,6 +800,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     async def _on_respond(
         channel_id: int,
         buffer: list[BufferedMessage],
+        trigger: ResponseTrigger,
     ) -> None:
         # Voice dispatch first: if this channel has a voice response
         # handler registered by subscribe_my_voice, hand the buffer to
@@ -780,12 +808,12 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         # interjection check, conversational lull) reaches the voice
         # path now that voice shares the same monitor as text.
         voice_handlers = cast(
-            "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
+            "dict[int, Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]]]",  # noqa: E501
             familiar.extras.get("voice_response_handlers", {}),
         )
         voice_handler = voice_handlers.get(channel_id)
         if voice_handler is not None:
-            await voice_handler(channel_id, buffer)
+            await voice_handler(channel_id, buffer, trigger)
             return
 
         channel = bot.get_channel(channel_id)

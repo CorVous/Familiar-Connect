@@ -24,6 +24,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from familiar_connect.llm import Message
@@ -35,6 +36,27 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger(__name__)
+
+
+class ResponseTrigger(Enum):
+    """Why the conversation monitor decided the familiar should respond.
+
+    Passed to ``on_respond`` so downstream code (specifically the voice
+    interruption state machine) can tell invited speech (``direct_address``)
+    apart from unsolicited speech (``interjection``, ``lull``). Unsolicited
+    triggers get a positive bias on the interrupt-tolerance RNG so the
+    familiar tends to push through interruptions of its own self-started
+    remarks rather than yielding immediately.
+    """
+
+    direct_address = "direct_address"
+    interjection = "interjection"
+    lull = "lull"
+
+    @property
+    def is_unsolicited(self) -> bool:
+        """True when the familiar chose to speak without being addressed."""
+        return self is not ResponseTrigger.direct_address
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +232,10 @@ class ConversationMonitor:
     :param character_card: Pre-loaded text from the familiar's
         ``memory/self/`` files, injected into every evaluation prompt.
     :param on_respond: Async callback invoked when the LLM says YES.
-        Receives ``(channel_id, buffer_snapshot)``.
+        Receives ``(channel_id, buffer_snapshot, trigger)`` where
+        ``trigger`` is a :class:`ResponseTrigger` describing which gate
+        fired. Voice code uses ``trigger.is_unsolicited`` to bias the
+        interrupt-tolerance RNG on its :class:`ResponseTracker`.
     """
 
     def __init__(
@@ -222,7 +247,10 @@ class ConversationMonitor:
         lull_timeout: float,
         llm_client: LLMClient,
         character_card: str,
-        on_respond: Callable[[int, list[BufferedMessage]], Awaitable[None]],
+        on_respond: Callable[
+            [int, list[BufferedMessage], ResponseTrigger],
+            Awaitable[None],
+        ],
     ) -> None:
         self._familiar_name = familiar_name
         self._aliases = aliases
@@ -290,7 +318,9 @@ class ConversationMonitor:
                     ),
                 )
                 if yes:
-                    await self._fire_respond(channel_id, buf)
+                    await self._fire_respond(
+                        channel_id, buf, ResponseTrigger.direct_address
+                    )
                 else:
                     # Still reset on direct address, per spec
                     self._reset_buffer(buf)
@@ -305,7 +335,9 @@ class ConversationMonitor:
                 )
                 yes = await self._evaluate(channel_id, buf, trigger_context=trigger)
                 if yes:
-                    await self._fire_respond(channel_id, buf)
+                    await self._fire_respond(
+                        channel_id, buf, ResponseTrigger.interjection
+                    )
                     return
                 # NO → advance step-down curve
                 buf.check_count += 1
@@ -321,7 +353,7 @@ class ConversationMonitor:
             async with buf.lock:
                 yes = await self._evaluate(channel_id, buf, trigger_context=None)
                 if yes:
-                    await self._fire_respond(channel_id, buf)
+                    await self._fire_respond(channel_id, buf, ResponseTrigger.lull)
         else:
             # Text path: silence is detected by waiting for no further
             # messages for ``lull_timeout`` seconds.
@@ -379,7 +411,7 @@ class ConversationMonitor:
         async with buf.lock:
             yes = await self._evaluate(channel_id, buf, trigger_context=None)
             if yes:
-                await self._fire_respond(channel_id, buf)
+                await self._fire_respond(channel_id, buf, ResponseTrigger.lull)
 
     async def _evaluate(
         self,
@@ -457,11 +489,16 @@ class ConversationMonitor:
         )
         return decision
 
-    async def _fire_respond(self, channel_id: int, buf: ChannelBuffer) -> None:
+    async def _fire_respond(
+        self,
+        channel_id: int,
+        buf: ChannelBuffer,
+        trigger: ResponseTrigger,
+    ) -> None:
         """Invoke on_respond with a snapshot of the buffer, then reset state."""
         snapshot = list(buf.buffer)
         self._reset_buffer(buf)
-        await self.on_respond(channel_id, snapshot)
+        await self.on_respond(channel_id, snapshot, trigger)
 
     def _reset_buffer(self, buf: ChannelBuffer) -> None:
         """Reset all per-channel state after a response (or direct address)."""

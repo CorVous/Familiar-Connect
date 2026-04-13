@@ -41,7 +41,7 @@ from familiar_connect.bot import (
     unsubscribe_text,
     unsubscribe_voice,
 )
-from familiar_connect.chattiness import BufferedMessage
+from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
 from familiar_connect.config import LLM_SLOT_NAMES, ChannelMode
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
@@ -529,6 +529,7 @@ class TestOnRespond:
                     buffer=buffer,
                     familiar=familiar,
                     vc=vc,
+                    trigger=ResponseTrigger.direct_address,
                 )
             )
 
@@ -1043,6 +1044,7 @@ class TestMainReplyResilience:
                     buffer=buffer,
                     familiar=familiar,
                     vc=vc,
+                    trigger=ResponseTrigger.direct_address,
                 )
             )
 
@@ -1108,6 +1110,7 @@ class TestVoicePreProcessorsSuppressed:
                 buffer=buffer,
                 familiar=familiar,
                 vc=vc,
+                trigger=ResponseTrigger.direct_address,
             )
         )
 
@@ -1257,7 +1260,9 @@ class TestVoiceInterjectionRouting:
         buffer = [BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)]
 
         async def _invoke() -> None:
-            await familiar.monitor.on_respond(9000, buffer)
+            await familiar.monitor.on_respond(
+                9000, buffer, ResponseTrigger.direct_address
+            )
 
         asyncio.run(_invoke())
 
@@ -1265,6 +1270,7 @@ class TestVoiceInterjectionRouting:
         args, _ = voice_handler.call_args
         assert args[0] == 9000
         assert args[1] == buffer
+        assert args[2] is ResponseTrigger.direct_address
 
     def test_on_respond_text_channel_bypasses_voice_handler_lookup(
         self, tmp_path: Path
@@ -1301,7 +1307,9 @@ class TestVoiceInterjectionRouting:
             buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
             async def _invoke() -> None:
-                await familiar.monitor.on_respond(12345, buffer)
+                await familiar.monitor.on_respond(
+                    12345, buffer, ResponseTrigger.direct_address
+                )
 
             asyncio.run(_invoke())
 
@@ -1345,6 +1353,7 @@ class TestVoiceInterjectionRouting:
                 buffer=buffer,
                 familiar=familiar,
                 vc=vc,
+                trigger=ResponseTrigger.direct_address,
             )
         )
 
