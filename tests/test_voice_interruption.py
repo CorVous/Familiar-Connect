@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.tts import WordTimestamp
 from familiar_connect.voice.interruption import (
     UNSOLICITED_TOLERANCE_BIAS,
     InterruptionClass,
@@ -14,6 +15,7 @@ from familiar_connect.voice.interruption import (
     ResponseState,
     ResponseTracker,
     ResponseTrackerRegistry,
+    split_at_elapsed,
 )
 from familiar_connect.voice_lull import VoiceActivityEvent
 
@@ -1010,3 +1012,115 @@ class TestInterruptionDetectorToleranceRoll:
         assert len(toll) == 1
         assert "→ keep_talking" in toll[0]
         assert "unsolicited=+0.35" in toll[0]
+
+
+class TestSplitAtElapsed:
+    """``split_at_elapsed`` partitions the word-timestamp list.
+
+    Returns ``(delivered, remaining)`` around the caller-supplied
+    elapsed playback time. Used by Step 11 to resume from a word
+    boundary on short-interruption yield and by Step 12 to record
+    only the delivered portion in history on long-interruption yield.
+    """
+
+    def test_empty_list_returns_two_empty_lists(self) -> None:
+        delivered, remaining = split_at_elapsed([], 500.0)
+        assert delivered == []
+        assert remaining == []
+
+    def test_before_first_word_returns_all_remaining(self) -> None:
+        ts = [
+            WordTimestamp("hello", 100.0, 400.0),
+            WordTimestamp("world", 500.0, 800.0),
+        ]
+        delivered, remaining = split_at_elapsed(ts, 50.0)
+        assert delivered == []
+        assert remaining == ts
+
+    def test_after_last_word_returns_all_delivered(self) -> None:
+        ts = [
+            WordTimestamp("hello", 100.0, 400.0),
+            WordTimestamp("world", 500.0, 800.0),
+        ]
+        delivered, remaining = split_at_elapsed(ts, 900.0)
+        assert delivered == ts
+        assert remaining == []
+
+    def test_between_words_splits_at_boundary(self) -> None:
+        # Elapsed lands in the 400-500ms gap between words; "hello" is
+        # already delivered, "world" is still pending.
+        ts = [
+            WordTimestamp("hello", 100.0, 400.0),
+            WordTimestamp("world", 500.0, 800.0),
+            WordTimestamp("!", 850.0, 900.0),
+        ]
+        delivered, remaining = split_at_elapsed(ts, 450.0)
+        assert [w.word for w in delivered] == ["hello"]
+        assert [w.word for w in remaining] == ["world", "!"]
+
+    def test_mid_word_keeps_in_flight_word_in_delivered(self) -> None:
+        # Elapsed falls inside "hello". The word has already begun
+        # playing; treat it as delivered so resumption starts with the
+        # next word (no stutter from re-synthesising a half-played word).
+        ts = [
+            WordTimestamp("hello", 100.0, 400.0),
+            WordTimestamp("world", 500.0, 800.0),
+        ]
+        delivered, remaining = split_at_elapsed(ts, 250.0)
+        assert [w.word for w in delivered] == ["hello"]
+        assert [w.word for w in remaining] == ["world"]
+
+    def test_exactly_at_word_start_keeps_word_in_remaining(self) -> None:
+        # The new word has not started yet at its own start_ms — treat
+        # it as still pending so resumption plays it in full.
+        ts = [
+            WordTimestamp("hello", 100.0, 400.0),
+            WordTimestamp("world", 500.0, 800.0),
+        ]
+        delivered, remaining = split_at_elapsed(ts, 500.0)
+        assert [w.word for w in delivered] == ["hello"]
+        assert [w.word for w in remaining] == ["world"]
+
+
+class TestSpeakingTransitionStampsPlaybackStart:
+    """``transition(SPEAKING)`` records ``time.monotonic()`` once.
+
+    Step 11 computes ``elapsed_ms = now - playback_start_time`` on
+    yield; that only works if the stamp is recorded at exactly the
+    point the audio starts playing.
+    """
+
+    def test_idle_to_speaking_sets_playback_start_time(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "familiar_connect.voice.interruption.time.monotonic",
+            lambda: 42.5,
+        )
+        t = ResponseTracker(guild_id=1)
+        t.state = ResponseState.GENERATING
+        t.transition(ResponseState.SPEAKING)
+        assert t.playback_start_time == 42.5  # noqa: RUF069
+
+    def test_transition_to_non_speaking_does_not_stamp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "familiar_connect.voice.interruption.time.monotonic",
+            lambda: 99.0,
+        )
+        t = ResponseTracker(guild_id=1)
+        t.transition(ResponseState.GENERATING)
+        assert t.playback_start_time is None
+
+    def test_speaking_to_idle_clears_playback_start_time(self) -> None:
+        # Already covered by TestResponseTrackerTransition but pinned
+        # here alongside the set-on-SPEAKING invariant so the full
+        # lifecycle lives in one place.
+        t = ResponseTracker(guild_id=1)
+        t.state = ResponseState.SPEAKING
+        t.playback_start_time = 100.0
+        t.transition(ResponseState.IDLE)
+        assert t.playback_start_time is None

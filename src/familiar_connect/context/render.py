@@ -278,7 +278,19 @@ def assemble_chat_messages(
                 Message(role=turn.role, content=content, name=None),
             )
 
-    # 3. Pending user turns — every message buffered since the last
+    # 3. Interruption-context note — inserted as a system message
+    # immediately before the final user turn so the LLM reads the
+    # "X interrupted while you were forming a response" annotation
+    # right before the utterance it's about to respond to. Populated
+    # only by the voice long-interruption path (Step 8); absent for
+    # every normal turn.
+    interruption_note = (request.interruption_context or "").strip()
+    if interruption_note:
+        messages.append(
+            Message(role="system", content=interruption_note),
+        )
+
+    # 4. Pending user turns — every message buffered since the last
     # response. Falls back to the single trigger utterance when no
     # pending turns are provided (voice path, tests, etc.).
     if request.pending_turns:
@@ -299,7 +311,7 @@ def assemble_chat_messages(
             ),
         )
 
-    # 4. Depth-inject at position-from-end, computed against the full list
+    # 5. Depth-inject at position-from-end, computed against the full list
     # (including the final user turn). ``position=0`` means immediately
     # before the final user turn — i.e. ``len - 1`` from the top. Values
     # larger than the chat buffer clamp to just after the system prompt.

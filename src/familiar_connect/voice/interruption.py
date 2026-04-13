@@ -135,6 +135,11 @@ class ResponseTracker:
             self.playback_start_time = None
             self.is_unsolicited = False
             self.mood_modifier = 0.0
+        elif new_state is ResponseState.SPEAKING:
+            # Stamp the wall clock at the moment audio begins so
+            # Step 11's yield path can compute elapsed_ms without
+            # threading the start time through every caller.
+            self.playback_start_time = time.monotonic()
         callback = self.on_state_change
         if callback is not None:
             callback(new_state)
@@ -190,6 +195,34 @@ class ResponseTracker:
             "keep_talking" if keep else "yield",
         )
         return keep
+
+
+def split_at_elapsed(
+    timestamps: list[WordTimestamp],
+    elapsed_ms: float,
+) -> tuple[list[WordTimestamp], list[WordTimestamp]]:
+    """Partition *timestamps* into delivered and remaining at *elapsed_ms*.
+
+    Called when the familiar yields mid-playback: we need to know
+    which words already came out of the speaker (history + context
+    for a regenerated reply) and which are still pending (re-synthesis
+    on resume). A word is treated as **delivered** the moment its
+    ``start_ms`` has passed — even if playback was cut partway
+    through — so resumption begins on the next clean word boundary
+    and never re-plays a half-spoken word.
+
+    :param timestamps: Per-word windows from
+        :class:`familiar_connect.tts.TTSResult`. Assumed to be in
+        playback order; no sort is performed.
+    :param elapsed_ms: Milliseconds since audio began (``(now -
+        tracker.playback_start_time) * 1000``).
+    :returns: ``(delivered, remaining)`` — two new lists whose
+        concatenation equals the input.
+    """
+    for i, ts in enumerate(timestamps):
+        if ts.start_ms >= elapsed_ms:
+            return timestamps[:i], timestamps[i:]
+    return list(timestamps), []
 
 
 class ResponseTrackerRegistry:
