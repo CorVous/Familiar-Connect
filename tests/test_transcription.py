@@ -537,6 +537,153 @@ class TestDeepgramReconnect:
         assert connect_mock.call_count <= 7
 
 
+class TestDeepgramKeepAlive:
+    """Tests for the periodic KeepAlive frame that prevents Deepgram's idle timeout."""
+
+    @pytest.fixture
+    def client(self) -> DeepgramTranscriber:
+        t = DeepgramTranscriber(api_key="test-key")
+        # Speed up tests — tick much faster than 5 s so suite stays fast.
+        t._KEEPALIVE_INTERVAL = 0.02
+        return t
+
+    def _make_ws_mock(self, messages: list[object] | None = None) -> MagicMock:
+        ws = MagicMock()
+        ws.send_bytes = AsyncMock()
+        ws.send_json = AsyncMock()
+        ws.close = AsyncMock()
+        ws.closed = False
+        ws.close_code = None
+        items = messages if messages is not None else []
+        # Keep the aiter alive for the duration of the test so the receive
+        # loop doesn't exit and trigger a reconnect during keepalive checks.
+        pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
+
+        class _Never:
+            def __aiter__(self) -> _Never:
+                return self
+
+            async def __anext__(self) -> object:
+                if items:
+                    return items.pop(0)
+                await pending  # wait forever — test will cancel via stop()
+                raise StopAsyncIteration
+
+        ws.__aiter__ = MagicMock(return_value=_Never())
+        return ws
+
+    @staticmethod
+    def _keepalive_calls(ws: MagicMock) -> list[object]:
+        return [
+            call.args[0]
+            for call in ws.send_json.call_args_list
+            if call.args and call.args[0] == {"type": "KeepAlive"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_keepalive_sent_while_connected(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """The KeepAlive loop ticks periodically while the WebSocket is open."""
+        ws_mock = self._make_ws_mock()
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                # With interval=0.02, expect >=2 ticks within 0.1s.
+                await asyncio.sleep(0.1)
+                assert len(self._keepalive_calls(ws_mock)) >= 2
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_keepalive_task_cancelled_on_stop(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """stop() cancels the keepalive task and no further KeepAlives fire."""
+        ws_mock = self._make_ws_mock()
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            count_before = len(self._keepalive_calls(ws_mock))
+            await asyncio.sleep(0.1)
+            count_after = len(self._keepalive_calls(ws_mock))
+
+        assert client._keepalive_task is None
+        assert count_after == count_before
+
+    @pytest.mark.asyncio
+    async def test_keepalive_skips_when_ws_closed(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """No KeepAlive frames are sent while the WS reports closed."""
+        ws_mock = self._make_ws_mock()
+        ws_mock.closed = True
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await asyncio.sleep(0.1)
+                assert self._keepalive_calls(ws_mock) == []
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_keepalive_survives_send_errors(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """A transient send failure does not kill the keepalive loop."""
+        ws_mock = self._make_ws_mock()
+        # First call raises; subsequent calls succeed.
+        ws_mock.send_json = AsyncMock(
+            side_effect=[RuntimeError("transient"), None, None, None, None, None]
+        )
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await asyncio.sleep(0.15)
+                # At least one post-error KeepAlive should have fired.
+                assert ws_mock.send_json.call_count >= 2
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_keepalive_follows_reconnect(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """After reconnect, KeepAlive targets the new WebSocket."""
+        client._RECONNECT_DELAY = 0.01
+        # ws1 closes immediately (empty async iter). ws2 stays open.
+        ws1 = MagicMock()
+        ws1.send_bytes = AsyncMock()
+        ws1.send_json = AsyncMock()
+        ws1.close = AsyncMock()
+        ws1.closed = False
+        ws1.close_code = 1006
+        ws1.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+
+        ws2 = self._make_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                # Wait for reconnect + keepalive ticks on the new socket.
+                await asyncio.sleep(0.15)
+                assert len(self._keepalive_calls(ws2)) >= 1
+            finally:
+                await client.stop()
+
+
 class TestCreateTranscriberFromEnv:
     def test_creates_from_env(self) -> None:
         """Factory reads DEEPGRAM_API_KEY and optional overrides."""

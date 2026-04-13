@@ -23,7 +23,7 @@ A third setting, **lull timeout**, controls how long a gap in messages counts as
 
 ### Why not just the preset?
 
-An earlier sketch suggested a "chattiness preset" governing response frequency alone. That misses the character layer: a familiar set to "moderate" should feel very different depending on who it is. A shy familiar hedges and apologises when it speaks up unprompted; an arrogant one acts like it's doing the room a favour; a curious one opens with a question. The preset governs *when* it responds. The personality description governs *how it feels* about responding. This design keeps both: `chattiness` for personality, `interjection` for mechanical timing.
+An earlier sketch suggested a "chattiness preset" governing response frequency alone. That misses the character layer: a "moderate" familiar should feel very different depending on who it is. A shy familiar hedges when speaking unprompted; an arrogant one acts like it's doing the room a favour; a curious one opens with a question. The preset governs *when* it responds; the personality description governs *how it feels* about responding. This design keeps both: `chattiness` for personality, `interjection` for mechanical timing.
 
 ## Configuration
 
@@ -33,7 +33,8 @@ All three settings live in `character.toml` on `CharacterConfig`:
 aliases = ["aria", "ari"]
 chattiness = "Curious and opinionated, but knows when to let others have their moment"
 interjection = "average"
-lull_timeout = 2.0
+text_lull_timeout = 10.0
+voice_lull_timeout = 5.0
 ```
 
 ### `aliases: list[str]`
@@ -68,11 +69,19 @@ Enum controlling how long the familiar waits before the side model is even consu
 | `eager`              | 6                            |
 | `very_eager`         | 3                            |
 
-### `lull_timeout: float`
+### `text_lull_timeout: float`
 
-Seconds of silence before the lull evaluation fires. Configurable so operators can tune per-familiar.
+Seconds of silence on a **text** channel before the lull evaluation fires. Text-only — the voice path has its own debounce (`voice_lull_timeout`). Configurable so operators can tune per-familiar.
 
-**Default:** `2.0`
+**Default:** `10.0`
+
+### `voice_lull_timeout: float`
+
+Seconds of channel-wide silence after which a buffered voice utterance is handed to the response pipeline. Acts as a debounce on Deepgram's per-final transcript stream so the bot only responds once the speaker has actually paused, rather than on every mid-sentence fragment.
+
+Silence is detected Discord-natively: every inbound audio frame routed through the voice pipeline resets per-user silence watchdogs inside `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`). When every user has been quiet for longer than `user_silence_s` (200 ms) *and* there is at least one buffered final, the lull timer starts; on expiry the concatenated text is sent to `_handle_voice_result` via `on_utterance_complete`. Unlike the text lull, there is no side-model yes/no gate — voice lull is pure debounce.
+
+**Default:** `5.0`
 
 ## Sketch
 
@@ -170,7 +179,7 @@ The prompt pressure also builds naturally: by check 5 on a `very_quiet` familiar
 
 ### 3. Lull (silence-based)
 
-**When:** No new message arrives for `lull_timeout` seconds after the most recent message.
+**When:** No new message arrives for `text_lull_timeout` seconds after the most recent message.
 
 **Timing:** A timer is started (or reset) on every incoming message. If it expires without a new message arriving, the evaluation fires.
 
@@ -253,7 +262,7 @@ familiar.monitor.on_message(channel_id, speaker, text, is_mention)
     │   └─ YES → acquire lock → side model eval → respond or not
     │           └─ if NO: advance step-down curve (lower next threshold, floor at 3)
     │
-    └─ start new lull timer (lull_timeout seconds)
+    └─ start new lull timer (text_lull_timeout seconds)
             └─ on expiry → acquire lock → side model eval → respond or not
 ```
 
@@ -288,7 +297,7 @@ Each step follows red/green: write a failing test first, then the minimum code t
 
 - **Interruption of a reply already in progress.** This page covers the **pre-speech** decision (whether to start talking). Cutting off a reply mid-stream when someone else starts talking lives in [Voice input](voice-input.md).
 - **Silence-initiated conversation starts.** The lull trigger requires *some* messages in the buffer. A feature where prolonged silence with an empty buffer causes the familiar to proactively start a new conversation is architecturally different and deferred.
-- **Per-modality monitor tuning.** The current design applies equally to text and voice. Voice may want shorter `lull_timeout` values or different evaluation prompts — a future addition.
+- **Per-modality evaluation prompts.** Text and voice now have separate lull timeouts (`text_lull_timeout` / `voice_lull_timeout`), but they still share the same evaluation prompt structure. Tuning prompts per modality is a future addition.
 
 ## Open questions
 

@@ -1,34 +1,17 @@
 """Render a :class:`PipelineOutput` into a list of chat messages.
 
-The pipeline is deliberately ignorant of chat layout — it produces a
-per-layer :class:`BudgetResult` and leaves the question of "where
-does each layer live in the final message list" to this module. The
-renderer is the one place in the codebase that knows:
+Single source of truth for chat layout. Four rules live here:
 
-- Which layers belong in the system prompt (everything except
-  :class:`Layer.recent_history` and :class:`Layer.depth_inject`).
-- Where recent history comes from (the :class:`HistoryStore`, not
-  the ``recent_history`` Contribution's text — the provider writes
-  it as prose for the budgeter's accounting, but the renderer wants
-  discrete ``Message`` objects).
-- Where :class:`Layer.depth_inject` content goes (inserted between
-  messages at a configurable position-from-end, per SillyTavern's
-  ``@D N`` convention).
-- How user turns are labelled so the LLM can tell speakers apart.
-  Every user turn's content is prefixed with ``Speaker: `` — the
-  same display-name already carried on :attr:`Message.name` for
-  OpenAI-compatible backends. The redundant prefix exists because
-  OpenRouter silently drops the OpenAI ``name`` field when routing
-  to non-OpenAI models (Anthropic, Gemini, most local runners), so
-  relying on ``name`` alone means those models never see who's
-  talking. Assistant turns are NOT prefixed — the ``assistant``
-  role is sufficient to distinguish the bot's own replies, and
-  prefixing them would invite the LLM to echo the prefix back into
-  the reply it generates.
-
-Keeping all four rules in one file means the "where does what go"
-decision moves with the file; adding a new layer is a one-edit
-change.
+- System prompt layers: everything except ``recent_history`` and
+  ``depth_inject``
+- Recent history: discrete ``Message`` objects from ``HistoryStore``
+  (the ``recent_history`` Contribution is prose for budgeter
+  accounting only)
+- Depth-inject: inserted at configurable position-from-end (SillyTavern
+  ``@D N`` convention)
+- Speaker prefixes: user turns get ``Speaker: `` prefix because
+  OpenRouter drops the OpenAI ``name`` field for non-OpenAI models;
+  assistant turns are NOT prefixed
 """
 
 from __future__ import annotations
@@ -163,40 +146,17 @@ def assemble_chat_messages(
     mode: ChannelMode | None = None,
     display_tz: str = "UTC",
 ) -> list[Message]:
-    """Return a list of :class:`Message` ready to hand to the LLM client.
-
-    :param output: The :class:`PipelineOutput` from
-        :meth:`ContextPipeline.assemble`.
-    :param store: The :class:`HistoryStore` the recent-history window
-        is read from. (The :class:`Layer.recent_history`
-        contribution's text is ignored — it's a prose rendering for
-        the budgeter's token accounting, not for the message list.)
-    :param history_window_size: How many of the most-recent turns in
-        the request's channel to include as discrete messages.
-    :param depth_inject_position: Where to insert the
-        :class:`Layer.depth_inject` content, measured as an offset
-        from the end of the message list (excluding the final user
-        turn). ``0`` means immediately before the final user turn
-        (SillyTavern's ``@D 0``). Values larger than the chat
-        buffer clamp to the top of history.
-    :param depth_inject_role: Either ``"system"`` (default) or
-        ``"user"`` — the role assigned to the inserted message.
-    :param mode: When set, only turns tagged with this mode are
-        fetched and per-mode timestamp formatting is applied.
-    :param display_tz: IANA timezone name for rendering timestamps
-        in ``text_conversation_rp`` mode. Defaults to ``"UTC"``.
-    """
+    """Return a list of :class:`Message` ready to hand to the LLM client."""
     request = output.request
     by_layer = output.budget.by_layer
 
-    # 1. System prompt: every layer except recent_history and depth_inject.
+    # 1. system prompt: every layer except recent_history and depth_inject
     system_prompt = _build_system_prompt(by_layer)
     messages: list[Message] = [Message(role="system", content=system_prompt)]
 
-    # 2. Recent history rendered as discrete messages. User turns are
-    # prefixed with ``Speaker: `` so backends that drop the OpenAI
-    # ``name`` field can still distinguish speakers; assistant turns
-    # are left bare. Per-mode formatting applies timestamps or gap hints.
+    # 2. recent history as discrete messages; user turns get Speaker:
+    # prefix, assistant turns left bare. Per-mode formatting applies
+    # timestamps or gap hints.
     turns = store.recent(
         familiar_id=request.familiar_id,
         channel_id=request.channel_id,
@@ -204,7 +164,7 @@ def assemble_chat_messages(
         mode=mode,
     )
 
-    # Pre-fetch cross-context data for full_rp breadcrumbs.
+    # pre-fetch cross-context data for full_rp breadcrumbs
     cross_summaries: dict[int, str] = {}
     cross_timestamps: dict[int, datetime] = {}
     if mode is ChannelMode.full_rp:
@@ -243,7 +203,7 @@ def assemble_chat_messages(
                         Message(role="system", content=breadcrumb),
                     )
 
-        # Per-mode formatting on user turns.
+        # per-mode formatting on user turns
         if turn.role == "user":
             if mode is ChannelMode.text_conversation_rp:
                 ts_prefix = _format_timestamp(turn.timestamp, display_tz)
@@ -278,9 +238,8 @@ def assemble_chat_messages(
                 Message(role=turn.role, content=content, name=None),
             )
 
-    # 3. Pending user turns — every message buffered since the last
-    # response. Falls back to the single trigger utterance when no
-    # pending turns are provided (voice path, tests, etc.).
+    # 3. pending user turns — falls back to single trigger utterance
+    # when none provided (voice path, tests, etc.)
     if request.pending_turns:
         messages.extend(
             Message(
@@ -299,10 +258,8 @@ def assemble_chat_messages(
             ),
         )
 
-    # 4. Depth-inject at position-from-end, computed against the full list
-    # (including the final user turn). ``position=0`` means immediately
-    # before the final user turn — i.e. ``len - 1`` from the top. Values
-    # larger than the chat buffer clamp to just after the system prompt.
+    # 4. depth-inject at position-from-end; values larger than the
+    # chat buffer clamp to just after the system prompt
     depth_text = by_layer.get(Layer.depth_inject, "").strip()
     if depth_text:
         distance_from_end = max(1, depth_inject_position)
@@ -316,9 +273,8 @@ def assemble_chat_messages(
 
 
 def _build_system_prompt(by_layer: dict[Layer, str]) -> str:
-    # The speaker-prefix preamble is always first so the LLM reads the
-    # rendering convention before any character or mode content that
-    # might assume it.
+    # speaker-prefix preamble always first so the LLM reads the
+    # rendering convention before any character or mode content
     sections: list[str] = [_SPEAKER_PREFIX_PREAMBLE]
     for layer in _SYSTEM_PROMPT_LAYER_ORDER:
         text = by_layer.get(layer, "").strip()

@@ -1,13 +1,13 @@
 # Voice input
 
-Everything the bot needs to handle incoming audio on the reply path, plus a few adjacent concerns about text and image input that arrive *during* a voice session.
+What the bot needs to handle incoming audio on the reply path, plus adjacent concerns about text and image input during a voice session.
 
 !!! info "Status: Design"
     `/subscribe-my-voice` ships today. It joins the caller's voice channel and keeps the PCM sink open for TTS replies, but **incoming audio is not yet wired into the context pipeline** — this is the last step-7 deferral from the [Context pipeline](../architecture/context-pipeline.md) branch.
 
 ## Motivation
 
-The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` or `"text"`), providers and processors can branch on it, and the budget / channel-mode tables already distinguish `imitate_voice` from the text modes. What's missing is the actual plumbing from Deepgram (or whichever STT provider) back into `ContextPipeline.run()`. Once that lands, voice input is a first-class peer of text input, and everything downstream (history, memory writes, conversation flow) just works.
+The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` or `"text"`), providers and processors can branch on it, and the budget / channel-mode tables already distinguish `imitate_voice` from the text modes. What's missing is the plumbing from Deepgram (or whichever STT provider) back into `ContextPipeline.run()`. Once that lands, voice input is a first-class peer of text input, and everything downstream (history, memory writes, conversation flow) just works.
 
 ## Sketch
 
@@ -41,6 +41,6 @@ While the bot is active in a voice channel, the associated text channel should a
 ## Open questions
 
 - **STT provider choice.** Deepgram is the default assumption from earlier planning. Worth confirming before coding; the provider boundary is a small one and easy to swap.
-- **Turn segmentation.** When is "the user has stopped talking" fired? Silence threshold? Deepgram's own endpointing? Both? This affects the naturalness of turn-taking.
+- **Turn segmentation.** The voice lull debounce (`voice_lull_timeout`, default 0.8s) is the current answer — see [Conversation flow § `voice_lull_timeout`](conversation-flow.md#voice_lull_timeout-float). Deepgram's own endpointing still emits per-fragment finals; `VoiceLullMonitor` uses Discord-native audio-frame arrivals to gate when the accumulated utterance is treated as complete.
 - **Barge-in / interruption handling.** See [Interruption flow](interruption-flow.md). Needs a scope review (voice-only vs. modality-agnostic) before anything else.
 - **Vision fallback UX.** What's the observable behaviour when the user sends an image to a non-vision model? A warning in the same channel? A silent log line? Both?

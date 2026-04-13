@@ -1,40 +1,15 @@
-"""Per-character and per-channel configuration loaded from TOML sidecars.
+"""Per-character and per-channel configuration from TOML sidecars.
 
-Step 7 of docs/architecture/context-pipeline.md. The bot reads two
-kinds of config at runtime:
+Two config levels at runtime:
 
-- ``character.toml`` — one per install, loaded once on startup.
-  Tuning knobs the user sets *for the familiar* (default channel
-  mode, history window size, depth-inject placement). Missing file
-  is fine and falls back to :data:`DEFAULT_CHANNEL_MODE` and sensible
-  per-field defaults.
+- ``character.toml`` — loaded once on startup; familiar-wide defaults
+  (mode, history window, depth-inject, LLM slots, TTS)
+- ``channels/<channel_id>.toml`` — loaded lazily per channel; stores
+  :class:`ChannelMode` and eventual per-channel budget overrides
 
-- ``channels/<channel_id>.toml`` — one per subscribed channel, loaded
-  lazily when the bot first needs it. Stores the channel's
-  :class:`ChannelMode` plus (eventually) per-channel budget
-  overrides. Missing file is also fine — the store falls back to the
-  character's ``default_mode``.
-
-A :class:`ChannelMode` is the human-selected tuning profile:
-
-- ``full_rp`` — everything on, high budget. Good for roleplay
-  channels where latency doesn't dominate.
-- ``text_conversation_rp`` — character + history + stepped thinking,
-  no content-search agent, no recast. Balanced defaults for a
-  normal text channel.
-- ``imitate_voice`` — tight budget, no stepped thinking, recast with
-  a voice flavour. Tuned for TTFB on voice channels.
-
-The three modes' concrete provider / processor sets live in
-:func:`channel_config_for_mode`. Editing those defaults is a one-
-line change; adding a fourth mode is a new enum member plus a table
-entry.
-
-Per-channel TOML files are currently expected to contain just a
-single ``mode = "…"`` key. Future work can add per-key overrides on
-top of the mode defaults without breaking existing files — the
-loader ignores unknown top-level keys so hand-edited overrides are
-forward-compatible.
+Three :class:`ChannelMode` profiles: ``full_rp``, ``text_conversation_rp``,
+``imitate_voice``. Concrete provider/processor sets live in
+:func:`channel_config_for_mode`.
 """
 
 from __future__ import annotations
@@ -67,12 +42,10 @@ DEFAULT_CHANNEL_MODE = ChannelMode.text_conversation_rp
 
 
 class Interjection(Enum):
-    """How patient the familiar is before the side model is consulted.
+    """Controls message-count threshold for interjection checks.
 
-    Controls the message-count threshold at which the monitor asks the
-    side model whether to interject. Higher tiers evaluate sooner and
-    more frequently (shorter starting interval). After each declined
-    check the interval shrinks by 3, flooring at 3.
+    Higher tiers evaluate sooner (shorter starting interval). After
+    each declined check, interval shrinks by 3, flooring at 3.
 
     | Value        | Starting interval (messages) |
     |--------------|------------------------------|
@@ -115,25 +88,16 @@ LLM_SLOT_NAMES: frozenset[str] = frozenset(
         "interjection_decision",
     },
 )
-"""Canonical set of LLM call-site slot names.
+"""Canonical LLM call-site slot names.
 
-Every LLM call site in the codebase resolves its ``LLMClient`` from
-:attr:`CharacterConfig.llm` by one of these names. A user's
-``character.toml`` may omit individual slots — missing slots inherit
-from ``data/familiars/_default/character.toml``. Adding a new call
-site means adding a name here, wiring it in the familiar bundle,
-and adding the default in ``_default/character.toml``.
+Missing slots in ``character.toml`` inherit from
+``data/familiars/_default/character.toml``.
 """
 
 
 @dataclass(frozen=True)
 class LLMSlotConfig:
-    """Per-call-site LLM config loaded from a ``[llm.<slot>]`` TOML section.
-
-    :param model: OpenRouter-style model id (e.g. ``"z-ai/glm-5.1"``).
-    :param temperature: Sampling temperature. May be ``None`` if the
-        call site should rely on the provider's own default.
-    """
+    """Per-call-site LLM config loaded from a ``[llm.<slot>]`` TOML section."""
 
     model: str
     temperature: float | None = None
@@ -141,11 +105,7 @@ class LLMSlotConfig:
 
 @dataclass(frozen=True)
 class TTSConfig:
-    """Text-to-speech config loaded from the ``[tts]`` TOML section.
-
-    :param voice_id: Cartesia voice id. ``None`` means no TTS at all.
-    :param model: Cartesia model name (e.g. ``"sonic-3"``).
-    """
+    """Text-to-speech config loaded from the ``[tts]`` TOML section."""
 
     voice_id: str | None = None
     model: str | None = None
@@ -155,34 +115,12 @@ class TTSConfig:
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``.
 
-    Carries the familiar-wide defaults that the pipeline and renderer
-    need regardless of which channel a turn arrives in.
-
-    :param default_mode: Fallback :class:`ChannelMode` used when a
-        specific channel has no sidecar of its own.
-    :param history_window_size: How many recent turns
-        :class:`HistoryProvider` surfaces verbatim.
-    :param depth_inject_position: Position (from the end of the
-        message list) at which the renderer inserts
-        :class:`Layer.depth_inject` content. ``0`` means immediately
-        before the final user turn — SillyTavern's ``@D 0``.
-    :param depth_inject_role: Role the renderer assigns to the
-        depth-injected message. Either ``"system"`` (default) or
-        ``"user"``.
-    :param aliases: Additional names the familiar responds to (beyond
-        the ``familiar_id``). Used for direct-address detection.
-    :param chattiness: Free-text personality trait describing the
-        familiar's conversational disposition. Fed to the interjection
-        monitor's evaluation prompt.
-    :param interjection: Controls how long the familiar waits before
-        the interjection monitor is consulted during an active
-        conversation.
-    :param lull_timeout: Seconds of silence before the lull evaluation
-        fires.
-    :param llm: ``slot_name -> LLMSlotConfig`` map for every LLM call
-        site. Populated by the loader; slots missing from the user's
-        ``character.toml`` fall back to ``_default/character.toml``.
-    :param tts: :class:`TTSConfig` for Cartesia voice output.
+    :param depth_inject_position: position from end of message list
+        for :class:`Layer.depth_inject`; ``0`` = SillyTavern's ``@D 0``.
+    :param chattiness: free-text personality trait fed to interjection
+        evaluation prompt.
+    :param text_lull_timeout: text-only; voice uses ``voice_lull_timeout``.
+    :param voice_lull_timeout: debounce for Deepgram final-transcript stream.
     """
 
     default_mode: ChannelMode = DEFAULT_CHANNEL_MODE
@@ -196,7 +134,8 @@ class CharacterConfig:
     aliases: list[str] = field(default_factory=list)
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average
-    lull_timeout: float = 2.0
+    text_lull_timeout: float = 10.0
+    voice_lull_timeout: float = 5.0
     memory_writer_turn_threshold: int = 50
     """Run the memory writer pass after this many new turns."""
     memory_writer_idle_timeout: float = 1800.0
@@ -207,27 +146,9 @@ class CharacterConfig:
 
 @dataclass(frozen=True)
 class ChannelConfig:
-    """Concrete tuning for one channel, derived from a :class:`ChannelMode`.
+    """Concrete tuning for one channel, derived from :class:`ChannelMode`.
 
-    The dataclass is frozen so it can be cached by
-    :class:`ChannelConfigStore` and passed around without copying.
-
-    :param mode: The :class:`ChannelMode` this config was derived from.
-    :param budget_tokens: Total token budget for the assembled
-        system prompt, handed to :class:`ContextPipeline` on every
-        request.
-    :param deadline_s: Hard wall-clock deadline the pipeline enforces
-        on itself per request.
-    :param budget_by_layer: Per-layer budget map handed to the
-        :class:`Budgeter`. Layers not present here get zero budget
-        and are silently dropped.
-    :param providers_enabled: Set of provider ``id``s allowed to run
-        in this channel. The bot layer filters its registered
-        providers against this set before constructing the pipeline.
-    :param preprocessors_enabled: Set of pre-processor ``id``s
-        allowed to run in this channel.
-    :param postprocessors_enabled: Set of post-processor ``id``s
-        allowed to run in this channel.
+    Frozen for caching by :class:`ChannelConfigStore`.
     """
 
     mode: ChannelMode
@@ -245,14 +166,7 @@ class ChannelConfig:
 
 
 def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
-    """Return a :class:`ChannelConfig` with the baked-in defaults for *mode*.
-
-    Called by :class:`ChannelConfigStore.get` whenever a channel's
-    TOML sidecar is absent or only names a mode. Hand-editing the
-    tables below is the intended way to reshape a mode's behaviour;
-    adding a fourth mode is a single new enum member plus a branch
-    here.
-    """
+    """Return a :class:`ChannelConfig` with baked-in defaults for *mode*."""
     if mode is ChannelMode.full_rp:
         return ChannelConfig(
             mode=mode,
@@ -325,24 +239,13 @@ def load_character_config(
     *,
     defaults_path: Path,
 ) -> CharacterConfig:
-    """Load a :class:`CharacterConfig` from *path*, merged over *defaults_path*.
+    """Load :class:`CharacterConfig` from *path*, merged over *defaults_path*.
 
-    The loader reads two TOML files and deep-merges the user's on top
-    of the default profile:
+    Deep-merges user's TOML over default profile — missing slots
+    inherit from defaults.
 
-    1. ``defaults_path`` — the repo's reference profile at
-       ``data/familiars/_default/character.toml``. **Required**:
-       missing or malformed raises :class:`ConfigError` because it's
-       a checked-in repo asset, not user data.
-    2. ``path`` — the active familiar's ``character.toml``. Missing
-       is fine (the defaults alone produce a valid config). Present
-       values override the defaults nested per-key, so a user who
-       only wants to tweak ``[llm.main_prose].model`` doesn't have
-       to restate the other five LLM slots.
-
-    :raises ConfigError: If the default profile is missing, either
-        file is invalid TOML, ``[llm.<slot>]`` names an unknown slot,
-        or any parsed value fails validation.
+    :raises ConfigError: if default profile missing, invalid TOML,
+        unknown ``[llm.<slot>]``, or validation failure.
     """
     defaults_data = _read_toml(defaults_path)
     if defaults_data is None:
@@ -388,7 +291,8 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         data.get("interjection"), default=Interjection.average
     )
 
-    lull_timeout = float(data.get("lull_timeout", 2.0))
+    text_lull_timeout = float(data.get("text_lull_timeout", 10.0))
+    voice_lull_timeout = float(data.get("voice_lull_timeout", 5.0))
 
     mw_section = data.get("memory_writer", {})
     if not isinstance(mw_section, dict):
@@ -418,7 +322,8 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         aliases=aliases,
         chattiness=chattiness,
         interjection=interjection,
-        lull_timeout=lull_timeout,
+        text_lull_timeout=text_lull_timeout,
+        voice_lull_timeout=voice_lull_timeout,
         memory_writer_turn_threshold=memory_writer_turn_threshold,
         memory_writer_idle_timeout=memory_writer_idle_timeout,
         llm=llm,
@@ -427,15 +332,11 @@ def _parse_character_config(data: dict) -> CharacterConfig:
 
 
 def load_channel_config(path: Path) -> ChannelConfig | None:
-    """Load a :class:`ChannelConfig` from *path*, or ``None`` if missing.
+    """Load :class:`ChannelConfig` from *path*, or ``None`` if missing.
 
-    Currently only the ``mode`` key is read; the rest of the config
-    comes from :func:`channel_config_for_mode`. Unknown top-level
-    keys are ignored so future per-channel overrides can be added
-    without breaking forward compatibility of already-written files.
+    Only ``mode`` key is read; remainder from :func:`channel_config_for_mode`.
 
-    :raises ConfigError: If the file exists but is not valid TOML,
-        or references an unknown mode.
+    :raises ConfigError: if file exists but is invalid TOML or unknown mode.
     """
     data = _read_toml(path)
     if data is None:
@@ -466,10 +367,9 @@ def _read_toml(path: Path) -> dict | None:
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Return a new dict with *override* layered on top of *base*.
+    """Deep-merge *override* on top of *base*; neither input mutated.
 
-    Nested dicts are merged key-by-key; non-dict values (including
-    lists) are replaced wholesale. Neither input is mutated.
+    Nested dicts merge key-by-key; non-dict values replaced wholesale.
     """
     result: dict = {}
     for key, base_value in base.items():

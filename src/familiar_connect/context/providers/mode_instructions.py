@@ -1,22 +1,13 @@
 """ModeInstructionProvider — per-mode static instruction loader.
 
 Reads ``data/familiars/<id>/modes/<mode_value>.md`` and emits its
-contents as a :class:`Layer.author_note` Contribution. Each
-:class:`ChannelMode` can ship its own static "how to write a reply
-in this mode" instruction file — *this channel is in
-``text_conversation_rp`` mode, so keep replies short and
-chat-room-ish* — without editing Python code or the per-character
-persona.
+contents as a ``Layer.author_note`` Contribution. Each ChannelMode can
+ship its own static instruction file without editing Python code or
+the per-character persona.
 
-The provider is constructed per turn by
-:meth:`Familiar.build_pipeline` with the active mode baked in at
-construction time. This keeps the :class:`ContextProvider` protocol
-unchanged (the request still doesn't need to carry a mode) at the
-cost of a trivial per-turn allocation.
-
-Missing file, missing ``modes/`` directory, and empty-or-whitespace
-file all collapse to returning no contributions, so users can opt
-in per mode by just dropping a file in.
+Constructed per turn with the active mode baked in. Missing file,
+missing directory, and whitespace-only file all return no
+contributions.
 """
 
 from __future__ import annotations
@@ -48,18 +39,7 @@ complete in milliseconds; this is a generous upper bound."""
 
 
 class ModeInstructionProvider:
-    """ContextProvider that loads the mode's instruction file.
-
-    Conforms structurally to the :class:`ContextProvider` protocol.
-
-    :param modes_root: Directory that holds one ``<mode>.md`` file
-        per :class:`ChannelMode`. Typically
-        ``data/familiars/<familiar_id>/modes/``.
-    :param mode: The :class:`ChannelMode` this provider instance is
-        scoped to. One provider is constructed per turn inside
-        :meth:`Familiar.build_pipeline`, so the mode is fixed for
-        the lifetime of the provider.
-    """
+    """ContextProvider that loads the mode's instruction file."""
 
     id = "mode_instructions"
     deadline_s = _DEADLINE_S

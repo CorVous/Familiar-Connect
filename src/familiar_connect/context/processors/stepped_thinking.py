@@ -1,24 +1,13 @@
 """SteppedThinkingPreProcessor — hidden chain-of-thought via the reasoning slot.
 
-Step 10 of docs/architecture/context-pipeline.md. Inspired by
-SillyTavern's ``st-stepped-thinking``.
+Calls the ``reasoning_context`` slot's LLMClient with a "think step
+by step" prompt and stashes the result as a ``Layer.depth_inject``
+Contribution on the request. The pipeline picks it up alongside
+provider contributions when assembling budgeter input.
 
-Calls the ``reasoning_context`` slot's :class:`LLMClient` with a
-focused "think step by step about what the user is really asking
-for" prompt and stashes the result on the request's
-``preprocessor_contributions`` tuple as a :class:`Contribution` at
-:data:`Layer.depth_inject`. The pipeline picks it up automatically
-alongside provider contributions when assembling the final
-budgeter input.
-
-The processor is **failure-isolated**: a slow LLM call, an
-exception, or an empty response all return the request *unchanged*.
-A pre-processor that's broken should never block the reply.
-
-The "I'm thinking step by step" output is intentionally not surfaced
-to the user — it ends up in :data:`Layer.depth_inject`, which the
-budgeter routes into the model's hidden context rather than the
-user-visible reply path.
+Failure-isolated: timeout, exception, or empty response return the
+request unchanged. Output is routed to hidden context, never surfaced
+to the user. See docs/architecture/context-pipeline.md.
 """
 
 from __future__ import annotations
@@ -69,16 +58,7 @@ Your thinking:"""
 
 
 class SteppedThinkingPreProcessor:
-    """PreProcessor that prepends a hidden chain-of-thought to the request.
-
-    Conforms to the :class:`PreProcessor` Protocol structurally — no
-    inheritance required.
-
-    :param llm_client: The :class:`LLMClient` for the
-        ``reasoning_context`` slot.
-    :param processor_timeout_s: Soft cap on the LLM call. On
-        timeout, the processor returns the request unchanged.
-    """
+    """PreProcessor that prepends a hidden chain-of-thought to the request."""
 
     id = "stepped_thinking"
 

@@ -1,20 +1,12 @@
 """Conversation monitor — gates whether and when the familiar speaks.
 
-Implements the ConversationMonitor described in
-``future-features/conversation-flow.md``. The monitor is the single
-entry point ``bot.py`` calls instead of going straight to the
-context pipeline.
-
 Three triggers, one evaluation path:
 
-1. **Direct address** — name/alias/@mention detected → immediate side-model
-   evaluation. State always resets after a direct-address evaluation,
-   regardless of YES/NO.
-2. **Interjection check** — message counter reaches the current threshold
-   → side-model evaluated. On YES: respond + reset. On NO: advance the
-   step-down curve (next threshold decreases by 3, floor 3).
-3. **Lull** — no new message for ``lull_timeout`` seconds → side-model
-   evaluated. On YES: respond + reset. On NO: wait for next trigger.
+1. **Direct address** — name/alias/@mention → immediate evaluation;
+   state resets regardless of YES/NO.
+2. **Interjection** — counter hits threshold → evaluate; on NO advance
+   step-down curve (threshold shrinks by 3, floor 3).
+3. **Lull** — no message for ``lull_timeout`` seconds → evaluate.
 """
 
 from __future__ import annotations
@@ -44,12 +36,7 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class BufferedMessage:
-    """A single message accumulated in a channel buffer.
-
-    :param speaker: Sanitised display name of the author.
-    :param text: Raw message content.
-    :param timestamp: ``time.monotonic()`` value at receipt.
-    """
+    """Single message accumulated in a channel buffer."""
 
     speaker: str
     text: str
@@ -58,22 +45,7 @@ class BufferedMessage:
 
 @dataclass
 class ChannelBuffer:
-    """Per-channel state owned by :class:`ConversationMonitor`.
-
-    :param buffer: Messages since the bot last responded (or since
-        the channel was first seen).
-    :param message_counter: Total messages since last response.
-        Drives the interjection check schedule.
-    :param check_count: How many interjection checks have fired since
-        the last response. Drives the step-down curve.
-    :param next_interjection_at: Absolute ``message_counter`` value at
-        which the next interjection check fires. Set to the tier's
-        starting interval on construction/reset.
-    :param lock: Per-channel asyncio lock preventing simultaneous
-        evaluations.
-    :param lull_timer_handle: Handle to the pending lull callback,
-        cancelled and reset on every new message.
-    """
+    """Per-channel state owned by :class:`ConversationMonitor`."""
 
     buffer: list[BufferedMessage] = field(default_factory=list)
     message_counter: int = 0
@@ -95,14 +67,10 @@ def is_direct_address(
     *,
     is_mention: bool,
 ) -> bool:
-    """Return True if *text* contains a direct reference to the familiar.
+    """Check whether *text* contains a direct address to the familiar.
 
-    :param text: Message content to scan.
-    :param familiar_name: The familiar's primary name (its folder id).
-    :param aliases: Additional names to match.
-    :param is_mention: Whether the Discord message already includes an
-        @mention of the bot user. When True, this function returns True
-        immediately without scanning the text.
+    Word-boundary-aware, case-insensitive. Returns immediately on
+    ``is_mention=True``.
     """
     if is_mention:
         return True
@@ -113,13 +81,9 @@ def is_direct_address(
 
 
 def _interjection_interval(tier: Interjection, check_count: int) -> int:
-    """Return the message interval for the next interjection check.
+    """Message interval for next interjection check.
 
-    The interval shrinks by 3 after each declined check, flooring at 3.
-
-    :param tier: The familiar's :class:`Interjection` setting.
-    :param check_count: How many interjection checks have already fired
-        since the last response.
+    Shrinks by 3 after each declined check, flooring at 3.
     """
     return max(3, tier.starting_interval - check_count * 3)
 
@@ -193,24 +157,8 @@ def _format_buffer(buffer: list[BufferedMessage]) -> str:
 class ConversationMonitor:
     """Gates whether and when the familiar speaks.
 
-    Owned by :class:`Familiar` and called by ``bot.py`` for every
-    message on a subscribed channel. Internally manages per-channel
-    :class:`ChannelBuffer` state, evaluates the three triggers, and
-    invokes the ``on_respond`` callback when the interjection slot
-    says YES.
-
-    :param familiar_name: Primary name (folder id) of the familiar.
-    :param aliases: Additional names that trigger direct-address detection.
-    :param chattiness: Free-text personality trait injected into the
-        evaluation prompt.
-    :param interjection: Tier controlling the interjection check schedule.
-    :param lull_timeout: Seconds of silence before the lull evaluation fires.
-    :param llm_client: :class:`LLMClient` for the
-        ``interjection_decision`` slot, used for YES/NO evaluation.
-    :param character_card: Pre-loaded text from the familiar's
-        ``memory/self/`` files, injected into every evaluation prompt.
-    :param on_respond: Async callback invoked when the LLM says YES.
-        Receives ``(channel_id, buffer_snapshot)``.
+    Manages per-channel :class:`ChannelBuffer` state, evaluates three
+    triggers, invokes ``on_respond`` when interjection LLM says YES.
     """
 
     def __init__(
@@ -247,28 +195,19 @@ class ConversationMonitor:
         *,
         is_mention: bool,
     ) -> None:
-        """Process an incoming message on a subscribed channel.
-
-        Called by ``bot.py:on_message`` for every non-bot message on a
-        subscribed text channel.
-
-        :param channel_id: Discord channel id.
-        :param speaker: Sanitised display name of the author.
-        :param text: Raw message content.
-        :param is_mention: Whether the Discord message @mentions the bot.
-        """
+        """Process incoming message on a subscribed channel."""
         buf = self._get_or_create_buffer(channel_id)
 
-        # 1. Cancel the existing lull timer (we'll restart it below)
+        # 1. cancel existing lull timer (restarted below)
         self._cancel_lull_timer(buf)
 
-        # 2. Append to buffer and increment counter
+        # 2. append to buffer and increment counter
         buf.buffer.append(
             BufferedMessage(speaker=speaker, text=text, timestamp=time.monotonic())
         )
         buf.message_counter += 1
 
-        # 3. Direct address → evaluate immediately; reset state regardless of result
+        # 3. direct address → immediate evaluation; reset regardless of result
         if is_direct_address(
             text, self._familiar_name, self._aliases, is_mention=is_mention
         ):
@@ -283,11 +222,11 @@ class ConversationMonitor:
                 if yes:
                     await self._fire_respond(channel_id, buf)
                 else:
-                    # Still reset on direct address, per spec
+                    # still reset on direct address, per spec
                     self._reset_buffer(buf)
             return
 
-        # 4. Interjection check
+        # 4. interjection check
         if buf.message_counter >= buf.next_interjection_at:
             async with buf.lock:
                 trigger = (
@@ -298,21 +237,17 @@ class ConversationMonitor:
                 if yes:
                     await self._fire_respond(channel_id, buf)
                     return
-                # NO → advance step-down curve
+                # no → advance step-down curve
                 buf.check_count += 1
                 buf.next_interjection_at += _interjection_interval(
                     self._interjection, buf.check_count
                 )
 
-        # 5. Start new lull timer
+        # 5. start new lull timer
         self._start_lull_timer(channel_id, buf)
 
     def clear_channel(self, channel_id: int) -> None:
-        """Remove all state for *channel_id*.
-
-        Called by ``bot.py`` when a channel is unsubscribed. Cancels any
-        pending lull timer so it doesn't fire after the unsubscribe.
-        """
+        """Remove all state for *channel_id*, cancelling pending lull timer."""
         buf = self._buffers.pop(channel_id, None)
         if buf is not None:
             self._cancel_lull_timer(buf)
@@ -344,10 +279,10 @@ class ConversationMonitor:
 
     def _schedule_lull_evaluation(self, channel_id: int) -> None:
         """Sync callback from call_later — schedules the async evaluation."""
+        _logger.info("text lull expired channel=%s", channel_id)
         loop = asyncio.get_event_loop()
         task = loop.create_task(self._run_lull_evaluation(channel_id))
-        # Keep a strong reference so the task isn't garbage-collected before
-        # it runs. The done-callback removes it from the set automatically.
+        # strong ref prevents GC before completion; done-callback cleans up
         self._lull_tasks.add(task)
         task.add_done_callback(self._lull_tasks.discard)
 
@@ -419,10 +354,8 @@ class ConversationMonitor:
             return False
 
         response = reply.content
-        # Check the first token for an affirmative. The system prompt
-        # asks for exactly one word, but some models add punctuation
-        # or a short prefix — stripping to the first token is robust
-        # against both.
+        # check first token for affirmative; robust against models that
+        # add punctuation or a short prefix despite system prompt
         stripped = response.strip()
         first_word = stripped.split()[0].upper().rstrip(".,!") if stripped else ""
         decision = first_word == "YES"

@@ -460,6 +460,88 @@ class TestOnRespond:
         assert user_turns[1].content == "msg2"
         assert user_turns[2].content == "msg3"
 
+    def test_llm_request_log_shows_only_new_messages(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """LLM request log shows total message count and new messages only."""
+        familiar = _make_familiar(tmp_path, reply="Hello.")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.imitate_voice
+        )
+        channel = _make_channel(12345)
+        buffer = [
+            BufferedMessage(speaker="Alice", text="first message", timestamp=0.0),
+            BufferedMessage(speaker="Bob", text="second message", timestamp=1.0),
+        ]
+
+        with caplog.at_level("INFO", logger="familiar_connect.bot"):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Bob",
+                    utterance="second message",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        llm_records = [r for r in caplog.records if "LLM request" in r.getMessage()]
+        assert len(llm_records) == 1
+        msg = llm_records[0].getMessage()
+        # New format: "messages=N, K new:"
+        assert ", 2 new:" in msg
+        # New messages are shown
+        assert "first message" in msg
+        assert "second message" in msg
+        # Full history (system prompt) is not dumped
+        assert "[system]" not in msg
+
+    def test_voice_llm_request_log_shows_only_new_message(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Voice LLM request log shows total count and the utterance only."""
+        familiar = _make_familiar(tmp_path, reply="I hear you.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        handler = _build_voice_response_handler(
+            vc=vc,
+            familiar=familiar,
+            voice_channel_id=9000,
+            guild_id=999,
+            user_names={42: "Alice"},
+        )
+        transcription = TranscriptionResult(
+            text="hello world",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        with caplog.at_level("INFO", logger="familiar_connect.bot"):
+            asyncio.run(handler(42, transcription))
+
+        llm_records = [r for r in caplog.records if "LLM request" in r.getMessage()]
+        assert len(llm_records) == 1
+        msg = llm_records[0].getMessage()
+        # New format: "(voice) messages=N, 1 new:"
+        assert "(voice)" in msg
+        assert ", 1 new:" in msg
+        # Utterance text is shown
+        assert "hello world" in msg
+        # Full history (system prompt) is not dumped
+        assert "[system]" not in msg
+
 
 # ---------------------------------------------------------------------------
 # /subscribe-text and friends
@@ -575,6 +657,7 @@ class TestVoiceSubscription:
         voice_channel = ctx.author.voice.channel
         voice_channel.connect.assert_called_once()
         assert familiar.subscriptions.voice_in_guild(999) is not None
+        ctx.defer.assert_called_once_with(ephemeral=True)
         ctx.followup.send.assert_called_once_with(ANY, ephemeral=True)
 
     def test_subscribe_my_voice_skips_transcription_when_no_transcriber(
@@ -978,3 +1061,70 @@ class TestMainReplyResilience:
             "main reply" in record.getMessage() and record.levelname == "WARNING"
             for record in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Voice pre/post-processor suppression
+# ---------------------------------------------------------------------------
+
+
+class TestVoicePreProcessorsSuppressed:
+    """Voice turns must not invoke preprocessing or postprocessing LLMs.
+
+    stepped_thinking (reasoning_context) and recast (post_process_style)
+    are disabled for voice to reduce real-time latency. This test pins
+    that contract so it cannot be silently regressed.
+    """
+
+    def test_voice_handler_does_not_call_reasoning_context_or_post_process_style(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Neither side-model slot is called when handling a voice turn.
+
+        Uses full_rp mode — which normally enables both stepped_thinking
+        (preprocessor) and recast (postprocessor) — so the suppression is
+        confirmed against the most permissive baseline.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        # full_rp enables preprocessors_enabled={"stepped_thinking"} and
+        # postprocessors_enabled={"recast"} — worst-case baseline.
+        familiar.channel_configs.set_mode(channel_id=9000, mode=ChannelMode.full_rp)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        handler = _build_voice_response_handler(
+            vc=vc,
+            familiar=familiar,
+            voice_channel_id=9000,
+            guild_id=999,
+            user_names={42: "Alice"},
+        )
+        transcription = TranscriptionResult(
+            text="hello there",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        asyncio.run(handler(42, transcription))
+
+        # No LLM slot beyond main_prose should have been touched.
+        # interjection_decision is included: voice interjection is wired but
+        # currently disabled via _VOICE_INTERJECTION_ENABLED = False.
+        llm_only_slots = (
+            "reasoning_context",
+            "post_process_style",
+            "memory_search",
+            "history_summary",
+            "interjection_decision",
+        )
+        for slot in llm_only_slots:
+            client = familiar.llm_clients[slot]
+            assert isinstance(client, _StubLLMClient)
+            assert client.calls == [], f"Expected no calls on {slot!r}"

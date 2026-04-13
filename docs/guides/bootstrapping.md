@@ -1,19 +1,16 @@
 # Bootstrapping a familiar
 
-One-shot operator utilities for seeding a familiar from external
-assets. **Nothing in this file is invoked by the bot at runtime.** If
-you are only running the bot against a familiar whose `memory/`
-directory is already populated, you can ignore this document entirely.
+One-shot operator utilities for seeding a familiar from external assets.
+**Nothing here is invoked at runtime.** If your familiar's `memory/`
+directory is already populated, you can ignore this document.
 
-Everything listed here lives under `familiar_connect.bootstrap` in the
-source tree and is expected to be called by hand (Python REPL,
-one-off script, or future CLI subcommand) when you are setting up a
-new familiar. The dependency direction is one-way: the `bootstrap`
-package imports from `familiar_connect.memory.store`, but nothing in
-the runtime reply pipeline (`bot.py`, `familiar.py`, `commands/run.py`)
-ever imports from `bootstrap`. That invariant is enforced by a ruff
-`flake8-tidy-imports` `banned-api` rule in `pyproject.toml` — any PR
-that accidentally crosses the boundary will fail lint.
+Everything here lives under `familiar_connect.bootstrap` and is meant
+to be called by hand (Python REPL, one-off script, or future CLI
+subcommand) when setting up a new familiar. The dependency direction
+is one-way: `bootstrap` imports from `familiar_connect.memory.store`,
+but nothing in the runtime reply pipeline ever imports from
+`bootstrap`. A ruff `banned-api` rule in `pyproject.toml` enforces
+this — any PR that crosses the boundary will fail lint.
 
 ## Prerequisites
 
@@ -121,15 +118,14 @@ file, invalid JSON, missing `entries` field) raise
 ## Why these utilities are quarantined
 
 These tools write Markdown into a `MemoryStore` once, at setup time,
-and are then never touched again. Keeping them in their own
-subpackage means:
+and are never touched again. Keeping them in their own subpackage means:
 
-- The runtime's import graph stays small and auditable. No operator
-  glue code is loaded when the bot starts.
-- Engineers (and AI assistants) reading `src/familiar_connect/memory/`
-  see only the hot-path file-IO surface, not the one-shot converters.
-- Bit-rot is caught by the standard pytest run — the bootstrap tests
-  live under `tests/bootstrap/` and run in every CI invocation.
+- The runtime import graph stays small and auditable — no operator
+  glue code loads at bot startup.
+- Readers of `src/familiar_connect/memory/` see only the hot-path
+  file-IO surface, not one-shot converters.
+- Bit-rot is caught by `tests/bootstrap/`, which runs in every CI
+  invocation.
 - Accidental coupling is caught at lint time by the ruff `TID251`
   rule, which bans imports of `familiar_connect.bootstrap` outside
   the bootstrap package and its tests.

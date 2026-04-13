@@ -1,15 +1,9 @@
 """Token budgeter for the context pipeline.
 
-Walks a list of Contributions, groups them by Layer, sorts each layer's
-contributions by priority (higher first), and joins them up to a per-
-layer token budget. Over-budget content is truncated at sentence /
-word boundaries when possible and reported in BudgetResult.dropped so
-the pipeline can log every lost byte rather than silently dropping it.
-
-Token counting for the first pass is a deliberately boring
-character-count heuristic (~4 chars per token). tiktoken can replace
-:func:`estimate_tokens` later without touching the Budgeter's public
-contract.
+Groups contributions by layer, sorts by priority, joins up to per-layer
+budget. Over-budget content truncated at sentence/word boundaries;
+drops logged in ``BudgetResult.dropped``. Token counting uses a ~4
+chars/token heuristic (swappable for tiktoken without API change).
 """
 
 from __future__ import annotations
@@ -37,12 +31,9 @@ _SECTION_SEPARATOR = "\n\n"
 
 
 def estimate_tokens(text: str) -> int:
-    """Return an approximate token count for *text*.
+    """Approximate token count via ``len(text) // 4`` rounded up.
 
-    Uses a character-count heuristic (``len(text) // 4``, rounded up).
-    Returns 0 for the empty string and at least 1 for any non-empty
-    input. Callers that need exact counts should swap this for a real
-    tokeniser at the call site.
+    Returns 0 for empty string, at least 1 for any non-empty input.
     """
     if not text:
         return 0
@@ -77,14 +68,7 @@ class DroppedNote:
 
 @dataclass
 class BudgetResult:
-    """What the Budgeter produced for a single pipeline run.
-
-    :param by_layer: Final text per layer, ready to be joined into the
-        system prompt by the pipeline. Layers not present in the input
-        budget map (or with no surviving content) are simply absent.
-    :param dropped: One entry per dropped or truncated contribution,
-        for logging and dashboard display.
-    """
+    """What the Budgeter produced for a single pipeline run."""
 
     by_layer: dict[Layer, str] = field(default_factory=dict)
     dropped: list[DroppedNote] = field(default_factory=list)
@@ -105,13 +89,8 @@ class Budgeter:
     ) -> BudgetResult:
         """Return a BudgetResult for *contributions* under *budget_by_layer*.
 
-        :param contributions: Iterable of Contributions from providers.
-            Insertion order does not matter; the budgeter sorts by
-            priority (higher first) within each layer.
-        :param budget_by_layer: Per-layer token budgets. A layer with no
-            entry here has an effective budget of zero — its
-            contributions will be dropped and logged.
-        :return: A populated :class:`BudgetResult`.
+        Sorts by priority (higher first) within each layer; layers
+        absent from *budget_by_layer* have effective budget zero.
         """
         result = BudgetResult()
 

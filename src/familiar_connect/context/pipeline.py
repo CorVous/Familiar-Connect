@@ -1,18 +1,11 @@
-"""The ContextPipeline — the asyncio orchestrator.
+"""Asyncio orchestrator for the context pipeline.
 
-Walks the registered pre-processors, fans the providers out under a
-scoped ``asyncio.TaskGroup`` with per-provider deadlines, collects
-their Contributions, and hands everything to the Budgeter. Individual
-provider failures and deadline misses are isolated so one misbehaving
-provider never poisons the rest of the pipeline.
-
-The pipeline deliberately does **not** call the main LLM itself. The
-bot layer owns the LLM call so that TTS fan-out and history
-persistence stay clustered together; the pipeline's
-:meth:`ContextPipeline.run_post_processors` hook lets the bot fire
-post-processors against the resulting reply without having to
-re-implement the reverse-order, per-stage failure isolation every
-call site would otherwise need.
+- Runs pre-processors sequentially, fans providers out via TaskGroup
+- Per-provider deadlines; failures/timeouts isolated, never poison siblings
+- Does NOT call the LLM — bot layer owns that so TTS fan-out and
+  history persistence stay together
+- ``run_post_processors`` gives the bot reverse-order, isolated
+  post-processing without reimplementing it per call site
 """
 
 from __future__ import annotations
@@ -46,13 +39,7 @@ ProviderStatus = str  # "ok" | "error" | "timeout"
 
 @dataclass
 class ProviderOutcome:
-    """Per-provider execution record for logging and the dashboard.
-
-    One of these exists for every provider the pipeline ran, regardless
-    of whether it succeeded, errored, or timed out. The ``status`` field
-    is ``"ok"``, ``"error"``, or ``"timeout"``; ``error_message`` is
-    populated for the non-ok cases.
-    """
+    """Per-provider execution record for logging and the dashboard."""
 
     provider_id: str
     duration_s: float
@@ -63,15 +50,7 @@ class ProviderOutcome:
 
 @dataclass
 class PipelineOutput:
-    """Result of a single pipeline run.
-
-    :param request: The ``ContextRequest`` as seen by the providers,
-        i.e. after all pre-processors have run. This is the canonical
-        "what did the pipeline actually see" record for logs.
-    :param budget: The budgeter's output — per-layer text and the list
-        of dropped / truncated contributions.
-    :param outcomes: One entry per provider that was executed.
-    """
+    """Result of a single pipeline run."""
 
     request: ContextRequest
     budget: BudgetResult
@@ -81,12 +60,9 @@ class PipelineOutput:
 class ContextPipeline:
     """Assemble context for a single reply turn.
 
-    The pipeline is stateless across turns — construct it once with the
-    active providers / pre-processors / post-processors, then call
-    :meth:`assemble` per request. Providers are run concurrently inside
-    a scoped ``asyncio.TaskGroup`` with per-provider deadlines; a
-    provider that misses its deadline or raises is recorded in the
-    output and does not affect other providers.
+    Stateless across turns. Construct once, call :meth:`assemble` per
+    request. Providers run concurrently with per-provider deadlines;
+    failures are recorded, never propagated.
     """
 
     def __init__(
@@ -106,19 +82,10 @@ class ContextPipeline:
         request: ContextRequest,
         budget_by_layer: dict[Layer, int],
     ) -> PipelineOutput:
-        """Run the pipeline for *request* and return a :class:`PipelineOutput`.
-
-        :param request: The request built from the incoming event.
-        :param budget_by_layer: Per-layer token budgets to hand to the
-            budgeter.
-        """
-        # 1. Pre-processors run sequentially; each sees the previous one's
-        # output. A pre-processor that raises ``PreProcessorError`` is
-        # skipped — ``processed`` is not updated, so the next stage sees
-        # the last successful value. Any other exception escapes this
-        # loop and crashes the pipeline: that is a Protocol-contract
-        # violation and is intentionally surfaced loudly rather than
-        # silently masked by a blanket ``except``.
+        """Run the pipeline for *request* and return a :class:`PipelineOutput`."""
+        # 1. pre-processors run sequentially; PreProcessorError is
+        # isolated (skipped), any other exception is a contract violation
+        # and propagates intentionally
         processed = request
         for pre in self._pre_processors:
             try:
@@ -132,12 +99,12 @@ class ContextPipeline:
                 )
                 continue
 
-        # 2. Providers fan out concurrently under a single TaskGroup.
+        # 2. providers fan out concurrently under a single TaskGroup
         outcomes = await self._run_providers(processed)
 
-        # 3. Everything that came back goes to the budgeter — both
+        # 3. everything that came back goes to the budgeter — both
         # provider outputs and any contributions pre-processors stashed
-        # on the request via dataclasses.replace().
+        # on the request via dataclasses.replace()
         all_contributions: list[Contribution] = list(
             processed.preprocessor_contributions
         )
@@ -159,12 +126,7 @@ class ContextPipeline:
     ) -> str:
         """Run every registered post-processor against *reply_text*.
 
-        Processors run in **reverse** registration order so the
-        most-recently-registered processor is the outermost wrapper
-        and sees every earlier transformation. A processor that
-        raises is caught, logged, and skipped — its input is passed
-        through to the next stage unchanged so one buggy processor
-        never eats a reply entirely.
+        Reverse registration order; failures isolated and skipped.
         """
         current = reply_text
         for post in reversed(self._post_processors):
@@ -187,8 +149,8 @@ class ContextPipeline:
         if not self._providers:
             return []
 
-        # Each provider's outcome is written into this list at its fixed
-        # index so the caller sees a deterministic order.
+        # each provider's outcome is written into this list at its fixed
+        # index so the caller sees a deterministic order
         outcomes: list[ProviderOutcome | None] = [None] * len(self._providers)
 
         async with asyncio.TaskGroup() as tg:
@@ -197,8 +159,8 @@ class ContextPipeline:
                     self._run_single_provider(idx, provider, request, outcomes)
                 )
 
-        # At this point every slot is filled (_run_single_provider never
-        # leaves a None behind — it catches everything).
+        # at this point every slot is filled (_run_single_provider never
+        # leaves a None behind — it catches everything)
         return [o for o in outcomes if o is not None]
 
     async def _run_single_provider(
@@ -210,9 +172,8 @@ class ContextPipeline:
     ) -> None:
         """Invoke one provider and record its outcome.
 
-        This method **must not raise** — otherwise it would propagate
-        out of the TaskGroup and cancel sibling providers. All errors
-        are captured as ``ProviderOutcome``s instead.
+        Must not raise — would cancel siblings via TaskGroup. All
+        errors captured as ``ProviderOutcome``s.
         """
         loop = asyncio.get_event_loop()
         start = loop.time()

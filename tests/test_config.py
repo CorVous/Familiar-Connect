@@ -353,7 +353,7 @@ class TestCharacterConfigConversationFields:
         assert cfg.aliases == []
         assert cfg.chattiness == "Balanced — responds when the conversation is relevant"
         assert cfg.interjection is Interjection.average
-        assert cfg.lull_timeout == 2.0  # noqa: RUF069
+        assert cfg.text_lull_timeout == 10.0  # noqa: RUF069
 
     def test_reads_aliases_from_toml(
         self,
@@ -395,15 +395,15 @@ class TestCharacterConfigConversationFields:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.interjection is Interjection.eager
 
-    def test_reads_lull_timeout_from_toml(
+    def test_reads_text_lull_timeout_from_toml(
         self,
         tmp_path: Path,
         default_profile_path: Path,
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("lull_timeout = 5.0\n")
+        path.write_text("text_lull_timeout = 5.0\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.lull_timeout == 5.0  # noqa: RUF069
+        assert cfg.text_lull_timeout == 5.0  # noqa: RUF069
 
     def test_unknown_interjection_value_raises(
         self,
