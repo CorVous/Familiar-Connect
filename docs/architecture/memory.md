@@ -5,7 +5,7 @@ A familiar's long-term memory is a directory of plain-text files on disk, one tr
 This page covers *what goes in that directory* — the content conventions. The *pipeline that reads and writes it* lives in [Context pipeline](context-pipeline.md).
 
 !!! success "Status: Implemented"
-    `MemoryStore`, the character-card unpacker, the lorebook importer, `CharacterProvider`, and `ContentSearchProvider` are all in place. The **post-session writer pass** that updates `people/`, `topics/`, and `sessions/` files automatically is still a roadmap item.
+    `MemoryStore`, the character-card unpacker, the lorebook importer, `CharacterProvider`, `ContentSearchProvider`, and the **post-session memory writer** are all in place. The writer pass automatically updates `sessions/`, `people/`, and `topics/` files from conversation history.
 
 ## Why freeform text
 
@@ -101,10 +101,10 @@ Suggested sections:
 
 ### `sessions/<date>-<slot>.md` — per-session summaries
 
-- Written by the post-session writer pass (cheap-model call at session end or timeout).
-- One file per session. The slot suffix (`evening`, `afternoon`, `short`) disambiguates multiple sessions in one day.
+- Written by the `MemoryWriter` when a turn-count or idle-timeout threshold is reached.
+- One file per writer invocation. The slot suffix (`morning`, `afternoon`, `evening`, `night`) is derived from the time of day; a numeric suffix (`-2`, `-3`, etc.) disambiguates multiple sessions in the same slot.
 - Contents are freeform: a paragraph summary, a bulleted list of highlights, or whatever the writer pass produces.
-- The writer pass is also responsible for *updating relevant people/ and topics/ files* based on what happened in the session.
+- The writer pass also *creates and updates relevant people/ and topics/ files* based on what happened in the session.
 
 ### `lore/` — persistent background
 
@@ -120,7 +120,20 @@ Suggested sections:
 
 Two patterns, in descending order of preference:
 
-1. **Post-session writer pass (preferred).** After a session ends (via `/unsubscribe-text`, text-session timeout, or an idle window in voice), a cheap side-model reads the session transcript, produces a session summary file, and proposes updates to relevant `people/` and `topics/` files. The writer pass is the *only* code path that mutates memory under normal operation.
+1. **Post-session writer pass (implemented).** The `MemoryWriter` and `MemoryWriterScheduler` (in `familiar_connect.memory.writer` and `familiar_connect.memory.scheduler`) automatically summarize conversation history into long-term memory files. The writer is triggered by two conditions — whichever fires first:
+
+    - **Turn-count threshold** — after N turns (default 50, configurable via `[memory_writer].turn_threshold` in `character.toml`).
+    - **Idle timeout** — after M seconds of silence (default 1800s / 30 min, configurable via `[memory_writer].idle_timeout`).
+    - **Flush on unsubscribe** — `/unsubscribe-text` and `/unsubscribe-voice` also trigger an immediate write if there are unsummarized turns.
+
+    The writer calls the `memory_writer` LLM slot (a cheap side-model) with the unsummarized transcript and any existing relevant memory files. The model produces structured output that the writer parses into:
+
+    - A **session summary** → `sessions/<date>-<slot>.md`
+    - **People file** creates/updates → `people/<name>.md`
+    - **Topic file** creates/updates → `topics/<slug>.md`
+
+    A watermark in the `HistoryStore` tracks which turns have been summarized, so the writer never re-processes old turns and advances only on success. All writes are tagged with `source="memory_writer"` in the `MemoryStore` audit log.
+
 2. **In-conversation writer tool (not first pass).** In principle, the main LLM or the content search agent could be given a `write_file` tool during a reply and edit memory live. This is strictly more powerful than the writer pass but also strictly more dangerous (the bot rewriting its own memory in real time, during latency-sensitive voice turns). We do not build this in the first cut. If we build it later, it should be heavily audited via the `MemoryStore`'s audit log and probably feature-flagged per character.
 
 ## Reading from memory

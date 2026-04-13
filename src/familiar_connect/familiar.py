@@ -44,7 +44,9 @@ from familiar_connect.context.providers.mode_instructions import (
     ModeInstructionProvider,
 )
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.memory.scheduler import MemoryWriterScheduler
 from familiar_connect.memory.store import MemoryStore
+from familiar_connect.memory.writer import MemoryWriter
 from familiar_connect.subscriptions import SubscriptionRegistry
 
 if TYPE_CHECKING:
@@ -107,6 +109,7 @@ class Familiar:
     subscriptions: SubscriptionRegistry
     channel_configs: ChannelConfigStore
     monitor: ConversationMonitor
+    memory_writer_scheduler: MemoryWriterScheduler
     extras: dict[str, object] = field(default_factory=dict)
     """Scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet."""
@@ -225,6 +228,20 @@ class Familiar:
             on_respond=_noop_respond,
         )
 
+        memory_writer = MemoryWriter(
+            memory_store=memory_store,
+            history_store=history_store,
+            llm_client=llm_clients["memory_writer"],
+            familiar_id=familiar_id,
+        )
+        memory_writer_scheduler = MemoryWriterScheduler(
+            writer=memory_writer,
+            history_store=history_store,
+            familiar_id=familiar_id,
+            turn_threshold=character_config.memory_writer_turn_threshold,
+            idle_timeout=character_config.memory_writer_idle_timeout,
+        )
+
         return cls(
             id=familiar_id,
             root=root,
@@ -240,6 +257,7 @@ class Familiar:
             subscriptions=subscriptions,
             channel_configs=channel_configs,
             monitor=monitor,
+            memory_writer_scheduler=memory_writer_scheduler,
         )
 
     # ------------------------------------------------------------------

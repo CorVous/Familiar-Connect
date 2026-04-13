@@ -111,6 +111,7 @@ LLM_SLOT_NAMES: frozenset[str] = frozenset(
         "reasoning_context",
         "history_summary",
         "memory_search",
+        "memory_writer",
         "interjection_decision",
     },
 )
@@ -196,6 +197,10 @@ class CharacterConfig:
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average
     lull_timeout: float = 2.0
+    memory_writer_turn_threshold: int = 50
+    """Run the memory writer pass after this many new turns."""
+    memory_writer_idle_timeout: float = 1800.0
+    """Run the memory writer pass after this many seconds of silence (30 min)."""
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
 
@@ -385,6 +390,13 @@ def _parse_character_config(data: dict) -> CharacterConfig:
 
     lull_timeout = float(data.get("lull_timeout", 2.0))
 
+    mw_section = data.get("memory_writer", {})
+    if not isinstance(mw_section, dict):
+        msg = f"[memory_writer] must be a table, got {type(mw_section).__name__}"
+        raise ConfigError(msg)
+    memory_writer_turn_threshold = int(mw_section.get("turn_threshold", 50))
+    memory_writer_idle_timeout = float(mw_section.get("idle_timeout", 1800.0))
+
     llm_raw = data.get("llm", {})
     if not isinstance(llm_raw, dict):
         msg = f"[llm] must be a table, got {type(llm_raw).__name__}"
@@ -407,6 +419,8 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         chattiness=chattiness,
         interjection=interjection,
         lull_timeout=lull_timeout,
+        memory_writer_turn_threshold=memory_writer_turn_threshold,
+        memory_writer_idle_timeout=memory_writer_idle_timeout,
         llm=llm,
         tts=tts,
     )

@@ -84,6 +84,14 @@ class CrossContextEntry:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class WatermarkEntry:
+    """Tracks the last turn id written to long-term memory by the memory writer."""
+
+    last_written_id: int
+    created_at: datetime
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,6 +131,12 @@ CREATE TABLE IF NOT EXISTS cross_context_summaries (
     summary_text       TEXT    NOT NULL,
     created_at         TEXT    NOT NULL,
     PRIMARY KEY (familiar_id, viewer_mode, source_channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS memory_writer_watermark (
+    familiar_id       TEXT    PRIMARY KEY,
+    last_written_id   INTEGER NOT NULL,
+    created_at        TEXT    NOT NULL
 );
 """
 
@@ -549,6 +563,78 @@ class HistoryStore:
             ),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # memory-writer watermark
+    # ------------------------------------------------------------------
+
+    def get_writer_watermark(
+        self,
+        *,
+        familiar_id: str,
+    ) -> WatermarkEntry | None:
+        """Return the memory-writer watermark for *familiar_id*, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT last_written_id, created_at
+              FROM memory_writer_watermark
+             WHERE familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return WatermarkEntry(
+            last_written_id=int(row["last_written_id"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def put_writer_watermark(
+        self,
+        *,
+        familiar_id: str,
+        last_written_id: int,
+    ) -> None:
+        """Insert or replace the memory-writer watermark for *familiar_id*."""
+        timestamp = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO memory_writer_watermark
+                (familiar_id, last_written_id, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT (familiar_id)
+            DO UPDATE SET
+                last_written_id = excluded.last_written_id,
+                created_at      = excluded.created_at
+            """,
+            (familiar_id, last_written_id, timestamp),
+        )
+        self._conn.commit()
+
+    def turns_since_watermark(
+        self,
+        *,
+        familiar_id: str,
+        limit: int = 10_000,
+    ) -> list[HistoryTurn]:
+        """Return turns after the memory-writer watermark, oldest first.
+
+        If no watermark has been set, returns all turns for the familiar.
+        """
+        wm = self.get_writer_watermark(familiar_id=familiar_id)
+        min_id = wm.last_written_id if wm is not None else 0
+        rows = self._conn.execute(
+            """
+            SELECT id, timestamp, role, speaker, content
+              FROM turns
+             WHERE familiar_id = ?
+               AND id > ?
+             ORDER BY id ASC
+             LIMIT ?
+            """,
+            (familiar_id, min_id, limit),
+        ).fetchall()
+        return [_row_to_turn(r) for r in rows]
 
 
 def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:

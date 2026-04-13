@@ -1,0 +1,342 @@
+"""Red-first tests for the post-session memory writer.
+
+The MemoryWriter reads unsummarized turns from HistoryStore, calls a
+cheap side-model to produce structured output, and writes session/people/
+topic files into the MemoryStore.
+
+Covers familiar_connect.memory.writer.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import pytest
+
+from familiar_connect.history.store import HistoryStore
+from familiar_connect.memory.store import MemoryStore
+from familiar_connect.memory.writer import (
+    MemoryWriter,
+    _parse_writer_output,
+    _session_filename,
+    _time_slot,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from familiar_connect.llm import Message
+
+# Re-use the shared FakeLLMClient from conftest.
+from tests.conftest import FakeLLMClient
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+_FAMILIAR = "aria"
+
+
+def _make_stores(tmp_path: Path) -> tuple[MemoryStore, HistoryStore]:
+    mem_root = tmp_path / "memory"
+    mem_root.mkdir()
+    return MemoryStore(mem_root), HistoryStore(tmp_path / "history.db")
+
+
+def _seed_turns(store: HistoryStore, n: int) -> None:
+    """Append *n* alternating user/assistant turns."""
+    for i in range(n):
+        role = "user" if i % 2 == 0 else "assistant"
+        speaker = "Alice" if role == "user" else None
+        store.append_turn(
+            familiar_id=_FAMILIAR,
+            channel_id=100,
+            role=role,
+            content=f"turn {i}",
+            speaker=speaker,
+        )
+
+
+_STRUCTURED_OUTPUT = """\
+===SESSION_SUMMARY===
+Alice and the familiar had a brief exchange about greetings.
+===END_SESSION_SUMMARY===
+
+===PEOPLE===
+---FILE: alice.md---
+# Alice
+
+Alice is a friendly person who greeted the familiar.
+
+## Impressions
+- Seems warm and approachable
+---END_FILE---
+===END_PEOPLE===
+
+===TOPICS===
+---FILE: greetings.md---
+# Greetings
+
+A conversation about saying hello.
+
+## Notes
+- Alice prefers casual greetings
+---END_FILE---
+===END_TOPICS==="""
+
+
+# ---------------------------------------------------------------------------
+# Output parser tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseWriterOutput:
+    def test_parses_all_sections(self) -> None:
+        session, people, topics = _parse_writer_output(_STRUCTURED_OUTPUT)
+        assert "Alice and the familiar" in session
+        assert "alice.md" in people
+        assert "# Alice" in people["alice.md"]
+        assert "greetings.md" in topics
+        assert "# Greetings" in topics["greetings.md"]
+
+    def test_missing_session_returns_empty(self) -> None:
+        text = "===PEOPLE===\n===END_PEOPLE===\n===TOPICS===\n===END_TOPICS==="
+        session, people, topics = _parse_writer_output(text)
+        assert not session
+        assert people == {}
+        assert topics == {}
+
+    def test_empty_input(self) -> None:
+        session, people, topics = _parse_writer_output("")
+        assert not session
+        assert people == {}
+        assert topics == {}
+
+    def test_multiple_people_files(self) -> None:
+        text = """\
+===SESSION_SUMMARY===
+Summary
+===END_SESSION_SUMMARY===
+
+===PEOPLE===
+---FILE: alice.md---
+# Alice
+Content about Alice
+---END_FILE---
+---FILE: bob.md---
+# Bob
+Content about Bob
+---END_FILE---
+===END_PEOPLE===
+
+===TOPICS===
+===END_TOPICS==="""
+        _, people, _ = _parse_writer_output(text)
+        assert len(people) == 2
+        assert "alice.md" in people
+        assert "bob.md" in people
+
+
+# ---------------------------------------------------------------------------
+# Session filename helpers
+# ---------------------------------------------------------------------------
+
+
+class TestSessionFilename:
+    def test_time_slot_morning(self) -> None:
+        assert _time_slot(datetime(2026, 1, 1, 8, 0, tzinfo=UTC)) == "morning"
+
+    def test_time_slot_afternoon(self) -> None:
+        assert _time_slot(datetime(2026, 1, 1, 14, 0, tzinfo=UTC)) == "afternoon"
+
+    def test_time_slot_evening(self) -> None:
+        assert _time_slot(datetime(2026, 1, 1, 20, 0, tzinfo=UTC)) == "evening"
+
+    def test_time_slot_night(self) -> None:
+        assert _time_slot(datetime(2026, 1, 1, 3, 0, tzinfo=UTC)) == "night"
+
+    def test_session_filename_unique(self, tmp_path: Path) -> None:
+        store = MemoryStore(tmp_path / "memory")
+        dt = datetime(2026, 4, 13, 20, 0, tzinfo=UTC)
+        name = _session_filename(store, dt)
+        assert name == "sessions/2026-04-13-evening.md"
+
+    def test_session_filename_collision(self, tmp_path: Path) -> None:
+        mem_root = tmp_path / "memory"
+        mem_root.mkdir()
+        store = MemoryStore(mem_root)
+        # Create the first session file
+        store.write_file("sessions/2026-04-13-evening.md", "existing", source="test")
+        dt = datetime(2026, 4, 13, 20, 0, tzinfo=UTC)
+        name = _session_filename(store, dt)
+        assert name == "sessions/2026-04-13-evening-2.md"
+
+
+# ---------------------------------------------------------------------------
+# MemoryWriter.run() tests
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryWriterRun:
+    def test_no_unsummarized_turns_returns_empty(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        llm = FakeLLMClient()
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+        assert result.turns_summarized == 0
+        assert result.session_file is None
+        assert llm.calls == []  # No LLM call made
+
+    def test_writes_session_file(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 10)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+        assert result.session_file is not None
+        assert result.session_file.startswith("sessions/")
+        content = mem_store.read_file(result.session_file)
+        assert "Alice and the familiar" in content
+
+    def test_creates_people_file(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 10)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+        assert "people/alice.md" in result.people_files
+        content = mem_store.read_file("people/alice.md")
+        assert "# Alice" in content
+
+    def test_creates_topic_file(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 10)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+        assert "topics/greetings.md" in result.topic_files
+        content = mem_store.read_file("topics/greetings.md")
+        assert "# Greetings" in content
+
+    def test_advances_watermark(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 10)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+        assert result.watermark_id > 0
+        wm = hist_store.get_writer_watermark(familiar_id=_FAMILIAR)
+        assert wm is not None
+        assert wm.last_written_id == result.watermark_id
+
+    def test_no_watermark_advance_on_llm_failure(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 10)
+
+        class FailingLLM(FakeLLMClient):
+            async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
+                msg = "LLM failed"
+                raise RuntimeError(msg)
+
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=FailingLLM(),
+            familiar_id=_FAMILIAR,
+        )
+        with pytest.raises(RuntimeError, match="LLM failed"):
+            asyncio.run(writer.run())
+
+        # Watermark should NOT have advanced
+        assert hist_store.get_writer_watermark(familiar_id=_FAMILIAR) is None
+
+    def test_empty_llm_response_returns_empty_result(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 10)
+        llm = FakeLLMClient(replies=[""])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+        assert result.session_file is None
+        assert result.turns_summarized == 0
+
+    def test_existing_people_file_included_in_prompt(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        # Create an existing people file for Alice
+        mem_store.write_file(
+            "people/alice.md",
+            "# Alice\nExisting info about Alice.",
+            source="test",
+        )
+        _seed_turns(hist_store, 10)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+
+        # Check the prompt included the existing file content
+        assert len(llm.calls) == 1
+        user_msg = llm.calls[0][1].content
+        assert "Existing info about Alice" in user_msg
+
+    def test_audit_source_tag(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 10)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+        for entry in mem_store.audit_entries:
+            assert entry.source == "memory_writer"
+
+    def test_turns_summarized_count(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 6)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+        assert result.turns_summarized == 6

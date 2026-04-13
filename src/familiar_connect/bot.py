@@ -154,6 +154,7 @@ async def unsubscribe_text(
         kind=SubscriptionKind.text,
     )
     familiar.monitor.clear_channel(channel_id)
+    await familiar.memory_writer_scheduler.flush()
     await ctx.respond("No longer listening here.", ephemeral=True)
 
 
@@ -267,6 +268,7 @@ def _build_voice_response_handler(
             content=reply_text,
             mode=channel_config.mode,
         )
+        await familiar.memory_writer_scheduler.notify_turn()
 
         _logger.info("[Voice Response] %s", reply_text)
 
@@ -423,6 +425,7 @@ async def unsubscribe_voice(
             kind=SubscriptionKind.voice,
         )
 
+    await familiar.memory_writer_scheduler.flush()
     await ctx.respond("Left voice.", ephemeral=True)
 
 
@@ -564,6 +567,7 @@ async def _run_text_response(
         content=reply_text,
         mode=channel_config.mode,
     )
+    await familiar.memory_writer_scheduler.notify_turn()
 
     await channel.send(reply_text)
 
@@ -657,6 +661,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     @bot.event
     async def on_ready() -> None:  # noqa: RUF029
         familiar.extras["bot_user"] = bot.user
+        familiar.memory_writer_scheduler.start()
 
     # Build the on_respond callback that drives the full pipeline path.
     # Captured variables: bot (for channel lookup) and familiar.
