@@ -426,11 +426,12 @@ class ConversationMonitor:
         stripped = response.strip()
         first_word = stripped.split()[0].upper().rstrip(".,!") if stripped else ""
         decision = first_word == "YES"
-        _logger.debug(
-            "evaluate channel=%s trigger=%s decision=%s raw=%r",
+        _logger.info(
+            "interjection channel=%s trigger=%s decision=%s msgs=%d raw=%r",
             channel_id,
             trigger_label,
             "YES" if decision else "NO",
+            buf.message_counter,
             response[:120],
         )
         return decision

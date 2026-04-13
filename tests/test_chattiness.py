@@ -32,6 +32,8 @@ from familiar_connect.llm import Message
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -474,6 +476,57 @@ class TestSideModelEvaluation:
         _, buf_snapshot = calls[0]
         assert len(buf_snapshot) == 3
         assert buf_snapshot[0].speaker == "Alice"
+
+    def test_yes_decision_logged_at_info(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Log the YES interjection decision at INFO.
+
+        Operators need to see in real time whether the familiar chose
+        to respond.
+        """
+        monitor, _ = _make_monitor(side_model_reply="YES")
+        with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=42, speaker="Alice", text="aria?", is_mention=False
+                )
+            )
+        matches = [
+            r
+            for r in caplog.records
+            if r.name == "familiar_connect.chattiness"
+            and r.levelname == "INFO"
+            and "interjection" in r.getMessage()
+        ]
+        assert len(matches) == 1
+        msg = matches[0].getMessage()
+        assert "decision=YES" in msg
+        assert "channel=42" in msg
+        assert "trigger=direct_address" in msg
+
+    def test_no_decision_logged_at_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Log NO decisions at INFO too.
+
+        Operators need to see the familiar choosing to stay silent, not
+        just when it speaks.
+        """
+        monitor, _ = _make_monitor(side_model_reply="NO")
+        with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=7, speaker="Alice", text="aria?", is_mention=False
+                )
+            )
+        matches = [
+            r
+            for r in caplog.records
+            if r.name == "familiar_connect.chattiness"
+            and r.levelname == "INFO"
+            and "interjection" in r.getMessage()
+        ]
+        assert len(matches) == 1
+        assert "decision=NO" in matches[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
