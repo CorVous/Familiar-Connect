@@ -15,6 +15,8 @@ from familiar_connect.voice.interruption import (
 from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import pytest
 
 
@@ -194,22 +196,73 @@ class _FakeClock:
         return self.now
 
 
+class _FakeHandle:
+    def __init__(self, scheduler: _FakeScheduler) -> None:
+        self._scheduler = scheduler
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self._scheduler.pending = None
+
+
+class _FakeScheduler:
+    """Synchronous scheduler stub for the detector's lull timer.
+
+    Only one pending callback at a time — matches how the detector
+    uses it (the lull handle is re-armed/cancelled, never doubled up).
+    """
+
+    def __init__(self) -> None:
+        self.pending: tuple[float, _FakeHandle, Callable[[], None]] | None = None
+
+    def __call__(
+        self,
+        delay: float,
+        callback: Callable[[], None],
+    ) -> _FakeHandle:
+        handle = _FakeHandle(self)
+        self.pending = (delay, handle, callback)
+        return handle
+
+    def fire(self) -> None:
+        """Invoke the pending callback as if the timer expired."""
+        pending = self.pending
+        if pending is None:
+            msg = "no pending callback"
+            raise RuntimeError(msg)
+        _delay, handle, cb = pending
+        if handle.cancelled:
+            msg = "pending callback was cancelled"
+            raise RuntimeError(msg)
+        self.pending = None
+        cb()
+
+    @property
+    def is_armed(self) -> bool:
+        return self.pending is not None
+
+
 def _make_detector(
     *,
     guild_id: int = 1,
     min_s: float = 1.5,
     boundary_s: float = 4.0,
-) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock]:
+    lull_s: float = 5.0,
+) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
     registry = ResponseTrackerRegistry()
     clock = _FakeClock()
+    scheduler = _FakeScheduler()
     detector = InterruptionDetector(
         tracker_registry=registry,
         guild_id=guild_id,
         min_interruption_s=min_s,
         short_long_boundary_s=boundary_s,
+        lull_timeout_s=lull_s,
         clock=clock,
+        scheduler=scheduler,
     )
-    return detector, registry, clock
+    return detector, registry, clock, scheduler
 
 
 class TestInterruptionDetectorIdle:
@@ -217,13 +270,14 @@ class TestInterruptionDetectorIdle:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, _registry, clock = _make_detector()
+        detector, _registry, clock, scheduler = _make_detector()
         with caplog.at_level(
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        assert not scheduler.is_armed
         assert not any("interruption:" in rec.message for rec in caplog.records)
 
 
@@ -232,7 +286,7 @@ class TestInterruptionDetectorClassification:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, clock = _make_detector(min_s=1.5, boundary_s=4.0)
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
         registry.get(1).state = ResponseState.SPEAKING
         with caplog.at_level(
             logging.INFO, logger="familiar_connect.voice.interruption"
@@ -240,6 +294,7 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(0.5)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()  # lull timer expires
         msgs = [r.message for r in caplog.records if "interruption:" in r.message]
         assert len(msgs) == 1
         assert "discarded" in msgs[0]
@@ -249,7 +304,7 @@ class TestInterruptionDetectorClassification:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, clock = _make_detector(min_s=1.5, boundary_s=4.0)
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
         registry.get(1).state = ResponseState.SPEAKING
         with caplog.at_level(
             logging.INFO, logger="familiar_connect.voice.interruption"
@@ -257,6 +312,7 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()
         msgs = [r.message for r in caplog.records if "interruption:" in r.message]
         assert len(msgs) == 1
         assert "short" in msgs[0]
@@ -266,7 +322,7 @@ class TestInterruptionDetectorClassification:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, clock = _make_detector(min_s=1.5, boundary_s=4.0)
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
         registry.get(1).state = ResponseState.GENERATING
         with caplog.at_level(
             logging.INFO, logger="familiar_connect.voice.interruption"
@@ -274,6 +330,7 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()
         msgs = [r.message for r in caplog.records if "interruption:" in r.message]
         assert len(msgs) == 1
         assert "long" in msgs[0]
@@ -285,7 +342,7 @@ class TestInterruptionDetectorMultiUser:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, clock = _make_detector(min_s=1.5, boundary_s=4.0)
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
         registry.get(1).state = ResponseState.SPEAKING
 
         with caplog.at_level(
@@ -296,13 +353,15 @@ class TestInterruptionDetectorMultiUser:
             detector.on_voice_activity(43, VoiceActivityEvent.started)
             clock.advance(0.5)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            # user 43 still speaking — no classification yet.
+            # User 43 still speaking — no lull arming yet.
+            assert not scheduler.is_armed
             msgs_during = [
                 r.message for r in caplog.records if "interruption:" in r.message
             ]
             assert msgs_during == []
             clock.advance(1.5)
             detector.on_voice_activity(43, VoiceActivityEvent.ended)
+            scheduler.fire()
 
         msgs = [r.message for r in caplog.records if "interruption:" in r.message]
         assert len(msgs) == 1
@@ -310,12 +369,49 @@ class TestInterruptionDetectorMultiUser:
         assert "short" in msgs[0]
 
 
-class TestInterruptionDetectorResetBetweenBursts:
-    def test_consecutive_bursts_are_measured_independently(
+class TestInterruptionDetectorLullAggregation:
+    def test_sub_utterance_gap_within_lull_aggregates(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, clock = _make_detector(min_s=1.5, boundary_s=4.0)
+        # The hallmark behavior: "I was just—" <0.5s pause> "—thinking"
+        # is one interruption, not two. Both sub-utterances roll into
+        # the same classification because the gap is shorter than the
+        # lull timeout.
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, lull_s=5.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(1.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            # Lull timer now armed — intra-lull pause begins.
+            assert scheduler.is_armed
+            clock.advance(0.5)  # short gap, well under lull_timeout_s
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            # New speech cancels the lull timer.
+            assert not scheduler.is_armed
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()  # now the full lull expires
+
+        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        # Single classification covering both sub-utterances.
+        # Duration: 1.0 + 0.5 + 2.0 = 3.5s → short.
+        assert len(msgs) == 1
+        assert "short" in msgs[0]
+
+    def test_new_speech_after_lull_fires_starts_fresh_burst(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, lull_s=5.0
+        )
         registry.get(1).state = ResponseState.SPEAKING
 
         with caplog.at_level(
@@ -324,10 +420,12 @@ class TestInterruptionDetectorResetBetweenBursts:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
-            clock.advance(10.0)  # long gap between bursts shouldn't leak
+            scheduler.fire()  # first burst classified
+            clock.advance(10.0)
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()  # second burst classified
 
         msgs = [r.message for r in caplog.records if "interruption:" in r.message]
         assert len(msgs) == 2
@@ -342,7 +440,7 @@ class TestInterruptionDetectorStateSnapshot:
     ) -> None:
         # If state transitions during the burst, the classification
         # should report the state observed when the burst began.
-        detector, registry, clock = _make_detector(min_s=1.5, boundary_s=4.0)
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
         tracker = registry.get(1)
         tracker.state = ResponseState.GENERATING
 
@@ -354,6 +452,7 @@ class TestInterruptionDetectorStateSnapshot:
             tracker.state = ResponseState.SPEAKING  # state changed mid-burst
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()
 
         msgs = [r.message for r in caplog.records if "interruption:" in r.message]
         assert len(msgs) == 1
