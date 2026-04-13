@@ -246,10 +246,14 @@ class InterruptionDetector:
         # cancelled on any new ``started`` event within the same lull.
         self._lull_handle: _Cancelable | None = None
         # Pending min-threshold timer. Armed at burst start for
-        # ``min_interruption_s`` seconds; fires exactly once to log
-        # that the noise floor was crossed (if anyone is still
-        # speaking at that moment). Cancelled on burst finalize.
+        # ``min_interruption_s`` seconds; together with re-evaluations
+        # on every ``started`` / ``ended`` event, guarantees the
+        # min-crossed log fires the instant the burst's accumulated
+        # wall-clock duration (first ``started`` → now) crosses
+        # ``min_interruption_s``. Cancelled on burst finalize.
         self._min_handle: _Cancelable | None = None
+        # Latch so the min-crossed log fires at most once per burst.
+        self._min_logged: bool = False
 
     def on_voice_activity(
         self,
@@ -273,11 +277,15 @@ class InterruptionDetector:
                 self._burst_started_at = self._clock()
                 self._burst_state = tracker.state
                 # Arm the min-crossed timer once per burst. Fires in
-                # real time at exactly ``min_interruption_s`` after
-                # first speech, letting operators see the threshold
-                # crossing as it happens rather than only at finalize.
+                # real time at ``min_interruption_s`` after first
+                # speech — the earliest moment the accumulated burst
+                # duration can cross the threshold.
                 self._arm_min_timer()
             self._speaking.add(user_id)
+            # A fresh ``started`` may push the accumulated duration
+            # (``now - burst_started_at``) past ``min`` if the timer
+            # already fired during a silent gap without logging.
+            self._maybe_log_min_crossed()
             return
 
         # ended
@@ -294,6 +302,11 @@ class InterruptionDetector:
         # keep accumulating into the same classification.
         self._burst_last_ended_at = self._clock()
         self._arm_lull()
+        # The update to ``burst_last_ended_at`` may itself cross ``min``
+        # even if we're now silent — e.g., the timer fired during an
+        # earlier gap and stayed silent, and this utterance carried
+        # the burst past the threshold.
+        self._maybe_log_min_crossed()
 
     def _schedule(self, delay: float, callback: Callable[[], None]) -> _Cancelable:
         scheduler = self._scheduler
@@ -324,22 +337,45 @@ class InterruptionDetector:
             self._min_handle = None
 
     def _on_min_crossed(self) -> None:
-        """Fire the min-threshold log if the burst is still live.
-
-        The burst is "live" if at least one user is actively speaking
-        at this moment — i.e., the speech has continued past
-        ``min_interruption_s`` without a silence gap long enough to
-        disqualify it. If the speaker went quiet before the threshold
-        fired, the burst hasn't crossed yet and may end up discarded;
-        we stay silent in that case.
-        """
+        """Timer callback: re-evaluate whether the min has been crossed."""
         self._min_handle = None
-        if not self._speaking or self._burst_state is None:
+        self._maybe_log_min_crossed()
+
+    def _maybe_log_min_crossed(self) -> None:
+        """Log once per burst the moment accumulated duration ≥ ``min``.
+
+        "Accumulated duration" is wall-clock from the first ``started``
+        of the burst to the present:
+
+        - while someone is speaking, ``now - burst_started_at``;
+        - during an intra-lull silent gap, ``last_ended_at -
+          burst_started_at``.
+
+        Called from the min timer and from both ``started`` / ``ended``
+        event handlers so we catch every possible crossing moment —
+        continuous speech (timer), restart after a below-min gap
+        (``started``), and utterance-end that pushes us over the line
+        (``ended``).
+        """
+        if (
+            self._min_logged
+            or self._burst_started_at is None
+            or self._burst_state is None
+        ):
+            return
+        if self._speaking:
+            effective = self._clock() - self._burst_started_at
+        elif self._burst_last_ended_at is not None:
+            effective = self._burst_last_ended_at - self._burst_started_at
+        else:
+            return
+        if effective < self._min_interruption_s:
             return
         _logger.info(
             "interruption: min threshold crossed during %s",
             self._burst_state.value,
         )
+        self._min_logged = True
 
     def _finalize_burst(self) -> None:
         """Classify + log the accumulated burst. Invoked by the lull timer."""
@@ -352,6 +388,7 @@ class InterruptionDetector:
         self._burst_started_at = None
         self._burst_last_ended_at = None
         self._burst_state = None
+        self._min_logged = False
         if started_at is None or last_ended_at is None or observed is None:
             return
         # Effective speech duration — first speech to last speech,

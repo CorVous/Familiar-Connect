@@ -534,7 +534,7 @@ class TestInterruptionDetectorMinThresholdLog:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        detector, registry, _clock, scheduler = _make_detector(
+        detector, registry, clock, scheduler = _make_detector(
             min_s=2.0, boundary_s=30.0
         )
         registry.get(1).state = ResponseState.SPEAKING
@@ -542,7 +542,9 @@ class TestInterruptionDetectorMinThresholdLog:
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             detector.on_voice_activity(42, VoiceActivityEvent.started)
-            # Min timer fires in real time while user is still speaking.
+            # Simulate the 2.0s of real time the scheduler would
+            # actually have waited before firing the timer.
+            clock.advance(2.0)
             scheduler.fire_for(detector._on_min_crossed)
         crossed = [
             r.message for r in caplog.records if "min threshold crossed" in r.message
@@ -553,6 +555,89 @@ class TestInterruptionDetectorMinThresholdLog:
         # crossing event itself, not a measured duration.
         assert "s)" not in crossed[0]
         assert "min=" not in crossed[0]
+
+    def test_accumulated_duration_crosses_min_on_new_speech(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Sub-utterances: first utterance ends below ``min`` and the
+        # timer fires during the silent gap without logging. When the
+        # user starts speaking again past the 2s wall-clock mark, the
+        # accumulated duration has crossed and we log.
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)  # t=0
+            clock.advance(0.5)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)  # t=0.5
+            clock.advance(1.5)  # t=2.0 — timer would fire here
+            scheduler.fire_for(detector._on_min_crossed)
+            # Still silent, last_ended-started=0.5 < 2 → no log yet.
+            assert not any("min threshold crossed" in r.message for r in caplog.records)
+            clock.advance(0.5)  # t=2.5
+            # New speech: now-started = 2.5 ≥ 2 → log fires.
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+        crossed = [
+            r.message for r in caplog.records if "min threshold crossed" in r.message
+        ]
+        assert len(crossed) == 1
+
+    def test_accumulated_duration_crosses_min_on_ended(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Timer fires during a below-min silent gap; the next utterance
+        # is the one that pushes the burst past ``min`` — the ``ended``
+        # event (which sets ``last_ended_at``) triggers the log.
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)  # t=0
+            clock.advance(0.5)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)  # t=0.5
+            scheduler.fire_for(detector._on_min_crossed)  # silent, no log
+            clock.advance(1.0)  # t=1.5
+            detector.on_voice_activity(42, VoiceActivityEvent.started)  # 1.5<2
+            assert not any("min threshold crossed" in r.message for r in caplog.records)
+            clock.advance(1.0)  # t=2.5
+            # ``last_ended_at - started_at`` = 2.5 ≥ 2 → log fires.
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        crossed = [
+            r.message for r in caplog.records if "min threshold crossed" in r.message
+        ]
+        assert len(crossed) == 1
+
+    def test_min_crossed_logs_at_most_once_per_burst(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(3.0)
+            # Timer fires: speaking, 3 ≥ 2 → log.
+            scheduler.fire_for(detector._on_min_crossed)
+            clock.advance(1.0)
+            # Subsequent ``ended`` would also satisfy the threshold,
+            # but the latch prevents a second log.
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        crossed = [
+            r.message for r in caplog.records if "min threshold crossed" in r.message
+        ]
+        assert len(crossed) == 1
 
     def test_min_fires_while_silent_does_not_log(
         self,
