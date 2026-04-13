@@ -23,7 +23,7 @@ A third setting, **lull timeout**, controls how long a gap in messages counts as
 
 ### Why not just the preset?
 
-An earlier sketch suggested a "chattiness preset" governing response frequency alone. That misses the character layer: a familiar set to "moderate" should feel very different depending on who it is. A shy familiar hedges and apologises when it speaks up unprompted; an arrogant one acts like it's doing the room a favour; a curious one opens with a question. The preset governs *when* it responds. The personality description governs *how it feels* about responding. This design keeps both: `chattiness` for personality, `interjection` for mechanical timing.
+An earlier sketch suggested a "chattiness preset" governing response frequency alone. That misses the character layer: a "moderate" familiar should feel very different depending on who it is. A shy familiar hedges when speaking unprompted; an arrogant one acts like it's doing the room a favour; a curious one opens with a question. The preset governs *when* it responds; the personality description governs *how it feels* about responding. This design keeps both: `chattiness` for personality, `interjection` for mechanical timing.
 
 ## Configuration
 

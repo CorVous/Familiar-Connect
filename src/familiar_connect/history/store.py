@@ -1,34 +1,17 @@
 """SQLite-backed persistent conversation history.
 
-The HistoryStore owns one SQLite database with two tables:
+One database per familiar. Two core tables:
 
-- ``turns`` — every conversational turn the bot has seen, scoped by
-  ``(familiar_id, channel_id)``. Each turn carries a monotonically
-  increasing primary key, a role (user/assistant/system), an
-  optional speaker name, the textual content, an optional
-  ``guild_id`` (observability only), and a UTC timestamp.
-- ``summaries`` — at most one rolling summary per ``familiar_id``,
-  with a ``last_summarised_id`` watermark so the
-  :class:`HistoryProvider` can tell whether the cache still covers
-  every turn the familiar has heard. The summary is *global per
-  familiar* — see ``docs/architecture/context-pipeline.md`` for the rationale.
-  The recent rolling window is partitioned per channel; the rolling
-  summary is not.
+- ``turns`` — every turn scoped by ``(familiar_id, channel_id)``;
+  monotonic PK, role, optional speaker, content, optional guild_id, UTC ts
+- ``summaries`` — at most one rolling summary per (familiar, channel)
+  with a ``last_summarised_id`` watermark for cache freshness.
+  See ``docs/architecture/context-pipeline.md`` for rationale.
 
-A Familiar-Connect install runs exactly one familiar at a time, so
-``familiar_id`` effectively identifies the single active character on
-this install. It's still carried through the API surface (rather than
-implicit) so that tests can exercise multiple familiars against a
-single store and future work that revisits the single-character
-constraint has a clean extension point.
-
-The store deliberately exposes a small, synchronous API. SQLite is
-fast enough for the volumes a per-host bot will see, and keeping the
-API sync means callers (the bot's text/voice loops, the
-:class:`HistoryProvider`) don't need to manage a connection pool.
-Sync calls from async code can be wrapped with :func:`asyncio.to_thread`
-if they ever start blocking the event loop, but at the scale of "tens
-of turns per second worst case" it's not worth pre-empting.
+``familiar_id`` is explicit (not implicit) so tests can exercise
+multiple familiars against one store. Synchronous API — SQLite is
+fast enough at per-host volumes; wrap with ``asyncio.to_thread`` if
+needed.
 """
 
 from __future__ import annotations
@@ -47,7 +30,7 @@ PathLike = str | Path
 
 @dataclass(frozen=True)
 class HistoryTurn:
-    """A single conversational turn as stored on disk."""
+    """Single persisted conversational turn."""
 
     id: int
     timestamp: datetime
@@ -58,7 +41,7 @@ class HistoryTurn:
 
 @dataclass(frozen=True)
 class SummaryEntry:
-    """A cached rolling summary for one ``familiar_id``."""
+    """Cached rolling summary for one familiar."""
 
     last_summarised_id: int
     summary_text: str
@@ -67,7 +50,7 @@ class SummaryEntry:
 
 @dataclass(frozen=True)
 class OtherChannelInfo:
-    """Summary info about another channel's recent activity."""
+    """Recent-activity info for another channel."""
 
     channel_id: int
     mode: str | None
@@ -77,7 +60,7 @@ class OtherChannelInfo:
 
 @dataclass(frozen=True)
 class CrossContextEntry:
-    """A cached cross-context summary for one source channel."""
+    """Cached cross-context summary for one source channel."""
 
     source_last_id: int
     summary_text: str
@@ -130,9 +113,7 @@ CREATE TABLE IF NOT EXISTS cross_context_summaries (
 class HistoryStore:
     """Persistent SQLite store for turns + rolling summaries.
 
-    Pass a filesystem path (str or :class:`Path`) for a real
-    persistent database, or the literal string ``":memory:"`` for an
-    ephemeral in-process database (useful in tests).
+    Pass ``":memory:"`` for an ephemeral in-process database (tests).
     """
 
     def __init__(self, db_path: PathLike) -> None:
@@ -150,13 +131,8 @@ class HistoryStore:
         self._conn.commit()
 
     def _migrate_if_needed(self) -> None:
-        """Run idempotent migrations for schema changes.
-
-        Currently handles:
-        - Adding the ``mode`` column to ``turns`` (+ backfill index).
-        """
-        # Check whether the turns table exists at all — if not, the
-        # CREATE TABLE IF NOT EXISTS in _SCHEMA will handle it.
+        """Idempotent migrations (currently: add ``mode`` column to turns)."""
+        # check whether turns table exists — if not, _SCHEMA handles it
         row = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='turns'"
         ).fetchone()
@@ -171,9 +147,8 @@ class HistoryStore:
             self._conn.execute("ALTER TABLE turns ADD COLUMN mode TEXT")
             self._conn.commit()
 
-        # Migrate summaries table: old schema had PK (familiar_id) only.
-        # New schema adds channel_id to the PK. Summaries are a cache —
-        # dropping and recreating is safe (they rebuild on next request).
+        # migrate summaries: old PK was (familiar_id) only; new adds channel_id.
+        # summaries are a cache — drop + recreate is safe
         summary_row = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='summaries'"
         ).fetchone()
@@ -191,7 +166,7 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the underlying SQLite connection."""
+        """Close underlying SQLite connection."""
         self._conn.close()
 
     # ------------------------------------------------------------------
@@ -247,16 +222,11 @@ class HistoryStore:
         limit: int,
         mode: ChannelMode | None = None,
     ) -> list[HistoryTurn]:
-        """Return up to *limit* most recent turns *in this channel*.
+        """Return most recent turns in channel, oldest-first.
 
-        The recent window is partitioned per channel so two
-        simultaneous conversations don't bleed into each other.
-        Results are sorted oldest-first so callers can render them
-        without re-reversing.
-
-        When *mode* is provided, only turns recorded under that mode
-        are returned. This prevents cross-mode style contamination in
-        the verbatim example window.
+        Per-channel partitioning prevents bleed between conversations.
+        When *mode* is set, only matching turns returned (prevents
+        cross-mode style contamination).
         """
         if limit <= 0:
             return []
@@ -292,11 +262,9 @@ class HistoryStore:
         channel_id: int | None = None,
         limit: int = 10_000,
     ) -> list[HistoryTurn]:
-        """Return turns whose ``id`` is *<= max_id*, oldest first.
+        """Return turns with ``id <= max_id``, oldest first.
 
-        When *channel_id* is provided, scopes to that single channel.
-        When omitted, returns turns globally across all channels (the
-        legacy behaviour).
+        *channel_id* scopes to one channel; omit for global.
         """
         if channel_id is not None:
             rows = self._conn.execute(
@@ -331,13 +299,9 @@ class HistoryStore:
         familiar_id: str,
         channel_id: int | None = None,
     ) -> int | None:
-        """Return the highest turn id for the familiar.
+        """Return highest turn id (watermark for cache freshness).
 
-        When *channel_id* is provided, scopes to that single channel.
-        When omitted, returns the global max across all channels.
-
-        Used by :class:`HistoryProvider` as the watermark for cache
-        freshness.
+        *channel_id* scopes to one channel; omit for global max.
         """
         if channel_id is not None:
             row = self._conn.execute(
@@ -367,11 +331,7 @@ class HistoryStore:
         familiar_id: str,
         channel_id: int | None = None,
     ) -> int:
-        """Return the number of stored turns.
-
-        With ``channel_id`` set, scoped to that channel; without it,
-        scoped to the whole familiar.
-        """
+        """Return number of stored turns. *channel_id* scopes to one channel."""
         if channel_id is None:
             row = self._conn.execute(
                 """
@@ -462,12 +422,9 @@ class HistoryStore:
         familiar_id: str,
         exclude_channel_id: int,
     ) -> list[OtherChannelInfo]:
-        """Return info about other channels with activity for this familiar.
+        """Return other channels with activity, most-recently-active first.
 
-        Each row carries the channel's most recent mode, latest turn id,
-        and latest timestamp. Channels with *only* the excluded channel_id
-        are omitted. Results are ordered by latest turn id descending
-        (most-recently-active first).
+        Each row carries latest mode, turn id, and timestamp.
         """
         rows = self._conn.execute(
             """

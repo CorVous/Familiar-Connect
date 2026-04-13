@@ -47,3 +47,25 @@ Always follow red/green TDD:
    add a *new* slash command or CLI subcommand, check that it shows
    up in the rendered `getting-started/slash-commands.md` /
    `getting-started/installation.md` pages.
+
+## Technical Writing Style
+
+All comments, docstrings, and documentation must follow this style:
+
+* Be concise
+* Prefer **telegraphic** style
+    * Omit: articles ("the", "a"), auxiliary verbs, unnecessary prepositions, filler words
+    * Keep: nouns, verbs, adjectives, key modifiers
+* Avoid restating the obvious
+    * Don't restate types already in signatures
+    * Don't summarize functions when the name is self-explanatory
+* Document what's close and stable
+    * Avoid "far away" references likely to change
+    * Exception: ok if lints/tests/jobs catch breakage
+* Start inline comments lowercase
+* Use periods only for full sentences
+* Use full sentences only when needed; lean on context
+
+**Scope:** telegraphic style applies strictly to docstrings and inline
+comments. Wiki pages (`docs/*.md`) keep full sentences for readability
+but should still be concise — trim wordiness, filler, and restating.

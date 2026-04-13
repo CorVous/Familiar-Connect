@@ -1,29 +1,14 @@
 """On-disk MemoryStore for a single familiar.
 
-Owns one directory of plain-text files (one tree per familiar per
-guild). Exposes a small, deliberately boring file-IO surface — list /
-read / write / append / glob / grep — that is safe to hand to a tool-
-using cheap model later via the ContentSearchProvider.
+One plain-text directory tree per familiar per guild. Exposes
+list / read / write / append / glob / grep for tool-using models.
 
-Key invariants enforced here, not by every caller:
+Invariants enforced here, not by callers:
 
-- **Path-traversal safety.** Every relative path is resolved against
-  the store's root and rejected if the resolved real path is not under
-  the root. Absolute paths, ``..`` segments that escape, null bytes,
-  and symlinks pointing outside the store all raise
-  :class:`MemoryStorePathError`.
-- **Sanity caps.** Per-file size, per-operation result count, and per-
-  directory file count are bounded by a configurable
-  :class:`MemoryStoreLimits`. Hitting a cap raises
-  :class:`MemoryStoreSizeLimitError` rather than reading or writing
-  silently truncated content.
-- **Atomic writes.** ``write_file`` and ``append_file`` write to a
-  sibling temp file and ``rename`` it into place so a partial write
-  is never observable.
-- **Audit log.** Every successful write or append is recorded in an
-  in-memory log so the pipeline can later reconstruct "when did the
-  bot's beliefs about Alice change." The log is intentionally
-  in-process for the first cut; persisting it is a follow-up.
+- Path-traversal safety — rejects escaping paths, symlinks, null bytes
+- Sanity caps — per-file, per-op, per-dir limits via :class:`MemoryStoreLimits`
+- Atomic writes — temp-file + rename; partial writes never observable
+- Audit log — in-memory log of every write/append (persistence is a follow-up)
 """
 
 from __future__ import annotations
@@ -36,18 +21,14 @@ from pathlib import Path
 PathLike = str | Path
 
 DEFAULT_MAX_FILE_BYTES = 256 * 1024
-"""Per-file byte cap. ~256 KB is plenty for a Markdown note about a
-person, topic, session, or piece of lore, and keeps grep cheap."""
+"""Per-file byte cap. ~256 KB covers any Markdown note and keeps grep cheap."""
 
 DEFAULT_MAX_RESULTS_PER_OP = 1000
-"""Cap on the number of results a single read-side op may return.
-Protects callers from accidentally pulling the entire store into
-memory through a too-broad grep or glob."""
+"""Cap on results per read-side op. Prevents pulling entire store
+into memory via a too-broad grep or glob."""
 
 DEFAULT_MAX_FILES_PER_DIR = 10_000
-"""Cap on entries returned by a single ``list_dir`` call. Same idea
-as the result cap — defends against accidental enumerations of
-runaway directories."""
+"""Cap on entries per ``list_dir`` call. Defends against runaway directories."""
 
 _TMP_SUFFIX = ".__memstore_tmp__"
 
@@ -62,11 +43,11 @@ class MemoryStoreError(Exception):
 
 
 class MemoryStorePathError(MemoryStoreError):
-    """A path argument escaped the store's root or was otherwise unsafe."""
+    """Path escaped store root or was otherwise unsafe."""
 
 
 class MemoryStoreSizeLimitError(MemoryStoreError):
-    """A per-file, per-op, or per-directory size cap was exceeded."""
+    """Size cap exceeded."""
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +57,7 @@ class MemoryStoreSizeLimitError(MemoryStoreError):
 
 @dataclass(frozen=True)
 class MemoryStoreLimits:
-    """Configurable safety caps for a :class:`MemoryStore`."""
+    """Safety caps for a :class:`MemoryStore`."""
 
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_results_per_op: int = DEFAULT_MAX_RESULTS_PER_OP
@@ -85,7 +66,7 @@ class MemoryStoreLimits:
 
 @dataclass(frozen=True)
 class MemoryEntry:
-    """One entry returned by :meth:`MemoryStore.list_dir`."""
+    """Single entry from :meth:`MemoryStore.list_dir`."""
 
     name: str
     is_dir: bool
@@ -95,7 +76,7 @@ class MemoryEntry:
 
 @dataclass(frozen=True)
 class GrepHit:
-    """One match returned by :meth:`MemoryStore.grep`."""
+    """Single match from :meth:`MemoryStore.grep`."""
 
     rel_path: str
     line_number: int
@@ -106,7 +87,7 @@ class GrepHit:
 
 @dataclass(frozen=True)
 class AuditEntry:
-    """A single record in the in-memory audit log."""
+    """Single record in the in-memory audit log."""
 
     rel_path: str
     operation: str  # "write" | "append"
@@ -126,12 +107,7 @@ class _MutableState:
 
 
 class MemoryStore:
-    """Per-familiar plain-text memory directory.
-
-    Construct with the absolute root path you want this familiar's
-    memory to live under. The directory is created on first use if it
-    doesn't already exist.
-    """
+    """Per-familiar plain-text memory directory."""
 
     def __init__(
         self,
@@ -149,13 +125,11 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def list_dir(self, rel_path: str = "") -> list[MemoryEntry]:
-        """Return the entries in the directory at *rel_path*.
+        """List entries in directory at *rel_path*.
 
         :raises MemoryStorePathError: If *rel_path* escapes the root.
-        :raises MemoryStoreError: If the path doesn't exist or is not
-            a directory.
-        :raises MemoryStoreSizeLimitError: If the directory contains
-            more than ``limits.max_files_per_dir`` entries.
+        :raises MemoryStoreError: If path missing or not a directory.
+        :raises MemoryStoreSizeLimitError: If entries exceed cap.
         """
         path = self._resolve(rel_path)
         if not path.exists():
@@ -188,13 +162,11 @@ class MemoryStore:
         return entries
 
     def read_file(self, rel_path: str) -> str:
-        """Return the UTF-8 contents of the file at *rel_path*.
+        """Return UTF-8 contents of file at *rel_path*.
 
         :raises MemoryStorePathError: If *rel_path* escapes the root.
-        :raises MemoryStoreError: If the path is missing or not a
-            regular file.
-        :raises MemoryStoreSizeLimitError: If the file is larger than
-            ``limits.max_file_bytes``.
+        :raises MemoryStoreError: If path missing or not a regular file.
+        :raises MemoryStoreSizeLimitError: If file exceeds byte cap.
         """
         path = self._resolve(rel_path)
         if not path.exists():
@@ -213,16 +185,12 @@ class MemoryStore:
         return path.read_text(encoding="utf-8")
 
     def glob(self, pattern: str) -> list[str]:
-        """Return relative paths under the root matching *pattern*.
+        """Return matching relative paths, deduplicated and sorted.
 
-        Uses :meth:`pathlib.Path.glob`. Recursive globs use ``**``.
-        Results are deduplicated, sorted, and capped at
-        ``limits.max_results_per_op``. Any path that — after symlink
-        resolution — escapes the root is silently dropped (we never
-        leak escaping symlinks; we just don't return them).
+        Capped at ``limits.max_results_per_op``. Escaping symlinks
+        silently dropped.
 
-        :raises MemoryStorePathError: If the pattern itself looks like
-            a traversal attempt (absolute, contains a null byte, etc.).
+        :raises MemoryStorePathError: If pattern is a traversal attempt.
         """
         if not pattern:
             return []
@@ -249,15 +217,10 @@ class MemoryStore:
         *,
         case_insensitive: bool = True,
     ) -> list[GrepHit]:
-        """Return regex-match hits across files under *rel_path*.
+        """Search files under *rel_path* for regex *pattern*.
 
-        Walks the file tree under *rel_path* and runs *pattern*
-        against each line of each readable file. Files larger than
-        ``limits.max_file_bytes`` are silently skipped (defensive —
-        someone may have written a giant file directly to disk).
-        Files that aren't valid UTF-8 are also skipped.
-
-        Results are capped at ``limits.max_results_per_op``.
+        Oversized and non-UTF-8 files silently skipped.
+        Capped at ``limits.max_results_per_op``.
 
         :raises MemoryStorePathError: If *rel_path* escapes the root.
         """
@@ -325,15 +288,10 @@ class MemoryStore:
         *,
         source: str = "unknown",
     ) -> None:
-        """Write *content* to the file at *rel_path*, replacing it.
-
-        Atomic via temp-file + rename — a partial write is never
-        observable. Creates intermediate directories. Records an
-        ``AuditEntry`` on success.
+        """Atomic replace. Creates intermediate directories.
 
         :raises MemoryStorePathError: If *rel_path* escapes the root.
-        :raises MemoryStoreSizeLimitError: If *content* exceeds the
-            per-file size cap.
+        :raises MemoryStoreSizeLimitError: If *content* exceeds byte cap.
         """
         path = self._resolve(rel_path)
         encoded = content.encode("utf-8")
@@ -348,17 +306,12 @@ class MemoryStore:
         *,
         source: str = "unknown",
     ) -> None:
-        """Append *content* to the file at *rel_path*, creating it if missing.
+        """Append via atomic read-concat-write; create if missing.
 
-        Reads the existing file (if any), concatenates *content*, and
-        writes the result atomically. The post-append size is checked
-        against the cap; if it would overflow, the original file is
-        left untouched and :class:`MemoryStoreSizeLimitError` is
-        raised.
+        On overflow the original is left untouched.
 
         :raises MemoryStorePathError: If *rel_path* escapes the root.
-        :raises MemoryStoreSizeLimitError: If the post-append size
-            exceeds the per-file size cap.
+        :raises MemoryStoreSizeLimitError: If post-append size exceeds cap.
         """
         path = self._resolve(rel_path)
 
@@ -381,7 +334,7 @@ class MemoryStore:
 
     @property
     def audit_entries(self) -> list[AuditEntry]:
-        """Return a copy of the in-memory audit log."""
+        """Copy of the in-memory audit log."""
         return list(self._state.audit)
 
     # ------------------------------------------------------------------
@@ -389,10 +342,10 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _resolve(self, rel_path: str) -> Path:
-        """Resolve *rel_path* against the root, rejecting any escape.
+        """Resolve *rel_path* against root; reject escapes.
 
-        Empty string maps to the root. Absolute paths, null bytes,
-        and resolved paths outside the root all raise.
+        Empty string maps to root. Absolute paths, null bytes, and
+        resolved paths outside root all raise.
         """
         if not rel_path:
             return self.root
@@ -414,7 +367,7 @@ class MemoryStore:
         return full
 
     def _is_under_root(self, path: Path) -> bool:
-        """Return True iff *path*, fully resolved, is under ``self.root``."""
+        """Check whether *path*, fully resolved, is under ``self.root``."""
         try:
             resolved = path.resolve(strict=False)
         except OSError:
@@ -440,8 +393,8 @@ class MemoryStore:
             tmp.write_bytes(data)
             tmp.replace(path)
         finally:
-            # If the rename happened, the temp file is gone; if it
-            # didn't, we want to leave no garbage behind.
+            # if the rename happened the temp file is gone; if it
+            # didn't, leave no garbage behind
             if tmp.exists():
                 tmp.unlink()
 

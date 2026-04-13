@@ -1,8 +1,7 @@
 # Architecture overview
 
-Familiar-Connect is an AI familiar that joins Discord voice channels,
-listens to users, understands speech, and talks back using real AI
-voices.
+An AI familiar that joins Discord voice channels, listens, understands
+speech, and talks back using real AI voices.
 
 ## Goals
 
@@ -50,17 +49,15 @@ flowchart TB
     class aq,tq,oq queue;
 ```
 
-Every box in that diagram is a task running under one root
-`asyncio.TaskGroup`, so a crash anywhere cancels the whole reply path
-cleanly rather than leaking half-dead tasks.
+Every box runs under one root `asyncio.TaskGroup` — a crash anywhere
+cancels the whole reply path.
 
 Development uses red/green TDD throughout.
 
 ## External services
 
-The runtime talks to exactly five kinds of outside service. Two are
-required (nothing runs without them), the rest are optional and the
-bot degrades gracefully when they are absent or unconfigured.
+The runtime talks to five outside services. Two are required; the rest
+are optional and the bot degrades gracefully without them.
 
 ```mermaid
 flowchart LR

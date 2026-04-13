@@ -9,11 +9,11 @@ This page covers *what goes in that directory* — the content conventions. The 
 
 ## Why freeform text
 
-- **Authoring cost is near zero.** The familiar (or a human) writes in Markdown. No schemas to satisfy, no trigger words to author, no tags to maintain.
-- **Debuggability is free.** You can `grep -r "Alice"` in your terminal and see the exact same thing the model sees.
-- **One tool surface for everything.** Lore, session summaries, per-person notes, per-topic notes, and scratchpad jottings all live in the same directory and are searched by the same tools. No schema-translation layer between different "kinds of memory."
-- **Cache invalidation is easy.** Because the directory is the source of truth, any derived artefact (future vector indices, tag caches, graph indexes) is a regenerable cache. If it's out of date, throw it away.
-- **SillyTavern interop is an importer, not a runtime.** Lorebook/World-Info JSON is unpacked into Markdown files in the directory at import time. After that it's just text.
+- **Near-zero authoring cost.** Write Markdown. No schemas, no trigger words, no tags.
+- **Free debuggability.** `grep -r "Alice"` in your terminal shows the exact same thing the model sees.
+- **One tool surface for everything.** Lore, session summaries, per-person notes, per-topic notes, and scratchpad jottings all live in the same directory, searched by the same tools. No schema-translation layer.
+- **Easy cache invalidation.** The directory is the source of truth; any derived artefact (vector indices, tag caches, graph indexes) is a regenerable cache.
+- **SillyTavern interop is an importer, not a runtime.** Lorebook/World-Info JSON is unpacked into Markdown at import time. After that it's just text.
 
 ## Directory layout
 
@@ -58,12 +58,12 @@ Subdirectories are a human-ergonomic suggestion. The search agent treats the who
 
 ## File conventions
 
-- **Plain Markdown.** No YAML frontmatter requirement. If you *want* to put frontmatter on a file that's fine — it'll just be text the model reads along with everything else.
-- **One H1 per file, near the top**, describing what the file is about. This helps the search agent find relevant files from filename + first line alone, without needing to read the whole file.
-- **Markdown cross-links are encouraged.** If `topics/last-tuesdays-argument-about-ska.md` mentions Alice, it should link to her: `[Alice](../people/alice.md)`. Today this is just a convenience for humans; later it gives free graph-style traversal without changing the storage format.
-- **No required fields.** A person file doesn't have to have "feelings" and "known usernames" as sections; it can have whatever sections the familiar (or a human) felt like writing.
-- **Short is fine.** A file can be three sentences. A file can be a single bullet list. There is no minimum.
-- **Size caps.** `MemoryStore` enforces a per-file size cap (default 256 KB) to keep `grep` fast and to prevent one runaway file from eating everything. Hitting the cap is a soft error — the file is still readable, but writes to it fail until something is trimmed.
+- **Plain Markdown.** No YAML frontmatter requirement. Frontmatter is fine if you want it — it's just text the model reads along with everything else.
+- **One H1 per file, near the top.** Helps the search agent find relevant files from filename + first line alone, without reading the whole file.
+- **Markdown cross-links encouraged.** If `topics/last-tuesdays-argument-about-ska.md` mentions Alice, link to her: `[Alice](../people/alice.md)`. Today this is a convenience for humans; later it enables graph-style traversal without changing the storage format.
+- **No required fields.** A person file can have whatever sections the familiar (or a human) felt like writing.
+- **Short is fine.** Three sentences, a single bullet list — there is no minimum.
+- **Size caps.** `MemoryStore` enforces a per-file cap (default 256 KB) to keep `grep` fast. Hitting the cap is a soft error — the file is still readable, but writes fail until something is trimmed.
 
 ## Content conventions by subdirectory
 

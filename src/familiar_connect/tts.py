@@ -13,16 +13,11 @@ if TYPE_CHECKING:
 
 CARTESIA_BASE_URL = "https://api.cartesia.ai"
 CARTESIA_API_VERSION = "2024-06-10"
-DEFAULT_SAMPLE_RATE = 48000  # Hz — matches Discord's native rate
+DEFAULT_SAMPLE_RATE = 48000  # matches Discord's native rate
 
 
 class CartesiaTTSClient:
-    """Client for synthesizing speech via Cartesia's TTS API.
-
-    Requests raw 16-bit signed PCM audio at the configured sample rate.
-    The bytes returned by :meth:`synthesize` are mono PCM and can be
-    converted to stereo for Discord playback via :mod:`familiar_connect.voice.audio`.
-    """
+    """Cartesia TTS client. Returns raw 16-bit signed mono PCM."""
 
     def __init__(
         self: Self,
@@ -40,7 +35,7 @@ class CartesiaTTSClient:
         self.sample_rate = sample_rate
 
     def build_headers(self: Self) -> dict[str, str]:
-        """Build HTTP headers for the Cartesia API request."""
+        """HTTP headers for Cartesia API."""
         return {
             "X-API-Key": self.api_key,
             "Cartesia-Version": CARTESIA_API_VERSION,
@@ -48,7 +43,7 @@ class CartesiaTTSClient:
         }
 
     def build_payload(self: Self, text: str) -> dict[str, Any]:
-        """Build the JSON payload for a TTS synthesis request."""
+        """JSON payload for TTS synthesis."""
         return {
             "model_id": self.model,
             "transcript": text,
@@ -73,14 +68,9 @@ class CartesiaTTSClient:
             return await http.post(url, headers=headers, json=payload)
 
     async def synthesize(self: Self, text: str) -> bytes:
-        """Synthesize *text* to speech and return raw mono PCM bytes.
+        """Return raw mono PCM bytes for *text*.
 
-        The returned bytes are 16-bit signed little-endian PCM at
-        :attr:`sample_rate` Hz (mono).
-
-        :param text: The text to synthesize.
-        :return: Raw PCM audio bytes.
-        :raises httpx.HTTPStatusError: On a non-2xx response from Cartesia.
+        :raises httpx.HTTPStatusError: On non-2xx response.
         """
         url = f"{self.base_url}/tts/bytes"
         headers = self.build_headers()
@@ -97,17 +87,9 @@ class CartesiaTTSClient:
 
 
 def create_tts_client(voice_id: str, model: str) -> CartesiaTTSClient:
-    """Create a :class:`CartesiaTTSClient` from character-config values.
+    """Create client from character-config values + ``CARTESIA_API_KEY`` env var.
 
-    The voice and model are per-familiar concerns and live in the
-    character's ``[tts]`` TOML section; only ``CARTESIA_API_KEY``
-    stays at the environment-variable level because it's a secret
-    scoped to the host machine.
-
-    :param voice_id: Cartesia voice id (character.toml ``[tts].voice_id``).
-    :param model: Cartesia model name (character.toml ``[tts].model``).
-    :raises ValueError: If ``CARTESIA_API_KEY`` is not set or either
-        argument is empty.
+    :raises ValueError: If API key missing or args empty.
     """
     api_key = os.environ.get("CARTESIA_API_KEY")
     if not api_key:

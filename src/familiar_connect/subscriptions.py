@@ -1,17 +1,7 @@
-"""Persistent subscription registry.
+"""Persistent subscription registry backed by a TOML sidecar.
 
-The single-slot ``TextSession`` that step 0 shipped with is replaced
-by a multi-channel, multi-kind :class:`SubscriptionRegistry`. Each
-``/subscribe-text`` or ``/subscribe-my-voice`` slash command adds a
-row; each ``/unsubscribe-*`` removes one. Mutations are persisted to
-a TOML sidecar on every write so the bot's listening set survives
-restarts without the operator having to re-subscribe everywhere.
-
-The file format is deliberately human-editable — the whole point of
-the file-on-disk config decision (see
-``docs/architecture/configuration-model.md``) is that an admin can
-``$EDITOR data/familiars/<id>/subscriptions.toml`` to sanity-check
-or prune rows without stopping the bot.
+Multi-channel, multi-kind. Mutations persist on every write so
+subscriptions survive restarts. Human-editable on disk.
 """
 
 from __future__ import annotations
@@ -27,12 +17,7 @@ if TYPE_CHECKING:
 
 
 class SubscriptionKind(Enum):
-    """Which feed a subscription is for.
-
-    Text and voice have different latency budgets and different
-    chattiness requirements, so they are distinct rows even when a
-    single channel hosts both.
-    """
+    """Text or voice — distinct rows even when a channel hosts both."""
 
     text = "text"
     voice = "voice"
@@ -40,14 +25,7 @@ class SubscriptionKind(Enum):
 
 @dataclass(frozen=True)
 class Subscription:
-    """A single persistent subscription row.
-
-    :param channel_id: Discord channel id (text or voice).
-    :param kind: Which feed — text or voice.
-    :param guild_id: Discord guild id the channel lives in, or
-        ``None`` if the bot doesn't have one recorded (legacy rows
-        or non-Discord sources).
-    """
+    """Single persistent subscription row."""
 
     channel_id: int
     kind: SubscriptionKind
@@ -55,12 +33,10 @@ class Subscription:
 
 
 class SubscriptionRegistry:
-    """In-memory view of subscriptions, backed by a TOML sidecar.
+    """In-memory subscription set backed by a TOML sidecar.
 
-    Constructing the registry loads the file (if it exists) and
-    populates the in-memory set. Every subsequent mutation rewrites
-    the whole file — the expected volume is tens of rows at most, so
-    atomic rewrites are cheaper than incremental patches.
+    Loads on construction; every mutation rewrites the whole file
+    (tens of rows at most).
     """
 
     def __init__(self, path: Path) -> None:
@@ -86,11 +62,9 @@ class SubscriptionRegistry:
         return self._rows.get((channel_id, kind))
 
     def voice_in_guild(self, guild_id: int) -> Subscription | None:
-        """Return the voice subscription in *guild_id*, if any.
+        """Return voice subscription in *guild_id*, if any.
 
-        The bot can hold at most one voice connection at a time
-        (``discord.VoiceClient`` constraint) so there is at most one
-        voice row per guild.
+        At most one voice row per guild (``discord.VoiceClient`` constraint).
         """
         for sub in self._rows.values():
             if sub.kind is SubscriptionKind.voice and sub.guild_id == guild_id:
@@ -108,11 +82,9 @@ class SubscriptionRegistry:
         kind: SubscriptionKind,
         guild_id: int | None,
     ) -> Subscription:
-        """Add or replace the subscription for ``(channel_id, kind)``.
+        """Add or replace subscription for ``(channel_id, kind)``.
 
-        Idempotent: re-adding an already-present row simply updates
-        the stored ``guild_id`` (which can legitimately change if
-        Discord moves the channel).
+        Idempotent; re-adding updates ``guild_id``.
         """
         sub = Subscription(channel_id=channel_id, kind=kind, guild_id=guild_id)
         self._rows[channel_id, kind] = sub
@@ -120,10 +92,7 @@ class SubscriptionRegistry:
         return sub
 
     def remove(self, *, channel_id: int, kind: SubscriptionKind) -> None:
-        """Remove the subscription for ``(channel_id, kind)`` if present.
-
-        Silently a no-op when the key is absent.
-        """
+        """Remove subscription for ``(channel_id, kind)``; no-op if absent."""
         if self._rows.pop((channel_id, kind), None) is not None:
             self._save()
 
