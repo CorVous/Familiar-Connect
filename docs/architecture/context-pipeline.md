@@ -1,6 +1,6 @@
 # Context Pipeline
 
-The context pipeline is the single path between "something happened" and "call the LLM" for both the text and voice code paths. Providers assemble contributions concurrently, a budgeter packs them into layered system-prompt slots, the LLM is called, and post-processors run over the reply before it reaches TTS or Discord.
+The context pipeline is the single path between "something happened" and "call the LLM" for both the text and voice code paths. Pre-processors and providers run **concurrently** (the pre-processor chain is a single task that runs alongside the provider fan-out), a budgeter packs their contributions into layered system-prompt slots, the LLM is called, and post-processors run over the reply before it reaches TTS or Discord.
 
 !!! success "Status: Implemented"
     Steps 1–10 below have all shipped. The pipeline, memory store, character unpacker, lorebook importer, providers (`CharacterProvider`, `HistoryProvider`, `ContentSearchProvider`), and both initial processors (`SteppedThinkingPreProcessor`, `RecastPostProcessor`) are in place and individually toggleable per familiar and per modality.
@@ -14,8 +14,9 @@ flowchart TB
     req([ContextRequest<br/>speaker + utterance + modality + deadline])
     req --> tg
 
-    subgraph tg[asyncio.TaskGroup - providers run in parallel]
+    subgraph tg[asyncio.gather - pre-processors and providers run in parallel]
         direction LR
+        pre[Pre-processor chain<br/>SteppedThinkingPreProcessor, ...]
         char[CharacterProvider<br/>self/*.md]
         hist[HistoryProvider<br/>recent + summary]
         content[ContentSearchProvider<br/>agentic grep/read]
@@ -23,13 +24,12 @@ flowchart TB
 
     tg --> contribs([list of Contribution<br/>layer + priority + text + tokens])
     contribs --> budget[Budgeter.fill<br/>pack by priority, truncate tail]
-    budget --> pre[Pre-processors<br/>SteppedThinkingPreProcessor, ...]
-    pre --> llm[OpenRouter<br/>streaming completion]
+    budget --> llm[OpenRouter<br/>streaming completion]
     llm --> post[Post-processors<br/>RecastPostProcessor, ...]
     post --> out([Reply → TTS / Discord<br/>+ HistoryStore write])
 
     classDef phase fill:#f4ecff,stroke:#6a1b9a;
-    class budget,pre,llm,post phase;
+    class budget,llm,post phase;
 ```
 
 Every provider runs with its own `asyncio.timeout`; a straggler past
@@ -64,13 +64,14 @@ Shapes:
 - **`Layer` enum** — `core`, `character`, `content`, `history_summary`, `recent_history`, `author_note`, `depth_inject`.
 - **`ContextProvider`** — `Protocol` with `async def contribute(request: ContextRequest) -> list[Contribution]`.
 - **`PreProcessor` / `PostProcessor`** — `Protocol`s with `async def process(...)`.
-- **`ContextPipeline.run(request)`** — opens an `asyncio.TaskGroup`, spawns every enabled provider with the per-provider deadline via `asyncio.timeout`, collects contributions, hands them to the budgeter, calls the LLM, and then runs post-processors over the reply.
+- **`ContextPipeline.assemble(request)`** — fires the pre-processor chain and the provider fan-out concurrently via `asyncio.gather`. The pre-processor chain is sequential (each pre-processor sees the previous one's result); the providers run in parallel inside a scoped `asyncio.TaskGroup` with per-provider deadlines via `asyncio.timeout`. Collected contributions are handed to the budgeter; the bot layer owns the main LLM call and invokes `run_post_processors` on the reply.
 
 Guarantees:
 
 - Slow providers past their deadline are dropped with a logged warning; the pipeline never stalls on one straggler.
 - A failing provider does not poison other providers — the pipeline catches, logs, and continues.
-- Pre-processors run in registration order; post-processors run in reverse registration order (so they wrap symmetrically).
+- Pre-processors run sequentially in registration order within their own task; post-processors run in reverse registration order (so they wrap symmetrically).
+- Providers fan out against the **original** `ContextRequest`. A pre-processor that wants to feed data into the prompt does so by appending to `preprocessor_contributions`, which rides alongside provider output on the way to the budgeter. Providers must not depend on fields that pre-processors mutate.
 - Modality on the request reaches each provider, so providers can branch on it.
 
 ## 2. Token budgeter
@@ -139,6 +140,12 @@ Summaries are cached in SQLite keyed by `(familiar_id, last_summarised_id)` — 
 
 Respects the deadline: if the summariser hasn't returned in time, the provider emits only the verbatim window and flags the cached summary as stale for the next run.
 
+**Cross-context "meanwhile elsewhere" summaries.** When the active channel mode is `full_rp`, the provider also builds per-channel summaries of activity in *other* channels so the renderer can splice them in as mid-chat breadcrumbs. Gating rules:
+
+- Gated on `full_rp` mode only. Text and voice modes skip this phase entirely — the breadcrumbs would be pure latency otherwise (two extra `history_summary` LLM calls per message with no consumer).
+- Channels whose last-known mode differs from the viewer's are filtered out as defence-in-depth: a `full_rp` reply in one text-based RP channel never summarises a voice channel the bot happens to be idling in.
+- Per-channel builds fan out concurrently via `asyncio.gather`, so two stale channels no longer serialise their way through the provider's deadline.
+
 ## 7. Wiring: single-character install, subscriptions, channel configs
 
 Delivered in one commit on top of step 10:
@@ -165,7 +172,7 @@ A small tool-using cheap-model loop scoped to a single familiar's `MemoryStore`.
 - `grep(pattern, path="")` → matches with surrounding context.
 - `read_file(path)` → file contents.
 
-**Loop** — up to K tool-call turns (default 5), hard deadline. The final turn is a "return the relevant snippets" message; anything before that is tool calls.
+**Loop** — up to K tool-call turns (default 3), hard deadline, and an inner per-iteration budget check so the loop stops cleanly when the deadline is about to bite rather than letting `asyncio.timeout` hard-cancel mid-LLM-call (which would discard the scratchpad). The final turn is a "return the relevant snippets" message; anything before that is tool calls.
 
 **Output** — a single `Contribution(layer=Layer.content, ...)` with the concatenated snippets and the file paths they came from as `source`.
 

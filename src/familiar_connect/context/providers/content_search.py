@@ -31,6 +31,7 @@ level deadline is enforced upstream by ``ContextPipeline``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -64,14 +65,32 @@ The provider's internal loop has its own iteration cap; the deadline
 exists so a runaway agent loop never blocks the reply.
 """
 
-DEFAULT_MAX_ITERATIONS = 5
+DEFAULT_MAX_ITERATIONS = 3
 """Maximum number of LLM calls per contribute() invocation.
 
 Hit when the model keeps emitting tool calls without ever returning
 an ANSWER. After the cap, the provider gives up and returns no
 contribution; the pipeline gets one fewer Contribution rather than
 a stalled reply.
+
+Three iterations covers the realistic shape of a memory-search
+agent (one to plan, one to execute, one to answer) without paying
+the full 15 s outer deadline every time the model is chatty.
 """
+
+_PER_ITERATION_BUDGET_S = 4.0
+"""Estimated cost of a single agent iteration.
+
+Used to decide whether to start a fresh iteration when the outer
+deadline is close. If less than this remains, we stop early instead
+of letting ``asyncio.timeout`` hard-cancel mid-LLM-call (which
+discards the partial scratchpad entirely).
+"""
+
+_DEADLINE_SAFETY_MARGIN_S = 1.0
+"""Wall-clock breathing room kept between the last iteration's start
+and the outer deadline; prevents a just-barely-in-time iteration
+from blowing past the pipeline's timeout."""
 
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -161,8 +180,26 @@ class ContentSearchProvider:
           as the final answer (graceful fallback).
         """
         scratchpad: list[str] = []
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        budget_remaining = self.deadline_s - _DEADLINE_SAFETY_MARGIN_S
 
         for iteration in range(self._max_iterations):
+            # Bail early if we don't have time for another full LLM
+            # round-trip. Starting an iteration we know we can't finish
+            # just means ``asyncio.timeout`` hard-cancels mid-call and
+            # discards the scratchpad we already built.
+            elapsed = loop.time() - start
+            if elapsed + _PER_ITERATION_BUDGET_S > budget_remaining:
+                _logger.info(
+                    "content_search: stopping early on iteration %d "
+                    "(elapsed=%.2fs, budget_remaining=%.2fs)",
+                    iteration,
+                    elapsed,
+                    budget_remaining,
+                )
+                break
+
             prompt = _SYSTEM_PROMPT_TEMPLATE.format(
                 speaker=request.speaker or "(unknown)",
                 utterance=request.utterance,

@@ -277,6 +277,44 @@ class TestIterationCap:
         # Exactly max_iterations side-model calls.
         assert len(side.calls) == 3
 
+    @pytest.mark.asyncio
+    async def test_stops_early_when_deadline_budget_exhausted(
+        self,
+        store: MemoryStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The loop bails before starting an iteration it can't finish.
+
+        Rather than letting ``asyncio.timeout`` hard-cancel mid-LLM-call
+        (which discards the scratchpad entirely), the provider checks
+        remaining wall-clock budget at the top of each iteration and
+        returns early if less than one iteration's worth remains.
+        """
+        # Ten TOOL responses — if the deadline check did nothing we'd
+        # hit max_iterations. Because deadline_s is tiny relative to the
+        # per-iteration budget, the loop bails at iteration 0.
+        forever = ['TOOL: {"tool": "list_dir", "args": {}}'] * 10
+        side = _ScriptedLLMClient(forever)
+        provider = ContentSearchProvider(
+            store=store,
+            llm_client=side,
+            max_iterations=10,
+        )
+        # Squeeze the deadline below the per-iteration budget so the
+        # first budget check trips and no LLM calls happen at all.
+        provider.deadline_s = 0.01
+
+        with caplog.at_level(
+            "INFO", logger="familiar_connect.context.providers.content_search"
+        ):
+            contributions = await provider.contribute(_request())
+
+        assert contributions == []
+        # The loop must have bailed well before max_iterations.
+        assert len(side.calls) < 10
+        # An INFO log should announce the early stop.
+        assert any("stopping early" in record.getMessage() for record in caplog.records)
+
 
 class TestErrorRecovery:
     @pytest.mark.asyncio

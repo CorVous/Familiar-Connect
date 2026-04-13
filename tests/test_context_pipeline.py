@@ -126,6 +126,18 @@ class _ContributingPreProcessor:
         )
 
 
+class _SleepyPreProcessor:
+    """Pre-processor that sleeps before returning the request unchanged."""
+
+    def __init__(self, processor_id: str, *, sleep_s: float) -> None:
+        self.id = processor_id
+        self._sleep_s = sleep_s
+
+    async def process(self, request: ContextRequest) -> ContextRequest:
+        await asyncio.sleep(self._sleep_s)
+        return request
+
+
 class _FailingPreProcessor:
     """Pre-processor whose ``process`` raises a configurable exception."""
 
@@ -380,7 +392,15 @@ class TestFailingProviderIsIsolated:
 
 class TestPreProcessors:
     @pytest.mark.asyncio
-    async def test_pre_processor_mutates_request_seen_by_provider(self) -> None:
+    async def test_pre_processor_mutation_reflected_in_output_request(self) -> None:
+        """Pre-processor mutations land on ``PipelineOutput.request``.
+
+        As of the parallel pre-processor / provider rollout, providers
+        see the **original** request (they run concurrently with the
+        pre-processor chain). The final ``PipelineOutput.request`` still
+        reflects the pre-processed version so downstream consumers see
+        the mutation.
+        """
         pre = _StubPreProcessor("pre", "rewritten utterance")
         provider = _StubProvider("p", [])
 
@@ -390,10 +410,33 @@ class TestPreProcessors:
         )
         result = await pipeline.assemble(_make_request(), budget_by_layer={})
 
+        # Providers fan out in parallel against the ORIGINAL request.
         assert provider.last_request is not None
-        assert provider.last_request.utterance == "rewritten utterance"
+        assert provider.last_request.utterance == "hello"
         # The final PipelineOutput.request reflects the pre-processed version.
         assert result.request.utterance == "rewritten utterance"
+
+    @pytest.mark.asyncio
+    async def test_pre_processors_run_concurrently_with_providers(self) -> None:
+        """Slow pre-processor + slow provider wall time ≈ max, not sum."""
+        slow_pre = _SleepyPreProcessor("slow_pre", sleep_s=0.2)
+        slow_provider = _StubProvider("slow_p", [], sleep_s=0.2)
+
+        pipeline = ContextPipeline(
+            providers=[slow_provider],
+            pre_processors=[slow_pre],
+        )
+
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        await pipeline.assemble(_make_request(), budget_by_layer={})
+        elapsed = loop.time() - start
+
+        # Parallel execution: ~0.2s, not ~0.4s. Give generous headroom
+        # so CI slowness doesn't flake the test, but well below the sum.
+        assert elapsed < 0.35, (
+            f"pre-processor and provider appear to run sequentially: {elapsed:.3f}s"
+        )
 
     @pytest.mark.asyncio
     async def test_multiple_pre_processors_run_in_registration_order(self) -> None:
@@ -557,10 +600,12 @@ class TestPreProcessorIsolation:
         # mutation is visible on the final request.
         assert isinstance(result, PipelineOutput)
         assert result.request.utterance == "after-bad"
-        # The downstream processor saw the upstream request unchanged —
-        # the raising processor did not corrupt the chain.
+        # Providers now fan out in parallel against the ORIGINAL request
+        # so they don't see any pre-processor mutation. The point of
+        # this test is that the pre-processor chain still completed
+        # despite the raise — asserted via ``result.request`` above.
         assert provider.last_request is not None
-        assert provider.last_request.utterance == "after-bad"
+        assert provider.last_request.utterance == "hello"
 
         # A warning was logged naming the raising processor.
         assert any(

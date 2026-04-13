@@ -213,7 +213,15 @@ class HistoryProvider:
                 contributions.append(self._summary_contribution(summary_text))
 
         # Cross-context: summarise activity in other channels.
-        if self._mode is not None:
+        #
+        # Gated on ``full_rp`` mode only. In ``text_conversation_rp`` (and
+        # other modes) the breadcrumbs are pure latency: two extra
+        # ``history_summary`` LLM calls per message, often against
+        # channels in a different mode the reader cares nothing about
+        # (e.g. a voice channel the bot is also sitting in). ``full_rp``
+        # is the one mode whose renderer actually consumes these
+        # summaries for mid-chat gap notices.
+        if self._mode is ChannelMode.full_rp:
             cross = await self._build_cross_context_contributions(request)
             contributions.extend(cross)
 
@@ -307,17 +315,32 @@ class HistoryProvider:
             familiar_id=request.familiar_id,
             exclude_channel_id=request.channel_id,
         )
+        # Defence in depth: only pull in channels whose last-known mode
+        # matches ours. A text reply should never summarise a voice
+        # channel and vice versa; without this filter, ``full_rp`` in
+        # a text channel would drag in voice-channel history purely
+        # because the bot happens to be idling there.
+        others = [info for info in others if info.mode == self._mode.value]
         if not others:
             return []
 
-        contributions: list[Contribution] = []
         viewer_mode_desc = _MODE_DESCRIPTIONS.get(self._mode.value, self._mode.value)
         emit = self._mode is not ChannelMode.full_rp
 
-        for info in others[:_MAX_CROSS_CHANNELS]:
-            text = await self._fetch_or_build_cross_context(
-                request, info, viewer_mode_desc
-            )
+        # Build the per-channel summaries concurrently — they're
+        # independent LLM calls (or cache hits). Sequential fan-out
+        # made the history provider the common latency bottleneck:
+        # two stale channels x ~6 s each chewed the whole 12 s
+        # soft deadline.
+        texts = await asyncio.gather(
+            *(
+                self._fetch_or_build_cross_context(request, info, viewer_mode_desc)
+                for info in others[:_MAX_CROSS_CHANNELS]
+            ),
+        )
+
+        contributions: list[Contribution] = []
+        for info, text in zip(others[:_MAX_CROSS_CHANNELS], texts, strict=True):
             if text and emit:
                 contributions.append(
                     Contribution(

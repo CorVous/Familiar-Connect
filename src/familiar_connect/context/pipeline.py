@@ -111,31 +111,30 @@ class ContextPipeline:
         :param request: The request built from the incoming event.
         :param budget_by_layer: Per-layer token budgets to hand to the
             budgeter.
+
+        Pre-processors and providers run **concurrently**. The pre-
+        processor chain executes sequentially within its own task (so
+        each pre-processor still sees the previous one's
+        :class:`ContextRequest`), and providers fan out in parallel
+        against the **original** request. This trades the old "providers
+        see pre-processor mutations" semantic for a dramatic latency
+        win: a slow ``stepped_thinking`` LLM call no longer pushes the
+        provider phase back by its own duration. None of the shipping
+        pre-processors mutate fields that providers read — they only
+        append to ``preprocessor_contributions``, which rides alongside
+        provider contributions on the way to the budgeter.
         """
-        # 1. Pre-processors run sequentially; each sees the previous one's
-        # output. A pre-processor that raises ``PreProcessorError`` is
-        # skipped — ``processed`` is not updated, so the next stage sees
-        # the last successful value. Any other exception escapes this
-        # loop and crashes the pipeline: that is a Protocol-contract
-        # violation and is intentionally surfaced loudly rather than
-        # silently masked by a blanket ``except``.
-        processed = request
-        for pre in self._pre_processors:
-            try:
-                processed = await pre.process(processed)
-            except PreProcessorError as exc:
-                _logger.warning(
-                    "pre-processor %s raised %s: %s; skipping",
-                    pre.id,
-                    type(exc).__name__,
-                    exc,
-                )
-                continue
+        # Pre-processor chain and provider fan-out run concurrently.
+        # The pre-processor task produces the final (possibly-mutated)
+        # request; providers see the original request — which is safe
+        # because the only field shipping pre-processors write is
+        # ``preprocessor_contributions``, which no provider reads.
+        processed, outcomes = await asyncio.gather(
+            self._run_pre_processors(request),
+            self._run_providers(request),
+        )
 
-        # 2. Providers fan out concurrently under a single TaskGroup.
-        outcomes = await self._run_providers(processed)
-
-        # 3. Everything that came back goes to the budgeter — both
+        # Everything that came back goes to the budgeter — both
         # provider outputs and any contributions pre-processors stashed
         # on the request via dataclasses.replace().
         all_contributions: list[Contribution] = list(
@@ -151,6 +150,33 @@ class ContextPipeline:
             budget=budget_result,
             outcomes=outcomes,
         )
+
+    async def _run_pre_processors(
+        self,
+        request: ContextRequest,
+    ) -> ContextRequest:
+        """Run the pre-processor chain sequentially and return the result.
+
+        A pre-processor that raises :class:`PreProcessorError` is
+        skipped — ``processed`` is not updated, so the next stage sees
+        the last successful value. Any other exception escapes this
+        loop and crashes the pipeline: that is a Protocol-contract
+        violation and is intentionally surfaced loudly rather than
+        silently masked by a blanket ``except``.
+        """
+        processed = request
+        for pre in self._pre_processors:
+            try:
+                processed = await pre.process(processed)
+            except PreProcessorError as exc:
+                _logger.warning(
+                    "pre-processor %s raised %s: %s; skipping",
+                    pre.id,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+        return processed
 
     async def run_post_processors(
         self,

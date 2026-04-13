@@ -417,14 +417,20 @@ class TestModeFilteredRecentWindow:
 
 class TestCrossContextContributions:
     @pytest.mark.asyncio
-    async def test_cross_context_emitted_for_non_full_rp(
+    async def test_no_cross_context_for_text_conversation_rp(
         self, store: HistoryStore
     ) -> None:
-        """Non-full_rp modes get cross-context as contributions."""
+        """text_conversation_rp skips cross-context entirely.
+
+        Cross-context is gated on ``full_rp`` — in text modes the
+        breadcrumbs are pure latency (extra LLM calls per message with
+        no renderer to consume the result). Any activity in other
+        channels is invisible to a text reply.
+        """
         _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
-        side = _StubLLMClient(response="Meanwhile in the RP scene...")
+        side = _StubLLMClient(response="should not appear")
         provider = HistoryProvider(
             store=store,
             llm_client=side,
@@ -436,10 +442,55 @@ class TestCrossContextContributions:
         cross = [
             c for c in contributions if c.source.startswith("history:cross_channel:")
         ]
-        assert len(cross) == 1
-        assert cross[0].layer is Layer.history_summary
-        assert cross[0].priority == 55
-        assert "Meanwhile" in cross[0].text
+        assert cross == []
+
+        # The side model was NOT called for cross-context either (no cache
+        # populated for the other channel).
+        cached = store.get_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="text_conversation_rp",
+            source_channel_id=200,
+        )
+        assert cached is None
+
+    @pytest.mark.asyncio
+    async def test_cross_context_filters_by_matching_mode(
+        self, store: HistoryStore
+    ) -> None:
+        """full_rp only summarises other channels that are also full_rp.
+
+        Defence-in-depth filter: a full_rp reply should never drag in a
+        voice channel the bot happens to be idling in. Channels whose
+        last-known mode differs from the viewer's are skipped even if
+        there is cross-channel history.
+        """
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.imitate_voice, channel_id=200)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=300)
+
+        side = _StubLLMClient(response="Meanwhile elsewhere...")
+        provider = HistoryProvider(
+            store=store,
+            llm_client=side,
+            window_size=20,
+            mode=ChannelMode.full_rp,
+        )
+        await provider.contribute(_request(channel_id=100))
+
+        # The voice channel's cross-context was NOT built.
+        voice_cached = store.get_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=200,
+        )
+        assert voice_cached is None
+        # The matching full_rp channel's cross-context WAS built.
+        rp_cached = store.get_cross_context(
+            familiar_id=_FAMILIAR,
+            viewer_mode="full_rp",
+            source_channel_id=300,
+        )
+        assert rp_cached is not None
 
     @pytest.mark.asyncio
     async def test_full_rp_caches_but_does_not_emit_cross_context(
@@ -447,10 +498,12 @@ class TestCrossContextContributions:
     ) -> None:
         """full_rp caches cross-context but does not emit contributions.
 
-        The renderer inserts them as mid-chat breadcrumbs instead.
+        The renderer inserts them as mid-chat breadcrumbs instead. The
+        other channel must share the viewer's mode — cross-mode
+        summaries are filtered out as defence-in-depth.
         """
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
-        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=200)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
         side = _StubLLMClient(response="Meanwhile in text chat...")
         provider = HistoryProvider(
@@ -479,7 +532,7 @@ class TestCrossContextContributions:
     @pytest.mark.asyncio
     async def test_cross_context_cache_reuse(self, store: HistoryStore) -> None:
         """A fresh cross-context cache is reused without re-calling the side model."""
-        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
         side = _StubLLMClient(response="cached cross summary")
@@ -487,7 +540,7 @@ class TestCrossContextContributions:
             store=store,
             llm_client=side,
             window_size=20,
-            mode=ChannelMode.text_conversation_rp,
+            mode=ChannelMode.full_rp,
         )
         # First call builds the cache.
         await provider.contribute(_request(channel_id=100))
@@ -510,7 +563,7 @@ class TestCrossContextContributions:
         self, store: HistoryStore
     ) -> None:
         """When the side model fails, cross-context contributions are skipped."""
-        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
         _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=200)
 
         side = _StubLLMClient(exc=RuntimeError("kaboom"))
@@ -518,7 +571,7 @@ class TestCrossContextContributions:
             store=store,
             llm_client=side,
             window_size=20,
-            mode=ChannelMode.text_conversation_rp,
+            mode=ChannelMode.full_rp,
         )
         contributions = await provider.contribute(_request(channel_id=100))
 
@@ -532,14 +585,14 @@ class TestCrossContextContributions:
         self, store: HistoryStore
     ) -> None:
         """Single-channel familiars produce no cross-context contributions."""
-        _seed_with_mode(store, 5, mode=ChannelMode.text_conversation_rp, channel_id=100)
+        _seed_with_mode(store, 5, mode=ChannelMode.full_rp, channel_id=100)
 
         side = _StubLLMClient(response="should not appear")
         provider = HistoryProvider(
             store=store,
             llm_client=side,
             window_size=20,
-            mode=ChannelMode.text_conversation_rp,
+            mode=ChannelMode.full_rp,
         )
         contributions = await provider.contribute(_request(channel_id=100))
 
