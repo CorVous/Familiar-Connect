@@ -248,9 +248,10 @@ async def _run_voice_response(
 
     if familiar.tts_client is not None:
         try:
-            pcm_mono = await familiar.tts_client.synthesize(reply_text)
-            stereo = mono_to_stereo(pcm_mono)
-            # wait for current audio to finish (poll — no event available)
+            tts_result = await familiar.tts_client.synthesize(reply_text)
+            stereo = mono_to_stereo(tts_result.audio)
+            # Wait for any currently-playing audio to finish.
+            # vc.is_playing() is a third-party poll; no event available.
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
@@ -321,8 +322,8 @@ async def subscribe_my_voice(
 
     if familiar.tts_client is not None:
         try:
-            pcm_mono = await familiar.tts_client.synthesize("Hello!")
-            stereo = mono_to_stereo(pcm_mono)
+            tts_result = await familiar.tts_client.synthesize("Hello!")
+            stereo = mono_to_stereo(tts_result.audio)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
         except Exception:
             _logger.exception("Opening greeting TTS failed")
@@ -621,8 +622,8 @@ async def _run_text_response(
         vc = guild.voice_client
         if vc is not None and not vc.is_playing():
             try:
-                pcm_mono = await familiar.tts_client.synthesize(reply_text)
-                stereo = mono_to_stereo(pcm_mono)
+                tts_result = await familiar.tts_client.synthesize(reply_text)
+                stereo = mono_to_stereo(tts_result.audio)
                 vc.play(discord.PCMAudio(io.BytesIO(stereo)))
             except Exception:
                 _logger.exception("TTS synthesis failed")
