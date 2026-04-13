@@ -463,8 +463,8 @@ class TestVoiceInterruptionConfig:
             defaults_path=default_profile_path,
         )
         assert cfg.interrupt_tolerance is InterruptTolerance.average
-        assert cfg.min_interruption_s == 1.5  # noqa: RUF069
-        assert cfg.short_long_boundary_s == 4.0  # noqa: RUF069
+        assert cfg.min_interruption_s == 2.0  # noqa: RUF069
+        assert cfg.short_long_boundary_s == 30.0  # noqa: RUF069
 
     def test_reads_tolerance_tier(
         self,

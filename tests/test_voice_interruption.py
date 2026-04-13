@@ -295,7 +295,11 @@ class TestInterruptionDetectorClassification:
             clock.advance(0.5)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire()  # lull timer expires
-        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
         assert len(msgs) == 1
         assert "discarded" in msgs[0]
         assert "SPEAKING" in msgs[0]
@@ -313,7 +317,11 @@ class TestInterruptionDetectorClassification:
             clock.advance(2.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire()
-        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
         assert len(msgs) == 1
         assert "short" in msgs[0]
         assert "SPEAKING" in msgs[0]
@@ -331,7 +339,11 @@ class TestInterruptionDetectorClassification:
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire()
-        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
         assert len(msgs) == 1
         assert "long" in msgs[0]
         assert "GENERATING" in msgs[0]
@@ -363,7 +375,11 @@ class TestInterruptionDetectorMultiUser:
             detector.on_voice_activity(43, VoiceActivityEvent.ended)
             scheduler.fire()
 
-        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
         assert len(msgs) == 1
         # Total duration: 1.0 + 0.5 + 1.5 = 3.0s → short.
         assert "short" in msgs[0]
@@ -399,7 +415,11 @@ class TestInterruptionDetectorLullAggregation:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire()  # now the full lull expires
 
-        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
         # Single classification covering both sub-utterances.
         # Duration: 1.0 + 0.5 + 2.0 = 3.5s → short.
         assert len(msgs) == 1
@@ -427,7 +447,11 @@ class TestInterruptionDetectorLullAggregation:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire()  # second burst classified
 
-        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
         assert len(msgs) == 2
         assert "short" in msgs[0]
         assert "long" in msgs[1]
@@ -454,9 +478,55 @@ class TestInterruptionDetectorStateSnapshot:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire()
 
-        msgs = [r.message for r in caplog.records if "interruption:" in r.message]
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
         assert len(msgs) == 1
         assert "GENERATING" in msgs[0]
+
+
+class TestInterruptionDetectorMinThresholdLog:
+    def test_discarded_burst_does_not_log_min_crossed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(0.5)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()
+        assert not any("min threshold crossed" in r.message for r in caplog.records)
+
+    def test_short_burst_logs_min_crossed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(3.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire()
+        crossed = [
+            r.message for r in caplog.records if "min threshold crossed" in r.message
+        ]
+        assert len(crossed) == 1
+        assert "3.00s" in crossed[0]
+        assert "min=2.00s" in crossed[0]
+        assert "SPEAKING" in crossed[0]
 
 
 class TestInterruptionClassEnum:

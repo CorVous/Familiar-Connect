@@ -316,6 +316,17 @@ class InterruptionDetector:
         duration = last_ended_at - started_at
 
         classification = self._classify(duration)
+        # Separate info log for the min-threshold crossing so operators
+        # can see "this burst is no longer back-channel noise" as a
+        # distinct event from the short/long classification. Only fires
+        # when the burst survives the noise floor.
+        if duration >= self._min_interruption_s:
+            _logger.info(
+                "interruption: min threshold crossed (%.2fs, min=%.2fs) during %s",
+                duration,
+                self._min_interruption_s,
+                observed.value,
+            )
         _logger.info(
             "interruption: %s (%.2fs) during %s",
             classification.value,
