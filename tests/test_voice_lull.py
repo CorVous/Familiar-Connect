@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -291,3 +292,26 @@ class TestVoiceLullMonitor:
 
         # Both attempts happened despite the first raising.
         assert calls == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_fire_lull_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        """_fire_lull emits a DEBUG log when the lull timer expires."""
+
+        async def _on_done(user_id: int, result: TranscriptionResult) -> None:
+            pass
+
+        monitor = VoiceLullMonitor(
+            lull_timeout=0.08,
+            user_silence_s=0.02,
+            on_utterance_complete=_on_done,
+        )
+
+        monitor.on_audio(42)
+        monitor.on_transcript(42, _final("hello"))
+        with caplog.at_level(logging.DEBUG, logger="familiar_connect.voice_lull"):
+            await asyncio.sleep(0.2)
+
+        assert any(
+            r.levelno == logging.DEBUG and "voice lull expired" in r.message
+            for r in caplog.records
+        )

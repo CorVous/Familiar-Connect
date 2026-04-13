@@ -145,6 +145,7 @@ class VoiceLullMonitor:
             return
         finals = self._finals
         self._finals = []
+        _logger.debug("voice lull expired: %d finals buffered", len(finals))
 
         merged_text = " ".join(r.text for _, r in finals).strip()
         if not merged_text:
