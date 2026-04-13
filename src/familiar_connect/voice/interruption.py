@@ -14,16 +14,16 @@ the scenarios documented in
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Callable
 
     import discord
@@ -169,6 +169,12 @@ class InterruptionClass(Enum):
     that should cancel/regenerate the in-flight response."""
 
 
+class _Cancelable(Protocol):
+    """Minimal handle protocol: anything with a ``cancel()`` method."""
+
+    def cancel(self) -> None: ...
+
+
 class InterruptionDetector:
     """Classify user speech bursts against the current response state.
 
@@ -176,7 +182,10 @@ class InterruptionDetector:
     per-user voice-activity stream (Discord audio frames, no Deepgram
     VAD). A *burst* begins on the first ``started`` event received
     while the :class:`ResponseTracker` is not :attr:`ResponseState.IDLE`
-    and ends when every user in the burst has gone silent.
+    and stays open across sub-utterance gaps within the same lull —
+    finalization waits for ``lull_timeout_s`` of channel-wide silence,
+    matching the voice-lull boundary the rest of the pipeline uses. If
+    new speech arrives before the timer fires, aggregation continues.
 
     Today this is **detect-only**: each classified burst produces a
     single INFO log line. Later steps will dispatch on short/long
@@ -192,8 +201,16 @@ class InterruptionDetector:
     :param short_long_boundary_s: Bursts at or above this are
         :attr:`InterruptionClass.long`; between the two thresholds
         they are :attr:`InterruptionClass.short`.
+    :param lull_timeout_s: Channel-wide silence required after the
+        last ``ended`` event before the burst is finalized. Matches
+        :attr:`~familiar_connect.config.CharacterConfig.voice_lull_timeout`.
     :param clock: Optional monotonic clock override, for tests.
         Defaults to :func:`time.monotonic`.
+    :param scheduler: Optional scheduling hook. Given ``(delay_s, cb)``
+        it must schedule ``cb`` after ``delay_s`` and return an object
+        with a ``.cancel()`` method. Defaults to
+        ``asyncio.get_event_loop().call_later``. Injected in unit tests
+        to drive the lull timer synchronously.
     """
 
     def __init__(
@@ -203,23 +220,31 @@ class InterruptionDetector:
         guild_id: int,
         min_interruption_s: float,
         short_long_boundary_s: float,
+        lull_timeout_s: float,
         clock: Callable[[], float] | None = None,
+        scheduler: Callable[[float, Callable[[], None]], _Cancelable] | None = None,
     ) -> None:
         self._tracker_registry = tracker_registry
         self._guild_id = guild_id
         self._min_interruption_s = min_interruption_s
         self._short_long_boundary_s = short_long_boundary_s
+        self._lull_timeout_s = lull_timeout_s
         self._clock = clock if clock is not None else time.monotonic
+        self._scheduler = scheduler
 
         # Users currently speaking *within the active burst*. Users who
         # start speaking while the tracker is IDLE are never added, so
         # their ``ended`` events don't spuriously close a burst.
         self._speaking: set[int] = set()
         self._burst_started_at: float | None = None
+        self._burst_last_ended_at: float | None = None
         # The ResponseState observed when the burst began. Used for the
         # classification log so mid-burst transitions don't change the
         # reported state.
         self._burst_state: ResponseState | None = None
+        # Pending finalize timer. Armed when everyone goes quiet,
+        # cancelled on any new ``started`` event within the same lull.
+        self._lull_handle: _Cancelable | None = None
 
     def on_voice_activity(
         self,
@@ -236,7 +261,10 @@ class InterruptionDetector:
             if tracker.state is ResponseState.IDLE:
                 # Detector dormant — nothing to classify.
                 return
-            if not self._speaking:
+            # Any new speech cancels a pending finalize; we're still
+            # within the same lull window so the burst keeps growing.
+            self._cancel_lull()
+            if self._burst_started_at is None:
                 self._burst_started_at = self._clock()
                 self._burst_state = tracker.state
             self._speaking.add(user_id)
@@ -250,15 +278,42 @@ class InterruptionDetector:
         self._speaking.discard(user_id)
         if self._speaking:
             return
-        # All users quiet — close and classify the burst. The
-        # _speaking set was non-empty, so these invariants hold.
+        # All users quiet — arm the lull timer. The burst isn't
+        # finalized until ``lull_timeout_s`` passes without anyone
+        # speaking again; short inter-utterance pauses (< lull_timeout)
+        # keep accumulating into the same classification.
+        self._burst_last_ended_at = self._clock()
+        self._arm_lull()
+
+    def _arm_lull(self) -> None:
+        self._cancel_lull()
+        scheduler = self._scheduler
+        if scheduler is None:
+            loop = asyncio.get_event_loop()
+            scheduler = loop.call_later
+        self._lull_handle = scheduler(self._lull_timeout_s, self._finalize_burst)
+
+    def _cancel_lull(self) -> None:
+        if self._lull_handle is not None:
+            self._lull_handle.cancel()
+            self._lull_handle = None
+
+    def _finalize_burst(self) -> None:
+        """Classify + log the accumulated burst. Invoked by the lull timer."""
+        self._lull_handle = None
         started_at = self._burst_started_at
+        last_ended_at = self._burst_last_ended_at
         observed = self._burst_state
-        if started_at is None or observed is None:
-            return
-        duration = self._clock() - started_at
+        # Reset regardless; a new burst starts from a clean slate.
         self._burst_started_at = None
+        self._burst_last_ended_at = None
         self._burst_state = None
+        if started_at is None or last_ended_at is None or observed is None:
+            return
+        # Effective speech duration — first speech to last speech,
+        # excluding trailing lull silence. Sub-utterance gaps are
+        # included (they're part of the same conversational turn).
+        duration = last_ended_at - started_at
 
         classification = self._classify(duration)
         _logger.info(

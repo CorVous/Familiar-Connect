@@ -450,6 +450,7 @@ async def subscribe_my_voice(
             guild_id=voice_guild_id if voice_guild_id is not None else 0,
             min_interruption_s=familiar.config.min_interruption_s,
             short_long_boundary_s=familiar.config.short_long_boundary_s,
+            lull_timeout_s=familiar.config.voice_lull_timeout,
         )
         familiar.extras["interruption_detector"] = interruption_detector
 
