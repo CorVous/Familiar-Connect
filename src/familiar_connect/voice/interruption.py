@@ -263,6 +263,11 @@ class InterruptionDetector:
         # The user whose speech opened the burst — included in every
         # interruption log so operators can see who did the interrupting.
         self._burst_starter_id: int | None = None
+        # The latest non-IDLE state observed during the burst. Updated
+        # at burst start and on every non-IDLE tracker transition; not
+        # cleared on SPEAKING→IDLE so the classification log still
+        # reports ``during SPEAKING`` for bursts that outlive playback.
+        self._burst_latest_state: ResponseState | None = None
         # Pending finalize timer. Armed when everyone goes quiet,
         # cancelled on any new ``started`` event within the same lull.
         self._lull_handle: _Cancelable | None = None
@@ -334,26 +339,37 @@ class InterruptionDetector:
         """React to a :class:`ResponseTracker` state transition.
 
         Wired by ``__init__`` as the tracker's ``on_state_change``
-        callback. Handles the two lifecycle edges the event stream
-        alone can't see:
+        callback. Handles the lifecycle edges the event stream alone
+        can't see:
 
         - Leaving ``IDLE`` while users are already speaking —
           retroactively starts a burst timed from this transition
           (speech pre-dating the transition doesn't count against the
           ``min`` threshold, but its continuation does).
-        - Returning to ``IDLE`` mid-burst — the familiar either
-          finished speaking cleanly or gave up generating; there's
-          nothing left to interrupt, so the burst is aborted and all
-          timers cancelled with no classification emitted.
+        - ``SPEAKING → IDLE``: the familiar finished its turn cleanly.
+          Keep the burst alive so the interruption still classifies;
+          the latest non-IDLE state (``SPEAKING``) is preserved and
+          used at log time.
+        - ``GENERATING → IDLE``: the familiar abandoned generation
+          (e.g., interjection eval said NO). There's nothing left to
+          interrupt, so the burst is aborted and all timers cancelled
+          with no classification emitted.
         """
         if new_state is ResponseState.IDLE:
-            if self._burst_started_at is not None:
-                self._abort_burst()
+            if self._burst_started_at is None:
+                return
+            # Preserve the burst only when the familiar was actually
+            # speaking — a natural end-of-turn shouldn't erase the
+            # interruption record.
+            if self._burst_latest_state is ResponseState.SPEAKING:
+                return
+            self._abort_burst()
             return
-        # Non-IDLE: if users were already speaking through the
-        # transition, start a burst now. Pick any active speaker as
-        # the starter (in practice this is the user whose speech
-        # carried across).
+        # Non-IDLE: record the new state and, if users were already
+        # speaking through the transition, start a burst now. Pick any
+        # active speaker as the starter (in practice this is the user
+        # whose speech carried across).
+        self._burst_latest_state = new_state
         if self._burst_started_at is None and self._speaking:
             starter = next(iter(self._speaking))
             self._start_burst(starter)
@@ -364,6 +380,12 @@ class InterruptionDetector:
         self._burst_started_at = self._clock()
         self._burst_starter_id = starter_id
         self._min_logged = False
+        tracker = self._tracker_registry.get(self._guild_id)
+        # Capture the tracker's non-IDLE state for log-time resolution.
+        # Direct ``tracker.state = ...`` assignments in tests bypass
+        # the observer, so reading here keeps them working.
+        if tracker.state is not ResponseState.IDLE:
+            self._burst_latest_state = tracker.state
         # Arm the min-crossed timer. Fires in real time at
         # ``min_interruption_s`` after burst start — the earliest
         # moment the accumulated duration can cross the threshold.
@@ -376,6 +398,7 @@ class InterruptionDetector:
         self._burst_started_at = None
         self._burst_last_ended_at = None
         self._burst_starter_id = None
+        self._burst_latest_state = None
         self._min_logged = False
 
     def _schedule(self, delay: float, callback: Callable[[], None]) -> _Cancelable:
@@ -459,11 +482,15 @@ class InterruptionDetector:
         self._min_logged = True
 
     def _current_tracker_state(self) -> ResponseState | None:
-        """Return tracker state, or ``None`` if IDLE."""
-        tracker = self._tracker_registry.get(self._guild_id)
-        if tracker.state is ResponseState.IDLE:
-            return None
-        return tracker.state
+        """State to report in interruption logs.
+
+        Returns the latest non-IDLE tracker state observed during the
+        active burst. This lets a burst that spans ``GENERATING →
+        SPEAKING`` report as ``SPEAKING``, and a burst that began in
+        ``SPEAKING`` and continues past playback-end (``SPEAKING →
+        IDLE``) still classify as ``SPEAKING``.
+        """
+        return self._burst_latest_state
 
     def _finalize_burst(self) -> None:
         """Classify + log the accumulated burst. Invoked by the lull timer."""
@@ -472,19 +499,18 @@ class InterruptionDetector:
         started_at = self._burst_started_at
         last_ended_at = self._burst_last_ended_at
         starter_id = self._burst_starter_id
+        state = self._current_tracker_state()
         # Reset regardless; a new burst starts from a clean slate.
         self._burst_started_at = None
         self._burst_last_ended_at = None
         self._burst_starter_id = None
+        self._burst_latest_state = None
         self._min_logged = False
         if started_at is None or last_ended_at is None or starter_id is None:
             return
-        state = self._current_tracker_state()
         if state is None:
-            # Tracker returned to IDLE between the last ``ended`` and
-            # the lull timer firing — on_tracker_state_change would
-            # normally have aborted this, but if we got here anyway,
-            # treat the burst as stale and skip classification.
+            # Shouldn't happen — _start_burst always populates
+            # _burst_latest_state — but stay defensive.
             return
         # Effective speech duration — burst start to last speech,
         # excluding trailing lull silence. Sub-utterance gaps are
