@@ -34,6 +34,7 @@ from familiar_connect.bot import (
     _run_text_response,
     _run_voice_response,
     create_bot,
+    dispatch_interruption_regen,
     on_message,
     set_channel_mode,
     subscribe_my_voice,
@@ -1496,3 +1497,187 @@ class TestVoiceGenerationCancellation:
             familiar_id=familiar.id, channel_id=9000, limit=10
         )
         assert turns == []
+
+
+# ---------------------------------------------------------------------------
+# Step 8 — dispatch_interruption_regen
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchInterruptionRegen:
+    """Step 8: long interruption during GENERATING cancels + re-generates.
+
+    The :func:`dispatch_interruption_regen` helper:
+
+    - Cancels the in-flight ``generation_task`` on the tracker.
+    - Awaits the cancelled task so :func:`_run_voice_response` can clean up.
+    - Calls :func:`_run_voice_response` again with an ``interruption_context``
+      note so the new reply can acknowledge what the user said.
+    - The cancelled turn writes nothing to history.
+    """
+
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_generating_cancels_task(
+        self, tmp_path: Path
+    ) -> None:
+        """Generation task receives ``CancelledError`` when dispatch fires."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        voice_task = asyncio.create_task(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="original",
+                buffer=[
+                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
+                ],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+        # Wait until generation is in-flight.
+        await slow_client.started.wait()
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.state is ResponseState.GENERATING
+
+        # Fire the interruption dispatch with a fast-returning stub so
+        # the regen completes.
+        familiar.llm_clients["main_prose"] = _StubLLMClient(reply="Regen reply.")
+        dispatch_task = asyncio.create_task(
+            dispatch_interruption_regen(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                transcript="hey stop",
+                familiar=familiar,
+                vc=vc,
+            )
+        )
+        await dispatch_task
+        await voice_task  # original _run_voice_response must exit cleanly.
+
+        assert slow_client.was_cancelled
+
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_generating_regens_with_context(
+        self, tmp_path: Path
+    ) -> None:
+        """New LLM call contains the interruption_context note."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        voice_task = asyncio.create_task(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="original",
+                buffer=[
+                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
+                ],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+        await slow_client.started.wait()
+
+        regen_client = _StubLLMClient(reply="I heard you.")
+        familiar.llm_clients["main_prose"] = regen_client
+
+        dispatch_task = asyncio.create_task(
+            dispatch_interruption_regen(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                transcript="hey stop",
+                familiar=familiar,
+                vc=vc,
+            )
+        )
+        await dispatch_task
+        await voice_task
+
+        # Regen LLM must have been called.
+        assert len(regen_client.calls) == 1
+        # The message list sent to the LLM must contain the interruption note.
+        all_content = " ".join(m.content for m in regen_client.calls[0] if m.content)
+        assert "interrupted while you were forming a response" in all_content
+        assert "hey stop" in all_content
+
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_generating_no_history_from_cancelled_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """The cancelled generation must not write any history turns."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        voice_task = asyncio.create_task(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="original",
+                buffer=[
+                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
+                ],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+        await slow_client.started.wait()
+
+        # Swap to a fast client for the regen.
+        familiar.llm_clients["main_prose"] = _StubLLMClient(reply="Regen reply.")
+
+        dispatch_task = asyncio.create_task(
+            dispatch_interruption_regen(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                transcript="hey stop",
+                familiar=familiar,
+                vc=vc,
+            )
+        )
+        await dispatch_task
+        await voice_task
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        # Cancelled turn must not be in history; only the regen turn should exist.
+        contents = [t.content for t in turns]
+        assert "I am here." not in contents  # default stub reply never stored
+        # Regen user + assistant turn written.
+        assert any("hey stop" in c for c in contents)
+        assert any("Regen reply." in c for c in contents)

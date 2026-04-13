@@ -278,6 +278,7 @@ def _make_detector(
     lull_s: float = 5.0,
     base_tolerance: float = 0.30,
     rng: Callable[[], float] | None = None,
+    on_long_during_generating: Callable[[int, str], None] | None = None,
 ) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
     registry = ResponseTrackerRegistry()
     clock = _FakeClock()
@@ -296,6 +297,7 @@ def _make_detector(
         clock=clock,
         scheduler=scheduler,
         rng=rng,
+        on_long_during_generating=on_long_during_generating,
     )
     return detector, registry, clock, scheduler
 
@@ -1124,3 +1126,179 @@ class TestSpeakingTransitionStampsPlaybackStart:
         t.playback_start_time = 100.0
         t.transition(ResponseState.IDLE)
         assert t.playback_start_time is None
+
+
+# ---------------------------------------------------------------------------
+# Step 8 — transcript accumulation + long@GENERATING dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptionDetectorTranscriptCapture:
+    """``on_transcript`` accumulates text only during an active burst."""
+
+    def test_on_transcript_ignored_outside_burst(self) -> None:
+        # No burst → transcript silently dropped.
+        detector, _registry, _clock, _scheduler = _make_detector()
+        detector.on_transcript(42, "hello")
+        assert not detector._burst_transcript
+
+    def test_transcript_accumulated_during_burst(self) -> None:
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hello world")
+        assert detector._burst_transcript == "hello world"
+
+    def test_multiple_transcripts_joined_with_space(self) -> None:
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hello")
+        detector.on_transcript(42, "world")
+        assert detector._burst_transcript == "hello world"
+
+    def test_transcript_cleared_at_new_burst(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        # First burst
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "first")
+        clock.advance(1.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Finalize the first burst (lull fires)
+        scheduler.fire_for(detector._finalize_burst)
+        # Second burst starts fresh
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._burst_transcript
+
+    def test_transcript_accepted_from_any_user_in_burst(self) -> None:
+        # Multi-user: second user's transcript also accumulated.
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey")
+        detector.on_transcript(99, "listen")
+        assert detector._burst_transcript == "hey listen"
+
+
+class TestInterruptionDetectorLongDispatch:
+    """long@GENERATING fires the ``on_long_during_generating`` callback."""
+
+    def test_long_during_generating_calls_callback(self) -> None:
+        calls: list[tuple[int, str]] = []
+
+        def callback(starter_id: int, transcript: str) -> None:
+            calls.append((starter_id, transcript))
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey listen to me")
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert calls == [(42, "hey listen to me")]
+
+    def test_dispatch_receives_full_accumulated_transcript(self) -> None:
+        received: list[str] = []
+
+        def callback(_starter_id: int, transcript: str) -> None:
+            received.append(transcript)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "part one")
+        detector.on_transcript(42, "part two")
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert received == ["part one part two"]
+
+    def test_long_during_speaking_does_not_call_generating_callback(self) -> None:
+        calls: list[tuple[int, str]] = []
+
+        def callback(starter_id: int, transcript: str) -> None:
+            calls.append((starter_id, transcript))
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert calls == []
+
+    def test_short_during_generating_does_not_call_callback(self) -> None:
+        calls: list[tuple[int, str]] = []
+
+        def callback(starter_id: int, transcript: str) -> None:
+            calls.append((starter_id, transcript))
+
+        # boundary_s=30.0 so a 2s burst is short, not long
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=30.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert calls == []
+
+    def test_no_callback_set_does_not_raise(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Default (no callback) must not raise even on a long burst.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(5.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
+        assert any("long" in m and "GENERATING" in m for m in msgs)
+
+    def test_dispatch_log_emitted_when_callback_set(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def callback(starter_id: int, transcript: str) -> None:
+            pass
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(5.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any("dispatch: long@GENERATING" in r.message for r in caplog.records)

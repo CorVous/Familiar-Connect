@@ -9,14 +9,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import io
 import logging
+import time
 from typing import TYPE_CHECKING, cast
 
 import discord
 import httpx
 
+from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
@@ -31,7 +34,6 @@ from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_p
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
     from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
@@ -137,6 +139,7 @@ async def _run_voice_response(
     familiar: Familiar,
     vc: discord.VoiceClient,
     trigger: ResponseTrigger,
+    interruption_context: str | None = None,
 ) -> None:
     """Run full pipeline → LLM → TTS path for a voice channel.
 
@@ -189,6 +192,7 @@ async def _run_voice_response(
         pending_turns=tuple(
             PendingTurn(speaker=m.speaker, text=m.text) for m in buffer
         ),
+        interruption_context=interruption_context,
     )
 
     pipeline = familiar.build_pipeline(channel_config)
@@ -313,6 +317,66 @@ async def _run_voice_response(
         except Exception:
             _logger.exception("Voice response TTS failed")
     tracker.transition(ResponseState.IDLE)
+
+
+async def dispatch_interruption_regen(
+    channel_id: int,
+    guild_id: int | None,
+    speaker: str,
+    transcript: str,
+    familiar: Familiar,
+    vc: discord.VoiceClient,
+) -> None:
+    """Re-generate voice reply after a long interruption during GENERATING.
+
+    Cancels the in-flight LLM task and waits for it to finish so
+    :func:`_run_voice_response` can run its ``CancelledError`` handler
+    (which transitions the tracker back to ``IDLE``), then calls
+    :func:`_run_voice_response` again with an ``interruption_context``
+    note so the regenerated reply can acknowledge what the user said.
+
+    Called by the per-guild ``_on_long_during_generating`` closure wired
+    inside :func:`subscribe_my_voice` via ``asyncio.create_task``.
+    :func:`_run_voice_response` registered its awaiter on
+    ``generation_task`` first, so asyncio schedules its cleanup before
+    resuming this coroutine — the tracker is ``IDLE`` by the time we
+    continue after ``await task``.
+    """
+    tracker = familiar.tracker_registry.get(guild_id if guild_id is not None else 0)
+    task = tracker.generation_task
+    if task is not None and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    # Safety net: if _run_voice_response's cleanup hasn't run yet
+    # (e.g. task was already done when we got here), ensure clean state.
+    if tracker.state is not ResponseState.IDLE:
+        tracker.transition(ResponseState.IDLE)
+    note = (
+        f"{speaker} interrupted while you were forming a response."
+        f' They said: "{transcript}"'
+    )
+    _logger.info(
+        "dispatch: long@GENERATING → cancel+regen speaker=%s",
+        speaker,
+    )
+    await _run_voice_response(
+        channel_id=channel_id,
+        guild_id=guild_id,
+        speaker=speaker,
+        utterance=transcript,
+        buffer=[
+            BufferedMessage(
+                speaker=speaker,
+                text=transcript,
+                timestamp=time.monotonic(),
+            )
+        ],
+        familiar=familiar,
+        vc=vc,
+        trigger=ResponseTrigger.direct_address,
+        interruption_context=note,
+    )
 
 
 async def subscribe_my_voice(
@@ -474,8 +538,33 @@ async def subscribe_my_voice(
         # Per-guild interruption detector. Consumes Discord voice-activity
         # events from the lull monitor (no separate Deepgram VAD path)
         # and classifies bursts as discarded/short/long relative to the
-        # current ResponseTracker state. Detect-only for now — dispatch
-        # lands in later steps.
+        # current ResponseTracker state.
+        #
+        # Step 8: ``_on_long_during_generating`` fires when a burst
+        # finalizes as ``long`` while the tracker is ``GENERATING``.
+        # It schedules ``dispatch_interruption_regen`` as an asyncio
+        # task so the detector callback stays synchronous.
+        # Pending regen tasks — held so they are not garbage-collected before
+        # they complete (asyncio only keeps a weak reference to tasks).
+        regen_tasks: set[asyncio.Task[None]] = set()
+
+        def _on_long_during_generating(starter_id: int, transcript: str) -> None:
+            raw_name = user_names.get(starter_id, f"User-{starter_id}")
+            safe_name = sanitize_name(raw_name) or raw_name
+            t = asyncio.create_task(
+                dispatch_interruption_regen(
+                    channel_id=voice_channel_id,
+                    guild_id=voice_guild_id,
+                    speaker=safe_name,
+                    transcript=transcript,
+                    familiar=familiar,
+                    vc=vc,
+                ),
+                name="long-interruption-regen",
+            )
+            regen_tasks.add(t)
+            t.add_done_callback(regen_tasks.discard)
+
         interruption_detector = InterruptionDetector(
             tracker_registry=familiar.tracker_registry,
             guild_id=voice_guild_id if voice_guild_id is not None else 0,
@@ -483,6 +572,7 @@ async def subscribe_my_voice(
             short_long_boundary_s=familiar.config.short_long_boundary_s,
             lull_timeout_s=familiar.config.voice_lull_timeout,
             base_tolerance=(familiar.config.interrupt_tolerance.base_probability),
+            on_long_during_generating=_on_long_during_generating,
         )
         familiar.extras["interruption_detector"] = interruption_detector
 
@@ -504,6 +594,10 @@ async def subscribe_my_voice(
             result: TranscriptionResult,
         ) -> None:
             lull_monitor.on_transcript(user_id, result)
+            # Forward finals to the interruption detector so it can
+            # accumulate the burst transcript for Step 8 dispatch.
+            if result.is_final:
+                interruption_detector.on_transcript(user_id, result.text)
 
         pipeline = await start_pipeline(
             familiar.transcriber,

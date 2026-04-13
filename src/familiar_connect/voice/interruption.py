@@ -352,6 +352,7 @@ class InterruptionDetector:
         clock: Callable[[], float] | None = None,
         scheduler: Callable[[float, Callable[[], None]], _Cancelable] | None = None,
         rng: Callable[[], float] | None = None,
+        on_long_during_generating: Callable[[int, str], None] | None = None,
     ) -> None:
         self._tracker_registry = tracker_registry
         self._guild_id = guild_id
@@ -362,6 +363,11 @@ class InterruptionDetector:
         self._clock = clock if clock is not None else time.monotonic
         self._scheduler = scheduler
         self._rng = rng
+        # Sync callback invoked when a burst finalizes as ``long`` during
+        # ``GENERATING``. Called with ``(starter_id, transcript)``. The
+        # caller (bot.py) wraps the async cancel+regen work in
+        # ``asyncio.create_task`` so the detector stays synchronous.
+        self._on_long_during_generating = on_long_during_generating
 
         # Users currently speaking, tracked regardless of tracker
         # state. This lets us retroactively start a burst when the
@@ -389,6 +395,10 @@ class InterruptionDetector:
         self._min_handle: _Cancelable | None = None
         # Latch so the min-crossed log fires at most once per burst.
         self._min_logged: bool = False
+        # Deepgram finals accumulated during the active burst. Cleared at
+        # each new burst start and at finalize. Passed to the dispatch
+        # callback so the regen call can include the user's words.
+        self._burst_transcript: str = ""
 
         # Register as an observer on the guild's tracker so state
         # transitions can retroactively start / abort bursts.
@@ -484,11 +494,28 @@ class InterruptionDetector:
             self._start_burst(starter)
             self._maybe_log_min_crossed()
 
+    def on_transcript(self, user_id: int, text: str) -> None:  # noqa: ARG002
+        """Accumulate a Deepgram final into the burst transcript.
+
+        Wire from the voice pipeline's ``_route_transcript_to_monitor``
+        alongside the existing :class:`~familiar_connect.voice_lull.VoiceLullMonitor`
+        call so the detector captures what the interrupting user said.
+        Ignored when no burst is active. ``user_id`` is unused (all
+        users in a multi-user burst contribute to the same transcript).
+        """
+        if self._burst_started_at is None:
+            return
+        if self._burst_transcript:
+            self._burst_transcript += " " + text
+        else:
+            self._burst_transcript = text
+
     def _start_burst(self, starter_id: int) -> None:
         """Begin a new burst attributed to *starter_id*."""
         self._burst_started_at = self._clock()
         self._burst_starter_id = starter_id
         self._min_logged = False
+        self._burst_transcript = ""
         tracker = self._tracker_registry.get(self._guild_id)
         # Capture the tracker's non-IDLE state for log-time resolution.
         # Direct ``tracker.state = ...`` assignments in tests bypass
@@ -509,6 +536,7 @@ class InterruptionDetector:
         self._burst_starter_id = None
         self._burst_latest_state = None
         self._min_logged = False
+        self._burst_transcript = ""
 
     def _schedule(self, delay: float, callback: Callable[[], None]) -> _Cancelable:
         scheduler = self._scheduler
@@ -616,12 +644,14 @@ class InterruptionDetector:
         last_ended_at = self._burst_last_ended_at
         starter_id = self._burst_starter_id
         state = self._current_tracker_state()
+        transcript = self._burst_transcript
         # Reset regardless; a new burst starts from a clean slate.
         self._burst_started_at = None
         self._burst_last_ended_at = None
         self._burst_starter_id = None
         self._burst_latest_state = None
         self._min_logged = False
+        self._burst_transcript = ""
         if started_at is None or last_ended_at is None or starter_id is None:
             return
         if state is None:
@@ -641,6 +671,17 @@ class InterruptionDetector:
             starter_id,
             state.value,
         )
+        # Step 8 dispatch: long burst during GENERATING → cancel + regen.
+        if (
+            classification is InterruptionClass.long
+            and state is ResponseState.GENERATING
+            and self._on_long_during_generating is not None
+        ):
+            _logger.info(
+                "dispatch: long@GENERATING → cancel+regen user=%s",
+                starter_id,
+            )
+            self._on_long_during_generating(starter_id, transcript)
 
     def _classify(self, duration: float) -> InterruptionClass:
         if duration < self._min_interruption_s:
