@@ -105,3 +105,13 @@ class ContextRequest:
     user turns instead of the single ``utterance``. The last entry
     should match ``utterance`` / ``speaker``."""
     preprocessor_contributions: tuple[Contribution, ...] = ()
+    interruption_context: str | None = None
+    """Optional system note describing a voice interruption. Populated
+    by the Step 8 long-interruption handler (see
+    ``docs/roadmap/interruption-flow.md``) with a short annotation
+    like ``{speaker} interrupted while you were forming a response.
+    They said: "{transcript}"`` so the regenerated reply can
+    acknowledge the cutoff. The renderer inserts it as a ``system``
+    message immediately before the final user turn. ``None`` or the
+    empty string means no note is rendered — the default for every
+    non-interrupted turn."""
