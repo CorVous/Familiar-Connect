@@ -66,6 +66,7 @@ class VoicePipeline:
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None
+    on_audio: Callable[[int], None] | None = None
     streams: dict[int, _UserStream] = field(default_factory=dict)
 
 
@@ -208,6 +209,8 @@ async def _audio_router(
             )
             pipeline.streams[user_id] = stream
         await pipeline.streams[user_id].audio_queue.put(data)
+        if pipeline.on_audio is not None:
+            pipeline.on_audio(user_id)
         chunks_routed += 1
         if chunks_routed % 500 == 1:
             _logger.debug(
@@ -275,6 +278,7 @@ async def start_pipeline(  # noqa: RUF029
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None,
+    on_audio: Callable[[int], None] | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -287,6 +291,10 @@ async def start_pipeline(  # noqa: RUF029
     :param response_handler: Optional async callback invoked with
         ``(user_id, result)`` for each final transcription. Used to
         trigger LLM + TTS responses.
+    :param on_audio: Optional sync callback invoked with ``user_id``
+        every time an audio frame arrives for that user. Used by the
+        :class:`~familiar_connect.voice_lull.VoiceLullMonitor` to drive
+        its per-user silence watchdogs.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
@@ -304,6 +312,7 @@ async def start_pipeline(  # noqa: RUF029
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,
+        on_audio=on_audio,
     )
 
     pipeline.router_task = asyncio.create_task(

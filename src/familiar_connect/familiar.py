@@ -219,7 +219,7 @@ class Familiar:
             aliases=character_config.aliases,
             chattiness=character_config.chattiness,
             interjection=character_config.interjection,
-            lull_timeout=character_config.lull_timeout,
+            lull_timeout=character_config.text_lull_timeout,
             llm_client=llm_clients["interjection_decision"],
             character_card=character_card,
             on_respond=_noop_respond,

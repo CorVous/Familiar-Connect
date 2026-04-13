@@ -41,6 +41,6 @@ While the bot is active in a voice channel, the associated text channel should a
 ## Open questions
 
 - **STT provider choice.** Deepgram is the default assumption from earlier planning. Worth confirming before coding; the provider boundary is a small one and easy to swap.
-- **Turn segmentation.** When is "the user has stopped talking" fired? Silence threshold? Deepgram's own endpointing? Both? This affects the naturalness of turn-taking.
+- **Turn segmentation.** The voice lull debounce (`voice_lull_timeout`, default 0.8s) is the current answer — see [Conversation flow § `voice_lull_timeout`](conversation-flow.md#voice_lull_timeout-float). Deepgram's own endpointing still emits per-fragment finals; `VoiceLullMonitor` uses Discord-native audio-frame arrivals to gate when the accumulated utterance is treated as complete.
 - **Barge-in / interruption handling.** See [Interruption flow](interruption-flow.md). Needs a scope review (voice-only vs. modality-agnostic) before anything else.
 - **Vision fallback UX.** What's the observable behaviour when the user sends an image to a non-vision model? A warning in the same channel? A silent log line? Both?
