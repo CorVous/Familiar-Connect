@@ -1,14 +1,57 @@
 # Voice Interruption Flow
 
-!!! info "Status: Design — not committed"
-    Ported from an earlier design PR. The mechanism is scoped
-    specifically to voice channels as written, but latency and
-    interruption handling is a spectrum that spans both voice and
-    text modalities, so a modality-agnostic version of this design
-    may be preferable. Revisit the scope before implementation — see
-    [Voice input](voice-input.md) and
-    [Conversation flow](conversation-flow.md) for the adjacent
-    designs this one touches.
+!!! warning "Status: In progress — partially implemented"
+    Core infrastructure is shipped. Deepgram event routing and all
+    scenario dispatch handlers are still pending. See the
+    [Implementation Progress](#implementation-progress) section below
+    for the exact remaining steps before this is feature-complete.
+
+---
+
+## Implementation Progress
+
+### Completed
+
+| Step | What shipped |
+|---|---|
+| Step 2 | Cartesia streaming WebSocket + `TTSResult` / `WordTimestamp` dataclasses (`tts.py`) |
+| Step 3 | `ResponseState` enum, `ResponseTracker`, `ResponseTrackerRegistry` (`voice/interruption.py`); lifecycle transitions wired in `bot.py`; `is_unsolicited` / `mood_modifier` fields; generation task stored on tracker |
+| Step 5 (partial) | `InterruptionDetector` class with burst classification (discarded / short / long) and `compute_effective_tolerance()` / `should_keep_talking()` logic (`voice/interruption.py`) |
+| Step 6 | `MoodEvaluator` stub in `mood.py` (always returns `0.0`); tolerance roll logged at Moment 1 |
+| Step 7 | LLM call wrapped in cancellable `asyncio.Task` stored on `tracker.generation_task` |
+| Step 10 (partial) | `split_at_elapsed()` helper implemented and unit-tested in `voice/interruption.py` |
+| Context plumbing | `interruption_context: str \| None` field on `ContextRequest` (`context/types.py`); rendered as system note in `context/render.py` |
+| Tests | `tests/test_voice_interruption.py` covers state transitions, burst classification, `split_at_elapsed()`, and tolerance computation |
+
+### Remaining
+
+| Step | What's left | Files |
+|---|---|---|
+| **Step 1** (partial) | Parse `[voice.interruption]` TOML section in `config.py`; log loaded values at character startup | `config.py` |
+| **Step 4** | Extend `_parse_response()` in `transcription.py` to emit `SpeechStarted` / `UtteranceEnd` event objects (currently silently dropped); thread those events through `voice_pipeline.py` to the `InterruptionDetector`; add log lines `deepgram event=SpeechStarted user=U ts=...` | `transcription.py`, `voice_pipeline.py` |
+| **Step 5** (partial) | Wire `VoicePipeline` to push `SpeechStarted` / `UtteranceEnd` into `InterruptionDetector` only when `tracker.state != IDLE` | `voice_pipeline.py` |
+| **Step 8** | Long interruption during `GENERATING`: cancel `generation_task`, build new `ContextRequest` with `interruption_context`, regenerate; log `dispatch: long@GENERATING → cancel+regen` | `bot.py` |
+| **Step 9** | Short interruption during `GENERATING`: gate delivery on an `asyncio.Event` set when detector signals lull resolved; proceed to TTS + playback once ungated | `bot.py` |
+| **Step 10** (partial) | Set `tracker.playback_start_time = time.monotonic()` on `IDLE → SPEAKING` transition | `bot.py` |
+| **Step 11** | Short interruption during `SPEAKING`: yield path stops playback, captures `elapsed_ms`, re-synthesises remaining text from word boundary and plays; push-through path continues audio and appends transcript to history | `bot.py`, `voice/interruption.py` |
+| **Step 12** | Long interruption during `SPEAKING` (yielded): record `delivered_text`, set it as history entry, build new `ContextRequest` with partial + interruption context, regenerate | `bot.py` |
+| **Step 13** | Replace `MoodEvaluator` stub with a real side-model call; cache result on `tracker.mood_modifier` at `GENERATING` entry | `mood.py`, `bot.py` |
+| **Step 14** | Move this page to `docs/architecture/`; update status banner to "shipped"; run `uv run mkdocs build --strict` | `docs/` |
+
+### Integration test stops (remaining)
+
+Each stop requires a live Discord voice session before proceeding.
+
+| After step | What to verify |
+|---|---|
+| Step 1 partial | Bot prints `voice.interruption: tolerance=average(0.30) min=1.5s boundary=4.0s` at startup |
+| Step 4 + 5 | Speaking triggers `deepgram event=SpeechStarted` log within ~200ms; `UtteranceEnd` appears when you stop; no dispatch yet |
+| Step 8 + 9 | Long utterance during generation → cancel + regen reflecting content; short utterance → pause then deliver unchanged |
+| Step 11 | `very_meek` tolerance yields mid-sentence and resumes from next word; `very_stubborn` talks over; interjection responses (+0.35 bias) rarely yield |
+| Step 12 | Long interruption mid-sentence → reply references what was cut off; history shows only the delivered partial |
+| Step 13 | Emotional context shifts mood modifier visibly in logs; yield behaviour changes vs. Step 12 baseline |
+
+---
 
 When a user speaks for at least `min_interruption_s` (configurable, default 1.5s) while the familiar is either generating a response or speaking, it counts as an **interruption**. This feature applies only to voice channels — text conversations are unaffected.
 
