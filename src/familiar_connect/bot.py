@@ -273,9 +273,35 @@ async def _run_voice_response(
     # malformed payloads. Log and return cleanly so the transcriber
     # callback stays alive for the next utterance. No TTS, no
     # history write, no post-processing on failure.
+    #
+    # Step 7: the chat call runs as a cancellable asyncio.Task parked
+    # on ``tracker.generation_task`` so a later long-interruption
+    # handler can call ``tracker.generation_task.cancel()`` to abort
+    # mid-generation without wasting tokens. No caller cancels yet —
+    # this is plumbing for Steps 8 and 12.
+    generation_task = asyncio.create_task(
+        familiar.llm_clients["main_prose"].chat(messages),
+    )
+    tracker.generation_task = generation_task
     try:
-        reply = await familiar.llm_clients["main_prose"].chat(messages)
+        reply = await generation_task
+    except asyncio.CancelledError:
+        tracker.generation_task = None
+        current = asyncio.current_task()
+        if current is not None and current.cancelling() > 0:
+            # The outer task was cancelled from above — propagate so
+            # we don't swallow someone else's cancellation.
+            tracker.transition(ResponseState.IDLE)
+            raise
+        # The generation task itself was cancelled (interruption path).
+        _logger.info(
+            "voice generation cancelled channel=%s",
+            channel_id,
+        )
+        tracker.transition(ResponseState.IDLE)
+        return
     except (httpx.HTTPError, ValueError, KeyError) as exc:
+        tracker.generation_task = None
         _logger.warning(
             "main reply (voice): %s: %s",
             type(exc).__name__,
@@ -283,6 +309,7 @@ async def _run_voice_response(
         )
         tracker.transition(ResponseState.IDLE)
         return
+    tracker.generation_task = None
     reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 

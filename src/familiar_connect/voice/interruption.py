@@ -20,7 +20,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from familiar_connect.voice_lull import VoiceActivityEvent
 
@@ -86,7 +86,7 @@ class ResponseTracker:
 
     guild_id: int
     state: ResponseState = ResponseState.IDLE
-    generation_task: asyncio.Task[str] | None = None
+    generation_task: asyncio.Task[Any] | None = None
     response_text: str | None = None
     timestamps: list[WordTimestamp] = field(default_factory=list)
     playback_start_time: float | None = None
