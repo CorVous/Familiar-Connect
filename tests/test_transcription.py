@@ -804,6 +804,46 @@ class TestDeepgramReconnect:
         assert warnings, "expected a WARNING for close_code=1006"
 
     @pytest.mark.asyncio
+    async def test_any_live_frame_resets_reconnect_counter(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Any server message (not just Results) resets consecutive_reconnects.
+
+        Without this, a burst of ``1000 (rotation) → 1006 (transient) →
+        1000 → …`` closes — which can happen around Deepgram session
+        rotation — would exhaust retries even though Deepgram clearly
+        talked to us (SpeechStarted, Metadata, …) between closes.
+        """
+        client._MAX_RECONNECTS = 2
+
+        def _with_speech_started_then_close() -> MagicMock:
+            ws_msg = MagicMock()
+            ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
+            ws_msg.data = json.dumps({"type": "SpeechStarted"})
+            ws = self._make_ws_mock(messages=[ws_msg])
+            ws.close_code = 1006
+            return ws
+
+        # Produce more dying-with-a-frame sockets than _MAX_RECONNECTS
+        # allows; each delivers a SpeechStarted before its stream ends.
+        # Because every frame resets the counter, the loop should keep
+        # reconnecting past the original limit.
+        connect_mock = AsyncMock(
+            side_effect=[_with_speech_started_then_close() for _ in range(8)]
+        )
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.5)
+            await client.stop()
+
+        # Initial + at least 3 reconnects means we survived past the
+        # 2-reconnect cap. Exact count depends on timing, but > max+1
+        # proves the reset is working.
+        assert connect_mock.call_count > client._MAX_RECONNECTS + 1
+
+    @pytest.mark.asyncio
     async def test_gives_up_after_max_reconnects(
         self, client: DeepgramTranscriber
     ) -> None:
@@ -813,6 +853,10 @@ class TestDeepgramReconnect:
             ws = self._make_ws_mock()
             ws.close_code = 1006
             return ws
+
+        # Lower the cap for the test so we don't have to wait for the
+        # production default of 10 retries.
+        client._MAX_RECONNECTS = 5
 
         # Produce enough dying WSes for initial + max_reconnects + extra
         connect_mock = AsyncMock(side_effect=[_make_dying_ws() for _ in range(20)])
@@ -825,8 +869,8 @@ class TestDeepgramReconnect:
             await client.stop()
 
         # Should have stopped retrying (initial + max_reconnects)
-        # Not unlimited — must be <= initial + max (default 5) + 1
-        assert connect_mock.call_count <= 7
+        # Not unlimited — must be <= initial + max + 1
+        assert connect_mock.call_count <= client._MAX_RECONNECTS + 2
 
 
 class TestDeepgramKeepAlive:

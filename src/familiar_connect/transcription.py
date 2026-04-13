@@ -312,7 +312,12 @@ class DeepgramTranscriber:
             await self._session.close()
             self._session = None
 
-    _MAX_RECONNECTS: int = 5
+    # Raised from 5 to 10 so a burst of Deepgram-server-initiated
+    # drops (e.g. 1000 rotation followed by a transient 1006 shortly
+    # after) doesn't exhaust retries before transcription resumes.
+    # ``consecutive_reconnects`` is reset on any live server frame, so
+    # this cap only triggers when Deepgram is truly unreachable.
+    _MAX_RECONNECTS: int = 10
     _RECONNECT_DELAY: float = 0.1
     _KEEPALIVE_INTERVAL: float = 5.0
     # ~20 s of 48 kHz mono s16le — large enough to cover a reconnect
@@ -403,12 +408,14 @@ class DeepgramTranscriber:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
                     msg_type = data.get("type", "")
+                    # Any valid server-emitted frame proves the socket
+                    # is alive; reset the reconnect counter so a burst
+                    # of short-lived sessions doesn't exhaust retries.
+                    consecutive_reconnects = 0
                     if msg_type == "Results":
                         result = self._parse_response(data)
                         if result is not None:
                             await output.put(result)
-                            # Got real data — reset reconnect counter.
-                            consecutive_reconnects = 0
                     elif msg_type in {"SpeechStarted", "UtteranceEnd"}:
                         # VAD events: useful at INFO so operators can
                         # confirm Deepgram is hearing speech after a
