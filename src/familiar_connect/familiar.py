@@ -45,6 +45,7 @@ from familiar_connect.context.providers.mode_instructions import (
 )
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.memory.store import MemoryStore
+from familiar_connect.mood import MoodEvaluator
 from familiar_connect.subscriptions import SubscriptionRegistry
 from familiar_connect.voice.interruption import ResponseTrackerRegistry
 
@@ -114,6 +115,9 @@ class Familiar:
     """Per-guild :class:`ResponseTracker` lookup used by the voice
     interruption state machine. Populated lazily on first voice reply.
     """
+    mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
+    """Per-response mood modifier source. Stubbed to ``0.0`` until
+    Step 13 replaces it with a real side-model call."""
     extras: dict[str, object] = field(default_factory=dict)
     """Scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet."""

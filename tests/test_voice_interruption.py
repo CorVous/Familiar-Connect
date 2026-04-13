@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import pytest
+
 from familiar_connect.voice.interruption import (
+    UNSOLICITED_TOLERANCE_BIAS,
     InterruptionClass,
     InterruptionDetector,
     ResponseState,
@@ -16,8 +19,6 @@ from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    import pytest
 
 
 class TestResponseStateEnum:
@@ -273,18 +274,26 @@ def _make_detector(
     min_s: float = 1.5,
     boundary_s: float = 4.0,
     lull_s: float = 5.0,
+    base_tolerance: float = 0.30,
+    rng: Callable[[], float] | None = None,
 ) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
     registry = ResponseTrackerRegistry()
     clock = _FakeClock()
     scheduler = _FakeScheduler()
+    # A deterministic default roll keeps existing tests (which don't
+    # care about yield-vs-keep) from gaining a random log line.
+    if rng is None:
+        rng = lambda: 0.99  # noqa: E731 — inline for test clarity
     detector = InterruptionDetector(
         tracker_registry=registry,
         guild_id=guild_id,
         min_interruption_s=min_s,
         short_long_boundary_s=boundary_s,
         lull_timeout_s=lull_s,
+        base_tolerance=base_tolerance,
         clock=clock,
         scheduler=scheduler,
+        rng=rng,
     )
     return detector, registry, clock, scheduler
 
@@ -867,3 +876,137 @@ class TestInterruptionClassEnum:
             "short",
             "long",
         }
+
+
+class TestResponseTrackerTolerance:
+    def test_effective_tolerance_is_base_when_solicited_and_no_mood(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        assert t.compute_effective_tolerance(0.30) == 0.30  # noqa: RUF069
+
+    def test_effective_tolerance_adds_unsolicited_bias(self) -> None:
+        t = ResponseTracker(guild_id=1, is_unsolicited=True)
+        assert t.compute_effective_tolerance(0.30) == pytest.approx(
+            0.30 + UNSOLICITED_TOLERANCE_BIAS
+        )
+
+    def test_effective_tolerance_adds_mood_modifier(self) -> None:
+        t = ResponseTracker(guild_id=1, mood_modifier=0.15)
+        assert t.compute_effective_tolerance(0.30) == pytest.approx(0.45)
+
+    def test_effective_tolerance_subtracts_negative_mood(self) -> None:
+        t = ResponseTracker(guild_id=1, mood_modifier=-0.20)
+        assert t.compute_effective_tolerance(0.30) == pytest.approx(0.10)
+
+    def test_effective_tolerance_clamps_above_one(self) -> None:
+        t = ResponseTracker(guild_id=1, is_unsolicited=True, mood_modifier=0.50)
+        # 0.60 + 0.35 + 0.50 = 1.45 → clamped to 1.0
+        assert t.compute_effective_tolerance(0.60) == 1.0  # noqa: RUF069
+
+    def test_effective_tolerance_clamps_below_zero(self) -> None:
+        t = ResponseTracker(guild_id=1, mood_modifier=-0.50)
+        # 0.10 + 0 + -0.50 = -0.40 → clamped to 0.0
+        assert t.compute_effective_tolerance(0.10) == 0.0  # noqa: RUF069
+
+    def test_should_keep_talking_true_when_roll_below_tolerance(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        t = ResponseTracker(guild_id=1)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            keep = t.should_keep_talking(0.30, rng=lambda: 0.1)
+        assert keep is True
+        assert any("→ keep_talking" in r.message for r in caplog.records)
+
+    def test_should_keep_talking_false_when_roll_above_tolerance(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        t = ResponseTracker(guild_id=1)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            keep = t.should_keep_talking(0.30, rng=lambda: 0.9)
+        assert keep is False
+        assert any("→ yield" in r.message for r in caplog.records)
+
+    def test_should_keep_talking_log_includes_all_components(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        t = ResponseTracker(guild_id=1, is_unsolicited=True, mood_modifier=0.10)
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            t.should_keep_talking(0.30, rng=lambda: 0.50)
+        msgs = [r.message for r in caplog.records if "toll:" in r.message]
+        assert len(msgs) == 1
+        assert "base=0.30" in msgs[0]
+        assert "mood=+0.10" in msgs[0]
+        assert "unsolicited=+0.35" in msgs[0]
+        assert "effective=0.75" in msgs[0]
+        assert "roll=0.50" in msgs[0]
+
+
+class TestInterruptionDetectorToleranceRoll:
+    def test_roll_fires_at_min_crossing_during_speaking(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0, base_tolerance=0.30, rng=lambda: 0.99
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            scheduler.fire_for(detector._on_min_crossed)
+        toll = [r.message for r in caplog.records if "toll:" in r.message]
+        assert len(toll) == 1
+        assert "→ yield" in toll[0]
+
+    def test_roll_does_not_fire_during_generating(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Moment 1 roll is only meaningful during SPEAKING — during
+        # GENERATING the dispatch is long=cancel-and-regen /
+        # short=pause-and-deliver, not a tolerance roll.
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            scheduler.fire_for(detector._on_min_crossed)
+        assert not any("toll:" in r.message for r in caplog.records)
+
+    def test_roll_uses_tracker_unsolicited_flag(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # With unsolicited=True and base=0.30, effective = 0.65 so a
+        # roll of 0.50 still keeps talking; without the bias, the same
+        # roll would yield.
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0, base_tolerance=0.30, rng=lambda: 0.50
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.is_unsolicited = True
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            scheduler.fire_for(detector._on_min_crossed)
+        toll = [r.message for r in caplog.records if "toll:" in r.message]
+        assert len(toll) == 1
+        assert "→ keep_talking" in toll[0]
+        assert "unsolicited=+0.35" in toll[0]
