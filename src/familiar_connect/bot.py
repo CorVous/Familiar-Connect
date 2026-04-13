@@ -156,6 +156,10 @@ async def _run_voice_response(
     tracker = familiar.tracker_registry.get(guild_id if guild_id is not None else 0)
     tracker.vc = vc
     tracker.is_unsolicited = trigger.is_unsolicited
+    # Cache the mood modifier for the whole turn — should_keep_talking
+    # at Moment 1 must use the same value the tracker saw at generation
+    # start, not re-roll mid-response.
+    tracker.mood_modifier = familiar.mood_evaluator.evaluate()
     tracker.transition(ResponseState.GENERATING)
 
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
@@ -451,6 +455,7 @@ async def subscribe_my_voice(
             min_interruption_s=familiar.config.min_interruption_s,
             short_long_boundary_s=familiar.config.short_long_boundary_s,
             lull_timeout_s=familiar.config.voice_lull_timeout,
+            base_tolerance=(familiar.config.interrupt_tolerance.base_probability),
         )
         familiar.extras["interruption_detector"] = interruption_detector
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,6 +33,18 @@ if TYPE_CHECKING:
 
 
 _logger = logging.getLogger(__name__)
+
+
+UNSOLICITED_TOLERANCE_BIAS = 0.35
+"""Added to :meth:`ResponseTracker.compute_effective_tolerance` when
+the response was started as an unsolicited interjection (chattiness /
+voice-lull path). Unsolicited remarks should tend to push through
+interruptions — if the familiar spoke up on its own it's more
+committed to finishing the thought than if it was directly addressed.
+The value is deliberately large: combined with ``average`` tolerance
+(0.30) it yields ``0.65`` effective, i.e. a 65%% probability of
+pushing through, while leaving room for ``very_meek`` + negative mood
+to still yield cleanly."""
 
 
 class ResponseState(Enum):
@@ -125,6 +138,58 @@ class ResponseTracker:
         callback = self.on_state_change
         if callback is not None:
             callback(new_state)
+
+    def compute_effective_tolerance(self, base: float) -> float:
+        """Combine *base* tolerance with mood + unsolicited biases.
+
+        :param base: The familiar's configured
+            :attr:`~familiar_connect.config.InterruptTolerance.base_probability`.
+        :returns: ``clamp(base + mood_modifier + unsolicited_bias, 0,
+            1)``. ``unsolicited_bias`` is
+            :data:`UNSOLICITED_TOLERANCE_BIAS` when
+            :attr:`is_unsolicited` is true, else ``0.0``.
+        """
+        bias = UNSOLICITED_TOLERANCE_BIAS if self.is_unsolicited else 0.0
+        total = base + self.mood_modifier + bias
+        return max(0.0, min(1.0, total))
+
+    def should_keep_talking(
+        self,
+        base: float,
+        *,
+        rng: Callable[[], float] | None = None,
+    ) -> bool:
+        """Roll against the effective tolerance; log the outcome.
+
+        Called by the interruption detector the moment a burst
+        crosses ``min_interruption_s`` while the familiar is
+        ``SPEAKING``. A ``True`` result means push through — keep
+        playing; ``False`` means yield — stop playback and let the
+        user finish. Dispatch on the result lands in Step 11; this
+        method is intentionally logged even when no-one acts on it so
+        operators can tune ``interrupt_tolerance`` from voice-session
+        logs alone.
+
+        :param base: See :meth:`compute_effective_tolerance`.
+        :param rng: Optional zero-argument callable returning a float
+            in ``[0, 1)``. Defaults to :func:`random.random`. Injected
+            in tests for deterministic rolls.
+        """
+        tolerance = self.compute_effective_tolerance(base)
+        roll = (rng if rng is not None else random.random)()  # noqa: S311
+        keep = roll < tolerance
+        bias = UNSOLICITED_TOLERANCE_BIAS if self.is_unsolicited else 0.0
+        _logger.info(
+            "toll: base=%.2f mood=%+.2f unsolicited=%+.2f "
+            "effective=%.2f roll=%.2f → %s",
+            base,
+            self.mood_modifier,
+            bias,
+            tolerance,
+            roll,
+            "keep_talking" if keep else "yield",
+        )
+        return keep
 
 
 class ResponseTrackerRegistry:
@@ -226,6 +291,10 @@ class InterruptionDetector:
     :param lull_timeout_s: Channel-wide silence required after the
         last ``ended`` event before the burst is finalized. Matches
         :attr:`~familiar_connect.config.CharacterConfig.voice_lull_timeout`.
+    :param base_tolerance: The familiar's configured
+        :attr:`~familiar_connect.config.InterruptTolerance.base_probability`.
+        Used to roll ``should_keep_talking`` when the burst crosses
+        ``min`` during ``SPEAKING``.
     :param clock: Optional monotonic clock override, for tests.
         Defaults to :func:`time.monotonic`.
     :param scheduler: Optional scheduling hook. Given ``(delay_s, cb)``
@@ -233,6 +302,9 @@ class InterruptionDetector:
         with a ``.cancel()`` method. Defaults to
         ``asyncio.get_event_loop().call_later``. Injected in unit tests
         to drive the lull timer synchronously.
+    :param rng: Optional zero-argument callable returning ``[0, 1)``,
+        used for the tolerance roll. Defaults to
+        :func:`random.random`. Injected in unit tests for determinism.
     """
 
     def __init__(
@@ -243,16 +315,20 @@ class InterruptionDetector:
         min_interruption_s: float,
         short_long_boundary_s: float,
         lull_timeout_s: float,
+        base_tolerance: float,
         clock: Callable[[], float] | None = None,
         scheduler: Callable[[float, Callable[[], None]], _Cancelable] | None = None,
+        rng: Callable[[], float] | None = None,
     ) -> None:
         self._tracker_registry = tracker_registry
         self._guild_id = guild_id
         self._min_interruption_s = min_interruption_s
         self._short_long_boundary_s = short_long_boundary_s
         self._lull_timeout_s = lull_timeout_s
+        self._base_tolerance = base_tolerance
         self._clock = clock if clock is not None else time.monotonic
         self._scheduler = scheduler
+        self._rng = rng
 
         # Users currently speaking, tracked regardless of tracker
         # state. This lets us retroactively start a burst when the
@@ -480,6 +556,13 @@ class InterruptionDetector:
             state.value,
         )
         self._min_logged = True
+        # Moment 1: burst crossed ``min`` while the familiar is
+        # speaking. Roll against the effective tolerance so operators
+        # can see yield-vs-push-through decisions in the log. Dispatch
+        # on the outcome lands in Step 11; today this is observational.
+        if state is ResponseState.SPEAKING:
+            tracker = self._tracker_registry.get(self._guild_id)
+            tracker.should_keep_talking(self._base_tolerance, rng=self._rng)
 
     def _current_tracker_state(self) -> ResponseState | None:
         """State to report in interruption logs.
