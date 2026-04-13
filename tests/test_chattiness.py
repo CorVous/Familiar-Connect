@@ -611,7 +611,7 @@ class TestLullTimer:
             loop.close()
 
         assert any(
-            r.levelno == logging.INFO and "text lull expired" in r.message
+            r.levelno == logging.INFO and "conversational lull expired" in r.message
             for r in caplog.records
         )
 
