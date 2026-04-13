@@ -48,7 +48,7 @@ from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
-from familiar_connect.voice.interruption import ResponseState
+from familiar_connect.voice.interruption import InterruptionDetector, ResponseState
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
@@ -490,10 +490,24 @@ async def subscribe_my_voice(
                 if tracker.state is ResponseState.GENERATING:
                     tracker.transition(ResponseState.IDLE)
 
+        # Per-guild interruption detector. Consumes Discord voice-activity
+        # events from the lull monitor (no separate Deepgram VAD path)
+        # and classifies bursts as discarded/short/long relative to the
+        # current ResponseTracker state. Detect-only for now — dispatch
+        # lands in later steps.
+        interruption_detector = InterruptionDetector(
+            tracker_registry=familiar.tracker_registry,
+            guild_id=voice_guild_id if voice_guild_id is not None else 0,
+            min_interruption_s=familiar.config.min_interruption_s,
+            short_long_boundary_s=familiar.config.short_long_boundary_s,
+        )
+        familiar.extras["interruption_detector"] = interruption_detector
+
         lull_monitor = VoiceLullMonitor(
             lull_timeout=familiar.config.voice_lull_timeout,
             user_silence_s=0.2,
             on_utterance_complete=_deliver_to_monitor,
+            on_voice_activity=interruption_detector.on_voice_activity,
         )  # voice_lull_timeout is endpointing only; the conversational
         # lull (side-model YES/NO gate) is governed by text_lull_timeout
         # inside ConversationMonitor.
@@ -553,6 +567,7 @@ async def unsubscribe_voice(
         lull_monitor = familiar.extras.pop("voice_lull_monitor", None)
         if isinstance(lull_monitor, VoiceLullMonitor):
             lull_monitor.clear()
+        familiar.extras.pop("interruption_detector", None)
         await vc.disconnect()
 
     if sub is not None:

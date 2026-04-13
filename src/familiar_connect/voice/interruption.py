@@ -15,12 +15,16 @@ the scenarios documented in
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from familiar_connect.voice_lull import VoiceActivityEvent
+
 if TYPE_CHECKING:
     import asyncio
+    from collections.abc import Callable
 
     import discord
 
@@ -141,3 +145,132 @@ class ResponseTrackerRegistry:
     def snapshot(self) -> dict[int, ResponseTracker]:
         """Return a shallow copy of the guild→tracker map (for tests)."""
         return dict(self._by_guild)
+
+
+class InterruptionClass(Enum):
+    """How a user speech burst during a voice response is classified.
+
+    The detector measures the burst duration from the first
+    ``VoiceActivityEvent.started`` to the moment all users go silent
+    (last ``VoiceActivityEvent.ended``) and bins it against two
+    thresholds from :class:`~familiar_connect.config.CharacterConfig`.
+    """
+
+    discarded = "discarded"
+    """Burst was shorter than ``min_interruption_s`` — back-channel
+    noise ("mm-hm", laughter), not a real interruption."""
+
+    short = "short"
+    """Burst was ≥ ``min_interruption_s`` but < ``short_long_boundary_s``
+    — a polite pause that only yields the floor briefly."""
+
+    long = "long"
+    """Burst was ≥ ``short_long_boundary_s`` — a full interruption
+    that should cancel/regenerate the in-flight response."""
+
+
+class InterruptionDetector:
+    """Classify user speech bursts against the current response state.
+
+    Subscribes to :class:`~familiar_connect.voice_lull.VoiceLullMonitor`'s
+    per-user voice-activity stream (Discord audio frames, no Deepgram
+    VAD). A *burst* begins on the first ``started`` event received
+    while the :class:`ResponseTracker` is not :attr:`ResponseState.IDLE`
+    and ends when every user in the burst has gone silent.
+
+    Today this is **detect-only**: each classified burst produces a
+    single INFO log line. Later steps will dispatch on short/long
+    classifications via ``ResponseTracker``.
+
+    :param tracker_registry: Shared registry so the detector can read
+        the current state of the guild's response at event time.
+    :param guild_id: The voice-connected guild this detector is scoped
+        to. One detector per voice-connected guild (paired 1:1 with a
+        :class:`~familiar_connect.voice_lull.VoiceLullMonitor`).
+    :param min_interruption_s: Bursts shorter than this are
+        :attr:`InterruptionClass.discarded`.
+    :param short_long_boundary_s: Bursts at or above this are
+        :attr:`InterruptionClass.long`; between the two thresholds
+        they are :attr:`InterruptionClass.short`.
+    :param clock: Optional monotonic clock override, for tests.
+        Defaults to :func:`time.monotonic`.
+    """
+
+    def __init__(
+        self,
+        *,
+        tracker_registry: ResponseTrackerRegistry,
+        guild_id: int,
+        min_interruption_s: float,
+        short_long_boundary_s: float,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._tracker_registry = tracker_registry
+        self._guild_id = guild_id
+        self._min_interruption_s = min_interruption_s
+        self._short_long_boundary_s = short_long_boundary_s
+        self._clock = clock if clock is not None else time.monotonic
+
+        # Users currently speaking *within the active burst*. Users who
+        # start speaking while the tracker is IDLE are never added, so
+        # their ``ended`` events don't spuriously close a burst.
+        self._speaking: set[int] = set()
+        self._burst_started_at: float | None = None
+        # The ResponseState observed when the burst began. Used for the
+        # classification log so mid-burst transitions don't change the
+        # reported state.
+        self._burst_state: ResponseState | None = None
+
+    def on_voice_activity(
+        self,
+        user_id: int,
+        event: VoiceActivityEvent,
+    ) -> None:
+        """Consume a per-user speaking transition.
+
+        Wire as the ``on_voice_activity`` callback on the guild's
+        :class:`~familiar_connect.voice_lull.VoiceLullMonitor`.
+        """
+        tracker = self._tracker_registry.get(self._guild_id)
+        if event is VoiceActivityEvent.started:
+            if tracker.state is ResponseState.IDLE:
+                # Detector dormant — nothing to classify.
+                return
+            if not self._speaking:
+                self._burst_started_at = self._clock()
+                self._burst_state = tracker.state
+            self._speaking.add(user_id)
+            return
+
+        # ended
+        if user_id not in self._speaking:
+            # User never joined the active burst (they started during
+            # IDLE, or we're between bursts). Ignore.
+            return
+        self._speaking.discard(user_id)
+        if self._speaking:
+            return
+        # All users quiet — close and classify the burst. The
+        # _speaking set was non-empty, so these invariants hold.
+        started_at = self._burst_started_at
+        observed = self._burst_state
+        if started_at is None or observed is None:
+            return
+        duration = self._clock() - started_at
+        self._burst_started_at = None
+        self._burst_state = None
+
+        classification = self._classify(duration)
+        _logger.info(
+            "interruption: %s (%.2fs) during %s",
+            classification.value,
+            duration,
+            observed.value,
+        )
+
+    def _classify(self, duration: float) -> InterruptionClass:
+        if duration < self._min_interruption_s:
+            return InterruptionClass.discarded
+        if duration < self._short_long_boundary_s:
+            return InterruptionClass.short
+        return InterruptionClass.long
