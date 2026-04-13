@@ -176,8 +176,9 @@ class CharacterConfig:
     :param interjection: Controls how long the familiar waits before
         the interjection monitor is consulted during an active
         conversation.
-    :param lull_timeout: Seconds of silence before the lull evaluation
-        fires.
+    :param text_lull_timeout: Seconds of silence on a text channel
+        before the lull evaluation (side-model yes/no gate) fires.
+        Text-only — the voice path uses ``voice_lull_timeout``.
     :param voice_lull_timeout: Seconds of channel-wide silence after
         which a buffered voice utterance is sent to the response
         pipeline. Debounce for the Deepgram final-transcript stream.
@@ -198,8 +199,8 @@ class CharacterConfig:
     aliases: list[str] = field(default_factory=list)
     chattiness: str = _DEFAULT_CHATTINESS
     interjection: Interjection = Interjection.average
-    lull_timeout: float = 2.0
-    voice_lull_timeout: float = 0.8
+    text_lull_timeout: float = 10.0
+    voice_lull_timeout: float = 2.0
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
 
@@ -387,8 +388,8 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         data.get("interjection"), default=Interjection.average
     )
 
-    lull_timeout = float(data.get("lull_timeout", 2.0))
-    voice_lull_timeout = float(data.get("voice_lull_timeout", 0.8))
+    text_lull_timeout = float(data.get("text_lull_timeout", 10.0))
+    voice_lull_timeout = float(data.get("voice_lull_timeout", 2.0))
 
     llm_raw = data.get("llm", {})
     if not isinstance(llm_raw, dict):
@@ -411,7 +412,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         aliases=aliases,
         chattiness=chattiness,
         interjection=interjection,
-        lull_timeout=lull_timeout,
+        text_lull_timeout=text_lull_timeout,
         voice_lull_timeout=voice_lull_timeout,
         llm=llm,
         tts=tts,

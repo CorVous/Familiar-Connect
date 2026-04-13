@@ -381,7 +381,7 @@ async def subscribe_my_voice(
             lull_timeout=familiar.config.voice_lull_timeout,
             user_silence_s=0.2,
             on_utterance_complete=voice_response_handler,
-        )
+        )  # voice_lull_timeout, not text_lull_timeout — voice uses pure debounce
         familiar.extras["voice_lull_monitor"] = lull_monitor
 
         async def _route_transcript_to_monitor(  # noqa: RUF029
