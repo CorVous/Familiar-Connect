@@ -34,6 +34,7 @@ from familiar_connect.bot import (
     _run_text_response,
     _run_voice_response,
     create_bot,
+    dispatch_interruption_regen,
     on_message,
     set_channel_mode,
     subscribe_my_voice,
@@ -1491,6 +1492,176 @@ class TestVoiceGenerationCancellation:
         assert tracker.generation_task is None
         assert tracker.state is ResponseState.IDLE
         # No TTS, no history writes.
+        vc.play.assert_not_called()
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=10
+        )
+        assert turns == []
+
+
+class _RecordingLLMClient(LLMClient):
+    """LLMClient capturing the messages passed to ``chat``."""
+
+    def __init__(self, reply: str = "I heard you.") -> None:
+        super().__init__(api_key="test-key", model="stub/test-model")
+        self.reply = reply
+        self.calls: list[list[Message]] = []
+
+    async def chat(self, messages: list[Message]) -> Message:
+        self.calls.append(list(messages))
+        return Message(role="assistant", content=self.reply)
+
+
+class TestStep8LongInterruptionDispatch:
+    """Step 8: long interruption during GENERATING cancels + regenerates.
+
+    Pause-then-commit model: at ``min`` the delivery gate is cleared so
+    the speaking step waits; at the long boundary the generation task is
+    cancelled, ``cancel_committed`` is set, the gate is released, and
+    the regen dispatcher rebuilds the request with the original buffer
+    plus the interrupter's transcript appended as a pending turn.
+    """
+
+    def test_dispatch_regen_preserves_buffer_and_appends_interrupter(
+        self, tmp_path: Path
+    ) -> None:
+        """Regen request carries original pending_turns + interrupter."""
+        familiar = _make_familiar(tmp_path, reply="Got it.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        recorder = _RecordingLLMClient(reply="Got it.")
+        familiar.llm_clients["main_prose"] = recorder
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        tracker = familiar.tracker_registry.get(999)
+        original_buffer = [
+            BufferedMessage(speaker="Alice", text="hey", timestamp=0.0),
+            BufferedMessage(speaker="Alice", text="you there", timestamp=1.0),
+        ]
+
+        asyncio.run(
+            dispatch_interruption_regen(
+                channel_id=9000,
+                guild_id=999,
+                speaker_name="Alice",
+                transcript="actually never mind",
+                original_buffer=original_buffer,
+                familiar=familiar,
+                vc=vc,
+                tracker=tracker,
+            )
+        )
+
+        assert len(recorder.calls) == 1
+        msgs = recorder.calls[0]
+        user_texts = [m.content for m in msgs if m.role == "user"]
+        assert "Alice: hey" in user_texts
+        assert "Alice: you there" in user_texts
+        assert "Alice: actually never mind" in user_texts
+        # interrupter goes last
+        assert user_texts.index("Alice: actually never mind") == len(user_texts) - 1
+
+    def test_cancelled_turn_writes_no_history_on_cancel_committed(
+        self, tmp_path: Path
+    ) -> None:
+        """Long-interruption cancel path skips history writes."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        async def _run() -> None:
+            task = asyncio.create_task(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hey",
+                    buffer=[
+                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
+                    ],
+                    familiar=familiar,
+                    vc=vc,
+                    trigger=ResponseTrigger.direct_address,
+                )
+            )
+            await slow_client.started.wait()
+            tracker = familiar.tracker_registry.get(999)
+            assert tracker.generation_task is not None
+            # simulate _commit_long: set flag, cancel task, release gate
+            tracker.cancel_committed = True
+            tracker.generation_task.cancel()
+            tracker.delivery_gate.set()
+            await task
+
+        asyncio.run(_run())
+
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.generation_task is None
+        vc.play.assert_not_called()
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=10
+        )
+        assert turns == []
+
+    def test_post_gate_cancel_committed_aborts_tts_and_history(
+        self, tmp_path: Path
+    ) -> None:
+        """Long boundary crosses AFTER generation completes: abort TTS.
+
+        Covers the race where the LLM finishes before the long-boundary
+        timer fires. ``delivery_gate`` gates TTS; once released with
+        ``cancel_committed=True``, the post-gate check returns early.
+        """
+        familiar = _make_familiar(tmp_path, reply="Nevermind.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        tracker = familiar.tracker_registry.get(999)
+        tracker.delivery_gate.clear()
+        tracker.cancel_committed = True
+
+        async def _run() -> None:
+            task = asyncio.create_task(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hey",
+                    buffer=[
+                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
+                    ],
+                    familiar=familiar,
+                    vc=vc,
+                    trigger=ResponseTrigger.direct_address,
+                )
+            )
+            for _ in range(50):
+                await asyncio.sleep(0)
+                if (
+                    tracker.generation_task is None
+                    and not tracker.delivery_gate.is_set()
+                ):
+                    break
+            tracker.delivery_gate.set()
+            await task
+
+        asyncio.run(_run())
+
         vc.play.assert_not_called()
         turns = familiar.history_store.recent(
             familiar_id=familiar.id, channel_id=9000, limit=10

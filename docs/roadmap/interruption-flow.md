@@ -1,14 +1,15 @@
 # Voice Interruption Flow
 
-!!! success "Status: Partially shipped — plumbing + detection complete; dispatch pending"
+!!! success "Status: Partially shipped — Step 8 (GENERATING dispatch) live; Steps 11–12 pending"
     The state machine, interruption detector, tolerance system, Cartesia
     streaming TTS, and cancellable generation task are all in production
-    code. Interruptions are classified and logged but **no dispatch
-    happens yet** — the bot's voice behaviour is identical to before
-    this work began. The next integration-test stops (Steps 8, 9, 11,
-    12) will enable the actual yield / cancel / resume paths one at a
-    time. See [Implementation status](#implementation-status) below for
-    what is live, what is a stub, and what is still pending.
+    code. Interruption-during-GENERATING now dispatches via a unified
+    pause-then-commit mechanism (Step 8, absorbing former Step 9): short
+    interruptions pause delivery until silence resumes, long interruptions
+    cancel generation and regenerate carrying the original pending turns
+    plus the interrupter's transcript forward. SPEAKING-state dispatch
+    (Steps 11, 12) remains pending. See
+    [Implementation status](#implementation-status) below.
 
 When a user speaks for at least `min_interruption_s` while the familiar
 is either generating a response or speaking, it counts as an
@@ -37,7 +38,8 @@ into a single event.
 | 5 | `voice/interruption.py` — `InterruptionDetector` | Watches voice-activity events while state ≠ `IDLE`. Accumulates burst duration, classifies as *discarded* / *short* / *long*, logs result with state + starter user. No dispatch yet. |
 | 6 | `mood.py` — `MoodEvaluator` stub + tolerance roll | `ResponseTracker.compute_effective_tolerance` and `should_keep_talking` methods. Tolerance roll is **logged** at min-threshold crossing during `SPEAKING`. No action on the result yet. |
 | 7 | `bot.py` — cancellable LLM task | Voice `main_prose` chat call wrapped as `asyncio.Task` parked on `tracker.generation_task`. `CancelledError` is caught and returns cleanly to `IDLE`. No caller cancels yet. |
-| 8 (plumbing) | `context/types.py` + `context/render.py` | `ContextRequest.interruption_context: str \| None` field. Renderer inserts it as a `system` message before the final user turn when non-empty. Nothing populates it yet. |
+| 8 (plumbing) | `context/types.py` + `context/render.py` | `ContextRequest.interruption_context: str \| None` field. Renderer inserts it as a `system` message before the final user turn when non-empty. Reserved for Step 12; not populated by Step 8 dispatch. |
+| 8 (dispatch) | `voice/interruption.py` + `bot.py` | Unified pause-then-commit during `GENERATING`. At `min_interruption_s` crossed, `tracker.delivery_gate` clears so TTS blocks. On burst finalize-as-short, gate is set → original reply delivered. On `short_long_boundary_s` crossed mid-burst, `_commit_long()` cancels `generation_task`, flips `cancel_committed`, and dispatches `dispatch_interruption_regen` which rebuilds a `ContextRequest` carrying the original `pending_turns` plus a trailing `PendingTurn` from the interrupter. History writes are skipped on the cancelled turn. Step 9 absorbed. |
 | 10 | `voice/interruption.py` — `split_at_elapsed` + playback stamp | `transition(SPEAKING)` stamps `playback_start_time`. `split_at_elapsed(timestamps, elapsed_ms) → (delivered, remaining)` partitions word timestamps at a word boundary. Neither is called yet. |
 
 ### Stubs — interface live, real logic pending
@@ -46,16 +48,14 @@ into a single event.
 |---|---|---|---|
 | `MoodEvaluator.evaluate()` | `mood.py` | Always returns `0.0`. Logged as `mood_modifier=0.00 (stub)`. | Step 13 — real side-model LLM call |
 | Tolerance-roll dispatch | `voice/interruption.py` `InterruptionDetector._on_min_crossed` | Roll is computed and logged (`toll: base=… → keep_talking/yield`) but the result drives no action. | Step 11 — yield path wired |
-| `tracker.generation_task.cancel()` | `bot.py` | Task exists and responds correctly to cancellation, but no code calls `.cancel()` yet. | Step 8 dispatch |
-| `ContextRequest.interruption_context` | `context/types.py` | Field exists; renderer handles it. No caller populates it. | Steps 8 + 12 |
+| `ContextRequest.interruption_context` | `context/types.py` | Field exists; renderer handles it. Reserved for Step 12 (long-during-SPEAKING). Step 8 does not use it — carries interrupter transcript as a `PendingTurn` instead. | Step 12 |
 | `split_at_elapsed` | `voice/interruption.py` | Helper is implemented and unit-tested. No caller uses it. | Step 11 |
 
 ### Pending (behavior-changing)
 
 | Step | What changes |
 |---|---|
-| 8 dispatch | Long interruption during `GENERATING` → `generation_task.cancel()` + rebuild `ContextRequest` with `interruption_context` + re-generate. **STOP gate — integration test required.** |
-| 9 | Short interruption during `GENERATING` → gate delivery on `asyncio.Event`; deliver original response once user is quiet. **STOP gate.** |
+| ~~9~~ | Absorbed into Step 8 (pause-then-commit covers both short and long during `GENERATING`). |
 | 11 | Short interruption during `SPEAKING` → yield path (`vc.stop()` + re-synth remaining) and push-through path (audio continues). **STOP gate.** |
 | 12 | Long interruption during `SPEAKING` → yield path: record `delivered_text`, build new `ContextRequest`, re-generate. **STOP gate.** |
 | 13 | `MoodEvaluator` real implementation — short LLM prompt inspecting recent turns; result in `[−0.5, +0.5]`. **STOP gate.** |
@@ -199,23 +199,38 @@ at classification time. A burst that began during `IDLE` and carried into
 
 The LLM call is in-flight. A user starts talking.
 
-### Short interruption (Step 9 — pending)
+Step 8 handles both short and long via a unified pause-then-commit gate.
+
+### Short interruption (Step 8 — shipped)
 
 - Do **not** cancel the generation — let it finish.
-- Gate delivery on an `asyncio.Event` set when silence resumes.
-- Once quiet, proceed to TTS + playback as normal.
+- At `min_interruption_s`, `tracker.delivery_gate` is cleared so the
+  post-generation `await tracker.delivery_gate.wait()` blocks TTS.
+- On burst finalize-as-short, the gate is set → the originally-generated
+  reply is delivered unchanged.
 - Effect: the familiar pauses politely, then speaks as if nothing happened.
 
-### Long interruption (Step 8 dispatch — pending)
+### Long interruption (Step 8 — shipped)
 
-- Cancel `tracker.generation_task`.
-- Capture the interruption transcript.
-- Set `ContextRequest.interruption_context`:
-  ```
-  {speaker} interrupted while you were forming a response.
-  They said: "{transcript}"
-  ```
-- Regenerate. The reply now accounts for the new context.
+- At `short_long_boundary_s` crossed mid-burst, `_commit_long()` fires:
+  - Cancels `tracker.generation_task`.
+  - Sets `tracker.cancel_committed = True`.
+  - Sets the delivery gate (awaiter unblocks, sees the flag, returns
+    without TTS or history writes).
+  - Dispatches `dispatch_interruption_regen(...)` on the event loop.
+- The dispatcher:
+  - Reads `tracker.pending_buffer` (original user turns stashed at
+    `GENERATING` entry).
+  - Builds a new `ContextRequest` with `pending_turns` equal to the
+    original buffer **plus** a trailing `PendingTurn` from the
+    interrupter carrying the accumulated transcript.
+  - Calls the shared `_run_voice_response_with_request` helper which
+    generates, synthesizes, and plays the replacement reply.
+- Effect: no tokens lost — original user messages plus the interruption
+  appear in the regen request as contiguous user speech. The LLM sees a
+  uniform conversation view; `interruption_context` is **not** used here
+  (it is reserved for Step 12's long-during-SPEAKING case, where framing
+  about a cut-off assistant reply is actually needed).
 
 ---
 
@@ -310,18 +325,36 @@ Examples of drift:
 ### Interrupted during generation (long) — Step 8 dispatch
 
 ```
-User speaks (>boundary_s) ─── detector ─── long@GENERATING
+User speaks (>boundary_s) ─── _commit_long fires mid-burst
                                                    │
                                     generation_task.cancel()
+                                    cancel_committed = True
+                                    delivery_gate.set()
                                                    │
-User quiet ─── capture transcript ─────────────────►
+                        dispatch_interruption_regen()
                                                    │
-                                    build ContextRequest
-                                    (interruption_context set)
+                          build ContextRequest with:
+                           • original pending_turns (preserved)
+                           • trailing PendingTurn from interrupter
                                                    │
                                            new LLM call
                                                    │
                                              TTS + play
+```
+
+### Interrupted during generation (short) — Step 8 pause
+
+```
+User speaks (≥min, <boundary) ─── _maybe_log_min_crossed
+                                        delivery_gate.clear()
+                                                   │
+LLM completes ─── await delivery_gate.wait() (blocks)
+                                                   │
+User quiet ─── _finalize_burst classifies short
+                                        delivery_gate.set()
+                                                   │
+                                  await returns → TTS + play
+                                  (original reply, unchanged)
 ```
 
 ### Interrupted while speaking (short, yielded) — Step 11

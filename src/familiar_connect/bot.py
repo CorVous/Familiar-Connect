@@ -17,21 +17,26 @@ from typing import TYPE_CHECKING, cast
 import discord
 import httpx
 
-from familiar_connect.config import ChannelMode
+from familiar_connect.chattiness import BufferedMessage
+from familiar_connect.config import ChannelConfig, ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
-from familiar_connect.voice.interruption import InterruptionDetector, ResponseState
+from familiar_connect.voice.interruption import (
+    InterruptionDetector,
+    ResponseState,
+    ResponseTracker,
+)
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
+    from familiar_connect.chattiness import ResponseTrigger
     from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
@@ -138,17 +143,19 @@ async def _run_voice_response(
     vc: discord.VoiceClient,
     trigger: ResponseTrigger,
 ) -> None:
-    """Run full pipeline → LLM → TTS path for voice channel."""
-    # resolve per-guild response tracker; mark unsolicited flag
+    """Run full pipeline → LLM → TTS path for voice channel.
+
+    Thin shim: builds the initial :class:`ContextRequest` and delegates to
+    :func:`_run_voice_response_with_request`. The regen-on-interruption
+    path (:func:`dispatch_interruption_regen`) shares the same helper.
+    """
     tracker = familiar.tracker_registry.get(guild_id if guild_id is not None else 0)
     tracker.vc = vc
     tracker.is_unsolicited = trigger.is_unsolicited
     # cache mood modifier for whole turn (no mid-response re-roll)
     tracker.mood_modifier = familiar.mood_evaluator.evaluate()
-    tracker.transition(ResponseState.GENERATING)
 
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
-
     # disable LLM-calling providers and processors for voice to reduce
     # real-time latency; remove this replace() call to re-enable
     channel_config = dataclasses.replace(
@@ -161,7 +168,6 @@ async def _run_voice_response(
         preprocessors_enabled=frozenset(),
         postprocessors_enabled=frozenset(),
     )
-
     request = ContextRequest(
         familiar_id=familiar.id,
         channel_id=channel_id,
@@ -175,6 +181,37 @@ async def _run_voice_response(
             PendingTurn(speaker=m.speaker, text=m.text) for m in buffer
         ),
     )
+    await _run_voice_response_with_request(
+        request=request,
+        channel_config=channel_config,
+        buffer=buffer,
+        familiar=familiar,
+        vc=vc,
+        tracker=tracker,
+    )
+
+
+async def _run_voice_response_with_request(
+    *,
+    request: ContextRequest,
+    channel_config: ChannelConfig,
+    buffer: list[BufferedMessage],
+    familiar: Familiar,
+    vc: discord.VoiceClient,
+    tracker: ResponseTracker,
+) -> None:
+    """Core pipeline → LLM → TTS → play path; shared by initial + regen.
+
+    Caller supplies a fully-formed :class:`ContextRequest`. Step-8 gate +
+    commit flag consumed here so the regen path shares this body without
+    duplicating orchestration.
+    """
+    # stash original user buffer so the dispatcher can replay on cancel
+    tracker.pending_buffer = list(buffer)
+    tracker.transition(ResponseState.GENERATING)
+
+    channel_id = request.channel_id
+    guild_id = request.guild_id
 
     pipeline = familiar.build_pipeline(channel_config)
     pipeline_output = await pipeline.assemble(
@@ -224,7 +261,16 @@ async def _run_voice_response(
             # outer task cancelled from above — propagate
             tracker.transition(ResponseState.IDLE)
             raise
-        # generation task cancelled (interruption path)
+        # step 8: long-interruption path — dispatcher owns regen + state.
+        # don't write history (buffer forwards to regen); don't reset
+        # scratch (dispatcher yields via sleep(0) then transitions IDLE).
+        if tracker.cancel_committed:
+            _logger.info(
+                "voice generation cancelled by long-interruption channel=%s",
+                channel_id,
+            )
+            return
+        # unexpected cancellation outside the interruption dispatch path
         _logger.info(
             "voice generation cancelled channel=%s",
             channel_id,
@@ -241,6 +287,20 @@ async def _run_voice_response(
         tracker.transition(ResponseState.IDLE)
         return
     tracker.generation_task = None
+
+    # step 8: pause until burst finalizes (short) or commits long.
+    # gate is only cleared when min-crossed during GENERATING; no-op fast
+    # path in the common case where no interruption registered.
+    await tracker.delivery_gate.wait()
+    if tracker.cancel_committed:
+        # long boundary crossed while we were generating or post-gate;
+        # dispatcher owns regen. Skip history + TTS + play.
+        _logger.info(
+            "voice reply aborted by long-interruption channel=%s",
+            channel_id,
+        )
+        return
+
     reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 
@@ -261,7 +321,7 @@ async def _run_voice_response(
         guild_id=guild_id,
         role="assistant",
         content=reply_text,
-        mode=channel_config.mode,
+        mode=channel_config.mode,  # type: ignore[attr-defined]
     )
 
     _logger.info("[Voice Response] %s", reply_text)
@@ -282,6 +342,84 @@ async def _run_voice_response(
         except Exception:
             _logger.exception("Voice response TTS failed")
     tracker.transition(ResponseState.IDLE)
+
+
+async def dispatch_interruption_regen(
+    *,
+    channel_id: int,
+    guild_id: int | None,
+    speaker_name: str,
+    transcript: str,
+    original_buffer: list[BufferedMessage],
+    familiar: Familiar,
+    vc: discord.VoiceClient,
+    tracker: ResponseTracker,
+) -> None:
+    """Re-run voice pipeline after a long interruption commits.
+
+    Preserves ``original_buffer`` as leading pending turns and appends
+    the interrupter's transcript as a trailing user turn. Yields once to
+    let the cancelled branch of the prior ``_run_voice_response`` settle
+    before resetting tracker state.
+    """
+    # let the cancelled branch of the original call settle first so its
+    # IDLE transition (if any) doesn't stomp on the fresh GENERATING
+    await asyncio.sleep(0)
+
+    # reset scratch (gate, cancel flag, pending buffer, etc.)
+    tracker.transition(ResponseState.IDLE)
+
+    channel_config = familiar.channel_configs.get(channel_id=channel_id)
+    channel_config = dataclasses.replace(
+        channel_config,
+        providers_enabled=channel_config.providers_enabled
+        - {
+            "content_search",
+            "history",
+        },
+        preprocessors_enabled=frozenset(),
+        postprocessors_enabled=frozenset(),
+    )
+
+    # build combined buffer: original user turns + interrupter's transcript
+    combined_buffer: list[BufferedMessage] = list(original_buffer)
+    interrupter_msg = BufferedMessage(
+        speaker=speaker_name,
+        text=transcript,
+        timestamp=0.0,
+    )
+    combined_buffer.append(interrupter_msg)
+
+    pending_turns = tuple(
+        PendingTurn(speaker=m.speaker, text=m.text) for m in combined_buffer
+    )
+
+    request = ContextRequest(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        speaker=speaker_name,
+        utterance=transcript,
+        modality=Modality.voice,
+        budget_tokens=channel_config.budget_tokens,
+        deadline_s=channel_config.deadline_s,
+        pending_turns=pending_turns,
+    )
+
+    # mark unsolicited=False: this is a direct reply to an interrupter,
+    # not a chattiness interjection. mood eval re-runs for new turn.
+    tracker.is_unsolicited = False
+    tracker.mood_modifier = familiar.mood_evaluator.evaluate()
+    tracker.vc = vc
+
+    await _run_voice_response_with_request(
+        request=request,
+        channel_config=channel_config,
+        buffer=combined_buffer,
+        familiar=familiar,
+        vc=vc,
+        tracker=tracker,
+    )
 
 
 async def subscribe_my_voice(
@@ -416,7 +554,7 @@ async def subscribe_my_voice(
                 if tracker.state is ResponseState.GENERATING:
                     tracker.transition(ResponseState.IDLE)
 
-        # per-guild interruption detector (detect-only for now)
+        # per-guild interruption detector (step 8: dispatches regen)
         interruption_detector = InterruptionDetector(
             tracker_registry=familiar.tracker_registry,
             guild_id=voice_guild_id if voice_guild_id is not None else 0,
@@ -425,6 +563,49 @@ async def subscribe_my_voice(
             lull_timeout_s=familiar.config.voice_lull_timeout,
             base_tolerance=(familiar.config.interrupt_tolerance.base_probability),
         )
+
+        # step 8: dispatcher fires regen when long boundary crossed
+        # during GENERATING. resolves the interrupter's display name from
+        # the user_names map or channel members.
+        def _resolve_interrupter_name(user_id: int) -> str:
+            raw = user_names.get(user_id)
+            if raw is None:
+                for member in channel.members:
+                    if member.id == user_id:
+                        raw = member.display_name
+                        break
+            if raw is None:
+                raw = f"User-{user_id}"
+            return sanitize_name(raw) or raw
+
+        regen_tasks: set[asyncio.Task[None]] = set()
+
+        def _dispatch_regen(
+            *,
+            speaker_user_id: int,
+            transcript: str,
+            original_buffer: list[BufferedMessage],
+            tracker: ResponseTracker,
+        ) -> None:
+            speaker_name = _resolve_interrupter_name(speaker_user_id)
+            task = asyncio.create_task(
+                dispatch_interruption_regen(
+                    channel_id=voice_channel_id,
+                    guild_id=voice_guild_id,
+                    speaker_name=speaker_name,
+                    transcript=transcript,
+                    original_buffer=original_buffer,
+                    familiar=familiar,
+                    vc=vc,
+                    tracker=tracker,
+                ),
+            )
+            regen_tasks.add(task)
+            task.add_done_callback(regen_tasks.discard)
+
+        familiar.extras["voice_interruption_regen_tasks"] = regen_tasks
+
+        interruption_detector.set_dispatch(_dispatch_regen)
         familiar.extras["interruption_detector"] = interruption_detector
 
         # debounce per-final Deepgram fragments into a single utterance
@@ -444,6 +625,9 @@ async def subscribe_my_voice(
             result: TranscriptionResult,
         ) -> None:
             lull_monitor.on_transcript(user_id, result)
+            # step 8: feed finals to the detector's burst transcript
+            # accumulator; detector ignores when no burst active.
+            interruption_detector.on_transcript(user_id, result.text)
 
         pipeline = await start_pipeline(
             familiar.transcriber,

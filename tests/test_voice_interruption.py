@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -20,6 +20,7 @@ from familiar_connect.voice.interruption import (
 from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Callable
 
 
@@ -1124,3 +1125,235 @@ class TestSpeakingTransitionStampsPlaybackStart:
         t.playback_start_time = 100.0
         t.transition(ResponseState.IDLE)
         assert t.playback_start_time is None
+
+
+class TestResponseTrackerInterruptionFields:
+    """Step 8: pause-then-commit state on the tracker."""
+
+    def test_new_tracker_delivery_gate_is_set(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        assert t.delivery_gate.is_set()
+
+    def test_new_tracker_cancel_committed_is_false(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        assert t.cancel_committed is False
+
+    def test_new_tracker_pending_buffer_is_empty(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        assert t.pending_buffer == []
+
+    def test_idle_resets_delivery_gate_cancel_and_buffer(self) -> None:
+        from familiar_connect.chattiness import BufferedMessage  # noqa: PLC0415
+
+        t = ResponseTracker(guild_id=1)
+        t.state = ResponseState.GENERATING
+        t.delivery_gate.clear()
+        t.cancel_committed = True
+        t.pending_buffer = [BufferedMessage(speaker="u", text="x", timestamp=0.0)]
+        t.transition(ResponseState.IDLE)
+        assert t.delivery_gate.is_set()
+        assert t.cancel_committed is False
+        assert t.pending_buffer == []
+
+
+class TestInterruptionDetectorTranscriptAccumulator:
+    """Step 8: burst-scoped transcript capture."""
+
+    def test_on_transcript_ignored_when_no_active_burst(self) -> None:
+        detector, _registry, _clock, _scheduler = _make_detector()
+        detector.on_transcript(42, "pre-burst noise")
+        assert detector._burst_transcript == []
+
+    def test_on_transcript_accumulates_during_active_burst(self) -> None:
+        detector, registry, clock, _scheduler = _make_detector()
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hello")
+        clock.advance(0.1)
+        detector.on_transcript(42, "world")
+        assert detector._burst_transcript == ["hello", "world"]
+
+    def test_finalize_resets_transcript(self) -> None:
+        detector, registry, clock, scheduler = _make_detector()
+        registry.get(1).state = ResponseState.SPEAKING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey")
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert detector._burst_transcript == []
+
+
+class TestInterruptionDetectorMinCrossedClearsGate:
+    """Step 8: gate cleared at min during GENERATING."""
+
+    def test_min_crossed_generating_clears_delivery_gate(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        assert tracker.delivery_gate.is_set()
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        assert not tracker.delivery_gate.is_set()
+
+    def test_min_crossed_speaking_does_not_clear_gate(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        assert tracker.delivery_gate.is_set()
+
+    def test_short_finalize_during_generating_releases_gate(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.0, boundary_s=30.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+        assert not tracker.delivery_gate.is_set()
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.delivery_gate.is_set()
+
+
+class _FakeTask:
+    """Minimal stand-in for :class:`asyncio.Task` that records cancel()."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> bool:
+        self.cancelled = True
+        return True
+
+    def done(self) -> bool:
+        return self.cancelled
+
+
+class TestInterruptionDetectorLongCommit:
+    """Step 8: long boundary commits cancellation + dispatch."""
+
+    def test_long_boundary_cancels_generation_task(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=3.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        task = _FakeTask()
+        tracker.generation_task = cast("asyncio.Task[Any]", task)
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(3.0)
+        scheduler.fire_for(detector._on_long_boundary_crossed)
+        assert task.cancelled is True
+
+    def test_long_boundary_sets_cancel_committed_and_releases_gate(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=3.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        assert not tracker.delivery_gate.is_set()
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_long_boundary_crossed)
+        assert tracker.cancel_committed is True
+        assert tracker.delivery_gate.is_set()
+
+    def test_long_boundary_during_speaking_does_not_commit_or_cancel(
+        self,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=3.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        task = _FakeTask()
+        tracker.generation_task = cast("asyncio.Task[Any]", task)
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(3.0)
+        scheduler.fire_for(detector._on_long_boundary_crossed)
+        assert tracker.cancel_committed is False
+        assert task.cancelled is False
+
+    def test_long_boundary_dispatches_with_transcript_and_buffer(self) -> None:
+        from familiar_connect.chattiness import BufferedMessage  # noqa: PLC0415
+
+        dispatched: list[dict[str, object]] = []
+
+        def _dispatch(
+            *,
+            speaker_user_id: int,
+            transcript: str,
+            original_buffer: list[BufferedMessage],
+            tracker: ResponseTracker,
+        ) -> None:
+            dispatched.append(
+                {
+                    "speaker_user_id": speaker_user_id,
+                    "transcript": transcript,
+                    "original_buffer": list(original_buffer),
+                    "tracker": tracker,
+                },
+            )
+
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=3.0)
+        detector.set_dispatch(_dispatch)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        original = [
+            BufferedMessage(speaker="alice", text="first", timestamp=0.0),
+            BufferedMessage(speaker="alice", text="second", timestamp=0.0),
+        ]
+        tracker.pending_buffer = list(original)
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "wait no")
+        clock.advance(3.0)
+        scheduler.fire_for(detector._on_long_boundary_crossed)
+        assert len(dispatched) == 1
+        payload = dispatched[0]
+        assert payload["speaker_user_id"] == 42
+        assert payload["transcript"] == "wait no"
+        assert payload["original_buffer"] == original
+        assert payload["tracker"] is tracker
+
+    def test_short_finalize_does_not_dispatch(self) -> None:
+        dispatched: list[object] = []
+
+        def _dispatch(**kwargs: object) -> None:
+            dispatched.append(kwargs)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.0, boundary_s=30.0
+        )
+        detector.set_dispatch(_dispatch)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert dispatched == []
+
+    def test_long_finalize_is_idempotent_after_mid_burst_commit(self) -> None:
+        dispatched: list[object] = []
+
+        def _dispatch(**kwargs: object) -> None:
+            dispatched.append(kwargs)
+
+        detector, registry, clock, scheduler = _make_detector(min_s=1.0, boundary_s=3.0)
+        detector.set_dispatch(_dispatch)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(3.0)
+        scheduler.fire_for(detector._on_long_boundary_crossed)
+        assert len(dispatched) == 1
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        # long finalize after mid-burst commit: no duplicate dispatch
+        assert len(dispatched) == 1
