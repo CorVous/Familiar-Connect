@@ -888,6 +888,23 @@ class InterruptionDetector:
                 cb2 = self._on_push_through_transcript
                 if cb2 is not None and transcript:
                     cb2(starter_id, transcript)
+        # Step 11b dispatch: long interruption during SPEAKING with push-through.
+        # Familiar kept talking (did_yield=False) but user spoke for a long time.
+        # Forward transcript to push-through callback so it lands in history.
+        if (
+            classification is InterruptionClass.long
+            and state is ResponseState.SPEAKING
+            and not did_yield
+        ):
+            _logger.info(
+                "dispatch: long@SPEAKING push-through speaker=%s",
+                self._name_resolver(starter_id)
+                if self._name_resolver is not None
+                else starter_id,
+            )
+            cb3 = self._on_push_through_transcript
+            if cb3 is not None and transcript:
+                cb3(starter_id, transcript)
         # Step 9 dispatch: short interruption during GENERATING.
         # Familiar keeps generating; delivery gate already opens on
         # finalize so playback proceeds naturally. Stash the interrupter

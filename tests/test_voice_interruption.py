@@ -2227,3 +2227,123 @@ class TestInterruptionLogNames:
             "speaker=42" in r.message and "interruption:" in r.message
             for r in caplog.records
         )
+
+
+class TestLongSpeakingPushThrough:
+    """Step 11b: long interruption while SPEAKING with push-through.
+
+    When the familiar decides to keep talking at Moment 1 (push-through)
+    but the burst grows past ``short_long_boundary_s``, the interrupter
+    transcript must still be forwarded to the push-through callback so it
+    lands in history.
+    """
+
+    def test_dispatch_log_emitted(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,  # high tolerance → rng=0.01 < 0.99 → keep
+            rng=lambda: 0.01,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = _FakeVC()  # ty: ignore[invalid-assignment]
+
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)  # crosses min → Moment 1 → keep
+            scheduler.fire_for(detector._on_min_crossed)
+            clock.advance(3.0)  # total 5s > boundary_s=4 → long
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "dispatch: long@SPEAKING push-through" in r.message for r in caplog.records
+        )
+
+    def test_push_through_callback_invoked(self) -> None:
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,
+            rng=lambda: 0.01,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = _FakeVC()  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey what about this")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(3.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert push_through_calls == [(42, "hey what about this")]
+
+    def test_yield_path_does_not_invoke_push_through(self) -> None:
+        # Roll > tolerance → yield, not push-through; callback must NOT fire.
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,  # low tolerance → rng=0.99 > 0.10 → yield
+            rng=lambda: 0.99,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = _FakeVC()  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "actually you know what")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(3.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert push_through_calls == []
+
+    def test_long_generating_does_not_invoke_push_through(self) -> None:
+        # long@GENERATING must not fire the push-through callback.
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "wait hold on")
+        clock.advance(5.0)  # exceeds boundary → long
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert push_through_calls == []
