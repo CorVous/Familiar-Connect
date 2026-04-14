@@ -1302,3 +1302,65 @@ class TestInterruptionDetectorLongDispatch:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         assert any("dispatch: long@GENERATING" in r.message for r in caplog.records)
+
+
+class TestInterruptionDetectorDeliveryGate:
+    """Delivery gate: cleared at burst start, set at finalize/abort."""
+
+    @pytest.mark.asyncio
+    async def test_gate_open_when_no_burst(self) -> None:
+        detector, _, _, _ = _make_detector()
+        result = await detector.wait_for_lull()
+        assert result is None
+
+    def test_gate_closed_at_burst_start(self) -> None:
+        detector, registry, _, _ = _make_detector()
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._delivery_gate.is_set()
+
+    @pytest.mark.asyncio
+    async def test_gate_opens_after_abort(self) -> None:
+        detector, registry, _, _ = _make_detector()
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._delivery_gate.is_set()
+        detector._abort_burst()
+        result = await detector.wait_for_lull()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_gate_opens_and_returns_long(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        result = await detector.wait_for_lull()
+        assert result is InterruptionClass.long
+
+    @pytest.mark.asyncio
+    async def test_gate_opens_and_returns_short(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        result = await detector.wait_for_lull()
+        assert result is InterruptionClass.short
+
+    @pytest.mark.asyncio
+    async def test_gate_clears_between_bursts(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        # First burst finalizes → gate opens.
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert detector._delivery_gate.is_set()
+        # Second burst starts → gate re-closes.
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._delivery_gate.is_set()

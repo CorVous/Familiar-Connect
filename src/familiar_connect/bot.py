@@ -27,7 +27,11 @@ from familiar_connect.llm import sanitize_name
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
-from familiar_connect.voice.interruption import InterruptionDetector, ResponseState
+from familiar_connect.voice.interruption import (
+    InterruptionClass,
+    InterruptionDetector,
+    ResponseState,
+)
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
@@ -272,35 +276,43 @@ async def _run_voice_response(
     reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 
-    # persist every buffered user utterance then the assistant reply
-    # after the LLM call so a crash never leaves an orphaned user
-    # turn with no reply; mirrors _run_text_response
-    for msg in buffer:
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=channel_id,
-            guild_id=guild_id,
-            role="user",
-            content=msg.text,
-            speaker=msg.speaker,
-            mode=channel_config.mode,
-        )
-    familiar.history_store.append_turn(
-        familiar_id=familiar.id,
-        channel_id=channel_id,
-        guild_id=guild_id,
-        role="assistant",
-        content=reply_text,
-        mode=channel_config.mode,
-    )
-
-    _logger.info("[Voice Response] %s", reply_text)
-
     if familiar.tts_client is not None:
         try:
             tts_result = await familiar.tts_client.synthesize(reply_text)
             tracker.timestamps = list(tts_result.timestamps)
             stereo = mono_to_stereo(tts_result.audio)
+            # Delivery gate: await any active burst before transitioning to
+            # SPEAKING. Keeps _burst_latest_state as GENERATING so
+            # _finalize_burst classifies correctly even when TTS synthesis
+            # spans the lull window (fast LLM + slow TTS scenario).
+            detector = familiar.extras.get("interruption_detector")
+            if isinstance(detector, InterruptionDetector):
+                gate_result = await detector.wait_for_lull()
+                if gate_result is InterruptionClass.long:
+                    # Long interruption: on_long_during_generating already
+                    # scheduled a regen task. Discard — skip history + play.
+                    tracker.transition(ResponseState.IDLE)
+                    return
+            # Persist history only for responses that reach delivery.
+            for msg in buffer:
+                familiar.history_store.append_turn(
+                    familiar_id=familiar.id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    role="user",
+                    content=msg.text,
+                    speaker=msg.speaker,
+                    mode=channel_config.mode,
+                )
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                role="assistant",
+                content=reply_text,
+                mode=channel_config.mode,
+            )
+            _logger.info("[Voice Response] %s", reply_text)
             # Wait for any currently-playing audio to finish.
             # vc.is_playing() is a third-party poll; no event available.
             while vc.is_playing():  # noqa: ASYNC110
@@ -309,13 +321,32 @@ async def _run_voice_response(
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
             # Poll playback to completion so the IDLE transition is
             # observable in the log and the tracker state reflects
-            # reality for the next turn. No interruption dispatch yet
-            # (Step 3 is observational); later steps will replace this
-            # poll with a state-machine-aware loop.
+            # reality for the next turn.
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
         except Exception:
             _logger.exception("Voice response TTS failed")
+    else:
+        # No TTS — write history directly (no delivery gate needed).
+        for msg in buffer:
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                role="user",
+                content=msg.text,
+                speaker=msg.speaker,
+                mode=channel_config.mode,
+            )
+        familiar.history_store.append_turn(
+            familiar_id=familiar.id,
+            channel_id=channel_id,
+            guild_id=guild_id,
+            role="assistant",
+            content=reply_text,
+            mode=channel_config.mode,
+        )
+        _logger.info("[Voice Response] %s", reply_text)
     tracker.transition(ResponseState.IDLE)
 
 

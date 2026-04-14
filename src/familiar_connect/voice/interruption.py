@@ -399,6 +399,13 @@ class InterruptionDetector:
         # each new burst start and at finalize. Passed to the dispatch
         # callback so the regen call can include the user's words.
         self._burst_transcript: str = ""
+        # Delivery gate: cleared at burst start, set at finalize/abort.
+        # _run_voice_response awaits this before transitioning to SPEAKING
+        # so _burst_latest_state stays GENERATING at _finalize_burst time
+        # even when TTS synthesis spans the lull window.
+        self._delivery_gate: asyncio.Event = asyncio.Event()
+        self._delivery_gate.set()  # no burst initially → gate open
+        self._last_classification: InterruptionClass | None = None
 
         # Register as an observer on the guild's tracker so state
         # transitions can retroactively start / abort bursts.
@@ -510,12 +517,23 @@ class InterruptionDetector:
         else:
             self._burst_transcript = text
 
+    async def wait_for_lull(self) -> InterruptionClass | None:
+        """Await active burst finalization; return classification or None.
+
+        Returns immediately if no burst is active. Used by
+        ``_run_voice_response`` to gate the SPEAKING transition so
+        ``_burst_latest_state`` stays ``GENERATING`` at finalize time.
+        """
+        await self._delivery_gate.wait()
+        return self._last_classification
+
     def _start_burst(self, starter_id: int) -> None:
         """Begin a new burst attributed to *starter_id*."""
         self._burst_started_at = self._clock()
         self._burst_starter_id = starter_id
         self._min_logged = False
         self._burst_transcript = ""
+        self._delivery_gate.clear()
         tracker = self._tracker_registry.get(self._guild_id)
         # Capture the tracker's non-IDLE state for log-time resolution.
         # Direct ``tracker.state = ...`` assignments in tests bypass
@@ -537,6 +555,8 @@ class InterruptionDetector:
         self._burst_latest_state = None
         self._min_logged = False
         self._burst_transcript = ""
+        self._last_classification = None
+        self._delivery_gate.set()
 
     def _schedule(self, delay: float, callback: Callable[[], None]) -> _Cancelable:
         scheduler = self._scheduler
@@ -664,6 +684,8 @@ class InterruptionDetector:
         duration = last_ended_at - started_at
 
         classification = self._classify(duration)
+        self._last_classification = classification
+        self._delivery_gate.set()
         _logger.info(
             "interruption: %s (%.2fs) by user=%s during %s",
             classification.value,

@@ -48,7 +48,13 @@ from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.transcription import TranscriptionResult
-from familiar_connect.voice.interruption import ResponseState
+from familiar_connect.tts import TTSResult
+from familiar_connect.voice.interruption import (
+    InterruptionClass,
+    InterruptionDetector,
+    ResponseState,
+    ResponseTrackerRegistry,
+)
 from familiar_connect.voice_lull import VoiceLullMonitor
 
 if TYPE_CHECKING:
@@ -1681,3 +1687,157 @@ class TestDispatchInterruptionRegen:
         # Regen user + assistant turn written.
         assert any("hey stop" in c for c in contents)
         assert any("Regen reply." in c for c in contents)
+
+
+def _make_stub_detector(
+    classification: InterruptionClass | None,
+    *,
+    guild_id: int = 999,
+) -> InterruptionDetector:
+    """Real InterruptionDetector with gate pre-opened at *classification*.
+
+    Because the gate starts as set (open) in ``__init__`` and
+    ``_last_classification`` defaults to ``None``, callers just override
+    ``_last_classification`` to exercise specific gate outcomes without
+    triggering a real burst.
+    """
+    registry = ResponseTrackerRegistry()
+    detector = InterruptionDetector(
+        tracker_registry=registry,
+        guild_id=guild_id,
+        min_interruption_s=1.5,
+        short_long_boundary_s=4.0,
+        lull_timeout_s=2.0,
+        base_tolerance=0.30,
+    )
+    detector._last_classification = classification
+    return detector
+
+
+class TestDeliveryGate:
+    """Delivery gate: _run_voice_response awaits wait_for_lull() after TTS synthesis."""
+
+    @pytest.mark.asyncio
+    async def test_long_burst_during_tts_prevents_play(self, tmp_path: Path) -> None:
+        """wait_for_lull → long → vc.play not called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.long
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        vc.play.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_long_burst_during_tts_skips_history(self, tmp_path: Path) -> None:
+        """wait_for_lull → long → no history turns written."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.long
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        assert len(turns) == 0
+
+    @pytest.mark.asyncio
+    async def test_short_burst_during_tts_allows_play(self, tmp_path: Path) -> None:
+        """wait_for_lull → short → vc.play IS called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.short
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        vc.play.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_burst_gate_skipped(self, tmp_path: Path) -> None:
+        """wait_for_lull → None → play happens normally."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(None)
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        vc.play.assert_called_once()
