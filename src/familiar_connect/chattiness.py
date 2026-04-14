@@ -114,8 +114,7 @@ _EVALUATION_SYSTEM_PROMPT = """\
 You are a conversation monitor. Your ONLY job is to decide whether \
 {familiar_name} should respond. Reply with exactly two lines:
 Line 1: YES or NO (one word, no punctuation)
-Line 2: One brief sentence explaining your reasoning.
-Do not reply in character."""
+Line 2: One brief sentence in {familiar_name}'s voice explaining why."""
 
 _LULL_PROMPT = """\
 Character: {familiar_name}
