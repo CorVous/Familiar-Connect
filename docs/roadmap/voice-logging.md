@@ -19,7 +19,7 @@ While the familiar is active in a voice channel, operators (and other participan
 4. **The thread receives append-only entries**: timestamped transcript lines, bot responses, notable events (join, leave, interruption, Twitch event acknowledgement).
 5. **On voice leave**, the embed is updated to "Session ended — {duration}, {message_count} exchanges", and the thread is archived.
 
-This keeps the main channel to one message per session while preserving full history in the thread. The [session logging](session-logging.md) writer pass reads the thread content at session end to generate its memory summary.
+This keeps the main channel to one message per session while preserving full history in the thread. The [session logging](../architecture/session-logging.md) writer pass reads the thread content at session end to generate its memory summary.
 
 ### Alternatives considered
 
@@ -34,12 +34,12 @@ This keeps the main channel to one message per session while preserving full his
 - **Thread message format.** Short, regular, timestamp + speaker + text. No distinction between voice and text input:
     - `[12:34] User: "can you tell me a story"`
     - `[12:34] Bot: "Once upon a time..."`
-- **Inline image noting.** Images sent during the session are noted inline in the thread: `[12:34] User: "what do you think of this?" [image: screenshot.png]`. Vision input itself is handled at the pipeline level — see [Voice input § text and image input](voice-input.md#text-and-image-input-during-a-voice-session).
+- **Inline image noting.** Images sent during the session are noted inline in the thread: `[12:34] User: "what do you think of this?" [image: screenshot.png]`. Vision input handling is a [Voice input future-work item](../architecture/voice-input.md#future-work).
 - **Privacy opt-out.** Sensitive content (private conversations) should respect a configurable opt-out so logging can be disabled per-familiar or per-channel. Likely lives on `ChannelConfig` as a `session_logging: bool` field.
 
 ## Non-goals
 
-- **Logging outside Discord.** This page is only about surfacing the session inside the Discord text channel. Persistent on-disk memory of the session is a separate concern — see [Session logging](session-logging.md).
+- **Logging outside Discord.** This page is only about surfacing the session inside the Discord text channel. Persistent on-disk memory of the session is a separate concern — see [Session logging](../architecture/session-logging.md).
 - **A "what happened while I was away" catch-up feature.** Re-opening the archived thread is the catch-up feature.
 
 ## Open questions

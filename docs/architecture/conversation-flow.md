@@ -2,15 +2,7 @@
 
 How the familiar decides **whether** and **when** to speak in a conversation it hasn't been directly addressed in.
 
-!!! info "Status: Shipped"
-    The monitor is wired for both **text** and **voice** channels.
-    `bot.py:on_message` routes text messages through
-    `familiar.monitor.on_message`; `subscribe_my_voice` debounces
-    Deepgram finals through `VoiceLullMonitor` and then hands the
-    merged utterance to the **same** monitor with the voice channel
-    id. On a YES decision, the monitor's `on_respond` callback
-    dispatches to `_run_text_response` or `_run_voice_response` based
-    on whether a voice handler is registered for the channel.
+The monitor is wired for both **text** and **voice** channels. `bot.py:on_message` routes text messages through `familiar.monitor.on_message`; `subscribe_my_voice` debounces Deepgram finals through `VoiceLullMonitor` and then hands the merged utterance to the **same** monitor, keyed by voice channel id. On a YES decision, the monitor's `on_respond` callback dispatches to `_run_text_response` or `_run_voice_response` based on whether a voice handler is registered for the channel.
 
 ## Motivation
 
@@ -92,11 +84,11 @@ For voice, **`voice_lull_timeout` is the only conversational pause** — the mon
 
 **Default:** `5.0`
 
-## Sketch
+## Implementation
 
 ### `ConversationMonitor`
 
-A standalone class that owns all per-channel conversation state and is the single entry point `bot.py` calls instead of going straight to the pipeline. Held on the `Familiar` bundle, built in `Familiar.load_from_disk`.
+A standalone class (`src/familiar_connect/chattiness.py`) that owns all per-channel conversation state and is the single entry point `bot.py` calls instead of going straight to the pipeline. Held on the `Familiar` bundle, built in `Familiar.load_from_disk`.
 
 ```python
 class ConversationMonitor:
@@ -275,41 +267,13 @@ familiar.monitor.on_message(channel_id, speaker, text, is_mention)
             └─ on expiry → acquire lock → side model eval → respond or not
 ```
 
-## Changes by file
-
-| File | Change |
-|---|---|
-| `config.py` | Add `chattiness: str`, `interjection: Interjection`, `lull_timeout: float`, `aliases: list[str]` to `CharacterConfig`. Add `Interjection` enum. Load/validate from TOML. |
-| `chattiness.py` | **New.** `ConversationMonitor`, `ChannelBuffer`, `BufferedMessage`, `is_direct_address()`, interjection step-down logic, lull timer management. |
-| `familiar.py` | Add `monitor: ConversationMonitor` field. Build it in `load_from_disk` from config + side model + character card text. |
-| `bot.py` | `on_message` calls `monitor.on_message()` instead of the pipeline. Pipeline/LLM/reply logic moves into `on_respond` callback. Voice handler gets the same treatment. Unsubscribe commands clear monitor state. |
-| `tests/test_chattiness.py` | **New.** Tests for `is_direct_address`, step-down curve, lull timer firing, evaluation trigger conditions, buffer/counter reset on response. |
-| `tests/test_config.py` | Tests for loading `chattiness`, `interjection`, `lull_timeout`, `aliases` from TOML. Validation of enum values and types. |
-| `tests/test_bot_message_loop.py` | Adjust existing tests — `on_message` no longer calls the pipeline directly. Add cases for the monitor integration. |
-
-## Implementation order (TDD)
-
-Each step follows red/green: write a failing test first, then the minimum code to pass.
-
-1. **Config fields** — `aliases`, `chattiness`, `interjection`, `lull_timeout` on `CharacterConfig` + `Interjection` enum + TOML loading/validation.
-2. **`is_direct_address()`** — pure function, word-boundary-aware, case-insensitive name/alias matching.
-3. **`ChannelBuffer` and `BufferedMessage`** — the per-channel state dataclasses.
-4. **Interjection step-down curve** — a function that computes the next check threshold given the tier and check count.
-5. **`ConversationMonitor` core** — buffer management, counter incrementing, direct-address detection triggering.
-6. **Lull timer** — start/reset/expiry logic using `asyncio` call-later handles.
-7. **Side-model evaluation wiring** — the monitor calls `side_model.complete()` with the assembled prompt, parses YES/NO.
-8. **`on_respond` integration** — callback invocation on YES, state reset.
-9. **`bot.py` integration** — replace direct pipeline calls with `monitor.on_message()`, build the `on_respond` callback, wire up cleanup on unsubscribe.
-10. **`familiar.py` integration** — build the monitor in `load_from_disk`, pass through config and dependencies.
-
 ## Non-goals
 
-- **Interruption of a reply already in progress.** This page covers the **pre-speech** decision (whether to start talking). Cutting off a reply mid-stream when someone else starts talking lives in [Voice input](voice-input.md).
+- **Interruption of a reply already in progress.** This page covers the **pre-speech** decision (whether to start talking). Cutting off a reply mid-stream when someone else starts talking lives in [Voice interruption](interruption.md).
 - **Silence-initiated conversation starts.** The lull trigger requires *some* messages in the buffer. A feature where prolonged silence with an empty buffer causes the familiar to proactively start a new conversation is architecturally different and deferred.
 - **Per-modality evaluation prompts.** Text and voice now have separate lull timeouts (`text_lull_timeout` / `voice_lull_timeout`), but they still share the same evaluation prompt structure. Tuning prompts per modality is a future addition.
 
-## Open questions
+## Future work
 
 - **Twitch events.** Twitch events (subs, bits, raids) should always be acknowledged. They could bypass the monitor entirely, or be treated as direct-address-equivalent triggers. Deferred until Twitch integration is wired into the monitor.
-- **Conversation summary source.** The evaluation prompt includes "a summary of the recent conversation." At evaluation time, this could come from `HistoryProvider`'s cached rolling summary, or be generated fresh. Cached is cheaper; fresh is more accurate. Start with cached.
 - **Static thresholds feel robotic.** Interjection checks fire at fixed intervals (9, 6, 3, …), so a patient observer could count messages and know exactly when the familiar is about to weigh in. A small random jitter (±1–2 messages, clamped at 1, floor at 3) would break the mechanical regularity without changing tier semantics.

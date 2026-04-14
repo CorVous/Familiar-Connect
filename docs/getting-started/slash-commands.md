@@ -35,9 +35,9 @@ Subscriptions and channel modes persist across restarts under
 `data/familiars/<id>/channels/<channel_id>.toml`; delete those files
 to reset.
 
-## Voice input caveat
+## Voice input
 
-`/subscribe-my-voice` currently joins the voice channel and keeps a
-PCM sink open for TTS replies, but **incoming audio is not yet wired
-into the reply pipeline**. See [Voice input](../roadmap/voice-input.md)
-for the roadmap entry.
+`/subscribe-my-voice` joins the voice channel, keeps a PCM sink open for
+TTS replies, and streams incoming audio through Deepgram into the same
+`ConversationMonitor` that handles text. See
+[Voice input](../architecture/voice-input.md) for the full wiring.

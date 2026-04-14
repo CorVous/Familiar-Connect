@@ -5,7 +5,7 @@ The context pipeline is the single path between "something happened" and "call t
 !!! success "Status: Implemented"
     Steps 1–10 below have all shipped. The pipeline, memory store, character unpacker, lorebook importer, providers (`CharacterProvider`, `HistoryProvider`, `ContentSearchProvider`), and both initial processors (`SteppedThinkingPreProcessor`, `RecastPostProcessor`) are in place and individually toggleable per familiar and per modality.
 
-    **Still deferred:** the per-turn monitoring dashboard, a `/context` slash command that shows the last assembled context, wiring STT input into the pipeline, and a `familiar init --from-card` subcommand. See [Roadmap](../roadmap/index.md).
+    **Still deferred:** the per-turn monitoring dashboard, a `/context` slash command that shows the last assembled context, and a `familiar init --from-card` subcommand. See [Roadmap](../roadmap/index.md).
 
 ## Shape of one reply turn
 
