@@ -111,6 +111,13 @@ class ResponseTracker:
     # buffer write (preserves chronology: buffer → interrupter →
     # assistant reply). Each entry is (resolved_name, transcript).
     pending_interrupter_turns: list[tuple[str, str]] = field(default_factory=list)
+    # Step 11 bug-fix — set by InterruptionDetector when a short@SPEAKING
+    # yield+resume task is in flight. _deliver_to_monitor checks this flag
+    # and skips the lull if set, preventing the concurrent voice endpointing
+    # lull from transitioning IDLE→GENERATING and causing the resume task to
+    # bail (the race that silences the resumed audio). Cleared by
+    # _on_short_yield_resume and on IDLE transition.
+    short_yield_pending: bool = False
 
     def transition(self, new_state: ResponseState) -> None:
         """Move to *new_state* and log the transition at INFO.
@@ -158,6 +165,7 @@ class ResponseTracker:
             # Step 9 — clear any leftover interrupter turns not yet
             # flushed (e.g., response discarded before delivery).
             self.pending_interrupter_turns = []
+            self.short_yield_pending = False
         elif new_state is ResponseState.SPEAKING:
             # Stamp the wall clock at the moment audio begins so
             # Step 11's yield path can compute elapsed_ms without
@@ -864,8 +872,14 @@ class InterruptionDetector:
             )
             if did_yield:
                 cb = self._on_short_yield_resume
-                if cb is not None and remaining:
-                    asyncio.create_task(cb(remaining))  # noqa: RUF006
+                if remaining:
+                    # Set before scheduling so _deliver_to_monitor (which may
+                    # fire in the same event-loop window) sees the flag and
+                    # suppresses the concurrent voice endpointing lull.
+                    t = self._tracker_registry.get(self._guild_id)
+                    t.short_yield_pending = True
+                    if cb is not None:
+                        asyncio.create_task(cb(remaining))  # noqa: RUF006
             else:
                 cb2 = self._on_push_through_transcript
                 if cb2 is not None and transcript:

@@ -658,9 +658,13 @@ async def subscribe_my_voice(
             # Guard 1: a long-interruption regen was dispatched synchronously
             # before this coroutine runs — let the regen path handle the speech.
             # Guard 2: familiar is already generating/speaking (concurrent lull).
+            # Guard 3: a short@SPEAKING yield+resume task is in flight — the
+            # voice endpointing lull fires in the same event-loop window as
+            # _finalize_burst, so the task runs before the resume can claim IDLE.
             if (
                 familiar.extras.pop("_regen_pending", False)
                 or tracker.state is not ResponseState.IDLE
+                or tracker.short_yield_pending
             ):
                 return
             # Voice lull dispatch: mark the tracker as GENERATING for the
@@ -700,6 +704,9 @@ async def subscribe_my_voice(
             t = familiar.tracker_registry.get(
                 voice_guild_id if voice_guild_id is not None else 0
             )
+            # Always clear — we're now past the window where the lull needs
+            # to be suppressed (regardless of whether we proceed to play).
+            t.short_yield_pending = False
             # If a new response started before the lull confirmed, skip.
             if t.state is not ResponseState.IDLE or familiar.tts_client is None:
                 return

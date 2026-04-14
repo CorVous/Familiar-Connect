@@ -1928,6 +1928,53 @@ class TestDeliverToMonitorGuard:
 
         monitor_spy.assert_not_called()
 
+    def test_deliver_to_monitor_skipped_when_short_yield_pending(
+        self, tmp_path: Path
+    ) -> None:
+        """tracker.short_yield_pending=True → on_message never called.
+
+        Reproduces the race where the voice endpointing lull fires in the
+        same event-loop window as InterruptionDetector finalizing a
+        short@SPEAKING yield. Without the flag the lull transitions
+        IDLE→GENERATING, which causes _on_short_yield_resume to bail.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        monitor_spy = AsyncMock()
+        familiar.monitor.on_message = monitor_spy  # ty: ignore[invalid-assignment]
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        lull_monitor = familiar.extras["voice_lull_monitor"]
+        assert isinstance(lull_monitor, VoiceLullMonitor)
+        tracker = familiar.tracker_registry.get(999)
+        # Simulate InterruptionDetector setting the flag after short@SPEAKING yield.
+        tracker.short_yield_pending = True
+
+        merged = TranscriptionResult(
+            text="alright i'm going to try to do a building event",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        async def _fire() -> None:
+            await lull_monitor._on_utterance_complete(42, merged)
+
+        asyncio.run(_fire())
+
+        monitor_spy.assert_not_called()
+
 
 def _fake_long_speaking_interrupt(
     tracker: ResponseTracker,

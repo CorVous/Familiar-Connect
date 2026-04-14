@@ -1805,6 +1805,59 @@ class TestStep11ShortSpeakingDispatch:
         # only the empty transcript from during the burst
         assert pushed == []
 
+    def test_short_speaking_yield_sets_pending_flag(self) -> None:
+        # After short@SPEAKING yield+resume finalize, tracker.short_yield_pending
+        # must be True so _deliver_to_monitor suppresses the concurrent lull.
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,
+            rng=lambda: 0.99,  # roll > tolerance → yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = 0.0
+        tracker.timestamps = [
+            WordTimestamp("hello", 0.0, 300.0),
+            WordTimestamp("world", 1600.0, 2000.0),
+        ]
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)  # yield; remaining=["world"]
+
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.short_yield_pending is True
+
+    def test_short_speaking_push_through_does_not_set_pending_flag(self) -> None:
+        # push-through: familiar keeps talking → no resume pending.
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,  # very stubborn → keep
+            rng=lambda: 0.01,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.short_yield_pending is False
+
 
 class TestLongSpeakingYieldDispatch:
     """Step 12: long interruption during SPEAKING triggers yield dispatch.
