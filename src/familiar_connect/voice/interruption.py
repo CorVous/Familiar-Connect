@@ -108,8 +108,13 @@ class ResponseTracker:
     # Step 9: gates TTS delivery during a short interruption while
     # GENERATING. Starts set (unblocked); cleared by the detector when
     # a burst begins during GENERATING; set again when the burst ends.
-    # Always reset to set on IDLE so the next turn starts unblocked.
+    # Also cleared (and vc.stop() called) when burst crosses min during
+    # SPEAKING. Always reset to set on IDLE so the next turn starts clean.
     delivery_gate: asyncio.Event = field(default_factory=_make_set_event)
+    # Set to True by the detector on short@SPEAKING finalization so the
+    # speaking loop in _run_voice_response knows to replay the audio.
+    # Cleared when consumed or on IDLE reset.
+    speaking_resume: bool = False
 
     def transition(self, new_state: ResponseState) -> None:
         """Move to *new_state* and log the transition at INFO.
@@ -148,6 +153,7 @@ class ResponseTracker:
             self.is_unsolicited = False
             self.mood_modifier = 0.0
             self.delivery_gate.set()
+            self.speaking_resume = False
         elif new_state is ResponseState.SPEAKING:
             # Stamp the wall clock at the moment audio begins so
             # Step 11's yield path can compute elapsed_ms without
@@ -610,13 +616,20 @@ class InterruptionDetector:
             state.value,
         )
         self._min_logged = True
-        # Moment 1: burst crossed ``min`` while the familiar is
-        # speaking. Roll against the effective tolerance so operators
-        # can see yield-vs-push-through decisions in the log. Dispatch
-        # on the outcome lands in Step 11; today this is observational.
+        # Moment 1: burst crossed ``min`` while the familiar is speaking.
+        # Roll against the effective tolerance (observational; Step 11 will
+        # act on the result). Also stop audio and clear the delivery gate so
+        # _run_voice_response waits for the lull before replaying.
         if state is ResponseState.SPEAKING:
             tracker = self._tracker_registry.get(self._guild_id)
             tracker.should_keep_talking(self._base_tolerance, rng=self._rng)
+            tracker.delivery_gate.clear()
+            if tracker.vc is not None:
+                tracker.vc.stop()
+            _logger.info(
+                "dispatch: SPEAKING interrupted awaiting lull speaker=%s",
+                self._burst_starter_id,
+            )
 
     def _current_tracker_state(self) -> ResponseState | None:
         """State to report in interruption logs.
@@ -662,11 +675,10 @@ class InterruptionDetector:
             starter_id,
             state.value,
         )
-        # Step 9: release the delivery gate for any burst that occurred
-        # during GENERATING. For short/discarded the gate was cleared at
-        # burst start; set it now so TTS can proceed. For long, Step 8
-        # (future) will cancel the task before the gate matters — the
-        # IDLE transition also resets it as a safety net.
+        # Step 9 dispatch — GENERATING: release the delivery gate so TTS
+        # can proceed. The gate was cleared at burst start for all bursts
+        # during GENERATING; set it now. For long, Step 8 (future) will
+        # cancel the task before the gate matters.
         if state is ResponseState.GENERATING:
             tracker = self._tracker_registry.get(self._guild_id)
             tracker.delivery_gate.set()
@@ -675,6 +687,23 @@ class InterruptionDetector:
                     "dispatch: short@GENERATING → gate released speaker=%s",
                     starter_id,
                 )
+        # Step 9 dispatch — SPEAKING: set gate + speaking_resume flag so
+        # the playback loop in _run_voice_response can replay (short) or
+        # break without replay (long). DISCARDED never cleared the gate
+        # (burst didn't cross min), so nothing to do for that case.
+        elif state is ResponseState.SPEAKING:
+            tracker = self._tracker_registry.get(self._guild_id)
+            if classification is InterruptionClass.short:
+                tracker.speaking_resume = True
+                tracker.delivery_gate.set()
+                _logger.info(
+                    "dispatch: short@SPEAKING → resume speaking speaker=%s",
+                    starter_id,
+                )
+            elif classification is InterruptionClass.long:
+                # Unblock the playback loop; loop checks speaking_resume=False
+                # and breaks without replaying.
+                tracker.delivery_gate.set()
 
     def _classify(self, duration: float) -> InterruptionClass:
         if duration < self._min_interruption_s:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,6 +64,10 @@ class TestResponseTrackerDefaults:
         t = ResponseTracker(guild_id=42)
         assert t.delivery_gate.is_set()
 
+    def test_new_tracker_speaking_resume_is_false(self) -> None:
+        t = ResponseTracker(guild_id=42)
+        assert t.speaking_resume is False
+
 
 class TestResponseTrackerTransition:
     def test_transition_updates_state(self) -> None:
@@ -92,6 +97,13 @@ class TestResponseTrackerTransition:
         t.delivery_gate.clear()  # simulate gate cleared mid-response
         t.transition(ResponseState.IDLE)
         assert t.delivery_gate.is_set()
+
+    def test_transition_to_idle_resets_speaking_resume(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        t.state = ResponseState.SPEAKING
+        t.speaking_resume = True
+        t.transition(ResponseState.IDLE)
+        assert t.speaking_resume is False
 
     def test_transition_from_idle_to_generating_preserves_unsolicited_flag(
         self,
@@ -1230,3 +1242,93 @@ class TestDeliveryGate:
             task.cancel()
             loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
             loop.close()
+
+
+class TestDeliveryGateSpeaking:
+    """Step 9 (SPEAKING extension): short interruption pauses audio; replays after lull.
+
+    When a burst crosses ``min`` during SPEAKING:
+    - ``vc.stop()`` is called and the delivery gate is cleared.
+    - On SHORT finalization: gate set + ``speaking_resume = True`` → replay.
+    - On LONG finalization: gate set + ``speaking_resume = False`` → no replay.
+    - DISCARDED bursts never cross ``min`` → no stop, no gate clear.
+    """
+
+    def test_min_crossing_during_speaking_stops_vc(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        mock_vc = MagicMock()
+        tracker.vc = mock_vc
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        mock_vc.stop.assert_called_once()
+
+    def test_min_crossing_during_speaking_clears_gate(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert not tracker.delivery_gate.is_set()
+
+    def test_finalize_short_during_speaking_sets_resume_and_gate(self) -> None:
+        # short_long_boundary_s=10 → 3s burst is short
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=10.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(3.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.delivery_gate.is_set()
+        assert tracker.speaking_resume is True
+
+    def test_finalize_long_during_speaking_sets_gate_no_resume(self) -> None:
+        # short_long_boundary_s=4 → 6s burst is long
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(6.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.delivery_gate.is_set()
+        assert tracker.speaking_resume is False
+
+    def test_discarded_burst_does_not_stop_vc(self) -> None:
+        # Burst never crosses min → no vc.stop, gate unchanged
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=10.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        mock_vc = MagicMock()
+        tracker.vc = mock_vc
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(0.5)  # sub-min
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        mock_vc.stop.assert_not_called()
+        assert tracker.delivery_gate.is_set()

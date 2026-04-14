@@ -308,14 +308,21 @@ async def _run_voice_response(
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
             tracker.transition(ResponseState.SPEAKING)
-            vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            # Poll playback to completion so the IDLE transition is
-            # observable in the log and the tracker state reflects
-            # reality for the next turn. No interruption dispatch yet
-            # (Step 3 is observational); later steps will replace this
-            # poll with a state-machine-aware loop.
-            while vc.is_playing():  # noqa: ASYNC110
-                await asyncio.sleep(0.1)
+            # Gate-aware replay loop: plays audio, then waits for a short
+            # interruption lull before replaying. A long interruption (or
+            # natural end) breaks without replaying.
+            while True:
+                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                # Natural end: gate is set and speaking_resume is False.
+                if tracker.delivery_gate.is_set():
+                    break
+                # Gate was cleared by a real interruption — wait for lull.
+                await tracker.delivery_gate.wait()
+                if not tracker.speaking_resume:
+                    break  # long interruption — do not replay
+                tracker.speaking_resume = False  # consume; loop replays
         except Exception:
             _logger.exception("Voice response TTS failed")
     tracker.transition(ResponseState.IDLE)

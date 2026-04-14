@@ -1639,3 +1639,120 @@ class TestDeliveryGate:
 
         tracker = familiar.tracker_registry.get(999)
         assert tracker.delivery_gate.is_set()
+
+    def test_speaking_interrupted_short_replays_audio(self, tmp_path: Path) -> None:
+        """vc.play called twice: once for initial play, once for replay.
+
+        Simulates a short interruption: vc.play's side-effect clears the
+        gate and signals a coordination event; a concurrent task sets the
+        gate with speaking_resume=True (mimicking _finalize_burst short@SPEAKING).
+        """
+        familiar = _make_familiar(tmp_path, reply="Here I am.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        mock_tts: Any = AsyncMock()
+        mock_tts.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00" * 4, timestamps=[])
+        )
+        familiar.tts_client = mock_tts
+
+        tracker = familiar.tracker_registry.get(999)
+        play_calls: list[int] = [0]
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+        gate_cleared = asyncio.Event()
+
+        def _play_side(_audio: object) -> None:
+            play_calls[0] += 1
+            if play_calls[0] == 1:
+                # Simulate min-crossing during SPEAKING: clear gate.
+                tracker.delivery_gate.clear()
+                gate_cleared.set()
+
+        vc.play = MagicMock(side_effect=_play_side)
+
+        async def _lull_resolved() -> None:
+            # Wait until gate_cleared is signalled (first play happened).
+            await gate_cleared.wait()
+            # Simulate short burst lull confirmed.
+            tracker.speaking_resume = True
+            tracker.delivery_gate.set()
+
+        async def _run() -> None:
+            voice_task = asyncio.create_task(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hey",
+                    buffer=[
+                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
+                    ],
+                    familiar=familiar,
+                    vc=vc,
+                    trigger=ResponseTrigger.direct_address,
+                )
+            )
+            await asyncio.gather(voice_task, _lull_resolved())
+
+        asyncio.run(_run())
+
+        # First play + replay = 2 total vc.play calls.
+        assert play_calls[0] == 2
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.state is ResponseState.IDLE
+
+    def test_speaking_interrupted_long_does_not_replay(self, tmp_path: Path) -> None:
+        """vc.play called once when a long interruption occurs (no replay)."""
+        familiar = _make_familiar(tmp_path, reply="Here I am.")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        mock_tts: Any = AsyncMock()
+        mock_tts.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00" * 4, timestamps=[])
+        )
+        familiar.tts_client = mock_tts
+
+        tracker = familiar.tracker_registry.get(999)
+        play_calls: list[int] = [0]
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+        gate_cleared = asyncio.Event()
+
+        def _play_side(_audio: object) -> None:
+            play_calls[0] += 1
+            if play_calls[0] == 1:
+                tracker.delivery_gate.clear()
+                gate_cleared.set()
+
+        vc.play = MagicMock(side_effect=_play_side)
+
+        async def _long_burst_lull() -> None:
+            await gate_cleared.wait()
+            # Long classification: release gate but do NOT set speaking_resume.
+            tracker.delivery_gate.set()
+
+        async def _run() -> None:
+            voice_task = asyncio.create_task(
+                _run_voice_response(
+                    channel_id=9000,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hey",
+                    buffer=[
+                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
+                    ],
+                    familiar=familiar,
+                    vc=vc,
+                    trigger=ResponseTrigger.direct_address,
+                )
+            )
+            await asyncio.gather(voice_task, _long_burst_lull())
+
+        asyncio.run(_run())
+
+        assert play_calls[0] == 1  # no replay
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.state is ResponseState.IDLE
