@@ -76,8 +76,8 @@ class Familiar:
     interruption state machine. Populated lazily on first voice reply.
     """
     mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
-    """Per-response mood modifier source. Stubbed to ``0.0`` until
-    Step 13 replaces it with a real side-model call."""
+    """Per-response mood modifier source. Real LLM call when wired
+    with ``llm_client`` + ``history_store``; stub (0.0) otherwise."""
     extras: dict[str, object] = field(default_factory=dict)
     """scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet"""
@@ -176,6 +176,11 @@ class Familiar:
             on_respond=_noop_respond,
         )
 
+        mood_evaluator = MoodEvaluator(
+            llm_client=llm_clients["mood_eval"],
+            history_store=history_store,
+        )
+
         return cls(
             id=familiar_id,
             root=root,
@@ -191,6 +196,7 @@ class Familiar:
             subscriptions=subscriptions,
             channel_configs=channel_configs,
             monitor=monitor,
+            mood_evaluator=mood_evaluator,
         )
 
     # ------------------------------------------------------------------

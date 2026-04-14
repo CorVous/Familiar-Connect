@@ -166,7 +166,10 @@ async def _run_voice_response(
     # Cache the mood modifier for the whole turn — should_keep_talking
     # at Moment 1 must use the same value the tracker saw at generation
     # start, not re-roll mid-response.
-    tracker.mood_modifier = familiar.mood_evaluator.evaluate()
+    tracker.mood_modifier = await familiar.mood_evaluator.evaluate(
+        channel_id=channel_id,
+        familiar_id=familiar.id,
+    )
     tracker.transition(ResponseState.GENERATING)
 
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
