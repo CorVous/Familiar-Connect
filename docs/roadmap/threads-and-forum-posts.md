@@ -33,7 +33,7 @@ Currently the channel-type guard in `/subscribe-text` rejects non-text, non-voic
 
 ## Session handling
 
-Session handling is identical to text-channel sessions (see [Session logging](session-logging.md)):
+Session handling is identical to text-channel sessions (see [Session logging](../architecture/session-logging.md)):
 
 - A session summary is written at the end.
 - Lorebook entries (people, topics) are updated as normal.

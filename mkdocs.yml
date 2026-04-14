@@ -66,15 +66,15 @@ nav:
       - architecture/context-pipeline.md
       - architecture/memory.md
       - architecture/configuration-model.md
+      - architecture/conversation-flow.md
+      - architecture/voice-input.md
       - architecture/interruption.md
+      - architecture/session-logging.md
       - architecture/security.md
       - architecture/decisions.md
   - Roadmap:
       - roadmap/index.md
-      - roadmap/conversation-flow.md
-      - roadmap/voice-input.md
       - roadmap/voice-logging.md
-      - roadmap/session-logging.md
       - roadmap/threads-and-forum-posts.md
       - roadmap/web-search.md
   - Contributing: contributing.md

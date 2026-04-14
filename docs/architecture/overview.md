@@ -91,9 +91,8 @@ flowchart LR
   generation call. Model selectable per-familiar.
 - **Cartesia / Azure Speech** (optional) — TTS providers. Without
   either, the bot still replies in text channels it is subscribed to.
-- **Deepgram** (optional, not yet wired) — streaming STT for voice
-  input. See the
-  [Voice input roadmap entry](../roadmap/voice-input.md).
+- **Deepgram** (optional) — streaming STT for voice input. See
+  [Voice input](voice-input.md) for the wiring.
 - **Twitch EventSub** (optional) — only needed if a familiar uses the
   Twitch commentary features in the
   [Twitch guide](../guides/twitch.md).
@@ -128,10 +127,9 @@ surface and channel-mode slash commands are documented in
 Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz →
 stream to Deepgram WebSocket (or feed chunks to faster-whisper).
 
-!!! warning "STT not yet wired into the reply path"
-    The transcription and voice-pipeline modules exist, but incoming
-    voice audio is not yet fed into the context pipeline. See
-    [Voice input](../roadmap/voice-input.md) for the roadmap entry.
+Incoming voice audio is fed into the `ConversationMonitor` via
+`VoiceLullMonitor` debouncing — see [Voice input](voice-input.md) for
+the full wiring.
 
 ### AI response (OpenRouter)
 
