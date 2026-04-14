@@ -400,7 +400,7 @@ class TestSideModelEvaluation:
         messages = llm_client.chat.call_args.args[0]  # ty: ignore[unresolved-attribute]
         assert len(messages) == 2
         assert messages[0].role == "system"
-        assert "one word" in messages[0].content.lower()
+        assert "YES or NO" in messages[0].content
         assert messages[1].role == "user"
 
     def test_yes_response_calls_on_respond(self) -> None:
@@ -466,7 +466,9 @@ class TestSideModelEvaluation:
         assert len(calls) == 0
 
     def test_yes_lowercase_accepted(self) -> None:
-        monitor, calls = _make_monitor(side_model_reply="yes, I want to respond")
+        monitor, calls = _make_monitor(
+            side_model_reply="I feel drawn into this conversation.\nyes"
+        )
         asyncio.run(
             monitor.on_message(
                 channel_id=1, speaker="Alice", text="aria?", is_mention=False
@@ -629,6 +631,40 @@ class TestSideModelEvaluation:
         ]
         assert len(matches) == 1
         assert "decision=NO" in matches[0].getMessage()
+
+    def test_reason_logged_when_model_returns_two_lines(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Reason from line 1 appears in the log."""
+        monitor, _ = _make_monitor(side_model_reply="The topic is off-character.\nNO")
+        with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=7, speaker="Alice", text="aria?", is_mention=False
+                )
+            )
+        record = next(
+            r
+            for r in caplog.records
+            if "interjection" in r.getMessage() and "decision=NO" in r.getMessage()
+        )
+        assert "reason=" in record.getMessage()
+        assert "off-character" in record.getMessage()
+
+    def test_reason_empty_when_model_returns_one_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Graceful fallback: single-line reply leaves reason as empty string."""
+        monitor, calls = _make_monitor(side_model_reply="YES")
+        with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                )
+            )
+        assert len(calls) == 1
+        record = next(r for r in caplog.records if "decision=YES" in r.getMessage())
+        assert "reason=''" in record.getMessage()
 
 
 # ---------------------------------------------------------------------------

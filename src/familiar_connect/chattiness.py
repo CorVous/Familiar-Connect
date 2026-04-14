@@ -112,9 +112,9 @@ def _interjection_interval(tier: Interjection, check_count: int) -> int:
 
 _EVALUATION_SYSTEM_PROMPT = """\
 You are a conversation monitor. Your ONLY job is to decide whether \
-{familiar_name} should respond. Reply with EXACTLY one word: YES or NO. \
-Do not reply in character. Do not explain your reasoning. \
-Do not include punctuation. One word only."""
+{familiar_name} should respond. Reply with exactly two lines:
+Line 1: One brief sentence in {familiar_name}'s voice explaining why.
+Line 2: YES or NO (one word, no punctuation)"""
 
 _LULL_PROMPT = """\
 Character: {familiar_name}
@@ -394,18 +394,28 @@ class ConversationMonitor:
             return False
 
         response = reply.content
-        # check first token for affirmative; robust against models that
-        # add punctuation or a short prefix despite system prompt
+        # first line: in-character reason; last line: YES/NO
+        # single-line fallback: treat as decision only (empty reason)
+        # robust against models that add punctuation despite system prompt
         stripped = response.strip()
-        first_word = stripped.split()[0].upper().rstrip(".,!") if stripped else ""
-        decision = first_word == "YES"
+        lines = stripped.splitlines()
+        if len(lines) >= 2:
+            reason = lines[0].strip()
+            last_line = lines[-1]
+        else:
+            reason = ""
+            last_line = lines[0] if lines else ""
+        last_word = (
+            last_line.split()[-1].upper().rstrip(".,!") if last_line.split() else ""
+        )
+        decision = last_word == "YES"
         _logger.info(
-            "interjection channel=%s trigger=%s decision=%s msgs=%d raw=%r",
+            "interjection channel=%s trigger=%s decision=%s msgs=%d reason=%r",
             channel_id,
             trigger_label,
             "YES" if decision else "NO",
             buf.message_counter,
-            response[:120],
+            reason,
         )
         return decision
 
