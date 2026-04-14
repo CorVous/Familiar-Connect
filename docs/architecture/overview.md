@@ -193,6 +193,26 @@ on-disk memory directory the pipeline reads and writes.
 Pipeline: LLM text → stream to Cartesia/Azure WebSocket → receive PCM
 audio → resample to 48kHz Opus → feed to Discord voice playback.
 
+### Voice interruption
+
+When a user speaks during an active voice response, `InterruptionDetector`
+classifies the burst and dispatches one of five paths:
+
+| State | Classification | Action |
+|---|---|---|
+| `GENERATING` | *discarded* | Drop. Generation continues. |
+| `GENERATING` | *short* | Polite wait — delivery gate holds playback until user is quiet. Interrupter transcript flushed to history after original buffer. |
+| `GENERATING` | *long* | Cancel `generation_task` immediately on boundary crossing. Re-generate with interruption context. |
+| `SPEAKING` | *short* | Tolerance roll decides yield or push-through. Yield: `vc.stop()`, re-synthesize remaining words, resume. Push-through: audio continues; interrupter transcript written to history. |
+| `SPEAKING` | *long* | Tolerance roll → yield → `vc.stop()`, write delivered portion to history, re-generate with delivered + interrupter transcript as context. |
+
+`ResponseTracker` holds per-guild state (`IDLE / GENERATING / SPEAKING`),
+the cancellable LLM task, word timestamps for word-boundary splits, and
+scratch fields consumed by the post-playback dispatch logic.
+
+See [Voice interruption](interruption.md) for the full design, configuration
+reference, and sequence diagrams.
+
 ### Twitch integration
 
 Connects to Twitch EventSub WebSocket as a task in the root

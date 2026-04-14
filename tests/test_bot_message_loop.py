@@ -2250,3 +2250,81 @@ class TestShortGeneratingFlush:
         )
         # Long discard skips buffer and interrupter writes alike.
         assert all("wait what" not in t.content for t in turns)
+
+
+def _fake_short_speaking_interrupt(
+    tracker: ResponseTracker,
+) -> None:
+    """Simulate a short@SPEAKING yield at finalization.
+
+    Sets the interrupt_event (pre-set) and classification=short so that
+    ``_run_voice_response`` wakes from ``interrupt_event.wait()`` and
+    takes the short path (write full reply, no regen).
+    Call from ``vc.play`` side_effect so the state is visible as soon
+    as playback starts.
+    """
+    evt = asyncio.Event()
+    evt.set()
+    tracker.interrupt_event = evt
+    tracker.interrupt_classification = InterruptionClass.short
+
+
+class TestShortSpeakingYieldHistory:
+    """Step 11: short@SPEAKING yield writes the FULL assistant reply to history.
+
+    Contrast with long@SPEAKING (step 12) which writes only the delivered
+    portion. For short yields the familiar is resuming the remainder via
+    _on_short_yield_resume, so the history entry should represent the
+    complete intended response (not just what came out before the stop).
+    """
+
+    def test_short_speaking_yield_writes_full_reply_to_history(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path, reply="hello world goodbye")
+        tts_mock = MagicMock()
+        tts_mock.synthesize = AsyncMock(
+            return_value=TTSResult(
+                audio=b"\x00" * 4,
+                timestamps=[
+                    WordTimestamp("hello", 0.0, 300.0),
+                    WordTimestamp("world", 400.0, 700.0),
+                    WordTimestamp("goodbye", 800.0, 1100.0),
+                ],
+            )
+        )
+        familiar.tts_client = tts_mock  # type: ignore[assignment]
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        tracker = familiar.tracker_registry.get(999)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+
+        def _inject_interrupt(audio: object) -> None:  # noqa: ARG001
+            _fake_short_speaking_interrupt(tracker)
+
+        vc.play = MagicMock(side_effect=_inject_interrupt)
+
+        buffer = [BufferedMessage(speaker="Alice", text="go ahead", timestamp=0.0)]
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="go ahead",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        assistant_turns = [t for t in turns if t.role == "assistant"]
+        # Exactly one assistant turn — the full reply, not a partial.
+        assert len(assistant_turns) == 1
+        assert assistant_turns[0].content == "hello world goodbye"

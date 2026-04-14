@@ -20,7 +20,7 @@ The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` o
 
 ### Barge-in / interruption handling
 
-When the familiar is mid-reply and someone starts talking, the bot needs a policy for whether to keep talking, stop immediately, or finish the current sentence. A separate, more detailed design proposal lives on the [Interruption flow](interruption-flow.md) page — it is scoped specifically to voice as written, and should be rescoped to cover both voice and text latency handling before it ships.
+When the familiar is mid-reply and someone starts talking, the bot needs a policy for whether to keep talking, stop immediately, or finish the current sentence. A separate, more detailed design proposal lives on the [Interruption flow](../architecture/interruption.md) page — it is scoped specifically to voice as written, and should be rescoped to cover both voice and text latency handling before it ships.
 
 ### Text and image input during a voice session
 
@@ -42,5 +42,5 @@ While the bot is active in a voice channel, the associated text channel should a
 
 - **STT provider choice.** Deepgram is the default assumption from earlier planning. Worth confirming before coding; the provider boundary is a small one and easy to swap.
 - **Turn segmentation.** The voice lull debounce (`voice_lull_timeout`, default 0.8s) is the current answer — see [Conversation flow § `voice_lull_timeout`](conversation-flow.md#voice_lull_timeout-float). Deepgram's own endpointing still emits per-fragment finals; `VoiceLullMonitor` uses Discord-native audio-frame arrivals to gate when the accumulated utterance is treated as complete.
-- **Barge-in / interruption handling.** See [Interruption flow](interruption-flow.md). Needs a scope review (voice-only vs. modality-agnostic) before anything else.
+- **Barge-in / interruption handling.** See [Interruption flow](../architecture/interruption.md). Needs a scope review (voice-only vs. modality-agnostic) before anything else.
 - **Vision fallback UX.** What's the observable behaviour when the user sends an image to a non-vision model? A warning in the same channel? A silent log line? Both?
