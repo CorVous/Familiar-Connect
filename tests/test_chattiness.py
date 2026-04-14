@@ -466,7 +466,9 @@ class TestSideModelEvaluation:
         assert len(calls) == 0
 
     def test_yes_lowercase_accepted(self) -> None:
-        monitor, calls = _make_monitor(side_model_reply="yes, I want to respond")
+        monitor, calls = _make_monitor(
+            side_model_reply="I feel drawn into this conversation.\nyes"
+        )
         asyncio.run(
             monitor.on_message(
                 channel_id=1, speaker="Alice", text="aria?", is_mention=False
@@ -633,8 +635,8 @@ class TestSideModelEvaluation:
     def test_reason_logged_when_model_returns_two_lines(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Reason from line 2 appears in the log."""
-        monitor, _ = _make_monitor(side_model_reply="NO\nThe topic is off-character.")
+        """Reason from line 1 appears in the log."""
+        monitor, _ = _make_monitor(side_model_reply="The topic is off-character.\nNO")
         with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
             asyncio.run(
                 monitor.on_message(
