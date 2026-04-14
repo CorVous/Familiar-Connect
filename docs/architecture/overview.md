@@ -81,7 +81,7 @@ flowchart LR
     openrouter <--> bot
     bot --> cartesia
     bot --> azure
-    deepgram -.not yet wired.-> bot
+    deepgram --> bot
     twitch --> bot
 ```
 

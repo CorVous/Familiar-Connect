@@ -16,7 +16,7 @@ The secrets and install selector the host machine needs to run the bot at all. S
 - `DISCORD_BOT` — Discord bot token
 - `OPENROUTER_API_KEY` — single key shared across every LLM call site
 - `CARTESIA_API_KEY` — Cartesia TTS key
-- `DEEPGRAM_API_KEY` — Deepgram STT key (optional, not yet wired)
+- `DEEPGRAM_API_KEY` — Deepgram STT key (optional; required for voice input — see [Voice input](voice-input.md))
 - Twitch client ID and OAuth token (optional)
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
 
