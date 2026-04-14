@@ -69,6 +69,7 @@ nav:
       - architecture/conversation-flow.md
       - architecture/voice-input.md
       - architecture/interruption.md
+      - architecture/typing-simulation.md
       - architecture/session-logging.md
       - architecture/security.md
       - architecture/decisions.md

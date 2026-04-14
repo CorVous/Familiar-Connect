@@ -34,6 +34,7 @@ from familiar_connect.memory.writer import MemoryWriter
 from familiar_connect.metrics import MetricsCollector, NullCollector
 from familiar_connect.mood import MoodEvaluator
 from familiar_connect.subscriptions import SubscriptionRegistry
+from familiar_connect.text.delivery import TextDeliveryRegistry
 from familiar_connect.voice.interruption import ResponseTrackerRegistry
 
 if TYPE_CHECKING:
@@ -77,6 +78,16 @@ class Familiar:
         default_factory=ResponseTrackerRegistry,
     )
     """Per-guild :class:`ResponseTracker` lookup; lazy-created."""
+    text_delivery_registry: TextDeliveryRegistry = field(
+        default_factory=TextDeliveryRegistry,
+    )
+    """Per-channel :class:`TextDeliveryTracker` lookup; lazy-created.
+
+    Used by the text-response path when
+    :attr:`ChannelConfig.typing_simulation.enabled` is ``True`` to
+    track in-flight chunked delivery and cancel it on new incoming
+    user messages.
+    """
     mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
     """Per-response mood modifier source. Real LLM call when wired
     with ``llm_client`` + ``history_store``; stub (0.0) otherwise."""

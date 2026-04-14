@@ -2376,3 +2376,367 @@ class TestShortSpeakingYieldHistory:
         # Exactly one assistant turn — the full reply, not a partial.
         assert len(assistant_turns) == 1
         assert assistant_turns[0].content == "hello world goodbye"
+
+
+# ---------------------------------------------------------------------------
+# Typing-simulation chunked delivery path
+# ---------------------------------------------------------------------------
+
+
+class TestTypingSimulationDelivery:
+    """``_run_text_response`` under ``typing_simulation.enabled=True``.
+
+    Patches ``asyncio.sleep`` to avoid real-time delays.
+    """
+
+    def _setup_channel_rp(
+        self, tmp_path: Path, *, reply: str
+    ) -> tuple[
+        Familiar,
+        MagicMock,
+    ]:
+        """Build familiar + subscribed text-rp channel + fake channel."""
+        familiar = _make_familiar(tmp_path, reply=reply)
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.text_conversation_rp
+        )
+        channel = _make_channel(12345)
+        return familiar, channel
+
+    def test_single_paragraph_sent_as_single_message(self, tmp_path: Path) -> None:
+        familiar, channel = self._setup_channel_rp(tmp_path, reply="Hello Alice.")
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        # single-paragraph → one send call with full text
+        assert channel.send.call_count == 1
+        channel.send.assert_called_once_with("Hello Alice.")
+
+    def test_multi_paragraph_sent_as_separate_messages(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        reply = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+        familiar, channel = self._setup_channel_rp(tmp_path, reply=reply)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        assert channel.send.call_count == 3
+        sent_texts = [call.args[0] for call in channel.send.call_args_list]
+        assert sent_texts == [
+            "First paragraph.",
+            "Second paragraph.",
+            "Third paragraph.",
+        ]
+
+    def test_typing_indicator_entered_per_chunk(self, tmp_path: Path) -> None:
+        reply = "Para one.\n\nPara two."
+        familiar, channel = self._setup_channel_rp(tmp_path, reply=reply)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        # 1 entry for the outer pipeline-wrapping typing() (still there)
+        # + 2 for per-chunk typing() contexts (one per paragraph)
+        assert channel.typing.call_count >= 3
+
+    def test_full_reply_persisted_when_delivery_completes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        reply = "First.\n\nSecond."
+        familiar, channel = self._setup_channel_rp(tmp_path, reply=reply)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id,
+            channel_id=12345,
+            limit=10,
+        )
+        assert len(turns) == 2
+        assert turns[0].role == "user"
+        assert turns[0].content == "hi"
+        assert turns[1].role == "assistant"
+        # chunks rejoined with blank-line separator
+        assert turns[1].content == "First.\n\nSecond."
+
+    def test_tracker_cleared_after_successful_delivery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        familiar, channel = self._setup_channel_rp(tmp_path, reply="Hello.")
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+
+        tracker = familiar.text_delivery_registry.get(12345)
+        assert tracker.is_active() is False
+        assert tracker.sent_chunks == []
+
+
+class TestTypingSimulationCancellation:
+    """Mid-flight cancellation yields partial history; no further sends."""
+
+    def test_cancelled_delivery_persists_sent_chunks_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        reply = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+        familiar = _make_familiar(tmp_path, reply=reply)
+        familiar.subscriptions.add(
+            channel_id=12345,
+            kind=SubscriptionKind.text,
+            guild_id=999,
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345,
+            mode=ChannelMode.text_conversation_rp,
+        )
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        # Channel.send blocks on the second call so we can cancel mid-way.
+        send_gate = asyncio.Event()
+        sends_done = 0
+
+        async def fake_send(text: str) -> None:  # noqa: ARG001
+            nonlocal sends_done
+            sends_done += 1
+            if sends_done == 2:
+                send_gate.set()
+                await asyncio.sleep(10.0)  # mock.patch will shortcut this
+                return
+            return
+
+        channel.send = AsyncMock(side_effect=fake_send)
+
+        async def runner() -> None:
+            # real asyncio.sleep needed so we can interleave
+            task = asyncio.create_task(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+            # wait until first send+second-send-started
+            await send_gate.wait()
+            # cancel via tracker (simulates on_message hook)
+            tracker = familiar.text_delivery_registry.get(12345)
+            await tracker.cancel_and_wait()
+            await task
+
+        asyncio.run(runner())
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id,
+            channel_id=12345,
+            limit=10,
+        )
+        # user turn persisted before delivery
+        assert turns[0].role == "user"
+        assert turns[0].content == "hi"
+        # assistant turn contains only the first (completed) chunk
+        assistant_turns = [t for t in turns if t.role == "assistant"]
+        assert len(assistant_turns) == 1
+        assert assistant_turns[0].content == "First paragraph."
+
+    def test_cancelled_delivery_skips_tts(self, tmp_path: Path) -> None:
+        """TTS fan-out should not fire when delivery was cancelled."""
+        reply = "One.\n\nTwo.\n\nThree."
+        familiar = _make_familiar(tmp_path, reply=reply)
+        # install a TTS client so fan-out would fire otherwise
+        tts_client = MagicMock()
+        tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"aud", timestamps=[]),
+        )
+        familiar.tts_client = tts_client
+        familiar.subscriptions.add(
+            channel_id=12345,
+            kind=SubscriptionKind.text,
+            guild_id=999,
+        )
+        familiar.subscriptions.add(
+            channel_id=9000,
+            kind=SubscriptionKind.voice,
+            guild_id=999,
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345,
+            mode=ChannelMode.text_conversation_rp,
+        )
+        channel = _make_channel(12345)
+        # attach a guild w/ voice_client so TTS branch would be entered
+        guild = MagicMock()
+        guild.id = 999
+        vc = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+        vc.play = MagicMock()
+        guild.voice_client = vc
+        type(channel).guild = PropertyMock(return_value=guild)
+
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        send_gate = asyncio.Event()
+        sends_done = 0
+
+        async def fake_send(text: str) -> None:  # noqa: ARG001
+            nonlocal sends_done
+            sends_done += 1
+            if sends_done == 1:
+                send_gate.set()
+                await asyncio.sleep(10.0)
+
+        channel.send = AsyncMock(side_effect=fake_send)
+
+        async def runner() -> None:
+            task = asyncio.create_task(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=channel,
+                )
+            )
+            await send_gate.wait()
+            tracker = familiar.text_delivery_registry.get(12345)
+            await tracker.cancel_and_wait()
+            await task
+
+        asyncio.run(runner())
+
+        # TTS must not have fired because delivery was cancelled
+        tts_client.synthesize.assert_not_called()
+        vc.play.assert_not_called()
+
+
+class TestOnMessageCancellationHook:
+    """on_message cancels any in-flight text delivery before routing."""
+
+    def test_on_message_cancels_active_tracker(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345,
+            kind=SubscriptionKind.text,
+            guild_id=999,
+        )
+
+        # Install a running task in the tracker; on_message should cancel it.
+        tracker = familiar.text_delivery_registry.get(12345)
+        started = asyncio.Event()
+        was_cancelled = False
+
+        async def long_task() -> None:
+            nonlocal was_cancelled
+            started.set()
+            try:
+                await asyncio.sleep(10.0)
+            except asyncio.CancelledError:
+                was_cancelled = True
+                raise
+
+        async def runner() -> None:
+            nonlocal was_cancelled
+            task = asyncio.create_task(long_task())
+            tracker.start(task)
+            await started.wait()
+
+            # stub monitor so no LLM call happens
+            mock = AsyncMock()
+            familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
+
+            msg = _make_message(channel_id=12345)
+            await on_message(msg, familiar)
+            assert was_cancelled is True
+            # monitor still called after cancel
+            mock.assert_called_once()
+
+        asyncio.run(runner())
+
+    def test_on_message_does_not_cancel_idle_tracker(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345,
+            kind=SubscriptionKind.text,
+            guild_id=999,
+        )
+
+        mock = AsyncMock()
+        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
+
+        msg = _make_message(channel_id=12345)
+        # no active tracker; on_message should flow through without error
+        asyncio.run(on_message(msg, familiar))
+        mock.assert_called_once()

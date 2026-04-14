@@ -26,6 +26,10 @@ from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
 from familiar_connect.metrics import TraceBuilder
 from familiar_connect.subscriptions import SubscriptionKind
+from familiar_connect.text.delivery import (
+    compute_typing_delay,
+    split_reply_into_chunks,
+)
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
 from familiar_connect.voice.interruption import (
@@ -1018,35 +1022,106 @@ async def _run_text_response(
         async with builder.span("post_processing"):
             reply_text = await pipeline.run_post_processors(reply.content, request)
 
-    # persist buffered user turns then assistant reply (after LLM
-    # call so a crash never leaves an orphaned user turn)
-    async with builder.span("history_write") as hw_meta:
-        turns_written = 0
-        for msg in buffer:
+    ts_cfg = channel_config.typing_simulation
+
+    if ts_cfg.enabled:
+        # chunked typing-simulation path: user turns persist BEFORE
+        # delivery so a mid-flight cancel leaves history in order
+        # (user msgs → partial assistant → new user msg → fresh reply).
+        async with builder.span("history_write_user") as hw_meta:
+            for msg in buffer:
+                familiar.history_store.append_turn(
+                    familiar_id=familiar.id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    role="user",
+                    content=msg.text,
+                    speaker=msg.speaker,
+                    mode=channel_config.mode,
+                )
+            hw_meta["turns_written"] = len(buffer)
+
+        chunks = split_reply_into_chunks(
+            reply_text,
+            sentence_split_threshold=ts_cfg.sentence_split_threshold,
+        )
+        tracker = familiar.text_delivery_registry.get(channel_id)
+
+        async def _deliver() -> None:
+            for i, chunk in enumerate(chunks):
+                delay = compute_typing_delay(chunk, ts_cfg)
+                async with channel.typing():
+                    await asyncio.sleep(delay)
+                await channel.send(chunk)
+                tracker.mark_sent(chunk)
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(ts_cfg.inter_line_pause_s)
+
+        was_cancelled = False
+        async with builder.span("chunked_delivery") as cd_meta:
+            cd_meta["chunk_count"] = len(chunks)
+            task = asyncio.create_task(_deliver())
+            tracker.start(task)
+            try:
+                await task
+            except asyncio.CancelledError:
+                was_cancelled = True
+                cd_meta["cancelled"] = True
+            cd_meta["chunks_sent"] = len(tracker.sent_chunks)
+
+        sent_chunks = list(tracker.sent_chunks)
+        tracker.clear()
+
+        async with builder.span("history_write_assistant") as hw_meta:
+            if sent_chunks:
+                familiar.history_store.append_turn(
+                    familiar_id=familiar.id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    role="assistant",
+                    content="\n\n".join(sent_chunks),
+                    mode=channel_config.mode,
+                )
+                hw_meta["turns_written"] = 1
+            else:
+                hw_meta["turns_written"] = 0
+        await familiar.memory_writer_scheduler.notify_turn()
+
+        if was_cancelled:
+            # cancelled delivery → skip TTS fan-out; caller's new
+            # user message will drive a fresh reply through the monitor
+            familiar.metrics_collector.record(builder.finalize())
+            return
+    else:
+        # legacy path: user turns + full assistant reply in one history
+        # write, then single send — preserves pre-typing-sim behaviour
+        async with builder.span("history_write") as hw_meta:
+            turns_written = 0
+            for msg in buffer:
+                familiar.history_store.append_turn(
+                    familiar_id=familiar.id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    role="user",
+                    content=msg.text,
+                    speaker=msg.speaker,
+                    mode=channel_config.mode,
+                )
+                turns_written += 1
             familiar.history_store.append_turn(
                 familiar_id=familiar.id,
                 channel_id=channel_id,
                 guild_id=guild_id,
-                role="user",
-                content=msg.text,
-                speaker=msg.speaker,
+                role="assistant",
+                content=reply_text,
                 mode=channel_config.mode,
             )
             turns_written += 1
-        familiar.history_store.append_turn(
-            familiar_id=familiar.id,
-            channel_id=channel_id,
-            guild_id=guild_id,
-            role="assistant",
-            content=reply_text,
-            mode=channel_config.mode,
-        )
-        turns_written += 1
-        hw_meta["turns_written"] = turns_written
-    await familiar.memory_writer_scheduler.notify_turn()
+            hw_meta["turns_written"] = turns_written
+        await familiar.memory_writer_scheduler.notify_turn()
 
-    async with builder.span("discord_send"):
-        await channel.send(reply_text)
+        async with builder.span("discord_send"):
+            await channel.send(reply_text)
 
     # TTS fan-out: speak reply in voice if a voice sub exists in guild
     guild = getattr(channel, "guild", None)
@@ -1094,6 +1169,13 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
         and bot_user is not None
         and bot_user in message.mentions
     )
+
+    # mid-delivery cancellation: if a chunked typing-sim delivery is
+    # in flight for this channel, cancel it and wait for its partial
+    # history write to settle before the new message enters the monitor.
+    tracker = familiar.text_delivery_registry.get(channel_id)
+    if tracker.is_active():
+        await tracker.cancel_and_wait()
 
     raw_name = message.author.display_name
     speaker = sanitize_name(raw_name) or raw_name
