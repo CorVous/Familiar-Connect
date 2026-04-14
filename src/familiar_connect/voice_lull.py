@@ -87,13 +87,20 @@ class VoiceLullMonitor:
             self._arm_lull()
 
     def on_transcript(self, user_id: int, result: TranscriptionResult) -> None:
-        """Buffer final transcription results; interims ignored.
+        """Buffer finals; arm safety-net lull.
 
-        Pure buffering — state transitions live in ``on_speech_start`` /
-        ``on_speech_end``.
+        Deepgram's ``UtteranceEnd`` can lag by seconds when audio
+        frames keep flowing through real silence (client-side VAD
+        variance, background noise above Discord's threshold).
+        Arming on each final guarantees dispatch within
+        ``lull_timeout`` of the last transcript even if
+        ``UtteranceEnd`` never arrives. A subsequent
+        ``on_speech_start`` still cancels (resumed speech extends
+        the utterance).
         """
         if result.is_final and result.text:
             self._finals.append((user_id, result))
+            self._arm_lull()
 
     def clear(self) -> None:
         """Cancel pending timer and drop buffered state."""

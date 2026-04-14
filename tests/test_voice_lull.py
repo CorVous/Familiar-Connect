@@ -104,8 +104,13 @@ class TestVoiceLullMonitor:
         assert result.text == "one two three"
 
     @pytest.mark.asyncio
-    async def test_does_not_fire_while_another_user_speaks(self) -> None:
-        """Alice's UtteranceEnd while Bob still speaking does not arm lull."""
+    async def test_concurrent_speech_cancels_pending_lull(self) -> None:
+        """Bob's continued speech events cancel Alice's pending lull.
+
+        Safety-net lull arms on each final. While Bob keeps emitting
+        Deepgram VAD activity (SpeechStarted), those events cancel the
+        pending lull so Alice's transcript doesn't dispatch mid-Bob.
+        """
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -122,11 +127,14 @@ class TestVoiceLullMonitor:
         monitor.on_speech_start(2)
         monitor.on_transcript(1, _final("alice done"))
         monitor.on_speech_end(1)
-        # Bob still marked speaking → no arm
-        await asyncio.sleep(0.2)
+        # Bob continues speaking — simulate Deepgram emitting more VAD
+        # on his stream (each cancels pending lull)
+        for _ in range(3):
+            await asyncio.sleep(0.04)
+            monitor.on_speech_start(2)
         assert len(calls) == 0
 
-        # Bob finally stops → lull arms → merges alice's final
+        # Bob finally stops → lull arms → dispatch
         monitor.on_speech_end(2)
         await asyncio.sleep(0.2)
         assert len(calls) == 1
@@ -311,14 +319,15 @@ class TestVoiceLullMonitor:
         )
 
     @pytest.mark.asyncio
-    async def test_discord_frames_do_not_drive_lull(self) -> None:
-        """Regression: transcript + only Discord frames (no VAD end) must not dispatch.
+    async def test_safety_net_fires_without_utterance_end(self) -> None:
+        """Regression: final + no UtteranceEnd must still dispatch.
 
-        Root cause of original bug: Discord packet arrival was driving
-        the silence watchdog, but packets can flow through real silence.
-        With the refactor, the lull is gated strictly on Deepgram VAD's
-        UtteranceEnd — a final buffered without a matching speech_end
-        must not fire.
+        Deepgram's UtteranceEnd is sometimes delivered only when the
+        next SpeechStarted arrives, even though `last_word_end` shows
+        real silence began seconds earlier. The safety-net lull armed
+        on each final guards against this: if no further VAD activity
+        arrives within `lull_timeout`, the buffered final dispatches
+        regardless.
         """
         calls: list[tuple[int, TranscriptionResult]] = []
 
@@ -334,10 +343,11 @@ class TestVoiceLullMonitor:
 
         monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("hello"))
-        # user is still marked speaking per Deepgram VAD; no speech_end
+        # no speech_end arrives (Deepgram UtteranceEnd stuck)
         await asyncio.sleep(0.2)
 
-        assert len(calls) == 0
+        assert len(calls) == 1
+        assert calls[0][1].text == "hello"
 
 
 class TestVoiceActivityEvents:
