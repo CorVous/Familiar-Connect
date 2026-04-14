@@ -15,7 +15,7 @@ Three :class:`ChannelMode` profiles: ``full_rp``, ``text_conversation_rp``,
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -137,6 +137,34 @@ class TTSConfig:
 
 
 @dataclass(frozen=True)
+class TypingSimulationConfig:
+    """Per-chunk typing+delay simulation for text channels.
+
+    Splits the LLM reply into paragraphs (with a sentence-split fallback
+    for long paragraphs), then for each chunk: shows ``typing…`` for a
+    length-proportional delay, sends the chunk, pauses briefly, repeats.
+
+    A new user message on the channel cancels the remaining chunks; see
+    :mod:`familiar_connect.text.delivery` for the tracker.
+
+    :param enabled: master on/off for chunked delivery on this channel.
+    :param chars_per_second: typing speed; ``~40`` ≈ 240 wpm.
+    :param min_delay_s: floor per-chunk typing delay.
+    :param max_delay_s: ceiling per-chunk typing delay.
+    :param inter_line_pause_s: gap after each send before next ``typing…``.
+    :param sentence_split_threshold: paragraph longer than this (chars)
+        splits by sentence instead of going out as one chunk.
+    """
+
+    enabled: bool = False
+    chars_per_second: float = 40.0
+    min_delay_s: float = 0.8
+    max_delay_s: float = 6.0
+    inter_line_pause_s: float = 0.7
+    sentence_split_threshold: int = 400
+
+
+@dataclass(frozen=True)
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``.
 
@@ -170,6 +198,13 @@ class CharacterConfig:
     """Run the memory writer pass after this many seconds of silence (30 min)."""
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
+    typing_simulation_overrides: dict[str, object] = field(default_factory=dict)
+    """Partial ``[typing_simulation]`` overrides from ``character.toml``.
+
+    Layered over :attr:`ChannelConfig.typing_simulation` (the per-mode
+    default) before any per-channel TOML overrides apply. Empty dict
+    when the character.toml omits the section entirely.
+    """
 
 
 @dataclass(frozen=True)
@@ -186,6 +221,9 @@ class ChannelConfig:
     providers_enabled: frozenset[str] = field(default_factory=frozenset)
     preprocessors_enabled: frozenset[str] = field(default_factory=frozenset)
     postprocessors_enabled: frozenset[str] = field(default_factory=frozenset)
+    typing_simulation: TypingSimulationConfig = field(
+        default_factory=TypingSimulationConfig,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +272,9 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
             ),
             preprocessors_enabled=frozenset({"stepped_thinking"}),
             postprocessors_enabled=frozenset(),
+            # text-rp channels simulate natural typing by default;
+            # operators can disable per familiar or per channel.
+            typing_simulation=TypingSimulationConfig(enabled=True),
         )
     if mode is ChannelMode.imitate_voice:
         return ChannelConfig(
@@ -356,6 +397,12 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     tts = _parse_tts_config(tts_raw)
 
+    ts_raw = data.get("typing_simulation", {})
+    if not isinstance(ts_raw, dict):
+        msg = f"[typing_simulation] must be a table, got {type(ts_raw).__name__}"
+        raise ConfigError(msg)
+    typing_simulation_overrides = _parse_typing_simulation_overrides(ts_raw)
+
     return CharacterConfig(
         default_mode=default_mode,
         history_window_size=history_window_size,
@@ -374,15 +421,24 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         memory_writer_idle_timeout=memory_writer_idle_timeout,
         llm=llm,
         tts=tts,
+        typing_simulation_overrides=typing_simulation_overrides,
     )
 
 
-def load_channel_config(path: Path) -> ChannelConfig | None:
+def load_channel_config(
+    path: Path,
+    *,
+    character_overrides: dict[str, object] | None = None,
+) -> ChannelConfig | None:
     """Load :class:`ChannelConfig` from *path*, or ``None`` if missing.
 
-    Only ``mode`` key is read; remainder from :func:`channel_config_for_mode`.
+    Resolves ``typing_simulation`` by layering (low → high):
+    per-mode default → *character_overrides* → channel ``[typing_simulation]``.
 
-    :raises ConfigError: if file exists but is invalid TOML or unknown mode.
+    :param character_overrides: partial overrides from ``character.toml``
+        (typically :attr:`CharacterConfig.typing_simulation_overrides`).
+    :raises ConfigError: if file exists but is invalid TOML, has an
+        unknown mode, or the ``[typing_simulation]`` table fails validation.
     """
     data = _read_toml(path)
     if data is None:
@@ -393,7 +449,21 @@ def load_channel_config(path: Path) -> ChannelConfig | None:
         msg = f"channel config at {path} is missing required 'mode' key"
         raise ConfigError(msg)
     mode = _parse_mode(mode_raw, default=None)
-    return channel_config_for_mode(mode)
+    base = channel_config_for_mode(mode)
+
+    ts_raw = data.get("typing_simulation", {})
+    if not isinstance(ts_raw, dict):
+        msg = f"[typing_simulation] must be a table, got {type(ts_raw).__name__}"
+        raise ConfigError(msg)
+    channel_overrides = _parse_typing_simulation_overrides(ts_raw)
+
+    # resolve: per-mode default → character overrides → channel overrides.
+    resolved_ts = _resolve_typing_simulation(
+        base.typing_simulation,
+        character_overrides=character_overrides or {},
+        channel_overrides=channel_overrides,
+    )
+    return replace(base, typing_simulation=resolved_ts)
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +536,123 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
             raise ConfigError(msg)
         slots[name] = LLMSlotConfig(model=model, temperature=temperature)
     return slots
+
+
+def _parse_typing_simulation_overrides(raw: dict) -> dict[str, object]:
+    """Parse and validate the ``[typing_simulation]`` TOML section.
+
+    Returns a dict of only the fields the user set — suitable for
+    :func:`dataclasses.replace` against a :class:`TypingSimulationConfig`
+    baseline. Missing keys are omitted (not set to defaults) so the
+    baseline's values survive.
+
+    :raises ConfigError: on unknown keys, wrong types, or out-of-range
+        numeric values. ``min_delay_s > max_delay_s`` is checked only
+        when both are present in *raw*.
+    """
+    if not raw:
+        return {}
+
+    valid_keys = {
+        "enabled",
+        "chars_per_second",
+        "min_delay_s",
+        "max_delay_s",
+        "inter_line_pause_s",
+        "sentence_split_threshold",
+    }
+    unknown = set(raw) - valid_keys
+    if unknown:
+        valid = ", ".join(sorted(valid_keys))
+        msg = (
+            f"unknown [typing_simulation] keys: {sorted(unknown)}; valid keys: {valid}"
+        )
+        raise ConfigError(msg)
+
+    overrides: dict[str, object] = {}
+
+    if "enabled" in raw:
+        enabled_raw = raw["enabled"]
+        if not isinstance(enabled_raw, bool):
+            msg = (
+                "[typing_simulation].enabled must be a boolean, "
+                f"got {type(enabled_raw).__name__}"
+            )
+            raise ConfigError(msg)
+        overrides["enabled"] = enabled_raw
+
+    for numeric_key in (
+        "chars_per_second",
+        "min_delay_s",
+        "max_delay_s",
+        "inter_line_pause_s",
+    ):
+        if numeric_key not in raw:
+            continue
+        val = raw[numeric_key]
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            msg = (
+                f"[typing_simulation].{numeric_key} must be a number, "
+                f"got {type(val).__name__}"
+            )
+            raise ConfigError(msg)
+        val = float(val)
+        if numeric_key == "chars_per_second" and val <= 0:
+            msg = f"[typing_simulation].chars_per_second must be > 0, got {val}"
+            raise ConfigError(msg)
+        if numeric_key != "chars_per_second" and val < 0:
+            msg = f"[typing_simulation].{numeric_key} must be >= 0, got {val}"
+            raise ConfigError(msg)
+        overrides[numeric_key] = val
+
+    if "sentence_split_threshold" in raw:
+        thresh = raw["sentence_split_threshold"]
+        if isinstance(thresh, bool) or not isinstance(thresh, int):
+            msg = (
+                "[typing_simulation].sentence_split_threshold must be an int, "
+                f"got {type(thresh).__name__}"
+            )
+            raise ConfigError(msg)
+        if thresh <= 0:
+            msg = (
+                "[typing_simulation].sentence_split_threshold must be > 0, "
+                f"got {thresh}"
+            )
+            raise ConfigError(msg)
+        overrides["sentence_split_threshold"] = thresh
+
+    min_val = overrides.get("min_delay_s")
+    max_val = overrides.get("max_delay_s")
+    if isinstance(min_val, float) and isinstance(max_val, float) and min_val > max_val:
+        msg = (
+            "[typing_simulation].min_delay_s "
+            f"({min_val}) must be <= max_delay_s ({max_val})"
+        )
+        raise ConfigError(msg)
+
+    return overrides
+
+
+def _resolve_typing_simulation(
+    base: TypingSimulationConfig,
+    *,
+    character_overrides: dict[str, object],
+    channel_overrides: dict[str, object],
+) -> TypingSimulationConfig:
+    """Apply character- then channel-level overrides on top of *base*.
+
+    Also catches cross-layer ``min_delay_s > max_delay_s`` violations
+    produced when one layer sets min and another sets max.
+    """
+    merged: dict[str, object] = {**character_overrides, **channel_overrides}
+    result = replace(base, **merged)  # type: ignore[arg-type]
+    if result.min_delay_s > result.max_delay_s:
+        msg = (
+            f"typing_simulation.min_delay_s ({result.min_delay_s}) must be "
+            f"<= max_delay_s ({result.max_delay_s}) after layered overrides"
+        )
+        raise ConfigError(msg)
+    return result
 
 
 def _parse_tts_config(raw: dict) -> TTSConfig:

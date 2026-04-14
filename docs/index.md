@@ -47,6 +47,7 @@ understands speech, and talks back using real AI voices.
 | [Metrics and profiling](guides/metrics.md) (per-turn traces + CLI report) | **Shipped** |
 | [Conversation monitor](architecture/conversation-flow.md) (chattiness / interjection / lull) | **Shipped** |
 | [Voice speech-to-text wired into the reply path](architecture/voice-input.md) | **Shipped** |
+| [Typing simulation for text-RP channels](architecture/typing-simulation.md) | **Shipped** |
 | [Post-session memory writer](architecture/session-logging.md) | **Shipped** |
 | Discord-side voice channel logging (threads + live embeds) | [Planned](roadmap/voice-logging.md) |
 | Web search as a provider tool | [Research](roadmap/web-search.md) |

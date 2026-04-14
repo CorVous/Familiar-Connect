@@ -36,6 +36,25 @@ interrupt_tolerance   = "average"   # very_meek | meek | average | stubborn | ve
 min_interruption_s    = 2.0         # back-channel filter threshold
 short_long_boundary_s = 30.0        # short (polite pause) vs. long (regen)
 
+# --- Typing simulation (text channels only) -------------------------------
+#
+# Chunks the LLM reply into paragraphs and sends each after a length-
+# proportional "typing..." delay. A new user message mid-delivery cancels
+# the remaining chunks; already-sent chunks become the assistant turn.
+#
+# Per-mode defaults live in channel_config_for_mode() — text_conversation_rp
+# enables; full_rp and imitate_voice disable. Uncomment below to override
+# familiar-wide (or per-channel via channels/<id>.toml).
+# See docs/architecture/typing-simulation.md.
+#
+# [typing_simulation]
+# enabled                  = true
+# chars_per_second         = 40.0    # ~240 wpm
+# min_delay_s              = 0.8
+# max_delay_s              = 6.0
+# inter_line_pause_s       = 0.7
+# sentence_split_threshold = 400     # chars — paragraphs above split by sentence
+
 [providers.history]
 window_size = 20
 
