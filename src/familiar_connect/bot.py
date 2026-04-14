@@ -299,6 +299,9 @@ async def _run_voice_response(
             if isinstance(detector, InterruptionDetector):
                 gate_result = await detector.wait_for_lull()
                 if gate_result is InterruptionClass.long:
+                    # Step 9 — any pending interrupter turns belong to a
+                    # discarded response; drop them so the regen starts clean.
+                    tracker.pending_interrupter_turns.clear()
                     tracker.transition(ResponseState.IDLE)
                     return
             # Persist user turns only after the delivery gate (discarded
@@ -313,6 +316,21 @@ async def _run_voice_response(
                     speaker=msg.speaker,
                     mode=channel_config.mode,
                 )
+            # Step 9 — flush interrupter turns captured during GENERATING
+            # (short@GENERATING dispatch stashed them on the tracker).
+            # Ordering: after buffer, before assistant reply → chronology.
+            for raw_name, text in tracker.pending_interrupter_turns:
+                safe_name = sanitize_name(raw_name) or raw_name
+                familiar.history_store.append_turn(
+                    familiar_id=familiar.id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    role="user",
+                    content=text,
+                    speaker=safe_name,
+                    mode=channel_config.mode,
+                )
+            tracker.pending_interrupter_turns.clear()
             _logger.info("[Voice Response] %s", reply_text)
             # Wait for any currently-playing audio to finish.
             while vc.is_playing():  # noqa: ASYNC110

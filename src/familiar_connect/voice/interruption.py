@@ -106,6 +106,11 @@ class ResponseTracker:
     interrupt_classification: InterruptionClass | None = None
     interrupt_transcript: str = ""
     interrupt_starter_name: str = ""
+    # Step 9 — transcripts captured from short@GENERATING bursts. Stashed
+    # here so _run_voice_response can flush them after the original
+    # buffer write (preserves chronology: buffer → interrupter →
+    # assistant reply). Each entry is (resolved_name, transcript).
+    pending_interrupter_turns: list[tuple[str, str]] = field(default_factory=list)
 
     def transition(self, new_state: ResponseState) -> None:
         """Move to *new_state* and log the transition at INFO.
@@ -150,6 +155,9 @@ class ResponseTracker:
             self.interrupt_classification = None
             self.interrupt_transcript = ""
             self.interrupt_starter_name = ""
+            # Step 9 — clear any leftover interrupter turns not yet
+            # flushed (e.g., response discarded before delivery).
+            self.pending_interrupter_turns = []
         elif new_state is ResponseState.SPEAKING:
             # Stamp the wall clock at the moment audio begins so
             # Step 11's yield path can compute elapsed_ms without
@@ -862,6 +870,27 @@ class InterruptionDetector:
                 cb2 = self._on_push_through_transcript
                 if cb2 is not None and transcript:
                     cb2(starter_id, transcript)
+        # Step 9 dispatch: short interruption during GENERATING.
+        # Familiar keeps generating; delivery gate already opens on
+        # finalize so playback proceeds naturally. Stash the interrupter
+        # transcript on the tracker so _run_voice_response can flush it
+        # to history after the original buffer write (preserves chronology).
+        if (
+            classification is InterruptionClass.short
+            and state is ResponseState.GENERATING
+        ):
+            _logger.info(
+                "dispatch: short@GENERATING → polite-wait speaker=%s",
+                starter_id,
+            )
+            if transcript.strip():
+                tracker = self._tracker_registry.get(self._guild_id)
+                resolved = (
+                    self._name_resolver(starter_id)
+                    if self._name_resolver is not None
+                    else f"User-{starter_id}"
+                )
+                tracker.pending_interrupter_turns.append((resolved, transcript))
         # Step 12: if yield was decided at Moment 1, deliver classification
         # and transcript to the tracker so _run_voice_response can dispatch.
         # Fires for both short and long yields — consumer picks based on

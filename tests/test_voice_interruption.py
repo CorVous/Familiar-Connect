@@ -1990,3 +1990,120 @@ class TestLongSpeakingYieldDispatch:
         scheduler.fire_for(detector._on_min_crossed)
 
         assert tracker.interrupt_starter_name == "Resolved-42"
+
+
+# ---------------------------------------------------------------------------
+# Step 9 — Short interruption during GENERATING (polite wait)
+# ---------------------------------------------------------------------------
+
+
+class TestShortGeneratingDispatch:
+    """Step 9: short interruption during GENERATING → polite wait.
+
+    Familiar keeps generating; delivery gate already opens on finalize so
+    playback proceeds naturally. Dispatch logs + stashes interrupter's
+    transcript on the tracker for chronological flush in
+    ``_run_voice_response`` after original buffer write.
+    """
+
+    def test_dispatch_log_format(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        with caplog.at_level(logging.INFO):
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "dispatch: short@GENERATING → polite-wait speaker=42" in r.message
+            for r in caplog.records
+        )
+
+    def test_transcript_stashed_on_tracker(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda uid: f"Name-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == [("Name-42", "hello")]
+
+    def test_transcript_stashed_without_resolver_uses_fallback(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == [("User-42", "hello")]
+
+    def test_llm_generation_task_not_cancelled(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        fake_task = MagicMock()
+        tracker.generation_task = fake_task
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        fake_task.cancel.assert_not_called()
+        assert tracker.generation_task is fake_task
+
+    @pytest.mark.asyncio
+    async def test_delivery_gate_opens_with_short(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        wait_task = asyncio.create_task(detector.wait_for_lull())
+        await asyncio.sleep(0)
+        scheduler.fire_for(detector._finalize_burst)
+        result = await wait_task
+        assert result is InterruptionClass.short
+
+    def test_empty_transcript_guarded(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda uid: f"Name-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        # no on_transcript call — transcript stays empty
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == []
+
+    def test_long_generating_leaves_pending_untouched(self) -> None:
+        # Regression: long@GENERATING path does not populate
+        # pending_interrupter_turns (early-cancel path uses its own callback).
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda uid: f"Name-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)  # exceeds boundary → long
+        detector.on_transcript(42, "hey stop")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == []

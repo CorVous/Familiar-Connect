@@ -2076,3 +2076,130 @@ class TestLongSpeakingYield:
         assert "hello" in note  # delivered portion
         assert "tell me more" in note  # interrupter's transcript
         assert "Bob" in note  # interrupter's name
+
+
+class TestShortGeneratingFlush:
+    """Step 9: _run_voice_response flushes pending_interrupter_turns.
+
+    Short@GENERATING dispatch stashes (name, transcript) pairs on the
+    tracker. _run_voice_response must write them to history AFTER the
+    original buffer user turns and BEFORE the assistant reply, then
+    clear the list.
+    """
+
+    @pytest.mark.asyncio
+    async def test_chronology_buffer_interrupter_assistant(
+        self, tmp_path: Path
+    ) -> None:
+        """History order: buffer user turn → interrupter turn → assistant."""
+        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.short
+        )
+        tracker = familiar.tracker_registry.get(999)
+        tracker.pending_interrupter_turns = [("Bob", "wait what")]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        # Expected: Alice "hello" (buffer), Bob "wait what" (interrupter),
+        # assistant reply "my reply".
+        assert [(t.role, t.speaker, t.content) for t in turns] == [
+            ("user", "Alice", "hello"),
+            ("user", "Bob", "wait what"),
+            ("assistant", None, "my reply"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_pending_cleared_after_flush(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.short
+        )
+        tracker = familiar.tracker_registry.get(999)
+        tracker.pending_interrupter_turns = [("Bob", "hi"), ("Carol", "hey")]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        assert tracker.pending_interrupter_turns == []
+
+    @pytest.mark.asyncio
+    async def test_pending_cleared_on_long_discard(self, tmp_path: Path) -> None:
+        """wait_for_lull → long → pending turns cleared, not written."""
+        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.long
+        )
+        tracker = familiar.tracker_registry.get(999)
+        tracker.pending_interrupter_turns = [("Bob", "wait what")]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        assert tracker.pending_interrupter_turns == []
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        # Long discard skips buffer and interrupter writes alike.
+        assert all("wait what" not in t.content for t in turns)
