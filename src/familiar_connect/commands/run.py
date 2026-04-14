@@ -19,6 +19,7 @@ from familiar_connect.bot import create_bot
 from familiar_connect.config import ConfigError, load_character_config
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
+from familiar_connect.metrics import SQLiteCollector
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
 
@@ -90,6 +91,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     finally:
         for client in familiar.llm_clients.values():
             await client.close()
+        familiar.metrics_collector.close()
 
 
 _OPUS_FALLBACK_PATHS = [
@@ -215,6 +217,8 @@ def run(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         _logger.error("Failed to load familiar config: %s", exc)
         return 1
+
+    familiar.metrics_collector = SQLiteCollector(familiar_root / "metrics.db")
 
     _logger.info(
         "Loaded familiar %s from %s (default_mode=%s)",

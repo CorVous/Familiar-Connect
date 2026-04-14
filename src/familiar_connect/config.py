@@ -75,20 +75,9 @@ class Interjection(Enum):
 
 
 class InterruptTolerance(Enum):
-    """How stubborn the familiar is when interrupted mid-speech (voice only).
+    """Base probability of pushing through a mid-speech interruption (voice).
 
-    Base probability of *continuing to talk* when a user interrupts during
-    SPEAKING. The mood evaluator adds an ephemeral modifier on top of this
-    base; responses begun from the chattiness/interjection path also get a
-    positive bias so unsolicited remarks tend to push through.
-
-    | Tier            | Base probability |
-    |-----------------|------------------|
-    | ``very_meek``     | 0.10           |
-    | ``meek``          | 0.20           |
-    | ``average``       | 0.30           |
-    | ``stubborn``      | 0.45           |
-    | ``very_stubborn`` | 0.60           |
+    Mood modifier and unsolicited bias added on top at runtime.
     """
 
     very_meek = "very_meek"
@@ -119,6 +108,7 @@ LLM_SLOT_NAMES: frozenset[str] = frozenset(
         "reasoning_context",
         "history_summary",
         "memory_search",
+        "memory_writer",
         "interjection_decision",
         "mood_eval",
     },
@@ -156,12 +146,6 @@ class CharacterConfig:
         evaluation prompt.
     :param text_lull_timeout: text-only; voice uses ``voice_lull_timeout``.
     :param voice_lull_timeout: debounce for Deepgram final-transcript stream.
-    :param interrupt_tolerance: voice-only; probability of pushing through
-        a mid-speech interruption. See :class:`InterruptTolerance`.
-    :param min_interruption_s: voice-only; minimum continuous user speech
-        before a burst counts as an interruption.
-    :param short_long_boundary_s: voice-only; threshold separating short
-        (polite pause) from long (cancel/regen) interruptions.
     """
 
     default_mode: ChannelMode = DEFAULT_CHANNEL_MODE
@@ -180,6 +164,10 @@ class CharacterConfig:
     interrupt_tolerance: InterruptTolerance = InterruptTolerance.average
     min_interruption_s: float = 2.0
     short_long_boundary_s: float = 30.0
+    memory_writer_turn_threshold: int = 50
+    """Run the memory writer pass after this many new turns."""
+    memory_writer_idle_timeout: float = 1800.0
+    """Run the memory writer pass after this many seconds of silence (30 min)."""
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
 
@@ -349,6 +337,13 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         _parse_voice_interruption(interruption_raw)
     )
 
+    mw_section = data.get("memory_writer", {})
+    if not isinstance(mw_section, dict):
+        msg = f"[memory_writer] must be a table, got {type(mw_section).__name__}"
+        raise ConfigError(msg)
+    memory_writer_turn_threshold = int(mw_section.get("turn_threshold", 50))
+    memory_writer_idle_timeout = float(mw_section.get("idle_timeout", 1800.0))
+
     llm_raw = data.get("llm", {})
     if not isinstance(llm_raw, dict):
         msg = f"[llm] must be a table, got {type(llm_raw).__name__}"
@@ -375,6 +370,8 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         interrupt_tolerance=interrupt_tolerance,
         min_interruption_s=min_interruption_s,
         short_long_boundary_s=short_long_boundary_s,
+        memory_writer_turn_threshold=memory_writer_turn_threshold,
+        memory_writer_idle_timeout=memory_writer_idle_timeout,
         llm=llm,
         tts=tts,
     )

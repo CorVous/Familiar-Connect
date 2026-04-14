@@ -25,6 +25,7 @@ from familiar_connect.history.store import (
     HistoryStore,
     HistoryTurn,
     SummaryEntry,
+    WatermarkEntry,
 )
 
 if TYPE_CHECKING:
@@ -792,3 +793,48 @@ class TestCrossContextCache:
         assert entry is not None
         assert entry.source_last_id == 20
         assert entry.summary_text == "new"
+
+
+# ---------------------------------------------------------------------------
+# Memory-writer watermark
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryWriterWatermark:
+    def test_get_watermark_none_when_unset(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert s.get_writer_watermark(familiar_id=_FAMILIAR) is None
+
+    def test_put_and_get_watermark(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.put_writer_watermark(familiar_id=_FAMILIAR, last_written_id=42)
+        entry = s.get_writer_watermark(familiar_id=_FAMILIAR)
+        assert isinstance(entry, WatermarkEntry)
+        assert entry.last_written_id == 42
+
+    def test_put_watermark_upsert(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.put_writer_watermark(familiar_id=_FAMILIAR, last_written_id=10)
+        s.put_writer_watermark(familiar_id=_FAMILIAR, last_written_id=50)
+        entry = s.get_writer_watermark(familiar_id=_FAMILIAR)
+        assert entry is not None
+        assert entry.last_written_id == 50
+
+    def test_turns_since_watermark(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 10)
+        # Set watermark at turn 5 — should get turns 6..10
+        s.put_writer_watermark(familiar_id=_FAMILIAR, last_written_id=turns[4].id)
+        since = s.turns_since_watermark(familiar_id=_FAMILIAR)
+        assert len(since) == 5
+        assert since[0].id == turns[5].id
+        assert since[-1].id == turns[9].id
+
+    def test_turns_since_watermark_no_watermark_returns_all(
+        self, tmp_path: Path
+    ) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 6)
+        since = s.turns_since_watermark(familiar_id=_FAMILIAR)
+        assert len(since) == 6
+        assert since[0].id == turns[0].id

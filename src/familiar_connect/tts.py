@@ -1,11 +1,7 @@
-"""TTS client for synthesizing speech via Cartesia.
+"""TTS client — Cartesia streaming WebSocket.
 
-The client uses Cartesia's streaming WebSocket endpoint so that a single
-synth call returns both the audio bytes and per-word timestamps. The
-timestamps are required by the voice interruption flow (see
-``docs/roadmap/interruption-flow.md``): when the familiar yields mid-
-speech, it needs to map elapsed playback time onto a word boundary to
-compute what was already spoken and what remains.
+Returns audio bytes + per-word timestamps (needed for mid-speech
+yield in voice interruption flow).
 """
 
 from __future__ import annotations
@@ -36,13 +32,7 @@ DEFAULT_SAMPLE_RATE = 48000  # matches Discord's native rate
 
 @dataclass(frozen=True)
 class WordTimestamp:
-    """A single word's playback window within a synthesised audio clip.
-
-    Times are milliseconds from the start of playback (start of the
-    audio buffer returned in :class:`TTSResult`). Cartesia returns
-    floating-point seconds; we convert to ms once at parse time so
-    downstream interruption math stays in a single unit.
-    """
+    """Per-word playback window (ms from audio start)."""
 
     word: str
     start_ms: float
@@ -51,28 +41,14 @@ class WordTimestamp:
 
 @dataclass(frozen=True)
 class TTSResult:
-    """Return value of :meth:`CartesiaTTSClient.synthesize`.
-
-    :param audio: Raw mono PCM bytes (16-bit signed little-endian at
-        the client's ``sample_rate``). Ready to be passed through
-        :func:`familiar_connect.voice.audio.mono_to_stereo` before
-        handing to Discord.
-    :param timestamps: Per-word playback windows, ordered. Empty when
-        Cartesia does not emit timestamps (older models, or when the
-        server drops the ``timestamps`` event).
-    """
+    """Synthesized audio + per-word timestamps."""
 
     audio: bytes
     timestamps: list[WordTimestamp] = field(default_factory=list)
 
 
 class CartesiaTTSClient:
-    """Client for synthesizing speech via Cartesia's TTS WebSocket API.
-
-    Connects on each :meth:`synthesize` call, streams audio chunks and
-    word timestamps for a single transcript, then closes. Returns a
-    :class:`TTSResult` carrying raw PCM bytes plus per-word timings.
-    """
+    """Cartesia TTS WebSocket client; one connection per :meth:`synthesize`."""
 
     def __init__(
         self: Self,
@@ -110,12 +86,7 @@ class CartesiaTTSClient:
         }
 
     def build_payload(self: Self, text: str, *, context_id: str) -> dict[str, Any]:
-        """Build the JSON payload for a one-shot TTS synthesis request.
-
-        ``continue=False`` tells Cartesia this is the only transcript
-        chunk for this context, so the server will finalise and emit
-        ``done`` without waiting for more input.
-        """
+        """Build JSON payload for one-shot TTS synthesis."""
         return {
             "context_id": context_id,
             "model_id": self.model,
@@ -143,15 +114,9 @@ class CartesiaTTSClient:
         return await session.ws_connect(url)
 
     async def synthesize(self: Self, text: str) -> TTSResult:
-        """Synthesize *text* and return audio bytes plus word timestamps.
+        """Synthesize *text* via WebSocket; return audio + word timestamps.
 
-        Opens a Cartesia WebSocket, streams one transcript with
-        ``add_timestamps=true``, concatenates all ``chunk`` events into
-        a single PCM buffer, collects ``timestamps`` events into a flat
-        list, and returns once a ``done`` event arrives.
-
-        :raises RuntimeError: On a Cartesia ``error`` event or unexpected
-            connection close.
+        :raises RuntimeError: on Cartesia ``error`` event or unexpected close.
         """
         context_id = uuid.uuid4().hex
         url = self.build_ws_url()

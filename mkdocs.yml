@@ -60,6 +60,7 @@ nav:
   - Guides:
       - guides/bootstrapping.md
       - guides/twitch.md
+      - guides/metrics.md
   - Architecture:
       - architecture/overview.md
       - architecture/context-pipeline.md

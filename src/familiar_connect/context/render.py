@@ -238,10 +238,7 @@ def assemble_chat_messages(
                 Message(role=turn.role, content=content, name=None),
             )
 
-    # 3. interruption-context note — inserted as a system message
-    # immediately before the final user turn. Populated only by the
-    # voice long-interruption path (Step 8); absent for every normal
-    # turn.
+    # 3. interruption-context note (voice long-interruption path)
     interruption_note = (request.interruption_context or "").strip()
     if interruption_note:
         messages.append(

@@ -291,6 +291,12 @@ code; contract violations surface loudly.
 - The [memory directory](memory.md) contains the distilled,
   human-readable form of everything the familiar "knows." It is the
   *model's* view of the world.
+- Per-turn performance traces (latency, token counts, provider
+  outcomes, A/B tags) are persisted in a separate SQLite DB —
+  `data/familiars/<id>/metrics.db` — via
+  `familiar_connect.metrics.SQLiteCollector`. See
+  [Metrics and profiling](../guides/metrics.md) for the data model,
+  the logging-vs-metrics boundary, and CLI usage.
 - Derived artefacts — rolling summaries, future vector indices, tag
   caches — are rebuildable from the raw transcript store and the
   memory directory. Losing them is annoying but not destructive.

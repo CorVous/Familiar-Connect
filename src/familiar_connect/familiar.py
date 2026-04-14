@@ -28,7 +28,10 @@ from familiar_connect.context.providers.mode_instructions import (
     ModeInstructionProvider,
 )
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.memory.scheduler import MemoryWriterScheduler
 from familiar_connect.memory.store import MemoryStore
+from familiar_connect.memory.writer import MemoryWriter
+from familiar_connect.metrics import MetricsCollector, NullCollector
 from familiar_connect.mood import MoodEvaluator
 from familiar_connect.subscriptions import SubscriptionRegistry
 from familiar_connect.voice.interruption import ResponseTrackerRegistry
@@ -69,15 +72,17 @@ class Familiar:
     subscriptions: SubscriptionRegistry
     channel_configs: ChannelConfigStore
     monitor: ConversationMonitor
+    memory_writer_scheduler: MemoryWriterScheduler
     tracker_registry: ResponseTrackerRegistry = field(
         default_factory=ResponseTrackerRegistry,
     )
-    """Per-guild :class:`ResponseTracker` lookup used by the voice
-    interruption state machine. Populated lazily on first voice reply.
-    """
+    """Per-guild :class:`ResponseTracker` lookup; lazy-created."""
     mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
     """Per-response mood modifier source. Real LLM call when wired
     with ``llm_client`` + ``history_store``; stub (0.0) otherwise."""
+    metrics_collector: MetricsCollector = field(default_factory=NullCollector)
+    """sink for per-turn ``TurnTrace`` records; ``NullCollector`` by default
+    so tests don't need to opt out. Replaced by ``SQLiteCollector`` in ``run``."""
     extras: dict[str, object] = field(default_factory=dict)
     """scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet"""
@@ -180,6 +185,19 @@ class Familiar:
             llm_client=llm_clients["mood_eval"],
             history_store=history_store,
         )
+        memory_writer = MemoryWriter(
+            memory_store=memory_store,
+            history_store=history_store,
+            llm_client=llm_clients["memory_writer"],
+            familiar_id=familiar_id,
+        )
+        memory_writer_scheduler = MemoryWriterScheduler(
+            writer=memory_writer,
+            history_store=history_store,
+            familiar_id=familiar_id,
+            turn_threshold=character_config.memory_writer_turn_threshold,
+            idle_timeout=character_config.memory_writer_idle_timeout,
+        )
 
         return cls(
             id=familiar_id,
@@ -197,6 +215,7 @@ class Familiar:
             channel_configs=channel_configs,
             monitor=monitor,
             mood_evaluator=mood_evaluator,
+            memory_writer_scheduler=memory_writer_scheduler,
         )
 
     # ------------------------------------------------------------------

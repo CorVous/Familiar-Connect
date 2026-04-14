@@ -24,6 +24,7 @@ from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
+from familiar_connect.metrics import TraceBuilder
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
@@ -39,7 +40,6 @@ from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_p
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
     from familiar_connect.tts import WordTimestamp
@@ -61,21 +61,6 @@ async def _recording_finished_callback(  # noqa: RUF029
     py-cord awaits this internally; cleanup lives in :func:`unsubscribe_voice`.
     """
     del sink, args
-
-
-def _log_pipeline_outcomes(
-    channel_id: int,
-    outcomes: list[ProviderOutcome],
-) -> None:
-    """Emit structured log entry per provider outcome."""
-    for outcome in outcomes:
-        _logger.info(
-            "pipeline channel=%s provider=%s status=%s duration=%.3fs",
-            channel_id,
-            outcome.provider_id,
-            outcome.status,
-            outcome.duration_s,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +123,10 @@ async def unsubscribe_text(
         kind=SubscriptionKind.text,
     )
     familiar.monitor.clear_channel(channel_id)
-    await ctx.respond("No longer listening here.", ephemeral=True)
+    # flush can exceed Discord's 3s interaction window (LLM call + file writes)
+    await ctx.defer(ephemeral=True)
+    await familiar.memory_writer_scheduler.flush()
+    await ctx.followup.send("No longer listening here.", ephemeral=True)
 
 
 async def _run_voice_response(
@@ -152,21 +140,8 @@ async def _run_voice_response(
     trigger: ResponseTrigger,
     interruption_context: str | None = None,
 ) -> None:
-    """Run full pipeline → LLM → TTS path for a voice channel.
-
-    Called by ``on_respond`` when :class:`ConversationMonitor` decides
-    the familiar should speak. Mirrors :func:`_run_text_response`;
-    voice uses :attr:`Modality.voice` and trims LLM-calling providers
-    and processors for lower latency. Persists every buffered user
-    utterance in order, then the assistant reply, so the history
-    store reflects the full conversation.
-    """
-    # Resolve the per-guild response tracker and mark this response with
-    # the trigger's unsolicited flag. The tracker drives the voice
-    # interruption state machine; for Step 3 it is observational only —
-    # we log the IDLE→GENERATING→SPEAKING→IDLE lifecycle so operators
-    # can see that solicited vs. unsolicited replies are tagged right
-    # before any interruption logic is wired up.
+    """Run full pipeline → LLM → TTS path for voice channel."""
+    # resolve per-guild response tracker; mark unsolicited flag
     tracker = familiar.tracker_registry.get(guild_id if guild_id is not None else 0)
     tracker.vc = vc
     tracker.is_unsolicited = trigger.is_unsolicited
@@ -209,22 +184,34 @@ async def _run_voice_response(
         interruption_context=interruption_context,
     )
 
-    pipeline = familiar.build_pipeline(channel_config)
-    pipeline_output = await pipeline.assemble(
-        request,
-        budget_by_layer=channel_config.budget_by_layer,
+    builder = TraceBuilder(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        modality="voice",
     )
-    _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
+    builder.tag("channel_mode", channel_config.mode.value)
+    builder.tag("speaker", speaker)
 
-    messages = assemble_chat_messages(
-        pipeline_output,
-        store=familiar.history_store,
-        history_window_size=familiar.config.history_window_size,
-        depth_inject_position=familiar.config.depth_inject_position,
-        depth_inject_role=familiar.config.depth_inject_role,
-        mode=channel_config.mode,
-        display_tz=familiar.config.display_tz,
-    )
+    pipeline = familiar.build_pipeline(channel_config)
+    async with builder.span("pipeline_assembly") as pa_meta:
+        pipeline_output = await pipeline.assemble(
+            request,
+            budget_by_layer=channel_config.budget_by_layer,
+        )
+        builder.add_provider_outcomes(pa_meta, pipeline_output.outcomes)
+
+    async with builder.span("render") as rmeta:
+        messages = assemble_chat_messages(
+            pipeline_output,
+            store=familiar.history_store,
+            history_window_size=familiar.config.history_window_size,
+            depth_inject_position=familiar.config.depth_inject_position,
+            depth_inject_role=familiar.config.depth_inject_role,
+            mode=channel_config.mode,
+            display_tz=familiar.config.display_tz,
+        )
+        rmeta["message_count"] = len(messages)
 
     _logger.info(
         "LLM request channel=%s (voice) messages=%d, %d new:\n%s",
@@ -243,47 +230,57 @@ async def _run_voice_response(
         ),
     )
 
-    # main reply isolation: catch ``LLMClient.chat`` raise set
-    # (transport, status, malformed payload) and return cleanly so
-    # the monitor callback stays alive for the next utterance.
-    #
-    # Step 7: the chat call runs as a cancellable asyncio.Task parked
-    # on ``tracker.generation_task`` so a later long-interruption
-    # handler can call ``tracker.generation_task.cancel()`` to abort
-    # mid-generation without wasting tokens. No caller cancels yet —
-    # this is plumbing for Steps 8 and 12.
-    generation_task = asyncio.create_task(
-        familiar.llm_clients["main_prose"].chat(messages),
-    )
-    tracker.generation_task = generation_task
-    try:
-        reply = await generation_task
-    except asyncio.CancelledError:
-        tracker.generation_task = None
+    # cancellable generation task; parked on tracker for interruption path.
+    # errors captured inside span so `llm_call` stage lands in trace;
+    # re-raise / early return happens after span exits cleanly.
+    llm_error: BaseException | None = None
+    reply = None
+    async with builder.span("llm_call") as llm_meta:
+        llm_meta["model"] = familiar.llm_clients["main_prose"].model
+        generation_task = asyncio.create_task(
+            familiar.llm_clients["main_prose"].chat(messages),
+        )
+        tracker.generation_task = generation_task
+        try:
+            reply = await generation_task
+        except asyncio.CancelledError as exc:
+            llm_meta["error"] = "cancelled"
+            llm_error = exc
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            llm_meta["error"] = f"{type(exc).__name__}: {exc}"
+            llm_error = exc
+        else:
+            llm_meta["reply_length"] = len(reply.content)
+        finally:
+            tracker.generation_task = None
+    if isinstance(llm_error, asyncio.CancelledError):
         current = asyncio.current_task()
+        tracker.transition(ResponseState.IDLE)
+        familiar.metrics_collector.record(builder.finalize())
         if current is not None and current.cancelling() > 0:
-            # The outer task was cancelled from above — propagate so
-            # we don't swallow someone else's cancellation.
-            tracker.transition(ResponseState.IDLE)
-            raise
-        # The generation task itself was cancelled (interruption path).
+            # outer task cancelled from above — propagate
+            raise llm_error
+        # generation task cancelled (interruption path)
         _logger.info(
             "voice generation cancelled channel=%s",
             channel_id,
         )
-        tracker.transition(ResponseState.IDLE)
         return
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
-        tracker.generation_task = None
+    if llm_error is not None:
         _logger.warning(
             "main reply (voice): %s: %s",
-            type(exc).__name__,
-            exc,
+            type(llm_error).__name__,
+            llm_error,
         )
         tracker.transition(ResponseState.IDLE)
+        familiar.metrics_collector.record(builder.finalize())
         return
-    tracker.generation_task = None
-    reply_text = await pipeline.run_post_processors(reply.content, request)
+    if reply is None:
+        # unreachable; type-guard
+        return
+
+    async with builder.span("post_processing"):
+        reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 
     if familiar.tts_client is not None:
@@ -417,6 +414,7 @@ async def _run_voice_response(
                     content=regen_text,
                     mode=channel_config.mode,
                 )
+                await familiar.memory_writer_scheduler.notify_turn()
                 _logger.info("[Voice Regen Response] %s", regen_text)
                 regen_tts = await familiar.tts_client.synthesize(regen_text)
                 tracker.timestamps = list(regen_tts.timestamps)
@@ -440,6 +438,7 @@ async def _run_voice_response(
                 content=reply_text,
                 mode=channel_config.mode,
             )
+            await familiar.memory_writer_scheduler.notify_turn()
         except Exception:
             _logger.exception("Voice response TTS failed")
             tracker.transition(ResponseState.IDLE)
@@ -464,8 +463,10 @@ async def _run_voice_response(
             content=reply_text,
             mode=channel_config.mode,
         )
+        await familiar.memory_writer_scheduler.notify_turn()
         _logger.info("[Voice Response] %s", reply_text)
     tracker.transition(ResponseState.IDLE)
+    familiar.metrics_collector.record(builder.finalize())
 
 
 async def dispatch_interruption_regen(
@@ -534,12 +535,9 @@ async def subscribe_my_voice(
 ) -> None:
     """Join caller's voice channel and register a voice subscription.
 
-    When ``familiar.transcriber`` is set, starts a per-user Deepgram
-    pipeline, debounces finals through :class:`VoiceLullMonitor`, and
-    feeds merged utterances into :attr:`Familiar.monitor` so voice
-    turns share the same ``ConversationMonitor`` gate as text. On
-    YES, the monitor dispatches via ``voice_response_handlers`` in
-    :attr:`Familiar.extras`. Without a transcriber, joins for TTS only.
+    When ``familiar.transcriber`` is set, starts per-user Deepgram
+    pipeline → :class:`VoiceLullMonitor` → ``ConversationMonitor``
+    (same gate as text). Without transcriber, joins for TTS only.
     """
     author = ctx.author
     if not isinstance(author, discord.Member) or author.voice is None:
@@ -608,12 +606,7 @@ async def subscribe_my_voice(
                     return member.display_name
             return None
 
-        # Register a per-voice-channel response handler on the familiar.
-        # The ``on_respond`` callback built in ``create_bot`` looks this
-        # up by channel id and dispatches here when the
-        # ``ConversationMonitor`` decides the familiar should speak on
-        # this voice channel. Captures ``vc`` so the same voice client
-        # connection handles playback for the life of the subscription.
+        # per-voice-channel response handler; dispatched by on_respond
         async def _voice_response_handler(
             channel_id: int,
             buffer: list[BufferedMessage],
@@ -639,13 +632,7 @@ async def subscribe_my_voice(
         )
         voice_response_handlers[voice_channel_id] = _voice_response_handler
 
-        # Debounce Deepgram finals into one utterance per speaker turn,
-        # then hand the merged transcript to the ConversationMonitor —
-        # exactly the same entry point text channels use. The monitor
-        # runs direct-address detection on the transcript text, counter-
-        # based interjection checks, and a silence-based conversational
-        # lull gate. On YES, ``_voice_response_handler`` fires via
-        # ``on_respond``.
+        # deliver debounced transcript to ConversationMonitor
         async def _deliver_to_monitor(
             user_id: int,
             merged: TranscriptionResult,
@@ -683,16 +670,12 @@ async def subscribe_my_voice(
                     speaker=safe_name,
                     text=merged.text,
                     is_mention=False,
-                    # The voice pipeline already debounced silence via
-                    # VoiceLullMonitor, so this call is itself the lull.
-                    # Tell the monitor not to start another lull timer.
+                    # already debounced by VoiceLullMonitor; skip lull timer
                     is_lull_endpoint=True,
                 )
             finally:
-                # If the side-model said NO, no on_respond fired, the
-                # tracker is still GENERATING — revert to IDLE so the
-                # next turn starts clean. If YES, _run_voice_response
-                # has already cycled the tracker through SPEAKING→IDLE.
+                # revert to IDLE if monitor said NO (on YES,
+                # _run_voice_response already cycled to IDLE)
                 if tracker.state is ResponseState.GENERATING:
                     tracker.transition(ResponseState.IDLE)
 
@@ -808,9 +791,8 @@ async def subscribe_my_voice(
             user_silence_s=0.2,
             on_utterance_complete=_deliver_to_monitor,
             on_voice_activity=interruption_detector.on_voice_activity,
-        )  # voice_lull_timeout is endpointing only; the conversational
-        # lull (side-model YES/NO gate) is governed by text_lull_timeout
-        # inside ConversationMonitor.
+        )  # voice_lull_timeout = endpointing; conversational lull governed
+        # by text_lull_timeout inside ConversationMonitor
         familiar.extras["voice_lull_monitor"] = lull_monitor
 
         async def _route_transcript_to_monitor(  # noqa: RUF029
@@ -860,6 +842,10 @@ async def unsubscribe_voice(
         await ctx.respond("I'm not in a voice channel.", ephemeral=True)
         return
 
+    # disconnect + pipeline teardown + memory flush can exceed Discord's 3s
+    # interaction window, so defer before doing any of it
+    await ctx.defer(ephemeral=True)
+
     if vc is not None:
         # stop transcription first so audio stops flowing before disconnect
         if get_pipeline() is not None:
@@ -874,10 +860,7 @@ async def unsubscribe_voice(
         await vc.disconnect()
 
     if sub is not None:
-        # Drop the per-channel voice response dispatch and clear any
-        # monitor state for this voice channel so a later re-subscribe
-        # starts fresh (and so a lull timer doesn't fire into a dead
-        # voice client).
+        # drop voice dispatch + monitor state for clean re-subscribe
         voice_response_handlers = cast(
             "dict[int, Callable[[int, list[BufferedMessage]], Awaitable[None]]]",
             familiar.extras.get("voice_response_handlers", {}),
@@ -889,7 +872,8 @@ async def unsubscribe_voice(
             kind=SubscriptionKind.voice,
         )
 
-    await ctx.respond("Left voice.", ephemeral=True)
+    await familiar.memory_writer_scheduler.flush()
+    await ctx.followup.send("Left voice.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +921,15 @@ async def _run_text_response(
     """
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
+    builder = TraceBuilder(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        modality="text",
+    )
+    builder.tag("channel_mode", channel_config.mode.value)
+    builder.tag("speaker", speaker)
+
     request = ContextRequest(
         familiar_id=familiar.id,
         channel_id=channel_id,
@@ -951,81 +944,109 @@ async def _run_text_response(
         ),
     )
 
-    pipeline = familiar.build_pipeline(channel_config)
-    pipeline_output = await pipeline.assemble(
-        request,
-        budget_by_layer=channel_config.budget_by_layer,
-    )
-    _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
-
-    messages = assemble_chat_messages(
-        pipeline_output,
-        store=familiar.history_store,
-        history_window_size=familiar.config.history_window_size,
-        depth_inject_position=familiar.config.depth_inject_position,
-        depth_inject_role=familiar.config.depth_inject_role,
-        mode=channel_config.mode,
-        display_tz=familiar.config.display_tz,
-    )
-
-    n_new = len(request.pending_turns) if request.pending_turns else 1
-    batch = (
-        "\n".join(
-            f"  [{pt.speaker or '?'}]: "
-            f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
-            for pt in request.pending_turns
-        )
-        if request.pending_turns
-        else (
-            f"  [{request.speaker or '?'}]: "
-            f"{request.utterance[:200]}{'…' if len(request.utterance) > 200 else ''}"
-        )
-    )
-    _logger.info(
-        "LLM request channel=%s messages=%d, %d new:\n%s",
-        channel_id,
-        len(messages),
-        n_new,
-        batch,
-    )
-
-    # main reply isolation: catch ``LLMClient.chat`` raise set;
-    # on failure return silently (no history write, no TTS)
+    # typing indicator spans pipeline assembly + LLM + post-proc so
+    # it shows while context is built, not just during the LLM call
     async with channel.typing():
-        try:
-            reply = await familiar.llm_clients["main_prose"].chat(messages)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
+        pipeline = familiar.build_pipeline(channel_config)
+        async with builder.span("pipeline_assembly") as pa_meta:
+            pipeline_output = await pipeline.assemble(
+                request,
+                budget_by_layer=channel_config.budget_by_layer,
+            )
+            builder.add_provider_outcomes(pa_meta, pipeline_output.outcomes)
+
+        async with builder.span("render") as rmeta:
+            messages = assemble_chat_messages(
+                pipeline_output,
+                store=familiar.history_store,
+                history_window_size=familiar.config.history_window_size,
+                depth_inject_position=familiar.config.depth_inject_position,
+                depth_inject_role=familiar.config.depth_inject_role,
+                mode=channel_config.mode,
+                display_tz=familiar.config.display_tz,
+            )
+            rmeta["message_count"] = len(messages)
+
+        n_new = len(request.pending_turns) if request.pending_turns else 1
+        batch = (
+            "\n".join(
+                f"  [{pt.speaker or '?'}]: "
+                f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
+                for pt in request.pending_turns
+            )
+            if request.pending_turns
+            else (
+                f"  [{request.speaker or '?'}]: "
+                f"{request.utterance[:200]}"
+                f"{'…' if len(request.utterance) > 200 else ''}"
+            )
+        )
+        _logger.info(
+            "LLM request channel=%s messages=%d, %d new:\n%s",
+            channel_id,
+            len(messages),
+            n_new,
+            batch,
+        )
+
+        # main reply isolation: catch ``LLMClient.chat`` raise set;
+        # on failure return silently (no history write, no TTS).
+        # error captured inside span so llm_call stage lands in the trace.
+        llm_error: Exception | None = None
+        reply = None
+        async with builder.span("llm_call") as llm_meta:
+            llm_meta["model"] = familiar.llm_clients["main_prose"].model
+            try:
+                reply = await familiar.llm_clients["main_prose"].chat(messages)
+            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                llm_meta["error"] = f"{type(exc).__name__}: {exc}"
+                llm_error = exc
+            else:
+                llm_meta["reply_length"] = len(reply.content)
+        if llm_error is not None:
             _logger.warning(
                 "main reply (text): %s: %s",
-                type(exc).__name__,
-                exc,
+                type(llm_error).__name__,
+                llm_error,
             )
+            familiar.metrics_collector.record(builder.finalize())
+            return
+        if reply is None:
+            # unreachable; type-guard
             return
 
-    reply_text = await pipeline.run_post_processors(reply.content, request)
+        async with builder.span("post_processing"):
+            reply_text = await pipeline.run_post_processors(reply.content, request)
 
     # persist buffered user turns then assistant reply (after LLM
     # call so a crash never leaves an orphaned user turn)
-    for msg in buffer:
+    async with builder.span("history_write") as hw_meta:
+        turns_written = 0
+        for msg in buffer:
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                role="user",
+                content=msg.text,
+                speaker=msg.speaker,
+                mode=channel_config.mode,
+            )
+            turns_written += 1
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
             channel_id=channel_id,
             guild_id=guild_id,
-            role="user",
-            content=msg.text,
-            speaker=msg.speaker,
+            role="assistant",
+            content=reply_text,
             mode=channel_config.mode,
         )
-    familiar.history_store.append_turn(
-        familiar_id=familiar.id,
-        channel_id=channel_id,
-        guild_id=guild_id,
-        role="assistant",
-        content=reply_text,
-        mode=channel_config.mode,
-    )
+        turns_written += 1
+        hw_meta["turns_written"] = turns_written
+    await familiar.memory_writer_scheduler.notify_turn()
 
-    await channel.send(reply_text)
+    async with builder.span("discord_send"):
+        await channel.send(reply_text)
 
     # TTS fan-out: speak reply in voice if a voice sub exists in guild
     guild = getattr(channel, "guild", None)
@@ -1036,12 +1057,17 @@ async def _run_text_response(
     ):
         vc = guild.voice_client
         if vc is not None and not vc.is_playing():
-            try:
-                tts_result = await familiar.tts_client.synthesize(reply_text)
-                stereo = mono_to_stereo(tts_result.audio)
-                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            except Exception:
-                _logger.exception("TTS synthesis failed")
+            async with builder.span("tts") as tts_meta:
+                try:
+                    tts_result = await familiar.tts_client.synthesize(reply_text)
+                    stereo = mono_to_stereo(tts_result.audio)
+                    tts_meta["audio_bytes"] = len(stereo)
+                    vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+                except Exception as exc:
+                    tts_meta["error"] = f"{type(exc).__name__}: {exc}"
+                    _logger.exception("TTS synthesis failed")
+
+    familiar.metrics_collector.record(builder.finalize())
 
 
 # ---------------------------------------------------------------------------
@@ -1100,6 +1126,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     @bot.event
     async def on_ready() -> None:  # noqa: RUF029
         familiar.extras["bot_user"] = bot.user
+        familiar.memory_writer_scheduler.start()
 
     # on_respond callback: drives full pipeline path
     async def _on_respond(
@@ -1107,11 +1134,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         buffer: list[BufferedMessage],
         trigger: ResponseTrigger,
     ) -> None:
-        # Voice dispatch first: if this channel has a voice response
-        # handler registered by subscribe_my_voice, hand the buffer to
-        # it. This is how the ConversationMonitor gate (direct address,
-        # interjection check, conversational lull) reaches the voice
-        # path now that voice shares the same monitor as text.
+        # voice dispatch first — shared ConversationMonitor gate
         voice_handlers = cast(
             "dict[int, Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]]]",  # noqa: E501
             familiar.extras.get("voice_response_handlers", {}),

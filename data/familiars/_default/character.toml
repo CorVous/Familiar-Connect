@@ -39,6 +39,12 @@ short_long_boundary_s = 30.0        # short (polite pause) vs. long (regen)
 [providers.history]
 window_size = 20
 
+# --- Memory writer (post-session summarisation into long-term memory) ---------
+
+[memory_writer]
+turn_threshold = 50     # run writer after this many new turns
+idle_timeout   = 1800.0 # run writer after 30 min of silence
+
 [layers.depth_inject]
 position = 0
 role     = "system"
@@ -81,6 +87,11 @@ temperature = 0.4
 [llm.memory_search]
 model       = "z-ai/glm-4.7-flash"
 temperature = 0.4
+
+# Memory writer: post-session summarisation into long-term memory files.
+[llm.memory_writer]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.3
 
 # Chattiness monitor: decide whether to proactively join a conversation.
 [llm.interjection_decision]
