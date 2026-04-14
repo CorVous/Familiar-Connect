@@ -579,47 +579,50 @@ async def _run_text_response(
         ),
     )
 
-    pipeline = familiar.build_pipeline(channel_config)
-    pipeline_output = await pipeline.assemble(
-        request,
-        budget_by_layer=channel_config.budget_by_layer,
-    )
-    _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
-
-    messages = assemble_chat_messages(
-        pipeline_output,
-        store=familiar.history_store,
-        history_window_size=familiar.config.history_window_size,
-        depth_inject_position=familiar.config.depth_inject_position,
-        depth_inject_role=familiar.config.depth_inject_role,
-        mode=channel_config.mode,
-        display_tz=familiar.config.display_tz,
-    )
-
-    n_new = len(request.pending_turns) if request.pending_turns else 1
-    batch = (
-        "\n".join(
-            f"  [{pt.speaker or '?'}]: "
-            f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
-            for pt in request.pending_turns
-        )
-        if request.pending_turns
-        else (
-            f"  [{request.speaker or '?'}]: "
-            f"{request.utterance[:200]}{'…' if len(request.utterance) > 200 else ''}"
-        )
-    )
-    _logger.info(
-        "LLM request channel=%s messages=%d, %d new:\n%s",
-        channel_id,
-        len(messages),
-        n_new,
-        batch,
-    )
-
-    # main reply isolation: catch ``LLMClient.chat`` raise set;
-    # on failure return silently (no history write, no TTS)
+    # typing indicator spans pipeline assembly + LLM + post-proc so
+    # it shows while context is built, not just during the LLM call
     async with channel.typing():
+        pipeline = familiar.build_pipeline(channel_config)
+        pipeline_output = await pipeline.assemble(
+            request,
+            budget_by_layer=channel_config.budget_by_layer,
+        )
+        _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
+
+        messages = assemble_chat_messages(
+            pipeline_output,
+            store=familiar.history_store,
+            history_window_size=familiar.config.history_window_size,
+            depth_inject_position=familiar.config.depth_inject_position,
+            depth_inject_role=familiar.config.depth_inject_role,
+            mode=channel_config.mode,
+            display_tz=familiar.config.display_tz,
+        )
+
+        n_new = len(request.pending_turns) if request.pending_turns else 1
+        batch = (
+            "\n".join(
+                f"  [{pt.speaker or '?'}]: "
+                f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
+                for pt in request.pending_turns
+            )
+            if request.pending_turns
+            else (
+                f"  [{request.speaker or '?'}]: "
+                f"{request.utterance[:200]}"
+                f"{'…' if len(request.utterance) > 200 else ''}"
+            )
+        )
+        _logger.info(
+            "LLM request channel=%s messages=%d, %d new:\n%s",
+            channel_id,
+            len(messages),
+            n_new,
+            batch,
+        )
+
+        # main reply isolation: catch ``LLMClient.chat`` raise set;
+        # on failure return silently (no history write, no TTS)
         try:
             reply = await familiar.llm_clients["main_prose"].chat(messages)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -630,7 +633,7 @@ async def _run_text_response(
             )
             return
 
-    reply_text = await pipeline.run_post_processors(reply.content, request)
+        reply_text = await pipeline.run_post_processors(reply.content, request)
 
     # persist buffered user turns then assistant reply (after LLM
     # call so a crash never leaves an orphaned user turn)
