@@ -201,6 +201,9 @@ def _make_text_ctx(
 ) -> MagicMock:
     ctx = MagicMock(spec=discord.ApplicationContext)
     ctx.respond = AsyncMock()
+    ctx.defer = AsyncMock()
+    ctx.followup = MagicMock()
+    ctx.followup.send = AsyncMock()
     channel = MagicMock(spec=discord.TextChannel)
     channel.id = channel_id
     channel.name = "general"
@@ -620,7 +623,27 @@ class TestSubscriptionCommands:
             familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
             is None
         )
-        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
+        # deferred + followup because flush() can exceed Discord's 3s window
+        ctx.defer.assert_called_once_with(ephemeral=True)
+        ctx.followup.send.assert_called_once_with(ANY, ephemeral=True)
+
+    def test_unsubscribe_text_defers_before_flush(self, tmp_path: Path) -> None:
+        """Defer must happen before flush so slow flush can't expire interaction."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=42,
+            kind=SubscriptionKind.text,
+            guild_id=999,
+        )
+        call_order: list[str] = []
+        ctx = _make_text_ctx(channel_id=42, guild_id=999)
+        ctx.defer.side_effect = lambda **_: call_order.append("defer")
+        flush_mock = AsyncMock(side_effect=lambda: call_order.append("flush"))
+        familiar.memory_writer_scheduler.flush = flush_mock  # ty: ignore[invalid-assignment]
+
+        asyncio.run(unsubscribe_text(ctx, familiar))
+
+        assert call_order == ["defer", "flush"]
 
     def test_unsubscribe_text_clears_monitor_state(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path)
@@ -756,7 +779,32 @@ class TestVoiceSubscription:
 
         ctx.voice_client.disconnect.assert_called_once()
         assert familiar.subscriptions.voice_in_guild(999) is None
-        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
+        # deferred + followup because flush() can exceed Discord's 3s window
+        ctx.defer.assert_called_once_with(ephemeral=True)
+        ctx.followup.send.assert_called_once_with(ANY, ephemeral=True)
+
+    def test_unsubscribe_voice_defers_before_flush(self, tmp_path: Path) -> None:
+        """Defer must precede disconnect+flush so they can't expire interaction."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000,
+            kind=SubscriptionKind.voice,
+            guild_id=999,
+        )
+        call_order: list[str] = []
+        ctx = _make_voice_ctx(already_connected=True)
+        ctx.defer.side_effect = lambda **_: call_order.append("defer")
+        ctx.voice_client.disconnect = AsyncMock(
+            side_effect=lambda: call_order.append("disconnect"),
+        )
+        flush_mock = AsyncMock(side_effect=lambda: call_order.append("flush"))
+        familiar.memory_writer_scheduler.flush = flush_mock  # ty: ignore[invalid-assignment]
+
+        asyncio.run(unsubscribe_voice(ctx, familiar))
+
+        assert call_order[0] == "defer"
+        assert "flush" in call_order
+        assert call_order.index("defer") < call_order.index("flush")
 
     def test_unsubscribe_voice_stops_active_pipeline(self, tmp_path: Path) -> None:
         """Active voice pipeline is torn down before the voice client disconnects.

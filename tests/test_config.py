@@ -428,7 +428,6 @@ class TestCharacterConfigConversationFields:
             assert cfg.interjection is tier
 
 
-# ---------------------------------------------------------------------------
 # InterruptTolerance enum and [voice.interruption] TOML section
 # ---------------------------------------------------------------------------
 
@@ -552,3 +551,46 @@ class TestVoiceInterruptionConfig:
         )
         with pytest.raises(ConfigError, match="short_long_boundary_s"):
             load_character_config(path, defaults_path=default_profile_path)
+
+
+# ---------------------------------------------------------------------------
+# CharacterConfig memory-writer fields
+# ---------------------------------------------------------------------------
+
+
+class TestCharacterConfigMemoryWriterFields:
+    def test_defaults_when_file_absent(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        cfg = load_character_config(
+            tmp_path / "no-such-file.toml",
+            defaults_path=default_profile_path,
+        )
+        assert cfg.memory_writer_turn_threshold == 50
+        assert cfg.memory_writer_idle_timeout == 1800.0  # noqa: RUF069
+
+    def test_reads_memory_writer_section_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[memory_writer]\nturn_threshold = 30\nidle_timeout = 900.0\n",
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.memory_writer_turn_threshold == 30
+        assert cfg.memory_writer_idle_timeout == 900.0  # noqa: RUF069
+
+    def test_partial_memory_writer_section(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[memory_writer]\nturn_threshold = 100\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.memory_writer_turn_threshold == 100
+        assert cfg.memory_writer_idle_timeout == 1800.0  # noqa: RUF069

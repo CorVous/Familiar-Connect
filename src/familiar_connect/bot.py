@@ -125,7 +125,10 @@ async def unsubscribe_text(
         kind=SubscriptionKind.text,
     )
     familiar.monitor.clear_channel(channel_id)
-    await ctx.respond("No longer listening here.", ephemeral=True)
+    # flush can exceed Discord's 3s interaction window (LLM call + file writes)
+    await ctx.defer(ephemeral=True)
+    await familiar.memory_writer_scheduler.flush()
+    await ctx.followup.send("No longer listening here.", ephemeral=True)
 
 
 async def _run_voice_response(
@@ -263,6 +266,7 @@ async def _run_voice_response(
         content=reply_text,
         mode=channel_config.mode,
     )
+    await familiar.memory_writer_scheduler.notify_turn()
 
     _logger.info("[Voice Response] %s", reply_text)
 
@@ -482,6 +486,10 @@ async def unsubscribe_voice(
         await ctx.respond("I'm not in a voice channel.", ephemeral=True)
         return
 
+    # disconnect + pipeline teardown + memory flush can exceed Discord's 3s
+    # interaction window, so defer before doing any of it
+    await ctx.defer(ephemeral=True)
+
     if vc is not None:
         # stop transcription first so audio stops flowing before disconnect
         if get_pipeline() is not None:
@@ -508,7 +516,8 @@ async def unsubscribe_voice(
             kind=SubscriptionKind.voice,
         )
 
-    await ctx.respond("Left voice.", ephemeral=True)
+    await familiar.memory_writer_scheduler.flush()
+    await ctx.followup.send("Left voice.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +652,7 @@ async def _run_text_response(
         content=reply_text,
         mode=channel_config.mode,
     )
+    await familiar.memory_writer_scheduler.notify_turn()
 
     await channel.send(reply_text)
 
@@ -719,6 +729,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     @bot.event
     async def on_ready() -> None:  # noqa: RUF029
         familiar.extras["bot_user"] = bot.user
+        familiar.memory_writer_scheduler.start()
 
     # on_respond callback: drives full pipeline path
     async def _on_respond(

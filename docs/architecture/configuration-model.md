@@ -33,6 +33,7 @@ Per-familiar configuration. The persona, behaviour knobs, pluggable component se
 - **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
 - **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.
 - **TTS voice** — `[tts]` section carries `voice_id` and `model` for the Cartesia client.
+- **Memory writer** — `[memory_writer]` section with `turn_threshold` (default 50) and `idle_timeout` (default 1800.0s / 30 min). Controls when the post-session writer pass runs to summarise conversation history into long-term memory files.
 - **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`.
 - **Subscriptions** — which Discord channels the bot listens in, written to `subscriptions.toml` by `/subscribe-text` and `/subscribe-my-voice`.
 
@@ -49,6 +50,7 @@ Every LLM call site in the bot has its own slot, each independently configurable
 | `reasoning_context` | Hidden chain-of-thought before replying (`SteppedThinkingPreProcessor`) |
 | `history_summary` | Summarizes own-channel and cross-channel history (`HistoryProvider`) |
 | `memory_search` | Agentic memory/lore retrieval loop (`ContentSearchProvider`) |
+| `memory_writer` | Post-session summarisation into long-term memory files (`MemoryWriter`) |
 | `interjection_decision` | Decides whether to proactively join a conversation (`ConversationMonitor`) |
 
 Each slot takes the same shape in `character.toml`:
