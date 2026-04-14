@@ -149,32 +149,32 @@ Every incoming message on a subscribed channel flows through the monitor. There 
 
 **When:** The message counter reaches the current interjection threshold.
 
-**Timing:** Threshold starts at the tier's starting interval and decreases by 3 after each check, flooring at 3.
+**Timing:** Threshold starts at the tier's starting interval and decreases by 3 after each check, flooring at 3. Each interval has ±1–2 message jitter applied so the cadence is never exactly predictable.
 
 **Extra prompt context:** `"{N} messages have been said without you speaking."` (where N is the total `message_counter` value, not the interval).
 
-**Step-down curve.** The starting interval is tier-dependent. After each check where the familiar declines, the interval for the *next* check decreases by 3, with a floor of 3. The total message counter never resets until the familiar responds.
+**Step-down curve.** The starting interval is tier-dependent. After each check where the familiar declines, the interval for the *next* check decreases by 3, with a floor of 3. The total message counter never resets until the familiar responds. Each computed interval has ±1–2 message jitter added before use (floor still 3), so the exact fire message varies slightly each cycle.
 
-Example for `average` (starting interval = 9):
+Approximate example for `average` (starting interval = 9, shown without jitter):
 
-| Check # | Fires at message | Interval used | Next interval |
-|---------|------------------|---------------|---------------|
-| 1       | 9                | 9             | 6             |
-| 2       | 15               | 6             | 3             |
-| 3       | 18               | 3             | 3 (floor)     |
-| 4       | 21               | 3             | 3             |
-| ...     | every 3 after    | 3             | 3             |
+| Check # | Fires near message | Base interval | Next base |
+|---------|-------------------|---------------|-----------|
+| 1       | 9                 | 9             | 6         |
+| 2       | 15                | 6             | 3         |
+| 3       | 18                | 3             | 3 (floor) |
+| 4       | 21                | 3             | 3         |
+| ...     | every ~3 after    | 3             | 3         |
 
-Example for `very_quiet` (starting interval = 15):
+Approximate example for `very_quiet` (starting interval = 15):
 
-| Check # | Fires at message | Interval used | Next interval |
-|---------|------------------|---------------|---------------|
-| 1       | 15               | 15            | 12            |
-| 2       | 27               | 12            | 9             |
-| 3       | 36               | 9             | 6             |
-| 4       | 42               | 6             | 3             |
-| 5       | 45               | 3             | 3 (floor)     |
-| ...     | every 3 after    | 3             | 3             |
+| Check # | Fires near message | Base interval | Next base |
+|---------|-------------------|---------------|-----------|
+| 1       | 15                | 15            | 12        |
+| 2       | 27                | 12            | 9         |
+| 3       | 36                | 9             | 6         |
+| 4       | 42                | 6             | 3         |
+| 5       | 45                | 3             | 3 (floor) |
+| ...     | every ~3 after    | 3             | 3         |
 
 The prompt pressure also builds naturally: by check 5 on a `very_quiet` familiar, the prompt says *"45 messages have been said without you speaking"* — making even a reserved personality more likely to respond.
 
@@ -276,4 +276,3 @@ familiar.monitor.on_message(channel_id, speaker, text, is_mention)
 ## Future work
 
 - **Twitch events.** Twitch events (subs, bits, raids) should always be acknowledged. They could bypass the monitor entirely, or be treated as direct-address-equivalent triggers. Deferred until Twitch integration is wired into the monitor.
-- **Static thresholds feel robotic.** Interjection checks fire at fixed intervals (9, 6, 3, …), so a patient observer could count messages and know exactly when the familiar is about to weigh in. A small random jitter (±1–2 messages, clamped at 1, floor at 3) would break the mechanical regularity without changing tier semantics.

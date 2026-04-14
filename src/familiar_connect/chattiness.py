@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -98,12 +99,20 @@ def is_direct_address(
     return False
 
 
-def _interjection_interval(tier: Interjection, check_count: int) -> int:
+def _interjection_interval(
+    tier: Interjection,
+    check_count: int,
+    *,
+    rng: Callable[[], float] | None = None,
+) -> int:
     """Message interval for next interjection check.
 
     Shrinks by 3 after each declined check, flooring at 3.
+    +-1-2 message jitter prevents predictable cadence.
     """
-    return max(3, tier.starting_interval - check_count * 3)
+    base = max(3, tier.starting_interval - check_count * 3)
+    jitter = int((rng if rng is not None else random.random)() * 5) - 2  # noqa: S311
+    return max(3, base + jitter)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +201,7 @@ class ConversationMonitor:
             [int, list[BufferedMessage], ResponseTrigger],
             Awaitable[None],
         ],
+        rng: Callable[[], float] | None = None,
     ) -> None:
         self._familiar_name = familiar_name
         self._aliases = aliases
@@ -201,6 +211,7 @@ class ConversationMonitor:
         self._llm_client = llm_client
         self._character_card = character_card
         self.on_respond = on_respond
+        self._rng = rng if rng is not None else random.random  # noqa: S311
         self._buffers: dict[int, ChannelBuffer] = {}
         self._lull_tasks: set[asyncio.Task[None]] = set()
 
@@ -271,7 +282,7 @@ class ConversationMonitor:
                 # no → advance step-down curve
                 buf.check_count += 1
                 buf.next_interjection_at += _interjection_interval(
-                    self._interjection, buf.check_count
+                    self._interjection, buf.check_count, rng=self._rng
                 )
 
         # 5. conversational lull
@@ -299,7 +310,9 @@ class ConversationMonitor:
     def _get_or_create_buffer(self, channel_id: int) -> ChannelBuffer:
         if channel_id not in self._buffers:
             buf = ChannelBuffer(
-                next_interjection_at=self._interjection.starting_interval,
+                next_interjection_at=_interjection_interval(
+                    self._interjection, 0, rng=self._rng
+                ),
             )
             self._buffers[channel_id] = buf
         return self._buffers[channel_id]
@@ -426,4 +439,6 @@ class ConversationMonitor:
         buf.buffer.clear()
         buf.message_counter = 0
         buf.check_count = 0
-        buf.next_interjection_at = self._interjection.starting_interval
+        buf.next_interjection_at = _interjection_interval(
+            self._interjection, 0, rng=self._rng
+        )
