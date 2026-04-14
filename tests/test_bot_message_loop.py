@@ -1694,12 +1694,11 @@ def _make_stub_detector(
     *,
     guild_id: int = 999,
 ) -> InterruptionDetector:
-    """Real InterruptionDetector with gate pre-opened at *classification*.
+    """InterruptionDetector with wait_for_lull mocked to return *classification*.
 
-    Because the gate starts as set (open) in ``__init__`` and
-    ``_last_classification`` defaults to ``None``, callers just override
-    ``_last_classification`` to exercise specific gate outcomes without
-    triggering a real burst.
+    After the stale-gate fix, wait_for_lull() returns None when the gate
+    is already open. Mocking wait_for_lull directly is the only reliable
+    way to exercise specific delivery-gate outcomes without a real burst.
     """
     registry = ResponseTrackerRegistry()
     detector = InterruptionDetector(
@@ -1710,7 +1709,7 @@ def _make_stub_detector(
         lull_timeout_s=2.0,
         base_tolerance=0.30,
     )
-    detector._last_classification = classification
+    detector.wait_for_lull = AsyncMock(return_value=classification)  # ty: ignore[invalid-assignment]
     return detector
 
 
@@ -1841,3 +1840,88 @@ class TestDeliveryGate:
         )
 
         vc.play.assert_called_once()
+
+
+class TestDeliverToMonitorGuard:
+    """_deliver_to_monitor skips if _regen_pending is set or tracker is not IDLE."""
+
+    def test_deliver_to_monitor_skipped_when_regen_pending(
+        self, tmp_path: Path
+    ) -> None:
+        """extras['_regen_pending'] → on_message never called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        monitor_spy = AsyncMock()
+        familiar.monitor.on_message = monitor_spy  # ty: ignore[invalid-assignment]
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        lull_monitor = familiar.extras["voice_lull_monitor"]
+        assert isinstance(lull_monitor, VoiceLullMonitor)
+
+        merged = TranscriptionResult(
+            text="hey stop",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        async def _fire() -> None:
+            # Simulate: _on_long_during_generating set the flag synchronously,
+            # then _deliver_to_monitor fires in the next task.
+            familiar.extras["_regen_pending"] = True
+            await lull_monitor._on_utterance_complete(42, merged)
+
+        asyncio.run(_fire())
+
+        monitor_spy.assert_not_called()
+
+    def test_deliver_to_monitor_skipped_when_tracker_not_idle(
+        self, tmp_path: Path
+    ) -> None:
+        """tracker.state = GENERATING → on_message never called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        monitor_spy = AsyncMock()
+        familiar.monitor.on_message = monitor_spy  # ty: ignore[invalid-assignment]
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        lull_monitor = familiar.extras["voice_lull_monitor"]
+        assert isinstance(lull_monitor, VoiceLullMonitor)
+        tracker = familiar.tracker_registry.get(999)
+        tracker.transition(ResponseState.GENERATING)
+
+        merged = TranscriptionResult(
+            text="hello",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        async def _fire() -> None:
+            await lull_monitor._on_utterance_complete(42, merged)
+
+        asyncio.run(_fire())
+
+        monitor_spy.assert_not_called()

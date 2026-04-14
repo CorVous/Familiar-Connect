@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -279,6 +280,7 @@ def _make_detector(
     base_tolerance: float = 0.30,
     rng: Callable[[], float] | None = None,
     on_long_during_generating: Callable[[int, str], None] | None = None,
+    on_long_boundary_crossed: Callable[[int, str], None] | None = None,
 ) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
     registry = ResponseTrackerRegistry()
     clock = _FakeClock()
@@ -298,6 +300,7 @@ def _make_detector(
         scheduler=scheduler,
         rng=rng,
         on_long_during_generating=on_long_during_generating,
+        on_long_boundary_crossed=on_long_boundary_crossed,
     )
     return detector, registry, clock, scheduler
 
@@ -689,11 +692,12 @@ class TestInterruptionDetectorIdleTransition:
         assert not scheduler.has_pending(detector._on_min_crossed)
         assert not any("interruption:" in r.message for r in caplog.records)
 
-    def test_generating_to_idle_with_active_speech_cancels_min_timer(
+    def test_generating_to_idle_while_speaking_keeps_burst(
         self,
     ) -> None:
-        # Same abort behaviour while a user is still actively speaking:
-        # no pending timers should survive GENERATING → IDLE.
+        # Early-cancel path: LLM task cancelled (GENERATING→IDLE) while the
+        # user is still talking. Burst must stay alive so the lull can fire
+        # _finalize_burst → on_long_during_generating → regen.
         detector, registry, _clock, scheduler = _make_detector(
             min_s=2.0, boundary_s=30.0
         )
@@ -702,7 +706,9 @@ class TestInterruptionDetectorIdleTransition:
         detector.on_voice_activity(42, VoiceActivityEvent.started)
         assert scheduler.has_pending(detector._on_min_crossed)
         tracker.transition(ResponseState.IDLE)
-        assert not scheduler.has_pending(detector._on_min_crossed)
+        # Burst kept alive — timers must still be pending.
+        assert detector._burst_started_at is not None
+        assert scheduler.has_pending(detector._on_min_crossed)
 
 
 class TestInterruptionDetectorMinThresholdLog:
@@ -1336,8 +1342,11 @@ class TestInterruptionDetectorDeliveryGate:
         detector.on_voice_activity(42, VoiceActivityEvent.started)
         clock.advance(5.0)
         detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Create task BEFORE finalize so it suspends at gate.wait() (gate closed).
+        wait_task = asyncio.create_task(detector.wait_for_lull())
+        await asyncio.sleep(0)  # yield; task reaches gate.wait()
         scheduler.fire_for(detector._finalize_burst)
-        result = await detector.wait_for_lull()
+        result = await wait_task
         assert result is InterruptionClass.long
 
     @pytest.mark.asyncio
@@ -1347,9 +1356,25 @@ class TestInterruptionDetectorDeliveryGate:
         detector.on_voice_activity(42, VoiceActivityEvent.started)
         clock.advance(2.0)
         detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Create task BEFORE finalize so it suspends at gate.wait() (gate closed).
+        wait_task = asyncio.create_task(detector.wait_for_lull())
+        await asyncio.sleep(0)  # yield; task reaches gate.wait()
         scheduler.fire_for(detector._finalize_burst)
-        result = await detector.wait_for_lull()
+        result = await wait_task
         assert result is InterruptionClass.short
+
+    @pytest.mark.asyncio
+    async def test_gate_returns_none_after_burst_finalized(self) -> None:
+        # After finalize the gate is already open; wait_for_lull() must return
+        # None immediately — not the previous burst's classification.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        result = await detector.wait_for_lull()  # gate already open
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_gate_clears_between_bursts(self) -> None:
@@ -1364,3 +1389,98 @@ class TestInterruptionDetectorDeliveryGate:
         # Second burst starts → gate re-closes.
         detector.on_voice_activity(42, VoiceActivityEvent.started)
         assert not detector._delivery_gate.is_set()
+
+
+class TestInterruptionDetectorLongBoundaryCrossed:
+    """Early cancel: on_long_boundary_crossed fires before lull when GENERATING."""
+
+    def test_callback_fires_when_timer_crosses_boundary(self) -> None:
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(4.0)
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == [42]
+
+    def test_callback_not_fired_if_not_generating(self) -> None:
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(4.0)
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == []
+
+    def test_callback_fires_at_most_once_per_burst(self) -> None:
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(4.0)
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == [42]
+        # Calling again must be a no-op.
+        detector._maybe_dispatch_long_cancel()
+        assert fired == [42]
+
+    def test_long_timer_cancelled_at_finalize(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert detector._long_handle is not None
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert detector._long_handle is None
+
+    def test_long_timer_cancelled_at_abort(self) -> None:
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert detector._long_handle is not None
+        detector._abort_burst()
+        assert detector._long_handle is None
+
+    def test_callback_fires_on_restart_after_gap(self) -> None:
+        # Timer fires mid-gap when effective < boundary → no fire.
+        # User restarts; effective now ≥ boundary → fires on started event.
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(3.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Long timer fires; effective = 3.0 < 4.0 → no dispatch.
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == []
+        # User starts again; clock now at 3.0+gap. Simulate gap then restart.
+        clock.advance(2.0)  # clock = 5.0; effective = 5.0 ≥ 4.0
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert fired == [42]

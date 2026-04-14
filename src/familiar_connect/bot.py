@@ -534,6 +534,17 @@ async def subscribe_my_voice(
         ) -> None:
             raw_name = user_names.get(user_id, f"User-{user_id}")
             safe_name = sanitize_name(raw_name) or raw_name
+            tracker = familiar.tracker_registry.get(
+                voice_guild_id if voice_guild_id is not None else 0,
+            )
+            # Guard 1: a long-interruption regen was dispatched synchronously
+            # before this coroutine runs — let the regen path handle the speech.
+            # Guard 2: familiar is already generating/speaking (concurrent lull).
+            if (
+                familiar.extras.pop("_regen_pending", False)
+                or tracker.state is not ResponseState.IDLE
+            ):
+                return
             # Voice lull dispatch: mark the tracker as GENERATING for the
             # duration of the side-model YES/NO eval so an interruption
             # that arrives while the familiar is "thinking about whether
@@ -542,9 +553,6 @@ async def subscribe_my_voice(
             # SPEAKING/IDLE on its own. On NO, no on_respond fires, so
             # the tracker is still GENERATING when we get back here and
             # we transition it back to IDLE.
-            tracker = familiar.tracker_registry.get(
-                voice_guild_id if voice_guild_id is not None else 0,
-            )
             tracker.is_unsolicited = True  # lull is always unsolicited
             tracker.transition(ResponseState.GENERATING)
             try:
@@ -582,6 +590,9 @@ async def subscribe_my_voice(
         def _on_long_during_generating(starter_id: int, transcript: str) -> None:
             raw_name = user_names.get(starter_id, f"User-{starter_id}")
             safe_name = sanitize_name(raw_name) or raw_name
+            # Set before creating the task so _deliver_to_monitor (which
+            # fires in the same event-loop tick via _fire_lull) sees it.
+            familiar.extras["_regen_pending"] = True
             t = asyncio.create_task(
                 dispatch_interruption_regen(
                     channel_id=voice_channel_id,
@@ -596,6 +607,16 @@ async def subscribe_my_voice(
             regen_tasks.add(t)
             t.add_done_callback(regen_tasks.discard)
 
+        def _on_long_boundary_crossed(starter_id: int, transcript: str) -> None:  # noqa: ARG001
+            # Cancel the in-flight LLM task immediately — don't wait for the lull.
+            # Regen is still scheduled at lull time via on_long_during_generating.
+            tracker = familiar.tracker_registry.get(
+                voice_guild_id if voice_guild_id is not None else 0,
+            )
+            task = tracker.generation_task
+            if task is not None and not task.done():
+                task.cancel()
+
         interruption_detector = InterruptionDetector(
             tracker_registry=familiar.tracker_registry,
             guild_id=voice_guild_id if voice_guild_id is not None else 0,
@@ -604,6 +625,7 @@ async def subscribe_my_voice(
             lull_timeout_s=familiar.config.voice_lull_timeout,
             base_tolerance=(familiar.config.interrupt_tolerance.base_probability),
             on_long_during_generating=_on_long_during_generating,
+            on_long_boundary_crossed=_on_long_boundary_crossed,
         )
         familiar.extras["interruption_detector"] = interruption_detector
 

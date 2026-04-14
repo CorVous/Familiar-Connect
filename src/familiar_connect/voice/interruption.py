@@ -353,6 +353,7 @@ class InterruptionDetector:
         scheduler: Callable[[float, Callable[[], None]], _Cancelable] | None = None,
         rng: Callable[[], float] | None = None,
         on_long_during_generating: Callable[[int, str], None] | None = None,
+        on_long_boundary_crossed: Callable[[int, str], None] | None = None,
     ) -> None:
         self._tracker_registry = tracker_registry
         self._guild_id = guild_id
@@ -368,6 +369,10 @@ class InterruptionDetector:
         # caller (bot.py) wraps the async cancel+regen work in
         # ``asyncio.create_task`` so the detector stays synchronous.
         self._on_long_during_generating = on_long_during_generating
+        # Sync callback invoked immediately when burst crosses
+        # ``short_long_boundary_s`` during ``GENERATING`` — before the lull
+        # fires. Used by bot.py to cancel the in-flight LLM task early.
+        self._on_long_boundary_crossed = on_long_boundary_crossed
 
         # Users currently speaking, tracked regardless of tracker
         # state. This lets us retroactively start a burst when the
@@ -395,6 +400,12 @@ class InterruptionDetector:
         self._min_handle: _Cancelable | None = None
         # Latch so the min-crossed log fires at most once per burst.
         self._min_logged: bool = False
+        # Pending long-boundary timer. Armed at burst start for
+        # ``short_long_boundary_s`` seconds; fires ``on_long_boundary_crossed``
+        # the instant accumulated duration crosses the threshold while GENERATING.
+        self._long_handle: _Cancelable | None = None
+        # Latch so the boundary-crossed callback fires at most once per burst.
+        self._long_fired: bool = False
         # Deepgram finals accumulated during the active burst. Cleared at
         # each new burst start and at finalize. Passed to the dispatch
         # callback so the regen call can include the user's words.
@@ -439,6 +450,7 @@ class InterruptionDetector:
             # (``now - burst_started_at``) past ``min`` if the timer
             # already fired during a silent gap without logging.
             self._maybe_log_min_crossed()
+            self._maybe_dispatch_long_cancel()
             return
 
         # ended
@@ -460,6 +472,7 @@ class InterruptionDetector:
         # earlier gap and stayed silent, and this utterance carried
         # the burst past the threshold.
         self._maybe_log_min_crossed()
+        self._maybe_dispatch_long_cancel()
 
     def on_tracker_state_change(self, new_state: ResponseState) -> None:
         """React to a :class:`ResponseTracker` state transition.
@@ -488,6 +501,11 @@ class InterruptionDetector:
             # speaking — a natural end-of-turn shouldn't erase the
             # interruption record.
             if self._burst_latest_state is ResponseState.SPEAKING:
+                return
+            # Early-cancel path: LLM task cancelled while user is still
+            # talking. Keep the burst alive so the lull can finalize it
+            # and fire on_long_during_generating → regen.
+            if self._speaking:
                 return
             self._abort_burst()
             return
@@ -520,11 +538,15 @@ class InterruptionDetector:
     async def wait_for_lull(self) -> InterruptionClass | None:
         """Await active burst finalization; return classification or None.
 
-        Returns immediately if no burst is active. Used by
-        ``_run_voice_response`` to gate the SPEAKING transition so
-        ``_burst_latest_state`` stays ``GENERATING`` at finalize time.
+        Returns ``None`` immediately if no burst is active (gate already
+        open). Captures the gate reference before awaiting so a new burst
+        starting mid-TTS gets a fresh closed gate — the caller awaits
+        THAT burst rather than the already-finalized one.
         """
-        await self._delivery_gate.wait()
+        gate = self._delivery_gate
+        if gate.is_set():
+            return None
+        await gate.wait()
         return self._last_classification
 
     def _start_burst(self, starter_id: int) -> None:
@@ -532,8 +554,12 @@ class InterruptionDetector:
         self._burst_started_at = self._clock()
         self._burst_starter_id = starter_id
         self._min_logged = False
+        self._long_fired = False
         self._burst_transcript = ""
-        self._delivery_gate.clear()
+        # Fresh event per burst so regen's wait_for_lull() captures the
+        # new (closed) gate rather than the stale (open) one from the
+        # previous burst, preventing false long-classification returns.
+        self._delivery_gate = asyncio.Event()
         tracker = self._tracker_registry.get(self._guild_id)
         # Capture the tracker's non-IDLE state for log-time resolution.
         # Direct ``tracker.state = ...`` assignments in tests bypass
@@ -544,16 +570,19 @@ class InterruptionDetector:
         # ``min_interruption_s`` after burst start — the earliest
         # moment the accumulated duration can cross the threshold.
         self._arm_min_timer()
+        self._arm_long_timer()
 
     def _abort_burst(self) -> None:
         """Cancel timers and reset burst scratch without classifying."""
         self._cancel_lull()
         self._cancel_min_timer()
+        self._cancel_long_timer()
         self._burst_started_at = None
         self._burst_last_ended_at = None
         self._burst_starter_id = None
         self._burst_latest_state = None
         self._min_logged = False
+        self._long_fired = False
         self._burst_transcript = ""
         self._last_classification = None
         self._delivery_gate.set()
@@ -585,6 +614,54 @@ class InterruptionDetector:
         if self._min_handle is not None:
             self._min_handle.cancel()
             self._min_handle = None
+
+    def _arm_long_timer(self) -> None:
+        self._cancel_long_timer()
+        self._long_handle = self._schedule(
+            self._short_long_boundary_s,
+            self._on_long_crossed,
+        )
+
+    def _cancel_long_timer(self) -> None:
+        if self._long_handle is not None:
+            self._long_handle.cancel()
+            self._long_handle = None
+
+    def _on_long_crossed(self) -> None:
+        """Timer callback: re-evaluate whether the long boundary was crossed."""
+        self._long_handle = None
+        self._maybe_dispatch_long_cancel()
+
+    def _maybe_dispatch_long_cancel(self) -> None:
+        """Cancel generation immediately if burst ≥ boundary while GENERATING.
+
+        Parallel to ``_maybe_log_min_crossed``; latch ``_long_fired`` so
+        the callback fires at most once per burst.
+        """
+        if (
+            self._long_fired
+            or self._burst_started_at is None
+            or self._burst_starter_id is None
+            or self._on_long_boundary_crossed is None
+        ):
+            return
+        if self._speaking:
+            effective = self._clock() - self._burst_started_at
+        elif self._burst_last_ended_at is not None:
+            effective = self._burst_last_ended_at - self._burst_started_at
+        else:
+            return
+        if effective < self._short_long_boundary_s:
+            return
+        tracker = self._tracker_registry.get(self._guild_id)
+        if tracker.state is not ResponseState.GENERATING:
+            return
+        self._long_fired = True
+        _logger.info(
+            "interruption: long boundary crossed early by user=%s",
+            self._burst_starter_id,
+        )
+        self._on_long_boundary_crossed(self._burst_starter_id, self._burst_transcript)
 
     def _on_min_crossed(self) -> None:
         """Timer callback: re-evaluate whether the min has been crossed."""
@@ -660,6 +737,7 @@ class InterruptionDetector:
         """Classify + log the accumulated burst. Invoked by the lull timer."""
         self._lull_handle = None
         self._cancel_min_timer()
+        self._cancel_long_timer()
         started_at = self._burst_started_at
         last_ended_at = self._burst_last_ended_at
         starter_id = self._burst_starter_id
