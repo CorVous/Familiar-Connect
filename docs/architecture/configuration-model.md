@@ -62,7 +62,7 @@ model       = "z-ai/glm-5.1"
 temperature = 0.7
 
 [llm.post_process_style]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.5
 ```
 

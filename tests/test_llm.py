@@ -642,7 +642,7 @@ class TestConcurrencySemaphore:
 
 _has_api_key = bool(os.environ.get("OPENROUTER_API_KEY"))
 
-_LIVE_MODEL = "z-ai/glm-4.7-flash"
+_LIVE_MODEL = "mistralai/mistral-small-2603"
 
 
 def _live_client() -> LLMClient:

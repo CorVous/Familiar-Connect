@@ -27,3 +27,4 @@ site/
 # parent itself.
 data/familiars/*
 !data/familiars/_default/
+.aider*

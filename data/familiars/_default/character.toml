@@ -89,35 +89,35 @@ temperature = 0.7
 
 # Recast post-processor: rewrite the reply for tone or spoken delivery.
 [llm.post_process_style]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.5
 
 # Stepped-thinking pre-processor: hidden chain-of-thought before replying.
 [llm.reasoning_context]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.3
 
 # History provider: summarise own-channel and cross-channel history.
 [llm.history_summary]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.4
 
 # Content-search provider: agentic memory / lore retrieval loop.
 [llm.memory_search]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.4
 
 # Memory writer: post-session summarisation into long-term memory files.
 [llm.memory_writer]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.3
 
 # Chattiness monitor: decide whether to proactively join a conversation.
 [llm.interjection_decision]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.5
 
 # Mood evaluator: classify emotional context of recent turns → interrupt bias.
 [llm.mood_eval]
-model       = "z-ai/glm-4.7-flash"
+model       = "mistralai/mistral-small-2603"
 temperature = 0.3
