@@ -47,6 +47,38 @@ class TestVoiceLullMonitor:
         assert result.text == "hello world"
 
     @pytest.mark.asyncio
+    async def test_late_final_after_silence_still_fires(self) -> None:
+        """Real Deepgram timing: silence watchdog fires BEFORE the final.
+
+        Regression: previously the buffered final waited for the next
+        speech-then-silence cycle, causing indefinite delivery delay.
+        """
+        calls: list[tuple[int, TranscriptionResult]] = []
+
+        async def _on_done(  # noqa: RUF029
+            user_id: int, result: TranscriptionResult
+        ) -> None:
+            calls.append((user_id, result))
+
+        monitor = VoiceLullMonitor(
+            lull_timeout=0.08,
+            user_silence_s=0.02,
+            on_utterance_complete=_on_done,
+        )
+
+        monitor.on_audio(42)
+        # let user-silence watchdog fire first (Discord frames stopped)
+        await asyncio.sleep(0.05)
+        # now the late Deepgram final arrives
+        monitor.on_transcript(42, _final("hello world"))
+        await asyncio.sleep(0.15)
+
+        assert len(calls) == 1
+        user_id, result = calls[0]
+        assert user_id == 42
+        assert result.text == "hello world"
+
+    @pytest.mark.asyncio
     async def test_audio_resets_lull(self) -> None:
         """A new audio frame cancels a pending lull timer."""
         calls: list[tuple[int, TranscriptionResult]] = []

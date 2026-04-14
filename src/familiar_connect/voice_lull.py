@@ -65,9 +65,17 @@ class VoiceLullMonitor:
         self._reset_user_silence(user_id)
 
     def on_transcript(self, user_id: int, result: TranscriptionResult) -> None:
-        """Buffer final transcription results; interims ignored."""
+        """Buffer final transcription results; interims ignored.
+
+        Arm lull immediately if channel idle — handles late finals that
+        arrive after ``_on_user_silent`` already ran with empty ``_finals``.
+        Otherwise defer to ``_on_user_silent``; finals received mid-speech
+        still wait for silence via its ``not self._speaking`` guard.
+        """
         if result.is_final and result.text:
             self._finals.append((user_id, result))
+            if not self._speaking:
+                self._arm_lull()
 
     def clear(self) -> None:
         """Cancel pending timers and drop buffered finals."""
