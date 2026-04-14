@@ -552,7 +552,7 @@ class TestInterruptionDetectorStarterUser:
             if "interruption:" in r.message and "min threshold" not in r.message
         ]
         assert len(msgs) == 1
-        assert "by user=42" in msgs[0]
+        assert "by speaker=42" in msgs[0]
 
     def test_min_crossed_log_includes_starter_user_id(
         self,
@@ -572,7 +572,7 @@ class TestInterruptionDetectorStarterUser:
             r.message for r in caplog.records if "min threshold crossed" in r.message
         ]
         assert len(crossed) == 1
-        assert "by user=42" in crossed[0]
+        assert "by speaker=42" in crossed[0]
 
     def test_starter_is_first_speaker_even_with_multiple_users(
         self,
@@ -596,8 +596,8 @@ class TestInterruptionDetectorStarterUser:
             if "interruption:" in r.message and "min threshold" not in r.message
         ]
         assert len(msgs) == 1
-        assert "by user=42" in msgs[0]
-        assert "user=43" not in msgs[0]
+        assert "by speaker=42" in msgs[0]
+        assert "speaker=43" not in msgs[0]
 
 
 class TestInterruptionDetectorPreExistingSpeech:
@@ -630,7 +630,7 @@ class TestInterruptionDetectorPreExistingSpeech:
         ]
         assert len(msgs) == 1
         assert "during GENERATING" in msgs[0]
-        assert "by user=42" in msgs[0]
+        assert "by speaker=42" in msgs[0]
 
     def test_no_burst_started_when_idle_transition_has_no_speakers(
         self,
@@ -672,7 +672,7 @@ class TestInterruptionDetectorIdleTransition:
         ]
         assert len(msgs) == 1
         assert "during SPEAKING" in msgs[0]
-        assert "by user=42" in msgs[0]
+        assert "by speaker=42" in msgs[0]
 
     def test_generating_to_idle_aborts_burst(
         self,
@@ -2160,3 +2160,70 @@ class TestShortGeneratingDispatch:
         detector.on_voice_activity(42, VoiceActivityEvent.ended)
         scheduler.fire_for(detector._finalize_burst)
         assert tracker.pending_interrupter_turns == []
+
+
+class TestInterruptionLogNames:
+    """Step 10: log lines use resolved display names instead of raw user IDs."""
+
+    def test_min_crossed_log_uses_resolved_name(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda _uid: "Alice",
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._on_min_crossed)
+        assert any(
+            "speaker=Alice" in r.message and "min threshold crossed" in r.message
+            for r in caplog.records
+        )
+
+    def test_finalize_log_uses_resolved_name(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda _uid: "Alice",
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "speaker=Alice" in r.message and "interruption:" in r.message
+            for r in caplog.records
+        )
+
+    def test_fallback_when_no_resolver(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # No name_resolver — raw ID rendered as string, no crash.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "speaker=42" in r.message and "interruption:" in r.message
+            for r in caplog.records
+        )

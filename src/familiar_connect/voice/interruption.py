@@ -765,8 +765,10 @@ class InterruptionDetector:
             # is about to be aborted via on_tracker_state_change.
             return
         _logger.info(
-            "interruption: min threshold crossed by user=%s during %s",
-            self._burst_starter_id,
+            "interruption: min threshold crossed by speaker=%s during %s",
+            self._name_resolver(self._burst_starter_id)
+            if self._name_resolver is not None
+            else self._burst_starter_id,
             state.value,
         )
         self._min_logged = True
@@ -843,10 +845,12 @@ class InterruptionDetector:
         self._last_classification = classification
         self._delivery_gate.set()
         _logger.info(
-            "interruption: %s (%.2fs) by user=%s during %s",
+            "interruption: %s (%.2fs) by speaker=%s during %s",
             classification.value,
             duration,
-            starter_id,
+            self._name_resolver(starter_id)
+            if self._name_resolver is not None
+            else starter_id,
             state.value,
         )
         # Step 8 dispatch: long burst during GENERATING → cancel + regen.
