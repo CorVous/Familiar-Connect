@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -281,6 +282,7 @@ def _make_detector(
     rng: Callable[[], float] | None = None,
     on_long_during_generating: Callable[[int, str], None] | None = None,
     on_long_boundary_crossed: Callable[[int, str], None] | None = None,
+    name_resolver: Callable[[int], str] | None = None,
 ) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
     registry = ResponseTrackerRegistry()
     clock = _FakeClock()
@@ -301,6 +303,7 @@ def _make_detector(
         rng=rng,
         on_long_during_generating=on_long_during_generating,
         on_long_boundary_crossed=on_long_boundary_crossed,
+        name_resolver=name_resolver,
     )
     return detector, registry, clock, scheduler
 
@@ -1801,3 +1804,189 @@ class TestStep11ShortSpeakingDispatch:
 
         # only the empty transcript from during the burst
         assert pushed == []
+
+
+class TestLongSpeakingYieldDispatch:
+    """Step 12: long interruption during SPEAKING triggers yield dispatch.
+
+    At Moment 1 (min crossed, SPEAKING, yield decision):
+    - ``vc.stop()`` is called
+    - ``tracker.interruption_elapsed_ms`` is set
+    - ``tracker.interrupt_event`` is created
+
+    At finalize (long classification):
+    - ``tracker.interrupt_event`` is set
+    - ``tracker.interrupt_classification`` is ``InterruptionClass.long``
+    - ``tracker.interrupt_transcript`` carries the accumulated text
+    """
+
+    def test_yield_stops_vc_and_records_elapsed(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=30.0,
+            rng=lambda: 0.99,  # roll > tolerance → yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now  # playback started at t=0
+        vc_mock = MagicMock()
+        tracker.vc = vc_mock
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)  # crosses min_s
+        scheduler.fire_for(detector._on_min_crossed)
+
+        vc_mock.stop.assert_called_once()
+        assert tracker.interruption_elapsed_ms is not None
+        assert tracker.interruption_elapsed_ms == pytest.approx(2000.0)  # 2s in ms
+        assert tracker.interrupt_event is not None
+
+    def test_yield_long_finalize_sets_event_and_classification(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=5.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)  # yield dispatch
+        clock.advance(4.0)  # total duration 6s ≥ boundary_s=5 → long
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_event is not None
+        assert tracker.interrupt_event.is_set()
+        assert tracker.interrupt_classification is InterruptionClass.long
+
+    def test_yield_long_finalize_captures_transcript(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=5.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "tell me")
+        detector.on_transcript(42, "more please")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(4.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_transcript == "tell me more please"
+
+    def test_yield_short_finalize_sets_short_classification(self) -> None:
+        # burst between min and boundary → short classification
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=30.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(3.0)  # total 5s, < boundary_s=30 → short
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_classification is InterruptionClass.short
+
+    def test_no_yield_push_through_does_not_set_interrupt_event(self) -> None:
+        # roll < tolerance → keep_talking (push through)
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0, rng=lambda: 0.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        tracker.vc.stop.assert_not_called()
+        assert tracker.interrupt_event is None
+
+    def test_on_transcript_only_accumulates_during_burst(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=30.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+
+        # text before burst start is ignored
+        detector.on_transcript(42, "before")
+
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "during burst")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(4.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_transcript == "during burst"
+
+    def test_idle_to_idle_clears_interrupt_fields(self) -> None:
+        # transition(IDLE) must reset all Step 12 scratch
+        t = ResponseTracker(guild_id=1)
+        t.interruption_elapsed_ms = 500.0
+        t.interrupt_event = asyncio.Event()
+        t.interrupt_classification = InterruptionClass.long
+        t.interrupt_transcript = "hello"
+        t.interrupt_starter_name = "Bob"
+        t.state = ResponseState.SPEAKING
+        t.transition(ResponseState.IDLE)
+
+        assert t.interruption_elapsed_ms is None
+        assert t.interrupt_event is None
+        assert t.interrupt_classification is None
+        assert not t.interrupt_transcript
+        assert not t.interrupt_starter_name
+
+    def test_name_resolver_sets_starter_name(self) -> None:
+        registry = ResponseTrackerRegistry()
+        clock = _FakeClock()
+        scheduler = _FakeScheduler()
+        detector = InterruptionDetector(
+            tracker_registry=registry,
+            guild_id=1,
+            min_interruption_s=2.0,
+            short_long_boundary_s=30.0,
+            lull_timeout_s=5.0,
+            base_tolerance=0.30,
+            clock=clock,
+            scheduler=scheduler,
+            rng=lambda: 0.99,  # roll > tolerance → yield
+            name_resolver=lambda uid: f"Resolved-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert tracker.interrupt_starter_name == "Resolved-42"

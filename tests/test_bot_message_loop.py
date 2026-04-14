@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
@@ -48,11 +49,12 @@ from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.transcription import TranscriptionResult
-from familiar_connect.tts import TTSResult
+from familiar_connect.tts import TTSResult, WordTimestamp
 from familiar_connect.voice.interruption import (
     InterruptionClass,
     InterruptionDetector,
     ResponseState,
+    ResponseTracker,
     ResponseTrackerRegistry,
 )
 from familiar_connect.voice_lull import VoiceLullMonitor
@@ -1925,3 +1927,152 @@ class TestDeliverToMonitorGuard:
         asyncio.run(_fire())
 
         monitor_spy.assert_not_called()
+
+
+def _fake_long_speaking_interrupt(
+    tracker: ResponseTracker,
+    *,
+    elapsed_ms: float,
+    transcript: str,
+    starter_name: str,
+) -> None:
+    """Simulate what InterruptionDetector sets at yield + finalization.
+
+    Sets all Step 12 interrupt fields on *tracker* and pre-sets the
+    event so ``await interrupt_event.wait()`` returns immediately.
+    Call this from a ``vc.play`` side_effect so the interrupt state is
+    visible to ``_run_voice_response`` as soon as playback starts.
+    """
+    evt = asyncio.Event()
+    evt.set()
+    tracker.interruption_elapsed_ms = elapsed_ms
+    tracker.interrupt_event = evt
+    tracker.interrupt_classification = InterruptionClass.long
+    tracker.interrupt_transcript = transcript
+    tracker.interrupt_starter_name = starter_name
+
+
+class TestLongSpeakingYield:
+    """Step 12: long-interruption yield path in ``_run_voice_response``.
+
+    Uses a TTS mock with deterministic word timestamps so ``delivered_text``
+    is predictable, and a ``vc.play`` side-effect that injects the
+    interrupt state immediately so the test runs without real async delays.
+    """
+
+    _WORDS: typing.ClassVar[list[WordTimestamp]] = [
+        WordTimestamp("hello", 0.0, 300.0),
+        WordTimestamp("world", 400.0, 700.0),
+        WordTimestamp("goodbye", 800.0, 1100.0),
+    ]
+
+    def _make_tts_familiar(
+        self, tmp_path: Path, *, reply: str = "I am here."
+    ) -> Familiar:
+        familiar = _make_familiar(tmp_path, reply=reply)
+        tts_mock = MagicMock()
+        tts_mock.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00" * 4, timestamps=list(self._WORDS))
+        )
+        familiar.tts_client = tts_mock  # type: ignore[assignment]
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        return familiar
+
+    def test_long_speaking_yield_history_records_delivered_only(
+        self, tmp_path: Path
+    ) -> None:
+        """History assistant turn = delivered portion only, not full reply.
+
+        elapsed_ms=350 falls between "hello"@300 and "world"@400,
+        so only "hello" was delivered before the interrupt.
+        """
+        familiar = self._make_tts_familiar(tmp_path, reply="hello world goodbye")
+        tracker = familiar.tracker_registry.get(999)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+
+        def _inject_interrupt(audio: object) -> None:  # noqa: ARG001
+            _fake_long_speaking_interrupt(
+                tracker,
+                elapsed_ms=350.0,  # between "hello"@300 and "world"@400
+                transcript="tell me more",
+                starter_name="Bob",
+            )
+
+        vc.play = MagicMock(side_effect=_inject_interrupt)
+
+        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hello there",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        assistant_turns = [t for t in turns if t.role == "assistant"]
+        # First assistant turn = delivered portion only
+        assert assistant_turns[0].content == "hello"
+        # Second assistant turn = regen reply (from stub LLM)
+        assert len(assistant_turns) == 2
+
+    def test_long_speaking_yield_regen_contains_partial_and_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        """Regen LLM call receives system message with delivered text + transcript."""
+        familiar = self._make_tts_familiar(tmp_path, reply="hello world goodbye")
+        tracker = familiar.tracker_registry.get(999)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+
+        def _inject_interrupt(audio: object) -> None:  # noqa: ARG001
+            _fake_long_speaking_interrupt(
+                tracker,
+                elapsed_ms=350.0,
+                transcript="tell me more",
+                starter_name="Bob",
+            )
+
+        vc.play = MagicMock(side_effect=_inject_interrupt)
+
+        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hello there",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        main_prose = cast("_StubLLMClient", familiar.llm_clients["main_prose"])
+        # Two LLM calls: original + regen
+        assert len(main_prose.calls) == 2
+        regen_messages = main_prose.calls[1]
+        system_msgs = [m for m in regen_messages if m.role == "system"]
+        interruption_notes = [
+            m
+            for m in system_msgs
+            if "interrupted" in m.content and "hello" in m.content
+        ]
+        assert len(interruption_notes) == 1, "regen must have interruption system note"
+        note = interruption_notes[0].content
+        assert "hello" in note  # delivered portion
+        assert "tell me more" in note  # interrupter's transcript
+        assert "Bob" in note  # interrupter's name
