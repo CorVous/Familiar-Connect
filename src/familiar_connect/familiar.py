@@ -78,7 +78,8 @@ class Familiar:
     )
     """Per-guild :class:`ResponseTracker` lookup; lazy-created."""
     mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
-    """Per-response mood modifier (stub: ``0.0``)."""
+    """Per-response mood modifier source. Real LLM call when wired
+    with ``llm_client`` + ``history_store``; stub (0.0) otherwise."""
     metrics_collector: MetricsCollector = field(default_factory=NullCollector)
     """sink for per-turn ``TurnTrace`` records; ``NullCollector`` by default
     so tests don't need to opt out. Replaced by ``SQLiteCollector`` in ``run``."""
@@ -180,6 +181,10 @@ class Familiar:
             on_respond=_noop_respond,
         )
 
+        mood_evaluator = MoodEvaluator(
+            llm_client=llm_clients["mood_eval"],
+            history_store=history_store,
+        )
         memory_writer = MemoryWriter(
             memory_store=memory_store,
             history_store=history_store,
@@ -209,6 +214,7 @@ class Familiar:
             subscriptions=subscriptions,
             channel_configs=channel_configs,
             monitor=monitor,
+            mood_evaluator=mood_evaluator,
             memory_writer_scheduler=memory_writer_scheduler,
         )
 

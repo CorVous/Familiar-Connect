@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
@@ -34,6 +35,7 @@ from familiar_connect.bot import (
     _run_text_response,
     _run_voice_response,
     create_bot,
+    dispatch_interruption_regen,
     on_message,
     set_channel_mode,
     subscribe_my_voice,
@@ -47,7 +49,14 @@ from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.transcription import TranscriptionResult
-from familiar_connect.voice.interruption import ResponseState
+from familiar_connect.tts import TTSResult, WordTimestamp
+from familiar_connect.voice.interruption import (
+    InterruptionClass,
+    InterruptionDetector,
+    ResponseState,
+    ResponseTracker,
+    ResponseTrackerRegistry,
+)
 from familiar_connect.voice_lull import VoiceLullMonitor
 
 if TYPE_CHECKING:
@@ -1544,3 +1553,826 @@ class TestVoiceGenerationCancellation:
             familiar_id=familiar.id, channel_id=9000, limit=10
         )
         assert turns == []
+
+
+# ---------------------------------------------------------------------------
+# Step 8 — dispatch_interruption_regen
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchInterruptionRegen:
+    """Step 8: long interruption during GENERATING cancels + re-generates.
+
+    The :func:`dispatch_interruption_regen` helper:
+
+    - Cancels the in-flight ``generation_task`` on the tracker.
+    - Awaits the cancelled task so :func:`_run_voice_response` can clean up.
+    - Calls :func:`_run_voice_response` again with an ``interruption_context``
+      note so the new reply can acknowledge what the user said.
+    - The cancelled turn writes nothing to history.
+    """
+
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_generating_cancels_task(
+        self, tmp_path: Path
+    ) -> None:
+        """Generation task receives ``CancelledError`` when dispatch fires."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        voice_task = asyncio.create_task(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="original",
+                buffer=[
+                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
+                ],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+        # Wait until generation is in-flight.
+        await slow_client.started.wait()
+        tracker = familiar.tracker_registry.get(999)
+        assert tracker.state is ResponseState.GENERATING
+
+        # Fire the interruption dispatch with a fast-returning stub so
+        # the regen completes.
+        familiar.llm_clients["main_prose"] = _StubLLMClient(reply="Regen reply.")
+        dispatch_task = asyncio.create_task(
+            dispatch_interruption_regen(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                transcript="hey stop",
+                familiar=familiar,
+                vc=vc,
+            )
+        )
+        await dispatch_task
+        await voice_task  # original _run_voice_response must exit cleanly.
+
+        assert slow_client.was_cancelled
+
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_generating_regens_with_context(
+        self, tmp_path: Path
+    ) -> None:
+        """New LLM call contains the interruption_context note."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        voice_task = asyncio.create_task(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="original",
+                buffer=[
+                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
+                ],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+        await slow_client.started.wait()
+
+        regen_client = _StubLLMClient(reply="I heard you.")
+        familiar.llm_clients["main_prose"] = regen_client
+
+        dispatch_task = asyncio.create_task(
+            dispatch_interruption_regen(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                transcript="hey stop",
+                familiar=familiar,
+                vc=vc,
+            )
+        )
+        await dispatch_task
+        await voice_task
+
+        # Regen LLM must have been called.
+        assert len(regen_client.calls) == 1
+        # The message list sent to the LLM must contain the interruption note.
+        all_content = " ".join(m.content for m in regen_client.calls[0] if m.content)
+        assert "interrupted while you were forming a response" in all_content
+        assert "hey stop" in all_content
+
+    @pytest.mark.asyncio
+    async def test_long_interruption_during_generating_no_history_from_cancelled_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """The cancelled generation must not write any history turns."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        slow_client = _SlowLLMClient()
+        familiar.llm_clients["main_prose"] = slow_client
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        voice_task = asyncio.create_task(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="original",
+                buffer=[
+                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
+                ],
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+        await slow_client.started.wait()
+
+        # Swap to a fast client for the regen.
+        familiar.llm_clients["main_prose"] = _StubLLMClient(reply="Regen reply.")
+
+        dispatch_task = asyncio.create_task(
+            dispatch_interruption_regen(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                transcript="hey stop",
+                familiar=familiar,
+                vc=vc,
+            )
+        )
+        await dispatch_task
+        await voice_task
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        # Cancelled turn must not be in history; only the regen turn should exist.
+        contents = [t.content for t in turns]
+        assert "I am here." not in contents  # default stub reply never stored
+        # Regen user + assistant turn written.
+        assert any("hey stop" in c for c in contents)
+        assert any("Regen reply." in c for c in contents)
+
+
+def _make_stub_detector(
+    classification: InterruptionClass | None,
+    *,
+    guild_id: int = 999,
+) -> InterruptionDetector:
+    """InterruptionDetector with wait_for_lull mocked to return *classification*.
+
+    After the stale-gate fix, wait_for_lull() returns None when the gate
+    is already open. Mocking wait_for_lull directly is the only reliable
+    way to exercise specific delivery-gate outcomes without a real burst.
+    """
+    registry = ResponseTrackerRegistry()
+    detector = InterruptionDetector(
+        tracker_registry=registry,
+        guild_id=guild_id,
+        min_interruption_s=1.5,
+        short_long_boundary_s=4.0,
+        lull_timeout_s=2.0,
+        base_tolerance=0.30,
+    )
+    detector.wait_for_lull = AsyncMock(return_value=classification)  # ty: ignore[invalid-assignment]
+    return detector
+
+
+class TestDeliveryGate:
+    """Delivery gate: _run_voice_response awaits wait_for_lull() after TTS synthesis."""
+
+    @pytest.mark.asyncio
+    async def test_long_burst_during_tts_prevents_play(self, tmp_path: Path) -> None:
+        """wait_for_lull → long → vc.play not called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.long
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        vc.play.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_long_burst_during_tts_skips_history(self, tmp_path: Path) -> None:
+        """wait_for_lull → long → no history turns written."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.long
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        assert len(turns) == 0
+
+    @pytest.mark.asyncio
+    async def test_short_burst_during_tts_allows_play(self, tmp_path: Path) -> None:
+        """wait_for_lull → short → vc.play IS called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.short
+        )
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        vc.play.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_burst_gate_skipped(self, tmp_path: Path) -> None:
+        """wait_for_lull → None → play happens normally."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(None)
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        vc.play.assert_called_once()
+
+
+class TestDeliverToMonitorGuard:
+    """_deliver_to_monitor skips if _regen_pending is set or tracker is not IDLE."""
+
+    def test_deliver_to_monitor_skipped_when_regen_pending(
+        self, tmp_path: Path
+    ) -> None:
+        """extras['_regen_pending'] → on_message never called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        monitor_spy = AsyncMock()
+        familiar.monitor.on_message = monitor_spy  # ty: ignore[invalid-assignment]
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        lull_monitor = familiar.extras["voice_lull_monitor"]
+        assert isinstance(lull_monitor, VoiceLullMonitor)
+
+        merged = TranscriptionResult(
+            text="hey stop",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        async def _fire() -> None:
+            # Simulate: _on_long_during_generating set the flag synchronously,
+            # then _deliver_to_monitor fires in the next task.
+            familiar.extras["_regen_pending"] = True
+            await lull_monitor._on_utterance_complete(42, merged)
+
+        asyncio.run(_fire())
+
+        monitor_spy.assert_not_called()
+
+    def test_deliver_to_monitor_skipped_when_tracker_not_idle(
+        self, tmp_path: Path
+    ) -> None:
+        """tracker.state = GENERATING → on_message never called."""
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        monitor_spy = AsyncMock()
+        familiar.monitor.on_message = monitor_spy  # ty: ignore[invalid-assignment]
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        lull_monitor = familiar.extras["voice_lull_monitor"]
+        assert isinstance(lull_monitor, VoiceLullMonitor)
+        tracker = familiar.tracker_registry.get(999)
+        tracker.transition(ResponseState.GENERATING)
+
+        merged = TranscriptionResult(
+            text="hello",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        async def _fire() -> None:
+            await lull_monitor._on_utterance_complete(42, merged)
+
+        asyncio.run(_fire())
+
+        monitor_spy.assert_not_called()
+
+    def test_deliver_to_monitor_skipped_when_short_yield_pending(
+        self, tmp_path: Path
+    ) -> None:
+        """tracker.short_yield_pending=True → on_message never called.
+
+        Reproduces the race where the voice endpointing lull fires in the
+        same event-loop window as InterruptionDetector finalizing a
+        short@SPEAKING yield. Without the flag the lull transitions
+        IDLE→GENERATING, which causes _on_short_yield_resume to bail.
+        """
+        familiar = _make_familiar(tmp_path)
+        familiar.transcriber = MagicMock(name="transcriber")
+        ctx = _make_voice_ctx(channel_id=9000)
+
+        monitor_spy = AsyncMock()
+        familiar.monitor.on_message = monitor_spy  # ty: ignore[invalid-assignment]
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.tagged_audio_queue = MagicMock(name="audio_queue")
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=mock_pipeline,
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        lull_monitor = familiar.extras["voice_lull_monitor"]
+        assert isinstance(lull_monitor, VoiceLullMonitor)
+        tracker = familiar.tracker_registry.get(999)
+        # Simulate InterruptionDetector setting the flag after short@SPEAKING yield.
+        tracker.short_yield_pending = True
+
+        merged = TranscriptionResult(
+            text="alright i'm going to try to do a building event",
+            is_final=True,
+            start=0.0,
+            end=1.0,
+        )
+
+        async def _fire() -> None:
+            await lull_monitor._on_utterance_complete(42, merged)
+
+        asyncio.run(_fire())
+
+        monitor_spy.assert_not_called()
+
+
+def _fake_long_speaking_interrupt(
+    tracker: ResponseTracker,
+    *,
+    elapsed_ms: float,
+    transcript: str,
+    starter_name: str,
+) -> None:
+    """Simulate what InterruptionDetector sets at yield + finalization.
+
+    Sets all Step 12 interrupt fields on *tracker* and pre-sets the
+    event so ``await interrupt_event.wait()`` returns immediately.
+    Call this from a ``vc.play`` side_effect so the interrupt state is
+    visible to ``_run_voice_response`` as soon as playback starts.
+    """
+    evt = asyncio.Event()
+    evt.set()
+    tracker.interruption_elapsed_ms = elapsed_ms
+    tracker.interrupt_event = evt
+    tracker.interrupt_classification = InterruptionClass.long
+    tracker.interrupt_transcript = transcript
+    tracker.interrupt_starter_name = starter_name
+
+
+class TestLongSpeakingYield:
+    """Step 12: long-interruption yield path in ``_run_voice_response``.
+
+    Uses a TTS mock with deterministic word timestamps so ``delivered_text``
+    is predictable, and a ``vc.play`` side-effect that injects the
+    interrupt state immediately so the test runs without real async delays.
+    """
+
+    _WORDS: typing.ClassVar[list[WordTimestamp]] = [
+        WordTimestamp("hello", 0.0, 300.0),
+        WordTimestamp("world", 400.0, 700.0),
+        WordTimestamp("goodbye", 800.0, 1100.0),
+    ]
+
+    def _make_tts_familiar(
+        self, tmp_path: Path, *, reply: str = "I am here."
+    ) -> Familiar:
+        familiar = _make_familiar(tmp_path, reply=reply)
+        tts_mock = MagicMock()
+        tts_mock.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00" * 4, timestamps=list(self._WORDS))
+        )
+        familiar.tts_client = tts_mock  # type: ignore[assignment]
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        return familiar
+
+    def test_long_speaking_yield_history_records_delivered_only(
+        self, tmp_path: Path
+    ) -> None:
+        """History assistant turn = delivered portion only, not full reply.
+
+        elapsed_ms=350 falls between "hello"@300 and "world"@400,
+        so only "hello" was delivered before the interrupt.
+        """
+        familiar = self._make_tts_familiar(tmp_path, reply="hello world goodbye")
+        tracker = familiar.tracker_registry.get(999)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+
+        def _inject_interrupt(audio: object) -> None:  # noqa: ARG001
+            _fake_long_speaking_interrupt(
+                tracker,
+                elapsed_ms=350.0,  # between "hello"@300 and "world"@400
+                transcript="tell me more",
+                starter_name="Bob",
+            )
+
+        vc.play = MagicMock(side_effect=_inject_interrupt)
+
+        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hello there",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        assistant_turns = [t for t in turns if t.role == "assistant"]
+        # First assistant turn = delivered portion only
+        assert assistant_turns[0].content == "hello"
+        # Second assistant turn = regen reply (from stub LLM)
+        assert len(assistant_turns) == 2
+
+    def test_long_speaking_yield_regen_contains_partial_and_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        """Regen LLM call receives system message with delivered text + transcript."""
+        familiar = self._make_tts_familiar(tmp_path, reply="hello world goodbye")
+        tracker = familiar.tracker_registry.get(999)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+
+        def _inject_interrupt(audio: object) -> None:  # noqa: ARG001
+            _fake_long_speaking_interrupt(
+                tracker,
+                elapsed_ms=350.0,
+                transcript="tell me more",
+                starter_name="Bob",
+            )
+
+        vc.play = MagicMock(side_effect=_inject_interrupt)
+
+        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hello there",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        main_prose = cast("_StubLLMClient", familiar.llm_clients["main_prose"])
+        # Two LLM calls: original + regen
+        assert len(main_prose.calls) == 2
+        regen_messages = main_prose.calls[1]
+        system_msgs = [m for m in regen_messages if m.role == "system"]
+        interruption_notes = [
+            m
+            for m in system_msgs
+            if "interrupted" in m.content and "hello" in m.content
+        ]
+        assert len(interruption_notes) == 1, "regen must have interruption system note"
+        note = interruption_notes[0].content
+        assert "hello" in note  # delivered portion
+        assert "tell me more" in note  # interrupter's transcript
+        assert "Bob" in note  # interrupter's name
+
+
+class TestShortGeneratingFlush:
+    """Step 9: _run_voice_response flushes pending_interrupter_turns.
+
+    Short@GENERATING dispatch stashes (name, transcript) pairs on the
+    tracker. _run_voice_response must write them to history AFTER the
+    original buffer user turns and BEFORE the assistant reply, then
+    clear the list.
+    """
+
+    @pytest.mark.asyncio
+    async def test_chronology_buffer_interrupter_assistant(
+        self, tmp_path: Path
+    ) -> None:
+        """History order: buffer user turn → interrupter turn → assistant."""
+        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.short
+        )
+        tracker = familiar.tracker_registry.get(999)
+        tracker.pending_interrupter_turns = [("Bob", "wait what")]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        # Expected: Alice "hello" (buffer), Bob "wait what" (interrupter),
+        # assistant reply "my reply".
+        assert [(t.role, t.speaker, t.content) for t in turns] == [
+            ("user", "Alice", "hello"),
+            ("user", "Bob", "wait what"),
+            ("assistant", None, "my reply"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_pending_cleared_after_flush(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.short
+        )
+        tracker = familiar.tracker_registry.get(999)
+        tracker.pending_interrupter_turns = [("Bob", "hi"), ("Carol", "hey")]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        assert tracker.pending_interrupter_turns == []
+
+    @pytest.mark.asyncio
+    async def test_pending_cleared_on_long_discard(self, tmp_path: Path) -> None:
+        """wait_for_lull → long → pending turns cleared, not written."""
+        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        familiar.tts_client = MagicMock()  # type: ignore[assignment]
+        familiar.tts_client.synthesize = AsyncMock(
+            return_value=TTSResult(audio=b"\x00\x00", timestamps=[])
+        )
+        familiar.extras["interruption_detector"] = _make_stub_detector(
+            InterruptionClass.long
+        )
+        tracker = familiar.tracker_registry.get(999)
+        tracker.pending_interrupter_turns = [("Bob", "wait what")]
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+
+        await _run_voice_response(
+            channel_id=9000,
+            guild_id=999,
+            speaker="Alice",
+            utterance="hello",
+            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            familiar=familiar,
+            vc=vc,
+            trigger=ResponseTrigger.direct_address,
+        )
+
+        assert tracker.pending_interrupter_turns == []
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        # Long discard skips buffer and interrupter writes alike.
+        assert all("wait what" not in t.content for t in turns)
+
+
+def _fake_short_speaking_interrupt(
+    tracker: ResponseTracker,
+) -> None:
+    """Simulate a short@SPEAKING yield at finalization.
+
+    Sets the interrupt_event (pre-set) and classification=short so that
+    ``_run_voice_response`` wakes from ``interrupt_event.wait()`` and
+    takes the short path (write full reply, no regen).
+    Call from ``vc.play`` side_effect so the state is visible as soon
+    as playback starts.
+    """
+    evt = asyncio.Event()
+    evt.set()
+    tracker.interrupt_event = evt
+    tracker.interrupt_classification = InterruptionClass.short
+
+
+class TestShortSpeakingYieldHistory:
+    """Step 11: short@SPEAKING yield writes the FULL assistant reply to history.
+
+    Contrast with long@SPEAKING (step 12) which writes only the delivered
+    portion. For short yields the familiar is resuming the remainder via
+    _on_short_yield_resume, so the history entry should represent the
+    complete intended response (not just what came out before the stop).
+    """
+
+    def test_short_speaking_yield_writes_full_reply_to_history(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path, reply="hello world goodbye")
+        tts_mock = MagicMock()
+        tts_mock.synthesize = AsyncMock(
+            return_value=TTSResult(
+                audio=b"\x00" * 4,
+                timestamps=[
+                    WordTimestamp("hello", 0.0, 300.0),
+                    WordTimestamp("world", 400.0, 700.0),
+                    WordTimestamp("goodbye", 800.0, 1100.0),
+                ],
+            )
+        )
+        familiar.tts_client = tts_mock  # type: ignore[assignment]
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+        tracker = familiar.tracker_registry.get(999)
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.is_playing = MagicMock(return_value=False)
+
+        def _inject_interrupt(audio: object) -> None:  # noqa: ARG001
+            _fake_short_speaking_interrupt(tracker)
+
+        vc.play = MagicMock(side_effect=_inject_interrupt)
+
+        buffer = [BufferedMessage(speaker="Alice", text="go ahead", timestamp=0.0)]
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                speaker="Alice",
+                utterance="go ahead",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        turns = familiar.history_store.recent(
+            familiar_id=familiar.id, channel_id=9000, limit=20
+        )
+        assistant_turns = [t for t in turns if t.role == "assistant"]
+        # Exactly one assistant turn — the full reply, not a partial.
+        assert len(assistant_turns) == 1
+        assert assistant_turns[0].content == "hello world goodbye"

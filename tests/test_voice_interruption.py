@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -278,6 +280,9 @@ def _make_detector(
     lull_s: float = 5.0,
     base_tolerance: float = 0.30,
     rng: Callable[[], float] | None = None,
+    on_long_during_generating: Callable[[int, str], None] | None = None,
+    on_long_boundary_crossed: Callable[[int, str], None] | None = None,
+    name_resolver: Callable[[int], str] | None = None,
 ) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
     registry = ResponseTrackerRegistry()
     clock = _FakeClock()
@@ -296,6 +301,9 @@ def _make_detector(
         clock=clock,
         scheduler=scheduler,
         rng=rng,
+        on_long_during_generating=on_long_during_generating,
+        on_long_boundary_crossed=on_long_boundary_crossed,
+        name_resolver=name_resolver,
     )
     return detector, registry, clock, scheduler
 
@@ -544,7 +552,7 @@ class TestInterruptionDetectorStarterUser:
             if "interruption:" in r.message and "min threshold" not in r.message
         ]
         assert len(msgs) == 1
-        assert "by user=42" in msgs[0]
+        assert "by speaker=42" in msgs[0]
 
     def test_min_crossed_log_includes_starter_user_id(
         self,
@@ -564,7 +572,7 @@ class TestInterruptionDetectorStarterUser:
             r.message for r in caplog.records if "min threshold crossed" in r.message
         ]
         assert len(crossed) == 1
-        assert "by user=42" in crossed[0]
+        assert "by speaker=42" in crossed[0]
 
     def test_starter_is_first_speaker_even_with_multiple_users(
         self,
@@ -588,8 +596,8 @@ class TestInterruptionDetectorStarterUser:
             if "interruption:" in r.message and "min threshold" not in r.message
         ]
         assert len(msgs) == 1
-        assert "by user=42" in msgs[0]
-        assert "user=43" not in msgs[0]
+        assert "by speaker=42" in msgs[0]
+        assert "speaker=43" not in msgs[0]
 
 
 class TestInterruptionDetectorPreExistingSpeech:
@@ -622,7 +630,7 @@ class TestInterruptionDetectorPreExistingSpeech:
         ]
         assert len(msgs) == 1
         assert "during GENERATING" in msgs[0]
-        assert "by user=42" in msgs[0]
+        assert "by speaker=42" in msgs[0]
 
     def test_no_burst_started_when_idle_transition_has_no_speakers(
         self,
@@ -664,7 +672,7 @@ class TestInterruptionDetectorIdleTransition:
         ]
         assert len(msgs) == 1
         assert "during SPEAKING" in msgs[0]
-        assert "by user=42" in msgs[0]
+        assert "by speaker=42" in msgs[0]
 
     def test_generating_to_idle_aborts_burst(
         self,
@@ -687,11 +695,12 @@ class TestInterruptionDetectorIdleTransition:
         assert not scheduler.has_pending(detector._on_min_crossed)
         assert not any("interruption:" in r.message for r in caplog.records)
 
-    def test_generating_to_idle_with_active_speech_cancels_min_timer(
+    def test_generating_to_idle_while_speaking_keeps_burst(
         self,
     ) -> None:
-        # Same abort behaviour while a user is still actively speaking:
-        # no pending timers should survive GENERATING → IDLE.
+        # Early-cancel path: LLM task cancelled (GENERATING→IDLE) while the
+        # user is still talking. Burst must stay alive so the lull can fire
+        # _finalize_burst → on_long_during_generating → regen.
         detector, registry, _clock, scheduler = _make_detector(
             min_s=2.0, boundary_s=30.0
         )
@@ -700,7 +709,9 @@ class TestInterruptionDetectorIdleTransition:
         detector.on_voice_activity(42, VoiceActivityEvent.started)
         assert scheduler.has_pending(detector._on_min_crossed)
         tracker.transition(ResponseState.IDLE)
-        assert not scheduler.has_pending(detector._on_min_crossed)
+        # Burst kept alive — timers must still be pending.
+        assert detector._burst_started_at is not None
+        assert scheduler.has_pending(detector._on_min_crossed)
 
 
 class TestInterruptionDetectorMinThresholdLog:
@@ -1124,3 +1135,1215 @@ class TestSpeakingTransitionStampsPlaybackStart:
         t.playback_start_time = 100.0
         t.transition(ResponseState.IDLE)
         assert t.playback_start_time is None
+
+
+# ---------------------------------------------------------------------------
+# Step 8 — transcript accumulation + long@GENERATING dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptionDetectorTranscriptCapture:
+    """``on_transcript`` accumulates text only during an active burst."""
+
+    def test_on_transcript_ignored_outside_burst(self) -> None:
+        # No burst → transcript silently dropped.
+        detector, _registry, _clock, _scheduler = _make_detector()
+        detector.on_transcript(42, "hello")
+        assert not detector._burst_transcript
+
+    def test_transcript_accumulated_during_burst(self) -> None:
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hello world")
+        assert detector._burst_transcript == "hello world"
+
+    def test_multiple_transcripts_joined_with_space(self) -> None:
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hello")
+        detector.on_transcript(42, "world")
+        assert detector._burst_transcript == "hello world"
+
+    def test_transcript_cleared_at_new_burst(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        # First burst
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "first")
+        clock.advance(1.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Finalize the first burst (lull fires)
+        scheduler.fire_for(detector._finalize_burst)
+        # Second burst starts fresh
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._burst_transcript
+
+    def test_transcript_accepted_from_any_user_in_burst(self) -> None:
+        # Multi-user: second user's transcript also accumulated.
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey")
+        detector.on_transcript(99, "listen")
+        assert detector._burst_transcript == "hey listen"
+
+
+class TestInterruptionDetectorLongDispatch:
+    """long@GENERATING fires the ``on_long_during_generating`` callback."""
+
+    def test_long_during_generating_calls_callback(self) -> None:
+        calls: list[tuple[int, str]] = []
+
+        def callback(starter_id: int, transcript: str) -> None:
+            calls.append((starter_id, transcript))
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey listen to me")
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert calls == [(42, "hey listen to me")]
+
+    def test_dispatch_receives_full_accumulated_transcript(self) -> None:
+        received: list[str] = []
+
+        def callback(_starter_id: int, transcript: str) -> None:
+            received.append(transcript)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "part one")
+        detector.on_transcript(42, "part two")
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert received == ["part one part two"]
+
+    def test_long_during_speaking_does_not_call_generating_callback(self) -> None:
+        calls: list[tuple[int, str]] = []
+
+        def callback(starter_id: int, transcript: str) -> None:
+            calls.append((starter_id, transcript))
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert calls == []
+
+    def test_short_during_generating_does_not_call_callback(self) -> None:
+        calls: list[tuple[int, str]] = []
+
+        def callback(starter_id: int, transcript: str) -> None:
+            calls.append((starter_id, transcript))
+
+        # boundary_s=30.0 so a 2s burst is short, not long
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=30.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert calls == []
+
+    def test_no_callback_set_does_not_raise(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Default (no callback) must not raise even on a long burst.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(5.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        msgs = [
+            r.message
+            for r in caplog.records
+            if "interruption:" in r.message and "min threshold" not in r.message
+        ]
+        assert any("long" in m and "GENERATING" in m for m in msgs)
+
+    def test_dispatch_log_emitted_when_callback_set(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def callback(starter_id: int, transcript: str) -> None:
+            pass
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_during_generating=callback
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(5.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any("dispatch: long@GENERATING" in r.message for r in caplog.records)
+
+
+class TestInterruptionDetectorDeliveryGate:
+    """Delivery gate: cleared at burst start, set at finalize/abort."""
+
+    @pytest.mark.asyncio
+    async def test_gate_open_when_no_burst(self) -> None:
+        detector, _, _, _ = _make_detector()
+        result = await detector.wait_for_lull()
+        assert result is None
+
+    def test_gate_closed_at_burst_start(self) -> None:
+        detector, registry, _, _ = _make_detector()
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._delivery_gate.is_set()
+
+    @pytest.mark.asyncio
+    async def test_gate_opens_after_abort(self) -> None:
+        detector, registry, _, _ = _make_detector()
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._delivery_gate.is_set()
+        detector._abort_burst()
+        result = await detector.wait_for_lull()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_gate_opens_and_returns_long(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Create task BEFORE finalize so it suspends at gate.wait() (gate closed).
+        wait_task = asyncio.create_task(detector.wait_for_lull())
+        await asyncio.sleep(0)  # yield; task reaches gate.wait()
+        scheduler.fire_for(detector._finalize_burst)
+        result = await wait_task
+        assert result is InterruptionClass.long
+
+    @pytest.mark.asyncio
+    async def test_gate_opens_and_returns_short(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Create task BEFORE finalize so it suspends at gate.wait() (gate closed).
+        wait_task = asyncio.create_task(detector.wait_for_lull())
+        await asyncio.sleep(0)  # yield; task reaches gate.wait()
+        scheduler.fire_for(detector._finalize_burst)
+        result = await wait_task
+        assert result is InterruptionClass.short
+
+    @pytest.mark.asyncio
+    async def test_gate_returns_none_after_burst_finalized(self) -> None:
+        # After finalize the gate is already open; wait_for_lull() must return
+        # None immediately — not the previous burst's classification.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        result = await detector.wait_for_lull()  # gate already open
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_gate_clears_between_bursts(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        # First burst finalizes → gate opens.
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert detector._delivery_gate.is_set()
+        # Second burst starts → gate re-closes.
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert not detector._delivery_gate.is_set()
+
+
+class TestInterruptionDetectorLongBoundaryCrossed:
+    """Early cancel: on_long_boundary_crossed fires before lull when GENERATING."""
+
+    def test_callback_fires_when_timer_crosses_boundary(self) -> None:
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(4.0)
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == [42]
+
+    def test_callback_not_fired_if_not_generating(self) -> None:
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.SPEAKING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(4.0)
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == []
+
+    def test_callback_fires_at_most_once_per_burst(self) -> None:
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(4.0)
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == [42]
+        # Calling again must be a no-op.
+        detector._maybe_dispatch_long_cancel()
+        assert fired == [42]
+
+    def test_long_timer_cancelled_at_finalize(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert detector._long_handle is not None
+        clock.advance(5.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert detector._long_handle is None
+
+    def test_long_timer_cancelled_at_abort(self) -> None:
+        detector, registry, _clock, _scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert detector._long_handle is not None
+        detector._abort_burst()
+        assert detector._long_handle is None
+
+    def test_callback_fires_on_restart_after_gap(self) -> None:
+        # Timer fires mid-gap when effective < boundary → no fire.
+        # User restarts; effective now ≥ boundary → fires on started event.
+        fired: list[int] = []
+
+        def cb(user_id: int, transcript: str) -> None:  # noqa: ARG001
+            fired.append(user_id)
+
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5, boundary_s=4.0, on_long_boundary_crossed=cb
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(3.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        # Long timer fires; effective = 3.0 < 4.0 → no dispatch.
+        scheduler.fire_for(detector._on_long_crossed)
+        assert fired == []
+        # User starts again; clock now at 3.0+gap. Simulate gap then restart.
+        clock.advance(2.0)  # clock = 5.0; effective = 5.0 ≥ 4.0
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        assert fired == [42]
+
+
+# ---------------------------------------------------------------------------
+# Step 11 — Short interruption during SPEAKING (yield + push-through)
+# ---------------------------------------------------------------------------
+
+
+class _FakeVC:
+    """Minimal VoiceClient stand-in for Step 11 dispatch tests."""
+
+    def __init__(self, *, playing: bool = True) -> None:
+        self.playing = playing
+        self.stopped = False
+
+    def is_playing(self) -> bool:
+        return self.playing
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.playing = False
+
+
+def _make_detector_with_callbacks(
+    *,
+    guild_id: int = 1,
+    min_s: float = 1.5,
+    boundary_s: float = 4.0,
+    lull_s: float = 5.0,
+    base_tolerance: float = 0.30,
+    rng: Callable[[], float] | None = None,
+    on_short_yield_resume: Callable | None = None,
+    on_push_through_transcript: Callable | None = None,
+) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
+    registry = ResponseTrackerRegistry()
+    clock = _FakeClock()
+    scheduler = _FakeScheduler()
+    if rng is None:
+        rng = lambda: 0.99  # noqa: E731
+    detector = InterruptionDetector(
+        tracker_registry=registry,
+        guild_id=guild_id,
+        min_interruption_s=min_s,
+        short_long_boundary_s=boundary_s,
+        lull_timeout_s=lull_s,
+        base_tolerance=base_tolerance,
+        clock=clock,
+        scheduler=scheduler,
+        rng=rng,
+        on_short_yield_resume=on_short_yield_resume,
+        on_push_through_transcript=on_push_through_transcript,
+    )
+    return detector, registry, clock, scheduler
+
+
+class TestStep11ShortSpeakingDispatch:
+    """Step 11: short interruption during SPEAKING drives yield or push-through."""
+
+    # ------------------------------------------------------------------
+    # Moment 1: min crossed → vc.stop() / no-op
+    # ------------------------------------------------------------------
+
+    def test_short_speaking_yield_stops_vc(self) -> None:
+        # roll=0.99 > base=0.10 → keep=False → yield → vc.stop()
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.10, rng=lambda: 0.99
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is True
+
+    def test_short_speaking_push_through_does_not_stop_vc(self) -> None:
+        # roll=0.01 < base=0.99 → keep=True → push-through → vc untouched
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.99, rng=lambda: 0.01
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is False
+
+    def test_very_meek_tolerance_yields(self) -> None:
+        # base=0.10, roll=0.99 → 0.99 ≥ 0.10 → keep=False → yield
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.10, rng=lambda: 0.99
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is True
+
+    def test_very_stubborn_tolerance_keeps_talking(self) -> None:
+        # base=0.60, roll=0.01 → 0.01 < 0.60 → keep=True → push-through
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.60, rng=lambda: 0.01
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is False
+
+    def test_unsolicited_bias_shifts_roll_to_keep(self) -> None:
+        # base=0.30, is_unsolicited=True → effective=0.65.
+        # roll=0.50: 0.50 < 0.65 → keep (would yield at 0.30 without bias).
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.30, rng=lambda: 0.50
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+        tracker.is_unsolicited = True
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert fake_vc.stopped is False  # bias pushed past roll → keep
+
+    def test_interruption_elapsed_ms_stored_on_tracker_on_yield(self) -> None:
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5, boundary_s=4.0, base_tolerance=0.10, rng=lambda: 0.99
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = 10.0
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+        clock.now = 11.5  # 1.5s elapsed
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        # elapsed = (now - playback_start) * 1000 = 1.5s * 1000 = 1500ms
+        assert tracker.interruption_elapsed_ms is not None
+        assert tracker.interruption_elapsed_ms == pytest.approx(
+            (clock.now - 10.0) * 1000, abs=1.0
+        )
+
+    def test_interruption_elapsed_ms_cleared_on_idle(self) -> None:
+        t = ResponseTracker(guild_id=1)
+        t.state = ResponseState.SPEAKING
+        t.interruption_elapsed_ms = 1200.0
+        t.transition(ResponseState.IDLE)
+        assert t.interruption_elapsed_ms is None
+
+    # ------------------------------------------------------------------
+    # Lull confirmed → dispatch resume or push-through
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_short_speaking_yield_resumes_from_word_boundary(self) -> None:
+        # 3 words; elapsed_ms = 1500ms lands between word 1 (end 300ms)
+        # and word 2 (start 1600ms) → remaining = ["world", "bye"].
+        resumed: list[list[WordTimestamp]] = []
+
+        async def _capture_resume(remaining: list[WordTimestamp]) -> None:  # noqa: RUF029
+            resumed.append(remaining)
+
+        fake_vc = _FakeVC()
+        ts = [
+            WordTimestamp("hello", 0.0, 300.0),
+            WordTimestamp("world", 1600.0, 2000.0),
+            WordTimestamp("bye", 2100.0, 2400.0),
+        ]
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,
+            rng=lambda: 0.99,
+            on_short_yield_resume=_capture_resume,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = 0.0  # clock starts at 0.0
+        tracker.timestamps = ts
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # Burst starts at clock=0.0; advance 1.5s then fire min timer.
+        # elapsed_ms = (1.5 - 0.0) * 1000 = 1500ms → after "hello"
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        # Burst ends, lull fires as short (1.5s < 4.0s boundary)
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        await asyncio.sleep(0)  # yield to let the created task run
+
+        assert len(resumed) == 1
+        assert [w.word for w in resumed[0]] == ["world", "bye"]
+
+    def test_short_speaking_push_through_transcript_appended(self) -> None:
+        pushed: list[tuple[int, str]] = []
+
+        def _capture_push(user_id: int, transcript: str) -> None:
+            pushed.append((user_id, transcript))
+
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,  # very stubborn — keeps talking
+            rng=lambda: 0.01,
+            on_push_through_transcript=_capture_push,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # Burst starts at clock=0.0; transcript arrives during burst
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey wait")
+        clock.advance(1.5)  # min crossed (effective = 1.5 >= 1.5)
+        scheduler.fire_for(detector._on_min_crossed)  # keep=True → no stop
+
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert pushed == [(42, "hey wait")]
+
+    def test_yield_dispatch_only_on_short_not_long(self) -> None:
+        # Yield at min, burst ends up long → on_short_yield_resume NOT called
+        resumed: list[object] = []
+
+        async def _capture_resume(remaining: list[WordTimestamp]) -> None:  # noqa: RUF029
+            resumed.append(remaining)
+
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,
+            rng=lambda: 0.99,
+            on_short_yield_resume=_capture_resume,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # Min crossed → yield
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        # Burst continues → long (4.0s total ≥ boundary 4.0)
+        clock.advance(2.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert resumed == []
+
+    def test_on_transcript_ignored_before_burst(self) -> None:
+        pushed: list[tuple[int, str]] = []
+
+        def _capture_push(user_id: int, transcript: str) -> None:
+            pushed.append((user_id, transcript))
+
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,
+            rng=lambda: 0.01,
+            on_push_through_transcript=_capture_push,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        fake_vc = _FakeVC()
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        # transcript before burst starts
+        detector.on_transcript(42, "pre-burst noise")
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        # only the empty transcript from during the burst
+        assert pushed == []
+
+    def test_short_speaking_yield_sets_pending_flag(self) -> None:
+        # After short@SPEAKING yield+resume finalize, tracker.short_yield_pending
+        # must be True so _deliver_to_monitor suppresses the concurrent lull.
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,
+            rng=lambda: 0.99,  # roll > tolerance → yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = 0.0
+        tracker.timestamps = [
+            WordTimestamp("hello", 0.0, 300.0),
+            WordTimestamp("world", 1600.0, 2000.0),
+        ]
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)  # yield; remaining=["world"]
+
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.short_yield_pending is True
+
+    def test_short_speaking_push_through_does_not_set_pending_flag(self) -> None:
+        # push-through: familiar keeps talking → no resume pending.
+        fake_vc = _FakeVC()
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,  # very stubborn → keep
+            rng=lambda: 0.01,
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = fake_vc  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(1.5)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        clock.advance(0.5)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.short_yield_pending is False
+
+
+class TestLongSpeakingYieldDispatch:
+    """Step 12: long interruption during SPEAKING triggers yield dispatch.
+
+    At Moment 1 (min crossed, SPEAKING, yield decision):
+    - ``vc.stop()`` is called
+    - ``tracker.interruption_elapsed_ms`` is set
+    - ``tracker.interrupt_event`` is created
+
+    At finalize (long classification):
+    - ``tracker.interrupt_event`` is set
+    - ``tracker.interrupt_classification`` is ``InterruptionClass.long``
+    - ``tracker.interrupt_transcript`` carries the accumulated text
+    """
+
+    def test_yield_stops_vc_and_records_elapsed(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=30.0,
+            rng=lambda: 0.99,  # roll > tolerance → yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now  # playback started at t=0
+        vc_mock = MagicMock()
+        tracker.vc = vc_mock
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)  # crosses min_s
+        scheduler.fire_for(detector._on_min_crossed)
+
+        vc_mock.stop.assert_called_once()
+        assert tracker.interruption_elapsed_ms is not None
+        assert tracker.interruption_elapsed_ms == pytest.approx(2000.0)  # 2s in ms
+        assert tracker.interrupt_event is not None
+
+    def test_yield_long_finalize_sets_event_and_classification(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=5.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)  # yield dispatch
+        clock.advance(4.0)  # total duration 6s ≥ boundary_s=5 → long
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_event is not None
+        assert tracker.interrupt_event.is_set()
+        assert tracker.interrupt_classification is InterruptionClass.long
+
+    def test_yield_long_finalize_captures_transcript(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=5.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "tell me")
+        detector.on_transcript(42, "more please")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(4.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_transcript == "tell me more please"
+
+    def test_yield_short_finalize_sets_short_classification(self) -> None:
+        # burst between min and boundary → short classification
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=30.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(3.0)  # total 5s, < boundary_s=30 → short
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_classification is InterruptionClass.short
+
+    def test_no_yield_push_through_does_not_set_interrupt_event(self) -> None:
+        # roll < tolerance → keep_talking (push through)
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0, boundary_s=30.0, rng=lambda: 0.0
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        tracker.vc.stop.assert_not_called()
+        assert tracker.interrupt_event is None
+
+    def test_on_transcript_only_accumulates_during_burst(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=2.0,
+            boundary_s=30.0,
+            rng=lambda: 0.99,  # yield
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+
+        # text before burst start is ignored
+        detector.on_transcript(42, "before")
+
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "during burst")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(4.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert tracker.interrupt_transcript == "during burst"
+
+    def test_idle_to_idle_clears_interrupt_fields(self) -> None:
+        # transition(IDLE) must reset all Step 12 scratch
+        t = ResponseTracker(guild_id=1)
+        t.interruption_elapsed_ms = 500.0
+        t.interrupt_event = asyncio.Event()
+        t.interrupt_classification = InterruptionClass.long
+        t.interrupt_transcript = "hello"
+        t.interrupt_starter_name = "Bob"
+        t.state = ResponseState.SPEAKING
+        t.transition(ResponseState.IDLE)
+
+        assert t.interruption_elapsed_ms is None
+        assert t.interrupt_event is None
+        assert t.interrupt_classification is None
+        assert not t.interrupt_transcript
+        assert not t.interrupt_starter_name
+
+    def test_name_resolver_sets_starter_name(self) -> None:
+        registry = ResponseTrackerRegistry()
+        clock = _FakeClock()
+        scheduler = _FakeScheduler()
+        detector = InterruptionDetector(
+            tracker_registry=registry,
+            guild_id=1,
+            min_interruption_s=2.0,
+            short_long_boundary_s=30.0,
+            lull_timeout_s=5.0,
+            base_tolerance=0.30,
+            clock=clock,
+            scheduler=scheduler,
+            rng=lambda: 0.99,  # roll > tolerance → yield
+            name_resolver=lambda uid: f"Resolved-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = MagicMock()
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+
+        assert tracker.interrupt_starter_name == "Resolved-42"
+
+
+# ---------------------------------------------------------------------------
+# Step 9 — Short interruption during GENERATING (polite wait)
+# ---------------------------------------------------------------------------
+
+
+class TestShortGeneratingDispatch:
+    """Step 9: short interruption during GENERATING → polite wait.
+
+    Familiar keeps generating; delivery gate already opens on finalize so
+    playback proceeds naturally. Dispatch logs + stashes interrupter's
+    transcript on the tracker for chronological flush in
+    ``_run_voice_response`` after original buffer write.
+    """
+
+    def test_dispatch_log_format(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        with caplog.at_level(logging.INFO):
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "dispatch: short@GENERATING → polite-wait speaker=42" in r.message
+            for r in caplog.records
+        )
+
+    def test_transcript_stashed_on_tracker(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda uid: f"Name-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == [("Name-42", "hello")]
+
+    def test_transcript_stashed_without_resolver_uses_fallback(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == [("User-42", "hello")]
+
+    def test_llm_generation_task_not_cancelled(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        fake_task = MagicMock()
+        tracker.generation_task = fake_task
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_transcript(42, "hello")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        fake_task.cancel.assert_not_called()
+        assert tracker.generation_task is fake_task
+
+    @pytest.mark.asyncio
+    async def test_delivery_gate_opens_with_short(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        wait_task = asyncio.create_task(detector.wait_for_lull())
+        await asyncio.sleep(0)
+        scheduler.fire_for(detector._finalize_burst)
+        result = await wait_task
+        assert result is InterruptionClass.short
+
+    def test_empty_transcript_guarded(self) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda uid: f"Name-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(2.0)
+        # no on_transcript call — transcript stays empty
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == []
+
+    def test_long_generating_leaves_pending_untouched(self) -> None:
+        # Regression: long@GENERATING path does not populate
+        # pending_interrupter_turns (early-cancel path uses its own callback).
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda uid: f"Name-{uid}",
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        clock.advance(5.0)  # exceeds boundary → long
+        detector.on_transcript(42, "hey stop")
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+        assert tracker.pending_interrupter_turns == []
+
+
+class TestInterruptionLogNames:
+    """Step 10: log lines use resolved display names instead of raw user IDs."""
+
+    def test_min_crossed_log_uses_resolved_name(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda _uid: "Alice",
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._on_min_crossed)
+        assert any(
+            "speaker=Alice" in r.message and "min threshold crossed" in r.message
+            for r in caplog.records
+        )
+
+    def test_finalize_log_uses_resolved_name(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        detector, registry, clock, scheduler = _make_detector(
+            min_s=1.5,
+            boundary_s=4.0,
+            name_resolver=lambda _uid: "Alice",
+        )
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "speaker=Alice" in r.message and "interruption:" in r.message
+            for r in caplog.records
+        )
+
+    def test_fallback_when_no_resolver(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # No name_resolver — raw ID rendered as string, no crash.
+        detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
+        registry.get(1).state = ResponseState.GENERATING
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "speaker=42" in r.message and "interruption:" in r.message
+            for r in caplog.records
+        )
+
+
+class TestLongSpeakingPushThrough:
+    """Step 11b: long interruption while SPEAKING with push-through.
+
+    When the familiar decides to keep talking at Moment 1 (push-through)
+    but the burst grows past ``short_long_boundary_s``, the interrupter
+    transcript must still be forwarded to the push-through callback so it
+    lands in history.
+    """
+
+    def test_dispatch_log_emitted(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,  # high tolerance → rng=0.01 < 0.99 → keep
+            rng=lambda: 0.01,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = _FakeVC()  # ty: ignore[invalid-assignment]
+
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.voice.interruption"
+        ):
+            detector.on_voice_activity(42, VoiceActivityEvent.started)
+            clock.advance(2.0)  # crosses min → Moment 1 → keep
+            scheduler.fire_for(detector._on_min_crossed)
+            clock.advance(3.0)  # total 5s > boundary_s=4 → long
+            detector.on_voice_activity(42, VoiceActivityEvent.ended)
+            scheduler.fire_for(detector._finalize_burst)
+        assert any(
+            "dispatch: long@SPEAKING push-through" in r.message for r in caplog.records
+        )
+
+    def test_push_through_callback_invoked(self) -> None:
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.99,
+            rng=lambda: 0.01,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = _FakeVC()  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "hey what about this")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(3.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert push_through_calls == [(42, "hey what about this")]
+
+    def test_yield_path_does_not_invoke_push_through(self) -> None:
+        # Roll > tolerance → yield, not push-through; callback must NOT fire.
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            base_tolerance=0.10,  # low tolerance → rng=0.99 > 0.10 → yield
+            rng=lambda: 0.99,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.SPEAKING
+        tracker.playback_start_time = clock.now
+        tracker.vc = _FakeVC()  # ty: ignore[invalid-assignment]
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "actually you know what")
+        clock.advance(2.0)
+        scheduler.fire_for(detector._on_min_crossed)
+        clock.advance(3.0)
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert push_through_calls == []
+
+    def test_long_generating_does_not_invoke_push_through(self) -> None:
+        # long@GENERATING must not fire the push-through callback.
+        push_through_calls: list[tuple[int, str]] = []
+        detector, registry, clock, scheduler = _make_detector_with_callbacks(
+            min_s=1.5,
+            boundary_s=4.0,
+            on_push_through_transcript=lambda uid, text: push_through_calls.append((
+                uid,
+                text,
+            )),
+        )
+        tracker = registry.get(1)
+        tracker.state = ResponseState.GENERATING
+
+        detector.on_voice_activity(42, VoiceActivityEvent.started)
+        detector.on_transcript(42, "wait hold on")
+        clock.advance(5.0)  # exceeds boundary → long
+        detector.on_voice_activity(42, VoiceActivityEvent.ended)
+        scheduler.fire_for(detector._finalize_burst)
+
+        assert push_through_calls == []

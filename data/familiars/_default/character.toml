@@ -97,3 +97,8 @@ temperature = 0.3
 [llm.interjection_decision]
 model       = "z-ai/glm-4.7-flash"
 temperature = 0.5
+
+# Mood evaluator: classify emotional context of recent turns → interrupt bias.
+[llm.mood_eval]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.3

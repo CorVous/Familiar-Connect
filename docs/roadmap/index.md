@@ -8,7 +8,7 @@ Everything on this page is *planned, not shipped*. The shipped surface is descri
 |---|---|---|
 | Chattiness & interjection (proactive replies) | Design | [Conversation flow](conversation-flow.md) |
 | Voice input (STT → pipeline) | Design | [Voice input](voice-input.md) |
-| Barge-in / interruption handling | In progress — plumbing shipped, dispatch pending | [Interruption flow](interruption-flow.md) |
+| Barge-in / interruption handling | Shipped | [Interruption handling](../architecture/interruption.md) |
 | Voice channel logging (passive listeners) | Design | [Voice logging](voice-logging.md) |
 | Session logging & post-session writer pass | Design | [Session logging](session-logging.md) |
 | Thread & forum-post subscriptions | Design | [Threads and forum posts](threads-and-forum-posts.md) |
