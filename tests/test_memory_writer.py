@@ -340,3 +340,50 @@ class TestMemoryWriterRun:
         )
         result = asyncio.run(writer.run())
         assert result.turns_summarized == 6
+
+    def test_filenames_with_directory_prefix_are_normalized(
+        self, tmp_path: Path
+    ) -> None:
+        """LLM emitting ``people/alice.md`` must not produce ``people/people/alice.md``.
+
+        Regression test: the existing-files section shows paths like
+        ``people/<name>.md``, so the model can mirror that in its output.
+        """
+        prefixed_output = """\
+===SESSION_SUMMARY===
+Alice and the familiar had a brief exchange.
+===END_SESSION_SUMMARY===
+
+===PEOPLE===
+---FILE: people/alice.md---
+# Alice
+
+Alice is a friendly person.
+---END_FILE---
+===END_PEOPLE===
+
+===TOPICS===
+---FILE: topics/greetings.md---
+# Greetings
+
+A casual chat.
+---END_FILE---
+===END_TOPICS==="""
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 4)
+        llm = FakeLLMClient(replies=[prefixed_output])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        result = asyncio.run(writer.run())
+
+        assert "people/alice.md" in result.people_files
+        assert "people/people/alice.md" not in result.people_files
+        assert "topics/greetings.md" in result.topic_files
+        assert "topics/topics/greetings.md" not in result.topic_files
+        # and the files on disk live at the flat location
+        assert mem_store.read_file("people/alice.md").startswith("# Alice")
+        assert mem_store.read_file("topics/greetings.md").startswith("# Greetings")

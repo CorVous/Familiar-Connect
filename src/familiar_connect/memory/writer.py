@@ -85,6 +85,8 @@ its content — do not drop existing information.>
 
 Rules:
 - Filenames must be lowercase, use hyphens for spaces, and end in .md
+- Filenames must be a basename only — never include a directory prefix \
+  (write ``alice.md``, not ``people/alice.md``)
 - Only create/update people and topic files that are genuinely worth \
   remembering long-term
 - Write from {familiar_name}'s perspective
@@ -109,7 +111,7 @@ extend their content if you update them.
 """
 
 _EXISTING_FILE_TEMPLATE = """\
---- Existing file: {category}/{filename} ---
+--- Existing {category} file — {filename} ---
 {content}
 --- End existing file ---
 
@@ -164,15 +166,24 @@ def _parse_writer_output(
 
 
 def _parse_file_blocks(section: str) -> dict[str, str]:
-    """Extract ``filename -> content`` pairs from ``---FILE: x---`` blocks."""
+    """Extract ``filename -> content`` pairs from ``---FILE: x---`` blocks.
+
+    Normalises filenames to a basename so a model echoing back a
+    directory-prefixed path (e.g. ``people/alice.md``) doesn't cause
+    the writer to nest directories (``people/people/alice.md``).
+    """
     files: dict[str, str] = {}
     for match in re.finditer(
         r"---FILE:\s*(.+?)---\s*\n(.*?)\n\s*---END_FILE---",
         section,
         re.DOTALL,
     ):
-        filename = match.group(1).strip()
+        raw = match.group(1).strip()
         content = match.group(2).strip()
+        # keep only the basename; reject empty or traversal artefacts
+        filename = raw.replace("\\", "/").rstrip("/").split("/")[-1]
+        if filename in {"", ".", ".."}:
+            continue
         if filename and content:
             files[filename] = content
     return files
