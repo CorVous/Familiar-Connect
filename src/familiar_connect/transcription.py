@@ -84,9 +84,10 @@ class DeepgramTranscriber:
         sample_rate: int = 48000,
         channels: int = 1,
         diarize: bool = False,
-        interim_results: bool = True,
+        interim_results: bool = False,
         utterance_end_ms: int = 1000,
         vad_events: bool = True,
+        endpointing_ms: int = 300,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -97,6 +98,7 @@ class DeepgramTranscriber:
         self.interim_results = interim_results
         self.utterance_end_ms = utterance_end_ms
         self.vad_events = vad_events
+        self.endpointing_ms = endpointing_ms
 
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -104,17 +106,26 @@ class DeepgramTranscriber:
         self._keepalive_task: asyncio.Task[None] | None = None
 
     def build_ws_url(self: Self) -> str:
-        """Deepgram WebSocket URL with query parameters."""
+        """Deepgram WebSocket URL with query parameters.
+
+        ``interim_results`` / ``utterance_end_ms`` are emitted only when
+        interim results are enabled; Deepgram requires ``interim_results=true``
+        for ``utterance_end_ms`` to take effect. ``endpointing`` is always
+        emitted — it controls how long Deepgram waits in silence before
+        finalizing a segment.
+        """
         params: dict[str, str] = {
             "model": self.model,
             "language": self.language,
             "sample_rate": str(self.sample_rate),
             "channels": str(self.channels),
             "encoding": "linear16",
-            "interim_results": str(self.interim_results).lower(),
-            "utterance_end_ms": str(self.utterance_end_ms),
             "vad_events": str(self.vad_events).lower(),
+            "endpointing": str(self.endpointing_ms),
         }
+        if self.interim_results:
+            params["interim_results"] = "true"
+            params["utterance_end_ms"] = str(self.utterance_end_ms)
         if self.diarize:
             params["diarize"] = "true"
         return f"{DEEPGRAM_WS_URL}?{urlencode(params)}"
@@ -135,6 +146,7 @@ class DeepgramTranscriber:
             interim_results=self.interim_results,
             utterance_end_ms=self.utterance_end_ms,
             vad_events=self.vad_events,
+            endpointing_ms=self.endpointing_ms,
         )
 
     def _parse_response(self: Self, data: dict[str, Any]) -> TranscriptionResult | None:

@@ -1,16 +1,21 @@
-"""Voice lull monitor — debounce voice utterances via Deepgram VAD events.
+"""Voice lull monitor — conversational-silence detector over Deepgram finals.
 
-Buffers per-speaker Deepgram finals. When all users are silent per
-Deepgram's VAD (``UtteranceEnd``) and finals are buffered, a lull timer
-of ``lull_timeout`` seconds arms. If any user resumes speech
-(``SpeechStarted``) before it fires, the timer cancels and the buffer
-keeps accumulating. When the timer fires, finals merge into a single
-utterance and dispatch to the response pipeline.
+Buffers per-speaker Deepgram finals. Each incoming final (re-)arms the
+``lull_timeout`` timer. ``SpeechStarted`` from Deepgram VAD cancels a
+pending timer (resumed speech extends the turn). When the timer
+expires, buffered finals merge into a single utterance and dispatch to
+the response pipeline as the conversational-lull endpoint.
 
-Signals come exclusively from Deepgram VAD, not Discord audio frames.
-Frame arrival is unreliable as a speech-state signal (client-side VAD
-behaviour varies; background noise keeps frames flowing through real
-silence). Deepgram's VAD is authoritative.
+The lull is client-side wall-clock time since the last Deepgram event —
+no dependency on ``UtteranceEnd``. Deepgram's ``UtteranceEnd`` is
+unreliable under continuous audio (Discord keeps streaming near-silent
+frames; Deepgram holds the event until the next speech flushes it).
+Running with ``interim_results=false`` makes each ``Results(is_final)``
+a complete endpointed segment; arming on those is the prompt trigger.
+
+``VoiceActivityEvent.started`` is emitted on ``SpeechStarted``;
+``VoiceActivityEvent.ended`` is emitted on final arrival for a user
+currently in ``_speaking`` (final = user paused for this segment).
 """
 
 from __future__ import annotations
@@ -66,41 +71,49 @@ class VoiceLullMonitor:
     # ------------------------------------------------------------------
 
     def on_speech_start(self, user_id: int) -> None:
-        """Deepgram ``SpeechStarted`` — user began speaking."""
-        # cancel any pending lull; resumed speech extends the utterance
-        self._cancel_lull()
-        if user_id in self._speaking:
-            return
-        self._speaking.add(user_id)
-        _logger.info("voice activity user=%s event=started", user_id)
-        self._emit_activity(user_id, VoiceActivityEvent.started)
+        """Deepgram ``SpeechStarted`` — user began speaking.
+
+        Re-arms the lull timer. Any Deepgram activity (VAD pulse or
+        final) pushes the lull out by ``lull_timeout``; when activity
+        stops for that long, the timer fires and dispatches any
+        buffered finals. No-op fire if nothing is buffered.
+        """
+        if user_id not in self._speaking:
+            self._speaking.add(user_id)
+            _logger.info("voice activity user=%s event=started", user_id)
+            self._emit_activity(user_id, VoiceActivityEvent.started)
+        self._arm_lull()
 
     def on_speech_end(self, user_id: int) -> None:
-        """Deepgram ``UtteranceEnd`` — user finished an utterance."""
+        """Deepgram ``UtteranceEnd`` — user finished an utterance.
+
+        Defensive only: with ``interim_results=false`` Deepgram does not
+        emit ``UtteranceEnd``. Kept so the pipeline surface stays stable
+        and any future server-side behaviour change is absorbed safely.
+        """
         if user_id not in self._speaking:
             return
         self._speaking.discard(user_id)
         _logger.info("voice activity user=%s event=ended", user_id)
         self._emit_activity(user_id, VoiceActivityEvent.ended)
-        # channel idle + finals buffered → arm lull timer
-        if not self._speaking and self._finals:
-            self._arm_lull()
 
     def on_transcript(self, user_id: int, result: TranscriptionResult) -> None:
-        """Buffer finals; arm safety-net lull.
+        """Buffer final; (re-)arm the conversational lull.
 
-        Deepgram's ``UtteranceEnd`` can lag by seconds when audio
-        frames keep flowing through real silence (client-side VAD
-        variance, background noise above Discord's threshold).
-        Arming on each final guarantees dispatch within
-        ``lull_timeout`` of the last transcript even if
-        ``UtteranceEnd`` never arrives. A subsequent
-        ``on_speech_start`` still cancels (resumed speech extends
-        the utterance).
+        Each final resets the ``lull_timeout`` timer. Interim results
+        are ignored (normally absent under ``interim_results=false``).
+        If the user is still marked speaking from a prior
+        ``SpeechStarted``, a final means they endpointed — emit
+        ``VoiceActivityEvent.ended`` and drop them from ``_speaking``.
         """
-        if result.is_final and result.text:
-            self._finals.append((user_id, result))
-            self._arm_lull()
+        if not (result.is_final and result.text):
+            return
+        self._finals.append((user_id, result))
+        self._arm_lull()
+        if user_id in self._speaking:
+            self._speaking.discard(user_id)
+            _logger.info("voice activity user=%s event=ended", user_id)
+            self._emit_activity(user_id, VoiceActivityEvent.ended)
 
     def clear(self) -> None:
         """Cancel pending timer and drop buffered state."""

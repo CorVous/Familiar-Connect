@@ -134,10 +134,32 @@ class TestDeepgramTranscriber:
         assert params["sample_rate"] == ["48000"]
         assert params["channels"] == ["1"]
         assert params["encoding"] == ["linear16"]
-        assert params["interim_results"] == ["true"]
-        assert params["utterance_end_ms"] == ["1000"]
         assert params["vad_events"] == ["true"]
         assert "diarize" not in params
+
+    def test_builds_ws_url_omits_interim_results_by_default(self) -> None:
+        """Default config disables interim results and utterance_end_ms."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        # interim_results default is False → omitted (server default is false)
+        assert "interim_results" not in params
+        # utterance_end_ms requires interim_results → must be omitted when off
+        assert "utterance_end_ms" not in params
+
+    def test_builds_ws_url_emits_endpointing(self) -> None:
+        """Default endpointing_ms is serialized on the URL."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["endpointing"] == ["300"]
+
+    def test_builds_ws_url_emits_utterance_end_ms_when_interim_on(self) -> None:
+        """When interim_results is re-enabled, utterance_end_ms flows through."""
+        client = DeepgramTranscriber(
+            api_key="test-key", interim_results=True, utterance_end_ms=1500
+        )
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["interim_results"] == ["true"]
+        assert params["utterance_end_ms"] == ["1500"]
 
     def test_builds_ws_url_with_diarize(self) -> None:
         """build_ws_url includes diarize=true when enabled."""
@@ -164,6 +186,7 @@ class TestDeepgramTranscriber:
             interim_results=False,
             utterance_end_ms=500,
             vad_events=False,
+            endpointing_ms=450,
         )
         cloned = original.clone()
 
@@ -177,6 +200,7 @@ class TestDeepgramTranscriber:
         assert cloned.interim_results == original.interim_results
         assert cloned.utterance_end_ms == original.utterance_end_ms
         assert cloned.vad_events == original.vad_events
+        assert cloned.endpointing_ms == original.endpointing_ms
 
 
 class TestDeepgramTranscriberParseResponse:

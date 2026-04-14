@@ -104,12 +104,14 @@ class TestVoiceLullMonitor:
         assert result.text == "one two three"
 
     @pytest.mark.asyncio
-    async def test_concurrent_speech_cancels_pending_lull(self) -> None:
-        """Bob's continued speech events cancel Alice's pending lull.
+    async def test_concurrent_speech_holds_pending_lull(self) -> None:
+        """Bob's continued speech events re-arm the lull.
 
-        Safety-net lull arms on each final. While Bob keeps emitting
-        Deepgram VAD activity (SpeechStarted), those events cancel the
-        pending lull so Alice's transcript doesn't dispatch mid-Bob.
+        Any Deepgram activity (VAD pulse or final) re-arms the lull
+        timer. While Bob keeps emitting ``SpeechStarted``, Alice's
+        buffered final stays pending — the timer is continually pushed
+        forward. Only when Bob's stream goes quiet for ``lull_timeout``
+        does the merged dispatch fire.
         """
         calls: list[tuple[int, TranscriptionResult]] = []
 
@@ -319,15 +321,14 @@ class TestVoiceLullMonitor:
         )
 
     @pytest.mark.asyncio
-    async def test_safety_net_fires_without_utterance_end(self) -> None:
-        """Regression: final + no UtteranceEnd must still dispatch.
+    async def test_final_arms_lull_without_speech_end(self) -> None:
+        """Final arrival arms the lull; no `on_speech_end` needed.
 
-        Deepgram's UtteranceEnd is sometimes delivered only when the
-        next SpeechStarted arrives, even though `last_word_end` shows
-        real silence began seconds earlier. The safety-net lull armed
-        on each final guards against this: if no further VAD activity
-        arrives within `lull_timeout`, the buffered final dispatches
-        regardless.
+        Under ``interim_results=false`` Deepgram emits finals directly
+        but no ``UtteranceEnd`` (so ``on_speech_end`` never fires).
+        The lull is armed on final arrival; when no further VAD
+        activity arrives within ``lull_timeout``, the buffered final
+        dispatches.
         """
         calls: list[tuple[int, TranscriptionResult]] = []
 
@@ -417,6 +418,38 @@ class TestVoiceActivityEvents:
 
         monitor.on_speech_start(42)
         monitor.on_speech_end(42)
+        assert events == [
+            (42, VoiceActivityEvent.started),
+            (42, VoiceActivityEvent.ended),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ended_fires_on_final_for_speaking_user(self) -> None:
+        """Final arrival for a user in ``_speaking`` emits ``.ended``.
+
+        Deepgram with ``interim_results=false`` doesn't emit ``UtteranceEnd``,
+        so ``on_speech_end`` never fires. Final arrival is the authoritative
+        "user paused" signal and must drive ``.ended`` emission so the
+        interruption detector keeps getting both transitions.
+        """
+        events: list[tuple[int, VoiceActivityEvent]] = []
+
+        async def _on_done(  # noqa: RUF029
+            user_id: int, result: TranscriptionResult
+        ) -> None:
+            del user_id, result
+
+        def _on_activity(user_id: int, event: VoiceActivityEvent) -> None:
+            events.append((user_id, event))
+
+        monitor = VoiceLullMonitor(
+            lull_timeout=0.5,
+            on_utterance_complete=_on_done,
+            on_voice_activity=_on_activity,
+        )
+
+        monitor.on_speech_start(42)
+        monitor.on_transcript(42, _final("hello"))
         assert events == [
             (42, VoiceActivityEvent.started),
             (42, VoiceActivityEvent.ended),
