@@ -222,24 +222,18 @@ def _time_slot(dt: datetime) -> str:
     return "evening"
 
 
-def _session_filename(store: MemoryStore, dt: datetime) -> str:
-    """Generate a unique session filename like ``sessions/2026-04-13-evening.md``."""
+def _session_filename(dt: datetime) -> str:
+    """Return the session filename for a given datetime.
+
+    One file per date+slot. If one already exists the writer
+    overwrites it with a merged summary; it does not fork a
+    ``-2``/``-3`` sibling — that used to fragment a single
+    conversation across many files each time the turn-count
+    threshold re-fired.
+    """
     date_str = dt.strftime("%Y-%m-%d")
     slot = _time_slot(dt)
-    base = f"sessions/{date_str}-{slot}.md"
-
-    # Check for collisions and add a numeric suffix if needed
-    existing = store.glob("sessions/*.md")
-    if base not in existing:
-        return base
-
-    for i in range(2, 100):
-        candidate = f"sessions/{date_str}-{slot}-{i}.md"
-        if candidate not in existing:
-            return candidate
-
-    # Fallback with timestamp
-    return f"sessions/{date_str}-{dt.strftime('%H%M%S')}.md"
+    return f"sessions/{date_str}-{slot}.md"
 
 
 # ---------------------------------------------------------------------------
@@ -288,10 +282,15 @@ class MemoryWriter:
             return MemoryWriterResult()
 
         new_watermark = turns[-1].id
+        now = datetime.now(tz=UTC)
+        session_path = _session_filename(now)
 
         # Build the prompt with existing file context
         transcript = _render_turns(turns)
-        existing_section = self._build_existing_files_section(turns)
+        existing_section = self._build_existing_files_section(
+            turns,
+            session_path=session_path,
+        )
 
         system_prompt = _WRITER_SYSTEM_PROMPT.format(
             familiar_name=self._familiar_id,
@@ -319,10 +318,8 @@ class MemoryWriter:
         result_people: list[str] = []
         result_topics: list[str] = []
 
-        # Write session summary
+        # Write session summary — overwrites same date+slot file
         if session_summary:
-            now = datetime.now(tz=UTC)
-            session_path = _session_filename(self._memory_store, now)
             self._memory_store.write_file(
                 session_path,
                 session_summary,
@@ -376,9 +373,33 @@ class MemoryWriter:
     def _build_existing_files_section(
         self,
         turns: list[HistoryTurn],
+        *,
+        session_path: str | None = None,
     ) -> str:
-        """Load existing people/topic files relevant to the transcript."""
+        """Load existing session/people/topic files relevant to the transcript.
+
+        ``session_path`` points at the session file the writer will
+        overwrite this pass. If it already exists, its prior summary
+        is fed back so the model produces a merged update instead of
+        restating only the new turns.
+        """
         section_parts: list[str] = []
+
+        # load current slot's prior session summary (merge, don't restate)
+        if session_path:
+            try:
+                prior_session = self._memory_store.read_file(session_path)
+            except MemoryStoreError:
+                prior_session = ""
+            if prior_session:
+                filename = session_path.split("/")[-1]
+                section_parts.append(
+                    _EXISTING_FILE_TEMPLATE.format(
+                        category="session",
+                        filename=filename,
+                        content=prior_session,
+                    )
+                )
 
         # Collect speaker names from user turns
         speakers: set[str] = set()

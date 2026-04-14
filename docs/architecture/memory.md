@@ -102,7 +102,7 @@ Suggested sections:
 ### `sessions/<date>-<slot>.md` — per-session summaries
 
 - Written by the `MemoryWriter` when a turn-count or idle-timeout threshold is reached.
-- One file per writer invocation. The slot suffix (`morning`, `afternoon`, `evening`, `night`) is derived from the time of day; a numeric suffix (`-2`, `-3`, etc.) disambiguates multiple sessions in the same slot.
+- One file per date and time-of-day slot (`morning`, `afternoon`, `evening`, `night`). Subsequent writer passes in the same slot re-read the existing summary, merge in the newer turns, and overwrite the file — they do **not** fork a `-2`/`-3` sibling. A long conversation that straddles multiple writer invocations lands in one file.
 - Contents are freeform: a paragraph summary, a bulleted list of highlights, or whatever the writer pass produces.
 - The writer pass also *creates and updates relevant people/ and topics/ files* based on what happened in the session.
 

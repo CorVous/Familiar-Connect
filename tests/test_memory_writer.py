@@ -157,21 +157,10 @@ class TestSessionFilename:
     def test_time_slot_night(self) -> None:
         assert _time_slot(datetime(2026, 1, 1, 3, 0, tzinfo=UTC)) == "night"
 
-    def test_session_filename_unique(self, tmp_path: Path) -> None:
-        store = MemoryStore(tmp_path / "memory")
+    def test_session_filename_for_slot(self) -> None:
+        """Pure function of date+slot — no suffix, no store lookup."""
         dt = datetime(2026, 4, 13, 20, 0, tzinfo=UTC)
-        name = _session_filename(store, dt)
-        assert name == "sessions/2026-04-13-evening.md"
-
-    def test_session_filename_collision(self, tmp_path: Path) -> None:
-        mem_root = tmp_path / "memory"
-        mem_root.mkdir()
-        store = MemoryStore(mem_root)
-        # Create the first session file
-        store.write_file("sessions/2026-04-13-evening.md", "existing", source="test")
-        dt = datetime(2026, 4, 13, 20, 0, tzinfo=UTC)
-        name = _session_filename(store, dt)
-        assert name == "sessions/2026-04-13-evening-2.md"
+        assert _session_filename(dt) == "sessions/2026-04-13-evening.md"
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +329,81 @@ class TestMemoryWriterRun:
         )
         result = asyncio.run(writer.run())
         assert result.turns_summarized == 6
+
+    def test_second_pass_updates_same_session_file(self, tmp_path: Path) -> None:
+        """Two writer runs in the same slot update one file, not two.
+
+        Regression for the ``-2``/``-3`` suffix bug: the writer used
+        to treat every invocation as a fresh session, fragmenting a
+        single conversation across multiple files.
+        """
+        mem_store, hist_store = _make_stores(tmp_path)
+
+        # first pass: 10 turns, produces sessions/<date>-<slot>.md
+        _seed_turns(hist_store, 10)
+        llm1 = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm1,
+            familiar_id=_FAMILIAR,
+        )
+        first = asyncio.run(writer.run())
+        assert first.session_file is not None
+
+        # second pass in the same slot: more turns, same writer
+        _seed_turns(hist_store, 10)
+        second_output = _STRUCTURED_OUTPUT.replace(
+            "Alice and the familiar had a brief exchange about greetings.",
+            "Alice and the familiar continued chatting; merged summary here.",
+        )
+        llm2 = FakeLLMClient(replies=[second_output])
+        writer2 = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm2,
+            familiar_id=_FAMILIAR,
+        )
+        second = asyncio.run(writer2.run())
+
+        assert second.session_file == first.session_file, (
+            "second pass must reuse the same session file instead of "
+            "creating a -2 suffix"
+        )
+        # and only one session file should exist on disk
+        assert mem_store.glob("sessions/*.md") == [first.session_file]
+        content = mem_store.read_file(first.session_file)
+        assert "merged summary here" in content
+
+    def test_existing_session_content_included_in_prompt(self, tmp_path: Path) -> None:
+        """Prior session summary is fed back so the LLM can merge, not restate."""
+        mem_store, hist_store = _make_stores(tmp_path)
+
+        # first pass writes an initial summary
+        _seed_turns(hist_store, 6)
+        llm1 = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm1,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+
+        # second pass: prompt must carry the prior session text
+        _seed_turns(hist_store, 6)
+        llm2 = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer2 = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm2,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer2.run())
+
+        assert len(llm2.calls) == 1
+        user_msg = llm2.calls[0][1].content
+        assert "Alice and the familiar had a brief exchange about greetings" in user_msg
 
     def test_filenames_with_directory_prefix_are_normalized(
         self, tmp_path: Path
