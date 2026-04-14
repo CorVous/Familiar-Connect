@@ -137,7 +137,7 @@ Reads from the existing text/voice history store and emits two contributions per
 
 Summaries are cached in SQLite keyed by `(familiar_id, last_summarised_id)` — global per familiar, regardless of which channel each older turn happened in — so they are only regenerated when new turns have actually been added to the familiar's history. The recent rolling window is partitioned per channel; the rolling summary is global per familiar. Compression target is roughly 10:1.
 
-Respects the deadline: if the summariser hasn't returned in time, the provider emits only the verbatim window and flags the cached summary as stale for the next run.
+**Background refresh.** The summariser runs off the critical path. On a cache miss (or stale cache), `contribute()` returns the current cache contents immediately — empty on the very first turn, or the previous summary if one exists — and schedules a background `asyncio.Task` to rebuild the summary. The fresh value lands in the cache and is picked up on the next turn. Concurrent refreshes for the same target watermark dedupe to a single task. Same pattern applies to cross-context "meanwhile elsewhere" summaries. A first-turn user sees only the recent-history layer; from turn two onwards the summary layer is populated. This trades one turn of freshness for keeping the 8+ s summariser cost out of every reply's latency.
 
 ## 7. Wiring: single-character install, subscriptions, channel configs
 
@@ -165,7 +165,9 @@ A small tool-using cheap-model loop scoped to a single familiar's `MemoryStore`.
 - `grep(pattern, path="")` → matches with surrounding context.
 - `read_file(path)` → file contents.
 
-**Loop** — up to K tool-call turns (default 5), hard deadline. The final turn is a "return the relevant snippets" message; anything before that is tool calls.
+**Loop** — up to K tool-call turns (default 3), hard deadline. The final turn is forced to a "no more tools; emit `ANSWER:` now with whatever you've seen" prompt so the provider returns a best-effort partial instead of nothing when the model would otherwise keep tool-calling.
+
+**Redundant-call bail-out** — if the model repeats a `grep`/`read_file` arg pair already seen this turn, the loop jumps straight to the forced-answer turn rather than waste another iteration.
 
 **Output** — a single `Contribution(layer=Layer.content, ...)` with the concatenated snippets and the file paths they came from as `source`.
 

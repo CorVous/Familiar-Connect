@@ -179,27 +179,41 @@ class TestRecentHistorySlice:
 # ---------------------------------------------------------------------------
 
 
+async def _drain_refresh(provider: HistoryProvider) -> None:
+    """Await all currently-pending background refresh tasks on *provider*."""
+    await asyncio.gather(
+        *provider._pending_refresh.values(),
+        return_exceptions=True,
+    )
+
+
 class TestSummaryPath:
     @pytest.mark.asyncio
-    async def test_over_window_calls_side_model_and_emits_summary(
+    async def test_over_window_schedules_summary_in_background(
         self, store: HistoryStore
     ) -> None:
+        """Cache miss: first call returns recent only; bg task populates cache."""
         _seed(store, 25)
         side = _StubLLMClient(response="early-conversation summary")
         provider = HistoryProvider(store=store, llm_client=side, window_size=10)
 
-        contributions = await provider.contribute(_request())
+        # First call: recent only, summariser scheduled.
+        first = await provider.contribute(_request())
+        assert {c.layer for c in first} == {Layer.recent_history}
 
-        layers = {c.layer for c in contributions}
-        assert layers == {Layer.recent_history, Layer.history_summary}
+        # Drain background refresh.
+        await _drain_refresh(provider)
         assert len(side.calls) == 1
-        # The summariser was given the *older* turns, not the recent window.
         prompt = side.prompt_at(0)
         assert "turn 0" in prompt
         assert "turn 14" in prompt
         assert "turn 15" not in prompt  # in the recent window now
 
-        summary = next(c for c in contributions if c.layer is Layer.history_summary)
+        # Second call: cache now warm, summary surfaces.
+        second = await provider.contribute(_request())
+        layers = {c.layer for c in second}
+        assert layers == {Layer.recent_history, Layer.history_summary}
+        summary = next(c for c in second if c.layer is Layer.history_summary)
         assert summary.text == "early-conversation summary"
         assert summary.priority == HISTORY_SUMMARY_PRIORITY
 
@@ -209,29 +223,33 @@ class TestSummaryPath:
         side = _StubLLMClient(response="cached summary")
         provider = HistoryProvider(store=store, llm_client=side, window_size=10)
 
-        # First call writes the cache.
+        # First call schedules refresh.
         await provider.contribute(_request())
+        await _drain_refresh(provider)
         assert len(side.calls) == 1
 
-        # Second call must not invoke the side-model again.
+        # Second call hits the cache — no new side-model call.
         contributions = await provider.contribute(_request())
         assert len(side.calls) == 1
         summary = next(c for c in contributions if c.layer is Layer.history_summary)
         assert summary.text == "cached summary"
 
     @pytest.mark.asyncio
-    async def test_stale_cache_is_regenerated(self, store: HistoryStore) -> None:
+    async def test_stale_cache_is_served_then_refreshed(
+        self, store: HistoryStore
+    ) -> None:
+        """Stale cache surfaces immediately; bg refresh updates for next turn."""
         _seed(store, 25)
         side = _StubLLMClient(response="first")
         provider = HistoryProvider(store=store, llm_client=side, window_size=10)
 
-        await provider.contribute(_request())  # caches "first"
+        # Prime the cache.
+        await provider.contribute(_request())
+        await _drain_refresh(provider)
         assert len(side.calls) == 1
 
-        # Add more turns so the global watermark advances past what the
-        # cache covers.
-        seed_more = 5
-        for i in range(seed_more):
+        # Add new turns so the watermark advances past the cache.
+        for i in range(5):
             store.append_turn(
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
@@ -240,10 +258,20 @@ class TestSummaryPath:
                 speaker="Alice",
             )
 
+        # Flip response before triggering the refresh so the bg task
+        # picks up the new value.
         side._response = "second"
-        contributions = await provider.contribute(_request())
+
+        # Next call surfaces the stale cache immediately and schedules refresh.
+        stale_contribs = await provider.contribute(_request())
+        summary = next(c for c in stale_contribs if c.layer is Layer.history_summary)
+        assert summary.text == "first"  # stale — acceptable
+        await _drain_refresh(provider)
         assert len(side.calls) == 2
-        summary = next(c for c in contributions if c.layer is Layer.history_summary)
+
+        # Subsequent call sees the refreshed summary.
+        fresh_contribs = await provider.contribute(_request())
+        summary = next(c for c in fresh_contribs if c.layer is Layer.history_summary)
         assert summary.text == "second"
 
 
@@ -288,20 +316,16 @@ class TestSummariserFailures:
         assert Layer.history_summary not in layers
 
     @pytest.mark.asyncio
-    async def test_timeout_falls_back_to_stale_cached_summary(
+    async def test_stale_cache_surfaces_while_slow_refresh_runs(
         self, store: HistoryStore
     ) -> None:
-        """A timed-out new run surfaces the previously-cached summary.
-
-        Better stale than nothing — once we've paid for a summary,
-        the rolling window keeps it around even when the next refresh
-        misses its deadline.
-        """
+        """Stale cache surfaces on the critical path while a slow refresh times out."""
         _seed(store, 25)
         # First, populate the cache with a fast side-model.
         fast = _StubLLMClient(response="cached value")
         provider = HistoryProvider(store=store, llm_client=fast, window_size=10)
         await provider.contribute(_request())
+        await _drain_refresh(provider)
 
         # Add more turns and switch to a slow side-model.
         for i in range(5):
@@ -322,12 +346,15 @@ class TestSummariserFailures:
         )
         contributions = await provider2.contribute(_request())
 
+        # Stale cache surfaces immediately — no wait for the slow refresh.
         summary = next(
             (c for c in contributions if c.layer is Layer.history_summary),
             None,
         )
         assert summary is not None
         assert summary.text == "cached value"
+        # Drain the bg refresh (times out, cache unchanged).
+        await _drain_refresh(provider2)
 
 
 # ---------------------------------------------------------------------------
@@ -393,20 +420,22 @@ class TestModeFilteredRecentWindow:
             window_size=10,
             mode=ChannelMode.full_rp,
         )
+        # First call schedules both within-channel summary and
+        # cross-context refreshes in the background.
+        await provider.contribute(_request())
+        await _drain_refresh(provider)
+        # Two side-model calls: within-channel summary + cross-context.
+        assert len(side.calls) == 2
+        prompt = side.prompt_at(0)
+        assert "Summarise the following" in prompt
+
+        # Next call picks up the cached within-channel summary.
         contributions = await provider.contribute(_request())
         summary = next(
             (c for c in contributions if c.layer is Layer.history_summary),
             None,
         )
         assert summary is not None
-        # The side model was called twice: once for the within-channel
-        # summary and once for the cross-context summary of channel 999.
-        assert len(side.calls) == 2
-        # The first call is the within-channel summary — verify it
-        # doesn't contain the other channel's turns.
-        prompt = side.prompt_at(0)
-        assert "Summarise the following" in prompt
-        # The summary should come from the within-channel older turns only.
         assert summary.text == "channel summary"
 
 
@@ -431,8 +460,12 @@ class TestCrossContextContributions:
             window_size=20,
             mode=ChannelMode.text_conversation_rp,
         )
-        contributions = await provider.contribute(_request(channel_id=100))
+        # First call schedules cross-context refresh — not yet cached.
+        await provider.contribute(_request(channel_id=100))
+        await _drain_refresh(provider)
 
+        # Next call emits the now-cached cross-context contribution.
+        contributions = await provider.contribute(_request(channel_id=100))
         cross = [
             c for c in contributions if c.source.startswith("history:cross_channel:")
         ]
@@ -467,7 +500,8 @@ class TestCrossContextContributions:
         ]
         assert cross == []
 
-        # But the cache was populated so the renderer can use it.
+        # Background refresh populates the cache for the renderer.
+        await _drain_refresh(provider)
         cached = store.get_cross_context(
             familiar_id=_FAMILIAR,
             viewer_mode="full_rp",
@@ -489,8 +523,9 @@ class TestCrossContextContributions:
             window_size=20,
             mode=ChannelMode.text_conversation_rp,
         )
-        # First call builds the cache.
+        # First call schedules the bg refresh; drain it so cache warms.
         await provider.contribute(_request(channel_id=100))
+        await _drain_refresh(provider)
         call_count_after_first = len(side.calls)
 
         # Second call should reuse the cache — no new LLM calls for
@@ -526,6 +561,8 @@ class TestCrossContextContributions:
             c for c in contributions if c.source.startswith("history:cross_channel:")
         ]
         assert cross == []
+        # Drain bg refresh (errors logged, swallowed).
+        await _drain_refresh(provider)
 
     @pytest.mark.asyncio
     async def test_no_cross_context_when_no_other_channels(
@@ -547,3 +584,76 @@ class TestCrossContextContributions:
             c for c in contributions if c.source.startswith("history:cross_channel:")
         ]
         assert cross == []
+
+
+# ---------------------------------------------------------------------------
+# Background refresh dedupe + error handling
+# ---------------------------------------------------------------------------
+
+
+class TestBackgroundRefresh:
+    @pytest.mark.asyncio
+    async def test_cache_miss_schedules_bg_task_and_warms_on_next_turn(
+        self, store: HistoryStore
+    ) -> None:
+        """Refresh runs off the critical path; second turn sees the fresh summary."""
+        _seed(store, 25)
+        side = _StubLLMClient(response="fresh summary")
+        provider = HistoryProvider(store=store, llm_client=side, window_size=10)
+
+        first = await provider.contribute(_request())
+        # Cache was empty on the first turn → no summary contribution yet.
+        assert {c.layer for c in first} == {Layer.recent_history}
+        # One task queued on the instance.
+        assert len(provider._pending_refresh) == 1
+
+        await _drain_refresh(provider)
+        assert len(side.calls) == 1
+
+        second = await provider.contribute(_request())
+        assert {c.layer for c in second} == {
+            Layer.recent_history,
+            Layer.history_summary,
+        }
+        summary = next(c for c in second if c.layer is Layer.history_summary)
+        assert summary.text == "fresh summary"
+        # No new LLM calls on the warmed-cache turn.
+        assert len(side.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cache_miss_calls_dedupe_to_one_task(
+        self, store: HistoryStore
+    ) -> None:
+        """Two concurrent contribute() calls schedule at most one refresh."""
+        _seed(store, 25)
+        side = _StubLLMClient(response="one", delay_s=0.05)
+        provider = HistoryProvider(store=store, llm_client=side, window_size=10)
+
+        await asyncio.gather(
+            provider.contribute(_request()),
+            provider.contribute(_request()),
+        )
+        # Exactly one bg task held by the provider (the second was deduped).
+        assert len(provider._pending_refresh) == 1
+        await _drain_refresh(provider)
+        # Side model called once.
+        assert len(side.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_bg_refresh_error_leaves_cache_untouched(
+        self,
+        store: HistoryStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Errors in the bg task are logged and swallowed; cache not written."""
+        _seed(store, 25)
+        side = _StubLLMClient(exc=RuntimeError("kaboom"))
+        provider = HistoryProvider(store=store, llm_client=side, window_size=10)
+
+        with caplog.at_level("WARNING"):
+            await provider.contribute(_request())
+            await _drain_refresh(provider)
+
+        cached = store.get_summary(familiar_id=_FAMILIAR, channel_id=_CHANNEL)
+        assert cached is None
+        assert any("background refresh" in r.message.lower() for r in caplog.records)
