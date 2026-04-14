@@ -125,8 +125,10 @@ async def unsubscribe_text(
         kind=SubscriptionKind.text,
     )
     familiar.monitor.clear_channel(channel_id)
+    # flush can exceed Discord's 3s interaction window (LLM call + file writes)
+    await ctx.defer(ephemeral=True)
     await familiar.memory_writer_scheduler.flush()
-    await ctx.respond("No longer listening here.", ephemeral=True)
+    await ctx.followup.send("No longer listening here.", ephemeral=True)
 
 
 async def _run_voice_response(
@@ -484,6 +486,10 @@ async def unsubscribe_voice(
         await ctx.respond("I'm not in a voice channel.", ephemeral=True)
         return
 
+    # disconnect + pipeline teardown + memory flush can exceed Discord's 3s
+    # interaction window, so defer before doing any of it
+    await ctx.defer(ephemeral=True)
+
     if vc is not None:
         # stop transcription first so audio stops flowing before disconnect
         if get_pipeline() is not None:
@@ -511,7 +517,7 @@ async def unsubscribe_voice(
         )
 
     await familiar.memory_writer_scheduler.flush()
-    await ctx.respond("Left voice.", ephemeral=True)
+    await ctx.followup.send("Left voice.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
