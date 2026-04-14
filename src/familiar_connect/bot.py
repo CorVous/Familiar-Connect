@@ -792,7 +792,6 @@ async def subscribe_my_voice(
 
         lull_monitor = VoiceLullMonitor(
             lull_timeout=familiar.config.voice_lull_timeout,
-            user_silence_s=0.2,
             on_utterance_complete=_deliver_to_monitor,
             on_voice_activity=interruption_detector.on_voice_activity,
         )  # voice_lull_timeout = endpointing; conversational lull governed
@@ -814,7 +813,8 @@ async def subscribe_my_voice(
             user_names=user_names,
             resolve_name=_resolve_from_channel,
             response_handler=_route_transcript_to_monitor,
-            on_audio=lull_monitor.on_audio,
+            on_speech_start=lull_monitor.on_speech_start,
+            on_speech_end=lull_monitor.on_speech_end,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),

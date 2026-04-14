@@ -13,11 +13,17 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from familiar_connect.transcription import (
+    SpeechStartedEvent,
+    TranscriptionResult,
+    UtteranceEndEvent,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from typing import Any
 
-    from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
+    from familiar_connect.transcription import DeepgramTranscriber, TranscriptionEvent
 
 _logger = logging.getLogger(__name__)
 
@@ -42,7 +48,7 @@ class _UserStream:
 
     transcriber: DeepgramTranscriber
     audio_queue: asyncio.Queue[bytes]
-    transcript_queue: asyncio.Queue[TranscriptionResult]
+    transcript_queue: asyncio.Queue[TranscriptionEvent]
     pump_task: asyncio.Task[None]
     forwarder_task: asyncio.Task[None]
 
@@ -58,7 +64,7 @@ class VoicePipeline:
 
     template: DeepgramTranscriber
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]]
-    shared_transcript_queue: asyncio.Queue[tuple[int, TranscriptionResult]]
+    shared_transcript_queue: asyncio.Queue[tuple[int, TranscriptionEvent]]
     router_task: asyncio.Task[None] | None
     logger_task: asyncio.Task[None] | None
     user_names: dict[int, str]
@@ -66,7 +72,8 @@ class VoicePipeline:
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None
-    on_audio: Callable[[int], None] | None = None
+    on_speech_start: Callable[[int], None] | None = None
+    on_speech_end: Callable[[int], None] | None = None
     streams: dict[int, _UserStream] = field(default_factory=dict)
 
 
@@ -155,24 +162,24 @@ async def _audio_pump(
 
 async def _transcript_forwarder(
     user_id: int,
-    user_queue: asyncio.Queue[TranscriptionResult],
-    shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]],
+    user_queue: asyncio.Queue[TranscriptionEvent],
+    shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]],
 ) -> None:
-    """Read results from a per-user queue and tag them onto the shared queue."""
+    """Read events from a per-user queue and tag them onto the shared queue."""
     while True:
-        result = await user_queue.get()
-        await shared_queue.put((user_id, result))
+        event = await user_queue.get()
+        await shared_queue.put((user_id, event))
 
 
 async def _create_user_stream(
     user_id: int,
     template: DeepgramTranscriber,
-    shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]],
+    shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]],
 ) -> _UserStream:
     """Create and start a per-user transcription stream."""
     transcriber = template.clone()
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
-    transcript_queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+    transcript_queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
     await transcriber.start(transcript_queue)
     pump_task = asyncio.create_task(_audio_pump(audio_queue, transcriber))
     forwarder_task = asyncio.create_task(
@@ -209,8 +216,6 @@ async def _audio_router(
             )
             pipeline.streams[user_id] = stream
         await pipeline.streams[user_id].audio_queue.put(data)
-        if pipeline.on_audio is not None:
-            pipeline.on_audio(user_id)
         chunks_routed += 1
         if chunks_routed % 500 == 1:
             _logger.debug(
@@ -238,32 +243,46 @@ async def _run_response_handler(
 
 
 async def _transcript_logger(
-    shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]],
+    shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]],
     pipeline: VoicePipeline,
 ) -> None:
-    """Log transcription results with the speaker's display name.
+    """Log results + route VAD events to pipeline hooks.
 
-    Response handlers are fired as background tasks so the logger is
-    never blocked by slow LLM / TTS processing.
+    Response handlers fire as background tasks so the logger is never
+    blocked by slow LLM / TTS processing. VAD hooks run synchronously
+    (they're cheap state updates on :class:`VoiceLullMonitor`).
     """
     pending: set[asyncio.Task[None]] = set()
     while True:
-        user_id, result = await shared_queue.get()
-        name = _get_user_name(pipeline, user_id)
-        if result.is_final:
-            _logger.info("[Transcription] %s: %s", name, result.text)
-            if pipeline.response_handler is not None:
-                task = asyncio.create_task(
-                    _run_response_handler(
-                        pipeline.response_handler,
-                        user_id,
-                        result,
-                    ),
-                )
-                pending.add(task)
-                task.add_done_callback(pending.discard)
-        else:
-            _logger.debug("[Transcription interim] %s: %s", name, result.text)
+        user_id, event = await shared_queue.get()
+        if isinstance(event, TranscriptionResult):
+            name = _get_user_name(pipeline, user_id)
+            if event.is_final:
+                _logger.info("[Transcription] %s: %s", name, event.text)
+                if pipeline.response_handler is not None:
+                    task = asyncio.create_task(
+                        _run_response_handler(
+                            pipeline.response_handler,
+                            user_id,
+                            event,
+                        ),
+                    )
+                    pending.add(task)
+                    task.add_done_callback(pending.discard)
+            else:
+                _logger.debug("[Transcription interim] %s: %s", name, event.text)
+        elif isinstance(event, SpeechStartedEvent):
+            if pipeline.on_speech_start is not None:
+                try:
+                    pipeline.on_speech_start(user_id)
+                except Exception:
+                    _logger.exception("on_speech_start hook failed")
+        elif isinstance(event, UtteranceEndEvent):
+            if pipeline.on_speech_end is not None:
+                try:
+                    pipeline.on_speech_end(user_id)
+                except Exception:
+                    _logger.exception("on_speech_end hook failed")
 
 
 # ---------------------------------------------------------------------------
@@ -278,31 +297,29 @@ async def start_pipeline(  # noqa: RUF029
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
     ) = None,
-    on_audio: Callable[[int], None] | None = None,
+    on_speech_start: Callable[[int], None] | None = None,
+    on_speech_end: Callable[[int], None] | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
-    :param template: A configured transcriber whose settings are cloned
-        for each user stream.
+    :param template: Transcriber whose settings are cloned per user stream.
     :param user_names: Mapping of Discord user IDs to display names.
-    :param resolve_name: Optional callback to resolve a display name for
-        user IDs not in *user_names* (e.g. late joiners). The result is
-        cached in *user_names* automatically.
+    :param resolve_name: Optional display-name lookup for late joiners;
+        resolved names are cached in *user_names*.
     :param response_handler: Optional async callback invoked with
-        ``(user_id, result)`` for each final transcription. Used to
-        trigger LLM + TTS responses.
-    :param on_audio: Optional sync callback invoked with ``user_id``
-        every time an audio frame arrives for that user. Used by the
-        :class:`~familiar_connect.voice_lull.VoiceLullMonitor` to drive
-        its per-user silence watchdogs.
+        ``(user_id, result)`` for each final transcription.
+    :param on_speech_start: Optional sync callback invoked with ``user_id``
+        when Deepgram VAD reports speech started.
+    :param on_speech_end: Optional sync callback invoked with ``user_id``
+        when Deepgram VAD reports utterance ended.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
-    shared_transcript_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = (
+    shared_transcript_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = (
         asyncio.Queue()
     )
 
-    # We create a placeholder pipeline first so the router can reference it.
+    # placeholder pipeline so the router can reference it
     pipeline = VoicePipeline(
         template=template,
         tagged_audio_queue=tagged_audio_queue,
@@ -312,7 +329,8 @@ async def start_pipeline(  # noqa: RUF029
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,
-        on_audio=on_audio,
+        on_speech_start=on_speech_start,
+        on_speech_end=on_speech_end,
     )
 
     pipeline.router_task = asyncio.create_task(

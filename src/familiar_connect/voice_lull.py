@@ -1,8 +1,16 @@
-"""Voice lull monitor — debounce voice utterances until speaker pauses.
+"""Voice lull monitor — debounce voice utterances via Deepgram VAD events.
 
-Buffers per-speaker transcripts until channel-wide silence exceeds
-``lull_timeout``; merged utterance then fires to response pipeline.
-Silence detected via Discord audio frames (no Deepgram VAD).
+Buffers per-speaker Deepgram finals. When all users are silent per
+Deepgram's VAD (``UtteranceEnd``) and finals are buffered, a lull timer
+of ``lull_timeout`` seconds arms. If any user resumes speech
+(``SpeechStarted``) before it fires, the timer cancels and the buffer
+keeps accumulating. When the timer fires, finals merge into a single
+utterance and dispatch to the response pipeline.
+
+Signals come exclusively from Deepgram VAD, not Discord audio frames.
+Frame arrival is unreliable as a speech-state signal (client-side VAD
+behaviour varies; background noise keeps frames flowing through real
+silence). Deepgram's VAD is authoritative.
 """
 
 from __future__ import annotations
@@ -21,33 +29,31 @@ _logger = logging.getLogger(__name__)
 
 
 class VoiceActivityEvent(Enum):
-    """Per-user speaking transitions from Discord audio frames."""
+    """Per-user speaking transitions from Deepgram VAD."""
 
     started = "started"
-    """User began speaking."""
+    """User began speaking (Deepgram ``SpeechStarted``)."""
 
     ended = "ended"
-    """User stopped speaking (silence watchdog fired)."""
+    """User stopped speaking (Deepgram ``UtteranceEnd``)."""
 
 
 class VoiceLullMonitor:
-    """Debounce voice utterances by watching Discord audio activity."""
+    """Debounce voice utterances using Deepgram VAD events."""
 
     def __init__(
         self,
         *,
         lull_timeout: float,
-        user_silence_s: float,
         on_utterance_complete: Callable[[int, TranscriptionResult], Awaitable[None]],
         on_voice_activity: Callable[[int, VoiceActivityEvent], None] | None = None,
     ) -> None:
         self._lull_timeout = lull_timeout
-        self._user_silence_s = user_silence_s
         self._on_utterance_complete = on_utterance_complete
         self._on_voice_activity = on_voice_activity
 
-        # per-user silence watchdogs; presence = currently speaking
-        self._speaking: dict[int, asyncio.TimerHandle] = {}
+        # users currently speaking per Deepgram VAD
+        self._speaking: set[int] = set()
         # buffered finals since last utterance fired
         self._finals: list[tuple[int, TranscriptionResult]] = []
         # pending lull timer
@@ -59,21 +65,39 @@ class VoiceLullMonitor:
     # Public API — called from the voice pipeline
     # ------------------------------------------------------------------
 
-    def on_audio(self, user_id: int) -> None:
-        """Handle inbound audio frame; cancels lull, resets silence watchdog."""
+    def on_speech_start(self, user_id: int) -> None:
+        """Deepgram ``SpeechStarted`` — user began speaking."""
+        # cancel any pending lull; resumed speech extends the utterance
         self._cancel_lull()
-        self._reset_user_silence(user_id)
+        if user_id in self._speaking:
+            return
+        self._speaking.add(user_id)
+        _logger.info("voice activity user=%s event=started", user_id)
+        self._emit_activity(user_id, VoiceActivityEvent.started)
+
+    def on_speech_end(self, user_id: int) -> None:
+        """Deepgram ``UtteranceEnd`` — user finished an utterance."""
+        if user_id not in self._speaking:
+            return
+        self._speaking.discard(user_id)
+        _logger.info("voice activity user=%s event=ended", user_id)
+        self._emit_activity(user_id, VoiceActivityEvent.ended)
+        # channel idle + finals buffered → arm lull timer
+        if not self._speaking and self._finals:
+            self._arm_lull()
 
     def on_transcript(self, user_id: int, result: TranscriptionResult) -> None:
-        """Buffer final transcription results; interims ignored."""
+        """Buffer final transcription results; interims ignored.
+
+        Pure buffering — state transitions live in ``on_speech_start`` /
+        ``on_speech_end``.
+        """
         if result.is_final and result.text:
             self._finals.append((user_id, result))
 
     def clear(self) -> None:
-        """Cancel pending timers and drop buffered finals."""
+        """Cancel pending timer and drop buffered state."""
         self._cancel_lull()
-        for handle in self._speaking.values():
-            handle.cancel()
         self._speaking.clear()
         self._finals.clear()
 
@@ -85,30 +109,6 @@ class VoiceLullMonitor:
         if self._lull_handle is not None:
             self._lull_handle.cancel()
             self._lull_handle = None
-
-    def _reset_user_silence(self, user_id: int) -> None:
-        existing = self._speaking.get(user_id)
-        if existing is not None:
-            existing.cancel()
-        else:
-            # silent → speaking transition
-            _logger.info("voice activity user=%s event=started", user_id)
-            self._emit_activity(user_id, VoiceActivityEvent.started)
-        loop = asyncio.get_event_loop()
-        self._speaking[user_id] = loop.call_later(
-            self._user_silence_s,
-            self._on_user_silent,
-            user_id,
-        )
-
-    def _on_user_silent(self, user_id: int) -> None:
-        """Sync callback: user's silence watchdog fired."""
-        self._speaking.pop(user_id, None)
-        _logger.info("voice activity user=%s event=ended", user_id)
-        self._emit_activity(user_id, VoiceActivityEvent.ended)
-        # if everyone silent and finals buffered, arm lull
-        if not self._speaking and self._finals:
-            self._arm_lull()
 
     def _emit_activity(self, user_id: int, event: VoiceActivityEvent) -> None:
         """Forward voice-activity event to optional subscriber."""
