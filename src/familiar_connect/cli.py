@@ -12,7 +12,7 @@ import sys
 from dotenv import load_dotenv
 
 from familiar_connect import __version__
-from familiar_connect.commands import run_cmd, version_cmd
+from familiar_connect.commands import metrics_cmd, run_cmd, version_cmd
 
 # Get package name dynamically from installed metadata
 try:
@@ -97,6 +97,7 @@ def create_parser() -> argparse.ArgumentParser:
     # Register subcommands
     run_cmd.add_parser(subparsers, common_parser)
     version_cmd.add_parser(subparsers, common_parser)
+    metrics_cmd.add_parser(subparsers, common_parser)
 
     return parser
 

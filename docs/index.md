@@ -44,6 +44,7 @@ understands speech, and talks back using real AI voices.
 | Character card unpacker, SillyTavern lorebook importer | **Shipped** |
 | Per-channel subscriptions + channel modes + configuration model | **Shipped** |
 | Twitch EventSub integration | **Shipped** |
+| [Metrics and profiling](guides/metrics.md) (per-turn traces + CLI report) | **Shipped** |
 | Conversation monitor (chattiness / interjection / lull) | [Planned](roadmap/conversation-flow.md) |
 | Voice speech-to-text wired into the reply path | [Partial](roadmap/voice-input.md) — STT modules exist, not yet wired |
 | Discord-side session logging (threads + live embeds) | [Planned](roadmap/session-logging.md) |

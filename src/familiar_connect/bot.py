@@ -21,6 +21,7 @@ from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
+from familiar_connect.metrics import TraceBuilder
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
@@ -32,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
-    from familiar_connect.context.pipeline import ProviderOutcome
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
 
@@ -48,21 +48,6 @@ async def _recording_finished_callback(  # noqa: RUF029
     py-cord awaits this internally; cleanup lives in :func:`unsubscribe_voice`.
     """
     del sink, args
-
-
-def _log_pipeline_outcomes(
-    channel_id: int,
-    outcomes: list[ProviderOutcome],
-) -> None:
-    """Emit structured log entry per provider outcome."""
-    for outcome in outcomes:
-        _logger.info(
-            "pipeline channel=%s provider=%s status=%s duration=%.3fs",
-            channel_id,
-            outcome.provider_id,
-            outcome.status,
-            outcome.duration_s,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -179,22 +164,34 @@ async def _run_voice_response(
         ),
     )
 
-    pipeline = familiar.build_pipeline(channel_config)
-    pipeline_output = await pipeline.assemble(
-        request,
-        budget_by_layer=channel_config.budget_by_layer,
+    builder = TraceBuilder(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        modality="voice",
     )
-    _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
+    builder.tag("channel_mode", channel_config.mode.value)
+    builder.tag("speaker", speaker)
 
-    messages = assemble_chat_messages(
-        pipeline_output,
-        store=familiar.history_store,
-        history_window_size=familiar.config.history_window_size,
-        depth_inject_position=familiar.config.depth_inject_position,
-        depth_inject_role=familiar.config.depth_inject_role,
-        mode=channel_config.mode,
-        display_tz=familiar.config.display_tz,
-    )
+    pipeline = familiar.build_pipeline(channel_config)
+    async with builder.span("pipeline_assembly") as pa_meta:
+        pipeline_output = await pipeline.assemble(
+            request,
+            budget_by_layer=channel_config.budget_by_layer,
+        )
+        builder.add_provider_outcomes(pa_meta, pipeline_output.outcomes)
+
+    async with builder.span("render") as rmeta:
+        messages = assemble_chat_messages(
+            pipeline_output,
+            store=familiar.history_store,
+            history_window_size=familiar.config.history_window_size,
+            depth_inject_position=familiar.config.depth_inject_position,
+            depth_inject_role=familiar.config.depth_inject_role,
+            mode=channel_config.mode,
+            display_tz=familiar.config.display_tz,
+        )
+        rmeta["message_count"] = len(messages)
 
     _logger.info(
         "LLM request channel=%s (voice) messages=%d, %d new:\n%s",
@@ -213,79 +210,104 @@ async def _run_voice_response(
         ),
     )
 
-    # cancellable generation task; parked on tracker for interruption path
-    generation_task = asyncio.create_task(
-        familiar.llm_clients["main_prose"].chat(messages),
-    )
-    tracker.generation_task = generation_task
-    try:
-        reply = await generation_task
-    except asyncio.CancelledError:
-        tracker.generation_task = None
+    # cancellable generation task; parked on tracker for interruption path.
+    # errors captured inside span so `llm_call` stage lands in trace;
+    # re-raise / early return happens after span exits cleanly.
+    llm_error: BaseException | None = None
+    reply = None
+    async with builder.span("llm_call") as llm_meta:
+        llm_meta["model"] = familiar.llm_clients["main_prose"].model
+        generation_task = asyncio.create_task(
+            familiar.llm_clients["main_prose"].chat(messages),
+        )
+        tracker.generation_task = generation_task
+        try:
+            reply = await generation_task
+        except asyncio.CancelledError as exc:
+            llm_meta["error"] = "cancelled"
+            llm_error = exc
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            llm_meta["error"] = f"{type(exc).__name__}: {exc}"
+            llm_error = exc
+        else:
+            llm_meta["reply_length"] = len(reply.content)
+        finally:
+            tracker.generation_task = None
+    if isinstance(llm_error, asyncio.CancelledError):
         current = asyncio.current_task()
+        tracker.transition(ResponseState.IDLE)
+        familiar.metrics_collector.record(builder.finalize())
         if current is not None and current.cancelling() > 0:
             # outer task cancelled from above — propagate
-            tracker.transition(ResponseState.IDLE)
-            raise
+            raise llm_error
         # generation task cancelled (interruption path)
         _logger.info(
             "voice generation cancelled channel=%s",
             channel_id,
         )
-        tracker.transition(ResponseState.IDLE)
         return
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
-        tracker.generation_task = None
+    if llm_error is not None:
         _logger.warning(
             "main reply (voice): %s: %s",
-            type(exc).__name__,
-            exc,
+            type(llm_error).__name__,
+            llm_error,
         )
         tracker.transition(ResponseState.IDLE)
+        familiar.metrics_collector.record(builder.finalize())
         return
-    tracker.generation_task = None
-    reply_text = await pipeline.run_post_processors(reply.content, request)
+    if reply is None:
+        # unreachable; type-guard
+        return
+
+    async with builder.span("post_processing"):
+        reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 
     # persist buffered user utterances then assistant reply
-    for msg in buffer:
+    async with builder.span("history_write") as hw_meta:
+        for msg in buffer:
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                role="user",
+                content=msg.text,
+                speaker=msg.speaker,
+                mode=channel_config.mode,
+            )
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
             channel_id=channel_id,
             guild_id=guild_id,
-            role="user",
-            content=msg.text,
-            speaker=msg.speaker,
+            role="assistant",
+            content=reply_text,
             mode=channel_config.mode,
         )
-    familiar.history_store.append_turn(
-        familiar_id=familiar.id,
-        channel_id=channel_id,
-        guild_id=guild_id,
-        role="assistant",
-        content=reply_text,
-        mode=channel_config.mode,
-    )
+        hw_meta["turns_written"] = len(buffer) + 1
     await familiar.memory_writer_scheduler.notify_turn()
 
     _logger.info("[Voice Response] %s", reply_text)
 
     if familiar.tts_client is not None:
-        try:
-            tts_result = await familiar.tts_client.synthesize(reply_text)
-            tracker.timestamps = list(tts_result.timestamps)
-            stereo = mono_to_stereo(tts_result.audio)
-            # wait for current audio to finish (poll — no event available)
-            while vc.is_playing():  # noqa: ASYNC110
-                await asyncio.sleep(0.1)
-            tracker.transition(ResponseState.SPEAKING)
-            vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            # poll playback to completion for IDLE transition
-            while vc.is_playing():  # noqa: ASYNC110
-                await asyncio.sleep(0.1)
-        except Exception:
-            _logger.exception("Voice response TTS failed")
+        async with builder.span("tts") as tts_meta:
+            try:
+                tts_result = await familiar.tts_client.synthesize(reply_text)
+                tracker.timestamps = list(tts_result.timestamps)
+                stereo = mono_to_stereo(tts_result.audio)
+                tts_meta["audio_bytes"] = len(stereo)
+                # wait for current audio to finish (poll — no event available)
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+                tracker.transition(ResponseState.SPEAKING)
+                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+                # poll playback to completion for IDLE transition
+                while vc.is_playing():  # noqa: ASYNC110
+                    await asyncio.sleep(0.1)
+            except Exception as exc:
+                tts_meta["error"] = f"{type(exc).__name__}: {exc}"
+                _logger.exception("Voice response TTS failed")
     tracker.transition(ResponseState.IDLE)
+    familiar.metrics_collector.record(builder.finalize())
 
 
 async def subscribe_my_voice(
@@ -565,6 +587,15 @@ async def _run_text_response(
     """
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
+    builder = TraceBuilder(
+        familiar_id=familiar.id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        modality="text",
+    )
+    builder.tag("channel_mode", channel_config.mode.value)
+    builder.tag("speaker", speaker)
+
     request = ContextRequest(
         familiar_id=familiar.id,
         channel_id=channel_id,
@@ -583,21 +614,24 @@ async def _run_text_response(
     # it shows while context is built, not just during the LLM call
     async with channel.typing():
         pipeline = familiar.build_pipeline(channel_config)
-        pipeline_output = await pipeline.assemble(
-            request,
-            budget_by_layer=channel_config.budget_by_layer,
-        )
-        _log_pipeline_outcomes(channel_id, pipeline_output.outcomes)
+        async with builder.span("pipeline_assembly") as pa_meta:
+            pipeline_output = await pipeline.assemble(
+                request,
+                budget_by_layer=channel_config.budget_by_layer,
+            )
+            builder.add_provider_outcomes(pa_meta, pipeline_output.outcomes)
 
-        messages = assemble_chat_messages(
-            pipeline_output,
-            store=familiar.history_store,
-            history_window_size=familiar.config.history_window_size,
-            depth_inject_position=familiar.config.depth_inject_position,
-            depth_inject_role=familiar.config.depth_inject_role,
-            mode=channel_config.mode,
-            display_tz=familiar.config.display_tz,
-        )
+        async with builder.span("render") as rmeta:
+            messages = assemble_chat_messages(
+                pipeline_output,
+                store=familiar.history_store,
+                history_window_size=familiar.config.history_window_size,
+                depth_inject_position=familiar.config.depth_inject_position,
+                depth_inject_role=familiar.config.depth_inject_role,
+                mode=channel_config.mode,
+                display_tz=familiar.config.display_tz,
+            )
+            rmeta["message_count"] = len(messages)
 
         n_new = len(request.pending_turns) if request.pending_turns else 1
         batch = (
@@ -622,42 +656,63 @@ async def _run_text_response(
         )
 
         # main reply isolation: catch ``LLMClient.chat`` raise set;
-        # on failure return silently (no history write, no TTS)
-        try:
-            reply = await familiar.llm_clients["main_prose"].chat(messages)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
+        # on failure return silently (no history write, no TTS).
+        # error captured inside span so llm_call stage lands in the trace.
+        llm_error: Exception | None = None
+        reply = None
+        async with builder.span("llm_call") as llm_meta:
+            llm_meta["model"] = familiar.llm_clients["main_prose"].model
+            try:
+                reply = await familiar.llm_clients["main_prose"].chat(messages)
+            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                llm_meta["error"] = f"{type(exc).__name__}: {exc}"
+                llm_error = exc
+            else:
+                llm_meta["reply_length"] = len(reply.content)
+        if llm_error is not None:
             _logger.warning(
                 "main reply (text): %s: %s",
-                type(exc).__name__,
-                exc,
+                type(llm_error).__name__,
+                llm_error,
             )
+            familiar.metrics_collector.record(builder.finalize())
+            return
+        if reply is None:
+            # unreachable; type-guard
             return
 
-        reply_text = await pipeline.run_post_processors(reply.content, request)
+        async with builder.span("post_processing"):
+            reply_text = await pipeline.run_post_processors(reply.content, request)
 
     # persist buffered user turns then assistant reply (after LLM
     # call so a crash never leaves an orphaned user turn)
-    for msg in buffer:
+    async with builder.span("history_write") as hw_meta:
+        turns_written = 0
+        for msg in buffer:
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                role="user",
+                content=msg.text,
+                speaker=msg.speaker,
+                mode=channel_config.mode,
+            )
+            turns_written += 1
         familiar.history_store.append_turn(
             familiar_id=familiar.id,
             channel_id=channel_id,
             guild_id=guild_id,
-            role="user",
-            content=msg.text,
-            speaker=msg.speaker,
+            role="assistant",
+            content=reply_text,
             mode=channel_config.mode,
         )
-    familiar.history_store.append_turn(
-        familiar_id=familiar.id,
-        channel_id=channel_id,
-        guild_id=guild_id,
-        role="assistant",
-        content=reply_text,
-        mode=channel_config.mode,
-    )
+        turns_written += 1
+        hw_meta["turns_written"] = turns_written
     await familiar.memory_writer_scheduler.notify_turn()
 
-    await channel.send(reply_text)
+    async with builder.span("discord_send"):
+        await channel.send(reply_text)
 
     # TTS fan-out: speak reply in voice if a voice sub exists in guild
     guild = getattr(channel, "guild", None)
@@ -668,12 +723,17 @@ async def _run_text_response(
     ):
         vc = guild.voice_client
         if vc is not None and not vc.is_playing():
-            try:
-                tts_result = await familiar.tts_client.synthesize(reply_text)
-                stereo = mono_to_stereo(tts_result.audio)
-                vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-            except Exception:
-                _logger.exception("TTS synthesis failed")
+            async with builder.span("tts") as tts_meta:
+                try:
+                    tts_result = await familiar.tts_client.synthesize(reply_text)
+                    stereo = mono_to_stereo(tts_result.audio)
+                    tts_meta["audio_bytes"] = len(stereo)
+                    vc.play(discord.PCMAudio(io.BytesIO(stereo)))
+                except Exception as exc:
+                    tts_meta["error"] = f"{type(exc).__name__}: {exc}"
+                    _logger.exception("TTS synthesis failed")
+
+    familiar.metrics_collector.record(builder.finalize())
 
 
 # ---------------------------------------------------------------------------
