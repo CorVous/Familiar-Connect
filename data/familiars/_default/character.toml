@@ -84,6 +84,19 @@ provider    = "azure"
 azure_voice = "en-US-AmberNeural"
 cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"
+gemini_voice      = "Kore"
+gemini_model      = "gemini-3.1-flash-tts-preview"
+# Optional structured performance direction for Gemini. Any subset may be set;
+# unset fields are omitted from the composed prompt. All six are combined into
+# an Audio Profile / Scene / Director's Notes block prepended to each synthesis
+# request. Audio tags ([laughs], [whispers], [short pause], etc.) embedded in
+# LLM replies flow through automatically — no config needed.
+# gemini_audio_profile = "warm, curious 20-something"
+# gemini_scene         = "relaxed late-night voice chat"
+# gemini_context       = "casual banter with friends"
+# gemini_style         = "playful, conversational"
+# gemini_pace          = "natural, with thoughtful pauses"
+# gemini_accent        = "neutral American"
 
 # --- LLM slots -------------------------------------------------------------
 #

@@ -1,4 +1,4 @@
-"""Tests for TTS clients: Cartesia (WebSocket) and Azure (Speech SDK)."""
+"""Tests for TTS clients: Cartesia (WebSocket), Azure (Speech SDK), Gemini."""
 
 from __future__ import annotations
 
@@ -6,23 +6,34 @@ import base64
 import datetime
 import json
 import os
+import struct
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import aiohttp
 import pytest
 
-from familiar_connect.config import DEFAULT_AZURE_TTS_VOICE, TTSConfig
+from familiar_connect.config import (
+    DEFAULT_AZURE_TTS_VOICE,
+    DEFAULT_GEMINI_TTS_MODEL,
+    DEFAULT_GEMINI_TTS_VOICE,
+    TTSConfig,
+)
 from familiar_connect.tts import (
     CARTESIA_API_VERSION,
     CARTESIA_BASE_URL,
     CARTESIA_WS_URL,
     DEFAULT_AZURE_VOICE,
     DEFAULT_SAMPLE_RATE,
+    GEMINI_SAMPLE_RATE,
     AzureTTSClient,
     CartesiaTTSClient,
+    GeminiTTSClient,
     TTSResult,
     WordTimestamp,
+    _compose_gemini_style_prompt,
+    _estimate_word_timestamps,
+    _upsample_s16le_2x,
     create_tts_client,
 )
 
@@ -614,3 +625,338 @@ class TestCreateTTSClientAzure:
             pytest.raises(ValueError, match=r"AZURE_SPEECH_REGION"),
         ):
             create_tts_client(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Gemini helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_s16le(samples: list[int]) -> bytes:
+    """Pack a list of s16le sample values into raw PCM bytes."""
+    return struct.pack(f"<{len(samples)}h", *samples)
+
+
+class TestUpsampleS16le2x:
+    def test_doubles_length(self) -> None:
+        audio = _make_s16le([100, 200])
+        result = _upsample_s16le_2x(audio)
+        assert len(result) == len(audio) * 2
+
+    def test_first_sample_preserved(self) -> None:
+        audio = _make_s16le([1000, 2000])
+        result = _upsample_s16le_2x(audio)
+        samples = list(struct.unpack(f"<{len(result) // 2}h", result))
+        assert samples[0] == 1000
+
+    def test_interpolates_midpoint(self) -> None:
+        audio = _make_s16le([0, 2000])
+        result = _upsample_s16le_2x(audio)
+        samples = list(struct.unpack(f"<{len(result) // 2}h", result))
+        # interp between 0 and 2000 → 1000
+        assert samples[1] == 1000
+
+    def test_last_sample_doubled(self) -> None:
+        audio = _make_s16le([500])
+        result = _upsample_s16le_2x(audio)
+        samples = list(struct.unpack(f"<{len(result) // 2}h", result))
+        assert samples == [500, 500]
+
+    def test_empty_input(self) -> None:
+        assert _upsample_s16le_2x(b"") == b""
+
+
+class TestEstimateWordTimestamps:
+    def test_empty_text_returns_empty(self) -> None:
+        assert _estimate_word_timestamps("", 1000.0) == []
+
+    def test_zero_duration_returns_empty(self) -> None:
+        assert _estimate_word_timestamps("hello world", 0.0) == []
+
+    def test_single_word_spans_full_duration(self) -> None:
+        result = _estimate_word_timestamps("hello", 500.0)
+        assert len(result) == 1
+        assert result[0].word == "hello"
+        assert result[0].start_ms == pytest.approx(0.0)
+        assert result[0].end_ms == pytest.approx(500.0)
+
+    def test_uniform_distribution(self) -> None:
+        result = _estimate_word_timestamps("one two three four", 400.0)
+        assert len(result) == 4
+        assert result[0].start_ms == pytest.approx(0.0)
+        assert result[0].end_ms == pytest.approx(100.0)
+        assert result[1].start_ms == pytest.approx(100.0)
+        assert result[3].end_ms == pytest.approx(400.0)
+
+
+# ---------------------------------------------------------------------------
+# Gemini style-prompt composer
+# ---------------------------------------------------------------------------
+
+
+class TestComposeGeminiStylePrompt:
+    def test_returns_none_when_all_fields_empty(self) -> None:
+        cfg = TTSConfig(provider="gemini")
+        assert _compose_gemini_style_prompt(cfg) is None
+
+    def test_audio_profile_only(self) -> None:
+        cfg = TTSConfig(provider="gemini", gemini_audio_profile="warm contralto")
+        result = _compose_gemini_style_prompt(cfg)
+        assert result is not None
+        assert "Audio Profile: warm contralto" in result
+        assert "Scene:" not in result
+        assert "Director" not in result
+        assert result.endswith("\nSay:")
+
+    def test_scene_and_context_joined(self) -> None:
+        cfg = TTSConfig(
+            provider="gemini",
+            gemini_scene="quiet room",
+            gemini_context="tavern keeper",
+        )
+        result = _compose_gemini_style_prompt(cfg)
+        assert result is not None
+        assert "Scene: quiet room tavern keeper" in result
+
+    def test_scene_only(self) -> None:
+        cfg = TTSConfig(provider="gemini", gemini_scene="foggy docks")
+        result = _compose_gemini_style_prompt(cfg)
+        assert result is not None
+        assert "Scene: foggy docks" in result
+
+    def test_director_notes_joined(self) -> None:
+        cfg = TTSConfig(
+            provider="gemini",
+            gemini_style="playful",
+            gemini_pace="relaxed",
+            gemini_accent="Irish lilt",
+        )
+        result = _compose_gemini_style_prompt(cfg)
+        assert result is not None
+        assert "Director's Notes:" in result
+        assert "Style: playful." in result
+        assert "Pace: relaxed." in result
+        assert "Accent: Irish lilt." in result
+
+    def test_all_fields_ends_with_say(self) -> None:
+        cfg = TTSConfig(
+            provider="gemini",
+            gemini_audio_profile="old wizard",
+            gemini_scene="dark tower",
+            gemini_context="foreboding",
+            gemini_style="gravelly",
+            gemini_pace="slow",
+            gemini_accent="British",
+        )
+        result = _compose_gemini_style_prompt(cfg)
+        assert result is not None
+        assert result.endswith("\nSay:")
+        assert "Audio Profile:" in result
+        assert "Scene:" in result
+        assert "Director's Notes:" in result
+
+
+# ---------------------------------------------------------------------------
+# GeminiTTSClient
+# ---------------------------------------------------------------------------
+
+
+def _make_gemini_mock(pcm_24k: bytes) -> MagicMock:
+    """Return a mock google-genai client that yields *pcm_24k* audio bytes."""
+    part = MagicMock()
+    part.inline_data.data = pcm_24k
+    part.inline_data.mime_type = f"audio/L16;codec=pcm;rate={GEMINI_SAMPLE_RATE}"
+
+    candidate = MagicMock()
+    candidate.content.parts = [part]
+
+    response = MagicMock()
+    response.candidates = [candidate]
+
+    client = MagicMock()
+    client.models.generate_content.return_value = response
+    return client
+
+
+class TestGeminiTTSClientInit:
+    def test_stores_fields(self) -> None:
+        c = GeminiTTSClient(api_key="k", voice_name="Kore", model="m")
+        assert c.api_key == "k"
+        assert c.voice_name == "Kore"
+        assert c.model == "m"
+        assert c.style_prompt is None
+        assert c.sample_rate == DEFAULT_SAMPLE_RATE
+
+    def test_stores_style_prompt(self) -> None:
+        c = GeminiTTSClient(
+            api_key="k",
+            voice_name="Puck",
+            model="m",
+            style_prompt="Audio Profile: wizard",
+        )
+        assert c.style_prompt == "Audio Profile: wizard"
+
+    def test_default_voice_and_model(self) -> None:
+        c = GeminiTTSClient(
+            api_key="k",
+            voice_name=DEFAULT_GEMINI_TTS_VOICE,
+            model=DEFAULT_GEMINI_TTS_MODEL,
+        )
+        assert c.voice_name == DEFAULT_GEMINI_TTS_VOICE
+        assert c.model == DEFAULT_GEMINI_TTS_MODEL
+
+
+class TestGeminiTTSClientSynthesize:
+    def _client(self, *, style_prompt: str | None = None) -> GeminiTTSClient:
+        return GeminiTTSClient(
+            api_key="test-key",
+            voice_name="Kore",
+            model="m",
+            style_prompt=style_prompt,
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_upsampled_audio_and_timestamps(self) -> None:
+        pcm_24k = _make_s16le([100, 200, 300, 400])  # 4 samples @ 24 kHz
+        mock_client = _make_gemini_mock(pcm_24k)
+        client = self._client()
+        with patch.object(client, "_make_client", return_value=mock_client):
+            result = await client.synthesize("hello world")
+        # audio should be 2x length (upsampled to 48 kHz)
+        assert len(result.audio) == len(pcm_24k) * 2
+        assert isinstance(result, TTSResult)
+
+    @pytest.mark.asyncio
+    async def test_timestamps_cover_original_words(self) -> None:
+        pcm_24k = _make_s16le([0] * 96000)  # 2 s @ 24 kHz (16-bit = 2 bytes/sample)
+        mock_client = _make_gemini_mock(pcm_24k)
+        client = self._client()
+        with patch.object(client, "_make_client", return_value=mock_client):
+            result = await client.synthesize("one two three")
+        assert len(result.timestamps) == 3
+        assert result.timestamps[0].word == "one"
+        assert result.timestamps[2].word == "three"
+        # spans should cover full duration approximately
+        assert result.timestamps[0].start_ms == pytest.approx(0.0)
+        assert result.timestamps[-1].end_ms > 0.0
+
+    @pytest.mark.asyncio
+    async def test_prepends_style_prompt_when_set(self) -> None:
+        pcm_24k = _make_s16le([0] * 4)
+        mock_client = _make_gemini_mock(pcm_24k)
+        client = self._client(style_prompt="Audio Profile: wizard\nSay:")
+        with patch.object(client, "_make_client", return_value=mock_client):
+            await client.synthesize("hello there")
+        call_kwargs = mock_client.models.generate_content.call_args
+        contents_arg = call_kwargs[1].get("contents") or call_kwargs[0][1]
+        assert "Audio Profile: wizard" in contents_arg
+        assert "hello there" in contents_arg
+
+    @pytest.mark.asyncio
+    async def test_no_style_prompt_passes_text_unchanged(self) -> None:
+        pcm_24k = _make_s16le([0] * 4)
+        mock_client = _make_gemini_mock(pcm_24k)
+        client = self._client()
+        with patch.object(client, "_make_client", return_value=mock_client):
+            await client.synthesize("just the text")
+        call_kwargs = mock_client.models.generate_content.call_args
+        contents_arg = call_kwargs[1].get("contents") or call_kwargs[0][1]
+        assert contents_arg == "just the text"
+
+    @pytest.mark.asyncio
+    async def test_timestamps_from_original_text_not_prompt(self) -> None:
+        pcm_24k = _make_s16le([0] * 4)
+        mock_client = _make_gemini_mock(pcm_24k)
+        client = self._client(style_prompt="Audio Profile: quiet\nSay:")
+        with patch.object(client, "_make_client", return_value=mock_client):
+            result = await client.synthesize("alpha beta")
+        words = [ts.word for ts in result.timestamps]
+        assert words == ["alpha", "beta"]
+
+    @pytest.mark.asyncio
+    async def test_raises_when_no_candidates(self) -> None:
+        response = MagicMock()
+        response.candidates = []
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = response
+        client = self._client()
+        with (
+            patch.object(client, "_make_client", return_value=mock_client),
+            pytest.raises(RuntimeError, match="no audio"),
+        ):
+            await client.synthesize("hello")
+
+    @pytest.mark.asyncio
+    async def test_raises_when_no_parts(self) -> None:
+        candidate = MagicMock()
+        candidate.content.parts = []
+        response = MagicMock()
+        response.candidates = [candidate]
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = response
+        client = self._client()
+        with (
+            patch.object(client, "_make_client", return_value=mock_client),
+            pytest.raises(RuntimeError, match="no audio"),
+        ):
+            await client.synthesize("hello")
+
+
+# ---------------------------------------------------------------------------
+# Gemini factory
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTTSClientGemini:
+    def test_raises_when_no_api_key(self) -> None:
+        cfg = TTSConfig(provider="gemini")
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            pytest.raises(ValueError, match=r"GOOGLE_API_KEY"),
+        ):
+            create_tts_client(cfg)
+
+    def test_accepts_gemini_api_key_alias(self) -> None:
+        cfg = TTSConfig(provider="gemini")
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "g-key"}, clear=True):
+            client = create_tts_client(cfg)
+        assert isinstance(client, GeminiTTSClient)
+        assert client.api_key == "g-key"
+
+    def test_creates_gemini_client_from_tts_config(self) -> None:
+        cfg = TTSConfig(
+            provider="gemini",
+            gemini_voice="Puck",
+            gemini_model="gemini-3.1-flash-tts-preview",
+        )
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "goog-key"}, clear=True):
+            client = create_tts_client(cfg)
+        assert isinstance(client, GeminiTTSClient)
+        assert client.api_key == "goog-key"
+        assert client.voice_name == "Puck"
+        assert client.model == "gemini-3.1-flash-tts-preview"
+        assert client.style_prompt is None
+
+    def test_composes_style_prompt_from_config_fields(self) -> None:
+        cfg = TTSConfig(
+            provider="gemini",
+            gemini_audio_profile="warm narrator",
+            gemini_style="calm",
+        )
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "k"}, clear=True):
+            client = create_tts_client(cfg)
+        assert isinstance(client, GeminiTTSClient)
+        assert client.style_prompt is not None
+        assert "warm narrator" in client.style_prompt
+        assert "calm" in client.style_prompt
+
+    def test_google_api_key_preferred_over_alias(self) -> None:
+        cfg = TTSConfig(provider="gemini")
+        with patch.dict(
+            os.environ,
+            {"GOOGLE_API_KEY": "primary", "GEMINI_API_KEY": "alias"},
+            clear=True,
+        ):
+            client = create_tts_client(cfg)
+        assert isinstance(client, GeminiTTSClient)
+        assert client.api_key == "primary"

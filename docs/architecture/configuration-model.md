@@ -15,7 +15,9 @@ The secrets and install selector the host machine needs to run the bot at all. S
 
 - `DISCORD_BOT` — Discord bot token
 - `OPENROUTER_API_KEY` — single key shared across every LLM call site
-- `CARTESIA_API_KEY` — Cartesia TTS key
+- `CARTESIA_API_KEY` — Cartesia TTS key (required when `[tts].provider="cartesia"`)
+- `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech credentials (required when `[tts].provider="azure"`)
+- `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS key (required when `[tts].provider="gemini"`)
 - `DEEPGRAM_API_KEY` — Deepgram STT key (optional; required for voice input — see [Voice input](voice-input.md))
 - Twitch client ID and OAuth token (optional)
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
@@ -32,7 +34,7 @@ Per-familiar configuration. The persona, behaviour knobs, pluggable component se
 - **Memory directory** — `memory/`, owned by `MemoryStore`. See [Memory](memory.md).
 - **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
 - **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.
-- **TTS voice** — `[tts]` section carries `cartesia_voice_id` and `cartesia_model` for the Cartesia client.
+- **TTS provider** — `[tts]` section selects the active provider (`azure` / `cartesia` / `gemini`) and carries the provider-specific voice and model fields. See [TTS providers](#tts-providers) below.
 - **Memory writer** — `[memory_writer]` section with `turn_threshold` (default 50) and `idle_timeout` (default 1800.0s / 30 min). Controls when the post-session writer pass runs to summarise conversation history into long-term memory files.
 - **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`. Channels may also carry a `[typing_simulation]` table — see [Typing simulation](typing-simulation.md).
 - **Typing simulation** — `[typing_simulation]` section on `character.toml` and/or per-channel sidecar, layered over per-mode defaults. Controls chunk-based delivery and mid-flight cancellation on text channels. See [Typing simulation](typing-simulation.md).
@@ -76,6 +78,36 @@ A reference familiar lives at `data/familiars/_default/` and is checked into the
 2. **Documentation-by-example.** A new operator copies `_default/` to `data/familiars/my-familiar/` and edits from there.
 
 The leading underscore is a convention to keep `FAMILIAR_ID=_default` from being a meaningful selection. `.gitignore` contains a `!data/familiars/_default/` exception so the default profile is checked in while user data stays ignored.
+
+### TTS providers
+
+Three text-to-speech providers are available. Select one per familiar in `character.toml` under `[tts].provider`.
+
+| Provider | Key in `.env` | Character fields | Notes |
+|---|---|---|---|
+| `azure` (default) | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | `azure_voice` | Full word-level timestamps via Speech SDK word-boundary events |
+| `cartesia` | `CARTESIA_API_KEY` | `cartesia_voice_id`, `cartesia_model` | WebSocket streaming; word-level timestamps in API response |
+| `gemini` | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | `gemini_voice`, `gemini_model` | 24 kHz PCM upsampled to 48 kHz; timestamps estimated uniformly from duration |
+
+#### Gemini-specific fields
+
+Gemini TTS supports natural-language performance direction. Six optional fields in `[tts]` compose into an Audio Profile / Scene / Director's Notes prompt prepended to every synthesis request:
+
+| Field | Purpose | Example |
+|---|---|---|
+| `gemini_audio_profile` | Core voice identity | `"warm, curious 20-something"` |
+| `gemini_scene` | Physical environment / vibe | `"quiet late-night voice chat"` |
+| `gemini_context` | Narrative context | `"roleplay as a tavern keeper"` |
+| `gemini_style` | Delivery style | `"playful, conversational"` |
+| `gemini_pace` | Pacing direction | `"relaxed with thoughtful pauses"` |
+| `gemini_accent` | Accent direction | `"soft Irish lilt"` |
+
+Any subset may be set — unset fields are omitted from the composed prompt. All six default to unset (no prompt prefix).
+
+**Audio tags.** Gemini 3.1 Flash TTS supports 200+ inline audio tags (`[laughs]`, `[whispers]`, `[short pause]`, `[gasp]`, etc.). These flow through automatically if the LLM includes them in its reply — no config needed.
+
+**Available voices.** Prebuilt voice names (select with `gemini_voice`):
+Achernar, Achird, Algenib, Algieba, Alnilam, Aoede, Autonoe, Callirrhoe, Charon, Despina, Enceladus, Erinome, Fenrir (Excitable), Gacrux, Iapetus, Kore (Firm, default), Laomedeia, Leda, Orus, Puck (Upbeat), Pulcherrima, Rasalgethi, Sadachbia, Sadaltager, Schedar, Sulafat, Umbriel, Vindemiatrix, Zephyr (Bright), Zubenelgenubi.
 
 ## One active familiar per process
 
