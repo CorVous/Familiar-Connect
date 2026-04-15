@@ -49,6 +49,24 @@ class TranscriptionResult:
         return Message(role="user", content=f"[Voice] {self.text}", name=name)
 
 
+@dataclass
+class SpeechStartedEvent:
+    """Deepgram VAD detected start of speech on the stream."""
+
+    timestamp: float
+
+
+@dataclass
+class UtteranceEndEvent:
+    """Deepgram VAD endpointed an utterance (``utterance_end_ms`` silence)."""
+
+    last_word_end: float
+
+
+# tagged union placed on transcriber output queue in wire order
+TranscriptionEvent = TranscriptionResult | SpeechStartedEvent | UtteranceEndEvent
+
+
 # ---------------------------------------------------------------------------
 # Deepgram streaming transcriber
 # ---------------------------------------------------------------------------
@@ -66,9 +84,10 @@ class DeepgramTranscriber:
         sample_rate: int = 48000,
         channels: int = 1,
         diarize: bool = False,
-        interim_results: bool = True,
+        interim_results: bool = False,
         utterance_end_ms: int = 1000,
         vad_events: bool = True,
+        endpointing_ms: int = 300,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -79,6 +98,7 @@ class DeepgramTranscriber:
         self.interim_results = interim_results
         self.utterance_end_ms = utterance_end_ms
         self.vad_events = vad_events
+        self.endpointing_ms = endpointing_ms
 
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -86,17 +106,26 @@ class DeepgramTranscriber:
         self._keepalive_task: asyncio.Task[None] | None = None
 
     def build_ws_url(self: Self) -> str:
-        """Deepgram WebSocket URL with query parameters."""
+        """Deepgram WebSocket URL with query parameters.
+
+        ``interim_results`` / ``utterance_end_ms`` are emitted only when
+        interim results are enabled; Deepgram requires ``interim_results=true``
+        for ``utterance_end_ms`` to take effect. ``endpointing`` is always
+        emitted — it controls how long Deepgram waits in silence before
+        finalizing a segment.
+        """
         params: dict[str, str] = {
             "model": self.model,
             "language": self.language,
             "sample_rate": str(self.sample_rate),
             "channels": str(self.channels),
             "encoding": "linear16",
-            "interim_results": str(self.interim_results).lower(),
-            "utterance_end_ms": str(self.utterance_end_ms),
             "vad_events": str(self.vad_events).lower(),
+            "endpointing": str(self.endpointing_ms),
         }
+        if self.interim_results:
+            params["interim_results"] = "true"
+            params["utterance_end_ms"] = str(self.utterance_end_ms)
         if self.diarize:
             params["diarize"] = "true"
         return f"{DEEPGRAM_WS_URL}?{urlencode(params)}"
@@ -117,6 +146,7 @@ class DeepgramTranscriber:
             interim_results=self.interim_results,
             utterance_end_ms=self.utterance_end_ms,
             vad_events=self.vad_events,
+            endpointing_ms=self.endpointing_ms,
         )
 
     def _parse_response(self: Self, data: dict[str, Any]) -> TranscriptionResult | None:
@@ -165,11 +195,12 @@ class DeepgramTranscriber:
         """Open WS connection. Extracted for testability."""
         return await session.ws_connect(url, headers=headers)
 
-    async def start(self: Self, output: asyncio.Queue[TranscriptionResult]) -> None:
-        """Connect to Deepgram and begin receiving transcription results.
+    async def start(self: Self, output: asyncio.Queue[TranscriptionEvent]) -> None:
+        """Connect to Deepgram and begin receiving transcription events.
 
-        :param output: Queue where parsed :class:`TranscriptionResult` objects
-            are placed as they arrive from Deepgram.
+        Output queue carries a tagged union (:data:`TranscriptionEvent`):
+        :class:`TranscriptionResult`, :class:`SpeechStartedEvent`, or
+        :class:`UtteranceEndEvent`, in Deepgram wire order.
         """
         url = self.build_ws_url()
         _logger.info("Connecting to Deepgram: %s", url)
@@ -194,6 +225,21 @@ class DeepgramTranscriber:
         if self._ws.closed:
             return
         await self._ws.send_bytes(data)
+
+    async def finalize(self: Self) -> None:
+        """Force Deepgram to flush the buffered segment as a final.
+
+        Sends ``{"type":"Finalize"}``. Discord's client-side VAD drops
+        RTP during silence, so without an explicit flush Deepgram's
+        endpointer never sees the silence it needs and holds the final
+        until the next speech burst. Silent no-op if WS already closed
+        or never started — safe to call from idle-watchdog paths.
+        """
+        ws = self._ws
+        if ws is None or ws.closed:
+            return
+        with contextlib.suppress(Exception):
+            await ws.send_json({"type": "Finalize"})
 
     async def stop(self: Self) -> None:
         """Gracefully close Deepgram connection."""
@@ -258,7 +304,7 @@ class DeepgramTranscriber:
 
     async def _receive_loop(
         self: Self,
-        output: asyncio.Queue[TranscriptionResult],
+        output: asyncio.Queue[TranscriptionEvent],
     ) -> None:
         """Read messages from the WebSocket, reconnecting on drops."""
         consecutive_reconnects = 0
@@ -276,6 +322,20 @@ class DeepgramTranscriber:
                             await output.put(result)
                             # got real data — reset reconnect counter
                             consecutive_reconnects = 0
+                    elif msg_type == "SpeechStarted":
+                        _logger.info("[Deepgram] %s: %s", msg_type, msg.data[:200])
+                        await output.put(
+                            SpeechStartedEvent(
+                                timestamp=float(data.get("timestamp", 0.0)),
+                            )
+                        )
+                    elif msg_type == "UtteranceEnd":
+                        _logger.info("[Deepgram] %s: %s", msg_type, msg.data[:200])
+                        await output.put(
+                            UtteranceEndEvent(
+                                last_word_end=float(data.get("last_word_end", 0.0)),
+                            )
+                        )
                     else:
                         _logger.info(
                             "[Deepgram] %s: %s",

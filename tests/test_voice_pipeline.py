@@ -11,7 +11,12 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.transcription import (
+    SpeechStartedEvent,
+    TranscriptionEvent,
+    TranscriptionResult,
+    UtteranceEndEvent,
+)
 from familiar_connect.voice_pipeline import (
     PipelineError,
     VoicePipeline,
@@ -98,6 +103,7 @@ class TestAudioPump:
         audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
         transcriber = MagicMock()
         transcriber.send_audio = AsyncMock(side_effect=[RuntimeError("oops"), None])
+        transcriber.finalize = AsyncMock()
 
         await audio_queue.put(b"\x01")
         await audio_queue.put(b"\x02")
@@ -110,13 +116,103 @@ class TestAudioPump:
 
         assert transcriber.send_audio.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_finalizes_after_audio_idle(self) -> None:
+        """Pump sends Deepgram ``Finalize`` when no audio for the idle window.
+
+        Discord's client-side VAD drops RTP during silence; without an
+        explicit flush Deepgram holds the buffered final until next speech.
+        """
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        await audio_queue.put(b"\x00\x01")
+
+        task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        transcriber.finalize.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_does_not_finalize_before_any_audio(self) -> None:
+        """Pump never finalizes while it has not yet seen real audio."""
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        transcriber.finalize.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_does_not_finalize_twice_in_a_row(self) -> None:
+        """Once flushed, pump waits for new audio before finalizing again."""
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        await audio_queue.put(b"\x01")
+
+        task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        # Run for several idle windows.
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert transcriber.finalize.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_real_audio_after_finalize_re_arms_window(self) -> None:
+        """Fresh audio after a finalize re-enters the dirty state."""
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        async def feeder() -> None:
+            await audio_queue.put(b"\x01")
+            # Wait long enough for first finalize to fire.
+            await asyncio.sleep(0.15)
+            await audio_queue.put(b"\x02")
+
+        feeder_task = asyncio.create_task(feeder())
+        pump_task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        await asyncio.sleep(0.4)
+        pump_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pump_task
+        await feeder_task
+
+        # Finalize once after first chunk, then again after second chunk.
+        assert transcriber.finalize.await_count == 2
+
 
 class TestTranscriptForwarder:
     @pytest.mark.asyncio
     async def test_tags_results_with_user_id(self) -> None:
         """Forwarder reads from user queue and puts tagged tuple on shared queue."""
-        user_queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        user_queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
 
         result = TranscriptionResult(text="hello", is_final=True, start=0.0, end=1.0)
         await user_queue.put(result)
@@ -142,6 +238,8 @@ def _make_pipeline_stub(
     user_names: dict[int, str],
     resolve_name: Callable[[int], str | None] | None = None,
     response_handler: object = None,
+    on_speech_start: object = None,
+    on_speech_end: object = None,
 ) -> VoicePipeline:
     """Create a minimal VoicePipeline for transcript logger tests."""
     return VoicePipeline(
@@ -153,6 +251,8 @@ def _make_pipeline_stub(
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,  # ty: ignore[invalid-argument-type]
+        on_speech_start=on_speech_start,  # ty: ignore[invalid-argument-type]
+        on_speech_end=on_speech_end,  # ty: ignore[invalid-argument-type]
     )
 
 
@@ -160,7 +260,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_logs_final_with_user_name(self) -> None:
         """Final results are logged with the user's display name."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         pipeline = _make_pipeline_stub({42: "Alice"})
 
         result = TranscriptionResult(
@@ -182,7 +282,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_logs_interim_at_debug(self) -> None:
         """Interim results are logged at debug level."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         pipeline = _make_pipeline_stub({42: "Alice"})
 
         result = TranscriptionResult(text="hel", is_final=False, start=0.0, end=0.3)
@@ -203,7 +303,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_falls_back_to_user_id_for_unknown(self) -> None:
         """Unknown user IDs fall back to 'User-<id>' format."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         pipeline = _make_pipeline_stub({})
 
         result = TranscriptionResult(text="hi", is_final=True, start=0.0, end=0.5)
@@ -223,7 +323,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_resolve_name_callback_for_late_joiner(self) -> None:
         """resolve_name callback resolves unknown users and caches the result."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         pipeline = _make_pipeline_stub(
             {}, resolve_name=lambda uid: "Charlie" if uid == 77 else None
         )
@@ -247,7 +347,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_response_handler_called_for_final(self) -> None:
         """response_handler is awaited for final transcriptions."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         handler = AsyncMock()
         pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=handler)
 
@@ -266,7 +366,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_response_handler_not_called_for_interim(self) -> None:
         """response_handler is NOT called for interim results."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         handler = AsyncMock()
         pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=handler)
 
@@ -285,7 +385,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_response_handler_error_does_not_crash(self) -> None:
         """An error in response_handler is logged but doesn't kill the logger."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         handler = AsyncMock(side_effect=RuntimeError("llm failed"))
         pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=handler)
 
@@ -307,7 +407,7 @@ class TestTranscriptLogger:
     @pytest.mark.asyncio
     async def test_logger_not_blocked_by_slow_handler(self) -> None:
         """Logger keeps logging while the response handler is still running."""
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
 
         # Handler that blocks for a long time
         handler_entered = asyncio.Event()
@@ -350,6 +450,90 @@ class TestTranscriptLogger:
                 await task
 
 
+class TestTranscriptLoggerVADEvents:
+    @pytest.mark.asyncio
+    async def test_speech_started_invokes_on_speech_start(self) -> None:
+        """SpeechStartedEvent from Deepgram routes to pipeline.on_speech_start."""
+        calls: list[int] = []
+
+        def _on_start(user_id: int) -> None:
+            calls.append(user_id)
+
+        pipeline = _make_pipeline_stub({42: "Alice"}, on_speech_start=_on_start)
+        shared_queue = pipeline.shared_transcript_queue
+
+        await shared_queue.put((42, SpeechStartedEvent(timestamp=0.12)))
+
+        task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == [42]
+
+    @pytest.mark.asyncio
+    async def test_utterance_end_invokes_on_speech_end(self) -> None:
+        """UtteranceEndEvent from Deepgram routes to pipeline.on_speech_end."""
+        calls: list[int] = []
+
+        def _on_end(user_id: int) -> None:
+            calls.append(user_id)
+
+        pipeline = _make_pipeline_stub({42: "Alice"}, on_speech_end=_on_end)
+        shared_queue = pipeline.shared_transcript_queue
+
+        await shared_queue.put((42, UtteranceEndEvent(last_word_end=1.0)))
+
+        task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == [42]
+
+    @pytest.mark.asyncio
+    async def test_vad_hooks_optional(self) -> None:
+        """VAD events are a no-op when hooks are not wired."""
+        pipeline = _make_pipeline_stub({42: "Alice"})
+        shared_queue = pipeline.shared_transcript_queue
+
+        await shared_queue.put((42, SpeechStartedEvent(timestamp=0.0)))
+        await shared_queue.put((42, UtteranceEndEvent(last_word_end=1.0)))
+
+        task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # must not raise
+
+
+class TestTranscriptForwarderVADEvents:
+    @pytest.mark.asyncio
+    async def test_forwards_speech_events_tagged_with_user_id(self) -> None:
+        """Non-result events flow through the forwarder with user tagging."""
+        user_queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
+
+        await user_queue.put(SpeechStartedEvent(timestamp=0.0))
+        await user_queue.put(UtteranceEndEvent(last_word_end=1.0))
+
+        task = asyncio.create_task(_transcript_forwarder(7, user_queue, shared_queue))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        first = shared_queue.get_nowait()
+        second = shared_queue.get_nowait()
+        assert first[0] == 7
+        assert isinstance(first[1], SpeechStartedEvent)
+        assert second[0] == 7
+        assert isinstance(second[1], UtteranceEndEvent)
+
+
 # ---------------------------------------------------------------------------
 # Phase 6: Audio router
 # ---------------------------------------------------------------------------
@@ -375,7 +559,7 @@ class TestAudioRouter:
     async def test_creates_stream_for_new_user(self) -> None:
         """Router creates a new user stream when it sees a new user_id."""
         tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         template = _make_template()
         pipeline = VoicePipeline(
             template=template,
@@ -401,7 +585,7 @@ class TestAudioRouter:
     async def test_routes_to_existing_stream(self) -> None:
         """Router puts audio on the existing stream's queue for known users."""
         tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         template = _make_template()
         pipeline = VoicePipeline(
             template=template,
@@ -429,7 +613,7 @@ class TestAudioRouter:
     async def test_creates_separate_streams_per_user(self) -> None:
         """Different user_ids get different streams."""
         tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionResult]] = asyncio.Queue()
+        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         template = _make_template()
         pipeline = VoicePipeline(
             template=template,

@@ -21,8 +21,8 @@ def _interim(text: str) -> TranscriptionResult:
 
 class TestVoiceLullMonitor:
     @pytest.mark.asyncio
-    async def test_fires_after_silence(self) -> None:
-        """Monitor fires on_utterance_complete after lull_timeout of silence."""
+    async def test_fires_after_speech_end(self) -> None:
+        """Dispatch fires lull_timeout after the user's Deepgram UtteranceEnd."""
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -32,13 +32,12 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("hello world"))
-        # No more audio frames — user silence watchdog expires, then lull fires.
+        monitor.on_speech_end(42)
         await asyncio.sleep(0.2)
 
         assert len(calls) == 1
@@ -47,8 +46,8 @@ class TestVoiceLullMonitor:
         assert result.text == "hello world"
 
     @pytest.mark.asyncio
-    async def test_audio_resets_lull(self) -> None:
-        """A new audio frame cancels a pending lull timer."""
+    async def test_speech_start_cancels_pending_lull(self) -> None:
+        """Resumed speech before the timer fires cancels it; finals merge."""
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -58,31 +57,29 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.1,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("hello"))
-        # Let silence watchdog fire and lull timer start.
+        monitor.on_speech_end(42)
+        # timer armed; user resumes before it fires
         await asyncio.sleep(0.05)
-        # New audio frame before lull fires: should cancel the lull timer.
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("world"))
         await asyncio.sleep(0.05)
-
-        # Should not have fired yet — user is speaking again.
         assert len(calls) == 0
-
-        # Let everything finally settle.
+        # user finally stops
+        monitor.on_speech_end(42)
         await asyncio.sleep(0.2)
+
         assert len(calls) == 1
         _, result = calls[0]
         assert result.text == "hello world"
 
     @pytest.mark.asyncio
-    async def test_merges_multiple_finals(self) -> None:
-        """Multiple buffered finals are merged into a single utterance."""
+    async def test_merges_multiple_finals_within_one_utterance(self) -> None:
+        """Finals emitted mid-utterance merge into a single dispatch."""
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -92,25 +89,30 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("one"))
-        monitor.on_audio(42)
         monitor.on_transcript(42, _final("two"))
-        monitor.on_audio(42)
         monitor.on_transcript(42, _final("three"))
-        await asyncio.sleep(0.25)
+        monitor.on_speech_end(42)
+        await asyncio.sleep(0.2)
 
         assert len(calls) == 1
         _, result = calls[0]
         assert result.text == "one two three"
 
     @pytest.mark.asyncio
-    async def test_does_not_fire_while_another_user_speaks(self) -> None:
-        """If any user is still transmitting audio, the lull does not start."""
+    async def test_concurrent_speech_holds_pending_lull(self) -> None:
+        """Bob's continued speech events re-arm the lull.
+
+        Any Deepgram activity (VAD pulse or final) re-arms the lull
+        timer. While Bob keeps emitting ``SpeechStarted``, Alice's
+        buffered final stays pending — the timer is continually pushed
+        forward. Only when Bob's stream goes quiet for ``lull_timeout``
+        does the merged dispatch fire.
+        """
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -120,24 +122,25 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.05,
             on_utterance_complete=_on_done,
         )
 
-        # Alice finishes, but Bob keeps talking (keeps sending audio frames).
-        monitor.on_audio(1)
+        monitor.on_speech_start(1)
+        monitor.on_speech_start(2)
         monitor.on_transcript(1, _final("alice done"))
-
-        # Bob keeps his silence watchdog alive with frequent frames.
-        async def _keep_bob_speaking() -> None:
-            for _ in range(8):
-                monitor.on_audio(2)
-                await asyncio.sleep(0.02)
-
-        await _keep_bob_speaking()
-
-        # Lull should NOT have fired because Bob was always speaking.
+        monitor.on_speech_end(1)
+        # Bob continues speaking — simulate Deepgram emitting more VAD
+        # on his stream (each cancels pending lull)
+        for _ in range(3):
+            await asyncio.sleep(0.04)
+            monitor.on_speech_start(2)
         assert len(calls) == 0
+
+        # Bob finally stops → lull arms → dispatch
+        monitor.on_speech_end(2)
+        await asyncio.sleep(0.2)
+        assert len(calls) == 1
+        assert calls[0][1].text == "alice done"
 
     @pytest.mark.asyncio
     async def test_ignores_interim_transcripts(self) -> None:
@@ -151,21 +154,20 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _interim("hel"))
         monitor.on_transcript(42, _interim("hello"))
+        monitor.on_speech_end(42)
         await asyncio.sleep(0.2)
 
-        # Nothing to fire — no finals were ever received.
         assert len(calls) == 0
 
     @pytest.mark.asyncio
     async def test_fires_with_last_speaker_user_id(self) -> None:
-        """The merged utterance is attributed to the user of the last final."""
+        """Merged utterance is attributed to the user of the last final."""
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -175,14 +177,15 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(1)
+        monitor.on_speech_start(1)
         monitor.on_transcript(1, _final("alice"))
-        monitor.on_audio(2)
+        monitor.on_speech_end(1)
+        monitor.on_speech_start(2)
         monitor.on_transcript(2, _final("bob"))
+        monitor.on_speech_end(2)
         await asyncio.sleep(0.25)
 
         assert len(calls) == 1
@@ -201,25 +204,26 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("first"))
-        await asyncio.sleep(0.25)
+        monitor.on_speech_end(42)
+        await asyncio.sleep(0.2)
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("second"))
-        await asyncio.sleep(0.25)
+        monitor.on_speech_end(42)
+        await asyncio.sleep(0.2)
 
         assert len(calls) == 2
         assert calls[0][1].text == "first"
         assert calls[1][1].text == "second"
 
     @pytest.mark.asyncio
-    async def test_fires_only_when_finals_buffered(self) -> None:
-        """Silence with no finals (e.g. failed transcription) does not fire."""
+    async def test_speech_end_with_no_finals_does_not_fire(self) -> None:
+        """VAD end without any finals (e.g. failed transcription) does nothing."""
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -229,19 +233,18 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        # Audio arrived but no transcript ever did.
-        monitor.on_audio(42)
-        await asyncio.sleep(0.25)
+        monitor.on_speech_start(42)
+        monitor.on_speech_end(42)
+        await asyncio.sleep(0.2)
 
         assert len(calls) == 0
 
     @pytest.mark.asyncio
     async def test_clear_cancels_pending(self) -> None:
-        """clear() cancels pending timers and drops buffered finals."""
+        """clear() cancels pending timer and drops buffered state."""
         calls: list[tuple[int, TranscriptionResult]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -251,14 +254,14 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("hi"))
+        monitor.on_speech_end(42)
         monitor.clear()
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.2)
 
         assert len(calls) == 0
 
@@ -278,19 +281,20 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.05,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(1)
+        monitor.on_speech_start(1)
         monitor.on_transcript(1, _final("first"))
+        monitor.on_speech_end(1)
         await asyncio.sleep(0.2)
 
-        monitor.on_audio(2)
+        monitor.on_speech_start(2)
         monitor.on_transcript(2, _final("second"))
+        monitor.on_speech_end(2)
         await asyncio.sleep(0.2)
 
-        # Both attempts happened despite the first raising.
+        # both attempts happened despite the first raising
         assert calls == [1, 2]
 
     @pytest.mark.asyncio
@@ -302,12 +306,12 @@ class TestVoiceLullMonitor:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.08,
-            user_silence_s=0.02,
             on_utterance_complete=_on_done,
         )
 
-        monitor.on_audio(42)
+        monitor.on_speech_start(42)
         monitor.on_transcript(42, _final("hello"))
+        monitor.on_speech_end(42)
         with caplog.at_level(logging.INFO, logger="familiar_connect.voice_lull"):
             await asyncio.sleep(0.2)
 
@@ -316,11 +320,41 @@ class TestVoiceLullMonitor:
             for r in caplog.records
         )
 
+    @pytest.mark.asyncio
+    async def test_final_arms_lull_without_speech_end(self) -> None:
+        """Final arrival arms the lull; no `on_speech_end` needed.
+
+        Under ``interim_results=false`` Deepgram emits finals directly
+        but no ``UtteranceEnd`` (so ``on_speech_end`` never fires).
+        The lull is armed on final arrival; when no further VAD
+        activity arrives within ``lull_timeout``, the buffered final
+        dispatches.
+        """
+        calls: list[tuple[int, TranscriptionResult]] = []
+
+        async def _on_done(  # noqa: RUF029
+            user_id: int, result: TranscriptionResult
+        ) -> None:
+            calls.append((user_id, result))
+
+        monitor = VoiceLullMonitor(
+            lull_timeout=0.05,
+            on_utterance_complete=_on_done,
+        )
+
+        monitor.on_speech_start(42)
+        monitor.on_transcript(42, _final("hello"))
+        # no speech_end arrives (Deepgram UtteranceEnd stuck)
+        await asyncio.sleep(0.2)
+
+        assert len(calls) == 1
+        assert calls[0][1].text == "hello"
+
 
 class TestVoiceActivityEvents:
     @pytest.mark.asyncio
-    async def test_started_fires_on_first_audio_frame(self) -> None:
-        """First audio frame after silence emits a `started` event."""
+    async def test_started_fires_on_speech_start(self) -> None:
+        """on_speech_start emits a `started` event synchronously."""
         events: list[tuple[int, VoiceActivityEvent]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -333,18 +367,16 @@ class TestVoiceActivityEvents:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.5,
-            user_silence_s=0.05,
             on_utterance_complete=_on_done,
             on_voice_activity=_on_activity,
         )
 
-        monitor.on_audio(42)
-        # No await between first call and assertion: started fires synchronously.
+        monitor.on_speech_start(42)
         assert events == [(42, VoiceActivityEvent.started)]
 
     @pytest.mark.asyncio
-    async def test_started_does_not_fire_on_repeated_frames(self) -> None:
-        """While a user keeps speaking, no extra `started` events fire."""
+    async def test_started_idempotent(self) -> None:
+        """Repeated speech_start for the same user does not re-emit."""
         events: list[tuple[int, VoiceActivityEvent]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -357,21 +389,17 @@ class TestVoiceActivityEvents:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.5,
-            user_silence_s=0.1,
             on_utterance_complete=_on_done,
             on_voice_activity=_on_activity,
         )
 
         for _ in range(5):
-            monitor.on_audio(42)
-            await asyncio.sleep(0.01)
-
-        # Exactly one started event despite five frames.
+            monitor.on_speech_start(42)
         assert events == [(42, VoiceActivityEvent.started)]
 
     @pytest.mark.asyncio
-    async def test_ended_fires_after_silence_window(self) -> None:
-        """`ended` event fires when the per-user silence watchdog expires."""
+    async def test_ended_fires_on_speech_end(self) -> None:
+        """on_speech_end emits an `ended` event synchronously."""
         events: list[tuple[int, VoiceActivityEvent]] = []
 
         async def _on_done(  # noqa: RUF029
@@ -384,18 +412,70 @@ class TestVoiceActivityEvents:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.5,
-            user_silence_s=0.03,
             on_utterance_complete=_on_done,
             on_voice_activity=_on_activity,
         )
 
-        monitor.on_audio(42)
-        await asyncio.sleep(0.1)
-
+        monitor.on_speech_start(42)
+        monitor.on_speech_end(42)
         assert events == [
             (42, VoiceActivityEvent.started),
             (42, VoiceActivityEvent.ended),
         ]
+
+    @pytest.mark.asyncio
+    async def test_ended_fires_on_final_for_speaking_user(self) -> None:
+        """Final arrival for a user in ``_speaking`` emits ``.ended``.
+
+        Deepgram with ``interim_results=false`` doesn't emit ``UtteranceEnd``,
+        so ``on_speech_end`` never fires. Final arrival is the authoritative
+        "user paused" signal and must drive ``.ended`` emission so the
+        interruption detector keeps getting both transitions.
+        """
+        events: list[tuple[int, VoiceActivityEvent]] = []
+
+        async def _on_done(  # noqa: RUF029
+            user_id: int, result: TranscriptionResult
+        ) -> None:
+            del user_id, result
+
+        def _on_activity(user_id: int, event: VoiceActivityEvent) -> None:
+            events.append((user_id, event))
+
+        monitor = VoiceLullMonitor(
+            lull_timeout=0.5,
+            on_utterance_complete=_on_done,
+            on_voice_activity=_on_activity,
+        )
+
+        monitor.on_speech_start(42)
+        monitor.on_transcript(42, _final("hello"))
+        assert events == [
+            (42, VoiceActivityEvent.started),
+            (42, VoiceActivityEvent.ended),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_speech_end_without_start_is_noop(self) -> None:
+        """speech_end for a user not in _speaking does not emit or crash."""
+        events: list[tuple[int, VoiceActivityEvent]] = []
+
+        async def _on_done(  # noqa: RUF029
+            user_id: int, result: TranscriptionResult
+        ) -> None:
+            del user_id, result
+
+        def _on_activity(user_id: int, event: VoiceActivityEvent) -> None:
+            events.append((user_id, event))
+
+        monitor = VoiceLullMonitor(
+            lull_timeout=0.5,
+            on_utterance_complete=_on_done,
+            on_voice_activity=_on_activity,
+        )
+
+        monitor.on_speech_end(42)
+        assert events == []
 
     @pytest.mark.asyncio
     async def test_separate_users_get_separate_events(self) -> None:
@@ -411,16 +491,15 @@ class TestVoiceActivityEvents:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.5,
-            user_silence_s=0.03,
             on_utterance_complete=_on_done,
             on_voice_activity=_on_activity,
         )
 
-        monitor.on_audio(1)
-        monitor.on_audio(2)
-        await asyncio.sleep(0.1)
+        monitor.on_speech_start(1)
+        monitor.on_speech_start(2)
+        monitor.on_speech_end(1)
+        monitor.on_speech_end(2)
 
-        # Two starts (one per user), then two ends as their watchdogs fire.
         starts = [(uid, ev) for uid, ev in events if ev is VoiceActivityEvent.started]
         ends = [(uid, ev) for uid, ev in events if ev is VoiceActivityEvent.ended]
         assert sorted(starts) == [
@@ -448,15 +527,13 @@ class TestVoiceActivityEvents:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.5,
-            user_silence_s=0.03,
             on_utterance_complete=_on_done,
             on_voice_activity=_on_activity,
         )
 
         # Exception must be swallowed; monitor still tracks the user.
-        monitor.on_audio(42)
-        await asyncio.sleep(0.1)  # let silence watchdog fire too
-        # Should reach this line without raising.
+        monitor.on_speech_start(42)
+        monitor.on_speech_end(42)
 
     @pytest.mark.asyncio
     async def test_no_callback_is_optional(self) -> None:
@@ -469,12 +546,10 @@ class TestVoiceActivityEvents:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.5,
-            user_silence_s=0.03,
             on_utterance_complete=_on_done,
         )
-        # Must not raise even though no subscriber is wired.
-        monitor.on_audio(42)
-        await asyncio.sleep(0.1)
+        monitor.on_speech_start(42)
+        monitor.on_speech_end(42)
 
     @pytest.mark.asyncio
     async def test_logs_speech_started_and_ended(
@@ -487,13 +562,12 @@ class TestVoiceActivityEvents:
 
         monitor = VoiceLullMonitor(
             lull_timeout=0.5,
-            user_silence_s=0.03,
             on_utterance_complete=_on_done,
         )
 
         with caplog.at_level(logging.INFO, logger="familiar_connect.voice_lull"):
-            monitor.on_audio(42)
-            await asyncio.sleep(0.1)
+            monitor.on_speech_start(42)
+            monitor.on_speech_end(42)
 
         msgs = [r.message for r in caplog.records]
         assert any("event=started" in m and "user=42" in m for m in msgs)

@@ -15,7 +15,10 @@ from familiar_connect.transcription import (
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DeepgramTranscriber,
+    SpeechStartedEvent,
+    TranscriptionEvent,
     TranscriptionResult,
+    UtteranceEndEvent,
     create_transcriber_from_env,
 )
 
@@ -131,10 +134,32 @@ class TestDeepgramTranscriber:
         assert params["sample_rate"] == ["48000"]
         assert params["channels"] == ["1"]
         assert params["encoding"] == ["linear16"]
-        assert params["interim_results"] == ["true"]
-        assert params["utterance_end_ms"] == ["1000"]
         assert params["vad_events"] == ["true"]
         assert "diarize" not in params
+
+    def test_builds_ws_url_omits_interim_results_by_default(self) -> None:
+        """Default config disables interim results and utterance_end_ms."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        # interim_results default is False → omitted (server default is false)
+        assert "interim_results" not in params
+        # utterance_end_ms requires interim_results → must be omitted when off
+        assert "utterance_end_ms" not in params
+
+    def test_builds_ws_url_emits_endpointing(self) -> None:
+        """Default endpointing_ms is serialized on the URL."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["endpointing"] == ["300"]
+
+    def test_builds_ws_url_emits_utterance_end_ms_when_interim_on(self) -> None:
+        """When interim_results is re-enabled, utterance_end_ms flows through."""
+        client = DeepgramTranscriber(
+            api_key="test-key", interim_results=True, utterance_end_ms=1500
+        )
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["interim_results"] == ["true"]
+        assert params["utterance_end_ms"] == ["1500"]
 
     def test_builds_ws_url_with_diarize(self) -> None:
         """build_ws_url includes diarize=true when enabled."""
@@ -161,6 +186,7 @@ class TestDeepgramTranscriber:
             interim_results=False,
             utterance_end_ms=500,
             vad_events=False,
+            endpointing_ms=450,
         )
         cloned = original.clone()
 
@@ -174,6 +200,7 @@ class TestDeepgramTranscriber:
         assert cloned.interim_results == original.interim_results
         assert cloned.utterance_end_ms == original.utterance_end_ms
         assert cloned.vad_events == original.vad_events
+        assert cloned.endpointing_ms == original.endpointing_ms
 
 
 class TestDeepgramTranscriberParseResponse:
@@ -317,7 +344,7 @@ class TestDeepgramTranscriberLifecycle:
         connect_mock = AsyncMock(return_value=ws_mock)
 
         with patch.object(client, "_ws_connect", new=connect_mock):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             try:
                 connect_mock.assert_called_once()
@@ -330,7 +357,7 @@ class TestDeepgramTranscriberLifecycle:
         ws_mock = self._make_ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             try:
                 audio = b"\x00\x01\x02\x03"
@@ -356,7 +383,7 @@ class TestDeepgramTranscriberLifecycle:
         ws_mock.closed = True
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             try:
                 # Should NOT raise — just returns silently.
@@ -366,12 +393,52 @@ class TestDeepgramTranscriberLifecycle:
                 await client.stop()
 
     @pytest.mark.asyncio
+    async def test_finalize_sends_finalize_message(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """finalize() sends Deepgram ``{"type":"Finalize"}`` to flush buffer."""
+        ws_mock = self._make_ws_mock()
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await client.finalize()
+                ws_mock.send_json.assert_any_call({"type": "Finalize"})
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_finalize_skips_when_ws_closed(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """finalize() silently no-ops when the WebSocket is already closed."""
+        ws_mock = self._make_ws_mock()
+        ws_mock.closed = True
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await client.finalize()
+                ws_mock.send_json.assert_not_called()
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_finalize_before_start_is_noop(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """finalize() before start() is a silent no-op (never raises)."""
+        await client.finalize()
+
+    @pytest.mark.asyncio
     async def test_stop_sends_close_stream(self, client: DeepgramTranscriber) -> None:
         """stop() sends the CloseStream message and closes the WebSocket."""
         ws_mock = self._make_ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             await client.stop()
 
@@ -384,7 +451,7 @@ class TestDeepgramTranscriberLifecycle:
         ws_mock = self._make_ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             await client.stop()
             await client.stop()  # second call should not raise
@@ -413,7 +480,7 @@ class TestDeepgramTranscriberLifecycle:
         ws_mock = self._make_ws_mock(messages=[ws_msg])
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
 
             # Give the receive loop a moment to process
@@ -422,6 +489,7 @@ class TestDeepgramTranscriberLifecycle:
 
             assert not queue.empty()
             result = queue.get_nowait()
+            assert isinstance(result, TranscriptionResult)
             assert result.text == "hello"
             assert result.is_final is True
 
@@ -442,13 +510,117 @@ class TestDeepgramTranscriberLifecycle:
         ws_mock = self._make_ws_mock(messages=[ws_msg])
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
 
             await asyncio.sleep(0.05)
             await client.stop()
 
             assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_receive_loop_emits_speech_started_event(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Deepgram `SpeechStarted` message becomes `SpeechStartedEvent` on queue."""
+        payload = json.dumps({
+            "type": "SpeechStarted",
+            "channel": [0, 1],
+            "timestamp": 0.12,
+        })
+        ws_msg = MagicMock()
+        ws_msg.type = 1
+        ws_msg.data = payload
+
+        ws_mock = self._make_ws_mock(messages=[ws_msg])
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            assert not queue.empty()
+            event = queue.get_nowait()
+            assert isinstance(event, SpeechStartedEvent)
+            assert event.timestamp == pytest.approx(0.12)
+
+    @pytest.mark.asyncio
+    async def test_receive_loop_emits_utterance_end_event(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Deepgram `UtteranceEnd` message becomes `UtteranceEndEvent` on queue."""
+        payload = json.dumps({
+            "type": "UtteranceEnd",
+            "channel": [0, 1],
+            "last_word_end": 1.04,
+        })
+        ws_msg = MagicMock()
+        ws_msg.type = 1
+        ws_msg.data = payload
+
+        ws_mock = self._make_ws_mock(messages=[ws_msg])
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            assert not queue.empty()
+            event = queue.get_nowait()
+            assert isinstance(event, UtteranceEndEvent)
+            assert event.last_word_end == pytest.approx(1.04)
+
+    @pytest.mark.asyncio
+    async def test_receive_loop_preserves_event_order(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Results, final, and UtteranceEnd preserve wire order on the output queue."""
+        msgs = []
+        for payload in (
+            {
+                "type": "SpeechStarted",
+                "channel": [0, 1],
+                "timestamp": 0.1,
+            },
+            {
+                "type": "Results",
+                "channel": {
+                    "alternatives": [
+                        {"transcript": "hello", "confidence": 0.99},
+                    ],
+                },
+                "is_final": True,
+                "start": 0.0,
+                "duration": 1.0,
+            },
+            {
+                "type": "UtteranceEnd",
+                "channel": [0, 1],
+                "last_word_end": 1.0,
+            },
+        ):
+            m = MagicMock()
+            m.type = 1
+            m.data = json.dumps(payload)
+            msgs.append(m)
+
+        ws_mock = self._make_ws_mock(messages=msgs)
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            first = queue.get_nowait()
+            second = queue.get_nowait()
+            third = queue.get_nowait()
+            assert isinstance(first, SpeechStartedEvent)
+            assert isinstance(second, TranscriptionResult)
+            assert second.is_final is True
+            assert isinstance(third, UtteranceEndEvent)
 
 
 class TestDeepgramReconnect:
@@ -482,7 +654,7 @@ class TestDeepgramReconnect:
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             # Give the receive loop time to detect close and reconnect
             await asyncio.sleep(0.3)
@@ -502,7 +674,7 @@ class TestDeepgramReconnect:
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             await asyncio.sleep(0.3)
 
@@ -526,7 +698,7 @@ class TestDeepgramReconnect:
         connect_mock = AsyncMock(side_effect=[_make_dying_ws() for _ in range(20)])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             # Give it enough time to exhaust retries
             await asyncio.sleep(1.5)
@@ -588,7 +760,7 @@ class TestDeepgramKeepAlive:
         ws_mock = self._make_ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             try:
                 # With interval=0.02, expect >=2 ticks within 0.1s.
@@ -605,7 +777,7 @@ class TestDeepgramKeepAlive:
         ws_mock = self._make_ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             await asyncio.sleep(0.05)
             await client.stop()
@@ -626,7 +798,7 @@ class TestDeepgramKeepAlive:
         ws_mock.closed = True
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             try:
                 await asyncio.sleep(0.1)
@@ -646,7 +818,7 @@ class TestDeepgramKeepAlive:
         )
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             try:
                 await asyncio.sleep(0.15)
@@ -674,7 +846,7 @@ class TestDeepgramKeepAlive:
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
-            queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             try:
                 # Wait for reconnect + keepalive ticks on the new socket.
