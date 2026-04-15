@@ -128,11 +128,17 @@ class LLMSlotConfig:
     temperature: float | None = None
 
 
-_TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia"})
+_TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia", "gemini"})
 """Valid ``[tts].provider`` values."""
 
 DEFAULT_AZURE_TTS_VOICE = "en-US-AmberNeural"
 """Azure Neural voice used when ``[tts].azure_voice`` is unset."""
+
+DEFAULT_GEMINI_TTS_VOICE = "Kore"
+"""Gemini prebuilt voice used when ``[tts].gemini_voice`` is unset."""
+
+DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+"""Gemini TTS model used when ``[tts].gemini_model`` is unset."""
 
 
 @dataclass(frozen=True)
@@ -140,13 +146,17 @@ class TTSConfig:
     """Text-to-speech config loaded from the ``[tts]`` TOML section."""
 
     provider: str = "azure"
-    """Active TTS provider. ``"azure"`` or ``"cartesia"``."""
+    """Active TTS provider. ``"azure"``, ``"cartesia"``, or ``"gemini"``."""
     cartesia_voice_id: str | None = None
     """Cartesia voice UUID (``provider = "cartesia"`` only)."""
     cartesia_model: str | None = None
     """Cartesia model name (``provider = "cartesia"`` only)."""
     azure_voice: str = DEFAULT_AZURE_TTS_VOICE
     """Azure Neural voice name (``provider = "azure"`` only)."""
+    gemini_voice: str = DEFAULT_GEMINI_TTS_VOICE
+    """Gemini prebuilt voice name (``provider = "gemini"`` only)."""
+    gemini_model: str = DEFAULT_GEMINI_TTS_MODEL
+    """Gemini TTS model ID (``provider = "gemini"`` only)."""
     greetings: list[str] = field(default_factory=list)
     """Random greeting audio played when the familiar joins a voice channel."""
 
@@ -696,6 +706,16 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         msg = "[tts].azure_voice must be a non-empty string"
         raise ConfigError(msg)
 
+    gemini_voice_raw = raw.get("gemini_voice", DEFAULT_GEMINI_TTS_VOICE)
+    if not isinstance(gemini_voice_raw, str) or not gemini_voice_raw:
+        msg = "[tts].gemini_voice must be a non-empty string"
+        raise ConfigError(msg)
+
+    gemini_model_raw = raw.get("gemini_model", DEFAULT_GEMINI_TTS_MODEL)
+    if not isinstance(gemini_model_raw, str) or not gemini_model_raw:
+        msg = "[tts].gemini_model must be a non-empty string"
+        raise ConfigError(msg)
+
     greetings_raw = raw.get("greetings", [])
     if not isinstance(greetings_raw, list):
         msg = (
@@ -710,6 +730,8 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         cartesia_voice_id=cartesia_voice_id,
         cartesia_model=cartesia_model,
         azure_voice=azure_voice_raw,
+        gemini_voice=gemini_voice_raw,
+        gemini_model=gemini_model_raw,
         greetings=greetings,
     )
 

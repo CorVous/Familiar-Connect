@@ -27,6 +27,23 @@ def mono_to_stereo(data: bytes) -> bytes:
     return bytes(result)
 
 
+def upsample_2x(data: bytes) -> bytes:
+    """Duplicate each 16-bit sample, doubling the effective sample rate.
+
+    :raises ValueError: If *data* has odd length.
+    """
+    if len(data) % 2 != 0:
+        msg = f"PCM data length must be even, got {len(data)}"
+        raise ValueError(msg)
+    result = bytearray(len(data) * 2)
+    for i in range(0, len(data), 2):
+        sample = data[i : i + 2]
+        out_off = i * 2
+        result[out_off : out_off + 2] = sample
+        result[out_off + 2 : out_off + 4] = sample
+    return bytes(result)
+
+
 def stereo_to_mono(data: bytes) -> bytes:
     """Average L+R int16 samples into mono, producing 0.5x output.
 

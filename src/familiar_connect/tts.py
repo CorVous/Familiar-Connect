@@ -40,6 +40,15 @@ DEFAULT_AZURE_VOICE = "en-US-AmberNeural"
 _AZURE_TICKS_PER_MS: float = 10_000.0
 """100-nanosecond ticks per millisecond — Azure SDK offset unit."""
 
+GEMINI_SAMPLE_RATE = 24_000
+"""Gemini TTS native output rate; upsampled to 48kHz before returning."""
+
+DEFAULT_GEMINI_VOICE = "Kore"
+"""Default Gemini prebuilt voice; mirrors ``config.DEFAULT_GEMINI_TTS_VOICE``."""
+
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-tts-preview"
+"""Default Gemini TTS model; mirrors ``config.DEFAULT_GEMINI_TTS_MODEL``."""
+
 
 @dataclass(frozen=True)
 class WordTimestamp:
@@ -218,6 +227,33 @@ def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:
     ]
 
 
+def _synthesize_word_timestamps(
+    text: str,
+    audio: bytes,
+    sample_rate: int,
+) -> list[WordTimestamp]:
+    """Synthesize evenly-distributed word timestamps from audio duration.
+
+    Used when the TTS provider does not return per-word timing. Distributes
+    whitespace-split words uniformly across total audio duration so interruption
+    logic has something to work with.
+    """
+    words = text.split()
+    if not words:
+        return []
+    # bytes / (2 bytes/sample) / sample_rate → duration in seconds → ms
+    duration_ms = (len(audio) / 2 / sample_rate) * 1000.0
+    step = duration_ms / len(words)
+    return [
+        WordTimestamp(
+            word=word,
+            start_ms=i * step,
+            end_ms=(i + 1) * step,
+        )
+        for i, word in enumerate(words)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Greeting cache (shared across all TTS providers)
 # ---------------------------------------------------------------------------
@@ -240,7 +276,7 @@ async def get_cached_greeting_audio(
     provider: str,
     voice_id: str,
     greeting: str,
-    client: CartesiaTTSClient | AzureTTSClient,
+    client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient,
 ) -> TTSResult:
     """Return TTS audio for *greeting*.
 
@@ -356,11 +392,92 @@ class AzureTTSClient:
 
 
 # ---------------------------------------------------------------------------
+# Gemini
+# ---------------------------------------------------------------------------
+
+
+class GeminiTTSClient:
+    """Google Gemini TTS client (google-genai SDK, synchronous, thread-wrapped).
+
+    Gemini returns PCM at 24kHz; audio is upsampled 2x to 48kHz before
+    returning so it matches the Discord pipeline. Word timestamps are not
+    provided by the API — evenly-distributed estimates are synthesized instead.
+    """
+
+    def __init__(
+        self: Self,
+        *,
+        api_key: str,
+        voice: str = DEFAULT_GEMINI_VOICE,
+        model: str = DEFAULT_GEMINI_MODEL,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+    ) -> None:
+        self.api_key = api_key
+        self.voice = voice
+        self.model = model
+        self.sample_rate = sample_rate  # target output rate (48kHz)
+
+    def _make_client(self: Self) -> Any:  # noqa: ANN401
+        """Return configured genai.Client; extracted for testability."""
+        from google import genai  # noqa: PLC0415
+
+        return genai.Client(api_key=self.api_key)
+
+    def _synthesize_sync(self: Self, text: str) -> TTSResult:
+        """Blocking synthesis; upsample 24kHz → sample_rate; return TTSResult.
+
+        :raises RuntimeError: on unexpected response structure or API error.
+        """
+        from google.genai import types  # noqa: PLC0415
+
+        from familiar_connect.voice.audio import upsample_2x  # noqa: PLC0415
+
+        client = self._make_client()
+        response = client.models.generate_content(
+            model=self.model,
+            contents=text,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=self.voice,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        try:
+            raw_audio: bytes = response.candidates[0].content.parts[0].inline_data.data
+        except (IndexError, AttributeError) as exc:
+            msg = f"Gemini TTS returned unexpected response structure: {exc}"
+            raise RuntimeError(msg) from exc
+
+        audio = upsample_2x(raw_audio)
+        timestamps = _synthesize_word_timestamps(text, audio, self.sample_rate)
+        _logger.info(
+            "gemini tts: %d words, audio=%d bytes, timing=%.0fms→%.0fms",
+            len(timestamps),
+            len(audio),
+            timestamps[0].start_ms if timestamps else 0.0,
+            timestamps[-1].end_ms if timestamps else 0.0,
+        )
+        return TTSResult(audio=audio, timestamps=timestamps)
+
+    async def synthesize(self: Self, text: str) -> TTSResult:
+        """Synthesize *text* in a thread executor; return audio + word timestamps."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._synthesize_sync, text)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 
-def create_tts_client(tts_config: TTSConfig) -> CartesiaTTSClient | AzureTTSClient:
+def create_tts_client(
+    tts_config: TTSConfig,
+) -> CartesiaTTSClient | AzureTTSClient | GeminiTTSClient:
     """Instantiate the TTS client for the active provider.
 
     Provider is taken from ``[tts].provider`` in ``character.toml``.
@@ -378,7 +495,11 @@ def create_tts_client(tts_config: TTSConfig) -> CartesiaTTSClient | AzureTTSClie
         return _create_azure_client(tts_config)
     if provider == "cartesia":
         return _create_cartesia_client(tts_config)
-    msg = f"Unknown TTS provider {provider!r}; expected 'azure' or 'cartesia'"
+    if provider == "gemini":
+        return _create_gemini_client(tts_config)
+    msg = (
+        f"Unknown TTS provider {provider!r}; expected 'azure', 'cartesia', or 'gemini'"
+    )
     raise ValueError(msg)
 
 
@@ -418,3 +539,15 @@ def _create_cartesia_client(tts_config: TTSConfig) -> CartesiaTTSClient:
         )
         raise ValueError(msg)
     return CartesiaTTSClient(api_key=api_key, voice_id=voice_id, model=model)
+
+
+def _create_gemini_client(tts_config: TTSConfig) -> GeminiTTSClient:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        msg = "GEMINI_API_KEY environment variable is required for Gemini TTS"
+        raise ValueError(msg)
+    return GeminiTTSClient(
+        api_key=api_key,
+        voice=tts_config.gemini_voice,
+        model=tts_config.gemini_model,
+    )

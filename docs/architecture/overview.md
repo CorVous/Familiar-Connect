@@ -41,7 +41,7 @@ flowchart TB
     tq --> cm[ConversationMonitor<br/>chattiness &amp; interjection]
     cm --> cp[Context pipeline]
     cp --> or[OpenRouter<br/>streaming completion]
-    or --> tts[TTS<br/>Cartesia / Azure]
+    or --> tts[TTS<br/>Cartesia / Azure / Gemini]
     tts --> oq[(asyncio.Queue&#58; audio)]
     oq --> dvp([Discord voice playback])
 
@@ -73,6 +73,7 @@ flowchart LR
         direction TB
         cartesia[Cartesia TTS]
         azure[Azure Speech]
+        gemini[Gemini TTS]
         deepgram[Deepgram STT]
         twitch[Twitch EventSub]
     end
@@ -81,6 +82,7 @@ flowchart LR
     openrouter <--> bot
     bot --> cartesia
     bot --> azure
+    bot --> gemini
     deepgram --> bot
     twitch --> bot
 ```
@@ -89,8 +91,8 @@ flowchart LR
   to listen to or speak into without it.
 - **OpenRouter** (required) — `OPENROUTER_API_KEY`. The reply
   generation call. Model selectable per-familiar.
-- **Cartesia / Azure Speech** (optional) — TTS providers. Without
-  either, the bot still replies in text channels it is subscribed to.
+- **Cartesia / Azure Speech / Gemini TTS** (optional) — TTS providers. Without
+  any, the bot still replies in text channels it is subscribed to.
 - **Deepgram** (optional) — streaming STT for voice input. See
   [Voice input](voice-input.md) for the wiring.
 - **Twitch EventSub** (optional) — only needed if a familiar uses the
@@ -169,7 +171,7 @@ on-disk memory directory the pipeline reads and writes.
 
 ### Text-to-speech
 
-Both providers are implemented; the active one is set via `[tts].provider`
+Three providers are implemented; the active one is set via `[tts].provider`
 in `character.toml`. Default is `"azure"`.
 
 **Azure Speech (default, `provider = "azure"`)**
@@ -186,7 +188,14 @@ in `character.toml`. Default is `"azure"`.
 - Native WebSocket streaming
 - Requires `CARTESIA_API_KEY` env var; set `voice_id` + `model` in `[tts]`
 
-Pipeline: LLM text → TTS (Azure SDK / Cartesia WebSocket) → PCM →
+**Gemini TTS (`provider = "gemini"`)**
+
+- Google Gemini 3.1 Flash TTS via the `google-genai` SDK
+- Requires `GEMINI_API_KEY` env var; set `gemini_voice` + `gemini_model` in `[tts]`
+- Outputs PCM 24kHz; upsampled 2× to 48kHz before Discord playback
+- No per-word timestamps from API — evenly-distributed estimates synthesized
+
+Pipeline: LLM text → TTS (Azure SDK / Cartesia WebSocket / Gemini API) → PCM →
 resample to 48kHz Opus → Discord voice playback.
 
 ### Voice interruption

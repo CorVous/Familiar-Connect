@@ -1,4 +1,4 @@
-"""Tests for TTS clients: Cartesia (WebSocket) and Azure (Speech SDK)."""
+"""Tests for TTS clients: Cartesia (WebSocket), Azure (Speech SDK), and Gemini."""
 
 from __future__ import annotations
 
@@ -23,11 +23,15 @@ from familiar_connect.tts import (
     CARTESIA_BASE_URL,
     CARTESIA_WS_URL,
     DEFAULT_AZURE_VOICE,
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_GEMINI_VOICE,
     DEFAULT_SAMPLE_RATE,
     AzureTTSClient,
     CartesiaTTSClient,
+    GeminiTTSClient,
     TTSResult,
     WordTimestamp,
+    _synthesize_word_timestamps,
     create_tts_client,
     get_cached_greeting_audio,
 )
@@ -713,3 +717,210 @@ class TestCreateTTSClientAzure:
             pytest.raises(ValueError, match=r"AZURE_SPEECH_REGION"),
         ):
             create_tts_client(cfg)
+
+
+# ---------------------------------------------------------------------------
+# _synthesize_word_timestamps helper
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesizeWordTimestamps:
+    def test_returns_one_timestamp_per_word(self) -> None:
+        audio = bytes(9600)  # 100ms at 48kHz 16-bit (9600 bytes = 100ms)
+        result = _synthesize_word_timestamps("hello world", audio, DEFAULT_SAMPLE_RATE)
+        assert len(result) == 2
+
+    def test_first_starts_at_zero(self) -> None:
+        audio = bytes(9600)
+        result = _synthesize_word_timestamps(
+            "one two three", audio, DEFAULT_SAMPLE_RATE
+        )
+        assert result[0].start_ms == pytest.approx(0.0)
+
+    def test_last_ends_at_audio_duration(self) -> None:
+        # 9600 bytes / 2 bytes/sample / 48000 samples/s * 1000 = 100ms
+        audio = bytes(9600)
+        result = _synthesize_word_timestamps("one two", audio, DEFAULT_SAMPLE_RATE)
+        expected_duration_ms = (len(audio) / 2 / DEFAULT_SAMPLE_RATE) * 1000.0
+        assert result[-1].end_ms == pytest.approx(expected_duration_ms)
+
+    def test_words_are_preserved(self) -> None:
+        audio = bytes(9600)
+        result = _synthesize_word_timestamps("alpha beta", audio, DEFAULT_SAMPLE_RATE)
+        assert result[0].word == "alpha"
+        assert result[1].word == "beta"
+
+    def test_empty_text_returns_empty(self) -> None:
+        audio = bytes(9600)
+        assert _synthesize_word_timestamps("", audio, DEFAULT_SAMPLE_RATE) == []
+
+    def test_whitespace_only_returns_empty(self) -> None:
+        audio = bytes(9600)
+        assert _synthesize_word_timestamps("   ", audio, DEFAULT_SAMPLE_RATE) == []
+
+    def test_consecutive_timestamps_are_contiguous(self) -> None:
+        audio = bytes(9600)
+        result = _synthesize_word_timestamps("a b c", audio, DEFAULT_SAMPLE_RATE)
+        for i in range(len(result) - 1):
+            assert result[i].end_ms == pytest.approx(result[i + 1].start_ms)
+
+
+# ---------------------------------------------------------------------------
+# GeminiTTSClient unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_gemini_response(raw_audio: bytes) -> MagicMock:
+    """Build a fake genai response with audio inline_data."""
+    part = MagicMock()
+    part.inline_data.data = raw_audio
+    content = MagicMock()
+    content.parts = [part]
+    candidate = MagicMock()
+    candidate.content = content
+    response = MagicMock()
+    response.candidates = [candidate]
+    return response
+
+
+class TestGeminiTTSClient:
+    def test_init_stores_params(self) -> None:
+        client = GeminiTTSClient(
+            api_key="key",
+            voice="Puck",
+            model="gemini-3.1-flash-tts-preview",
+            sample_rate=48000,
+        )
+        assert client.api_key == "key"
+        assert client.voice == "Puck"
+        assert client.model == "gemini-3.1-flash-tts-preview"
+        assert client.sample_rate == 48000
+
+    def test_default_voice_and_model(self) -> None:
+        client = GeminiTTSClient(api_key="key")
+        assert client.voice == DEFAULT_GEMINI_VOICE
+        assert client.model == DEFAULT_GEMINI_MODEL
+        assert client.sample_rate == DEFAULT_SAMPLE_RATE
+
+    def test_synthesize_returns_tts_result(self) -> None:
+        # 4800 bytes of 24kHz audio → upsampled to 9600 bytes
+        raw_24k = bytes(4800)
+        client = GeminiTTSClient(api_key="key")
+        fake_genai = MagicMock()
+        fake_genai.models.generate_content.return_value = _make_gemini_response(raw_24k)
+
+        with patch.object(client, "_make_client", return_value=fake_genai):
+            result = client._synthesize_sync("hello world")
+
+        assert isinstance(result, TTSResult)
+
+    def test_audio_is_upsampled(self) -> None:
+        raw_24k = bytes(4800)
+        client = GeminiTTSClient(api_key="key")
+        fake_genai = MagicMock()
+        fake_genai.models.generate_content.return_value = _make_gemini_response(raw_24k)
+
+        with patch.object(client, "_make_client", return_value=fake_genai):
+            result = client._synthesize_sync("test")
+
+        assert len(result.audio) == len(raw_24k) * 2
+
+    def test_timestamps_count_matches_word_count(self) -> None:
+        raw_24k = bytes(4800)
+        client = GeminiTTSClient(api_key="key")
+        fake_genai = MagicMock()
+        fake_genai.models.generate_content.return_value = _make_gemini_response(raw_24k)
+
+        with patch.object(client, "_make_client", return_value=fake_genai):
+            result = client._synthesize_sync("one two three")
+
+        assert len(result.timestamps) == 3
+
+    def test_timestamps_span_full_duration(self) -> None:
+        # 9600 bytes 48kHz = 100ms
+        raw_24k = bytes(4800)  # upsampled → 9600
+        client = GeminiTTSClient(api_key="key")
+        fake_genai = MagicMock()
+        fake_genai.models.generate_content.return_value = _make_gemini_response(raw_24k)
+
+        with patch.object(client, "_make_client", return_value=fake_genai):
+            result = client._synthesize_sync("alpha beta")
+
+        assert result.timestamps[0].start_ms == pytest.approx(0.0)
+        expected_ms = (9600 / 2 / DEFAULT_SAMPLE_RATE) * 1000.0
+        assert result.timestamps[-1].end_ms == pytest.approx(expected_ms)
+
+    def test_empty_text_timestamps_empty(self) -> None:
+        raw_24k = bytes(4800)
+        client = GeminiTTSClient(api_key="key")
+        fake_genai = MagicMock()
+        fake_genai.models.generate_content.return_value = _make_gemini_response(raw_24k)
+
+        with patch.object(client, "_make_client", return_value=fake_genai):
+            result = client._synthesize_sync("")
+
+        assert result.timestamps == []
+
+    def test_bad_response_structure_raises(self) -> None:
+        client = GeminiTTSClient(api_key="key")
+        bad_response = MagicMock()
+        bad_response.candidates = []  # IndexError on [0]
+        fake_genai = MagicMock()
+        fake_genai.models.generate_content.return_value = bad_response
+
+        with (
+            patch.object(client, "_make_client", return_value=fake_genai),
+            pytest.raises(RuntimeError, match=r"unexpected response structure"),
+        ):
+            client._synthesize_sync("hello")
+
+    @pytest.mark.asyncio
+    async def test_synthesize_runs_in_executor(self) -> None:
+        raw_24k = bytes(4800)
+        client = GeminiTTSClient(api_key="key")
+        fake_genai = MagicMock()
+        fake_genai.models.generate_content.return_value = _make_gemini_response(raw_24k)
+
+        with patch.object(client, "_make_client", return_value=fake_genai):
+            result = await client.synthesize("hello world")
+
+        assert isinstance(result, TTSResult)
+        assert len(result.audio) == len(raw_24k) * 2
+
+
+# ---------------------------------------------------------------------------
+# Gemini factory
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTTSClientGemini:
+    def test_creates_gemini_client(self) -> None:
+        cfg = TTSConfig(
+            provider="gemini",
+            gemini_voice="Puck",
+            gemini_model="gemini-3.1-flash-tts-preview",
+        )
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "gm-key"}):
+            client = create_tts_client(cfg)
+        assert isinstance(client, GeminiTTSClient)
+        assert client.api_key == "gm-key"
+
+    def test_missing_api_key_raises(self) -> None:
+        cfg = TTSConfig(provider="gemini")
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            pytest.raises(ValueError, match=r"GEMINI_API_KEY"),
+        ):
+            create_tts_client(cfg)
+
+    def test_passes_voice_and_model(self) -> None:
+        cfg = TTSConfig(
+            provider="gemini",
+            gemini_voice="Charon",
+            gemini_model="gemini-3.1-flash-tts-preview",
+        )
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "key"}):
+            client = create_tts_client(cfg)
+        assert isinstance(client, GeminiTTSClient)
+        assert client.voice == "Charon"
+        assert client.model == "gemini-3.1-flash-tts-preview"

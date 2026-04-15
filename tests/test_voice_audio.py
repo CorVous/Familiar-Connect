@@ -10,6 +10,7 @@ from familiar_connect.voice.audio import (
     DISCORD_FRAME_SIZE,
     mono_to_stereo,
     stereo_to_mono,
+    upsample_2x,
 )
 
 
@@ -94,6 +95,38 @@ class TestStereoToMono:
         original = struct.pack("<5h", 100, -200, 32767, -32768, 0)
         roundtripped = stereo_to_mono(mono_to_stereo(original))
         assert roundtripped == original
+
+
+class TestUpsample2x:
+    def test_doubles_length(self) -> None:
+        """Output is exactly twice the length of input."""
+        data = bytes(4)  # 2 samples of 16-bit audio
+        assert len(upsample_2x(data)) == 8
+
+    def test_each_sample_duplicated(self) -> None:
+        """Each 16-bit sample appears twice consecutively in output."""
+        data = struct.pack("<hh", 0x0102, 0x0304)
+        result = upsample_2x(data)
+        samples = struct.unpack("<hhhh", result)
+        assert samples[0] == samples[1] == 0x0102
+        assert samples[2] == samples[3] == 0x0304
+
+    def test_empty_input(self) -> None:
+        """Empty input returns empty bytes."""
+        assert upsample_2x(b"") == b""
+
+    def test_odd_length_raises(self) -> None:
+        """Odd-length input is not valid 16-bit PCM — raises ValueError."""
+        with pytest.raises(ValueError, match=r"even"):
+            upsample_2x(b"\x00\x01\x02")
+
+    def test_single_sample(self) -> None:
+        """Single 16-bit sample produces two identical copies."""
+        data = struct.pack("<h", -32000)
+        result = upsample_2x(data)
+        assert len(result) == 4
+        s0, s1 = struct.unpack("<hh", result)
+        assert s0 == s1 == -32000
 
 
 class TestDiscordFrameSize:
