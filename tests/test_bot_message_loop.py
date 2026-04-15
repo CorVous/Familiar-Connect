@@ -2378,6 +2378,80 @@ class TestShortSpeakingYieldHistory:
         assert assistant_turns[0].content == "hello world goodbye"
 
 
+class TestShortYieldResumeRace:
+    """_on_short_yield_resume must wait for SPEAKING→IDLE before proceeding.
+
+    Reproduces the race where the resume task is scheduled via
+    asyncio.create_task before interrupt_event.set() unblocks
+    _run_voice_response. Without the wait loop the guard
+    ``if t.state is not ResponseState.IDLE`` bails while still SPEAKING,
+    so TTS is never called for the remaining words.
+    """
+
+    def test_resume_waits_for_idle_when_still_speaking(self, tmp_path: Path) -> None:
+        """Resume callback synthesizes remaining words even if called while SPEAKING."""
+        familiar = _make_familiar(tmp_path)
+        # Transcriber must be set so subscribe_my_voice creates the
+        # interruption_detector (the detector is only built when a
+        # transcriber is present).
+        familiar.transcriber = MagicMock(name="transcriber")
+        tts_mock = MagicMock()
+        resume_tts_result = TTSResult(
+            audio=b"\x00" * 4,
+            timestamps=[
+                WordTimestamp("world", 400.0, 700.0),
+                WordTimestamp("goodbye", 800.0, 1100.0),
+            ],
+        )
+        # First call: subscribe_my_voice greeting ("Hello!").
+        # Subsequent call: the resume synthesis under test.
+        greeting_result = TTSResult(audio=b"\x00" * 4, timestamps=[])
+        tts_mock.synthesize = AsyncMock(
+            side_effect=[greeting_result, resume_tts_result]
+        )
+        familiar.tts_client = tts_mock  # type: ignore[assignment]
+
+        ctx = _make_voice_ctx(channel_id=9000, guild_id=999)
+        vc = ctx.author.voice.channel.connect.return_value
+
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=MagicMock(tagged_audio_queue=MagicMock()),
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+        detector = familiar.extras["interruption_detector"]
+        resume_cb = detector._on_short_yield_resume
+        tracker = familiar.tracker_registry.get(999)
+
+        remaining = [
+            WordTimestamp("world", 400.0, 700.0),
+            WordTimestamp("goodbye", 800.0, 1100.0),
+        ]
+
+        async def _run() -> None:
+            # Simulate the race: tracker is SPEAKING when resume task starts.
+            tracker.state = ResponseState.SPEAKING
+            # Schedule a task that transitions to IDLE after a short yield —
+            # mirrors what _run_voice_response does after interrupt_event fires.
+
+            async def _settle() -> None:
+                await asyncio.sleep(0.05)
+                tracker.state = ResponseState.IDLE
+
+            asyncio.create_task(_settle())  # noqa: RUF006
+            await resume_cb(remaining)
+
+        asyncio.run(_run())
+
+        # Resume must have called synthesize with the remaining words.
+        # (First call is the subscribe_my_voice greeting "Hello!".)
+        calls = [c.args[0] for c in tts_mock.synthesize.call_args_list]
+        assert "world goodbye" in calls, f"resume synthesize not called; calls={calls}"
+        assert vc.play.call_count >= 1
+
+
 # ---------------------------------------------------------------------------
 # Typing-simulation chunked delivery path
 # ---------------------------------------------------------------------------
