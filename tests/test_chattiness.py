@@ -50,6 +50,7 @@ def _make_monitor(
     interjection: Interjection = Interjection.average,
     lull_timeout: float = 100.0,  # large default so lull never fires unintentionally
     side_model_reply: str = "YES",
+    rng: Callable[[], float] = lambda: 0.5,  # zero jitter by default
     on_respond: (
         Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]] | None
     ) = None,
@@ -84,6 +85,7 @@ def _make_monitor(
         lull_timeout=lull_timeout,
         llm_client=llm_client,
         character_card="You are Aria.",
+        rng=rng,
         on_respond=on_respond if on_respond is not None else _default_on_respond,
     )
     return monitor, calls
@@ -163,50 +165,157 @@ class TestChannelBuffer:
 # ---------------------------------------------------------------------------
 
 
+def _no_jitter() -> float:
+    return 0.5  # int(0.5*5)-2 == 0
+
+
 class TestInterjectionInterval:
     def test_average_check_0(self) -> None:
-        assert _interjection_interval(Interjection.average, 0) == 9
+        assert _interjection_interval(Interjection.average, 0, rng=_no_jitter) == 9
 
     def test_average_check_1(self) -> None:
-        assert _interjection_interval(Interjection.average, 1) == 6
+        assert _interjection_interval(Interjection.average, 1, rng=_no_jitter) == 6
 
     def test_average_check_2(self) -> None:
-        assert _interjection_interval(Interjection.average, 2) == 3
+        assert _interjection_interval(Interjection.average, 2, rng=_no_jitter) == 3
 
     def test_average_check_3_floors_at_3(self) -> None:
-        assert _interjection_interval(Interjection.average, 3) == 3
+        assert _interjection_interval(Interjection.average, 3, rng=_no_jitter) == 3
 
     def test_average_check_100_floors_at_3(self) -> None:
-        assert _interjection_interval(Interjection.average, 100) == 3
+        assert _interjection_interval(Interjection.average, 100, rng=_no_jitter) == 3
 
     def test_very_quiet_check_0(self) -> None:
         # Spec: check 1 fires at message 15
-        assert _interjection_interval(Interjection.very_quiet, 0) == 15
+        assert _interjection_interval(Interjection.very_quiet, 0, rng=_no_jitter) == 15
 
     def test_very_quiet_check_1(self) -> None:
-        assert _interjection_interval(Interjection.very_quiet, 1) == 12
+        assert _interjection_interval(Interjection.very_quiet, 1, rng=_no_jitter) == 12
 
     def test_very_quiet_check_2(self) -> None:
-        assert _interjection_interval(Interjection.very_quiet, 2) == 9
+        assert _interjection_interval(Interjection.very_quiet, 2, rng=_no_jitter) == 9
 
     def test_very_quiet_check_3(self) -> None:
-        assert _interjection_interval(Interjection.very_quiet, 3) == 6
+        assert _interjection_interval(Interjection.very_quiet, 3, rng=_no_jitter) == 6
 
     def test_very_quiet_check_4(self) -> None:
-        assert _interjection_interval(Interjection.very_quiet, 4) == 3
+        assert _interjection_interval(Interjection.very_quiet, 4, rng=_no_jitter) == 3
 
     def test_very_quiet_check_5_floors_at_3(self) -> None:
-        assert _interjection_interval(Interjection.very_quiet, 5) == 3
+        assert _interjection_interval(Interjection.very_quiet, 5, rng=_no_jitter) == 3
 
     def test_very_eager_always_3(self) -> None:
         for check in range(5):
-            assert _interjection_interval(Interjection.very_eager, check) == 3
+            assert (
+                _interjection_interval(Interjection.very_eager, check, rng=_no_jitter)
+                == 3
+            )
 
     def test_eager_check_0(self) -> None:
-        assert _interjection_interval(Interjection.eager, 0) == 6
+        assert _interjection_interval(Interjection.eager, 0, rng=_no_jitter) == 6
 
     def test_eager_check_1_floors(self) -> None:
-        assert _interjection_interval(Interjection.eager, 1) == 3
+        assert _interjection_interval(Interjection.eager, 1, rng=_no_jitter) == 3
+
+
+# ---------------------------------------------------------------------------
+# Step 4b — _interjection_interval jitter
+# ---------------------------------------------------------------------------
+
+
+class TestInterjectionIntervalJitter:
+    def test_zero_jitter(self) -> None:
+        # rng=0.5 → int(2.5)=2, 2-2=0
+        assert _interjection_interval(Interjection.average, 0, rng=lambda: 0.5) == 9
+
+    def test_min_jitter(self) -> None:
+        # rng=0.0 → int(0.0)=0, 0-2=-2 → base 9, result 7
+        assert _interjection_interval(Interjection.average, 0, rng=lambda: 0.0) == 7
+
+    def test_max_jitter(self) -> None:
+        # rng=0.9 → int(4.5)=4, 4-2=+2 → base 9, result 11
+        assert _interjection_interval(Interjection.average, 0, rng=lambda: 0.9) == 11
+
+    def test_floor_preserved_under_negative_jitter(self) -> None:
+        # very_eager base=3, jitter=-2 → max(3, 1) = 3
+        assert _interjection_interval(Interjection.very_eager, 0, rng=lambda: 0.0) == 3
+
+    def test_floor_preserved_at_step_down_floor(self) -> None:
+        # average check_count=3: base=max(3,9-9)=3, jitter=-2 → max(3,1)=3
+        assert _interjection_interval(Interjection.average, 3, rng=lambda: 0.0) == 3
+
+    def test_positive_jitter_on_small_tier(self) -> None:
+        # very_eager base=3, jitter=+2 → 5
+        assert _interjection_interval(Interjection.very_eager, 0, rng=lambda: 0.9) == 5
+
+    def test_default_rng_produces_values_in_range(self) -> None:
+        # Without injectable rng: result must be in [base-2, base+2] ∩ [3, ∞)
+        for _ in range(50):
+            result = _interjection_interval(Interjection.average, 0)
+            assert 7 <= result <= 11
+
+
+# ---------------------------------------------------------------------------
+# Jitter wired through ConversationMonitor
+# ---------------------------------------------------------------------------
+
+
+class TestConversationMonitorJitter:
+    def test_initial_threshold_is_jittered(self) -> None:
+        # rng=0.0 → jitter=-2 → next_interjection_at = starting_interval - 2
+        monitor, _ = _make_monitor(
+            interjection=Interjection.average,
+            rng=lambda: 0.0,
+            side_model_reply="NO",
+        )
+        asyncio.run(
+            monitor.on_message(channel_id=1, speaker="Bob", text="hi", is_mention=False)
+        )
+        buf = monitor._buffers[1]
+        # average starting_interval=9, jitter=-2 → next_interjection_at=7
+        assert buf.next_interjection_at == 7
+
+    def test_step_down_interval_is_jittered(self) -> None:
+        # After first NO, advancement uses jittered interval.
+        # rng=0.0 → jitter=-2 always.
+        # Initial: 9-2=7. After NO at 7: check_count=1, interval=max(3,6-2)=4.
+        # next_interjection_at = 7 + 4 = 11.
+        monitor, _ = _make_monitor(
+            interjection=Interjection.average,
+            rng=lambda: 0.0,
+            side_model_reply="NO",
+        )
+        # First check fires at message 7 (jittered initial)
+        for i in range(7):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                )
+            )
+        buf = monitor._buffers[1]
+        assert buf.check_count == 1
+        assert buf.next_interjection_at == 11  # 7 + (6-2)
+
+    def test_reset_threshold_is_jittered(self) -> None:
+        # After YES, reset applies jitter to starting_interval.
+        # rng=0.0 → jitter=-2 → reset next_interjection_at = 9-2 = 7
+        monitor, calls = _make_monitor(
+            interjection=Interjection.average,
+            rng=lambda: 0.0,
+            side_model_reply="YES",
+        )
+        # Fire at message 7 (jittered initial), then reset
+        for i in range(7):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                )
+            )
+        assert len(calls) == 1
+        # After YES → reset: buffer gone or next_interjection_at jittered
+        buf = monitor._buffers.get(1)
+        if buf is not None:
+            assert buf.next_interjection_at == 7  # jittered starting_interval
 
 
 # ---------------------------------------------------------------------------
