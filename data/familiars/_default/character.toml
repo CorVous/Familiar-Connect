@@ -69,10 +69,14 @@ position = 0
 role     = "system"
 
 # --- Text-to-speech (formerly CARTESIA_VOICE_ID / CARTESIA_MODEL) ----------
+#
+# List multiple greetings to have a random one played when joining voice.
+# Empty list falls back to "Hello!" (hardcoded default in voice join path).
 
 [tts]
-voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
-model    = "sonic-3"
+voice_id   = "999df508-4de5-40a7-8bd3-8c12f678c284"
+model      = "sonic-3"
+greetings  = []
 
 # --- LLM slots -------------------------------------------------------------
 #

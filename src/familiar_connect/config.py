@@ -134,6 +134,7 @@ class TTSConfig:
 
     voice_id: str | None = None
     model: str | None = None
+    greetings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -665,7 +666,15 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
     if model is not None and not isinstance(model, str):
         msg = f"[tts].model must be a string, got {type(model).__name__}"
         raise ConfigError(msg)
-    return TTSConfig(voice_id=voice_id, model=model)
+    greetings_raw = raw.get("greetings", [])
+    if not isinstance(greetings_raw, list):
+        msg = (
+            "[tts].greetings must be a list of strings, "
+            f"got {type(greetings_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    greetings = [str(g) for g in greetings_raw]
+    return TTSConfig(voice_id=voice_id, model=model, greetings=greetings)
 
 
 def _parse_voice_interruption(
