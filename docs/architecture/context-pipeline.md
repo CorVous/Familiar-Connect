@@ -218,7 +218,7 @@ Both are **off by default for voice** (to protect TTFB) and **on by default for 
 
 Tracked so they don't sneak back in mid-implementation.
 
-- **Vector retrieval of any kind.** No `sqlite-vec`, no embedding API calls, no chunking strategy. Vector search becomes a *tool* the same `ContentSearchProvider` agent can call, added later, only if measurements show `grep` getting too slow.
+- **Any third-party vector store or embedding API.** Vector retrieval ships locally via `fastembed`/ONNX and a SQLite `.index/embeddings.sqlite` — see [Memory → Derived indices](memory.md#derived-indices).
 - **Any SillyTavern keyword/World Info runtime.** Imports flatten to Markdown; there is no keyword walker.
 - **Plugin discovery / dynamic loading.** Providers and processors are registered in code at startup.
 - **Cross-familiar shared memory.** Each familiar's memory directory is isolated; two familiars never see each other's memories.

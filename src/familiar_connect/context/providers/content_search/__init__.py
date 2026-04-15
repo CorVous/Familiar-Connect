@@ -4,10 +4,12 @@ Three-tier design (see docs/architecture/context-pipeline.md §8):
 
 1. ``people_lookup`` — deterministic. Speaker + mentioned-name files
    loaded verbatim. Correctness floor.
-2. *(reserved for embedding retrieval — arrives in a follow-up PR)*
+2. ``retrieval.EmbeddingRetriever`` — local fastembed/ONNX against
+   the SQLite embedding cache under ``.index/embeddings.sqlite``.
+   (Landed in PR 2; wiring into the provider happens in PR 3.)
 3. ``_agent_loop`` — cheap LLM with ``list_dir``/``glob``/``grep``/
    ``read_file`` tools. Transitional fallback; replaced by a
-   single-shot filter over embedding hits once tier 2 lands.
+   single-shot filter over embedding hits once PR 3 lands.
 """
 
 from familiar_connect.context.providers.content_search._agent_loop import (
@@ -24,14 +26,34 @@ from familiar_connect.context.providers.content_search.people_lookup import (
 from familiar_connect.context.providers.content_search.provider import (
     ContentSearchProvider,
 )
+from familiar_connect.context.providers.content_search.retrieval import (
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL,
+    EmbeddingModel,
+    EmbeddingRetriever,
+    FastEmbedModel,
+    PreparedChunk,
+    RetrievedChunk,
+    Retriever,
+    chunk_markdown,
+)
 
 __all__ = [
     "CONTENT_SEARCH_PRIORITY",
     "DEFAULT_DEADLINE_S",
+    "DEFAULT_EMBEDDING_DIM",
+    "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_MAX_ITERATIONS",
     "DEFAULT_MAX_TOKENS_PER_FILE",
     "FORCED_ANSWER_MARKER",
     "PEOPLE_LOOKUP_PRIORITY",
     "PEOPLE_LOOKUP_SOURCE",
     "ContentSearchProvider",
+    "EmbeddingModel",
+    "EmbeddingRetriever",
+    "FastEmbedModel",
+    "PreparedChunk",
+    "RetrievedChunk",
+    "Retriever",
+    "chunk_markdown",
 ]
