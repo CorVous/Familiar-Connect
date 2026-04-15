@@ -141,9 +141,9 @@ class TTSConfig:
 
     provider: str = "azure"
     """Active TTS provider. ``"azure"`` or ``"cartesia"``."""
-    voice_id: str | None = None
+    cartesia_voice_id: str | None = None
     """Cartesia voice UUID (``provider = "cartesia"`` only)."""
-    model: str | None = None
+    cartesia_model: str | None = None
     """Cartesia model name (``provider = "cartesia"`` only)."""
     azure_voice: str = DEFAULT_AZURE_TTS_VOICE
     """Azure Neural voice name (``provider = "azure"`` only)."""
@@ -679,14 +679,14 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         msg = f"[tts].provider {provider_raw!r} unknown; valid options: {valid}"
         raise ConfigError(msg)
 
-    voice_id = raw.get("voice_id")
-    if voice_id is not None and not isinstance(voice_id, str):
-        msg = f"[tts].voice_id must be a string, got {type(voice_id).__name__}"
+    cartesia_voice_id = raw.get("cartesia_voice_id")
+    if cartesia_voice_id is not None and not isinstance(cartesia_voice_id, str):
+        msg = "[tts].cartesia_voice_id must be a string"
         raise ConfigError(msg)
 
-    model = raw.get("model")
-    if model is not None and not isinstance(model, str):
-        msg = f"[tts].model must be a string, got {type(model).__name__}"
+    cartesia_model = raw.get("cartesia_model")
+    if cartesia_model is not None and not isinstance(cartesia_model, str):
+        msg = "[tts].cartesia_model must be a string"
         raise ConfigError(msg)
 
     azure_voice_raw = raw.get("azure_voice", DEFAULT_AZURE_TTS_VOICE)
@@ -696,8 +696,8 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
 
     return TTSConfig(
         provider=provider_raw,
-        voice_id=voice_id,
-        model=model,
+        cartesia_voice_id=cartesia_voice_id,
+        cartesia_model=cartesia_model,
         azure_voice=azure_voice_raw,
     )
 

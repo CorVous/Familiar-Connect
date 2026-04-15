@@ -355,12 +355,18 @@ def _create_cartesia_client(tts_config: TTSConfig) -> CartesiaTTSClient:
     if not api_key:
         msg = "CARTESIA_API_KEY environment variable is required"
         raise ValueError(msg)
-    voice_id = tts_config.voice_id or ""
+    voice_id = tts_config.cartesia_voice_id or ""
     if not voice_id:
-        msg = "TTS voice_id is required (set [tts].voice_id in character.toml)"
+        msg = (
+            "TTS cartesia_voice_id is required "
+            "(set [tts].cartesia_voice_id in character.toml)"
+        )
         raise ValueError(msg)
-    model = tts_config.model or ""
+    model = tts_config.cartesia_model or ""
     if not model:
-        msg = "TTS model is required (set [tts].model in character.toml)"
+        msg = (
+            "TTS cartesia_model is required "
+            "(set [tts].cartesia_model in character.toml)"
+        )
         raise ValueError(msg)
     return CartesiaTTSClient(api_key=api_key, voice_id=voice_id, model=model)

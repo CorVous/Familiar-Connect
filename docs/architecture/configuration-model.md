@@ -32,7 +32,7 @@ Per-familiar configuration. The persona, behaviour knobs, pluggable component se
 - **Memory directory** — `memory/`, owned by `MemoryStore`. See [Memory](memory.md).
 - **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
 - **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.
-- **TTS voice** — `[tts]` section carries `voice_id` and `model` for the Cartesia client.
+- **TTS voice** — `[tts]` section carries `cartesia_voice_id` and `cartesia_model` for the Cartesia client.
 - **Memory writer** — `[memory_writer]` section with `turn_threshold` (default 50) and `idle_timeout` (default 1800.0s / 30 min). Controls when the post-session writer pass runs to summarise conversation history into long-term memory files.
 - **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`. Channels may also carry a `[typing_simulation]` table — see [Typing simulation](typing-simulation.md).
 - **Typing simulation** — `[typing_simulation]` section on `character.toml` and/or per-channel sidecar, layered over per-mode defaults. Controls chunk-based delivery and mid-flight cancellation on text channels. See [Typing simulation](typing-simulation.md).

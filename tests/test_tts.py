@@ -340,7 +340,9 @@ class TestCartesiaTTSClientSynthesize:
 class TestCreateTTSClientCartesia:
     def test_creates_client_from_tts_config(self) -> None:
         cfg = TTSConfig(
-            provider="cartesia", voice_id="some-voice-uuid", model="sonic-turbo"
+            provider="cartesia",
+            cartesia_voice_id="some-voice-uuid",
+            cartesia_model="sonic-turbo",
         )
         with patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}):
             client = create_tts_client(cfg)
@@ -350,7 +352,7 @@ class TestCreateTTSClientCartesia:
         assert client.model == "sonic-turbo"
 
     def test_raises_when_api_key_missing(self) -> None:
-        cfg = TTSConfig(provider="cartesia", voice_id="v", model="m")
+        cfg = TTSConfig(provider="cartesia", cartesia_voice_id="v", cartesia_model="m")
         with (
             patch.dict(os.environ, {}, clear=True),
             pytest.raises(ValueError, match=r"CARTESIA_API_KEY"),
@@ -358,7 +360,9 @@ class TestCreateTTSClientCartesia:
             create_tts_client(cfg)
 
     def test_raises_when_voice_id_empty(self) -> None:
-        cfg = TTSConfig(provider="cartesia", voice_id="", model="sonic-3")
+        cfg = TTSConfig(
+            provider="cartesia", cartesia_voice_id="", cartesia_model="sonic-3"
+        )
         with (
             patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}),
             pytest.raises(ValueError, match=r"voice_id"),
@@ -366,7 +370,9 @@ class TestCreateTTSClientCartesia:
             create_tts_client(cfg)
 
     def test_raises_when_model_empty(self) -> None:
-        cfg = TTSConfig(provider="cartesia", voice_id="some-voice", model="")
+        cfg = TTSConfig(
+            provider="cartesia", cartesia_voice_id="some-voice", cartesia_model=""
+        )
         with (
             patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}),
             pytest.raises(ValueError, match=r"model"),
