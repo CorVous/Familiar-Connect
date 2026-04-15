@@ -25,6 +25,7 @@ from familiar_connect.context.providers.content_search import (
     CONTENT_SEARCH_PRIORITY,
     DEFAULT_MAX_ITERATIONS,
     FORCED_ANSWER_MARKER,
+    PEOPLE_LOOKUP_SOURCE,
     ContentSearchProvider,
 )
 from familiar_connect.context.types import (
@@ -176,8 +177,11 @@ class TestSingleToolCall:
 
         contributions = await provider.contribute(_request())
 
-        assert len(contributions) == 1
-        assert "Alice likes ska music" in contributions[0].text
+        # Two contributions: deterministic people-lookup (Alice is speaker)
+        # + agent-loop ANSWER.
+        assert len(contributions) == 2
+        agent = next(c for c in contributions if c.source == "content_search")
+        assert "Alice likes ska music" in agent.text
         assert len(side.calls) == 2
         # The second prompt fed back the grep result, so it should mention
         # the file the hit came from.
@@ -211,7 +215,10 @@ class TestSingleToolCall:
 
         contributions = await provider.contribute(_request())
 
-        assert len(contributions) == 1
+        # Deterministic tier picks up alice.md (speaker) — agent loop
+        # emits its ANSWER alongside.
+        agent = next(c for c in contributions if c.source == "content_search")
+        assert "Alice and Bob" in agent.text
         # The list_dir result fed back to the model includes both names.
         assert "alice.md" in side.prompt_at(1)
         assert "bob.md" in side.prompt_at(1)
@@ -226,7 +233,9 @@ class TestSingleToolCall:
         ])
         provider = ContentSearchProvider(store=store, llm_client=side)
         contributions = await provider.contribute(_request())
-        assert len(contributions) == 1
+        # Deterministic (alice.md) + agent-loop ANSWER.
+        agent = next(c for c in contributions if c.source == "content_search")
+        assert "people and topics" in agent.text
         assert "people/alice.md" in side.prompt_at(1)
         assert "topics/ska.md" in side.prompt_at(1)
 
@@ -252,8 +261,9 @@ class TestMultiStepLoop:
 
         contributions = await provider.contribute(_request())
 
-        assert len(contributions) == 1
-        assert "argued about ska bands" in contributions[0].text
+        # Deterministic (alice.md) + agent-loop ANSWER.
+        agent = next(c for c in contributions if c.source == "content_search")
+        assert "argued about ska bands" in agent.text
         assert len(side.calls) == 3
 
 
@@ -472,6 +482,56 @@ class TestErrorRecovery:
 # ---------------------------------------------------------------------------
 # Initial prompt content
 # ---------------------------------------------------------------------------
+
+
+class TestPeopleLookupInvariant:
+    """Deterministic-tier guarantees the forgetting-bug fix.
+
+    Speaker and mentioned-name files are surfaced regardless of
+    agent-loop behaviour — empty ANSWER, exception, etc.
+    """
+
+    @pytest.mark.asyncio
+    async def test_speaker_file_included_when_agent_returns_empty(
+        self, store: MemoryStore
+    ) -> None:
+        store.write_file("people/alice.md", "Alice is a ska fan from York.")
+        # Agent loop emits empty ANSWER — would drop any contribution on
+        # its own. Deterministic tier must still surface Alice's file.
+        side = _ScriptedLLMClient(["ANSWER:"])
+        provider = ContentSearchProvider(store=store, llm_client=side)
+
+        contribs = await provider.contribute(_request(utterance="hi"))
+
+        assert len(contribs) == 1
+        assert contribs[0].source == PEOPLE_LOOKUP_SOURCE
+        assert "ska fan from York" in contribs[0].text
+
+    @pytest.mark.asyncio
+    async def test_speaker_file_included_when_agent_raises(
+        self, store: MemoryStore
+    ) -> None:
+        store.write_file("people/alice.md", "Alice's notes.")
+
+        class _ExplodingClient(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    api_key="scripted-test-key", model="scripted/test-model"
+                )
+
+            async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
+                msg = "simulated LLM failure"
+                raise RuntimeError(msg)
+
+            async def close(self) -> None:  # pragma: no cover
+                return
+
+        provider = ContentSearchProvider(store=store, llm_client=_ExplodingClient())
+        contribs = await provider.contribute(_request())
+
+        assert len(contribs) == 1
+        assert contribs[0].source == PEOPLE_LOOKUP_SOURCE
+        assert "Alice's notes" in contribs[0].text
 
 
 class TestInitialPromptContent:

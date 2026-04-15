@@ -1,4 +1,4 @@
-"""ContentSearchProvider — memory-search agent loop.
+"""Tool-using agent loop — tier 3 of the content-search provider.
 
 Hands the ``memory_search`` slot's LLMClient a small toolset
 (``list_dir``, ``glob``, ``grep``, ``read_file``) scoped to one
@@ -11,7 +11,11 @@ prefixes) rather than a real tool-call API; the loop logic is
 wire-format-agnostic.
 
 Store errors are fed back as the tool's result string so the model
-can recover. See docs/architecture/context-pipeline.md.
+can recover.
+
+Slated for removal in the PR that introduces the embedding retriever
++ single-shot filter. Preserved verbatim in PR 1 so the deterministic
+people-lookup tier ships without disturbing the existing fallback.
 """
 
 from __future__ import annotations
@@ -35,28 +39,27 @@ _logger = logging.getLogger(__name__)
 
 
 CONTENT_SEARCH_PRIORITY = 70
-"""Priority assigned to content-search Contributions.
+"""Priority assigned to agent-loop Contributions.
 
-Lower than CharacterProvider (100) and HistoryProvider's recent
-window (80), higher than the rolling history summary (60). The
-familiar's persona and the active conversation always win against
-retrieved context under budget pressure."""
+Lower than CharacterProvider (100), the deterministic people-lookup
+tier (85), and HistoryProvider's recent window (80). The familiar's
+persona, the active conversation, and hard-guaranteed people files
+always win against retrieved context under budget pressure."""
 
 DEFAULT_DEADLINE_S = 15.0
-"""Hard cap the pipeline enforces on this provider's contribute() call.
-
-The provider's internal loop has its own iteration cap; the deadline
-exists so a runaway agent loop never blocks the reply.
-"""
+"""Hard cap the pipeline enforces on the full content-search
+provider's contribute() call. The agent loop's internal iteration
+cap is separate; this deadline exists so a runaway loop never blocks
+the reply."""
 
 DEFAULT_MAX_ITERATIONS = 3
-"""Maximum number of LLM calls per contribute() invocation.
+"""Maximum number of LLM calls per agent-loop invocation.
 
-Lowered from 5: with forced-answer on the final iteration plus
-redundant-call bail-out, three richer iterations beat five flailing
-ones. If even the forced-answer turn doesn't emit ``ANSWER:``, the
-provider gives up and returns no contribution.
-"""
+Three richer iterations beat five flailing ones: with forced-answer
+on the final iteration plus redundant-call bail-out, the model either
+converges or emits best-effort on turn 3. If even the forced-answer
+turn doesn't emit ``ANSWER:``, the loop gives up and returns no
+contribution."""
 
 FORCED_ANSWER_MARKER = "FORCED_ANSWER"
 """Sentinel substring in the forced-answer prompt.
@@ -127,11 +130,8 @@ _ANSWER_LINE_PREFIX = "ANSWER:"
 _TOOL_RESULT_PREFIX = "TOOL_RESULT"
 
 
-class ContentSearchProvider:
-    """ContextProvider that runs a tool-using agent loop over a MemoryStore."""
-
-    id = "content_search"
-    deadline_s = DEFAULT_DEADLINE_S
+class _AgentLoop:
+    """Tool-using loop over a MemoryStore. Internal to ContentSearchProvider."""
 
     def __init__(
         self,

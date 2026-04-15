@@ -138,14 +138,27 @@ Two patterns, in descending order of preference:
 
 ## Reading from memory
 
-Reads happen through `ContentSearchProvider` (see [Context pipeline](context-pipeline.md#8-contentsearchprovider)). The provider gives a cheap tool-using model a deadline-bounded loop with these tools scoped to the familiar's `MemoryStore`:
+Reads happen through `ContentSearchProvider` (see [Context pipeline](context-pipeline.md#8-contentsearchprovider)), which stacks two tiers:
 
-- `list_dir(path)`
-- `glob(pattern)`
-- `grep(pattern, path="")`
-- `read_file(path)`
+1. **Deterministic people lookup** — always runs first, no LLM. See [People lookup guarantee](#people-lookup-guarantee) below.
+2. **Tool-using agent loop** — deadline-bounded loop with a cheap LLM and these tools scoped to the familiar's `MemoryStore`:
+    - `list_dir(path)`
+    - `glob(pattern)`
+    - `grep(pattern, path="")`
+    - `read_file(path)`
 
-The model's job is to find and return the snippets of memory that are actually relevant to the current turn. The provider's job is to run that loop within a deadline, log the tool calls for debuggability, and emit the result as a single `Contribution` that the budgeter can place in the system prompt.
+The agent-loop model's job is to find and return the snippets of memory that are actually relevant to the current turn. The provider's job is to run both tiers within a deadline, log the tool calls for debuggability, and emit the collected `Contribution`s for the budgeter to place in the system prompt.
+
+### People lookup guarantee
+
+Before the agent loop runs, `ContentSearchProvider` always loads a fixed set of `people/*.md` files into `Layer.content`:
+
+- **Speaker's file.** If `people/<slug(request.speaker)>.md` exists, include it verbatim. The slug convention mirrors `memory/writer.py` exactly — lowercase, non-alphanumerics collapsed to single dashes, trimmed.
+- **Mentioned-name files.** For every `people/<stem>.md` in the store, check whether `<stem>` appears in the utterance. Single-token stems match as whole lowercase words (`"alice"` in `"tell me about alice"`). Hyphenated stems also reverse-match space-separated phrases (`people/bob-the-builder.md` ← `"where is bob the builder?"`). Capitalized mid-sentence words are an additional forward-match pass — `"Jane"` → slug `"jane"` → loaded if `people/jane.md` exists.
+
+Each loaded file is truncated to ~800 tokens before emission. The tier emits at priority 85 (between `CharacterProvider` at 100 and the agent-loop tier at 70), with source `content_search.people`. On total-content overflow, the speaker's file is kept and utterance-order tail entries are dropped first.
+
+This tier runs regardless of agent-loop behaviour. Even if the cheap model emits an empty `ANSWER:`, returns no contribution, or raises, people files are still surfaced — the familiar does not forget someone it has notes on.
 
 ## `MemoryStore` API
 

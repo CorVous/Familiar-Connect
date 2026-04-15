@@ -158,7 +158,21 @@ Delivered in one commit on top of step 10:
 
 Module: `familiar_connect.context.providers.content_search`.
 
-A small tool-using cheap-model loop scoped to a single familiar's `MemoryStore`. Tools registered with the cheap model on each call:
+A multi-tier provider scoped to a single familiar's `MemoryStore`. Each `contribute()` call runs the tiers in order and returns all emitted Contributions.
+
+### Tier 1 — Deterministic people lookup
+
+No LLM involvement. Runs first. For every `contribute()` call:
+
+- If `people/<slug(speaker)>.md` exists, load it verbatim.
+- Enumerate `people/*.md`, reverse-match each stem against utterance tokens (single-token stems match whole lowercase words; hyphenated stems match as space-separated phrases). Forward-match capitalized mid-sentence words as an additional candidate pass.
+- Each loaded file is truncated to ~800 tokens. Emitted at priority 85 with source `content_search.people`.
+
+This tier is the correctness floor — the people-file guarantee documented in [Memory → People lookup guarantee](memory.md#people-lookup-guarantee). It runs regardless of whether the agent-loop tier succeeds, fails, or returns empty.
+
+### Tier 3 — Tool-using cheap-model loop
+
+Tools registered with the cheap model on each call:
 
 - `list_dir(path)` → list of files and subdirectories.
 - `glob(pattern)` → paths matching a glob.
@@ -169,11 +183,15 @@ A small tool-using cheap-model loop scoped to a single familiar's `MemoryStore`.
 
 **Redundant-call bail-out** — if the model repeats a `grep`/`read_file` arg pair already seen this turn, the loop jumps straight to the forced-answer turn rather than waste another iteration.
 
-**Output** — a single `Contribution(layer=Layer.content, ...)` with the concatenated snippets and the file paths they came from as `source`.
+**Output** — up to one additional `Contribution(layer=Layer.content, ...)` with the model's summary, at priority 70 and source `content_search`.
+
+**Graceful failure** — if the loop raises, the deterministic tier's contributions are still returned.
 
 **Logging** — every tool call is written to a per-turn trace log so "why did the bot say X" has a reproducible answer.
 
 **Deterministic mode for tests** — the cheap model client is injectable so tests can substitute a scripted responder.
+
+*(Tier 2, a local-embedding retrieval step, is planned for a follow-up PR and will replace the tool loop.)*
 
 ## 9. SillyTavern lorebook / world-info importer
 
