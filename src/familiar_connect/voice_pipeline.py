@@ -130,17 +130,49 @@ def _get_user_name(pipeline: VoicePipeline, user_id: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_IDLE_FINALIZE_S: float = 0.5
+"""How long to wait with no Discord audio before forcing a Deepgram flush.
+
+Discord's client-side VAD stops RTP delivery during silence, so
+Deepgram's endpointer never sees the in-stream silence it needs and
+holds the buffered final until the next speech burst. After this many
+seconds of no chunks arriving, the pump sends ``{"type":"Finalize"}``
+to force Deepgram to emit immediately.
+"""
+
+
 async def _audio_pump(
     audio_queue: asyncio.Queue[bytes],
     transcriber: DeepgramTranscriber,
+    *,
+    idle_finalize_s: float = DEFAULT_IDLE_FINALIZE_S,
 ) -> None:
-    """Drain *audio_queue* and send each chunk to the transcriber."""
+    """Drain *audio_queue* into the transcriber; flush on idle gaps.
+
+    Two-state loop: ``dirty`` (audio buffered server-side, idle window
+    armed) and ``drained`` (already flushed, blocking until next chunk).
+    Real audio enters ``dirty``; an idle timeout in ``dirty`` sends
+    ``Finalize`` and transitions to ``drained``.
+    """
     chunks_sent = 0
     consecutive_errors = 0
+    dirty = False
     while True:
-        data = await audio_queue.get()
+        if dirty:
+            try:
+                data = await asyncio.wait_for(
+                    audio_queue.get(), timeout=idle_finalize_s
+                )
+            except TimeoutError:
+                with contextlib.suppress(Exception):
+                    await transcriber.finalize()
+                dirty = False
+                continue
+        else:
+            data = await audio_queue.get()
         try:
             await transcriber.send_audio(data)
+            dirty = True
             chunks_sent += 1
             consecutive_errors = 0
             if chunks_sent % 100 == 1:

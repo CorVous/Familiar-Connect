@@ -226,6 +226,21 @@ class DeepgramTranscriber:
             return
         await self._ws.send_bytes(data)
 
+    async def finalize(self: Self) -> None:
+        """Force Deepgram to flush the buffered segment as a final.
+
+        Sends ``{"type":"Finalize"}``. Discord's client-side VAD drops
+        RTP during silence, so without an explicit flush Deepgram's
+        endpointer never sees the silence it needs and holds the final
+        until the next speech burst. Silent no-op if WS already closed
+        or never started — safe to call from idle-watchdog paths.
+        """
+        ws = self._ws
+        if ws is None or ws.closed:
+            return
+        with contextlib.suppress(Exception):
+            await ws.send_json({"type": "Finalize"})
+
     async def stop(self: Self) -> None:
         """Gracefully close Deepgram connection."""
         if self._keepalive_task is not None:

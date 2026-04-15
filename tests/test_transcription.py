@@ -393,6 +393,46 @@ class TestDeepgramTranscriberLifecycle:
                 await client.stop()
 
     @pytest.mark.asyncio
+    async def test_finalize_sends_finalize_message(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """finalize() sends Deepgram ``{"type":"Finalize"}`` to flush buffer."""
+        ws_mock = self._make_ws_mock()
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await client.finalize()
+                ws_mock.send_json.assert_any_call({"type": "Finalize"})
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_finalize_skips_when_ws_closed(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """finalize() silently no-ops when the WebSocket is already closed."""
+        ws_mock = self._make_ws_mock()
+        ws_mock.closed = True
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                await client.finalize()
+                ws_mock.send_json.assert_not_called()
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_finalize_before_start_is_noop(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """finalize() before start() is a silent no-op (never raises)."""
+        await client.finalize()
+
+    @pytest.mark.asyncio
     async def test_stop_sends_close_stream(self, client: DeepgramTranscriber) -> None:
         """stop() sends the CloseStream message and closes the WebSocket."""
         ws_mock = self._make_ws_mock()

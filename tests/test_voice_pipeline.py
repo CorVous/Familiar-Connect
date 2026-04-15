@@ -103,6 +103,7 @@ class TestAudioPump:
         audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
         transcriber = MagicMock()
         transcriber.send_audio = AsyncMock(side_effect=[RuntimeError("oops"), None])
+        transcriber.finalize = AsyncMock()
 
         await audio_queue.put(b"\x01")
         await audio_queue.put(b"\x02")
@@ -114,6 +115,96 @@ class TestAudioPump:
             await task
 
         assert transcriber.send_audio.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_finalizes_after_audio_idle(self) -> None:
+        """Pump sends Deepgram ``Finalize`` when no audio for the idle window.
+
+        Discord's client-side VAD drops RTP during silence; without an
+        explicit flush Deepgram holds the buffered final until next speech.
+        """
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        await audio_queue.put(b"\x00\x01")
+
+        task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        transcriber.finalize.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_does_not_finalize_before_any_audio(self) -> None:
+        """Pump never finalizes while it has not yet seen real audio."""
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        transcriber.finalize.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_does_not_finalize_twice_in_a_row(self) -> None:
+        """Once flushed, pump waits for new audio before finalizing again."""
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        await audio_queue.put(b"\x01")
+
+        task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        # Run for several idle windows.
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert transcriber.finalize.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_real_audio_after_finalize_re_arms_window(self) -> None:
+        """Fresh audio after a finalize re-enters the dirty state."""
+        audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        transcriber = MagicMock()
+        transcriber.send_audio = AsyncMock()
+        transcriber.finalize = AsyncMock()
+
+        async def feeder() -> None:
+            await audio_queue.put(b"\x01")
+            # Wait long enough for first finalize to fire.
+            await asyncio.sleep(0.15)
+            await audio_queue.put(b"\x02")
+
+        feeder_task = asyncio.create_task(feeder())
+        pump_task = asyncio.create_task(
+            _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
+        )
+        await asyncio.sleep(0.4)
+        pump_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pump_task
+        await feeder_task
+
+        # Finalize once after first chunk, then again after second chunk.
+        assert transcriber.finalize.await_count == 2
 
 
 class TestTranscriptForwarder:
