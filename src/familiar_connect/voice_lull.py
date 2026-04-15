@@ -1,21 +1,20 @@
 """Voice lull monitor — conversational-silence detector over Deepgram finals.
 
 Buffers per-speaker Deepgram finals. Each incoming final (re-)arms the
-``lull_timeout`` timer. ``SpeechStarted`` from Deepgram VAD cancels a
-pending timer (resumed speech extends the turn). When the timer
-expires, buffered finals merge into a single utterance and dispatch to
-the response pipeline as the conversational-lull endpoint.
+``lull_timeout`` timer. TEN VAD's local ``speech_started`` edge
+(delivered via :meth:`on_speech_start`) also re-arms the timer so
+resumed speech extends the turn. When the timer expires, buffered
+finals merge into a single utterance and dispatch to the response
+pipeline as the conversational-lull endpoint.
 
-The lull is client-side wall-clock time since the last Deepgram event —
-no dependency on ``UtteranceEnd``. Deepgram's ``UtteranceEnd`` is
-unreliable under continuous audio (Discord keeps streaming near-silent
-frames; Deepgram holds the event until the next speech flushes it).
-Running with ``interim_results=false`` makes each ``Results(is_final)``
+The lull is client-side wall-clock time since the last speech event.
+Under ``interim_results=false`` each Deepgram ``Results(is_final)`` is
 a complete endpointed segment; arming on those is the prompt trigger.
 
-``VoiceActivityEvent.started`` is emitted on ``SpeechStarted``;
-``VoiceActivityEvent.ended`` is emitted on final arrival for a user
-currently in ``_speaking`` (final = user paused for this segment).
+``VoiceActivityEvent.started`` is emitted on TEN VAD speech-start;
+``VoiceActivityEvent.ended`` is emitted on TEN VAD speech-end or on
+final arrival for a user currently in ``_speaking`` (final = user
+paused for this segment).
 """
 
 from __future__ import annotations
@@ -34,13 +33,13 @@ _logger = logging.getLogger(__name__)
 
 
 class VoiceActivityEvent(Enum):
-    """Per-user speaking transitions from Deepgram VAD."""
+    """Per-user speaking transitions from the local TEN VAD detector."""
 
     started = "started"
-    """User began speaking (Deepgram ``SpeechStarted``)."""
+    """User began speaking (TEN VAD speech-start edge)."""
 
     ended = "ended"
-    """User stopped speaking (Deepgram ``UtteranceEnd``)."""
+    """User stopped speaking (TEN VAD speech-end edge or endpoint final)."""
 
 
 class VoiceLullMonitor:
@@ -71,12 +70,12 @@ class VoiceLullMonitor:
     # ------------------------------------------------------------------
 
     def on_speech_start(self, user_id: int) -> None:
-        """Deepgram ``SpeechStarted`` — user began speaking.
+        """TEN VAD speech-start edge — user began speaking.
 
-        Re-arms the lull timer. Any Deepgram activity (VAD pulse or
-        final) pushes the lull out by ``lull_timeout``; when activity
-        stops for that long, the timer fires and dispatches any
-        buffered finals. No-op fire if nothing is buffered.
+        Re-arms the lull timer. Any speech activity (VAD edge or
+        Deepgram final) pushes the lull out by ``lull_timeout``; when
+        activity stops for that long, the timer fires and dispatches
+        any buffered finals. No-op fire if nothing is buffered.
         """
         if user_id not in self._speaking:
             self._speaking.add(user_id)
@@ -85,12 +84,7 @@ class VoiceLullMonitor:
         self._arm_lull()
 
     def on_speech_end(self, user_id: int) -> None:
-        """Deepgram ``UtteranceEnd`` — user finished an utterance.
-
-        Defensive only: with ``interim_results=false`` Deepgram does not
-        emit ``UtteranceEnd``. Kept so the pipeline surface stays stable
-        and any future server-side behaviour change is absorbed safely.
-        """
+        """TEN VAD speech-end edge — user finished speaking."""
         if user_id not in self._speaking:
             return
         self._speaking.discard(user_id)

@@ -13,11 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from familiar_connect.transcription import (
-    SpeechStartedEvent,
-    TranscriptionResult,
-    UtteranceEndEvent,
-)
+from familiar_connect.transcription import TranscriptionResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -74,6 +70,7 @@ class VoicePipeline:
     ) = None
     on_speech_start: Callable[[int], None] | None = None
     on_speech_end: Callable[[int], None] | None = None
+    feed_vad: Callable[[int, bytes], None] | None = None
     streams: dict[int, _UserStream] = field(default_factory=dict)
 
 
@@ -230,10 +227,19 @@ async def _audio_router(
     tagged_queue: asyncio.Queue[tuple[int, bytes]],
     pipeline: VoicePipeline,
 ) -> None:
-    """Route tagged audio to per-user streams, creating them on demand."""
+    """Route tagged audio to per-user streams, creating them on demand.
+
+    Also feeds each chunk into the optional local VAD (TEN VAD) so
+    speech-activity edges arrive independently of Deepgram finals.
+    """
     chunks_routed = 0
     while True:
         user_id, data = await tagged_queue.get()
+        if pipeline.feed_vad is not None:
+            try:
+                pipeline.feed_vad(user_id, data)
+            except Exception:
+                _logger.exception("feed_vad hook failed")
         if user_id not in pipeline.streams:
             name = _get_user_name(pipeline, user_id)
             _logger.info(
@@ -278,43 +284,32 @@ async def _transcript_logger(
     shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]],
     pipeline: VoicePipeline,
 ) -> None:
-    """Log results + route VAD events to pipeline hooks.
+    """Log results + fan finals to the response handler.
 
-    Response handlers fire as background tasks so the logger is never
-    blocked by slow LLM / TTS processing. VAD hooks run synchronously
-    (they're cheap state updates on :class:`VoiceLullMonitor`).
+    VAD events (speech-start/end) are driven by the local TEN VAD
+    detector via :attr:`VoicePipeline.feed_vad`, not by Deepgram —
+    this logger only cares about transcription text.
     """
     pending: set[asyncio.Task[None]] = set()
     while True:
         user_id, event = await shared_queue.get()
-        if isinstance(event, TranscriptionResult):
-            name = _get_user_name(pipeline, user_id)
-            if event.is_final:
-                _logger.info("[Transcription] %s: %s", name, event.text)
-                if pipeline.response_handler is not None:
-                    task = asyncio.create_task(
-                        _run_response_handler(
-                            pipeline.response_handler,
-                            user_id,
-                            event,
-                        ),
-                    )
-                    pending.add(task)
-                    task.add_done_callback(pending.discard)
-            else:
-                _logger.debug("[Transcription interim] %s: %s", name, event.text)
-        elif isinstance(event, SpeechStartedEvent):
-            if pipeline.on_speech_start is not None:
-                try:
-                    pipeline.on_speech_start(user_id)
-                except Exception:
-                    _logger.exception("on_speech_start hook failed")
-        elif isinstance(event, UtteranceEndEvent):
-            if pipeline.on_speech_end is not None:
-                try:
-                    pipeline.on_speech_end(user_id)
-                except Exception:
-                    _logger.exception("on_speech_end hook failed")
+        if not isinstance(event, TranscriptionResult):
+            continue
+        name = _get_user_name(pipeline, user_id)
+        if event.is_final:
+            _logger.info("[Transcription] %s: %s", name, event.text)
+            if pipeline.response_handler is not None:
+                task = asyncio.create_task(
+                    _run_response_handler(
+                        pipeline.response_handler,
+                        user_id,
+                        event,
+                    ),
+                )
+                pending.add(task)
+                task.add_done_callback(pending.discard)
+        else:
+            _logger.debug("[Transcription interim] %s: %s", name, event.text)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +326,7 @@ async def start_pipeline(  # noqa: RUF029
     ) = None,
     on_speech_start: Callable[[int], None] | None = None,
     on_speech_end: Callable[[int], None] | None = None,
+    feed_vad: Callable[[int, bytes], None] | None = None,
 ) -> VoicePipeline:
     """Create and register the voice transcription pipeline.
 
@@ -341,9 +337,12 @@ async def start_pipeline(  # noqa: RUF029
     :param response_handler: Optional async callback invoked with
         ``(user_id, result)`` for each final transcription.
     :param on_speech_start: Optional sync callback invoked with ``user_id``
-        when Deepgram VAD reports speech started.
+        on TEN VAD speech-start edge (wired from the detector).
     :param on_speech_end: Optional sync callback invoked with ``user_id``
-        when Deepgram VAD reports utterance ended.
+        on TEN VAD speech-end edge (wired from the detector).
+    :param feed_vad: Optional sync callback ``(user_id, pcm)`` invoked
+        for every tagged audio chunk so the local VAD can observe the
+        stream in parallel with Deepgram.
     :raises PipelineError: If a pipeline is already active.
     """
     tagged_audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
@@ -363,6 +362,7 @@ async def start_pipeline(  # noqa: RUF029
         response_handler=response_handler,
         on_speech_start=on_speech_start,
         on_speech_end=on_speech_end,
+        feed_vad=feed_vad,
     )
 
     pipeline.router_task = asyncio.create_task(
