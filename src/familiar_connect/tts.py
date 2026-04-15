@@ -1,11 +1,12 @@
-"""TTS client — Cartesia streaming WebSocket.
+"""TTS clients — Cartesia (WebSocket) and Azure (Speech SDK).
 
-Returns audio bytes + per-word timestamps (needed for mid-speech
-yield in voice interruption flow).
+Both return :class:`TTSResult` with raw PCM audio + per-word timestamps.
+Timestamps drive mid-speech yield in the voice interruption flow.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -18,7 +19,10 @@ from urllib.parse import urlencode
 import aiohttp
 
 if TYPE_CHECKING:
+    from datetime import timedelta
     from typing import Any, Self
+
+    from familiar_connect.config import TTSConfig
 
 
 _logger = logging.getLogger(__name__)
@@ -28,6 +32,12 @@ CARTESIA_BASE_URL = "https://api.cartesia.ai"
 CARTESIA_WS_URL = "wss://api.cartesia.ai/tts/websocket"
 CARTESIA_API_VERSION = "2024-06-10"
 DEFAULT_SAMPLE_RATE = 48000  # matches Discord's native rate
+
+DEFAULT_AZURE_VOICE = "en-US-AmberNeural"
+"""Default Azure Neural voice; mirrors ``config.DEFAULT_AZURE_TTS_VOICE``."""
+
+_AZURE_TICKS_PER_MS: float = 10_000.0
+"""100-nanosecond ticks per millisecond — Azure SDK offset unit."""
 
 
 @dataclass(frozen=True)
@@ -45,6 +55,11 @@ class TTSResult:
 
     audio: bytes
     timestamps: list[WordTimestamp] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Cartesia
+# ---------------------------------------------------------------------------
 
 
 class CartesiaTTSClient:
@@ -202,20 +217,144 @@ def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:
     ]
 
 
-def create_tts_client(voice_id: str, model: str) -> CartesiaTTSClient:
-    """Create client from character-config values + ``CARTESIA_API_KEY`` env var.
+# ---------------------------------------------------------------------------
+# Azure
+# ---------------------------------------------------------------------------
 
-    :raises ValueError: If API key missing or args empty.
+
+class AzureTTSClient:
+    """Azure Cognitive Services TTS client.
+
+    Runs the blocking Speech SDK call in a thread-pool executor so the
+    asyncio event loop stays free. Word-boundary events are collected on
+    the same executor thread — no locking needed.
     """
+
+    def __init__(
+        self: Self,
+        *,
+        subscription_key: str,
+        region: str,
+        voice_name: str = DEFAULT_AZURE_VOICE,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+    ) -> None:
+        self.subscription_key = subscription_key
+        self.region = region
+        self.voice_name = voice_name
+        self.sample_rate = sample_rate
+
+    def _make_synthesizer(self: Self) -> tuple[Any, Any]:
+        """Return ``(speechsdk_module, SpeechSynthesizer)``; extracted for tests."""
+        import azure.cognitiveservices.speech as speechsdk  # noqa: PLC0415
+
+        speech_config = speechsdk.SpeechConfig(
+            subscription=self.subscription_key,
+            region=self.region,
+        )
+        speech_config.speech_synthesis_voice_name = self.voice_name
+        speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Raw48Khz16BitMonoPcm,
+        )
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=speech_config,
+            audio_config=None,  # audio returned via result.audio_data
+        )
+        return speechsdk, synthesizer
+
+    def _synthesize_sync(self: Self, text: str) -> TTSResult:
+        """Blocking synthesis; collect word boundaries, return TTSResult.
+
+        :raises RuntimeError: if Azure synthesis fails or is cancelled.
+        """
+        speechsdk, synthesizer = self._make_synthesizer()
+
+        word_timestamps: list[WordTimestamp] = []
+
+        def _on_word_boundary(evt: Any) -> None:  # noqa: ANN401
+            if evt.boundary_type != speechsdk.SpeechSynthesisBoundaryType.Word:
+                return
+            start_ms = evt.audio_offset / _AZURE_TICKS_PER_MS
+            duration_td: timedelta = evt.duration
+            end_ms = start_ms + duration_td.total_seconds() * 1000.0
+            word_timestamps.append(
+                WordTimestamp(word=evt.text, start_ms=start_ms, end_ms=end_ms),
+            )
+
+        synthesizer.synthesis_word_boundary.connect(_on_word_boundary)
+        result = synthesizer.speak_text_async(text).get()
+
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            audio: bytes = result.audio_data
+            _logger.info(
+                "azure tts: %d words, audio=%d bytes",
+                len(word_timestamps),
+                len(audio),
+            )
+            return TTSResult(audio=audio, timestamps=word_timestamps)
+
+        cancellation = speechsdk.CancellationDetails.from_result(result)
+        msg = (
+            f"Azure TTS synthesis failed: {cancellation.reason}"
+            f" — {cancellation.error_details}"
+        )
+        raise RuntimeError(msg)
+
+    async def synthesize(self: Self, text: str) -> TTSResult:
+        """Synthesize *text* in a thread executor; return audio + word timestamps."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._synthesize_sync, text)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+def create_tts_client(tts_config: TTSConfig) -> CartesiaTTSClient | AzureTTSClient:
+    """Instantiate the TTS client named by ``tts_config.provider``.
+
+    Reads credentials from environment variables; raises :class:`ValueError`
+    if required variables are absent or config values are empty.
+
+    :raises ValueError: missing env var, empty required field, or unknown provider.
+    """
+    if tts_config.provider == "azure":
+        return _create_azure_client(tts_config)
+    if tts_config.provider == "cartesia":
+        return _create_cartesia_client(tts_config)
+    msg = (
+        f"Unknown TTS provider {tts_config.provider!r}; expected 'azure' or 'cartesia'"
+    )
+    raise ValueError(msg)
+
+
+def _create_azure_client(tts_config: TTSConfig) -> AzureTTSClient:
+    subscription_key = os.environ.get("AZURE_SPEECH_KEY")
+    if not subscription_key:
+        msg = "AZURE_SPEECH_KEY environment variable is required for Azure TTS"
+        raise ValueError(msg)
+    region = os.environ.get("AZURE_SPEECH_REGION")
+    if not region:
+        msg = "AZURE_SPEECH_REGION environment variable is required for Azure TTS"
+        raise ValueError(msg)
+    return AzureTTSClient(
+        subscription_key=subscription_key,
+        region=region,
+        voice_name=tts_config.azure_voice,
+    )
+
+
+def _create_cartesia_client(tts_config: TTSConfig) -> CartesiaTTSClient:
     api_key = os.environ.get("CARTESIA_API_KEY")
     if not api_key:
         msg = "CARTESIA_API_KEY environment variable is required"
         raise ValueError(msg)
+    voice_id = tts_config.voice_id or ""
     if not voice_id:
         msg = "TTS voice_id is required (set [tts].voice_id in character.toml)"
         raise ValueError(msg)
+    model = tts_config.model or ""
     if not model:
         msg = "TTS model is required (set [tts].model in character.toml)"
         raise ValueError(msg)
-
     return CartesiaTTSClient(api_key=api_key, voice_id=voice_id, model=model)

@@ -68,11 +68,21 @@ idle_timeout   = 1800.0 # run writer after 30 min of silence
 position = 0
 role     = "system"
 
-# --- Text-to-speech (formerly CARTESIA_VOICE_ID / CARTESIA_MODEL) ----------
+# --- Text-to-speech --------------------------------------------------------
+#
+# provider: "azure" (default) or "cartesia"
+#
+# Azure:    set AZURE_SPEECH_KEY + AZURE_SPEECH_REGION env vars.
+#           azure_voice is any Azure Neural voice name.
+#
+# Cartesia: set CARTESIA_API_KEY env var.
+#           voice_id is the Cartesia voice UUID; model is e.g. "sonic-3".
 
 [tts]
-voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
-model    = "sonic-3"
+provider    = "azure"
+azure_voice = "en-US-AmberNeural"
+voice_id    = "999df508-4de5-40a7-8bd3-8c12f678c284"
+model       = "sonic-3"
 
 # --- LLM slots -------------------------------------------------------------
 #

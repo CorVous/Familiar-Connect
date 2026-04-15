@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv >= 1.0.0, < 2",
     "httpx >= 0.28.0, < 1",
     "tzdata >= 2025.1",
+    "azure-cognitiveservices-speech >= 1.42.0, < 2",
 ]
 
 [project.scripts]

@@ -128,12 +128,25 @@ class LLMSlotConfig:
     temperature: float | None = None
 
 
+_TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia"})
+"""Valid ``[tts].provider`` values."""
+
+DEFAULT_AZURE_TTS_VOICE = "en-US-AmberNeural"
+"""Azure Neural voice used when ``[tts].azure_voice`` is unset."""
+
+
 @dataclass(frozen=True)
 class TTSConfig:
     """Text-to-speech config loaded from the ``[tts]`` TOML section."""
 
+    provider: str = "azure"
+    """Active TTS provider. ``"azure"`` or ``"cartesia"``."""
     voice_id: str | None = None
+    """Cartesia voice UUID (``provider = "cartesia"`` only)."""
     model: str | None = None
+    """Cartesia model name (``provider = "cartesia"`` only)."""
+    azure_voice: str = DEFAULT_AZURE_TTS_VOICE
+    """Azure Neural voice name (``provider = "azure"`` only)."""
 
 
 @dataclass(frozen=True)
@@ -657,15 +670,36 @@ def _resolve_typing_simulation(
 
 def _parse_tts_config(raw: dict) -> TTSConfig:
     """Parse and validate the ``[tts]`` section into a typed config."""
+    provider_raw = raw.get("provider", "azure")
+    if not isinstance(provider_raw, str):
+        msg = f"[tts].provider must be a string, got {type(provider_raw).__name__}"
+        raise ConfigError(msg)
+    if provider_raw not in _TTS_PROVIDERS:
+        valid = ", ".join(sorted(_TTS_PROVIDERS))
+        msg = f"[tts].provider {provider_raw!r} unknown; valid options: {valid}"
+        raise ConfigError(msg)
+
     voice_id = raw.get("voice_id")
     if voice_id is not None and not isinstance(voice_id, str):
         msg = f"[tts].voice_id must be a string, got {type(voice_id).__name__}"
         raise ConfigError(msg)
+
     model = raw.get("model")
     if model is not None and not isinstance(model, str):
         msg = f"[tts].model must be a string, got {type(model).__name__}"
         raise ConfigError(msg)
-    return TTSConfig(voice_id=voice_id, model=model)
+
+    azure_voice_raw = raw.get("azure_voice", DEFAULT_AZURE_TTS_VOICE)
+    if not isinstance(azure_voice_raw, str) or not azure_voice_raw:
+        msg = "[tts].azure_voice must be a non-empty string"
+        raise ConfigError(msg)
+
+    return TTSConfig(
+        provider=provider_raw,
+        voice_id=voice_id,
+        model=model,
+        azure_voice=azure_voice_raw,
+    )
 
 
 def _parse_voice_interruption(

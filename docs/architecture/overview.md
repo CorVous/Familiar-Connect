@@ -169,27 +169,25 @@ on-disk memory directory the pipeline reads and writes.
 
 ### Text-to-speech
 
-**Primary: Cartesia Sonic**
+Both providers are implemented; the active one is set via `[tts].provider`
+in `character.toml`. Default is `"azure"`.
 
-- Purpose-built for real-time conversational AI
-- Sub-100ms time-to-first-byte — best-in-class latency
-- Native WebSocket streaming, quality rivalling ElevenLabs at lower
-  cost
-- Outputs 44.1kHz PCM natively
-- Voice cloning support
+**Azure Speech (default, `provider = "azure"`)**
 
-**Secondary: Azure Speech (Neural)**
+- Default voice: `en-US-AmberNeural` (set `azure_voice` to change)
+- Requires `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` env vars
+- Runs via the `azure-cognitiveservices-speech` SDK in a thread executor
+- Outputs `Raw48Khz16BitMonoPcm` — no resampling needed for Discord
+- Word-boundary events feed per-word timestamps for interruption detection
 
-- Keep the 9 original Azure voices for nostalgia
-- Mature Python SDK, good fallback if Cartesia has downtime
+**Cartesia Sonic (`provider = "cartesia"`)**
 
-**Budget fallback: Fish Audio**
+- Purpose-built for real-time conversational AI; sub-100ms TTFB
+- Native WebSocket streaming
+- Requires `CARTESIA_API_KEY` env var; set `voice_id` + `model` in `[tts]`
 
-- Generous free tier for development/testing
-- Community voice models for variety
-
-Pipeline: LLM text → stream to Cartesia/Azure WebSocket → receive PCM
-audio → resample to 48kHz Opus → feed to Discord voice playback.
+Pipeline: LLM text → TTS (Azure SDK / Cartesia WebSocket) → PCM →
+resample to 48kHz Opus → Discord voice playback.
 
 ### Voice interruption
 
