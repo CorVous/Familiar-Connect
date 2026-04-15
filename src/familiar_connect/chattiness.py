@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from familiar_connect.config import DynamicLullStrategy
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -28,6 +29,21 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger(__name__)
+
+_MAX_REPLY_ACTIVITY: int = 10
+"""Reply count at which engagement score saturates to 1.0 for reply_activity."""
+
+_ENGAGEMENT_SYSTEM_PROMPT = (
+    "Rate this conversation's engagement level. "
+    "Reply with exactly one word: HIGH, MEDIUM, or LOW. No other words."
+)
+_ENGAGEMENT_USER_PROMPT = "Recent messages:\n{buffer}"
+
+_ENGAGEMENT_SCORE_MAP: dict[str, float] = {
+    "HIGH": 1.0,
+    "MEDIUM": 0.5,
+    "LOW": 0.0,
+}
 
 
 class ResponseTrigger(Enum):
@@ -192,6 +208,11 @@ class ConversationMonitor:
             [int, list[BufferedMessage], ResponseTrigger],
             Awaitable[None],
         ],
+        *,
+        dynamic_lull: DynamicLullStrategy | None = None,
+        lull_timeout_min: float = 3.0,
+        lull_timeout_max: float = 30.0,
+        engagement_client: LLMClient | None = None,
     ) -> None:
         self._familiar_name = familiar_name
         self._aliases = aliases
@@ -201,8 +222,16 @@ class ConversationMonitor:
         self._llm_client = llm_client
         self._character_card = character_card
         self.on_respond = on_respond
+        self._dynamic_lull: DynamicLullStrategy = (
+            dynamic_lull if dynamic_lull is not None else DynamicLullStrategy.none
+        )
+        self._lull_timeout_min = lull_timeout_min
+        self._lull_timeout_max = lull_timeout_max
+        self._engagement_client = engagement_client
         self._buffers: dict[int, ChannelBuffer] = {}
         self._lull_tasks: set[asyncio.Task[None]] = set()
+        self._reply_counts: dict[int, int] = {}
+        self._engagement_scores: dict[int, float] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -291,6 +320,8 @@ class ConversationMonitor:
         buf = self._buffers.pop(channel_id, None)
         if buf is not None:
             self._cancel_lull_timer(buf)
+        self._reply_counts.pop(channel_id, None)
+        self._engagement_scores.pop(channel_id, None)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -309,10 +340,33 @@ class ConversationMonitor:
             buf.lull_timer_handle.cancel()
             buf.lull_timer_handle = None
 
+    def _compute_lull_timeout(self, channel_id: int) -> float:
+        """Compute lull timeout for *channel_id* based on dynamic_lull strategy.
+
+        ``none`` → static ``_lull_timeout``; others lerp between
+        ``_lull_timeout_max`` (disengaged) and ``_lull_timeout_min`` (engaged).
+        """
+        if self._dynamic_lull is DynamicLullStrategy.none:
+            return self._lull_timeout
+
+        reply_count = self._reply_counts.get(channel_id, 0)
+        reply_score = min(reply_count, _MAX_REPLY_ACTIVITY) / _MAX_REPLY_ACTIVITY
+        llm_score = self._engagement_scores.get(channel_id, 0.5)
+
+        if self._dynamic_lull is DynamicLullStrategy.reply_activity:
+            score = reply_score
+        elif self._dynamic_lull is DynamicLullStrategy.llm_engagement:
+            score = llm_score
+        else:  # combined
+            score = (reply_score + llm_score) / 2
+
+        spread = self._lull_timeout_min - self._lull_timeout_max
+        return self._lull_timeout_max + score * spread
+
     def _start_lull_timer(self, channel_id: int, buf: ChannelBuffer) -> None:
         loop = asyncio.get_event_loop()
         buf.lull_timer_handle = loop.call_later(
-            self._lull_timeout,
+            self._compute_lull_timeout(channel_id),
             self._schedule_lull_evaluation,
             channel_id,
         )
@@ -418,7 +472,58 @@ class ConversationMonitor:
         """Invoke on_respond with a snapshot of the buffer, then reset state."""
         snapshot = list(buf.buffer)
         self._reset_buffer(buf)
+
+        self._reply_counts[channel_id] = min(
+            self._reply_counts.get(channel_id, 0) + 1, _MAX_REPLY_ACTIVITY
+        )
+
+        if self._dynamic_lull in {
+            DynamicLullStrategy.llm_engagement,
+            DynamicLullStrategy.combined,
+        }:
+            self._schedule_engagement_check(channel_id, snapshot)
+
         await self.on_respond(channel_id, snapshot, trigger)
+
+    def _schedule_engagement_check(
+        self, channel_id: int, snapshot: list[BufferedMessage]
+    ) -> None:
+        """Schedule background engagement LLM call (fire-and-forget)."""
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(self._run_engagement_check(channel_id, snapshot))
+        self._lull_tasks.add(task)
+        task.add_done_callback(self._lull_tasks.discard)
+
+    async def _run_engagement_check(
+        self, channel_id: int, snapshot: list[BufferedMessage]
+    ) -> None:
+        """Call engagement LLM and update per-channel engagement score."""
+        if self._engagement_client is None:
+            return
+        buffer_text = _format_buffer(snapshot)
+        try:
+            reply = await self._engagement_client.chat(
+                [
+                    Message(role="system", content=_ENGAGEMENT_SYSTEM_PROMPT),
+                    Message(
+                        role="user",
+                        content=_ENGAGEMENT_USER_PROMPT.format(buffer=buffer_text),
+                    ),
+                ],
+            )
+        except Exception:
+            _logger.exception("engagement check failed channel=%s", channel_id)
+            return
+        stripped = reply.content.strip()
+        word = stripped.split()[0].upper().rstrip(".,!") if stripped else ""
+        score = _ENGAGEMENT_SCORE_MAP.get(word, 0.5)
+        self._engagement_scores[channel_id] = score
+        _logger.info(
+            "engagement channel=%s score=%.1f raw=%r",
+            channel_id,
+            score,
+            reply.content[:60],
+        )
 
     def _reset_buffer(self, buf: ChannelBuffer) -> None:
         """Reset all per-channel state after a response (or direct address)."""

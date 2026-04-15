@@ -179,6 +179,10 @@ class Familiar:
             llm_client=llm_clients["interjection_decision"],
             character_card=character_card,
             on_respond=_noop_respond,
+            dynamic_lull=character_config.dynamic_lull,
+            lull_timeout_min=character_config.lull_timeout_min,
+            lull_timeout_max=character_config.lull_timeout_max,
+            engagement_client=llm_clients["engagement_check"],
         )
 
         mood_evaluator = MoodEvaluator(

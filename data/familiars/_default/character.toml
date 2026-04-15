@@ -22,6 +22,9 @@ chattiness    = "Balanced — responds when the conversation is relevant"
 interjection  = "average"
 text_lull_timeout  = 10.0
 voice_lull_timeout = 5.0
+dynamic_lull       = "reply_activity"
+lull_timeout_min   = 3.0   # seconds — most-engaged floor
+lull_timeout_max   = 30.0  # seconds — least-engaged ceiling
 
 # --- Voice interruption handling (voice channels only) --------------------
 #
@@ -100,5 +103,11 @@ temperature = 0.5
 
 # Mood evaluator: classify emotional context of recent turns → interrupt bias.
 [llm.mood_eval]
+model       = "z-ai/glm-4.7-flash"
+temperature = 0.3
+
+# Dynamic lull engagement rater: rates conversation HIGH/MEDIUM/LOW.
+# Used only when dynamic_lull = "llm_engagement" or "combined".
+[llm.engagement_check]
 model       = "z-ai/glm-4.7-flash"
 temperature = 0.3

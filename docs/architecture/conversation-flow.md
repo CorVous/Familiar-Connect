@@ -84,6 +84,49 @@ For voice, **`voice_lull_timeout` is the only conversational pause** — the mon
 
 **Default:** `5.0`
 
+### Dynamic lull (`dynamic_lull`, `lull_timeout_min`, `lull_timeout_max`)
+
+The three dynamic lull settings let the text lull timeout shrink when a channel is engaged and grow when it is quiet.
+
+#### `dynamic_lull: str`
+
+Strategy for computing the effective lull timeout before each timer start.
+
+**Default:** `reply_activity`
+
+| Value            | Behaviour                                                   |
+|------------------|-------------------------------------------------------------|
+| `none`           | Static — always uses `text_lull_timeout`. Existing behaviour. |
+| `reply_activity` | Shorter timeout after more familiar replies. Zero extra LLM cost. |
+| `llm_engagement` | Background LLM call rates conversation HIGH/MEDIUM/LOW; score drives timeout. Uses `engagement_check` slot. |
+| `combined`       | Averages `reply_activity` and `llm_engagement` scores.      |
+
+#### `lull_timeout_min: float`
+
+Floor for the lull timeout (most-engaged end of the range), in seconds.
+
+**Default:** `3.0`
+
+#### `lull_timeout_max: float`
+
+Ceiling for the lull timeout (least-engaged end of the range), in seconds.
+
+**Default:** `30.0`
+
+#### How the timeout is computed
+
+For strategies other than `none`, the monitor derives an engagement score `s ∈ [0, 1]` (0 = disengaged, 1 = fully engaged) and lerps between the two extremes:
+
+```
+timeout = lull_timeout_max + s × (lull_timeout_min − lull_timeout_max)
+```
+
+- **`reply_activity`:** `s = min(reply_count, 10) / 10` where `reply_count` is the number of familiar replies in the channel since startup (capped at 10).
+- **`llm_engagement`:** `s` is the latest engagement score from the `engagement_check` LLM call (1.0 = HIGH, 0.5 = MEDIUM, 0.0 = LOW; defaults to 0.5 when no score yet).
+- **`combined`:** `s = (reply_score + llm_score) / 2`.
+
+The engagement check runs as a background task after each familiar response — no added latency on the response path. The updated score takes effect on the *next* lull timer start.
+
 ## Implementation
 
 ### `ConversationMonitor`

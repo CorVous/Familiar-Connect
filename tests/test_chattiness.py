@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from familiar_connect.chattiness import (
+    _MAX_REPLY_ACTIVITY,
     BufferedMessage,
     ChannelBuffer,
     ConversationMonitor,
@@ -28,7 +29,7 @@ from familiar_connect.chattiness import (
     _interjection_interval,
     is_direct_address,
 )
-from familiar_connect.config import Interjection
+from familiar_connect.config import DynamicLullStrategy, Interjection
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -759,3 +760,289 @@ class TestClearChannel:
     def test_clear_nonexistent_channel_is_noop(self) -> None:
         monitor, _ = _make_monitor()
         monitor.clear_channel(999)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Dynamic lull timeout
+# ---------------------------------------------------------------------------
+
+
+def _make_monitor_dynamic(
+    *,
+    dynamic_lull: DynamicLullStrategy = DynamicLullStrategy.none,
+    lull_timeout: float = 10.0,
+    lull_timeout_min: float = 3.0,
+    lull_timeout_max: float = 30.0,
+    engagement_client_reply: str | None = None,
+    side_model_reply: str = "NO",
+) -> tuple[
+    ConversationMonitor,
+    list[tuple[int, list[BufferedMessage], ResponseTrigger]],
+]:
+    """Build a monitor with dynamic lull strategy configured."""
+    calls: list[tuple[int, list[BufferedMessage], ResponseTrigger]] = []
+
+    async def _on_respond(  # noqa: RUF029
+        channel_id: int,
+        buffer: list[BufferedMessage],
+        trigger: ResponseTrigger,
+    ) -> None:
+        calls.append((channel_id, list(buffer), trigger))
+
+    llm_client = MagicMock()
+    llm_client.chat = AsyncMock(
+        return_value=Message(role="assistant", content=side_model_reply),
+    )
+
+    engagement_client: MagicMock | None = None
+    if engagement_client_reply is not None:
+        engagement_client = MagicMock()
+        engagement_client.chat = AsyncMock(
+            return_value=Message(role="assistant", content=engagement_client_reply),
+        )
+
+    monitor = ConversationMonitor(
+        familiar_name="aria",
+        aliases=[],
+        chattiness="Curious",
+        interjection=Interjection.average,
+        lull_timeout=lull_timeout,
+        llm_client=llm_client,
+        character_card="You are Aria.",
+        on_respond=_on_respond,
+        dynamic_lull=dynamic_lull,
+        lull_timeout_min=lull_timeout_min,
+        lull_timeout_max=lull_timeout_max,
+        engagement_client=engagement_client,
+    )
+    return monitor, calls
+
+
+class TestDynamicLullTimeout:
+    def test_none_strategy_returns_static_timeout(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.none,
+            lull_timeout=10.0,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        assert monitor._compute_lull_timeout(channel_id=1) == 10.0  # noqa: RUF069
+
+    def test_reply_activity_starts_at_max_timeout(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.reply_activity,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        # no replies yet — engagement score = 0.0 → timeout = max
+        assert monitor._compute_lull_timeout(channel_id=1) == 30.0  # noqa: RUF069
+
+    def test_reply_activity_decreases_timeout_with_replies(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.reply_activity,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        monitor._reply_counts[1] = 5
+        timeout = monitor._compute_lull_timeout(channel_id=1)
+        assert 3.0 < timeout < 30.0
+
+    def test_reply_activity_floors_at_lull_timeout_min(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.reply_activity,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        # saturate reply count at MAX
+        monitor._reply_counts[1] = 100
+        assert monitor._compute_lull_timeout(channel_id=1) == 3.0  # noqa: RUF069
+
+    def test_llm_engagement_uses_engagement_score_high(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.llm_engagement,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+            engagement_client_reply="HIGH",
+        )
+        monitor._engagement_scores[1] = 1.0
+        assert monitor._compute_lull_timeout(channel_id=1) == 3.0  # noqa: RUF069
+
+    def test_llm_engagement_uses_engagement_score_low(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.llm_engagement,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        monitor._engagement_scores[1] = 0.0
+        assert monitor._compute_lull_timeout(channel_id=1) == 30.0  # noqa: RUF069
+
+    def test_llm_engagement_defaults_to_neutral_when_no_score(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.llm_engagement,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        # no score set → defaults to 0.5 midpoint
+        timeout = monitor._compute_lull_timeout(channel_id=1)
+        assert timeout == 16.5  # 30 + 0.5 * (3 - 30) = 16.5  # noqa: RUF069
+
+    def test_combined_averages_both_signals(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.combined,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        # reply_score = 10/10 = 1.0, llm_score = 0.0 → avg = 0.5 → 16.5
+        monitor._reply_counts[1] = 10
+        monitor._engagement_scores[1] = 0.0
+        assert monitor._compute_lull_timeout(channel_id=1) == 16.5  # noqa: RUF069
+
+    def test_lull_timer_uses_dynamic_timeout(self) -> None:
+        """_start_lull_timer passes _compute_lull_timeout result to call_later."""
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.reply_activity,
+            lull_timeout=10.0,
+            lull_timeout_min=3.0,
+            lull_timeout_max=30.0,
+        )
+        monitor._reply_counts[1] = 10  # fully engaged → min timeout (3.0)
+
+        mock_handle = MagicMock()
+        mock_loop = MagicMock()
+        mock_loop.call_later.return_value = mock_handle
+        buf = monitor._get_or_create_buffer(1)
+
+        with patch("asyncio.get_event_loop", return_value=mock_loop):
+            monitor._start_lull_timer(1, buf)
+
+        expected = monitor._compute_lull_timeout(1)
+        mock_loop.call_later.assert_called_once_with(
+            expected,
+            monitor._schedule_lull_evaluation,
+            1,
+        )
+
+    def test_reply_count_increments_after_fire_respond(self) -> None:
+        """Each _fire_respond increments reply count for the channel."""
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.reply_activity,
+        )
+        buf = monitor._get_or_create_buffer(42)
+        buf.buffer.append(BufferedMessage(speaker="Bob", text="hi", timestamp=0.0))
+
+        asyncio.run(monitor._fire_respond(42, buf, ResponseTrigger.lull))
+
+        assert monitor._reply_counts.get(42, 0) == 1
+
+    def test_reply_count_caps_at_max(self) -> None:
+        """Reply count never exceeds _MAX_REPLY_ACTIVITY."""
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.reply_activity,
+        )
+        monitor._reply_counts[7] = _MAX_REPLY_ACTIVITY
+        buf = monitor._get_or_create_buffer(7)
+        buf.buffer.append(BufferedMessage(speaker="Bob", text="hi", timestamp=0.0))
+
+        asyncio.run(monitor._fire_respond(7, buf, ResponseTrigger.lull))
+
+        assert monitor._reply_counts[7] == _MAX_REPLY_ACTIVITY
+
+    def test_engagement_check_scheduled_after_respond_when_llm_engagement(
+        self,
+    ) -> None:
+        """Engagement check fires as background task for llm_engagement strategy."""
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.llm_engagement,
+            engagement_client_reply="HIGH",
+        )
+        buf = monitor._get_or_create_buffer(3)
+        buf.buffer.append(BufferedMessage(speaker="Bob", text="hello", timestamp=0.0))
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(monitor._fire_respond(3, buf, ResponseTrigger.lull))
+            # drain pending tasks (engagement check runs here)
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+
+        # engagement_client.chat should have been called
+        ec = monitor._engagement_client
+        assert ec is not None
+        cast(Any, ec.chat).assert_called_once()
+
+    def test_engagement_check_not_scheduled_for_reply_activity(self) -> None:
+        """No engagement LLM call when strategy is reply_activity."""
+        engagement_client = MagicMock()
+        engagement_client.chat = AsyncMock(
+            return_value=Message(role="assistant", content="HIGH"),
+        )
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.reply_activity,
+        )
+        # manually inject engagement client to detect if called
+        monitor._engagement_client = engagement_client
+
+        buf = monitor._get_or_create_buffer(4)
+        buf.buffer.append(BufferedMessage(speaker="Bob", text="hello", timestamp=0.0))
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(monitor._fire_respond(4, buf, ResponseTrigger.lull))
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+
+        engagement_client.chat.assert_not_called()
+
+    def test_engagement_score_updated_to_high(self) -> None:
+        """Engagement check parses HIGH → score 1.0."""
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.llm_engagement,
+            engagement_client_reply="HIGH",
+        )
+        buf = monitor._get_or_create_buffer(5)
+        buf.buffer.append(BufferedMessage(speaker="Bob", text="hello", timestamp=0.0))
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(monitor._fire_respond(5, buf, ResponseTrigger.lull))
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+
+        assert monitor._engagement_scores.get(5) == 1.0  # noqa: RUF069
+
+    def test_engagement_score_updated_to_low(self) -> None:
+        """Engagement check parses LOW → score 0.0."""
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.llm_engagement,
+            engagement_client_reply="LOW",
+        )
+        buf = monitor._get_or_create_buffer(6)
+        buf.buffer.append(BufferedMessage(speaker="Bob", text="hello", timestamp=0.0))
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(monitor._fire_respond(6, buf, ResponseTrigger.lull))
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+
+        assert monitor._engagement_scores.get(6) == 0.0  # noqa: RUF069
+
+    def test_clear_channel_removes_engagement_state(self) -> None:
+        monitor, _ = _make_monitor_dynamic(
+            dynamic_lull=DynamicLullStrategy.llm_engagement,
+        )
+        monitor._reply_counts[99] = 5
+        monitor._engagement_scores[99] = 0.8
+
+        monitor.clear_channel(99)
+
+        assert 99 not in monitor._reply_counts
+        assert 99 not in monitor._engagement_scores

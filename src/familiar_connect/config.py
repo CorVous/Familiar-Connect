@@ -98,6 +98,23 @@ class InterruptTolerance(Enum):
         }[self]
 
 
+class DynamicLullStrategy(Enum):
+    """Strategy for adjusting ``text_lull_timeout`` based on engagement.
+
+    | Value            | Description                                      |
+    |------------------|--------------------------------------------------|
+    | ``none``         | Static timeout; existing behavior.               |
+    | ``reply_activity`` | Shorter timeout after more familiar replies.   |
+    | ``llm_engagement`` | Shorter timeout when LLM rates conversation high. |
+    | ``combined``     | Average of reply_activity and llm_engagement.    |
+    """
+
+    none = "none"
+    reply_activity = "reply_activity"
+    llm_engagement = "llm_engagement"
+    combined = "combined"
+
+
 _DEFAULT_CHATTINESS = "Balanced — responds when the conversation is relevant"
 
 
@@ -111,6 +128,7 @@ LLM_SLOT_NAMES: frozenset[str] = frozenset(
         "memory_writer",
         "interjection_decision",
         "mood_eval",
+        "engagement_check",
     },
 )
 """Canonical LLM call-site slot names.
@@ -145,7 +163,11 @@ class CharacterConfig:
     :param chattiness: free-text personality trait fed to interjection
         evaluation prompt.
     :param text_lull_timeout: text-only; voice uses ``voice_lull_timeout``.
+        Used as-is when ``dynamic_lull = "none"``.
     :param voice_lull_timeout: debounce for Deepgram final-transcript stream.
+    :param dynamic_lull: strategy for varying lull timeout with engagement.
+    :param lull_timeout_min: floor (most-engaged) for dynamic lull, seconds.
+    :param lull_timeout_max: ceiling (least-engaged) for dynamic lull, seconds.
     """
 
     default_mode: ChannelMode = DEFAULT_CHANNEL_MODE
@@ -161,6 +183,9 @@ class CharacterConfig:
     interjection: Interjection = Interjection.average
     text_lull_timeout: float = 10.0
     voice_lull_timeout: float = 5.0
+    dynamic_lull: DynamicLullStrategy = DynamicLullStrategy.reply_activity
+    lull_timeout_min: float = 3.0
+    lull_timeout_max: float = 30.0
     interrupt_tolerance: InterruptTolerance = InterruptTolerance.average
     min_interruption_s: float = 2.0
     short_long_boundary_s: float = 30.0
@@ -321,6 +346,11 @@ def _parse_character_config(data: dict) -> CharacterConfig:
 
     text_lull_timeout = float(data.get("text_lull_timeout", 10.0))
     voice_lull_timeout = float(data.get("voice_lull_timeout", 5.0))
+    dynamic_lull = _parse_dynamic_lull(
+        data.get("dynamic_lull"), default=DynamicLullStrategy.reply_activity
+    )
+    lull_timeout_min = float(data.get("lull_timeout_min", 3.0))
+    lull_timeout_max = float(data.get("lull_timeout_max", 30.0))
 
     voice_raw = data.get("voice", {})
     if not isinstance(voice_raw, dict):
@@ -367,6 +397,9 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         interjection=interjection,
         text_lull_timeout=text_lull_timeout,
         voice_lull_timeout=voice_lull_timeout,
+        dynamic_lull=dynamic_lull,
+        lull_timeout_min=lull_timeout_min,
+        lull_timeout_max=lull_timeout_max,
         interrupt_tolerance=interrupt_tolerance,
         min_interruption_s=min_interruption_s,
         short_long_boundary_s=short_long_boundary_s,
@@ -542,6 +575,22 @@ def _parse_voice_interruption(
         raise ConfigError(msg)
 
     return tolerance, min_interruption_s, short_long_boundary_s
+
+
+def _parse_dynamic_lull(
+    raw: object, *, default: DynamicLullStrategy
+) -> DynamicLullStrategy:
+    if raw is None:
+        return default
+    if not isinstance(raw, str):
+        msg = f"dynamic_lull must be a string, got {type(raw).__name__}"
+        raise ConfigError(msg)
+    try:
+        return DynamicLullStrategy(raw)
+    except ValueError as exc:
+        valid = ", ".join(m.value for m in DynamicLullStrategy)
+        msg = f"unknown dynamic_lull strategy {raw!r}; valid options: {valid}"
+        raise ConfigError(msg) from exc
 
 
 def _parse_interjection(raw: object, *, default: Interjection) -> Interjection:

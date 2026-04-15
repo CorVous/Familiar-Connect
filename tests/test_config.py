@@ -21,6 +21,7 @@ from familiar_connect.config import (
     ChannelMode,
     CharacterConfig,
     ConfigError,
+    DynamicLullStrategy,
     Interjection,
     InterruptTolerance,
     channel_config_for_mode,
@@ -594,3 +595,105 @@ class TestCharacterConfigMemoryWriterFields:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.memory_writer_turn_threshold == 100
         assert cfg.memory_writer_idle_timeout == 1800.0  # noqa: RUF069
+
+
+# ---------------------------------------------------------------------------
+# DynamicLullStrategy enum and dynamic lull fields
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicLullStrategyEnum:
+    def test_has_four_values(self) -> None:
+        assert len(list(DynamicLullStrategy)) == 4
+
+    def test_value_strings(self) -> None:
+        assert DynamicLullStrategy("none") is DynamicLullStrategy.none
+        assert (
+            DynamicLullStrategy("reply_activity") is DynamicLullStrategy.reply_activity
+        )
+        assert (
+            DynamicLullStrategy("llm_engagement") is DynamicLullStrategy.llm_engagement
+        )
+        assert DynamicLullStrategy("combined") is DynamicLullStrategy.combined
+
+
+class TestCharacterConfigDynamicLullFields:
+    def test_defaults_when_file_absent(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        cfg = load_character_config(
+            tmp_path / "no-such-file.toml",
+            defaults_path=default_profile_path,
+        )
+        assert cfg.dynamic_lull is DynamicLullStrategy.reply_activity
+        assert cfg.lull_timeout_min == 3.0  # noqa: RUF069
+        assert cfg.lull_timeout_max == 30.0  # noqa: RUF069
+
+    def test_reads_dynamic_lull_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('dynamic_lull = "llm_engagement"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.dynamic_lull is DynamicLullStrategy.llm_engagement
+
+    def test_reads_none_strategy_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('dynamic_lull = "none"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.dynamic_lull is DynamicLullStrategy.none
+
+    def test_reads_lull_timeout_min_max_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("lull_timeout_min = 2.5\nlull_timeout_max = 45.0\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.lull_timeout_min == 2.5  # noqa: RUF069
+        assert cfg.lull_timeout_max == 45.0  # noqa: RUF069
+
+    def test_unknown_dynamic_lull_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('dynamic_lull = "turbo"\n')
+        with pytest.raises(ConfigError, match="turbo"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_all_strategies_load_from_toml(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        for strategy in DynamicLullStrategy:
+            path = tmp_path / f"character_{strategy.value}.toml"
+            path.write_text(f'dynamic_lull = "{strategy.value}"\n')
+            cfg = load_character_config(path, defaults_path=default_profile_path)
+            assert cfg.dynamic_lull is strategy
+
+    def test_engagement_check_slot_in_defaults(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        cfg = load_character_config(
+            tmp_path / "no-such-file.toml",
+            defaults_path=default_profile_path,
+        )
+        assert "engagement_check" in cfg.llm
+        assert cfg.llm["engagement_check"].model
+
+    def test_engagement_check_in_llm_slot_names(self) -> None:
+        assert "engagement_check" in LLM_SLOT_NAMES
