@@ -9,7 +9,7 @@
   ([portal](https://discord.com/developers/applications)) with the
   `message_content`, `messages`, and `voice_states` intents enabled
 - An OpenRouter API key
-- *(optional, voice only)* a Cartesia API key
+- *(optional, voice only)* Azure Cognitive Services key + region **or** a Cartesia API key
 
 ## Environment variables
 
@@ -26,8 +26,11 @@ OPENROUTER_API_KEY=<openrouter key>
 # pick the familiar to load (or pass --familiar on the CLI)
 FAMILIAR_ID=aria
 
-# optional — voice output secret. Voice id and model are now part of
-# character.toml under [tts], not .env.
+# Azure Speech credentials (required when provider="azure"):
+AZURE_SPEECH_KEY=<azure cognitive services key>
+AZURE_SPEECH_REGION=<azure region, e.g. eastus>
+
+# Cartesia credentials (required when provider="cartesia"):
 CARTESIA_API_KEY=<cartesia key>
 
 # optional — Deepgram transcription secret (voice channels only)

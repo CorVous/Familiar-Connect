@@ -16,6 +16,7 @@ The secrets and install selector the host machine needs to run the bot at all. S
 - `DISCORD_BOT` — Discord bot token
 - `OPENROUTER_API_KEY` — single key shared across every LLM call site
 - `CARTESIA_API_KEY` — Cartesia TTS key
+- `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` — Azure TTS credentials
 - `DEEPGRAM_API_KEY` — Deepgram STT key (optional; required for voice input — see [Voice input](voice-input.md))
 - Twitch client ID and OAuth token (optional)
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
@@ -32,7 +33,7 @@ Per-familiar configuration. The persona, behaviour knobs, pluggable component se
 - **Memory directory** — `memory/`, owned by `MemoryStore`. See [Memory](memory.md).
 - **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
 - **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.
-- **TTS voice** — `[tts]` section carries `voice_id`, `model`, and an optional `greetings` list. When the familiar joins a voice channel, a random greeting is selected from the list and played via TTS. Audio is cached to `data/cache/greetings/` (keyed by SHA-256 of provider+voice_id+greeting), so repeated joins with the same greeting read from disk without calling the TTS API. Empty `greetings` falls back to the hardcoded "Hello!".
+- **TTS voice** — `[tts]` section carries `provider` (``"azure"`` or ``"cartesia"``), voice selection (``azure_voice`` / ``cartesia_voice_id`` + ``cartesia_model``), and an optional ``greetings`` list. When the familiar joins a voice channel, a random greeting is selected from the list and played via TTS. Audio is cached to `data/cache/greetings/` (keyed by SHA-256 of provider+voice_id+greeting), so repeated joins with the same greeting read from disk without calling the TTS API. Empty ``greetings`` falls back to the hardcoded "Hello!".
 - **Memory writer** — `[memory_writer]` section with `turn_threshold` (default 50) and `idle_timeout` (default 1800.0s / 30 min). Controls when the post-session writer pass runs to summarise conversation history into long-term memory files.
 - **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`. Channels may also carry a `[typing_simulation]` table — see [Typing simulation](typing-simulation.md).
 - **Typing simulation** — `[typing_simulation]` section on `character.toml` and/or per-channel sidecar, layered over per-mode defaults. Controls chunk-based delivery and mid-flight cancellation on text channels. See [Typing simulation](typing-simulation.md).

@@ -128,13 +128,27 @@ class LLMSlotConfig:
     temperature: float | None = None
 
 
+_TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia"})
+"""Valid ``[tts].provider`` values."""
+
+DEFAULT_AZURE_TTS_VOICE = "en-US-AmberNeural"
+"""Azure Neural voice used when ``[tts].azure_voice`` is unset."""
+
+
 @dataclass(frozen=True)
 class TTSConfig:
     """Text-to-speech config loaded from the ``[tts]`` TOML section."""
 
-    voice_id: str | None = None
-    model: str | None = None
+    provider: str = "azure"
+    """Active TTS provider. ``"azure"`` or ``"cartesia"``."""
+    cartesia_voice_id: str | None = None
+    """Cartesia voice UUID (``provider = "cartesia"`` only)."""
+    cartesia_model: str | None = None
+    """Cartesia model name (``provider = "cartesia"`` only)."""
+    azure_voice: str = DEFAULT_AZURE_TTS_VOICE
+    """Azure Neural voice name (``provider = "azure"`` only)."""
     greetings: list[str] = field(default_factory=list)
+    """Random greeting audio played when the familiar joins a voice channel."""
 
 
 @dataclass(frozen=True)
@@ -658,14 +672,30 @@ def _resolve_typing_simulation(
 
 def _parse_tts_config(raw: dict) -> TTSConfig:
     """Parse and validate the ``[tts]`` section into a typed config."""
-    voice_id = raw.get("voice_id")
-    if voice_id is not None and not isinstance(voice_id, str):
-        msg = f"[tts].voice_id must be a string, got {type(voice_id).__name__}"
+    provider_raw = raw.get("provider", "azure")
+    if not isinstance(provider_raw, str):
+        msg = f"[tts].provider must be a string, got {type(provider_raw).__name__}"
         raise ConfigError(msg)
-    model = raw.get("model")
-    if model is not None and not isinstance(model, str):
-        msg = f"[tts].model must be a string, got {type(model).__name__}"
+    if provider_raw not in _TTS_PROVIDERS:
+        valid = ", ".join(sorted(_TTS_PROVIDERS))
+        msg = f"[tts].provider {provider_raw!r} unknown; valid options: {valid}"
         raise ConfigError(msg)
+
+    cartesia_voice_id = raw.get("cartesia_voice_id")
+    if cartesia_voice_id is not None and not isinstance(cartesia_voice_id, str):
+        msg = "[tts].cartesia_voice_id must be a string"
+        raise ConfigError(msg)
+
+    cartesia_model = raw.get("cartesia_model")
+    if cartesia_model is not None and not isinstance(cartesia_model, str):
+        msg = "[tts].cartesia_model must be a string"
+        raise ConfigError(msg)
+
+    azure_voice_raw = raw.get("azure_voice", DEFAULT_AZURE_TTS_VOICE)
+    if not isinstance(azure_voice_raw, str) or not azure_voice_raw:
+        msg = "[tts].azure_voice must be a non-empty string"
+        raise ConfigError(msg)
+
     greetings_raw = raw.get("greetings", [])
     if not isinstance(greetings_raw, list):
         msg = (
@@ -674,7 +704,14 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         )
         raise ConfigError(msg)
     greetings = [str(g) for g in greetings_raw]
-    return TTSConfig(voice_id=voice_id, model=model, greetings=greetings)
+
+    return TTSConfig(
+        provider=provider_raw,
+        cartesia_voice_id=cartesia_voice_id,
+        cartesia_model=cartesia_model,
+        azure_voice=azure_voice_raw,
+        greetings=greetings,
+    )
 
 
 def _parse_voice_interruption(
