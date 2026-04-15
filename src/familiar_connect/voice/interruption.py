@@ -559,8 +559,17 @@ class InterruptionDetector:
                 if tracker.playback_start_time is not None:
                     elapsed_ms = (self._clock() - tracker.playback_start_time) * 1000
                     tracker.interruption_elapsed_ms = elapsed_ms
-                    _, self._remaining_timestamps = split_at_elapsed(
+                    delivered, remaining_ts = split_at_elapsed(
                         tracker.timestamps, elapsed_ms
+                    )
+                    self._remaining_timestamps = remaining_ts
+                    _logger.info(
+                        "yield split: elapsed=%.0fms words=%d"
+                        " → delivered=%d remaining=%d",
+                        elapsed_ms,
+                        len(tracker.timestamps),
+                        len(delivered),
+                        len(remaining_ts),
                     )
                 starter = self._burst_starter_id
                 tracker.interrupt_starter_name = (

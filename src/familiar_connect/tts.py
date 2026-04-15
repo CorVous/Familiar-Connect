@@ -286,9 +286,11 @@ class AzureTTSClient:
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
             audio: bytes = result.audio_data
             _logger.info(
-                "azure tts: %d words, audio=%d bytes",
+                "azure tts: %d words, audio=%d bytes, timing=%.0fms→%.0fms",
                 len(word_timestamps),
                 len(audio),
+                word_timestamps[0].start_ms if word_timestamps else 0.0,
+                word_timestamps[-1].end_ms if word_timestamps else 0.0,
             )
             return TTSResult(audio=audio, timestamps=word_timestamps)
 
