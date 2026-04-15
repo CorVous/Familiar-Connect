@@ -13,6 +13,7 @@ import contextlib
 import dataclasses
 import io
 import logging
+import random
 import time
 from typing import TYPE_CHECKING, cast
 
@@ -44,11 +45,23 @@ from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_p
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from familiar_connect.config import TTSConfig
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
     from familiar_connect.tts import WordTimestamp
 
 _logger = logging.getLogger(__name__)
+
+
+DEFAULT_GREETING = "Hello!"
+"""Fallback spoken on voice-channel join when no ``[tts].greetings`` set."""
+
+
+def _pick_greeting(tts_config: TTSConfig) -> str:
+    """Pick a random greeting; fall back to :data:`DEFAULT_GREETING`."""
+    if not tts_config.greetings:
+        return DEFAULT_GREETING
+    return random.choice(tts_config.greetings)  # noqa: S311 — cosmetic, not security
 
 
 def _timestamps_to_text(timestamps: list[WordTimestamp]) -> str:
@@ -592,8 +605,12 @@ async def subscribe_my_voice(
     )
 
     if familiar.tts_client is not None:
+        greeting = _pick_greeting(familiar.config.tts)
         try:
-            tts_result = await familiar.tts_client.synthesize("Hello!")
+            tts_result = familiar.greeting_cache.get(greeting)
+            if tts_result is None:
+                tts_result = await familiar.tts_client.synthesize(greeting)
+                familiar.greeting_cache[greeting] = tts_result
             stereo = mono_to_stereo(tts_result.audio)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
         except Exception:

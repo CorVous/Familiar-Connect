@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -32,6 +33,8 @@ import httpx
 import pytest
 
 from familiar_connect.bot import (
+    DEFAULT_GREETING,
+    _pick_greeting,
     _run_text_response,
     _run_voice_response,
     create_bot,
@@ -44,7 +47,7 @@ from familiar_connect.bot import (
     unsubscribe_voice,
 )
 from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
-from familiar_connect.config import LLM_SLOT_NAMES, ChannelMode
+from familiar_connect.config import LLM_SLOT_NAMES, ChannelMode, TTSConfig
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
@@ -2814,3 +2817,94 @@ class TestOnMessageCancellationHook:
         # no active tracker; on_message should flow through without error
         asyncio.run(on_message(msg, familiar))
         mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Voice-join greetings
+# ---------------------------------------------------------------------------
+
+
+class TestPickGreeting:
+    """_pick_greeting chooses from ``[tts].greetings`` or falls back."""
+
+    def test_empty_greetings_returns_default(self) -> None:
+        cfg = TTSConfig()
+        assert _pick_greeting(cfg) == DEFAULT_GREETING
+        assert DEFAULT_GREETING == "Hello!"
+
+    def test_picks_from_configured_list(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = TTSConfig(greetings=("Hi", "Yo", "Sup"))
+
+        def _second(seq: object) -> str:
+            return cast("tuple[str, ...]", seq)[1]
+
+        monkeypatch.setattr("familiar_connect.bot.random.choice", _second)
+        assert _pick_greeting(cfg) == "Yo"
+
+    def test_random_choice_is_a_member(self) -> None:
+        cfg = TTSConfig(greetings=("Hi", "Yo", "Sup"))
+        for _ in range(20):
+            assert _pick_greeting(cfg) in cfg.greetings
+
+
+class TestGreetingCache:
+    """subscribe_my_voice caches synthesized greetings across joins."""
+
+    def _run_join(
+        self,
+        familiar: Familiar,
+        *,
+        channel_id: int,
+    ) -> None:
+        ctx = _make_voice_ctx(channel_id=channel_id, guild_id=999)
+        with patch(
+            "familiar_connect.bot.start_pipeline",
+            new_callable=AsyncMock,
+            return_value=MagicMock(tagged_audio_queue=MagicMock()),
+        ):
+            asyncio.run(subscribe_my_voice(ctx, familiar))
+
+    def test_first_join_synthesizes_and_stores(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        familiar.config = dataclasses.replace(
+            familiar.config,
+            tts=TTSConfig(greetings=("Hey!",)),
+        )
+        tts_mock = MagicMock()
+        result = TTSResult(audio=b"\x00" * 4, timestamps=[])
+        tts_mock.synthesize = AsyncMock(return_value=result)
+        familiar.tts_client = tts_mock  # type: ignore[assignment]
+
+        self._run_join(familiar, channel_id=9000)
+
+        tts_mock.synthesize.assert_awaited_once_with("Hey!")
+        assert familiar.greeting_cache == {"Hey!": result}
+
+    def test_second_join_reuses_cache(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        familiar.config = dataclasses.replace(
+            familiar.config,
+            tts=TTSConfig(greetings=("Hey!",)),
+        )
+        tts_mock = MagicMock()
+        result = TTSResult(audio=b"\x00" * 4, timestamps=[])
+        tts_mock.synthesize = AsyncMock(return_value=result)
+        familiar.tts_client = tts_mock  # type: ignore[assignment]
+
+        # First join populates cache.
+        self._run_join(familiar, channel_id=9000)
+
+        # Second join on a different channel exercises the cache.
+        self._run_join(familiar, channel_id=9001)
+
+        # Exactly one synth call across two joins.
+        assert tts_mock.synthesize.await_count == 1

@@ -189,6 +189,20 @@ in `character.toml`. Default is `"azure"`.
 Pipeline: LLM text → TTS (Azure SDK / Cartesia WebSocket) → PCM →
 resample to 48kHz Opus → Discord voice playback.
 
+**Voice-join greeting.** When the familiar joins a voice channel via
+`/subscribe_my_voice`, it speaks a short greeting. Set a pool in
+`character.toml`:
+
+```toml
+[tts]
+greetings = ["Hello!", "Hey there!", "Mornin'!"]
+```
+
+One line is picked at random per join. Empty/missing list falls back
+to `"Hello!"`. Each distinct line is synthesised once and cached
+in-process for the lifetime of the bot — changing voice or model
+requires a restart, which naturally drops the cache.
+
 ### Voice interruption
 
 When a user speaks during an active voice response, `InterruptionDetector`

@@ -268,6 +268,56 @@ class TestLoadCharacterConfig:
         assert cfg.tts.voice_id == "user-voice"
         assert cfg.tts.model == "sonic-4"
 
+    def test_tts_greetings_default_empty(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.greetings == ()
+
+    def test_tts_greetings_parsed_as_tuple(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\ngreetings = ["Hi", "Yo"]\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.greetings == ("Hi", "Yo")
+
+    def test_tts_greetings_rejects_non_list(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\ngreetings = "Hi"\n')
+        with pytest.raises(ConfigError, match=r"greetings must be a list"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tts_greetings_rejects_non_string_entry(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\ngreetings = ["Hi", 42]\n')
+        with pytest.raises(ConfigError, match=r"greetings\[1\] must be a string"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tts_greetings_rejects_empty_string(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\ngreetings = ["Hi", ""]\n')
+        with pytest.raises(ConfigError, match=r"greetings\[1\] must be non-empty"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_defaults_populate_every_llm_slot(
         self,
         tmp_path: Path,

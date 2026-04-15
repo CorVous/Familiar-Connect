@@ -83,6 +83,9 @@ provider    = "azure"
 azure_voice = "en-US-AmberNeural"
 voice_id    = "999df508-4de5-40a7-8bd3-8c12f678c284"
 model       = "sonic-3"
+# Spoken on voice-channel join; one picked at random. Empty → "Hello!".
+# Each distinct line is synthesised once and cached in-process.
+# greetings = ["Hello!", "Hey there!", "Mornin'!"]
 
 # --- LLM slots -------------------------------------------------------------
 #

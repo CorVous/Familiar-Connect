@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     )
     from familiar_connect.llm import LLMClient
     from familiar_connect.transcription import DeepgramTranscriber
-    from familiar_connect.tts import AzureTTSClient, CartesiaTTSClient
+    from familiar_connect.tts import AzureTTSClient, CartesiaTTSClient, TTSResult
 
 
 @dataclass
@@ -97,6 +97,13 @@ class Familiar:
     extras: dict[str, object] = field(default_factory=dict)
     """scratch space for later additions (e.g. Twitch client) that don't
     justify a dedicated field yet"""
+    greeting_cache: dict[str, TTSResult] = field(default_factory=dict)
+    """Synthesised voice-join greetings keyed by greeting text.
+
+    Populated on first join, reused across subsequent joins. Lives
+    for process lifetime; voice/model changes require a restart
+    which naturally drops the cache.
+    """
 
     # ------------------------------------------------------------------
     # Construction
