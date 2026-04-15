@@ -49,13 +49,20 @@ The provider's internal loop has its own iteration cap; the deadline
 exists so a runaway agent loop never blocks the reply.
 """
 
-DEFAULT_MAX_ITERATIONS = 5
+DEFAULT_MAX_ITERATIONS = 3
 """Maximum number of LLM calls per contribute() invocation.
 
-Hit when the model keeps emitting tool calls without ever returning
-an ANSWER. After the cap, the provider gives up and returns no
-contribution; the pipeline gets one fewer Contribution rather than
-a stalled reply.
+Lowered from 5: with forced-answer on the final iteration plus
+redundant-call bail-out, three richer iterations beat five flailing
+ones. If even the forced-answer turn doesn't emit ``ANSWER:``, the
+provider gives up and returns no contribution.
+"""
+
+FORCED_ANSWER_MARKER = "FORCED_ANSWER"
+"""Sentinel substring in the forced-answer prompt.
+
+Tests assert on this to distinguish the forced-final prompt from the
+normal iterative one without depending on the full prose template.
 """
 
 
@@ -95,6 +102,26 @@ Conversation so far:
 What's next?"""
 
 
+_FORCED_ANSWER_PROMPT_TEMPLATE = """\
+You are searching the familiar's memory directory to find context relevant
+to the current conversation. You have already used your tool-call budget.
+This is your FINAL turn — emit ANSWER now, based on whatever you have seen
+so far. NO MORE TOOL CALLS.
+
+Reply with EXACTLY ONE LINE of the shape:
+
+    ANSWER: <relevant context, or an empty string if nothing useful was found>
+
+The current speaker is {speaker}. The user said:
+
+    {utterance}
+
+Conversation so far:
+{scratchpad}
+
+FORCED_ANSWER: emit ANSWER now."""
+
+
 _TOOL_LINE_PREFIX = "TOOL:"
 _ANSWER_LINE_PREFIX = "ANSWER:"
 _TOOL_RESULT_PREFIX = "TOOL_RESULT"
@@ -129,15 +156,27 @@ class ContentSearchProvider:
         - The model emits ANSWER with non-empty text → one
           Contribution at ``Layer.content``.
         - The model emits ANSWER with empty text → no contribution.
-        - The model never emits ANSWER within ``max_iterations`` →
-          no contribution; logged.
+        - Final iteration swaps to a forced-answer prompt so a stalling
+          model gets one last chance to emit best-effort ANSWER.
+        - Repeating a (tool, args) pair triggers early forced-answer —
+          the redundant call is NOT executed.
         - The model emits a malformed line → that text is treated
           as the final answer (graceful fallback).
         """
         scratchpad: list[str] = []
+        seen_tool_calls: set[tuple[str, str]] = set()
+        redundancy_triggered = False
 
         for iteration in range(self._max_iterations):
-            prompt = _SYSTEM_PROMPT_TEMPLATE.format(
+            is_final = iteration == self._max_iterations - 1
+            use_forced_prompt = is_final or redundancy_triggered
+
+            template = (
+                _FORCED_ANSWER_PROMPT_TEMPLATE
+                if use_forced_prompt
+                else _SYSTEM_PROMPT_TEMPLATE
+            )
+            prompt = template.format(
                 speaker=request.speaker or "(unknown)",
                 utterance=request.utterance,
                 scratchpad="\n".join(scratchpad) if scratchpad else "(none yet)",
@@ -151,7 +190,25 @@ class ContentSearchProvider:
             if parsed.kind == "answer":
                 return self._answer_to_contribution(parsed.text)
 
+            if use_forced_prompt:
+                # forced turn: no more tools. A fallback (malformed) is
+                # still best-effort surfaced; a TOOL response means the
+                # model ignored the instruction — give up cleanly.
+                if parsed.kind == "fallback":
+                    return self._answer_to_contribution(parsed.text)
+                break
+
             if parsed.kind == "tool":
+                call_key = (parsed.tool, _canonicalise_args(parsed.args))
+                if call_key in seen_tool_calls:
+                    _logger.info(
+                        "content_search: redundant tool call %s; "
+                        "skipping execution, forcing answer",
+                        parsed.tool,
+                    )
+                    redundancy_triggered = True
+                    continue
+                seen_tool_calls.add(call_key)
                 tool_result = self._execute_tool(parsed.tool, parsed.args)
                 scratchpad.extend((
                     f"{_TOOL_LINE_PREFIX} {parsed.raw}",
@@ -271,6 +328,11 @@ class _ParsedResponse:
         self.tool = tool
         self.args = args or {}
         self.raw = raw
+
+
+def _canonicalise_args(args: dict[str, Any]) -> str:
+    """Stable string key for (tool, args) dedup — sorted JSON."""
+    return json.dumps(args, sort_keys=True, default=str)
 
 
 def _parse_response(response: str) -> _ParsedResponse:

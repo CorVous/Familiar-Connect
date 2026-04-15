@@ -23,6 +23,8 @@ import pytest
 from familiar_connect.context.protocols import ContextProvider
 from familiar_connect.context.providers.content_search import (
     CONTENT_SEARCH_PRIORITY,
+    DEFAULT_MAX_ITERATIONS,
+    FORCED_ANSWER_MARKER,
     ContentSearchProvider,
 )
 from familiar_connect.context.types import (
@@ -265,7 +267,12 @@ class TestIterationCap:
     async def test_max_iterations_returns_no_contribution(
         self, store: MemoryStore
     ) -> None:
-        """A model that never emits ANSWER is cut off cleanly."""
+        """A model that never emits ANSWER is cut off cleanly.
+
+        Even with forced-answer on the final iteration, a model that
+        stubbornly keeps emitting TOOL returns the empty contribution
+        and the warning log fires.
+        """
         store.write_file("notes.md", "x")
         forever = ['TOOL: {"tool": "list_dir", "args": {}}'] * 10
         side = _ScriptedLLMClient(forever)
@@ -276,6 +283,136 @@ class TestIterationCap:
         assert contributions == []
         # Exactly max_iterations side-model calls.
         assert len(side.calls) == 3
+
+
+class TestDefaultMaxIterations:
+    def test_default_lowered_to_three(self) -> None:
+        """Default iteration cap lowered to 3.
+
+        Three flailing tool calls don't blow the budget before the
+        forced-answer iteration fires.
+        """
+        assert DEFAULT_MAX_ITERATIONS == 3
+
+
+class TestForcedAnswerOnFinalIteration:
+    @pytest.mark.asyncio
+    async def test_final_iteration_prompt_forbids_more_tools(
+        self, store: MemoryStore
+    ) -> None:
+        """On the last iteration the prompt is swapped to 'emit ANSWER now'."""
+        side = _ScriptedLLMClient([
+            'TOOL: {"tool": "list_dir", "args": {}}',
+            'TOOL: {"tool": "glob", "args": {"pattern": "*"}}',
+            "ANSWER: best guess from what I saw.",
+        ])
+        provider = ContentSearchProvider(store=store, llm_client=side, max_iterations=3)
+        contribs = await provider.contribute(_request())
+        # Final prompt (index 2 since 3 calls) uses the forced-answer marker.
+        final_prompt = side.prompt_at(2)
+        assert FORCED_ANSWER_MARKER in final_prompt, (
+            "final iteration should use the forced-answer prompt"
+        )
+        # First and second prompts use the normal prompt (not forced).
+        assert FORCED_ANSWER_MARKER not in side.prompt_at(0)
+        assert FORCED_ANSWER_MARKER not in side.prompt_at(1)
+        assert len(contribs) == 1
+        assert "best guess" in contribs[0].text
+
+    @pytest.mark.asyncio
+    async def test_forced_answer_surfaces_best_effort_when_model_cooperates(
+        self, store: MemoryStore
+    ) -> None:
+        """With forced-answer, the model's last reply becomes the contribution."""
+        side = _ScriptedLLMClient([
+            'TOOL: {"tool": "list_dir", "args": {}}',
+            'TOOL: {"tool": "glob", "args": {"pattern": "**/*.md"}}',
+            "ANSWER: Alice mentioned ska, couldn't find anything more specific.",
+        ])
+        provider = ContentSearchProvider(store=store, llm_client=side, max_iterations=3)
+        contribs = await provider.contribute(_request())
+        assert len(contribs) == 1
+        assert "ska" in contribs[0].text
+
+
+class TestRedundantToolCallBailOut:
+    @pytest.mark.asyncio
+    async def test_repeated_tool_args_jumps_to_forced_answer(
+        self, store: MemoryStore
+    ) -> None:
+        """Repeating a (tool, args) pair bails out early to the forced prompt.
+
+        Saves an LLM call vs running the iteration cap down the full
+        length.
+        """
+        side = _ScriptedLLMClient([
+            'TOOL: {"tool": "grep", "args": {"pattern": "foo"}}',
+            # identical call — redundant
+            'TOOL: {"tool": "grep", "args": {"pattern": "foo"}}',
+            "ANSWER: found nothing interesting.",
+        ])
+        provider = ContentSearchProvider(store=store, llm_client=side, max_iterations=5)
+        contribs = await provider.contribute(_request())
+        assert len(contribs) == 1
+        # 3 calls total: normal, redundant detection, forced answer.
+        assert len(side.calls) == 3
+        # Third call uses forced-answer prompt.
+        assert FORCED_ANSWER_MARKER in side.prompt_at(2)
+        # Second call was still the normal prompt (redundancy is
+        # detected on parse, not on prompt build).
+        assert FORCED_ANSWER_MARKER not in side.prompt_at(1)
+
+    @pytest.mark.asyncio
+    async def test_same_tool_different_args_not_redundant(
+        self, store: MemoryStore
+    ) -> None:
+        """Same tool name but different args is a legitimate different call."""
+        store.write_file("a.md", "apple")
+        store.write_file("b.md", "banana")
+        side = _ScriptedLLMClient([
+            'TOOL: {"tool": "read_file", "args": {"path": "a.md"}}',
+            'TOOL: {"tool": "read_file", "args": {"path": "b.md"}}',
+            "ANSWER: saw both fruits.",
+        ])
+        provider = ContentSearchProvider(store=store, llm_client=side, max_iterations=5)
+        contribs = await provider.contribute(_request())
+        # All three calls ran; no early bail-out.
+        assert len(contribs) == 1
+        assert len(side.calls) == 3
+        # Third prompt is the normal one — max_iterations=5 means iter 2
+        # is not the final iteration and no redundancy was detected.
+        assert FORCED_ANSWER_MARKER not in side.prompt_at(2)
+        # Both file contents appear in the third prompt (proving both tools ran).
+        third = side.prompt_at(2)
+        assert "apple" in third
+        assert "banana" in third
+
+    @pytest.mark.asyncio
+    async def test_redundancy_does_not_re_execute_tool(
+        self, store: MemoryStore
+    ) -> None:
+        """On redundancy detection, the tool is NOT re-executed.
+
+        If the model keeps asking for the same grep, we shouldn't keep
+        running it — the result would be identical.
+        """
+        store.write_file("notes.md", "content")
+        side = _ScriptedLLMClient([
+            'TOOL: {"tool": "read_file", "args": {"path": "notes.md"}}',
+            'TOOL: {"tool": "read_file", "args": {"path": "notes.md"}}',
+            "ANSWER: fine.",
+        ])
+        provider = ContentSearchProvider(store=store, llm_client=side, max_iterations=5)
+        await provider.contribute(_request())
+        # The second prompt should contain the file content once (from iter 0);
+        # the third prompt (forced) should not have duplicated tool results.
+        second = side.prompt_at(1)
+        third = side.prompt_at(2)
+        # 'content' should appear exactly once in the scratchpad of the
+        # second prompt, and the third prompt's scratchpad should NOT
+        # have grown (no extra TOOL_RESULT block from the redundant call).
+        assert second.count("TOOL_RESULT") == 1
+        assert third.count("TOOL_RESULT") == 1
 
 
 class TestErrorRecovery:

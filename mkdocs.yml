@@ -64,6 +64,9 @@ nav:
   - Architecture:
       - architecture/overview.md
       - architecture/context-pipeline.md
+      - architecture/message-flow.md
+      - architecture/chattiness-fsm.md
+      - architecture/concurrency-model.md
       - architecture/memory.md
       - architecture/configuration-model.md
       - architecture/conversation-flow.md

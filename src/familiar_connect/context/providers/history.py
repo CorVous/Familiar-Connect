@@ -6,9 +6,14 @@ Emits up to two contributions per request:
 - ``history_summary`` — rolling LLM-built summary of older turns *globally*,
   cached by ``last_summarised_id`` and rebuilt only when stale.
 
-Soft deadline on the summariser (shorter than the pipeline deadline) ensures
-the recent-history layer always returns even when the model stalls. On
-timeout or error, falls back to stale cache, then to nothing.
+Summariser runs **off the critical path**: on cache miss or stale cache,
+``contribute`` returns the current cache (empty or stale) immediately and
+schedules a background ``asyncio.Task`` to rebuild. The fresh value lands
+on the next turn. Soft deadline on the background task guards against
+runaway stalls. Dedupe is per provider instance (one task per
+``(kind, familiar_id, channel_id, target_max_id)`` key). Familiar rebuilds
+the provider per turn, so cross-turn duplicate refreshes are possible but
+bounded — SQLite serialises cache writes and the later write wins.
 
 See docs/architecture/context-pipeline.md and
 docs/architecture/configuration-model.md for the hybrid per-channel /
@@ -19,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.budget import estimate_tokens
@@ -27,6 +32,8 @@ from familiar_connect.context.types import Contribution, Layer
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from familiar_connect.context.types import ContextRequest
     from familiar_connect.history.store import (
         HistoryStore,
@@ -34,6 +41,8 @@ if TYPE_CHECKING:
         OtherChannelInfo,
     )
     from familiar_connect.llm import LLMClient
+
+RefreshKey = tuple[Any, ...]
 
 
 _logger = logging.getLogger(__name__)
@@ -139,6 +148,9 @@ class HistoryProvider:
         self._summary_lag = summary_lag if summary_lag is not None else window_size
         self._mode = mode
         self._summary_timeout_s = summary_timeout_s
+        # instance-local dedupe map; per-turn rebuild means cross-turn
+        # dedupe is best-effort (see module docstring).
+        self._pending_refresh: dict[RefreshKey, asyncio.Task[None]] = {}
 
     async def contribute(
         self,
@@ -195,6 +207,7 @@ class HistoryProvider:
         request: ContextRequest,
         target_max_id: int,
     ) -> str:
+        """Return cache now; schedule background refresh on miss/stale."""
         cached = self._store.get_summary(
             familiar_id=request.familiar_id,
             channel_id=request.channel_id,
@@ -202,26 +215,15 @@ class HistoryProvider:
         if cached is not None and cached.last_summarised_id >= target_max_id:
             return cached.summary_text
 
-        # cache missing or stale — rebuild under soft deadline; on any
-        # failure, fall back to whatever the cache has
-        try:
-            async with asyncio.timeout(self._summary_timeout_s):
-                return await self._build_summary(request, target_max_id)
-        except TimeoutError:
-            _logger.warning(
-                "history summariser timed out after %.3fs for "
-                "familiar=%s channel=%s; falling back to cache",
-                self._summary_timeout_s,
-                request.familiar_id,
-                request.channel_id,
-            )
-        except Exception as exc:  # noqa: BLE001 — isolation by design
-            _logger.warning(
-                "history summariser raised %s: %s; falling back to cache",
-                type(exc).__name__,
-                exc,
-            )
-
+        # cache missing or stale — fire-and-forget refresh, return
+        # whatever the cache has now (possibly empty) immediately
+        key: RefreshKey = (
+            "summary",
+            request.familiar_id,
+            request.channel_id,
+            target_max_id,
+        )
+        self._schedule_refresh(key, self._refresh_summary(request, target_max_id))
         return cached.summary_text if cached is not None else ""
 
     async def _build_summary(
@@ -302,7 +304,7 @@ class HistoryProvider:
         info: OtherChannelInfo,
         viewer_mode_desc: str,
     ) -> str:
-        """Return a cross-context summary for *info*, using the cache when fresh."""
+        """Return cache now; schedule background refresh on miss/stale."""
         assert self._mode is not None  # noqa: S101
         cached = self._store.get_cross_context(
             familiar_id=request.familiar_id,
@@ -312,23 +314,89 @@ class HistoryProvider:
         if cached is not None and cached.source_last_id >= info.latest_id:
             return cached.summary_text
 
-        # cache miss or stale — build via side model
+        # cache miss or stale — fire-and-forget refresh
+        key: RefreshKey = (
+            "cross",
+            request.familiar_id,
+            self._mode.value,
+            info.channel_id,
+            info.latest_id,
+        )
+        self._schedule_refresh(
+            key,
+            self._refresh_cross_context(request, info, viewer_mode_desc),
+        )
+        return cached.summary_text if cached is not None else ""
+
+    def _schedule_refresh(
+        self,
+        key: RefreshKey,
+        coro: Coroutine[Any, Any, None],
+    ) -> None:
+        """Schedule *coro* as a background task unless one already in flight for *key*.
+
+        Dedupe is per-instance; see module docstring for cross-turn caveat.
+        """
+        if key in self._pending_refresh:
+            coro.close()  # dedupe; identical refresh already running
+            return
+        task = asyncio.create_task(coro)
+        self._pending_refresh[key] = task
+        task.add_done_callback(
+            lambda _t, k=key: self._pending_refresh.pop(k, None),
+        )
+
+    async def _refresh_summary(
+        self,
+        request: ContextRequest,
+        target_max_id: int,
+    ) -> None:
+        """Background summariser refresh under soft deadline.
+
+        Errors logged, swallowed.
+        """
         try:
             async with asyncio.timeout(self._summary_timeout_s):
-                return await self._build_cross_context(request, info, viewer_mode_desc)
+                await self._build_summary(request, target_max_id)
         except TimeoutError:
             _logger.warning(
-                "cross-context summariser timed out for channel=%s",
-                info.channel_id,
+                "history summariser background refresh timed out after %.3fs "
+                "for familiar=%s channel=%s",
+                self._summary_timeout_s,
+                request.familiar_id,
+                request.channel_id,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — isolation by design
             _logger.warning(
-                "cross-context summariser raised %s: %s",
+                "history summariser background refresh raised %s: %s",
                 type(exc).__name__,
                 exc,
             )
 
-        return cached.summary_text if cached is not None else ""
+    async def _refresh_cross_context(
+        self,
+        request: ContextRequest,
+        info: OtherChannelInfo,
+        viewer_mode_desc: str,
+    ) -> None:
+        """Background cross-context refresh under soft deadline.
+
+        Errors logged, swallowed.
+        """
+        try:
+            async with asyncio.timeout(self._summary_timeout_s):
+                await self._build_cross_context(request, info, viewer_mode_desc)
+        except TimeoutError:
+            _logger.warning(
+                "cross-context summariser background refresh timed out for channel=%s",
+                info.channel_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "cross-context summariser background refresh raised %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     async def _build_cross_context(
         self,
