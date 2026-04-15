@@ -88,5 +88,4 @@ evaluated next turn. A follow-up roadmap item generalises the voice
 path's `generation_task` / `interruption_detector` pattern (see
 [interruption flow](interruption.md)) to the text path so mid-response
 messages can re-plan or cancel the in-flight reply. See
-[conversation-flow roadmap](../roadmap/conversation-flow.md) for the
-target behaviour.
+[conversation-flow](conversation-flow.md) for the target behaviour.
