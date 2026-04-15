@@ -26,11 +26,15 @@ OPENROUTER_API_KEY=<openrouter key>
 # pick the familiar to load (or pass --familiar on the CLI)
 FAMILIAR_ID=aria
 
-# optional — voice output (Azure is default; set provider in character.toml [tts])
-# Azure Speech (provider = "azure"):
+# optional — TTS provider selection (overrides [tts].provider in character.toml)
+# Valid values: azure (default), cartesia
+TTS_PROVIDER=azure
+
+# Azure Speech credentials (required when TTS_PROVIDER=azure or provider="azure"):
 AZURE_SPEECH_KEY=<azure cognitive services key>
 AZURE_SPEECH_REGION=<azure region, e.g. eastus>
-# Cartesia (provider = "cartesia"):
+
+# Cartesia credentials (required when TTS_PROVIDER=cartesia or provider="cartesia"):
 CARTESIA_API_KEY=<cartesia key>
 
 # optional — Deepgram transcription secret (voice channels only)

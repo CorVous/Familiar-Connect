@@ -608,3 +608,56 @@ class TestCreateTTSClientAzure:
             pytest.raises(ValueError, match=r"AZURE_SPEECH_REGION"),
         ):
             create_tts_client(cfg)
+
+
+# ---------------------------------------------------------------------------
+# TTS_PROVIDER env var override
+# ---------------------------------------------------------------------------
+
+
+class TestTTSProviderEnvOverride:
+    """TTS_PROVIDER env var overrides [tts].provider from character.toml."""
+
+    def test_env_override_selects_azure_over_cartesia_toml(self) -> None:
+        cfg = TTSConfig(provider="cartesia")  # TOML says cartesia
+        with patch.dict(
+            os.environ,
+            {
+                "TTS_PROVIDER": "azure",
+                "AZURE_SPEECH_KEY": "az-key",
+                "AZURE_SPEECH_REGION": "eastus",
+            },
+        ):
+            client = create_tts_client(cfg)
+        assert isinstance(client, AzureTTSClient)
+
+    def test_env_override_selects_cartesia_over_azure_toml(self) -> None:
+        # TOML says azure, but TTS_PROVIDER=cartesia wins
+        with patch.dict(
+            os.environ,
+            {
+                "TTS_PROVIDER": "cartesia",
+                "CARTESIA_API_KEY": "cart-key",
+            },
+        ):
+            client = create_tts_client(
+                TTSConfig(provider="azure", voice_id="v", model="sonic-3"),
+            )
+        assert isinstance(client, CartesiaTTSClient)
+
+    def test_env_override_invalid_provider_raises(self) -> None:
+        with (
+            patch.dict(os.environ, {"TTS_PROVIDER": "fish"}),
+            pytest.raises(ValueError, match=r"TTS_PROVIDER"),
+        ):
+            create_tts_client(TTSConfig(provider="azure"))
+
+    def test_unset_env_uses_toml_provider(self) -> None:
+        """No TTS_PROVIDER set → falls through to tts_config.provider."""
+        cfg = TTSConfig(provider="azure", azure_voice="en-US-AmberNeural")
+        env = {"AZURE_SPEECH_KEY": "k", "AZURE_SPEECH_REGION": "eastus"}
+        # Explicitly exclude TTS_PROVIDER
+        base = {k: v for k, v in os.environ.items() if k != "TTS_PROVIDER"}
+        with patch.dict(os.environ, {**base, **env}, clear=True):
+            client = create_tts_client(cfg)
+        assert isinstance(client, AzureTTSClient)

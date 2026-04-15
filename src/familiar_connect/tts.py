@@ -311,20 +311,36 @@ class AzureTTSClient:
 
 
 def create_tts_client(tts_config: TTSConfig) -> CartesiaTTSClient | AzureTTSClient:
-    """Instantiate the TTS client named by ``tts_config.provider``.
+    """Instantiate the TTS client for the active provider.
+
+    Provider resolution order (first wins):
+
+    1. ``TTS_PROVIDER`` environment variable (``"azure"`` or ``"cartesia"``)
+    2. ``[tts].provider`` in ``character.toml`` (default: ``"azure"``)
 
     Reads credentials from environment variables; raises :class:`ValueError`
-    if required variables are absent or config values are empty.
+    if required variables are absent, config values are empty, or the
+    provider name is unrecognised.
 
-    :raises ValueError: missing env var, empty required field, or unknown provider.
+    :raises ValueError: unknown provider, missing env var, or empty field.
     """
-    if tts_config.provider == "azure":
+    env_provider = os.environ.get("TTS_PROVIDER")
+    if env_provider is not None:
+        from familiar_connect.config import _TTS_PROVIDERS  # noqa: PLC0415
+
+        if env_provider not in _TTS_PROVIDERS:
+            valid = ", ".join(sorted(_TTS_PROVIDERS))
+            msg = f"TTS_PROVIDER {env_provider!r} unknown; valid options: {valid}"
+            raise ValueError(msg)
+        provider = env_provider
+    else:
+        provider = tts_config.provider
+
+    if provider == "azure":
         return _create_azure_client(tts_config)
-    if tts_config.provider == "cartesia":
+    if provider == "cartesia":
         return _create_cartesia_client(tts_config)
-    msg = (
-        f"Unknown TTS provider {tts_config.provider!r}; expected 'azure' or 'cartesia'"
-    )
+    msg = f"Unknown TTS provider {provider!r}; expected 'azure' or 'cartesia'"
     raise ValueError(msg)
 
 
