@@ -2422,7 +2422,9 @@ class TestShortYieldResumeRace:
             asyncio.run(subscribe_my_voice(ctx, familiar))
 
         detector = familiar.extras["interruption_detector"]
+        detector = cast("InterruptionDetector", detector)
         resume_cb = detector._on_short_yield_resume
+        assert resume_cb is not None
         tracker = familiar.tracker_registry.get(999)
 
         remaining = [
