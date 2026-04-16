@@ -297,6 +297,9 @@ class DeepgramTranscriber:
     _RECONNECT_DELAY: float = 1.0  # base delay; first attempt is immediate
     _RECONNECT_BACKOFF_CAP: float = 16.0  # max backoff in seconds
     _KEEPALIVE_INTERVAL: float = 3.0
+    # extra margin on top of real-time replay duration before Finalize,
+    # to absorb server-side processing jitter
+    _FINALIZE_POST_REPLAY_BUFFER_S: float = 0.25
 
     # close codes that indicate a permanent, non-recoverable condition
     # (auth, billing, policy). reconnecting would just fail identically.
@@ -368,8 +371,9 @@ class DeepgramTranscriber:
             # immediately produces a partial covering only the first few
             # chunks the server had time to process. sleep is outside the
             # send_lock so post-reconnect audio can flow through normally.
+            # add a small cushion on top of real-time for server jitter.
             replay_s = replay_bytes / (self.sample_rate * self.channels * 2)
-            await asyncio.sleep(replay_s)
+            await asyncio.sleep(replay_s + self._FINALIZE_POST_REPLAY_BUFFER_S)
             async with self._send_lock:
                 ws = self._ws
                 if ws is not None and not ws.closed:
@@ -412,9 +416,10 @@ class DeepgramTranscriber:
                     aiohttp.WSMsgType.ERROR,
                 }:
                     _logger.warning(
-                        "Deepgram WebSocket closed/error: type=%s data=%s",
-                        msg.type,
-                        getattr(msg, "data", None),
+                        f"{ls.tag('🔌 WebSocket', ls.Y)} "
+                        f"{ls.word('Deepgram', ls.C)} "
+                        f"{ls.kv('type', str(msg.type), vc=ls.LW)} "
+                        f"{ls.kv('data', str(getattr(msg, 'data', None)), vc=ls.LW)}"
                     )
                     break
 
@@ -423,16 +428,20 @@ class DeepgramTranscriber:
             # self-initiated close → exit silently; ``stop()`` handles cleanup
             if self._shutting_down:
                 _logger.info(
-                    "Deepgram WebSocket closed for shutdown (close_code=%s)",
-                    close_code,
+                    f"{ls.tag('🔌 WebSocket', ls.Y)} "
+                    f"{ls.word('Deepgram', ls.C)} "
+                    f"{ls.word('shutdown', ls.W)} "
+                    f"{ls.kv('close_code', str(close_code), vc=ls.LW)}"
                 )
                 return
 
             # non-recoverable close (auth/billing/policy) → stop retrying
             if not self._should_reconnect(close_code):
                 _logger.error(
-                    "Deepgram closed with non-recoverable code %s; not reconnecting",
-                    close_code,
+                    f"{ls.tag('🔌 WebSocket', ls.R)} "
+                    f"{ls.word('Deepgram', ls.C)} "
+                    f"{ls.word('non-recoverable', ls.W)} "
+                    f"{ls.kv('close_code', str(close_code), vc=ls.LW)}"
                 )
                 return
 
@@ -447,13 +456,14 @@ class DeepgramTranscriber:
                     self._RECONNECT_DELAY * (2**exponent),
                     self._RECONNECT_BACKOFF_CAP,
                 )
+            attempt = f"{consecutive_reconnects}/{self._MAX_RECONNECTS}"
             _logger.warning(
-                "Deepgram WebSocket closed (close_code=%s), reconnecting (%d/%d) "
-                "after %.1fs…",
-                close_code,
-                consecutive_reconnects,
-                self._MAX_RECONNECTS,
-                backoff,
+                f"{ls.tag('🔌 WebSocket', ls.Y)} "
+                f"{ls.word('Deepgram', ls.C)} "
+                f"{ls.word('reconnecting', ls.W)} "
+                f"{ls.kv('close_code', str(close_code), vc=ls.LW)} "
+                f"{ls.kv('attempt', attempt, vc=ls.LW)} "
+                f"{ls.kv('backoff_s', f'{backoff:.1f}', vc=ls.LW)}"
             )
 
             try:
@@ -462,20 +472,22 @@ class DeepgramTranscriber:
                 await self._reconnect()
                 outage_s = time.monotonic() - outage_start
                 _logger.info(
-                    "Deepgram outage recovered: close_code=%s attempt=%d/%d "
-                    "outage_s=%.2f",
-                    close_code,
-                    consecutive_reconnects,
-                    self._MAX_RECONNECTS,
-                    outage_s,
+                    f"{ls.tag('🔌 WebSocket', ls.G)} "
+                    f"{ls.word('Deepgram', ls.C)} "
+                    f"{ls.word('recovered', ls.LG)} "
+                    f"{ls.kv('close_code', str(close_code), vc=ls.LW)} "
+                    f"{ls.kv('attempt', attempt, vc=ls.LW)} "
+                    f"{ls.kv('outage_s', f'{outage_s:.2f}', vc=ls.LW)}"
                 )
             except Exception:
                 _logger.exception("Deepgram reconnection failed")
                 return
 
         _logger.error(
-            "Deepgram: max reconnect attempts (%d) exhausted",
-            self._MAX_RECONNECTS,
+            f"{ls.tag('🔌 WebSocket', ls.R)} "
+            f"{ls.word('Deepgram', ls.C)} "
+            f"{ls.word('max reconnects exhausted', ls.W)} "
+            f"{ls.kv('attempts', str(self._MAX_RECONNECTS), vc=ls.LW)}"
         )
 
 

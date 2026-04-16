@@ -816,13 +816,14 @@ class TestReplayBuffer:
     async def test_finalize_delayed_by_replay_duration(
         self, client: DeepgramTranscriber
     ) -> None:
-        """Finalize is delayed by the real-time duration of the replayed audio.
+        """Finalize is delayed by replay duration + post-replay cushion.
 
         Deepgram processes incoming audio at ~real-time on its side.
         Bursting ~1 s of buffered audio in milliseconds then firing
         Finalize immediately causes Deepgram to emit a partial (only the
         fraction it had time to process). The delay gives the server
-        time to consume the burst before we force flush.
+        time to consume the burst before we force flush, with an extra
+        cushion for server-side jitter.
         """
         # 48000 Hz * 1 channel * 2 bytes/sample * 0.5s = 48000 bytes
         chunk = b"\xaa" * 48000  # exactly 0.5 s of mono 48 kHz linear16
@@ -847,10 +848,14 @@ class TestReplayBuffer:
             await client.send_audio(chunk)
             await original_sleep(0.1)  # let reconnect + drain run
 
-            # exactly one sleep close to the replay duration (0.5 s)
-            replay_sleeps = [d for d in sleep_calls if 0.4 < d < 0.6]
+            # exactly one sleep ≈ replay duration (0.5 s) + cushion (0.25 s)
+            expected = 0.5 + client._FINALIZE_POST_REPLAY_BUFFER_S
+            replay_sleeps = [
+                d for d in sleep_calls if expected - 0.05 < d < expected + 0.05
+            ]
             assert len(replay_sleeps) == 1, (
-                f"expected one ~0.5 s delay before Finalize; got {sleep_calls}"
+                f"expected one ~{expected:.2f} s delay before Finalize; "
+                f"got {sleep_calls}"
             )
 
             await client.stop()
@@ -875,7 +880,8 @@ class TestReplayBuffer:
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
             await client.send_audio(chunk)
-            await asyncio.sleep(0.2)  # let reconnect + drain run
+            # wait longer than the post-replay cushion so Finalize fires
+            await asyncio.sleep(client._FINALIZE_POST_REPLAY_BUFFER_S + 0.2)
 
             finalize_calls = [
                 c.args[0]
