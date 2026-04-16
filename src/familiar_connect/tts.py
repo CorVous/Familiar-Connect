@@ -8,19 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import urlencode
 
 import aiohttp
 
 if TYPE_CHECKING:
     from datetime import timedelta
-    from typing import Any, Self
 
     from familiar_connect.config import TTSConfig
 
@@ -215,6 +216,53 @@ def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:
         )
         for i in range(count)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Greeting cache (shared across all TTS providers)
+# ---------------------------------------------------------------------------
+
+# File-based greeting audio cache: stored in `data/cache/greetings/` keyed by
+# hash of (provider, voice_id, greeting). Shared across all TTS clients.
+
+_GREETING_CACHE_DIR = Path("data/cache/greetings")
+
+
+def _get_greeting_cache_path(provider: str, voice_id: str, greeting: str) -> Path:
+    """Return filesystem path for cached greeting audio."""
+    # Create a stable hash of the key parts.
+    key = f"{provider}:{voice_id}:{greeting}"
+    hash_hex = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return _GREETING_CACHE_DIR / f"{hash_hex}.bin"
+
+
+async def get_cached_greeting_audio(
+    provider: str,
+    voice_id: str,
+    greeting: str,
+    client: CartesiaTTSClient | AzureTTSClient,
+) -> TTSResult:
+    """Return TTS audio for *greeting*.
+
+    Uses a file-based cache keyed by (provider, voice_id, greeting).
+    On cache miss, synthesizes and stores the audio bytes to disk.
+    Subsequent calls for the same (provider, voice_id, greeting) read
+    from the file.
+    """
+    # Ensure cache directory exists (blocking I/O off the event loop).
+    await asyncio.to_thread(_GREETING_CACHE_DIR.mkdir, parents=True, exist_ok=True)
+
+    cache_path = _get_greeting_cache_path(provider, voice_id, greeting)
+    if cache_path.is_file():
+        # Cache hit: read audio bytes from file.
+        audio_bytes = await asyncio.to_thread(cache_path.read_bytes)
+        return TTSResult(audio=audio_bytes, timestamps=[])
+
+    # Cache miss: synthesize via TTS client.
+    tts_result = await client.synthesize(greeting)
+    # Write audio bytes to cache file.
+    await asyncio.to_thread(cache_path.write_bytes, tts_result.audio)
+    return TTSResult(audio=tts_result.audio, timestamps=[])
 
 
 # ---------------------------------------------------------------------------

@@ -147,6 +147,8 @@ class TTSConfig:
     """Cartesia model name (``provider = "cartesia"`` only)."""
     azure_voice: str = DEFAULT_AZURE_TTS_VOICE
     """Azure Neural voice name (``provider = "azure"`` only)."""
+    greetings: list[str] = field(default_factory=list)
+    """Random greeting audio played when the familiar joins a voice channel."""
 
 
 @dataclass(frozen=True)
@@ -694,11 +696,21 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         msg = "[tts].azure_voice must be a non-empty string"
         raise ConfigError(msg)
 
+    greetings_raw = raw.get("greetings", [])
+    if not isinstance(greetings_raw, list):
+        msg = (
+            "[tts].greetings must be a list of strings, "
+            f"got {type(greetings_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    greetings = [str(g) for g in greetings_raw]
+
     return TTSConfig(
         provider=provider_raw,
         cartesia_voice_id=cartesia_voice_id,
         cartesia_model=cartesia_model,
         azure_voice=azure_voice_raw,
+        greetings=greetings,
     )
 
 

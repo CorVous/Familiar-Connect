@@ -13,6 +13,7 @@ import contextlib
 import dataclasses
 import io
 import logging
+import secrets
 import time
 from typing import TYPE_CHECKING, cast
 
@@ -30,6 +31,7 @@ from familiar_connect.text.delivery import (
     compute_typing_delay,
     split_reply_into_chunks,
 )
+from familiar_connect.tts import get_cached_greeting_audio
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
 from familiar_connect.voice.interruption import (
@@ -593,7 +595,20 @@ async def subscribe_my_voice(
 
     if familiar.tts_client is not None:
         try:
-            tts_result = await familiar.tts_client.synthesize("Hello!")
+            greetings = familiar.config.tts.greetings
+            greeting_text = secrets.choice(greetings) if greetings else "Hello!"
+            tts_cfg = familiar.config.tts
+            voice_id = (
+                tts_cfg.cartesia_voice_id
+                if tts_cfg.provider == "cartesia"
+                else tts_cfg.azure_voice
+            )
+            tts_result = await get_cached_greeting_audio(
+                provider=tts_cfg.provider,
+                voice_id=voice_id or "",
+                greeting=greeting_text,
+                client=familiar.tts_client,
+            )
             stereo = mono_to_stereo(tts_result.audio)
             vc.play(discord.PCMAudio(io.BytesIO(stereo)))
         except Exception:
