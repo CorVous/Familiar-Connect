@@ -1255,6 +1255,7 @@ class TestBackdropModalRequiredFlag:
         )
         field = modal.children[0]
         assert field.required is False
+        assert field._underlying is not None
         assert field._underlying.to_dict()["required"] is False
 
 
