@@ -231,6 +231,7 @@ class Familiar:
             history_store=history_store,
             llm_client=llm_clients["memory_writer"],
             familiar_id=familiar_id,
+            channel_context_lookup=monitor.format_channel_context,
         )
         memory_writer_scheduler = MemoryWriterScheduler(
             writer=memory_writer,
@@ -288,6 +289,8 @@ class Familiar:
                 ModeInstructionProvider(
                     modes_root=self.root / "modes",
                     mode=channel_config.mode,
+                    channel_backdrop_override=channel_config.backdrop_override,
+                    defaults_modes_root=self.root.parent / "_default" / "modes",
                 ),
             )
         active_pre = [

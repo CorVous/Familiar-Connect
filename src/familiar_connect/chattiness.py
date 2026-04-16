@@ -18,7 +18,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from familiar_connect import log_style as ls
 from familiar_connect.llm import Message
@@ -28,6 +28,24 @@ if TYPE_CHECKING:
 
     from familiar_connect.config import Interjection
     from familiar_connect.llm import LLMClient
+
+
+ChannelKind = Literal["text", "thread", "forum_post"]
+
+
+@dataclass(frozen=True)
+class ChannelContext:
+    """Human-readable descriptor for a subscribed channel.
+
+    Captured once on subscribe (and refreshed per message so renames
+    propagate). Used for log labels and the memory-writer Context
+    block.
+    """
+
+    name: str
+    kind: ChannelKind
+    parent_name: str | None = None
+
 
 _logger = logging.getLogger(__name__)
 
@@ -215,18 +233,70 @@ class ConversationMonitor:
         self._rng = rng if rng is not None else random.random  # noqa: S311
         self._buffers: dict[int, ChannelBuffer] = {}
         self._lull_tasks: set[asyncio.Task[None]] = set()
-        self._channel_names: dict[int, str] = {}
+        self._channel_contexts: dict[int, ChannelContext] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def register_channel_name(self, channel_id: int, name: str) -> None:
-        """Store human-readable *name* for *channel_id* (used in log output)."""
-        self._channel_names[channel_id] = name
+        """Store human-readable *name* for *channel_id* (text channels only).
+
+        Legacy shim over :meth:`register_channel_context`. New call
+        sites should prefer the richer API.
+        """
+        self.register_channel_context(channel_id, name=name, kind="text")
+
+    def register_channel_context(
+        self,
+        channel_id: int,
+        *,
+        name: str,
+        kind: ChannelKind,
+        parent_name: str | None = None,
+    ) -> None:
+        """Store rich context for *channel_id* (name, kind, parent).
+
+        Idempotent; re-registering overwrites — used to refresh labels
+        after a rename.
+        """
+        self._channel_contexts[channel_id] = ChannelContext(
+            name=name,
+            kind=kind,
+            parent_name=parent_name,
+        )
+
+    def channel_context(self, channel_id: int) -> ChannelContext | None:
+        """Return stored context for *channel_id*, or ``None`` if unknown."""
+        return self._channel_contexts.get(channel_id)
+
+    def format_channel_context(self, channel_id: int) -> str:
+        """Return a compact human label for *channel_id*.
+
+        - text channel: ``#general``
+        - thread: ``#general -> feature-brainstorm``
+        - forum post: ``forum:announcements -> hotfix``
+        - unknown: ``str(channel_id)``
+        """
+        ctx = self._channel_contexts.get(channel_id)
+        if ctx is None:
+            return str(channel_id)
+        if ctx.kind == "text":
+            return f"#{ctx.name}"
+        if ctx.kind == "thread":
+            parent = ctx.parent_name or "?"
+            return f"#{parent} -> {ctx.name}"
+        # forum_post
+        parent = ctx.parent_name or "?"
+        return f"forum:{parent} -> {ctx.name}"
 
     def _channel_label(self, channel_id: int) -> str:
-        return self._channel_names.get(channel_id, str(channel_id))
+        ctx = self._channel_contexts.get(channel_id)
+        if ctx is None:
+            return str(channel_id)
+        if ctx.parent_name and ctx.kind != "text":
+            return f"{ctx.parent_name} -> {ctx.name}"
+        return ctx.name
 
     async def on_message(
         self,

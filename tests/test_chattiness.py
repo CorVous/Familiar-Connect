@@ -914,3 +914,71 @@ class TestClearChannel:
     def test_clear_nonexistent_channel_is_noop(self) -> None:
         monitor, _ = _make_monitor()
         monitor.clear_channel(999)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Channel context (name, kind, parent) — used by log labels and the
+# memory-writer Context block.
+# ---------------------------------------------------------------------------
+
+
+class TestChannelContext:
+    def test_format_unknown_channel_returns_id(self) -> None:
+        monitor, _ = _make_monitor()
+        assert monitor.format_channel_context(42) == "42"
+
+    def test_format_text_channel(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="general", kind="text")
+        assert monitor.format_channel_context(42) == "#general"
+
+    def test_format_thread(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(
+            42,
+            name="feature-brainstorm",
+            kind="thread",
+            parent_name="general",
+        )
+        assert monitor.format_channel_context(42) == "#general -> feature-brainstorm"
+
+    def test_format_forum_post(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(
+            42,
+            name="hotfix-rollout",
+            kind="forum_post",
+            parent_name="announcements",
+        )
+        assert (
+            monitor.format_channel_context(42)
+            == "forum:announcements -> hotfix-rollout"
+        )
+
+    def test_register_channel_name_back_compat(self) -> None:
+        """Legacy shim still populates context as a text channel."""
+        monitor, _ = _make_monitor()
+        monitor.register_channel_name(42, "general")
+        assert monitor.format_channel_context(42) == "#general"
+
+    def test_register_overwrites_existing_context(self) -> None:
+        """Re-registering updates the label — used to refresh renames."""
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="old", kind="text")
+        monitor.register_channel_context(42, name="new", kind="text")
+        assert monitor.format_channel_context(42) == "#new"
+
+    def test_channel_context_getter(self) -> None:
+        monitor, _ = _make_monitor()
+        assert monitor.channel_context(42) is None
+        monitor.register_channel_context(
+            42,
+            name="brainstorm",
+            kind="thread",
+            parent_name="general",
+        )
+        ctx = monitor.channel_context(42)
+        assert ctx is not None
+        assert ctx.name == "brainstorm"
+        assert ctx.kind == "thread"
+        assert ctx.parent_name == "general"

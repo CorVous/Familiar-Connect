@@ -261,6 +261,10 @@ class ChannelConfig:
     typing_simulation: TypingSimulationConfig = field(
         default_factory=TypingSimulationConfig,
     )
+    backdrop_override: str | None = None
+    """Per-channel author-note override. Replaces ``modes/<mode>.md`` when set."""
+    channel_name: str | None = None
+    """Discord channel name, written by the slash command for operator reference."""
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +504,16 @@ def load_channel_config(
         character_overrides=character_overrides or {},
         channel_overrides=channel_overrides,
     )
-    return replace(base, typing_simulation=resolved_ts)
+
+    backdrop_override = _parse_channel_backdrop(data.get("backdrop"))
+    channel_name = _parse_channel_name(data.get("channel_name"))
+
+    return replace(
+        base,
+        typing_simulation=resolved_ts,
+        backdrop_override=backdrop_override,
+        channel_name=channel_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -836,6 +849,34 @@ def _parse_interjection(raw: object, *, default: Interjection) -> Interjection:
         valid = ", ".join(m.value for m in Interjection)
         msg = f"unknown interjection tier {raw!r}; valid options: {valid}"
         raise ConfigError(msg) from exc
+
+
+def _parse_channel_backdrop(raw: object) -> str | None:
+    """Parse the ``backdrop`` channel sidecar key.
+
+    Non-string raises; empty/whitespace-only returns ``None``.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        msg = f"backdrop must be a string, got {type(raw).__name__}"
+        raise ConfigError(msg)
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _parse_channel_name(raw: object) -> str | None:
+    """Parse the ``channel_name`` channel sidecar key.
+
+    Non-string raises; empty/whitespace-only returns ``None``.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        msg = f"channel_name must be a string, got {type(raw).__name__}"
+        raise ConfigError(msg)
+    stripped = raw.strip()
+    return stripped or None
 
 
 def _parse_mode(raw: object, *, default: ChannelMode | None) -> ChannelMode:

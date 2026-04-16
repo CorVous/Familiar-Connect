@@ -451,3 +451,86 @@ A casual chat.
         # and the files on disk live at the flat location
         assert mem_store.read_file("people/alice.md").startswith("# Alice")
         assert mem_store.read_file("topics/greetings.md").startswith("# Greetings")
+
+
+# ---------------------------------------------------------------------------
+# Channel context header — thread/forum labels flow into the writer prompt
+# ---------------------------------------------------------------------------
+
+
+class TestChannelContextBlock:
+    def test_no_lookup_omits_context_block(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 4)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+        prompt = llm.calls[0][1].content
+        assert "## Context" not in prompt
+
+    def test_lookup_prepends_context_block(self, tmp_path: Path) -> None:
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 4)  # seeded at channel_id=100
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+            channel_context_lookup=lambda cid: (
+                "#general -> brainstorm" if cid == 100 else str(cid)
+            ),
+        )
+        asyncio.run(writer.run())
+        prompt = llm.calls[0][1].content
+        assert "## Context" in prompt
+        assert "- #general -> brainstorm" in prompt
+        # block sits at the top of the transcript body (above first turn)
+        assert prompt.index("## Context") < prompt.index("user (Alice): turn 0")
+
+    def test_lookup_unknown_channel_skips_block(self, tmp_path: Path) -> None:
+        """Lookup returning bare id for every channel yields no block."""
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 4)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+            channel_context_lookup=str,
+        )
+        asyncio.run(writer.run())
+        prompt = llm.calls[0][1].content
+        assert "## Context" not in prompt
+
+    def test_multi_channel_context_block(self, tmp_path: Path) -> None:
+        """Turns across two channels produce two context lines in order."""
+        mem_store, hist_store = _make_stores(tmp_path)
+        # two channels, interleaved
+        for i in range(4):
+            cid = 100 if i % 2 == 0 else 200
+            hist_store.append_turn(
+                familiar_id=_FAMILIAR,
+                channel_id=cid,
+                role="user",
+                content=f"msg {i}",
+                speaker="Alice",
+            )
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        labels = {100: "#general", 200: "#general -> thread"}
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+            channel_context_lookup=lambda cid: labels.get(cid, str(cid)),
+        )
+        asyncio.run(writer.run())
+        prompt = llm.calls[0][1].content
+        assert "- #general\n- #general -> thread" in prompt

@@ -26,6 +26,7 @@ from familiar_connect.context.protocols import ContextProvider
 from familiar_connect.context.providers.mode_instructions import (
     MODE_INSTRUCTION_PRIORITY,
     ModeInstructionProvider,
+    resolve_mode_default,
 )
 from familiar_connect.context.types import (
     ContextRequest,
@@ -210,3 +211,194 @@ class TestMissingOrEmpty:
             mode=ChannelMode.text_conversation_rp,
         )
         assert await proc.contribute(_request()) == []
+
+
+# ---------------------------------------------------------------------------
+# Channel backdrop override
+# ---------------------------------------------------------------------------
+
+
+class TestChannelBackdropOverride:
+    @pytest.mark.asyncio
+    async def test_backdrop_override_emitted_when_set(self, tmp_path: Path) -> None:
+        proc = ModeInstructionProvider(
+            modes_root=tmp_path,
+            mode=ChannelMode.full_rp,
+            channel_backdrop_override="Custom channel text.",
+        )
+        contributions = await proc.contribute(_request())
+        assert len(contributions) == 1
+        assert contributions[0].text == "Custom channel text."
+
+    @pytest.mark.asyncio
+    async def test_backdrop_override_source_prefix(self, tmp_path: Path) -> None:
+        proc = ModeInstructionProvider(
+            modes_root=tmp_path,
+            mode=ChannelMode.full_rp,
+            channel_backdrop_override="Custom.",
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.source == "channel_backdrop:full_rp"
+
+    @pytest.mark.asyncio
+    async def test_backdrop_override_beats_mode_file(self, tmp_path: Path) -> None:
+        (tmp_path / "full_rp.md").write_text("Mode default text.")
+        proc = ModeInstructionProvider(
+            modes_root=tmp_path,
+            mode=ChannelMode.full_rp,
+            channel_backdrop_override="Channel override wins.",
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.text == "Channel override wins."
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_backdrop_falls_back_to_mode_file(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "full_rp.md").write_text("Mode default text.")
+        proc = ModeInstructionProvider(
+            modes_root=tmp_path,
+            mode=ChannelMode.full_rp,
+            channel_backdrop_override="   ",
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.text == "Mode default text."
+
+    @pytest.mark.asyncio
+    async def test_empty_backdrop_falls_back_to_mode_file(self, tmp_path: Path) -> None:
+        (tmp_path / "full_rp.md").write_text("Mode default text.")
+        proc = ModeInstructionProvider(
+            modes_root=tmp_path,
+            mode=ChannelMode.full_rp,
+            channel_backdrop_override="",
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.text == "Mode default text."
+
+    @pytest.mark.asyncio
+    async def test_none_backdrop_falls_back_to_mode_file(self, tmp_path: Path) -> None:
+        (tmp_path / "full_rp.md").write_text("Mode default text.")
+        proc = ModeInstructionProvider(
+            modes_root=tmp_path,
+            mode=ChannelMode.full_rp,
+            channel_backdrop_override=None,
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.text == "Mode default text."
+
+
+# ---------------------------------------------------------------------------
+# Defaults fallback (defaults_modes_root)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultsFallback:
+    @pytest.mark.asyncio
+    async def test_defaults_used_when_familiar_file_absent(
+        self, tmp_path: Path
+    ) -> None:
+        familiar_modes = tmp_path / "familiar" / "modes"
+        familiar_modes.mkdir(parents=True)
+        default_modes = tmp_path / "default" / "modes"
+        default_modes.mkdir(parents=True)
+        (default_modes / "full_rp.md").write_text("Default fallback text.")
+
+        proc = ModeInstructionProvider(
+            modes_root=familiar_modes,
+            mode=ChannelMode.full_rp,
+            defaults_modes_root=default_modes,
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.text == "Default fallback text."
+        assert c.source == "mode_instructions_default:full_rp"
+
+    @pytest.mark.asyncio
+    async def test_familiar_file_beats_defaults(self, tmp_path: Path) -> None:
+        familiar_modes = tmp_path / "familiar" / "modes"
+        familiar_modes.mkdir(parents=True)
+        default_modes = tmp_path / "default" / "modes"
+        default_modes.mkdir(parents=True)
+        (familiar_modes / "full_rp.md").write_text("Familiar wins.")
+        (default_modes / "full_rp.md").write_text("Default text.")
+
+        proc = ModeInstructionProvider(
+            modes_root=familiar_modes,
+            mode=ChannelMode.full_rp,
+            defaults_modes_root=default_modes,
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.text == "Familiar wins."
+        assert c.source == "mode_instructions:full_rp"
+
+    @pytest.mark.asyncio
+    async def test_neither_file_nor_defaults_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
+        familiar_modes = tmp_path / "familiar" / "modes"
+        familiar_modes.mkdir(parents=True)
+        default_modes = tmp_path / "default" / "modes"
+        default_modes.mkdir(parents=True)
+
+        proc = ModeInstructionProvider(
+            modes_root=familiar_modes,
+            mode=ChannelMode.full_rp,
+            defaults_modes_root=default_modes,
+        )
+        assert await proc.contribute(_request()) == []
+
+    @pytest.mark.asyncio
+    async def test_backdrop_beats_defaults(self, tmp_path: Path) -> None:
+        familiar_modes = tmp_path / "familiar" / "modes"
+        familiar_modes.mkdir(parents=True)
+        default_modes = tmp_path / "default" / "modes"
+        default_modes.mkdir(parents=True)
+        (default_modes / "full_rp.md").write_text("Default text.")
+
+        proc = ModeInstructionProvider(
+            modes_root=familiar_modes,
+            mode=ChannelMode.full_rp,
+            channel_backdrop_override="Channel wins over default.",
+            defaults_modes_root=default_modes,
+        )
+        (c,) = await proc.contribute(_request())
+        assert c.text == "Channel wins over default."
+        assert c.source == "channel_backdrop:full_rp"
+
+
+# ---------------------------------------------------------------------------
+# resolve_mode_default helper
+# ---------------------------------------------------------------------------
+
+
+class TestResolveModeDefault:
+    def test_returns_familiar_file_when_present(self, tmp_path: Path) -> None:
+        (tmp_path / "full_rp.md").write_text("Familiar text.")
+        out = resolve_mode_default(modes_root=tmp_path, mode=ChannelMode.full_rp)
+        assert out == "Familiar text."
+
+    def test_falls_back_to_defaults(self, tmp_path: Path) -> None:
+        familiar = tmp_path / "familiar"
+        familiar.mkdir()
+        defaults = tmp_path / "default"
+        defaults.mkdir()
+        (defaults / "full_rp.md").write_text("Default text.")
+        out = resolve_mode_default(
+            modes_root=familiar,
+            mode=ChannelMode.full_rp,
+            defaults_modes_root=defaults,
+        )
+        assert out == "Default text."
+
+    def test_missing_everywhere_returns_none(self, tmp_path: Path) -> None:
+        familiar = tmp_path / "familiar"
+        familiar.mkdir()
+        defaults = tmp_path / "default"
+        defaults.mkdir()
+        assert (
+            resolve_mode_default(
+                modes_root=familiar,
+                mode=ChannelMode.full_rp,
+                defaults_modes_root=defaults,
+            )
+            is None
+        )

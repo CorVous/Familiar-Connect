@@ -37,6 +37,7 @@ class HistoryTurn:
     role: str
     speaker: str | None
     content: str
+    channel_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -582,7 +583,7 @@ class HistoryStore:
         min_id = wm.last_written_id if wm is not None else 0
         rows = self._conn.execute(
             """
-            SELECT id, timestamp, role, speaker, content
+            SELECT id, timestamp, role, speaker, content, channel_id
               FROM turns
              WHERE familiar_id = ?
                AND id > ?
@@ -595,10 +596,18 @@ class HistoryStore:
 
 
 def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
+    # channel_id missing from older SELECTs that don't need it; fall
+    # back to 0 so those callers keep working. Writer-facing SELECTs
+    # include it explicitly.
+    try:
+        channel_id = int(row["channel_id"])
+    except (IndexError, KeyError):
+        channel_id = 0
     return HistoryTurn(
         id=int(row["id"]),
         timestamp=datetime.fromisoformat(row["timestamp"]),
         role=str(row["role"]),
         speaker=row["speaker"] if row["speaker"] is not None else None,
         content=str(row["content"]),
+        channel_id=channel_id,
     )

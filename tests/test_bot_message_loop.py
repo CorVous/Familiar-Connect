@@ -33,8 +33,11 @@ import httpx
 import pytest
 
 from familiar_connect.bot import (
+    _default_backdrop_placeholder,
+    _make_backdrop_modal,
     _run_text_response,
     _run_voice_response,
+    channel_backdrop,
     create_bot,
     dispatch_interruption_regen,
     on_message,
@@ -243,6 +246,56 @@ def _make_text_ctx(
     else:
         type(ctx).guild_id = PropertyMock(return_value=None)
         type(ctx).guild = PropertyMock(return_value=None)
+    return ctx
+
+
+def _make_thread_ctx(
+    *,
+    channel_id: int = 12345,
+    parent_id: int = 54321,
+    parent_name: str = "general",
+    guild_id: int = 999,
+    view_channel: bool = True,
+    send_messages_in_threads: bool = True,
+    parent_type: type = discord.TextChannel,
+) -> MagicMock:
+    """Build a fake ``discord.ApplicationContext`` whose channel is a Thread.
+
+    ``parent_type`` switches between ``discord.TextChannel`` (regular
+    channel thread) and ``discord.ForumChannel`` (forum post).
+    """
+    ctx = MagicMock(spec=discord.ApplicationContext)
+    ctx.respond = AsyncMock()
+    ctx.defer = AsyncMock()
+    ctx.followup = MagicMock()
+    ctx.followup.send = AsyncMock()
+
+    parent = MagicMock(spec=parent_type)
+    parent.id = parent_id
+    parent.name = parent_name
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = channel_id
+    thread.name = "feature-brainstorm"
+    thread.parent = parent
+    thread.parent_id = parent_id
+    thread.join = AsyncMock()
+
+    perms = MagicMock(spec=discord.Permissions)
+    perms.view_channel = view_channel
+    perms.send_messages_in_threads = send_messages_in_threads
+    perms.send_messages = True  # irrelevant for threads
+    thread.permissions_for = MagicMock(return_value=perms)
+
+    type(ctx).channel = PropertyMock(return_value=thread)
+    type(ctx).channel_id = PropertyMock(return_value=channel_id)
+
+    guild = MagicMock(spec=discord.Guild)
+    guild.id = guild_id
+    bot_member = MagicMock(spec=discord.Member)
+    type(guild).me = PropertyMock(return_value=bot_member)
+    type(ctx).guild_id = PropertyMock(return_value=guild_id)
+    type(ctx).guild = PropertyMock(return_value=guild)
     return ctx
 
 
@@ -587,6 +640,48 @@ class TestOnRespond:
         # Utterance text is shown
         assert "hello world" in msg
 
+    def test_run_text_response_skips_closed_thread(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Archived+locked thread: log error, do not call send or LLM."""
+        familiar = _make_familiar(tmp_path, reply="should not be sent")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 12345
+        thread.archived = True
+        thread.locked = True
+        thread.send = AsyncMock()
+        typing_cm = MagicMock()
+        typing_cm.__aenter__ = AsyncMock(return_value=None)
+        typing_cm.__aexit__ = AsyncMock(return_value=False)
+        thread.typing = MagicMock(return_value=typing_cm)
+
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with caplog.at_level("ERROR", logger="familiar_connect.bot"):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=thread,
+                )
+            )
+
+        thread.send.assert_not_called()
+        llm = familiar.llm_clients["main_prose"]
+        assert isinstance(llm, _StubLLMClient)
+        assert llm.calls == []
+        skipped = [r for r in caplog.records if "Send skipped" in r.getMessage()]
+        assert len(skipped) == 1
+        assert "thread_closed" in skipped[0].getMessage()
+
 
 # ---------------------------------------------------------------------------
 # /subscribe-text and friends
@@ -704,6 +799,118 @@ class TestSubscriptionCommands:
         assert (
             familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
             is None
+        )
+
+    def test_subscribe_text_in_thread_registers_channel(self, tmp_path: Path) -> None:
+        """Thread subscription is accepted + thread.join is awaited."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77, guild_id=999)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is not None
+        )
+        ctx.channel.join.assert_awaited_once()
+        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
+
+    def test_subscribe_text_in_thread_records_thread_context(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77, parent_name="general")
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        label = familiar.monitor.format_channel_context(77)
+        assert label == "#general -> feature-brainstorm"
+
+    def test_subscribe_text_in_forum_post_records_forum_context(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(
+            channel_id=77,
+            parent_name="announcements",
+            parent_type=discord.ForumChannel,
+        )
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        label = familiar.monitor.format_channel_context(77)
+        assert label == "forum:announcements -> feature-brainstorm"
+
+    def test_subscribe_text_in_thread_rejects_without_send_perm(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(
+            channel_id=77,
+            send_messages_in_threads=False,
+        )
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is None
+        )
+        ctx.channel.join.assert_not_called()
+
+    def test_subscribe_text_rejects_forum_root(self, tmp_path: Path) -> None:
+        """The forum channel itself has no messages — reject, explain."""
+        familiar = _make_familiar(tmp_path)
+        ctx = MagicMock(spec=discord.ApplicationContext)
+        ctx.respond = AsyncMock()
+        forum = MagicMock(spec=discord.ForumChannel)
+        forum.id = 77
+        forum.name = "announcements"
+        type(ctx).channel = PropertyMock(return_value=forum)
+        type(ctx).channel_id = PropertyMock(return_value=77)
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = 999
+        type(guild).me = PropertyMock(return_value=MagicMock(spec=discord.Member))
+        type(ctx).guild = PropertyMock(return_value=guild)
+        type(ctx).guild_id = PropertyMock(return_value=999)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is None
+        )
+
+    def test_subscribe_text_thread_join_http_error_is_swallowed(
+        self, tmp_path: Path
+    ) -> None:
+        """Transient join failure still registers the subscription."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77)
+        ctx.channel.join = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(), "boom"),
+        )
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is not None
         )
 
 
@@ -964,6 +1171,7 @@ class TestCreateBot:
             "channel-full-rp",
             "channel-text-conversation-rp",
             "channel-imitate-voice",
+            "channel-backdrop",
         ],
     )
     def test_create_bot_registers_slash_command(
@@ -982,6 +1190,106 @@ class TestCreateBot:
         names = [cmd.name for cmd in bot.pending_application_commands]
         assert "awaken" not in names
         assert "sleep" not in names
+
+    def test_channel_backdrop_has_no_options(self, tmp_path: Path) -> None:
+        """``/channel-backdrop`` takes no slash-command options.
+
+        All input flows through the Discord modal; submitting blank clears.
+        """
+        familiar = _make_familiar(tmp_path)
+        bot = create_bot(familiar)
+        cmd = next(
+            c for c in bot.pending_application_commands if c.name == "channel-backdrop"
+        )
+        assert cmd.options == []
+
+
+class TestBackdropPlaceholder:
+    """Preview of the mode default shown as Discord modal placeholder text.
+
+    Discord caps InputText placeholder at 100 chars, so longer defaults
+    are collapsed to a single line and truncated.
+    """
+
+    def test_none_returns_generic_fallback(self) -> None:
+        out = _default_backdrop_placeholder(None)
+        assert "mode default" in out
+        assert len(out) <= 100
+
+    def test_short_default_passes_through(self) -> None:
+        out = _default_backdrop_placeholder("Talk like a pirate.")
+        assert out == "Talk like a pirate."
+
+    def test_long_default_truncated_with_ellipsis(self) -> None:
+        long_text = "a" * 200
+        out = _default_backdrop_placeholder(long_text)
+        assert len(out) == 100
+        assert out.endswith("\u2026")
+
+    def test_multiline_default_collapsed_to_single_line(self) -> None:
+        out = _default_backdrop_placeholder("line one\n\n  line two")
+        assert "\n" not in out
+        assert out == "line one line two"
+
+
+class TestBackdropModalRequiredFlag:
+    """Modal must send ``required=false`` so emptied text clears the backdrop.
+
+    Regression against a py-cord quirk where
+    ``InputText._generate_underlying`` collapses ``required=False`` to
+    ``None`` via ``False or self.required``, which Discord then defaults
+    to ``required=true``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_required_false_reaches_the_component_payload(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        modal = _make_backdrop_modal(
+            familiar,
+            channel_id=1,
+            channel_name="general",
+            current="Talk like a pirate.",
+            mode_default="Default text.",
+        )
+        field = modal.children[0]
+        assert field.required is False
+        assert field._underlying.to_dict()["required"] is False
+
+
+# ---------------------------------------------------------------------------
+# /channel-backdrop in a thread writes a labelled channel_name to the sidecar
+# ---------------------------------------------------------------------------
+
+
+class TestChannelBackdropInThread:
+    @pytest.mark.asyncio
+    async def test_backdrop_in_thread_writes_labelled_channel_name(
+        self, tmp_path: Path
+    ) -> None:
+        """Sidecar ``channel_name`` shows ``#parent -> thread`` label.
+
+        Guards that ``channel_backdrop`` → modal callback writes the
+        human-readable label rather than the raw integer thread id.
+        """
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77, parent_name="general")
+        ctx.send_modal = AsyncMock()
+
+        await channel_backdrop(ctx, familiar)
+
+        modal = ctx.send_modal.call_args[0][0]
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+        modal.children[0].value = "Speak like a wizard."
+        await modal.callback(interaction)
+
+        sidecar = familiar.root / "channels" / "77.toml"
+        assert sidecar.exists()
+        cfg = familiar.channel_configs.get(channel_id=77)
+        assert cfg.channel_name == "#general -> feature-brainstorm"
 
 
 # ---------------------------------------------------------------------------
