@@ -6,9 +6,11 @@ import importlib.metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pytest
 
 from familiar_connect.config import LLM_SLOT_NAMES
+from familiar_connect.context.providers.content_search import retrieval
 from familiar_connect.llm import LLMClient, Message
 
 if TYPE_CHECKING:
@@ -18,6 +20,33 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_PROFILE_PATH = (
     _REPO_ROOT / "data" / "familiars" / "_default" / "character.toml"
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_fastembed_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Block real HuggingFace downloads from :class:`FastEmbedModel`.
+
+    Production ``FastEmbedModel.embed`` lazy-loads a ~68 MB ONNX model
+    from HuggingFace on first call. In sandboxed CI that host isn't
+    allowlisted; fastembed retries with 3s + 9s + 27s backoff, costing
+    ~39 s per test that indirectly triggers a retrieval (e.g. any
+    ``_run_text_response`` pathway through ``ContentSearchProvider``).
+
+    Stub ``embed`` → zero vectors, ``_ensure_loaded`` → no-op. Tests
+    that care about retrieval relevance inject their own model via
+    :class:`EmbeddingRetriever` (see ``test_embedding_retriever.py``)
+    and aren't touched by this patch.
+    """
+
+    def _fake_embed(self: retrieval.FastEmbedModel, texts: list[str]) -> np.ndarray:
+        return np.zeros((len(texts), self.dim), dtype=np.float32)
+
+    def _fake_ensure_loaded(self: retrieval.FastEmbedModel) -> None:
+        # sentinel so any assert ``self._impl is not None`` still holds
+        self._impl = object()
+
+    monkeypatch.setattr(retrieval.FastEmbedModel, "embed", _fake_embed)
+    monkeypatch.setattr(retrieval.FastEmbedModel, "_ensure_loaded", _fake_ensure_loaded)
 
 
 @pytest.fixture
