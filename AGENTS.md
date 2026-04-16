@@ -67,3 +67,37 @@ All comments, docstrings, and documentation must follow this style:
 **Scope:** telegraphic style applies strictly to docstrings and inline
 comments. Wiki pages (`docs/*.md`) keep full sentences for readability
 but should still be concise — trim wordiness, filler, and restating.
+
+## Logging
+
+How to add a new log call. Match existing style — don't invent a new one.
+
+* Per module: `_logger = logging.getLogger(__name__)` at top. Never root.
+* Setup lives in `setup_logging` (`src/familiar_connect/cli.py`). Don't
+  reconfigure, add handlers, or log to files — console only.
+* Verbosity: default `WARNING`, `-v` `INFO`, `-vv` `DEBUG`. Package
+  logger floor is `INFO` so user-facing messages always show.
+* Levels:
+    * `DEBUG` — per-chunk/high-volume detail
+    * `INFO` — user-visible state transitions
+    * `WARNING` — recoverable failure; pass `exc_info=True` on caught exc
+    * `ERROR`/`CRITICAL` — unrecoverable
+* Compose with `from familiar_connect import log_style as ls`:
+    * `ls.tag(label, color)` — leading `[label]`
+    * `ls.kv(key, val, vc=color)` — `key=value` chunk
+    * `ls.trunc(text, limit=200)` — ellipsis-truncate payloads
+* Layout: one line, leading `ls.tag(...)` then space-separated
+  `ls.kv(...)` pairs. `StyledFormatter` repaints the leading tag for
+  `WARNING`/`ERROR` — keep the tag first. Example (`mood.py`):
+
+  ```python
+  _logger.info(
+      f"{ls.tag('Mood', ls.M)} "
+      f"{ls.kv('modifier', f'{modifier:+.2f}', vc=ls.LM)}"
+  )
+  ```
+* Use f-strings only for styled composition. Plain value/exception logs
+  use `%s` args: `_logger.warning("mood_eval failed: %s", exc, exc_info=True)`.
+* Emoji: reserve for notable transitions (✨ summon, 🎙️ stream).
+* One color per subsystem; stay consistent across that subsystem's logs.
+* New formatter/setup logic ships with a test in `tests/test_logging.py`.
