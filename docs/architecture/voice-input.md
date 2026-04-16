@@ -8,11 +8,12 @@ The context pipeline is modality-aware (`ContextRequest.modality` is `"voice"` o
 
 ## STT → pipeline wiring
 
-Wired end-to-end in `bot.py` around the `subscribe_my_voice` command (`bot.py:787–812`):
+Wired end-to-end in `bot.py` around the `subscribe_my_voice` command (`bot.py:787–820`):
 
 - Per-speaker PCM streams are pulled from a `discord.py` sink into an asyncio-tagged queue — see `src/familiar_connect/voice/recording_sink.py`.
 - `start_pipeline()` in `src/familiar_connect/voice_pipeline.py` creates one `DeepgramTranscriber` per speaker (`src/familiar_connect/transcription.py`) and fans tagged audio to the right stream.
-- Each finalised transcript is routed through `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`) for debouncing. The monitor uses Deepgram-event wall-clock (each `Results(is_final)` or `SpeechStarted` re-arms it) as the silence signal so `voice_lull_timeout` (default 5 s) reflects actual channel-wide quiet, not Deepgram's per-fragment endpointing.
+- In parallel, each tagged chunk is also fed into `TenVadDetector` (`src/familiar_connect/voice/ten_vad.py`) — a local [TEN VAD](https://github.com/TEN-framework/ten-vad) instance per speaker. TEN VAD resamples 48 kHz → 16 kHz, runs in 16 ms hops, and emits edge-triggered `on_speech_start` / `on_speech_end` callbacks that drive `VoiceLullMonitor`. Deepgram is used for transcription text only; its hosted VAD events are no longer consumed.
+- Each finalised transcript is routed through `VoiceLullMonitor` (`src/familiar_connect/voice_lull.py`) for debouncing. The monitor uses wall-clock since the last speech event (TEN VAD edge or Deepgram final) so `voice_lull_timeout` (default 5 s) reflects actual channel-wide quiet, not Deepgram's per-fragment endpointing.
 - On each merged utterance, the bot calls `familiar.monitor.on_message(channel_id=voice_channel_id, speaker=..., text=..., is_lull_endpoint=True)` — the same entry point text messages use (see [Conversation flow](conversation-flow.md)).
 - On a YES from the side-model gate, `on_respond` dispatches through `_run_voice_response`, which generates the reply and fans out to TTS.
 - Per-speaker streams stay separate so transcription attribution matches who actually spoke, not "the channel."
