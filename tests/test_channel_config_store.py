@@ -86,3 +86,135 @@ class TestCaching:
         # ChannelConfig is frozen so the cache can legitimately return the
         # same instance; both must at least compare equal.
         assert first == second
+
+
+# ---------------------------------------------------------------------------
+# set_backdrop / clear_backdrop / get_backdrop
+# ---------------------------------------------------------------------------
+
+
+class TestBackdrop:
+    def test_set_backdrop_creates_sidecar_when_absent(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(default_mode=ChannelMode.full_rp),
+        )
+        store.set_backdrop(channel_id=7, backdrop="Talk like a pirate.")
+
+        sidecar = tmp_path / "7.toml"
+        assert sidecar.exists()
+
+    def test_set_backdrop_seeds_mode_from_character_default(
+        self, tmp_path: Path
+    ) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(default_mode=ChannelMode.imitate_voice),
+        )
+        store.set_backdrop(channel_id=7, backdrop="Speak softly.")
+
+        cfg = store.get(channel_id=7)
+        assert cfg.mode is ChannelMode.imitate_voice
+
+    def test_set_backdrop_preserves_existing_mode(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(default_mode=ChannelMode.text_conversation_rp),
+        )
+        store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
+        store.set_backdrop(channel_id=7, backdrop="Pirate speech.")
+
+        cfg = store.get(channel_id=7)
+        assert cfg.mode is ChannelMode.full_rp
+        assert cfg.backdrop_override == "Pirate speech."
+
+    def test_set_backdrop_stores_channel_name(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_backdrop(channel_id=7, backdrop="Ahoy.", channel_name="tavern")
+
+        cfg = store.get(channel_id=7)
+        assert cfg.channel_name == "tavern"
+
+    def test_set_backdrop_invalidates_cache(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
+        _ = store.get(channel_id=7)  # prime cache
+
+        store.set_backdrop(channel_id=7, backdrop="New backdrop.")
+        cfg = store.get(channel_id=7)
+        assert cfg.backdrop_override == "New backdrop."
+
+    def test_clear_backdrop_removes_override(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_backdrop(channel_id=7, backdrop="Something.")
+        store.clear_backdrop(channel_id=7)
+
+        cfg = store.get(channel_id=7)
+        assert cfg.backdrop_override is None
+
+    def test_clear_backdrop_preserves_mode(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
+        store.set_backdrop(channel_id=7, backdrop="Something.")
+        store.clear_backdrop(channel_id=7)
+
+        cfg = store.get(channel_id=7)
+        assert cfg.mode is ChannelMode.full_rp
+
+    def test_get_backdrop_returns_none_for_unknown_channel(
+        self, tmp_path: Path
+    ) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        assert store.get_backdrop(channel_id=999) is None
+
+    def test_get_backdrop_returns_value_after_set(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_backdrop(channel_id=7, backdrop="Hello backdrop.")
+        assert store.get_backdrop(channel_id=7) == "Hello backdrop."
+
+
+# ---------------------------------------------------------------------------
+# set_mode preservation (regression)
+# ---------------------------------------------------------------------------
+
+
+class TestSetModePreservation:
+    def test_set_mode_preserves_backdrop(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_backdrop(channel_id=7, backdrop="Keep this.")
+        store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
+
+        cfg = store.get(channel_id=7)
+        assert cfg.backdrop_override == "Keep this."
+
+    def test_set_mode_preserves_channel_name(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_backdrop(channel_id=7, backdrop="x", channel_name="general")
+        store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
+
+        cfg = store.get(channel_id=7)
+        assert cfg.channel_name == "general"

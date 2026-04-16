@@ -25,20 +25,48 @@ the operator recipes.
 
 ## Per-mode instructions
 
-To tune *how* the familiar writes in a given channel mode (e.g. "keep
-it short, reply like a chat-room message"), drop a Markdown file into
-`data/familiars/<id>/modes/<mode>.md`. The filename must match the
-mode value: `text_conversation_rp.md`, `full_rp.md`, or
-`imitate_voice.md`. Missing file = no per-mode instruction; empty
-file = no-op. The text lands in `Layer.author_note` of the system
-prompt on every turn whose channel is in that mode.
+Each channel mode can carry its own author-note that gets injected into
+`Layer.author_note` on every turn. The lookup order is:
+
+1. **Per-channel backdrop** — set via `/channel-backdrop` (see below).
+2. **Familiar's own mode file** — `data/familiars/<id>/modes/<mode>.md`.
+3. **Repo default** — `data/familiars/_default/modes/<mode>.md` (ships with
+   the repo; covers all three modes out of the box).
+
+Drop a file into `data/familiars/<id>/modes/` to override the default for
+that familiar. The filename must match the mode value:
+`text_conversation_rp.md`, `full_rp.md`, or `imitate_voice.md`. Empty or
+missing file at a tier → the next tier is tried.
 
 ```
 data/familiars/aria/modes/
-├── text_conversation_rp.md    # "Reply as if in an internet chat room. A few lines, max."
-├── full_rp.md                 # "Prose style. Describe actions in italics. Stay in character."
-└── imitate_voice.md           # "Speak naturally. One or two sentences."
+├── text_conversation_rp.md    # familiar-specific override
+├── full_rp.md
+└── imitate_voice.md           # if absent, _default/modes/imitate_voice.md is used
 ```
+
+## Per-channel backdrop
+
+A **backdrop** is a custom author-note for a single channel that replaces the
+mode instruction for that channel. Set it with `/channel-backdrop` — a modal
+opens with a multi-line text field; submit to save, submit empty to clear.
+Pass `clear:True` to remove it without opening the modal:
+`/channel-backdrop clear:True`.
+
+The backdrop is stored in `data/familiars/<id>/channels/<channel_id>.toml`:
+
+```toml
+channel_name = "general"   # informational; written by the slash command
+mode = "full_rp"
+
+backdrop = """
+Reply as a stern tavern keeper. Call the user "traveler."
+Keep it to two sentences.
+"""
+```
+
+Switching modes with `/channel-full-rp` and siblings now preserves any
+`backdrop` (and `[typing_simulation]` block) that was already in the sidecar.
 
 ## Example `character.toml`
 

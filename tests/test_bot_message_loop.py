@@ -964,6 +964,7 @@ class TestCreateBot:
             "channel-full-rp",
             "channel-text-conversation-rp",
             "channel-imitate-voice",
+            "channel-backdrop",
         ],
     )
     def test_create_bot_registers_slash_command(

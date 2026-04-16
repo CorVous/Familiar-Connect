@@ -993,6 +993,87 @@ async def set_channel_mode(
     await ctx.respond(f"Channel mode set to **{mode.value}**.", ephemeral=True)
 
 
+def _make_backdrop_modal(
+    familiar: Familiar,
+    channel_id: int,
+    channel_name: str,
+    current: str | None,
+) -> discord.ui.Modal:
+    """Build and return the backdrop-editing modal for *channel_id*."""
+
+    class ChannelBackdropModal(discord.ui.Modal):
+        def __init__(self) -> None:
+            super().__init__(title="Channel Backdrop")
+            self.add_item(
+                discord.ui.InputText(
+                    label="Backdrop",
+                    style=discord.InputTextStyle.long,
+                    placeholder=(
+                        "Author-note injected on every turn in this channel. "
+                        "Replaces the mode default."
+                    ),
+                    value=current or "",
+                    required=False,
+                    max_length=4000,
+                )
+            )
+
+        async def callback(self, interaction: discord.Interaction) -> None:
+            text: str = self.children[0].value or ""  # type: ignore[union-attr]
+            familiar.channel_configs.set_backdrop(
+                channel_id=channel_id,
+                backdrop=text,
+                channel_name=channel_name,
+            )
+            _logger.info(
+                f"{ls.tag('Config', ls.W)} "
+                f"{ls.kv('channel', str(channel_id))} "
+                f"{ls.kv('action', 'backdrop_set')}"
+            )
+            stripped = text.strip()
+            if stripped:
+                msg = "Channel backdrop saved."
+            else:
+                msg = (
+                    "Channel backdrop cleared"
+                    " — reverting to the mode default on next turn."
+                )
+            await interaction.response.send_message(msg, ephemeral=True)
+
+    return ChannelBackdropModal()
+
+
+async def channel_backdrop(
+    ctx: discord.ApplicationContext,
+    familiar: Familiar,
+    *,
+    clear: bool,
+) -> None:
+    """Handle ``/channel-backdrop [clear]``."""
+    channel_id = ctx.channel_id
+    if channel_id is None:
+        await ctx.respond("Cannot determine channel.", ephemeral=True)
+        return
+
+    if clear:
+        familiar.channel_configs.clear_backdrop(channel_id=channel_id)
+        _logger.info(
+            f"{ls.tag('Config', ls.W)} "
+            f"{ls.kv('channel', str(channel_id))} "
+            f"{ls.kv('action', 'backdrop_cleared')}"
+        )
+        await ctx.respond(
+            "Channel backdrop cleared — reverting to the mode default on next turn.",
+            ephemeral=True,
+        )
+        return
+
+    channel_name = getattr(ctx.channel, "name", str(channel_id))
+    current = familiar.channel_configs.get_backdrop(channel_id=channel_id)
+    modal = _make_backdrop_modal(familiar, channel_id, channel_name, current)
+    await ctx.send_modal(modal)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline response path
 # ---------------------------------------------------------------------------
@@ -1399,6 +1480,23 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         name="channel-imitate-voice",
         description="Tune this channel for low-latency voice imitation",
     )(_channel_imitate_voice_cmd)
+
+    @bot.slash_command(
+        name="channel-backdrop",
+        description=(
+            "Set a per-channel author-note (replaces the mode default)."
+            " Use clear:True to remove."
+        ),
+    )
+    async def _channel_backdrop_cmd(
+        ctx: discord.ApplicationContext,
+        clear: discord.Option(  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
+            bool,
+            description="Remove the existing backdrop and revert to the mode default",
+            default=False,
+        ),
+    ) -> None:
+        await channel_backdrop(ctx, familiar, clear=clear)
 
     # --- message loop ---
     async def _on_message(message: discord.Message) -> None:
