@@ -268,6 +268,38 @@ class TestLoadCharacterConfig:
         assert cfg.tts.cartesia_voice_id == "user-voice"
         assert cfg.tts.cartesia_model == "sonic-4"
 
+    def test_tts_greetings_parsed(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[tts]\nvoice_id = "v"\nmodel = "m"\ngreetings = ["Hi!", "Hello!"]\n',
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.greetings == ["Hi!", "Hello!"]
+
+    def test_tts_greetings_must_be_list(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\ngreetings = "not-a-list"\n')
+        with pytest.raises(ConfigError, match="must be a list"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tts_greetings_defaults_empty(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\nvoice_id = "v"\nmodel = "m"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.greetings == []
+
     def test_defaults_populate_every_llm_slot(
         self,
         tmp_path: Path,

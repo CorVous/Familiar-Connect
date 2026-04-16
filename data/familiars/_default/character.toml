@@ -78,6 +78,9 @@ role     = "system"
 # Cartesia: set CARTESIA_API_KEY env var.
 #           cartesia_voice_id is the Cartesia voice UUID.
 #           cartesia_model is the model name, e.g. "sonic-3".
+#
+# greetings: list of strings to randomly pick from when joining voice.
+#           Empty list falls back to "Hello!" (hardcoded default).
 
 [tts]
 provider    = "azure"
@@ -97,6 +100,7 @@ gemini_model      = "gemini-3.1-flash-tts-preview"
 # gemini_style         = "playful, conversational"
 # gemini_pace          = "natural, with thoughtful pauses"
 # gemini_accent        = "neutral American"
+greetings  = []
 
 # --- LLM slots -------------------------------------------------------------
 #

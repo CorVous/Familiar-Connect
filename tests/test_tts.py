@@ -7,10 +7,15 @@ import datetime
 import json
 import os
 import struct
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import aiohttp
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+import familiar_connect.tts as tts_module  # noqa: I001
 import pytest
 
 from familiar_connect.config import (
@@ -35,6 +40,7 @@ from familiar_connect.tts import (
     _estimate_word_timestamps,
     _upsample_s16le_2x,
     create_tts_client,
+    get_cached_greeting_audio,
 )
 
 _TEST_VOICE_ID = "test-voice-id"
@@ -389,6 +395,99 @@ class TestCreateTTSClientCartesia:
             pytest.raises(ValueError, match=r"model"),
         ):
             create_tts_client(cfg)
+
+
+class TestGreetingCache:
+    """Tests for get_cached_greeting_audio file-based cache."""
+
+    @pytest.fixture
+    def fake_cache_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Redirect _GREETING_CACHE_DIR to a temp directory for tests."""
+        fake_dir = tmp_path / "greetings"
+        monkeypatch.setattr(tts_module, "_GREETING_CACHE_DIR", fake_dir)
+        return fake_dir
+
+    @pytest.mark.usefixtures("fake_cache_dir")
+    @pytest.mark.asyncio
+    async def test_cache_miss_synthesizes_and_writes_file(self) -> None:
+        """First call synthesizes and writes audio to disk."""
+        mock_client = AsyncMock(spec=CartesiaTTSClient)
+        mock_result = TTSResult(audio=b"cached-audio")
+        mock_client.synthesize.return_value = mock_result
+
+        result = await get_cached_greeting_audio(
+            provider="cartesia",
+            voice_id="voice-1",
+            greeting="Hello!",
+            client=mock_client,
+        )
+        assert result.audio == b"cached-audio"
+        mock_client.synthesize.assert_called_once_with("Hello!")
+
+    @pytest.mark.usefixtures("fake_cache_dir")
+    @pytest.mark.asyncio
+    async def test_cache_hit_reads_file_without_synthesis(self) -> None:
+        """Second call with same key reads from disk without calling synthesize."""
+        mock_client = AsyncMock(spec=CartesiaTTSClient)
+        mock_result = TTSResult(audio=b"cached-audio")
+        mock_client.synthesize.return_value = mock_result
+
+        await get_cached_greeting_audio(
+            provider="cartesia",
+            voice_id="voice-1",
+            greeting="Hello!",
+            client=mock_client,
+        )
+        await get_cached_greeting_audio(
+            provider="cartesia",
+            voice_id="voice-1",
+            greeting="Hello!",
+            client=mock_client,
+        )
+        # synthesize called only once
+        assert mock_client.synthesize.call_count == 1
+
+    @pytest.mark.usefixtures("fake_cache_dir")
+    @pytest.mark.asyncio
+    async def test_different_voice_id_not_cached(self) -> None:
+        """Different voice_id synthesizes separately."""
+        mock_client = AsyncMock(spec=CartesiaTTSClient)
+        mock_client.synthesize.return_value = TTSResult(audio=b"audio")
+
+        await get_cached_greeting_audio(
+            provider="cartesia",
+            voice_id="voice-1",
+            greeting="Hello!",
+            client=mock_client,
+        )
+        await get_cached_greeting_audio(
+            provider="cartesia",
+            voice_id="voice-2",
+            greeting="Hello!",
+            client=mock_client,
+        )
+        assert mock_client.synthesize.call_count == 2
+
+    @pytest.mark.usefixtures("fake_cache_dir")
+    @pytest.mark.asyncio
+    async def test_different_greeting_not_cached(self) -> None:
+        """Different greeting text synthesizes separately."""
+        mock_client = AsyncMock(spec=CartesiaTTSClient)
+        mock_client.synthesize.return_value = TTSResult(audio=b"audio")
+
+        await get_cached_greeting_audio(
+            provider="cartesia",
+            voice_id="voice-1",
+            greeting="Hello!",
+            client=mock_client,
+        )
+        await get_cached_greeting_audio(
+            provider="cartesia",
+            voice_id="voice-1",
+            greeting="Hi there!",
+            client=mock_client,
+        )
+        assert mock_client.synthesize.call_count == 2
 
 
 # ---------------------------------------------------------------------------

@@ -169,6 +169,8 @@ class TTSConfig:
     """Pace direction; e.g. ``"relaxed with thoughtful pauses"``."""
     gemini_accent: str | None = None
     """Accent direction; e.g. ``"soft Irish lilt"``."""
+    greetings: list[str] = field(default_factory=list)
+    """Random greeting audio played when the familiar joins a voice channel."""
 
 
 @dataclass(frozen=True)
@@ -732,6 +734,14 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
             msg = f"[tts].{key} must be a string"
             raise ConfigError(msg)
         return val or None
+    greetings_raw = raw.get("greetings", [])
+    if not isinstance(greetings_raw, list):
+        msg = (
+            "[tts].greetings must be a list of strings, "
+            f"got {type(greetings_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    greetings = [str(g) for g in greetings_raw]
 
     return TTSConfig(
         provider=provider_raw,
@@ -746,6 +756,7 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         gemini_style=_opt_str("gemini_style"),
         gemini_pace=_opt_str("gemini_pace"),
         gemini_accent=_opt_str("gemini_accent"),
+        greetings=greetings,
     )
 
 
