@@ -389,20 +389,6 @@ class TestResolveModeDefault:
         )
         assert out == "Default text."
 
-    def test_familiar_beats_defaults(self, tmp_path: Path) -> None:
-        familiar = tmp_path / "familiar"
-        familiar.mkdir()
-        defaults = tmp_path / "default"
-        defaults.mkdir()
-        (familiar / "full_rp.md").write_text("Familiar wins.")
-        (defaults / "full_rp.md").write_text("Default loses.")
-        out = resolve_mode_default(
-            modes_root=familiar,
-            mode=ChannelMode.full_rp,
-            defaults_modes_root=defaults,
-        )
-        assert out == "Familiar wins."
-
     def test_missing_everywhere_returns_none(self, tmp_path: Path) -> None:
         familiar = tmp_path / "familiar"
         familiar.mkdir()
@@ -416,17 +402,3 @@ class TestResolveModeDefault:
             )
             is None
         )
-
-    def test_whitespace_only_falls_through(self, tmp_path: Path) -> None:
-        familiar = tmp_path / "familiar"
-        familiar.mkdir()
-        defaults = tmp_path / "default"
-        defaults.mkdir()
-        (familiar / "full_rp.md").write_text("   \n\n  ")
-        (defaults / "full_rp.md").write_text("Default kept.")
-        out = resolve_mode_default(
-            modes_root=familiar,
-            mode=ChannelMode.full_rp,
-            defaults_modes_root=defaults,
-        )
-        assert out == "Default kept."

@@ -126,22 +126,6 @@ class ChannelConfigStore:
         self._cache[channel_id] = cfg
         return cfg
 
-    def clear_backdrop(self, *, channel_id: int) -> ChannelConfig:
-        """Remove the per-channel backdrop; revert to the mode default."""
-        sidecar = self._sidecar_path(channel_id)
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-
-        existing = self._read_raw(sidecar)
-        if "mode" not in existing:
-            existing["mode"] = self._character.default_mode.value
-        existing.pop("backdrop", None)
-
-        self._write_sidecar(sidecar, existing)
-
-        cfg = self._load_from_sidecar(sidecar)
-        self._cache[channel_id] = cfg
-        return cfg
-
     def get_backdrop(self, *, channel_id: int) -> str | None:
         """Return current ``backdrop_override`` or ``None`` if unset."""
         return self.get(channel_id=channel_id).backdrop_override

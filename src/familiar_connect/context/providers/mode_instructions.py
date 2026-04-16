@@ -32,6 +32,19 @@ if TYPE_CHECKING:
     from familiar_connect.context.types import ContextRequest
 
 
+def _read_mode_file(root: Path, mode: ChannelMode) -> str | None:
+    """Read ``<root>/<mode>.md``; return stripped text or ``None``."""
+    path = root / f"{mode.value}.md"
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
 MODE_INSTRUCTION_PRIORITY = 80
 """Priority assigned to mode-instruction contributions.
 
@@ -81,13 +94,13 @@ class ModeInstructionProvider:
                 return [self._make(stripped, f"channel_backdrop:{self._mode.value}")]
 
         # 2. familiar-specific modes/<mode>.md
-        text = self._read_file(self._modes_root)
+        text = _read_mode_file(self._modes_root, self._mode)
         if text is not None:
             return [self._make(text, f"mode_instructions:{self._mode.value}")]
 
         # 3. _default/modes/<mode>.md fallback
         if self._defaults_root is not None:
-            text = self._read_file(self._defaults_root)
+            text = _read_mode_file(self._defaults_root, self._mode)
             if text is not None:
                 return [
                     self._make(text, f"mode_instructions_default:{self._mode.value}")
@@ -96,18 +109,6 @@ class ModeInstructionProvider:
         return []
 
     # ------------------------------------------------------------------
-
-    def _read_file(self, root: Path) -> str | None:
-        """Read ``<root>/<mode>.md``; return stripped text or ``None``."""
-        path = root / f"{self._mode.value}.md"
-        if not path.is_file():
-            return None
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError:
-            return None
-        stripped = raw.strip()
-        return stripped or None
 
     def _make(self, text: str, source: str) -> Contribution:
         return Contribution(
@@ -134,14 +135,7 @@ def resolve_mode_default(
     for root in (modes_root, defaults_modes_root):
         if root is None:
             continue
-        path = root / f"{mode.value}.md"
-        if not path.is_file():
-            continue
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        stripped = raw.strip()
-        if stripped:
-            return stripped
+        text = _read_mode_file(root, mode)
+        if text is not None:
+            return text
     return None

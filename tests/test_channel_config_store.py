@@ -89,7 +89,7 @@ class TestCaching:
 
 
 # ---------------------------------------------------------------------------
-# set_backdrop / clear_backdrop / get_backdrop
+# set_backdrop / get_backdrop
 # ---------------------------------------------------------------------------
 
 
@@ -149,29 +149,6 @@ class TestBackdrop:
         store.set_backdrop(channel_id=7, backdrop="New backdrop.")
         cfg = store.get(channel_id=7)
         assert cfg.backdrop_override == "New backdrop."
-
-    def test_clear_backdrop_removes_override(self, tmp_path: Path) -> None:
-        store = ChannelConfigStore(
-            root=tmp_path,
-            character=CharacterConfig(),
-        )
-        store.set_backdrop(channel_id=7, backdrop="Something.")
-        store.clear_backdrop(channel_id=7)
-
-        cfg = store.get(channel_id=7)
-        assert cfg.backdrop_override is None
-
-    def test_clear_backdrop_preserves_mode(self, tmp_path: Path) -> None:
-        store = ChannelConfigStore(
-            root=tmp_path,
-            character=CharacterConfig(),
-        )
-        store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
-        store.set_backdrop(channel_id=7, backdrop="Something.")
-        store.clear_backdrop(channel_id=7)
-
-        cfg = store.get(channel_id=7)
-        assert cfg.mode is ChannelMode.full_rp
 
     def test_get_backdrop_returns_none_for_unknown_channel(
         self, tmp_path: Path
