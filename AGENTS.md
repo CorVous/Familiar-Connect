@@ -73,10 +73,6 @@ but should still be concise — trim wordiness, filler, and restating.
 How to add a new log call. Match existing style — don't invent a new one.
 
 * Per module: `_logger = logging.getLogger(__name__)` at top. Never root.
-* Setup lives in `setup_logging` (`src/familiar_connect/cli.py`). Don't
-  reconfigure, add handlers, or log to files — console only.
-* Verbosity: default `WARNING`, `-v` `INFO`, `-vv` `DEBUG`. Package
-  logger floor is `INFO` so user-facing messages always show.
 * Compose with `from familiar_connect import log_style as ls`:
     * `ls.tag(label, color)` — leading `[label]`
     * `ls.kv(key, val, vc=color)` — `key=value` chunk
@@ -84,7 +80,6 @@ How to add a new log call. Match existing style — don't invent a new one.
 * Layout: one line, leading `ls.tag(...)` then space-separated
   `ls.kv(...)` pairs. `StyledFormatter` repaints the leading tag for
   `WARNING`/`ERROR` — keep the tag first. Example (`mood.py`):
-
   ```python
   _logger.info(
       f"{ls.tag('Mood', ls.M)} "
@@ -93,4 +88,3 @@ How to add a new log call. Match existing style — don't invent a new one.
   ```
 * Emoji: reserve for notable transitions (✨ summon, 🎙️ stream).
 * One color per subsystem; stay consistent across that subsystem's logs.
-* New formatter/setup logic ships with a test in `tests/test_logging.py`.
