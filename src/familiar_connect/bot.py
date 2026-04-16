@@ -1487,15 +1487,21 @@ def create_bot(familiar: Familiar) -> discord.Bot:
             "Set a per-channel author-note (replaces the mode default)."
             " Use clear:True to remove."
         ),
+        options=[
+            discord.Option(
+                bool,
+                name="clear",
+                description=(
+                    "Remove the existing backdrop and revert to the mode default"
+                ),
+                default=False,
+                required=False,
+            ),
+        ],
     )
     async def _channel_backdrop_cmd(
         ctx: discord.ApplicationContext,
-        clear: discord.Option(  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
-            bool,
-            description="Remove the existing backdrop and revert to the mode default",
-            default=False,
-            required=False,
-        ),
+        clear: bool = False,  # noqa: FBT001, FBT002
     ) -> None:
         await channel_backdrop(ctx, familiar, clear=clear)
 
