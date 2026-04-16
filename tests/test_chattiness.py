@@ -570,7 +570,7 @@ class TestSideModelEvaluation:
         )
         assert len(calls) == 1
         assert calls[0][2] is ResponseTrigger.lull
-        assert calls[0][2].is_unsolicited is True
+        assert calls[0][2].is_unsolicited is False
 
     def test_no_response_does_not_call_on_respond(self) -> None:
         monitor, calls = _make_monitor(side_model_reply="NO")

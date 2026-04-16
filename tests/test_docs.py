@@ -63,6 +63,10 @@ INSTALLATION_DOC = DOCS_ROOT / "getting-started" / "installation.md"
 ENV_VAR_ALLOWLIST: frozenset[str] = frozenset({
     "TWITCH_CLIENT_ID",
     "TWITCH_ACCESS_TOKEN",
+    # module-level constant documented in voice-input.md as a tuning knob;
+    # not an env var — the SHOUT_CASE pattern false-positively matches it
+    # now that voice-input.md has env-context cues.
+    "DEFAULT_IDLE_FINALIZE_S",
 })
 
 #: Markdown files under ``docs/`` that intentionally live outside the

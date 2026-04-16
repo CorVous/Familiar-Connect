@@ -54,10 +54,10 @@ effective = clamp(base + mood_modifier + unsolicited_bias, 0, 1)
 keep_talking = random() < effective
 ```
 
-`unsolicited_bias = +0.35` when the response was initiated as a
-chattiness/interjection (unsolicited) reply. Unsolicited remarks are more
-committed — `average` tolerance + unsolicited bias yields a 65% push-through
-probability.
+`unsolicited_bias = +0.35` when the response was initiated as an
+interjection (the familiar barged in without being addressed). Lulls and
+direct addresses carry no bias. `average` tolerance + unsolicited bias
+yields a 65% push-through probability.
 
 ---
 

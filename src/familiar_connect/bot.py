@@ -799,7 +799,9 @@ async def subscribe_my_voice(
             # SPEAKING/IDLE on its own. On NO, no on_respond fires, so
             # the tracker is still GENERATING when we get back here and
             # we transition it back to IDLE.
-            tracker.is_unsolicited = True  # lull is always unsolicited
+            # is_unsolicited stays False here: lulls are not unsolicited.
+            # If monitor decides to respond (on_respond → _run_voice_response),
+            # trigger.is_unsolicited drives the tracker flag (bot.py:167).
             tracker.transition(ResponseState.GENERATING)
             try:
                 await familiar.monitor.on_message(

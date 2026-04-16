@@ -63,8 +63,8 @@ class ResponseTrigger(Enum):
 
     @property
     def is_unsolicited(self) -> bool:
-        """True when the familiar chose to speak without being addressed."""
-        return self is not ResponseTrigger.direct_address
+        """True only when the familiar barged in via interjection."""
+        return self is ResponseTrigger.interjection
 
 
 # ---------------------------------------------------------------------------

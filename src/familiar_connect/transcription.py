@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
@@ -24,6 +26,21 @@ _logger = logging.getLogger(__name__)
 DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen"
 DEFAULT_MODEL = "nova-3"
 DEFAULT_LANGUAGE = "en"
+
+DEFAULT_IDLE_FINALIZE_S: float = 0.5
+"""Silence gap before forcing a Deepgram ``Finalize``.
+
+Discord's client-side VAD stops RTP delivery during silence, so
+Deepgram's endpointer never sees the in-stream silence it needs and
+holds the buffered final until the next speech burst. After this many
+seconds of no chunks arriving, the pump sends ``{"type":"Finalize"}``
+to force Deepgram to emit immediately.
+
+Also used as the post-replay cushion in ``_reconnect``: after draining
+the replay buffer and sleeping for the real-time replay duration, an
+additional ``DEFAULT_IDLE_FINALIZE_S`` wait ensures the same silence
+window the endpointer expects in the normal flow.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +93,7 @@ class DeepgramTranscriber:
         utterance_end_ms: int = 1000,
         vad_events: bool = False,
         endpointing_ms: int = 300,
+        replay_buffer_s: float = 5.0,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -87,11 +105,20 @@ class DeepgramTranscriber:
         self.utterance_end_ms = utterance_end_ms
         self.vad_events = vad_events
         self.endpointing_ms = endpointing_ms
+        self.replay_buffer_s = replay_buffer_s
 
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._receive_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        # set by ``stop()`` so the receive loop can distinguish
+        # self-initiated close from server/transport closes
+        self._shutting_down: bool = False
+        # sliding window of recent PCM chunks; replayed to new WS on reconnect
+        self._replay_buffer: collections.deque[bytes] = collections.deque()
+        self._replay_buffer_bytes: int = 0
+        # guards concurrent send_audio / replay-drain so bytes stay ordered
+        self._send_lock: asyncio.Lock = asyncio.Lock()
 
     def build_ws_url(self: Self) -> str:
         """Deepgram WebSocket URL with query parameters.
@@ -135,6 +162,7 @@ class DeepgramTranscriber:
             utterance_end_ms=self.utterance_end_ms,
             vad_events=self.vad_events,
             endpointing_ms=self.endpointing_ms,
+            replay_buffer_s=self.replay_buffer_s,
         )
 
     def _parse_response(self: Self, data: dict[str, Any]) -> TranscriptionResult | None:
@@ -210,17 +238,32 @@ class DeepgramTranscriber:
         self._receive_task = asyncio.create_task(self._receive_loop(output))
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
+    def _buffer_chunk(self: Self, data: bytes) -> None:
+        """Append to sliding replay window, evicting oldest when over budget."""
+        self._replay_buffer.append(data)
+        self._replay_buffer_bytes += len(data)
+        max_bytes = int(self.replay_buffer_s * self.sample_rate * self.channels * 2)
+        while self._replay_buffer_bytes > max_bytes and self._replay_buffer:
+            evicted = self._replay_buffer.popleft()
+            self._replay_buffer_bytes -= len(evicted)
+
     async def send_audio(self: Self, data: bytes) -> None:
-        """Send PCM bytes. Silent no-op if WS already closed.
+        """Send PCM bytes; buffer for replay on reconnect.
+
+        Chunk is appended to the sliding replay window before attempting
+        the send, so a mid-send drop still lands in the buffer.
 
         :raises RuntimeError: If called before :meth:`start`.
         """
         if self._ws is None:
             msg = "Transcriber is not connected — call start() first"
             raise RuntimeError(msg)
-        if self._ws.closed:
-            return
-        await self._ws.send_bytes(data)
+        async with self._send_lock:
+            self._buffer_chunk(data)
+            if self._ws.closed:
+                return
+            with contextlib.suppress(Exception):
+                await self._ws.send_bytes(data)
 
     async def finalize(self: Self) -> None:
         """Force Deepgram to flush the buffered segment as a final.
@@ -239,6 +282,9 @@ class DeepgramTranscriber:
 
     async def stop(self: Self) -> None:
         """Gracefully close Deepgram connection."""
+        # flip before CloseStream so a late close frame in the receive
+        # loop doesn't race into a reconnect
+        self._shutting_down = True
         if self._keepalive_task is not None:
             self._keepalive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -263,8 +309,25 @@ class DeepgramTranscriber:
             self._session = None
 
     _MAX_RECONNECTS: int = 5
-    _RECONNECT_DELAY: float = 1.0
+    _RECONNECT_DELAY: float = 1.0  # base delay; first attempt is immediate
+    _RECONNECT_BACKOFF_CAP: float = 16.0  # max backoff in seconds
     _KEEPALIVE_INTERVAL: float = 3.0
+
+    # close codes that indicate a permanent, non-recoverable condition
+    # (auth, billing, policy). reconnecting would just fail identically.
+    # 1008 = policy violation (RFC 6455). 4xxx = Deepgram application-level.
+    _NO_RECONNECT_CLOSE_CODES: frozenset[int] = frozenset({1008})
+
+    @classmethod
+    def _should_reconnect(cls, close_code: object) -> bool:
+        """Classify close code. False → stop; True → reconnect."""
+        if not isinstance(close_code, int):
+            # transport-level drop (no close frame seen) — retry
+            return True
+        if close_code in cls._NO_RECONNECT_CLOSE_CODES:
+            return False
+        # Deepgram 4xxx codes = application-level errors (auth/billing/quota)
+        return not (4000 <= close_code < 5000)
 
     async def _keepalive_loop(self: Self) -> None:
         """Periodic KeepAlive to prevent Deepgram's ~10s idle timeout.
@@ -280,7 +343,7 @@ class DeepgramTranscriber:
                 await ws.send_json({"type": "KeepAlive"})
 
     async def _reconnect(self: Self) -> None:
-        """Close old session, open fresh one transparently."""
+        """Close old session, open fresh one; drain replay buffer to new WS."""
         # tear down old connection
         if self._ws is not None and not self._ws.closed:
             with contextlib.suppress(Exception):
@@ -301,6 +364,38 @@ class DeepgramTranscriber:
             f"{ls.word('Deepgram', ls.C)} "
             f"{ls.word('reconnected', ls.W)}"
         )
+
+        # replay buffered audio; hold send_lock so send_audio callers
+        # queue behind the drain rather than interleaving
+        async with self._send_lock:
+            chunks_replayed = len(self._replay_buffer)
+            replay_bytes = self._replay_buffer_bytes
+            for chunk in self._replay_buffer:
+                with contextlib.suppress(Exception):
+                    await self._ws.send_bytes(chunk)
+            self._replay_buffer.clear()
+            self._replay_buffer_bytes = 0
+
+        if chunks_replayed:
+            # wait ~replay duration before Finalize so Deepgram can process
+            # the burst. the replay arrives much faster than real-time, and
+            # Finalize emits "what's been transcribed so far" — firing it
+            # immediately produces a partial covering only the first few
+            # chunks the server had time to process. sleep is outside the
+            # send_lock so post-reconnect audio can flow through normally.
+            # DEFAULT_IDLE_FINALIZE_S cushion mirrors the silence window the
+            # endpointer sees in the normal idle-finalize path.
+            replay_s = replay_bytes / (self.sample_rate * self.channels * 2)
+            await asyncio.sleep(replay_s + DEFAULT_IDLE_FINALIZE_S)
+            async with self._send_lock:
+                ws = self._ws
+                if ws is not None and not ws.closed:
+                    with contextlib.suppress(Exception):
+                        await ws.send_json({"type": "Finalize"})
+            _logger.info(
+                f"{ls.tag('🔁 Replay', ls.C)} "
+                f"{ls.kv('chunks', str(chunks_replayed), vc=ls.LW)}"
+            )
 
     async def _receive_loop(
         self: Self,
@@ -334,31 +429,78 @@ class DeepgramTranscriber:
                     aiohttp.WSMsgType.ERROR,
                 }:
                     _logger.warning(
-                        "Deepgram WebSocket closed/error: type=%s data=%s",
-                        msg.type,
-                        getattr(msg, "data", None),
+                        f"{ls.tag('🔌 WebSocket', ls.Y)} "
+                        f"{ls.word('Deepgram', ls.C)} "
+                        f"{ls.kv('type', str(msg.type), vc=ls.LW)} "
+                        f"{ls.kv('data', str(getattr(msg, 'data', None)), vc=ls.LW)}"
                     )
                     break
 
             close_code = self._ws.close_code if self._ws else None
+
+            # self-initiated close → exit silently; ``stop()`` handles cleanup
+            if self._shutting_down:
+                _logger.info(
+                    f"{ls.tag('🔌 WebSocket', ls.Y)} "
+                    f"{ls.word('Deepgram', ls.C)} "
+                    f"{ls.word('shutdown', ls.W)} "
+                    f"{ls.kv('close_code', str(close_code), vc=ls.LW)}"
+                )
+                return
+
+            # non-recoverable close (auth/billing/policy) → stop retrying
+            if not self._should_reconnect(close_code):
+                _logger.error(
+                    f"{ls.tag('🔌 WebSocket', ls.R)} "
+                    f"{ls.word('Deepgram', ls.C)} "
+                    f"{ls.word('non-recoverable', ls.W)} "
+                    f"{ls.kv('close_code', str(close_code), vc=ls.LW)}"
+                )
+                return
+
+            outage_start = time.monotonic()
             consecutive_reconnects += 1
+            # exponential backoff: first attempt is immediate; subsequent
+            # failures back off as 1x, 2x, 4x... the base delay up to the cap
+            backoff = 0.0
+            if consecutive_reconnects > 1:
+                exponent = consecutive_reconnects - 2  # attempt 2 → 2^0 = 1
+                backoff = min(
+                    self._RECONNECT_DELAY * (2**exponent),
+                    self._RECONNECT_BACKOFF_CAP,
+                )
+            attempt = f"{consecutive_reconnects}/{self._MAX_RECONNECTS}"
             _logger.warning(
-                "Deepgram WebSocket closed (close_code=%s), reconnecting (%d/%d)…",
-                close_code,
-                consecutive_reconnects,
-                self._MAX_RECONNECTS,
+                f"{ls.tag('🔌 WebSocket', ls.Y)} "
+                f"{ls.word('Deepgram', ls.C)} "
+                f"{ls.word('reconnecting', ls.W)} "
+                f"{ls.kv('close_code', str(close_code), vc=ls.LW)} "
+                f"{ls.kv('attempt', attempt, vc=ls.LW)} "
+                f"{ls.kv('backoff_s', f'{backoff:.1f}', vc=ls.LW)}"
             )
 
             try:
-                await asyncio.sleep(self._RECONNECT_DELAY)
+                if backoff > 0:
+                    await asyncio.sleep(backoff)
                 await self._reconnect()
+                outage_s = time.monotonic() - outage_start
+                _logger.info(
+                    f"{ls.tag('🔌 WebSocket', ls.G)} "
+                    f"{ls.word('Deepgram', ls.C)} "
+                    f"{ls.word('recovered', ls.LG)} "
+                    f"{ls.kv('close_code', str(close_code), vc=ls.LW)} "
+                    f"{ls.kv('attempt', attempt, vc=ls.LW)} "
+                    f"{ls.kv('outage_s', f'{outage_s:.2f}', vc=ls.LW)}"
+                )
             except Exception:
                 _logger.exception("Deepgram reconnection failed")
                 return
 
         _logger.error(
-            "Deepgram: max reconnect attempts (%d) exhausted",
-            self._MAX_RECONNECTS,
+            f"{ls.tag('🔌 WebSocket', ls.R)} "
+            f"{ls.word('Deepgram', ls.C)} "
+            f"{ls.word('max reconnects exhausted', ls.W)} "
+            f"{ls.kv('attempts', str(self._MAX_RECONNECTS), vc=ls.LW)}"
         )
 
 
@@ -367,8 +509,37 @@ class DeepgramTranscriber:
 # ---------------------------------------------------------------------------
 
 
+def _env_float(raw: str | None, default: float) -> float:
+    """Parse *raw* as float, falling back to *default*."""
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(raw: str | None, default: int) -> int:
+    """Parse *raw* as int, falling back to *default*."""
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def create_transcriber_from_env() -> DeepgramTranscriber:
     """Create from env vars (``DEEPGRAM_API_KEY`` required).
+
+    Optional overrides:
+
+    - ``DEEPGRAM_MODEL`` (default ``nova-3``)
+    - ``DEEPGRAM_LANGUAGE`` (default ``en``)
+    - ``DEEPGRAM_REPLAY_BUFFER_S`` (default ``5.0``)
+    - ``DEEPGRAM_KEEPALIVE_INTERVAL_S`` (default ``3.0``)
+    - ``DEEPGRAM_RECONNECT_MAX_ATTEMPTS`` (default ``5``)
+    - ``DEEPGRAM_RECONNECT_BACKOFF_CAP_S`` (default ``16.0``)
 
     :raises ValueError: If ``DEEPGRAM_API_KEY`` not set.
     """
@@ -379,5 +550,20 @@ def create_transcriber_from_env() -> DeepgramTranscriber:
 
     model = os.environ.get("DEEPGRAM_MODEL") or DEFAULT_MODEL
     language = os.environ.get("DEEPGRAM_LANGUAGE") or DEFAULT_LANGUAGE
+    replay_buffer_s = _env_float(os.environ.get("DEEPGRAM_REPLAY_BUFFER_S"), 5.0)
+    keepalive_interval_s = _env_float(
+        os.environ.get("DEEPGRAM_KEEPALIVE_INTERVAL_S"), 3.0
+    )
+    max_attempts = _env_int(os.environ.get("DEEPGRAM_RECONNECT_MAX_ATTEMPTS"), 5)
+    backoff_cap_s = _env_float(os.environ.get("DEEPGRAM_RECONNECT_BACKOFF_CAP_S"), 16.0)
 
-    return DeepgramTranscriber(api_key=api_key, model=model, language=language)
+    t = DeepgramTranscriber(
+        api_key=api_key,
+        model=model,
+        language=language,
+        replay_buffer_s=replay_buffer_s,
+    )
+    t._KEEPALIVE_INTERVAL = keepalive_interval_s  # noqa: SLF001
+    t._MAX_RECONNECTS = max_attempts  # noqa: SLF001
+    t._RECONNECT_BACKOFF_CAP = backoff_cap_s  # noqa: SLF001
+    return t
