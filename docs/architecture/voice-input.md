@@ -31,7 +31,7 @@ Why it matters: Discord's client-side VAD stops sending RTP packets during silen
 
 Knobs:
 
-- **`DEFAULT_IDLE_FINALIZE_S`** (`0.5`) — how long to wait with no chunks before flushing. Shorter → faster transcripts; too short and the pump finalises mid-utterance during normal speech jitter. Module-level constant; not currently config-exposed.
+- **`DEFAULT_IDLE_FINALIZE_S`** (`0.5`, `src/familiar_connect/transcription.py`) — how long to wait with no chunks before flushing. Shorter → faster transcripts; too short and the pump finalises mid-utterance during normal speech jitter. Also used as the post-replay Finalize cushion — see [Replay buffer](#replay-buffer) below. Not currently config-exposed.
 
 Guarantees:
 
@@ -39,6 +39,34 @@ Guarantees:
 - No `Finalize` is sent before the pump has ever seen real audio.
 - A real chunk after a flush re-enters `dirty`, arming a fresh window.
 - `send_audio` errors are logged and swallowed; the pump keeps draining the queue so it never backs up.
+
+## Deepgram reconnect resilience
+
+`DeepgramTranscriber` (`src/familiar_connect/transcription.py`) reconnects automatically on both clean server-initiated closes (code 1000 — e.g. Deepgram session limit) and abrupt drops (code 1006 — network loss). Auth and billing codes (1008, 4xxx) are treated as permanent and do not retry.
+
+### Replay buffer
+
+Every PCM chunk passed to `send_audio` is appended to a bounded sliding-window buffer. On a successful reconnect the buffer is drained to the new WebSocket before any new audio is sent. This means any outage shorter than `DEEPGRAM_REPLAY_BUFFER_S` results in **zero audio loss** — Deepgram on the new connection receives a seamless continuation of the audio stream.
+
+Buffer budget: `replay_buffer_s × sample_rate × channels × 2` bytes. Oldest chunks are evicted when the budget is exceeded.
+
+After the drain, a `Finalize` control message is sent on the new connection — but only after a short wait equal to the real-time duration of the replayed audio (`replay_bytes / (sample_rate × channels × 2)`) plus `DEFAULT_IDLE_FINALIZE_S` (0.5 s). The replay arrives much faster than real-time, and Deepgram's server processes audio at roughly real-time on its side. Firing Finalize immediately emits "what's been transcribed so far", which would be only the first few chunks the server had time to consume — producing a truncated transcript. The delay lets the server catch up before the flush; the `DEFAULT_IDLE_FINALIZE_S` cushion mirrors the same silence window the endpointer sees in the normal idle-finalize path. Without any Finalize at all, the replayed audio would sit in-flight until the user's next utterance, because the pump is VAD-gated and stops feeding frames during silence. If the user is still speaking after the reconnect, the post-reconnect audio flows through normally during the wait (the send lock is released after the drain), so the pre- and post-reconnect segments merge into one transcript when Finalize fires.
+
+### Reconnect timing
+
+- First reconnect attempt: **immediate** (no delay).
+- Subsequent failures: exponential backoff — `1 s → 2 s → 4 s … `capped at `DEEPGRAM_RECONNECT_BACKOFF_CAP_S`. Backoff resets when the new connection delivers a real `Results` transcript.
+
+### Environment variable knobs (all optional)
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEEPGRAM_REPLAY_BUFFER_S` | `5.0` | Seconds of audio retained for replay on reconnect. |
+| `DEEPGRAM_KEEPALIVE_INTERVAL_S` | `3.0` | KeepAlive frame interval; prevents Deepgram's ~10 s idle timeout. |
+| `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` | `5` | Max consecutive reconnect failures before giving up. |
+| `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` | `16.0` | Maximum reconnect backoff in seconds. |
+
+A structured log line is emitted after each successful recovery: `close_code`, outage duration in seconds, and attempt count.
 
 ## Barge-in / interruption handling
 

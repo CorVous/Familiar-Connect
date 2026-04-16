@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
-from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.transcription import DEFAULT_IDLE_FINALIZE_S, TranscriptionResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -127,17 +127,6 @@ def _get_user_name(pipeline: VoicePipeline, user_id: int) -> str:
 # ---------------------------------------------------------------------------
 # Per-user coroutines
 # ---------------------------------------------------------------------------
-
-
-DEFAULT_IDLE_FINALIZE_S: float = 0.5
-"""How long to wait with no Discord audio before forcing a Deepgram flush.
-
-Discord's client-side VAD stops RTP delivery during silence, so
-Deepgram's endpointer never sees the in-stream silence it needs and
-holds the buffered final until the next speech burst. After this many
-seconds of no chunks arriving, the pump sends ``{"type":"Finalize"}``
-to force Deepgram to emit immediately.
-"""
 
 
 async def _audio_pump(

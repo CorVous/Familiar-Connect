@@ -12,6 +12,7 @@ import pytest
 
 from familiar_connect.transcription import (
     DEEPGRAM_WS_URL,
+    DEFAULT_IDLE_FINALIZE_S,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DeepgramTranscriber,
@@ -186,6 +187,7 @@ class TestDeepgramTranscriber:
             utterance_end_ms=500,
             vad_events=False,
             endpointing_ms=450,
+            replay_buffer_s=8.0,
         )
         cloned = original.clone()
 
@@ -200,6 +202,7 @@ class TestDeepgramTranscriber:
         assert cloned.utterance_end_ms == original.utterance_end_ms
         assert cloned.vad_events == original.vad_events
         assert cloned.endpointing_ms == original.endpointing_ms
+        assert cloned.replay_buffer_s == pytest.approx(original.replay_buffer_s)
 
 
 class TestDeepgramTranscriberParseResponse:
@@ -667,6 +670,369 @@ class TestDeepgramReconnect:
         # Not unlimited — must be <= initial + max (default 5) + 1
         assert connect_mock.call_count <= 7
 
+    @pytest.mark.asyncio
+    async def test_does_not_reconnect_when_shutting_down(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Receive loop must not reconnect once ``_shutting_down`` is set.
+
+        Simulates the race where ``stop()`` flips the flag before the
+        receive loop notices the close frame.
+        """
+        ws1 = self._make_ws_mock()
+        ws1.close_code = 1000  # clean close
+        ws2 = self._make_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            # Flip the flag before the loop sees the close.
+            client._shutting_down = True
+            await asyncio.sleep(0.1)
+            await client.stop()
+
+        # Only the initial connect — no reconnect attempt.
+        assert connect_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_reconnect_on_auth_close(
+        self,
+        client: DeepgramTranscriber,
+    ) -> None:
+        """Auth-style close codes (1008, 4001, 4008) must not be retried."""
+        ws1 = self._make_ws_mock()
+        ws1.close_code = 4001  # Deepgram auth failure style
+        ws2 = self._make_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.1)
+            await client.stop()
+
+        # Only the initial connect — auth failures aren't retried.
+        assert connect_mock.call_count == 1
+
+
+class TestReplayBuffer:
+    """Replay buffer — audio buffered during disconnect is resent on reconnect."""
+
+    @pytest.fixture
+    def client(self) -> DeepgramTranscriber:
+        t = DeepgramTranscriber(api_key="test-key")
+        t._RECONNECT_DELAY = 0.01
+        # suppress keepalive so its sleep() calls don't pollute timing tests
+        t._KEEPALIVE_INTERVAL = 999.0
+        return t
+
+    def _make_ws_mock(
+        self, messages: list[object] | None = None, *, close_code: int = 1006
+    ) -> MagicMock:
+        ws = MagicMock()
+        ws.send_bytes = AsyncMock()
+        ws.send_json = AsyncMock()
+        ws.close = AsyncMock()
+        ws.closed = False
+        ws.close_code = close_code
+        items = messages if messages is not None else []
+        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        return ws
+
+    def _make_open_ws_mock(self) -> MagicMock:
+        """WS that stays open forever (pending future aiter)."""
+        ws = MagicMock()
+        ws.send_bytes = AsyncMock()
+        ws.send_json = AsyncMock()
+        ws.close = AsyncMock()
+        ws.closed = False
+        ws.close_code = None
+        pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
+
+        class _Never:
+            def __aiter__(self) -> _Never:
+                return self
+
+            async def __anext__(self) -> object:
+                await pending
+                raise StopAsyncIteration
+
+        ws.__aiter__ = MagicMock(return_value=_Never())
+        return ws
+
+    @pytest.mark.asyncio
+    async def test_send_audio_buffers_chunk_when_ws_closed(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """send_audio on a closed WS adds the chunk to the replay buffer."""
+        ws = self._make_open_ws_mock()
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            try:
+                ws.closed = True
+                await client.send_audio(b"\x01\x02\x03\x04")
+                # chunk must be in the buffer, not sent over the wire
+                ws.send_bytes.assert_not_called()
+                assert len(client._replay_buffer) > 0
+            finally:
+                await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_replay_buffer_chunks_sent_to_new_ws_after_reconnect(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """After reconnect, buffered chunks are replayed to the new WS in order."""
+        chunk_a = b"\xaa" * 100
+        chunk_b = b"\xbb" * 100
+
+        ws1 = self._make_ws_mock()
+        ws1.closed = True  # already closed so send_audio buffers immediately
+        ws2 = self._make_open_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+
+            # send while ws1 is closed → buffer
+            await client.send_audio(chunk_a)
+            await client.send_audio(chunk_b)
+
+            # wait for reconnect to ws2
+            await asyncio.sleep(0.2)
+
+            call_args = [c.args[0] for c in ws2.send_bytes.call_args_list]
+            assert chunk_a in call_args
+            assert chunk_b in call_args
+            # order preserved
+            assert call_args.index(chunk_a) < call_args.index(chunk_b)
+            # buffer cleared after drain so chunks aren't re-sent on a later drain
+            assert len(client._replay_buffer) == 0
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_finalize_delayed_by_replay_duration(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Finalize is delayed by replay duration + post-replay cushion.
+
+        Deepgram processes incoming audio at ~real-time on its side.
+        Bursting ~1 s of buffered audio in milliseconds then firing
+        Finalize immediately causes Deepgram to emit a partial (only the
+        fraction it had time to process). The delay gives the server
+        time to consume the burst before we force flush, with an extra
+        cushion for server-side jitter.
+        """
+        # 48000 Hz * 1 channel * 2 bytes/sample * 0.5s = 48000 bytes
+        chunk = b"\xaa" * 48000  # exactly 0.5 s of mono 48 kHz linear16
+        ws1 = self._make_ws_mock()
+        ws1.closed = True
+        ws2 = self._make_open_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        sleep_calls: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def _track_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+            await original_sleep(0)
+
+        with (
+            patch.object(client, "_ws_connect", new=connect_mock),
+            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
+        ):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await client.send_audio(chunk)
+            await original_sleep(0.1)  # let reconnect + drain run
+
+            # exactly one sleep ≈ replay duration (0.5 s) + cushion (0.25 s)
+            expected = 0.5 + DEFAULT_IDLE_FINALIZE_S
+            replay_sleeps = [
+                d for d in sleep_calls if expected - 0.05 < d < expected + 0.05
+            ]
+            assert len(replay_sleeps) == 1, (
+                f"expected one ~{expected:.2f} s delay before Finalize; "
+                f"got {sleep_calls}"
+            )
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_replay_sends_finalize_after_drain(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """After draining the replay, Finalize flushes the replayed audio.
+
+        Without this, Deepgram holds the replayed segment until more audio
+        arrives (or endpointing silence — which our VAD-gated pump doesn't
+        send). The user sees no transcript until they speak again.
+        """
+        chunk = b"\xaa" * 100
+        ws1 = self._make_ws_mock()
+        ws1.closed = True  # already closed so send_audio buffers immediately
+        ws2 = self._make_open_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await client.send_audio(chunk)
+            # wait longer than the post-replay cushion so Finalize fires
+            await asyncio.sleep(DEFAULT_IDLE_FINALIZE_S + 0.2)
+
+            finalize_calls = [
+                c.args[0]
+                for c in ws2.send_json.call_args_list
+                if c.args and c.args[0].get("type") == "Finalize"
+            ]
+            assert len(finalize_calls) == 1, (
+                f"expected exactly one Finalize after replay; got {finalize_calls}"
+            )
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_empty_replay_does_not_send_finalize(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Zero-chunk replay should not trigger a spurious Finalize."""
+        ws1 = self._make_ws_mock()  # closes without any buffered audio
+        ws2 = self._make_open_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.2)  # let reconnect run
+
+            finalize_calls = [
+                c.args[0]
+                for c in ws2.send_json.call_args_list
+                if c.args and c.args[0].get("type") == "Finalize"
+            ]
+            assert finalize_calls == []
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_replay_buffer_trims_oldest_when_over_budget(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Buffer trims oldest chunks when cumulative bytes exceed the cap."""
+        # set a tiny cap: 1 s at 1 byte/s = 1 byte
+        client.sample_rate = 1
+        client.channels = 1
+
+        ws = self._make_open_ws_mock()
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            ws.closed = True  # force buffering
+
+            try:
+                chunk_a = b"\xaa" * 4
+                chunk_b = b"\xbb" * 4
+                chunk_c = b"\xcc" * 4
+
+                await client.send_audio(chunk_a)
+                await client.send_audio(chunk_b)
+                await client.send_audio(chunk_c)
+
+                # buffer is over budget; oldest chunk should be evicted
+                buffered = list(client._replay_buffer)
+                assert chunk_a not in buffered  # oldest dropped
+                assert chunk_c in buffered  # newest retained
+            finally:
+                await client.stop()
+
+
+class TestExponentialBackoff:
+    """First reconnect is immediate; subsequent failures back off exponentially."""
+
+    @pytest.fixture
+    def client(self) -> DeepgramTranscriber:
+        t = DeepgramTranscriber(api_key="test-key")
+        # suppress keepalive loop so its sleep() calls don't pollute the list
+        t._KEEPALIVE_INTERVAL = 999.0
+        return t
+
+    def _make_ws_mock(self, close_code: int = 1006) -> MagicMock:
+        ws = MagicMock()
+        ws.send_bytes = AsyncMock()
+        ws.send_json = AsyncMock()
+        ws.close = AsyncMock()
+        ws.closed = False
+        ws.close_code = close_code
+        ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+        return ws
+
+    def _make_open_ws_mock(self) -> MagicMock:
+        """WS that stays open indefinitely (never emits messages)."""
+        ws = MagicMock()
+        ws.send_bytes = AsyncMock()
+        ws.send_json = AsyncMock()
+        ws.close = AsyncMock()
+        ws.closed = False
+        ws.close_code = None
+        pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
+
+        class _Never:
+            def __aiter__(self) -> _Never:
+                return self
+
+            async def __anext__(self) -> object:
+                await pending
+                raise StopAsyncIteration
+
+        ws.__aiter__ = MagicMock(return_value=_Never())
+        return ws
+
+    @pytest.mark.asyncio
+    async def test_backoff_sequence(self, client: DeepgramTranscriber) -> None:
+        """First reconnect is immediate; successive failures back off with growth."""
+        sleep_calls: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def _track_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+            await original_sleep(0)
+
+        # ws1+ws2+ws3 die immediately; ws4 stays open
+        # reconnects: 1st (no sleep), 2nd (sleep 1.0), 3rd (sleep 2.0)
+        dying = [self._make_ws_mock() for _ in range(3)]
+        ws_list = [*dying, self._make_open_ws_mock()]
+        connect_mock = AsyncMock(side_effect=ws_list)
+
+        with (
+            patch.object(client, "_ws_connect", new=connect_mock),
+            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
+        ):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await original_sleep(0.2)
+            await client.stop()
+
+        # keepalive sleeps (999.0) excluded by the cap filter.
+        cap = client._RECONNECT_BACKOFF_CAP
+        backoff_sleeps = [d for d in sleep_calls if 0 < d <= cap]
+
+        # 3 failures → 3 reconnect attempts. If the 1st attempt had a
+        # pre-sleep we'd see 3 backoff delays; "first is immediate" means 2.
+        assert len(backoff_sleeps) == 2, (
+            f"expected exactly 2 backoff sleeps (first reconnect immediate, "
+            f"subsequent two delayed); got {sleep_calls}"
+        )
+        assert backoff_sleeps == sorted(backoff_sleeps), (
+            f"backoff sleeps must be non-decreasing: {backoff_sleeps}"
+        )
+        assert backoff_sleeps[-1] > backoff_sleeps[0], (
+            f"backoff must grow; got: {backoff_sleeps}"
+        )
+
 
 class TestDeepgramKeepAlive:
     """Tests for the periodic KeepAlive frame that prevents Deepgram's idle timeout."""
@@ -849,3 +1215,20 @@ class TestCreateTranscriberFromEnv:
             pytest.raises(ValueError, match=r"DEEPGRAM_API_KEY"),
         ):
             create_transcriber_from_env()
+
+    def test_reconnect_knobs_from_env(self) -> None:
+        """Factory wires reconnect/buffer/keepalive knobs from env vars."""
+        env = {
+            "DEEPGRAM_API_KEY": "sk-test",
+            "DEEPGRAM_REPLAY_BUFFER_S": "10.0",
+            "DEEPGRAM_KEEPALIVE_INTERVAL_S": "5.0",
+            "DEEPGRAM_RECONNECT_MAX_ATTEMPTS": "3",
+            "DEEPGRAM_RECONNECT_BACKOFF_CAP_S": "32.0",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            client = create_transcriber_from_env()
+
+        assert client.replay_buffer_s == pytest.approx(10.0)
+        assert pytest.approx(5.0) == client._KEEPALIVE_INTERVAL
+        assert client._MAX_RECONNECTS == 3
+        assert pytest.approx(32.0) == client._RECONNECT_BACKOFF_CAP
