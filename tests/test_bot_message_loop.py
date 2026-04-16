@@ -34,6 +34,7 @@ import pytest
 
 from familiar_connect.bot import (
     _default_backdrop_placeholder,
+    _make_backdrop_modal,
     _run_text_response,
     _run_voice_response,
     create_bot,
@@ -1024,6 +1025,32 @@ class TestBackdropPlaceholder:
         out = _default_backdrop_placeholder("line one\n\n  line two")
         assert "\n" not in out
         assert out == "line one line two"
+
+
+class TestBackdropModalRequiredFlag:
+    """Modal must send ``required=false`` so emptied text clears the backdrop.
+
+    Regression against a py-cord quirk where
+    ``InputText._generate_underlying`` collapses ``required=False`` to
+    ``None`` via ``False or self.required``, which Discord then defaults
+    to ``required=true``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_required_false_reaches_the_component_payload(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        modal = _make_backdrop_modal(
+            familiar,
+            channel_id=1,
+            channel_name="general",
+            current="Talk like a pirate.",
+            mode_default="Default text.",
+        )
+        field = modal.children[0]
+        assert field.required is False
+        assert field._underlying.to_dict()["required"] is False
 
 
 # ---------------------------------------------------------------------------

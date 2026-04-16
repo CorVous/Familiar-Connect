@@ -1021,16 +1021,20 @@ def _make_backdrop_modal(
     class ChannelBackdropModal(discord.ui.Modal):
         def __init__(self) -> None:
             super().__init__(title="Channel Backdrop")
-            self.add_item(
-                discord.ui.InputText(
-                    label="Backdrop",
-                    style=discord.InputTextStyle.long,
-                    placeholder=placeholder,
-                    value=current or "",
-                    required=False,
-                    max_length=4000,
-                )
+            field = discord.ui.InputText(
+                label="Backdrop",
+                style=discord.InputTextStyle.long,
+                placeholder=placeholder,
+                value=current or "",
+                required=False,
+                max_length=4000,
             )
+            # py-cord's _generate_underlying collapses ``required=False`` to
+            # ``None`` via ``False or self.required``; Discord then treats the
+            # field as required. Set the underlying flag directly so an empty
+            # submission (clearing the backdrop by deleting the text) works.
+            field.required = False
+            self.add_item(field)
 
         async def callback(self, interaction: discord.Interaction) -> None:
             text: str = self.children[0].value or ""  # type: ignore[union-attr]
