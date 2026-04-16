@@ -6,24 +6,24 @@ Three-tier design (see docs/architecture/context-pipeline.md §8):
    loaded verbatim. Correctness floor.
 2. ``retrieval.EmbeddingRetriever`` — local fastembed/ONNX against
    the SQLite embedding cache under ``.index/embeddings.sqlite``.
-   (Landed in PR 2; wiring into the provider happens in PR 3.)
-3. ``_agent_loop`` — cheap LLM with ``list_dir``/``glob``/``grep``/
-   ``read_file`` tools. Transitional fallback; replaced by a
-   single-shot filter over embedding hits once PR 3 lands.
+3. ``filter`` — one cheap-LLM call (with optional single grep
+   escalation) picking what to forward to the main model.
 """
 
-from familiar_connect.context.providers.content_search._agent_loop import (
-    CONTENT_SEARCH_PRIORITY,
-    DEFAULT_DEADLINE_S,
-    DEFAULT_MAX_ITERATIONS,
-    FORCED_ANSWER_MARKER,
+from familiar_connect.context.providers.content_search.filter import (
+    FILTER_MAX_ITERATIONS,
+    FILTER_PRIORITY,
+    FILTER_SOURCE,
 )
 from familiar_connect.context.providers.content_search.people_lookup import (
     DEFAULT_MAX_TOKENS_PER_FILE,
     PEOPLE_LOOKUP_PRIORITY,
     PEOPLE_LOOKUP_SOURCE,
+    LookupResult,
 )
 from familiar_connect.context.providers.content_search.provider import (
+    DEFAULT_DEADLINE_S,
+    DEFAULT_TOP_K,
     ContentSearchProvider,
 )
 from familiar_connect.context.providers.content_search.retrieval import (
@@ -39,19 +39,21 @@ from familiar_connect.context.providers.content_search.retrieval import (
 )
 
 __all__ = [
-    "CONTENT_SEARCH_PRIORITY",
     "DEFAULT_DEADLINE_S",
     "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_EMBEDDING_MODEL",
-    "DEFAULT_MAX_ITERATIONS",
     "DEFAULT_MAX_TOKENS_PER_FILE",
-    "FORCED_ANSWER_MARKER",
+    "DEFAULT_TOP_K",
+    "FILTER_MAX_ITERATIONS",
+    "FILTER_PRIORITY",
+    "FILTER_SOURCE",
     "PEOPLE_LOOKUP_PRIORITY",
     "PEOPLE_LOOKUP_SOURCE",
     "ContentSearchProvider",
     "EmbeddingModel",
     "EmbeddingRetriever",
     "FastEmbedModel",
+    "LookupResult",
     "PreparedChunk",
     "RetrievedChunk",
     "Retriever",

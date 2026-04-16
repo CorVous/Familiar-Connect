@@ -355,8 +355,11 @@ class EmbeddingRetriever:
 class FastEmbedModel:
     """``EmbeddingModel`` backed by ``fastembed.TextEmbedding``.
 
-    Lazy-imports fastembed so unit tests that only use stubs don't
-    pay the onnxruntime startup cost.
+    Both the fastembed import and the underlying ``TextEmbedding``
+    instance are deferred to first ``embed()`` call. That keeps
+    construction cheap (the ~68 MB model download and onnxruntime
+    session load only happen when something actually needs a vector),
+    so tests that never touch retrieval don't pay the cost.
     """
 
     def __init__(
@@ -365,16 +368,26 @@ class FastEmbedModel:
         *,
         dim: int = DEFAULT_EMBEDDING_DIM,
     ) -> None:
+        self._model_name = model_name
+        self.dim = dim
+        from typing import Any  # noqa: PLC0415
+
+        self._impl: Any = None
+
+    def _ensure_loaded(self) -> None:
+        if self._impl is not None:
+            return
         # Deferred import — heavy module, many transitive deps.
         from fastembed import TextEmbedding  # noqa: PLC0415
 
-        self._model = TextEmbedding(model_name=model_name)
-        self.dim = dim
+        self._impl = TextEmbedding(model_name=self._model_name)
 
     def embed(self, texts: list[str]) -> np.ndarray:
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
-        arr = np.stack(list(self._model.embed(texts))).astype(np.float32)
+        self._ensure_loaded()
+        assert self._impl is not None  # noqa: S101 — narrow after _ensure_loaded
+        arr = np.stack(list(self._impl.embed(texts))).astype(np.float32)
         # bge models already output near-unit vectors, but normalise
         # defensively so dot product == cosine for any swapped model.
         norms = np.linalg.norm(arr, axis=1, keepdims=True) + 1e-9

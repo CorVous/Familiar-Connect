@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from familiar_connect.context.budget import estimate_tokens
@@ -60,6 +61,19 @@ def slug(name: str) -> str:
     return _SLUG_NON_ALNUM.sub("-", name.lower()).strip("-")
 
 
+@dataclass(frozen=True)
+class LookupResult:
+    """Deterministic-tier output for the orchestrator.
+
+    ``rel_paths`` lets the orchestrator hand the retriever an exclude
+    set so embedding hits don't re-surface files already loaded
+    verbatim here.
+    """
+
+    contributions: list[Contribution] = field(default_factory=list)
+    rel_paths: list[str] = field(default_factory=list)
+
+
 def lookup(
     store: MemoryStore,
     request: ContextRequest,
@@ -73,15 +87,32 @@ def lookup(
     before pass-b reverse matches). Overflow against
     *content_cap_tokens* drops the tail, preserving the speaker.
     """
+    return lookup_with_paths(
+        store,
+        request,
+        content_cap_tokens=content_cap_tokens,
+        max_tokens_per_file=max_tokens_per_file,
+    ).contributions
+
+
+def lookup_with_paths(
+    store: MemoryStore,
+    request: ContextRequest,
+    *,
+    content_cap_tokens: int | None = None,
+    max_tokens_per_file: int = DEFAULT_MAX_TOKENS_PER_FILE,
+) -> LookupResult:
+    """Return contributions plus the loaded rel_paths for retriever exclusion."""
     stems = _list_people_stems(store)
     if not stems:
-        return []
+        return LookupResult()
 
     ordered_stems = _select_stems(stems, request)
     if not ordered_stems:
-        return []
+        return LookupResult()
 
     contributions: list[Contribution] = []
+    rel_paths: list[str] = []
     tokens_used = 0
     for stem in ordered_stems:
         rel_path = f"{_PEOPLE_DIR}/{stem}.md"
@@ -112,8 +143,9 @@ def lookup(
                 source=PEOPLE_LOOKUP_SOURCE,
             )
         )
+        rel_paths.append(rel_path)
 
-    return contributions
+    return LookupResult(contributions=contributions, rel_paths=rel_paths)
 
 
 # ---------------------------------------------------------------------------

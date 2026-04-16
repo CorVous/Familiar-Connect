@@ -170,28 +170,25 @@ No LLM involvement. Runs first. For every `contribute()` call:
 
 This tier is the correctness floor — the people-file guarantee documented in [Memory → People lookup guarantee](memory.md#people-lookup-guarantee). It runs regardless of whether the agent-loop tier succeeds, fails, or returns empty.
 
-### Tier 3 — Tool-using cheap-model loop
+### Tier 2 — Embedding retrieval
 
-Tools registered with the cheap model on each call:
+Optional semantic retrieval over the SQLite embedding cache (see [Memory → Derived indices](memory.md#derived-indices)). Embeds the utterance via `fastembed` / ONNX and returns the top-K chunks by cosine similarity. Chunks whose `rel_path` was already loaded by tier 1 are excluded so the filter doesn't see duplicates.
 
-- `list_dir(path)` → list of files and subdirectories.
-- `glob(pattern)` → paths matching a glob.
-- `grep(pattern, path="")` → matches with surrounding context.
-- `read_file(path)` → file contents.
+The embedding index is built (or refreshed) as a fire-and-forget background task on the first `contribute()` call. A stale or missing index returns `[]` — tier 1 is the correctness floor.
 
-**Loop** — up to K tool-call turns (default 3), hard deadline. The final turn is forced to a "no more tools; emit `ANSWER:` now with whatever you've seen" prompt so the provider returns a best-effort partial instead of nothing when the model would otherwise keep tool-calling.
+### Tier 3 — Single-shot filter
 
-**Redundant-call bail-out** — if the model repeats a `grep`/`read_file` arg pair already seen this turn, the loop jumps straight to the forced-answer turn rather than waste another iteration.
+One cheap-LLM call with the utterance, the top-K retrieved snippets (≤150 tokens each), and a note about which people files tier 1 already included. The model emits one of:
 
-**Output** — up to one additional `Contribution(layer=Layer.content, ...)` with the model's summary, at priority 70 and source `content_search`.
+- `ANSWER: <merged context>` — forwarded to the main model.
+- `ANSWER:` (empty) — nothing worth forwarding.
+- `ESCALATE: <reason>; GREP: <pattern>` — the filter runs one `store.grep(pattern)` call, feeds the results back in a second forced-answer prompt, and surfaces whatever the model says. 2 LLM calls max.
 
-**Graceful failure** — if the loop raises, the deterministic tier's contributions are still returned.
+**Output** — up to one `Contribution(layer=Layer.content, ...)` at priority 70 and source `content_search.rag`.
 
-**Logging** — every tool call is written to a per-turn trace log so "why did the bot say X" has a reproducible answer.
+**Graceful failure** — if the filter or the retriever raises, the deterministic tier's contributions are still returned.
 
 **Deterministic mode for tests** — the cheap model client is injectable so tests can substitute a scripted responder.
-
-*(Tier 2, a local-embedding retrieval step, is planned for a follow-up PR and will replace the tool loop.)*
 
 ## 9. SillyTavern lorebook / world-info importer
 
