@@ -19,6 +19,8 @@ The secrets and install selector the host machine needs to run the bot at all. S
 - `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech credentials (required when `[tts].provider="azure"`)
 - `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS key (required when `[tts].provider="gemini"`)
 - `DEEPGRAM_API_KEY` — Deepgram STT key (optional; required for voice input — see [Voice input](voice-input.md))
+- `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` — STT model and language (defaults: `nova-3` / `en`)
+- `DEEPGRAM_REPLAY_BUFFER_S` / `DEEPGRAM_KEEPALIVE_INTERVAL_S` / `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` / `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` — reconnect resilience knobs (see [Voice input § Deepgram reconnect resilience](voice-input.md#deepgram-reconnect-resilience))
 - Twitch client ID and OAuth token (optional)
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
 

@@ -40,6 +40,32 @@ Guarantees:
 - A real chunk after a flush re-enters `dirty`, arming a fresh window.
 - `send_audio` errors are logged and swallowed; the pump keeps draining the queue so it never backs up.
 
+## Deepgram reconnect resilience
+
+`DeepgramTranscriber` (`src/familiar_connect/transcription.py`) reconnects automatically on both clean server-initiated closes (code 1000 — e.g. Deepgram session limit) and abrupt drops (code 1006 — network loss). Auth and billing codes (1008, 4xxx) are treated as permanent and do not retry.
+
+### Replay buffer
+
+Every PCM chunk passed to `send_audio` is appended to a bounded sliding-window buffer. On a successful reconnect the buffer is drained to the new WebSocket before any new audio is sent. This means any outage shorter than `DEEPGRAM_REPLAY_BUFFER_S` results in **zero audio loss** — Deepgram on the new connection receives a seamless continuation of the audio stream.
+
+Buffer budget: `replay_buffer_s × sample_rate × channels × 2` bytes. Oldest chunks are evicted when the budget is exceeded.
+
+### Reconnect timing
+
+- First reconnect attempt: **immediate** (no delay).
+- Subsequent failures: exponential backoff — `1 s → 2 s → 4 s … `capped at `DEEPGRAM_RECONNECT_BACKOFF_CAP_S`. Backoff resets when the new connection delivers a real `Results` transcript.
+
+### Environment variable knobs (all optional)
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEEPGRAM_REPLAY_BUFFER_S` | `5.0` | Seconds of audio retained for replay on reconnect. |
+| `DEEPGRAM_KEEPALIVE_INTERVAL_S` | `3.0` | KeepAlive frame interval; prevents Deepgram's ~10 s idle timeout. |
+| `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` | `5` | Max consecutive reconnect failures before giving up. |
+| `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` | `16.0` | Maximum reconnect backoff in seconds. |
+
+A structured log line is emitted after each successful recovery: `close_code`, outage duration in seconds, and attempt count.
+
 ## Barge-in / interruption handling
 
 Once the familiar is speaking, subsequent user speech is policed by the interruption state machine. See [Voice interruption](interruption.md) for the full design.
