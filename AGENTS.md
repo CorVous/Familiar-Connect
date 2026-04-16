@@ -77,11 +77,6 @@ How to add a new log call. Match existing style — don't invent a new one.
   reconfigure, add handlers, or log to files — console only.
 * Verbosity: default `WARNING`, `-v` `INFO`, `-vv` `DEBUG`. Package
   logger floor is `INFO` so user-facing messages always show.
-* Levels:
-    * `DEBUG` — per-chunk/high-volume detail
-    * `INFO` — user-visible state transitions
-    * `WARNING` — recoverable failure; pass `exc_info=True` on caught exc
-    * `ERROR`/`CRITICAL` — unrecoverable
 * Compose with `from familiar_connect import log_style as ls`:
     * `ls.tag(label, color)` — leading `[label]`
     * `ls.kv(key, val, vc=color)` — `key=value` chunk
@@ -96,8 +91,6 @@ How to add a new log call. Match existing style — don't invent a new one.
       f"{ls.kv('modifier', f'{modifier:+.2f}', vc=ls.LM)}"
   )
   ```
-* Use f-strings only for styled composition. Plain value/exception logs
-  use `%s` args: `_logger.warning("mood_eval failed: %s", exc, exc_info=True)`.
 * Emoji: reserve for notable transitions (✨ summon, 🎙️ stream).
 * One color per subsystem; stay consistent across that subsystem's logs.
 * New formatter/setup logic ships with a test in `tests/test_logging.py`.
