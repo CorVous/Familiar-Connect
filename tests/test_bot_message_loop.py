@@ -248,6 +248,56 @@ def _make_text_ctx(
     return ctx
 
 
+def _make_thread_ctx(
+    *,
+    channel_id: int = 12345,
+    parent_id: int = 54321,
+    parent_name: str = "general",
+    guild_id: int = 999,
+    view_channel: bool = True,
+    send_messages_in_threads: bool = True,
+    parent_type: type = discord.TextChannel,
+) -> MagicMock:
+    """Build a fake ``discord.ApplicationContext`` whose channel is a Thread.
+
+    ``parent_type`` switches between ``discord.TextChannel`` (regular
+    channel thread) and ``discord.ForumChannel`` (forum post).
+    """
+    ctx = MagicMock(spec=discord.ApplicationContext)
+    ctx.respond = AsyncMock()
+    ctx.defer = AsyncMock()
+    ctx.followup = MagicMock()
+    ctx.followup.send = AsyncMock()
+
+    parent = MagicMock(spec=parent_type)
+    parent.id = parent_id
+    parent.name = parent_name
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = channel_id
+    thread.name = "feature-brainstorm"
+    thread.parent = parent
+    thread.parent_id = parent_id
+    thread.join = AsyncMock()
+
+    perms = MagicMock(spec=discord.Permissions)
+    perms.view_channel = view_channel
+    perms.send_messages_in_threads = send_messages_in_threads
+    perms.send_messages = True  # irrelevant for threads
+    thread.permissions_for = MagicMock(return_value=perms)
+
+    type(ctx).channel = PropertyMock(return_value=thread)
+    type(ctx).channel_id = PropertyMock(return_value=channel_id)
+
+    guild = MagicMock(spec=discord.Guild)
+    guild.id = guild_id
+    bot_member = MagicMock(spec=discord.Member)
+    type(guild).me = PropertyMock(return_value=bot_member)
+    type(ctx).guild_id = PropertyMock(return_value=guild_id)
+    type(ctx).guild = PropertyMock(return_value=guild)
+    return ctx
+
+
 def _make_voice_ctx(
     *,
     channel_id: int = 9000,
@@ -589,6 +639,48 @@ class TestOnRespond:
         # Utterance text is shown
         assert "hello world" in msg
 
+    def test_run_text_response_skips_closed_thread(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Archived+locked thread: log error, do not call send or LLM."""
+        familiar = _make_familiar(tmp_path, reply="should not be sent")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 12345
+        thread.archived = True
+        thread.locked = True
+        thread.send = AsyncMock()
+        typing_cm = MagicMock()
+        typing_cm.__aenter__ = AsyncMock(return_value=None)
+        typing_cm.__aexit__ = AsyncMock(return_value=False)
+        thread.typing = MagicMock(return_value=typing_cm)
+
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        with caplog.at_level("ERROR", logger="familiar_connect.bot"):
+            asyncio.run(
+                _run_text_response(
+                    channel_id=12345,
+                    guild_id=999,
+                    speaker="Alice",
+                    utterance="hi",
+                    buffer=buffer,
+                    familiar=familiar,
+                    channel=thread,
+                )
+            )
+
+        thread.send.assert_not_called()
+        llm = familiar.llm_clients["main_prose"]
+        assert isinstance(llm, _StubLLMClient)
+        assert llm.calls == []
+        skipped = [r for r in caplog.records if "Send skipped" in r.getMessage()]
+        assert len(skipped) == 1
+        assert "thread_closed" in skipped[0].getMessage()
+
 
 # ---------------------------------------------------------------------------
 # /subscribe-text and friends
@@ -706,6 +798,118 @@ class TestSubscriptionCommands:
         assert (
             familiar.subscriptions.get(channel_id=42, kind=SubscriptionKind.text)
             is None
+        )
+
+    def test_subscribe_text_in_thread_registers_channel(self, tmp_path: Path) -> None:
+        """Thread subscription is accepted + thread.join is awaited."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77, guild_id=999)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is not None
+        )
+        ctx.channel.join.assert_awaited_once()
+        ctx.respond.assert_called_once_with(ANY, ephemeral=True)
+
+    def test_subscribe_text_in_thread_records_thread_context(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77, parent_name="general")
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        label = familiar.monitor.format_channel_context(77)
+        assert label == "#general › feature-brainstorm (thread)"
+
+    def test_subscribe_text_in_forum_post_records_forum_context(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(
+            channel_id=77,
+            parent_name="announcements",
+            parent_type=discord.ForumChannel,
+        )
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        label = familiar.monitor.format_channel_context(77)
+        assert label == "forum:announcements › feature-brainstorm (forum post)"
+
+    def test_subscribe_text_in_thread_rejects_without_send_perm(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(
+            channel_id=77,
+            send_messages_in_threads=False,
+        )
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is None
+        )
+        ctx.channel.join.assert_not_called()
+
+    def test_subscribe_text_rejects_forum_root(self, tmp_path: Path) -> None:
+        """The forum channel itself has no messages — reject, explain."""
+        familiar = _make_familiar(tmp_path)
+        ctx = MagicMock(spec=discord.ApplicationContext)
+        ctx.respond = AsyncMock()
+        forum = MagicMock(spec=discord.ForumChannel)
+        forum.id = 77
+        forum.name = "announcements"
+        type(ctx).channel = PropertyMock(return_value=forum)
+        type(ctx).channel_id = PropertyMock(return_value=77)
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = 999
+        type(guild).me = PropertyMock(return_value=MagicMock(spec=discord.Member))
+        type(ctx).guild = PropertyMock(return_value=guild)
+        type(ctx).guild_id = PropertyMock(return_value=999)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is None
+        )
+
+    def test_subscribe_text_thread_join_http_error_is_swallowed(
+        self, tmp_path: Path
+    ) -> None:
+        """Transient join failure still registers the subscription."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77)
+        ctx.channel.join = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(), "boom"),
+        )
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        assert (
+            familiar.subscriptions.get(
+                channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is not None
         )
 
 

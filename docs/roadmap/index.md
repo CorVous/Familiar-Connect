@@ -7,7 +7,6 @@ Everything on this page is *planned, not shipped*. The shipped surface is descri
 | Feature | State | Page |
 |---|---|---|
 | Voice channel logging (passive listeners) | Design | [Voice logging](voice-logging.md) |
-| Thread & forum-post subscriptions | Design | [Threads and forum posts](threads-and-forum-posts.md) |
 | Web search provider | Design | [Web search](web-search.md) |
 | Gemini TTS: dynamic audio tags + situational style prompts | Design | [Gemini TTS expressivity](gemini-tts-expressivity.md) |
 | Per-turn monitoring dashboard | Partial — data exists, no UI | [Context pipeline § deferred](../architecture/context-pipeline.md) |
@@ -18,7 +17,9 @@ Previously listed here and now shipped (moved to Architecture):
 [Conversation flow](../architecture/conversation-flow.md),
 [Voice input](../architecture/voice-input.md),
 [Voice interruption](../architecture/interruption.md),
-[Session logging](../architecture/session-logging.md).
+[Session logging](../architecture/session-logging.md),
+threads & forum-post subscriptions (see
+[slash commands](../getting-started/slash-commands.md)).
 
 ## Scope rules for roadmap items
 
