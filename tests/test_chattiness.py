@@ -940,10 +940,7 @@ class TestChannelContext:
             kind="thread",
             parent_name="general",
         )
-        assert (
-            monitor.format_channel_context(42)
-            == "#general -> feature-brainstorm"
-        )
+        assert monitor.format_channel_context(42) == "#general -> feature-brainstorm"
 
     def test_format_forum_post(self) -> None:
         monitor, _ = _make_monitor()

@@ -174,7 +174,7 @@ async def subscribe_text(
     _logger.info(
         f"{ls.tag('✨ Summoned', ls.G)} "
         f"{ls.kv('type', kind)} "
-        f"{ls.kv('channel', label, vc=ls.G)} "
+        f"{ls.word(label, ls.C)} "
         f"{ls.kv('id', str(channel_id))} "
         f"{ls.kv('mode', ch_mode)}"
     )
@@ -321,7 +321,7 @@ async def _run_voice_response(
     hist = f"  {ls.word(ls.trunc(last_hist), ls.LW)}\n" if last_hist else ""
     _logger.info(
         f"{ls.tag('🧠 Generating Voice', ls.G)} "
-        f"{ls.kv('channel', str(channel_id), vc=ls.LG)} "
+        f"{ls.word(str(channel_id), ls.C)} "
         f"{ls.kv('messages', str(len(messages)), vc=ls.LG)} "
         f"{ls.kv('new', str(n_new), vc=ls.LG)}\n"
         f"{hist}"
@@ -362,7 +362,7 @@ async def _run_voice_response(
         # generation task cancelled (interruption path)
         _logger.info(
             f"{ls.tag('❌ Cancelled', ls.Y)} "
-            f"{ls.kv('channel', str(channel_id))} "
+            f"{ls.word(str(channel_id), ls.C)} "
             f"{ls.kv('elapsed', f'{time.monotonic() - gen_start:.2f}s')} "
             f"{ls.kv('reason', 'interruption')} "
             f"{ls.kv('speaker', tracker.interrupt_starter_name or 'unknown', vc=ls.LC)}"
@@ -432,7 +432,7 @@ async def _run_voice_response(
             tracker.pending_interrupter_turns.clear()
             _logger.info(
                 f"{ls.tag('🔊 Voice', ls.G)} "
-                f"{ls.kv('channel', str(channel_id))} "
+                f"{ls.word(str(channel_id), ls.C)} "
                 f"{ls.kv('text', ls.trunc(reply_text), vc=ls.LG)}"
             )
             # Wait for any currently-playing audio to finish.
@@ -468,7 +468,7 @@ async def _run_voice_response(
                 )
                 _logger.info(
                     f"{ls.tag('⚡ Dispatch', ls.Y)} "
-                    f"{ls.kv('channel', str(channel_id))} "
+                    f"{ls.word(str(channel_id), ls.C)} "
                     f"{ls.kv('speaker', tracker.interrupt_starter_name, vc=ls.LC)} "
                     f"{ls.kv('event', 'long@SPEAKING→regen', vc=ls.LY)}"
                 )
@@ -525,7 +525,7 @@ async def _run_voice_response(
                 await familiar.memory_writer_scheduler.notify_turn()
                 _logger.info(
                     f"{ls.tag('🔊 Voice Regen', ls.LG)} "
-                    f"{ls.kv('channel', str(channel_id))} "
+                    f"{ls.word(str(channel_id), ls.C)} "
                     f"{ls.kv('text', ls.trunc(regen_text))}"
                 )
                 regen_tts = await familiar.tts_client.synthesize(regen_text)
@@ -578,7 +578,7 @@ async def _run_voice_response(
         await familiar.memory_writer_scheduler.notify_turn()
         _logger.info(
             f"{ls.tag('🔊 Voice', ls.G)} "
-            f"{ls.kv('channel', str(channel_id))} "
+            f"{ls.word(str(channel_id), ls.C)} "
             f"{ls.kv('text', ls.trunc(reply_text), vc=ls.LG)}"
         )
     tracker.transition(ResponseState.IDLE)
@@ -624,7 +624,7 @@ async def dispatch_interruption_regen(
     )
     _logger.info(
         f"{ls.tag('⚡ Dispatch', ls.Y)} "
-        f"{ls.kv('channel', str(channel_id))} "
+        f"{ls.word(str(channel_id), ls.C)} "
         f"{ls.kv('speaker', speaker, vc=ls.LC)} "
         f"{ls.kv('event', 'long@GENERATING→cancel+regen', vc=ls.LY)}"
     )
@@ -700,7 +700,7 @@ async def subscribe_my_voice(
     _logger.info(
         f"{ls.tag('✨ Summoned', ls.G)} "
         f"{ls.kv('type', 'voice')} "
-        f"{ls.kv('channel', channel.name, vc=ls.G)} "
+        f"{ls.word(channel.name, ls.C)} "
         f"{ls.kv('id', str(channel.id))}"
     )
 
@@ -1054,7 +1054,7 @@ async def set_channel_mode(
     familiar.channel_configs.set_mode(channel_id=channel_id, mode=mode)
     _logger.info(
         f"{ls.tag('Config', ls.W)} "
-        f"{ls.kv('channel', familiar.monitor.format_channel_context(channel_id))} "
+        f"{ls.word(familiar.monitor.format_channel_context(channel_id), ls.C)} "
         f"{ls.kv('mode', mode.value)}"
     )
     await ctx.respond(f"Channel mode set to **{mode.value}**.", ephemeral=True)
@@ -1112,7 +1112,7 @@ def _make_backdrop_modal(
             label = familiar.monitor.format_channel_context(channel_id)
             _logger.info(
                 f"{ls.tag('Config', ls.W)} "
-                f"{ls.kv('channel', label)} "
+                f"{ls.word(label, ls.C)} "
                 f"{ls.kv('action', 'backdrop_set')}"
             )
             stripped = text.strip()
@@ -1257,7 +1257,7 @@ async def _run_text_response(
         ch_label = familiar.monitor.format_channel_context(channel_id)
         _logger.info(
             f"{ls.tag('🧠 Generating Text', ls.G)} "
-            f"{ls.kv('channel', ch_label, vc=ls.LG)} "
+            f"{ls.word(ch_label, ls.C)} "
             f"{ls.kv('messages', str(len(messages)), vc=ls.LG)} "
             f"{ls.kv('new', str(n_new), vc=ls.LG)}\n"
             f"{hist}"
