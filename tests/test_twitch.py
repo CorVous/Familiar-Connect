@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from familiar_connect.llm import Message
 from familiar_connect.twitch import (
     TwitchEvent,
@@ -36,8 +38,8 @@ from familiar_connect.twitch import (
 
 
 class TestTwitchEvent:
-    def test_has_channel_field(self) -> None:
-        """TwitchEvent carries the channel/session context."""
+    def test_required_fields(self) -> None:
+        """TwitchEvent stores channel, text, and priority."""
         event = TwitchEvent(
             channel="sapphire-stream",
             text="Alice has followed the channel",
@@ -45,25 +47,7 @@ class TestTwitchEvent:
             timestamp=datetime.now(UTC),
         )
         assert event.channel == "sapphire-stream"
-
-    def test_has_text_field(self) -> None:
-        """TwitchEvent carries a plain-text description."""
-        event = TwitchEvent(
-            channel="sapphire-stream",
-            text="Alice has followed the channel",
-            priority="normal",
-            timestamp=datetime.now(UTC),
-        )
         assert event.text == "Alice has followed the channel"
-
-    def test_priority_normal(self) -> None:
-        """TwitchEvent accepts 'normal' priority."""
-        event = TwitchEvent(
-            channel="ch",
-            text="something happened",
-            priority="normal",
-            timestamp=datetime.now(UTC),
-        )
         assert event.priority == "normal"
 
     def test_priority_immediate(self) -> None:
@@ -223,60 +207,30 @@ class TestFormatAdBreak:
 
 
 class TestTwitchWatcherConfig:
-    def test_default_subscriptions_enabled(self) -> None:
-        """Subscriptions are enabled by default."""
+    @pytest.mark.parametrize("attr,expected", [
+        ("subscriptions_enabled", True),
+        ("cheers_enabled", True),
+        ("follows_enabled", True),
+        ("ads_enabled", True),
+        ("ads_immediate", True),
+        ("redemption_names", []),
+    ])
+    def test_defaults(self, attr: str, expected: object) -> None:
+        """All boolean flags default to True; redemption_names defaults to []."""
         config = TwitchWatcherConfig()
-        assert config.subscriptions_enabled is True
+        assert getattr(config, attr) == expected
 
-    def test_default_cheers_enabled(self) -> None:
-        """Cheers are enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.cheers_enabled is True
-
-    def test_default_follows_enabled(self) -> None:
-        """Follows are enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.follows_enabled is True
-
-    def test_default_ads_enabled(self) -> None:
-        """Ads are enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.ads_enabled is True
-
-    def test_default_ads_immediate(self) -> None:
-        """Ad immediate mode is enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.ads_immediate is True
-
-    def test_default_redemption_names_empty(self) -> None:
-        """Redemption name list is empty by default (none trigger messages)."""
-        config = TwitchWatcherConfig()
-        assert config.redemption_names == []
-
-    def test_can_disable_subscriptions(self) -> None:
-        """Subscriptions can be toggled off."""
-        config = TwitchWatcherConfig(subscriptions_enabled=False)
-        assert config.subscriptions_enabled is False
-
-    def test_can_disable_cheers(self) -> None:
-        """Cheers can be toggled off."""
-        config = TwitchWatcherConfig(cheers_enabled=False)
-        assert config.cheers_enabled is False
-
-    def test_can_disable_follows(self) -> None:
-        """Follows can be toggled off."""
-        config = TwitchWatcherConfig(follows_enabled=False)
-        assert config.follows_enabled is False
-
-    def test_can_disable_ads(self) -> None:
-        """Ads can be toggled off."""
-        config = TwitchWatcherConfig(ads_enabled=False)
-        assert config.ads_enabled is False
-
-    def test_can_disable_ads_immediate(self) -> None:
-        """Ad immediate mode can be toggled off."""
-        config = TwitchWatcherConfig(ads_immediate=False)
-        assert config.ads_immediate is False
+    @pytest.mark.parametrize("field", [
+        "subscriptions_enabled",
+        "cheers_enabled",
+        "follows_enabled",
+        "ads_enabled",
+        "ads_immediate",
+    ])
+    def test_can_disable(self, field: str) -> None:
+        """Each boolean flag can be toggled off at construction."""
+        config = TwitchWatcherConfig(**{field: False})
+        assert getattr(config, field) is False
 
     def test_can_set_redemption_names(self) -> None:
         """Redemption name list can be populated."""

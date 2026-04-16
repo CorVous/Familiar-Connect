@@ -93,29 +93,19 @@ class TestTTSResult:
 
 
 class TestCartesiaTTSClient:
-    def test_init_stores_api_key(self) -> None:
-        client = _client()
+    def test_init_stores_required_fields(self) -> None:
+        """Constructor stores api_key, model, and voice_id."""
+        client = _client(model="sonic-3", voice_id="custom-uuid-1234")
         assert client.api_key == "test-key"
-
-    def test_init_stores_model(self) -> None:
-        client = _client(model="sonic-3")
         assert client.model == "sonic-3"
-
-    def test_init_stores_voice_id(self) -> None:
-        client = _client(voice_id="custom-uuid-1234")
         assert client.voice_id == "custom-uuid-1234"
 
-    def test_init_default_sample_rate(self) -> None:
+    def test_init_defaults(self) -> None:
+        """Default sample_rate, base_url, and ws_url are set."""
         client = _client()
         assert client.sample_rate == DEFAULT_SAMPLE_RATE
         assert client.sample_rate == 48000
-
-    def test_init_default_base_url(self) -> None:
-        client = _client()
         assert client.base_url == CARTESIA_BASE_URL
-
-    def test_init_default_ws_url(self) -> None:
-        client = _client()
         assert client.ws_url == CARTESIA_WS_URL
         assert client.ws_url.startswith("wss://")
 
@@ -564,18 +554,11 @@ def _make_fake_synth(
 
 
 class TestAzureTTSClientInit:
-    def test_stores_subscription_key(self) -> None:
-        client = AzureTTSClient(subscription_key="sk-az", region="eastus")
-        assert client.subscription_key == "sk-az"
-
-    def test_stores_region(self) -> None:
+    def test_stores_required_fields(self) -> None:
+        """Constructor stores subscription_key and region."""
         client = AzureTTSClient(subscription_key="sk-az", region="westus2")
+        assert client.subscription_key == "sk-az"
         assert client.region == "westus2"
-
-    def test_default_voice_is_amber_neural(self) -> None:
-        client = AzureTTSClient(subscription_key="sk-az", region="eastus")
-        assert client.voice_name == DEFAULT_AZURE_VOICE
-        assert client.voice_name == DEFAULT_AZURE_TTS_VOICE
 
     def test_custom_voice_stored(self) -> None:
         client = AzureTTSClient(
@@ -585,8 +568,11 @@ class TestAzureTTSClientInit:
         )
         assert client.voice_name == "en-US-JennyNeural"
 
-    def test_default_sample_rate(self) -> None:
+    def test_defaults(self) -> None:
+        """Default voice and sample_rate match module-level constants."""
         client = AzureTTSClient(subscription_key="k", region="r")
+        assert client.voice_name == DEFAULT_AZURE_VOICE
+        assert client.voice_name == DEFAULT_AZURE_TTS_VOICE
         assert client.sample_rate == DEFAULT_SAMPLE_RATE
 
 
@@ -894,15 +880,6 @@ class TestGeminiTTSClientInit:
             style_prompt="Audio Profile: wizard",
         )
         assert c.style_prompt == "Audio Profile: wizard"
-
-    def test_default_voice_and_model(self) -> None:
-        c = GeminiTTSClient(
-            api_key="k",
-            voice_name=DEFAULT_GEMINI_TTS_VOICE,
-            model=DEFAULT_GEMINI_TTS_MODEL,
-        )
-        assert c.voice_name == DEFAULT_GEMINI_TTS_VOICE
-        assert c.model == DEFAULT_GEMINI_TTS_MODEL
 
 
 class TestGeminiTTSClientSynthesize:

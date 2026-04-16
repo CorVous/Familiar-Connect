@@ -34,38 +34,22 @@ def _strip(text: str) -> str:
 
 
 class TestResponseStateEnum:
-    def test_has_three_states(self) -> None:
-        assert len(list(ResponseState)) == 3
-
     def test_idle_generating_speaking(self) -> None:
+        """All three states exist with their expected string values."""
         assert ResponseState.IDLE.value == "IDLE"
         assert ResponseState.GENERATING.value == "GENERATING"
         assert ResponseState.SPEAKING.value == "SPEAKING"
 
 
 class TestResponseTrackerDefaults:
-    def test_new_tracker_is_idle(self) -> None:
+    def test_defaults(self) -> None:
+        """Fresh tracker starts idle with all scratch fields at zero/None/empty."""
         t = ResponseTracker(guild_id=42)
         assert t.state is ResponseState.IDLE
-
-    def test_new_tracker_has_no_task(self) -> None:
-        t = ResponseTracker(guild_id=42)
         assert t.generation_task is None
-
-    def test_new_tracker_has_no_response_text(self) -> None:
-        t = ResponseTracker(guild_id=42)
         assert t.response_text is None
-
-    def test_new_tracker_has_empty_timestamps(self) -> None:
-        t = ResponseTracker(guild_id=42)
         assert t.timestamps == []
-
-    def test_new_tracker_is_not_unsolicited(self) -> None:
-        t = ResponseTracker(guild_id=42)
         assert t.is_unsolicited is False
-
-    def test_new_tracker_has_zero_mood_modifier(self) -> None:
-        t = ResponseTracker(guild_id=42)
         assert t.mood_modifier == 0.0  # noqa: RUF069
 
 

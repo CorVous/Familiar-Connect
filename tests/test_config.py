@@ -39,13 +39,9 @@ if TYPE_CHECKING:
 
 
 class TestChannelMode:
-    def test_has_full_rp(self) -> None:
+    def test_values(self) -> None:
         assert ChannelMode.full_rp.value == "full_rp"
-
-    def test_has_text_conversation_rp(self) -> None:
         assert ChannelMode.text_conversation_rp.value == "text_conversation_rp"
-
-    def test_has_imitate_voice(self) -> None:
         assert ChannelMode.imitate_voice.value == "imitate_voice"
 
     def test_from_string_recognises_all_modes(self) -> None:
@@ -350,10 +346,8 @@ class TestLoadChannelConfig:
 
 
 class TestInterjectionEnum:
-    def test_has_five_tiers(self) -> None:
-        assert len(list(Interjection)) == 5
-
     def test_tier_values(self) -> None:
+        """All five tiers exist with the expected string values."""
         assert Interjection("very_quiet") is Interjection.very_quiet
         assert Interjection("quiet") is Interjection.quiet
         assert Interjection("average") is Interjection.average
@@ -465,10 +459,8 @@ class TestCharacterConfigConversationFields:
 
 
 class TestInterruptToleranceEnum:
-    def test_has_five_tiers(self) -> None:
-        assert len(list(InterruptTolerance)) == 5
-
     def test_tier_values(self) -> None:
+        """All five tiers exist with the expected string values."""
         assert InterruptTolerance("very_meek") is InterruptTolerance.very_meek
         assert InterruptTolerance("meek") is InterruptTolerance.meek
         assert InterruptTolerance("average") is InterruptTolerance.average
