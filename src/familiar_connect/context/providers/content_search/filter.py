@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 from familiar_connect.llm import Message
@@ -143,7 +144,9 @@ async def run(
         return _answer_to_contribution(parsed2.text)
     # second escalate — forced turn ignores it
     _logger.info(
-        "content_search filter: second turn emitted ESCALATE; giving up cleanly"
+        f"{ls.tag('🔍 Filter', ls.M)} "
+        f"{ls.kv('event', 'escalate-exhausted', vc=ls.LY)} "
+        f"{ls.word('giving up cleanly', ls.LW)}"
     )
     return []
 
@@ -228,9 +231,10 @@ def _safe_grep(store: MemoryStore, pattern: str) -> str:
         return f"(grep error: {type(exc).__name__}: {exc})"
     except Exception as exc:  # noqa: BLE001 — fold into prompt
         _logger.warning(
-            "content_search filter: grep raised %s: %s",
-            type(exc).__name__,
-            exc,
+            f"{ls.tag('🔍 Filter', ls.M)} "
+            f"{ls.kv('grep', 'raised')} "
+            f"{ls.kv('type', type(exc).__name__)} "
+            f"{ls.kv('msg', str(exc), vc=ls.LW)}"
         )
         return f"(grep error: {type(exc).__name__})"
     if not hits:

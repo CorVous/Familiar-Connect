@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.context.providers.content_search import filter as _filter
 from familiar_connect.context.providers.content_search.people_lookup import (
     DEFAULT_MAX_TOKENS_PER_FILE,
@@ -107,7 +108,9 @@ class ContentSearchProvider:
             # never-forget invariant: deterministic tier must still land
             # if the cheap LLM or its transport fails.
             _logger.exception(
-                "content_search: filter raised; returning deterministic only"
+                f"{ls.tag('📚 Content', ls.M)} "
+                f"{ls.word('filter raised;', ls.LW)} "
+                f"{ls.kv('fallback', 'deterministic-only', vc=ls.LY)}"
             )
             filtered = []
 
@@ -127,7 +130,9 @@ class ContentSearchProvider:
         try:
             await self._index_build()
         except Exception:
-            _logger.exception("content_search: index build failed")
+            _logger.exception(
+                f"{ls.tag('📚 Content', ls.M)} {ls.word('index build failed', ls.LW)}"
+            )
 
     async def _retrieve(
         self,
@@ -144,5 +149,7 @@ class ContentSearchProvider:
                 exclude_paths=exclude,
             )
         except Exception:
-            _logger.exception("content_search: retriever raised")
+            _logger.exception(
+                f"{ls.tag('📚 Content', ls.M)} {ls.word('retriever raised', ls.LW)}"
+            )
             return []

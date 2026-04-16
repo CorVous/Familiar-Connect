@@ -9,7 +9,8 @@ Call ``init()`` once at startup (done inside ``setup_logging``).
 from __future__ import annotations
 
 import logging
-from typing import ClassVar, cast
+import re
+from typing import cast
 
 from colorama import Fore, Style
 from colorama import init as _colorama_init
@@ -72,17 +73,25 @@ def trunc(text: str, limit: int = 200) -> str:
 # ---------------------------------------------------------------------------
 
 
-class StyledFormatter(logging.Formatter):
-    """Suppress INFO prefix; colour WARNING/ERROR/DEBUG level labels."""
+# matches a leading `tag(text, color)` render: W[ COLOR text W] RS
+_TAG_RE = re.compile(r"^\x1b\[\d+m\[\x1b\[\d+m([^\x1b]+)\x1b\[\d+m\]\x1b\[0m")
 
-    _LEVEL_PREFIX: ClassVar[dict[int, str]] = {
-        logging.DEBUG: f"{LW}DEBUG{RS}: ",
-        logging.WARNING: f"{Y}WARNING{RS}: ",
-        logging.ERROR: f"{R}ERROR{RS}: ",
-        logging.CRITICAL: f"{R}CRITICAL{RS}: ",
-    }
+
+class StyledFormatter(logging.Formatter):
+    """Repaint leading tag + append level label for WARNING/ERROR; DEBUG prefix kept."""
 
     def format(self, record: logging.LogRecord) -> str:
         msg = record.getMessage()
-        prefix = self._LEVEL_PREFIX.get(record.levelno, "")
-        return f"{prefix}{msg}"
+        lvl = record.levelno
+        if lvl >= logging.WARNING:
+            color = R if lvl >= logging.ERROR else Y
+            label = logging.getLevelName(lvl)
+            new_msg, n = _TAG_RE.subn(
+                lambda m: f"{W}[{color}{m.group(1)}{W}]{RS} {color}{label}{RS}",
+                msg,
+                count=1,
+            )
+            return new_msg if n else f"{color}{label}{RS}: {msg}"
+        if lvl == logging.DEBUG:
+            return f"{LW}DEBUG{RS}: {msg}"
+        return msg
