@@ -255,7 +255,7 @@ class MemoryWriter:
     :param familiar_id: The active familiar's id.
     :param channel_context_lookup: Optional callable ``channel_id ->
         label`` used to prefix the transcript with a ``## Context``
-        block (e.g. ``#general -> brainstorm (thread)``). Empty labels
+        block (e.g. ``#general -> brainstorm``). Empty labels
         or a missing lookup suppress the block.
     """
 

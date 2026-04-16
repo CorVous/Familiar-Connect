@@ -56,9 +56,8 @@ The `/channel-full-rp`, `/channel-text-conversation-rp`,
 `/channel-imitate-voice`, and `/channel-backdrop` commands are all
 per-thread: each thread gets its own mode and backdrop stored in
 `channels/<thread_id>.toml`. The sidecar's `channel_name` field is
-written as `#parent -> thread (thread)` (or
-`forum:parent -> post (forum post)`) so operators can identify entries
-by reading the files directly.
+written as `#parent -> thread` (or `forum:parent -> post`) so
+operators can identify entries by reading the files directly.
 
 Subscriptions and channel modes persist across restarts under
 `data/familiars/<id>/subscriptions.toml` and

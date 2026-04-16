@@ -826,7 +826,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "#general -> feature-brainstorm (thread)"
+        assert label == "#general -> feature-brainstorm"
 
     def test_subscribe_text_in_forum_post_records_forum_context(
         self, tmp_path: Path
@@ -840,7 +840,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "forum:announcements -> feature-brainstorm (forum post)"
+        assert label == "forum:announcements -> feature-brainstorm"
 
     def test_subscribe_text_in_thread_rejects_without_send_perm(
         self, tmp_path: Path
@@ -1268,7 +1268,7 @@ class TestChannelBackdropInThread:
     async def test_backdrop_in_thread_writes_labelled_channel_name(
         self, tmp_path: Path
     ) -> None:
-        """Sidecar ``channel_name`` shows ``#parent -> thread (thread)`` label.
+        """Sidecar ``channel_name`` shows ``#parent -> thread`` label.
 
         Guards that ``channel_backdrop`` → modal callback writes the
         human-readable label rather than the raw integer thread id.
@@ -1289,7 +1289,7 @@ class TestChannelBackdropInThread:
         sidecar = familiar.root / "channels" / "77.toml"
         assert sidecar.exists()
         cfg = familiar.channel_configs.get(channel_id=77)
-        assert cfg.channel_name == "#general -> feature-brainstorm (thread)"
+        assert cfg.channel_name == "#general -> feature-brainstorm"
 
 
 # ---------------------------------------------------------------------------
