@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+from familiar_connect import log_style as ls
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -190,14 +191,22 @@ class DeepgramTranscriber:
         through this queue.
         """
         url = self.build_ws_url()
-        _logger.info("Connecting to Deepgram: %s", url)
+        _logger.info(
+            f"{ls.tag('🔌 WebSocket', ls.LG)} "
+            f"{ls.word('Deepgram', ls.C)} "
+            f"{ls.kv('url', url, vc=ls.LW)}"
+        )
         self._session = aiohttp.ClientSession()
         self._ws = await self._ws_connect(
             self._session,
             url,
             self.build_headers(),
         )
-        _logger.info("Deepgram WebSocket connected (status=%s)", self._ws.close_code)
+        _logger.info(
+            f"{ls.tag('🔌 WebSocket', ls.G)} "
+            f"{ls.word('Deepgram', ls.C)} "
+            f"{ls.kv('status', str(self._ws.close_code or 'none'), vc=ls.LW)}"
+        )
         self._receive_task = asyncio.create_task(self._receive_loop(output))
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
@@ -287,7 +296,11 @@ class DeepgramTranscriber:
             url,
             self.build_headers(),
         )
-        _logger.info("Deepgram WebSocket reconnected")
+        _logger.info(
+            f"{ls.tag('🔄 WebSocket', ls.Y)} "
+            f"{ls.word('Deepgram', ls.C)} "
+            f"{ls.word('reconnected', ls.W)}"
+        )
 
     async def _receive_loop(
         self: Self,
@@ -311,9 +324,10 @@ class DeepgramTranscriber:
                             consecutive_reconnects = 0
                     else:
                         _logger.info(
-                            "[Deepgram] %s: %s",
-                            msg_type,
-                            msg.data[:200],
+                            f"{ls.tag('Event', ls.C)} "
+                            f"{ls.word('Deepgram', ls.C)} "
+                            f"{ls.kv('type', msg_type)} "
+                            f"{ls.kv('data', ls.trunc(msg.data[:200], 100), vc=ls.LW)}"
                         )
                 elif msg.type in {
                     aiohttp.WSMsgType.CLOSED,

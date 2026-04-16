@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 import discord
 
+from familiar_connect import log_style as ls
 from familiar_connect.bot import create_bot
 from familiar_connect.config import ConfigError, load_character_config
 from familiar_connect.familiar import Familiar
@@ -169,12 +170,12 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("Failed to load familiar config: %s", exc)
         return 1
 
+    tol = character_config.interrupt_tolerance
     _logger.info(
-        "voice.interruption: tolerance=%s(%.2f) min=%.1fs boundary=%.1fs",
-        character_config.interrupt_tolerance.value,
-        character_config.interrupt_tolerance.base_probability,
-        character_config.min_interruption_s,
-        character_config.short_long_boundary_s,
+        f"{ls.tag('Config', ls.W)} "
+        f"{ls.kv('tolerance', f'{tol.value}({tol.base_probability:.2f})')} "
+        f"{ls.kv('min', f'{character_config.min_interruption_s:.1f}s')} "
+        f"{ls.kv('boundary', f'{character_config.short_long_boundary_s:.1f}s')}"
     )
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -218,10 +219,10 @@ def run(args: argparse.Namespace) -> int:
     familiar.metrics_collector = SQLiteCollector(familiar_root / "metrics.db")
 
     _logger.info(
-        "Loaded familiar %s from %s (default_mode=%s)",
-        familiar.id,
-        familiar_root,
-        familiar.config.default_mode.value,
+        f"{ls.tag('❇️ Loaded', ls.W)} "
+        f"{ls.kv('familiar', familiar.id)} "
+        f"{ls.kv('from', str(familiar_root))} "
+        f"{ls.kv('default_mode', familiar.config.default_mode.value)}"
     )
 
     load_opus()

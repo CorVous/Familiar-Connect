@@ -24,6 +24,8 @@ from discord import utils
 from discord.errors import ConnectionClosed
 from discord.gateway import DiscordVoiceWebSocket
 
+from familiar_connect import log_style as ls
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -168,9 +170,9 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
             return
         conn.dave_protocol_version = pending
         _logger.info(
-            "DAVE transition %d executed — protocol version now %d",
-            transition_id,
-            pending,
+            f"{ls.tag('🔐 DAVE', ls.LB)} "
+            f"{ls.kv('transition', str(transition_id), vc=ls.LW)} "
+            f"{ls.kv('protocol_version', str(pending), vc=ls.LW)}"
         )
 
     async def _handle_prepare_epoch(self, data: Mapping[str, Any]) -> None:

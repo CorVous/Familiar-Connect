@@ -11,6 +11,12 @@ import familiar_connect
 
 _PACKAGE_NAME: str = familiar_connect.__package__ or "familiar_connect"
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
 
 def test_cli_help() -> None:
     """Test that CLI help works."""
@@ -62,7 +68,10 @@ def test_cli_verbose_flag() -> None:
         check=False,
     )
     assert result.returncode == 0
-    assert "INFO:" in result.stderr or "INFO:" in result.stdout
+    # version subcommand emits its INFO log; styled formatter suppresses
+    # the level prefix, so check for the [Version] tag instead.
+    combined = _strip(result.stdout) + _strip(result.stderr)
+    assert "Version" in combined
 
 
 def test_cli_very_verbose_flag() -> None:
@@ -75,7 +84,8 @@ def test_cli_very_verbose_flag() -> None:
     )
     assert result.returncode == 0
     # DEBUG logging should show more details
-    assert "DEBUG:" in result.stderr or "DEBUG:" in result.stdout
+    combined = _strip(result.stdout) + _strip(result.stderr)
+    assert "DEBUG:" in combined
 
 
 def test_cli_no_subcommand() -> None:

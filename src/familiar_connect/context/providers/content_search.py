@@ -20,6 +20,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from familiar_connect import log_style as ls
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 from familiar_connect.llm import Message
@@ -202,9 +203,9 @@ class ContentSearchProvider:
                 call_key = (parsed.tool, _canonicalise_args(parsed.args))
                 if call_key in seen_tool_calls:
                     _logger.info(
-                        "content_search: redundant tool call %s; "
-                        "skipping execution, forcing answer",
-                        parsed.tool,
+                        f"{ls.tag('Skip', ls.Y)} "
+                        f"{ls.kv('tool', parsed.tool, vc=ls.LW)} "
+                        f"{ls.kv('reason', 'redundant', vc=ls.LW)}"
                     )
                     redundancy_triggered = True
                     continue

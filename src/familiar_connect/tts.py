@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from familiar_connect.config import TTSConfig
 
 
+from familiar_connect import log_style as ls
+
 _logger = logging.getLogger(__name__)
 
 
@@ -169,12 +171,14 @@ class CartesiaTTSClient:
                     await ws.close()
 
         audio = b"".join(audio_parts)
+        start_ms = timestamps[0].start_ms if timestamps else 0.0
+        end_ms = timestamps[-1].end_ms if timestamps else 0.0
         _logger.info(
-            "tts: %d words, audio=%d bytes, timing=%.0fms→%.0fms",
-            len(timestamps),
-            len(audio),
-            timestamps[0].start_ms if timestamps else 0.0,
-            timestamps[-1].end_ms if timestamps else 0.0,
+            f"{ls.tag('🔉 TTS', ls.C)} "
+            f"{ls.word('Cartesia', ls.C)} "
+            f"{ls.kv('words', str(len(timestamps)), vc=ls.LW)} "
+            f"{ls.kv('audio', f'{len(audio)}b', vc=ls.LW)} "
+            f"{ls.kv('timing', f'{start_ms:.0f}ms→{end_ms:.0f}ms', vc=ls.LW)}"
         )
         return TTSResult(audio=audio, timestamps=timestamps)
 
@@ -339,12 +343,14 @@ class AzureTTSClient:
 
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
             audio: bytes = result.audio_data
+            start_ms = word_timestamps[0].start_ms if word_timestamps else 0.0
+            end_ms = word_timestamps[-1].end_ms if word_timestamps else 0.0
             _logger.info(
-                "azure tts: %d words, audio=%d bytes, timing=%.0fms→%.0fms",
-                len(word_timestamps),
-                len(audio),
-                word_timestamps[0].start_ms if word_timestamps else 0.0,
-                word_timestamps[-1].end_ms if word_timestamps else 0.0,
+                f"{ls.tag('🔉 TTS', ls.C)} "
+                f"{ls.word('Azure', ls.C)} "
+                f"{ls.kv('words', str(len(word_timestamps)), vc=ls.LW)} "
+                f"{ls.kv('audio', f'{len(audio)}b', vc=ls.LW)} "
+                f"{ls.kv('timing', f'{start_ms:.0f}ms→{end_ms:.0f}ms', vc=ls.LW)}"
             )
             return TTSResult(audio=audio, timestamps=word_timestamps)
 
@@ -498,10 +504,11 @@ class GeminiTTSClient:
         timestamps = _estimate_word_timestamps(text, total_ms)
 
         _logger.info(
-            "gemini tts: %d words, audio=%d bytes, duration=%.0fms",
-            len(timestamps),
-            len(audio),
-            total_ms,
+            f"{ls.tag('🔉 TTS', ls.C)} "
+            f"{ls.word('Gemini', ls.C)} "
+            f"{ls.kv('words', str(len(timestamps)), vc=ls.LW)} "
+            f"{ls.kv('audio', f'{len(audio)}b', vc=ls.LW)} "
+            f"{ls.kv('duration', f'{total_ms:.0f}ms', vc=ls.LW)}"
         )
         return TTSResult(audio=audio, timestamps=timestamps)
 

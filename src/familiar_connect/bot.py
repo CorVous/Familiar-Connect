@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 import discord
 import httpx
 
+from familiar_connect import log_style as ls
 from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
@@ -103,7 +104,19 @@ async def subscribe_text(
         guild_id=ctx.guild_id,
     )
     name = getattr(ctx.channel, "name", str(channel_id))
-    _logger.info("Subscribed to text channel: %s (%s)", name, channel_id)
+    channel_config = familiar.channel_configs.get(channel_id=channel_id)
+    if channel_config:
+        ch_mode = channel_config.mode.value
+    else:
+        ch_mode = familiar.config.default_mode.value
+    familiar.monitor.register_channel_name(channel_id, name)
+    _logger.info(
+        f"{ls.tag('✨ Summoned', ls.G)} "
+        f"{ls.kv('type', 'text')} "
+        f"{ls.kv('channel', name, vc=ls.G)} "
+        f"{ls.kv('id', str(channel_id))} "
+        f"{ls.kv('mode', ch_mode)}"
+    )
     await ctx.respond(f"Subscribed to text in **#{name}**.", ephemeral=True)
 
 
@@ -220,11 +233,8 @@ async def _run_voice_response(
         )
         rmeta["message_count"] = len(messages)
 
-    _logger.info(
-        "LLM request channel=%s (voice) messages=%d, %d new:\n%s",
-        channel_id,
-        len(messages),
-        len(request.pending_turns) if request.pending_turns else 1,
+    n_new = len(request.pending_turns) if request.pending_turns else 1
+    pending_lines = (
         "\n".join(
             f"  [{pt.speaker or '?'}]: "
             f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
@@ -234,7 +244,21 @@ async def _run_voice_response(
         else (
             f"  [{request.speaker or '?'}]: "
             f"{request.utterance[:200]}{'…' if len(request.utterance) > 200 else ''}"
-        ),
+        )
+    )
+    last_hist = (
+        f"[{messages[-(n_new + 1)].role}]: {messages[-(n_new + 1)].content[:200]}"
+        if len(messages) > n_new
+        else ""
+    )
+    hist = f"  {ls.word(ls.trunc(last_hist), ls.LW)}\n" if last_hist else ""
+    _logger.info(
+        f"{ls.tag('🧠 LLM Voice', ls.B)} "
+        f"{ls.kv('channel', str(channel_id), vc=ls.LB)} "
+        f"{ls.kv('messages', str(len(messages)), vc=ls.LB)} "
+        f"{ls.kv('new', str(n_new), vc=ls.LB)}\n"
+        f"{hist}"
+        f"{ls.word(pending_lines, ls.LW)}"
     )
 
     # cancellable generation task; parked on tracker for interruption path.
@@ -242,6 +266,7 @@ async def _run_voice_response(
     # re-raise / early return happens after span exits cleanly.
     llm_error: BaseException | None = None
     reply = None
+    gen_start = time.monotonic()
     async with builder.span("llm_call") as llm_meta:
         llm_meta["model"] = familiar.llm_clients["main_prose"].model
         generation_task = asyncio.create_task(
@@ -269,8 +294,11 @@ async def _run_voice_response(
             raise llm_error
         # generation task cancelled (interruption path)
         _logger.info(
-            "voice generation cancelled channel=%s",
-            channel_id,
+            f"{ls.tag('❌ Cancelled', ls.Y)} "
+            f"{ls.kv('channel', str(channel_id))} "
+            f"{ls.kv('elapsed', f'{time.monotonic() - gen_start:.2f}s')} "
+            f"{ls.kv('reason', 'interruption')} "
+            f"{ls.kv('speaker', tracker.interrupt_starter_name or 'unknown', vc=ls.LC)}"
         )
         return
     if llm_error is not None:
@@ -335,7 +363,11 @@ async def _run_voice_response(
                     mode=channel_config.mode,
                 )
             tracker.pending_interrupter_turns.clear()
-            _logger.info("[Voice Response] %s", reply_text)
+            _logger.info(
+                f"{ls.tag('🔊 Voice', ls.G)} "
+                f"{ls.kv('channel', str(channel_id))} "
+                f"{ls.kv('text', ls.trunc(reply_text), vc=ls.LG)}"
+            )
             # Wait for any currently-playing audio to finish.
             while vc.is_playing():  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
@@ -368,8 +400,10 @@ async def _run_voice_response(
                     f'They said: "{tracker.interrupt_transcript}"'
                 )
                 _logger.info(
-                    "dispatch: long@SPEAKING → regen speaker=%s",
-                    tracker.interrupt_starter_name,
+                    f"{ls.tag('⚡ Dispatch', ls.Y)} "
+                    f"{ls.kv('channel', str(channel_id))} "
+                    f"{ls.kv('speaker', tracker.interrupt_starter_name, vc=ls.LC)} "
+                    f"{ls.kv('event', 'long@SPEAKING→regen', vc=ls.LY)}"
                 )
                 regen_request = dataclasses.replace(
                     request, interruption_context=interruption_note
@@ -422,7 +456,11 @@ async def _run_voice_response(
                     mode=channel_config.mode,
                 )
                 await familiar.memory_writer_scheduler.notify_turn()
-                _logger.info("[Voice Regen Response] %s", regen_text)
+                _logger.info(
+                    f"{ls.tag('🔊 Voice Regen', ls.LG)} "
+                    f"{ls.kv('channel', str(channel_id))} "
+                    f"{ls.kv('text', ls.trunc(regen_text))}"
+                )
                 regen_tts = await familiar.tts_client.synthesize(regen_text)
                 tracker.timestamps = list(regen_tts.timestamps)
                 regen_stereo = mono_to_stereo(regen_tts.audio)
@@ -471,7 +509,11 @@ async def _run_voice_response(
             mode=channel_config.mode,
         )
         await familiar.memory_writer_scheduler.notify_turn()
-        _logger.info("[Voice Response] %s", reply_text)
+        _logger.info(
+            f"{ls.tag('🔊 Voice', ls.G)} "
+            f"{ls.kv('channel', str(channel_id))} "
+            f"{ls.kv('text', ls.trunc(reply_text), vc=ls.LG)}"
+        )
     tracker.transition(ResponseState.IDLE)
     familiar.metrics_collector.record(builder.finalize())
 
@@ -514,8 +556,10 @@ async def dispatch_interruption_regen(
         f' They said: "{transcript}"'
     )
     _logger.info(
-        "dispatch: long@GENERATING → cancel+regen speaker=%s",
-        speaker,
+        f"{ls.tag('⚡ Dispatch', ls.Y)} "
+        f"{ls.kv('channel', str(channel_id))} "
+        f"{ls.kv('speaker', speaker, vc=ls.LC)} "
+        f"{ls.kv('event', 'long@GENERATING→cancel+regen', vc=ls.LY)}"
     )
     await _run_voice_response(
         channel_id=channel_id,
@@ -586,7 +630,12 @@ async def subscribe_my_voice(
             ephemeral=True,
         )
         return
-    _logger.info("Joined voice channel: %s", channel.name)
+    _logger.info(
+        f"{ls.tag('✨ Summoned', ls.G)} "
+        f"{ls.kv('type', 'voice')} "
+        f"{ls.kv('channel', channel.name, vc=ls.G)} "
+        f"{ls.kv('id', str(channel.id))}"
+    )
 
     familiar.subscriptions.add(
         channel_id=channel.id,
@@ -825,6 +874,7 @@ async def subscribe_my_voice(
             lull_timeout=familiar.config.voice_lull_timeout,
             on_utterance_complete=_deliver_to_monitor,
             on_voice_activity=interruption_detector.on_voice_activity,
+            channel_name=channel.name,
         )  # voice_lull_timeout = endpointing; conversational lull governed
         # by text_lull_timeout inside ConversationMonitor
         familiar.extras["voice_lull_monitor"] = lull_monitor
@@ -851,6 +901,7 @@ async def subscribe_my_voice(
         pipeline = await start_pipeline(
             familiar.transcriber,
             user_names=user_names,
+            channel_name=channel.name,
             resolve_name=_resolve_from_channel,
             response_handler=_route_transcript_to_monitor,
             on_speech_start=lull_monitor.on_speech_start,
@@ -862,10 +913,6 @@ async def subscribe_my_voice(
             audio_queue=pipeline.tagged_audio_queue,
         )
         vc.start_recording(sink, _recording_finished_callback)
-        _logger.info(
-            "Started voice transcription pipeline for channel %s",
-            channel.id,
-        )
 
     await ctx.followup.send(f"Joined **{channel.name}**.", ephemeral=True)
 
@@ -897,7 +944,7 @@ async def unsubscribe_voice(
             if hasattr(vc, "recording") and vc.recording:
                 vc.stop_recording()
             await stop_pipeline()
-            _logger.info("Stopped voice transcription pipeline")
+            # stt_stop logged inside stop_pipeline()
         lull_monitor = familiar.extras.pop("voice_lull_monitor", None)
         if isinstance(lull_monitor, VoiceLullMonitor):
             lull_monitor.clear()
@@ -938,7 +985,11 @@ async def set_channel_mode(
         return
 
     familiar.channel_configs.set_mode(channel_id=channel_id, mode=mode)
-    _logger.info("Channel %s mode = %s", channel_id, mode.value)
+    _logger.info(
+        f"{ls.tag('Config', ls.W)} "
+        f"{ls.kv('channel', str(channel_id))} "
+        f"{ls.kv('mode', mode.value)}"
+    )
     await ctx.respond(f"Channel mode set to **{mode.value}**.", ephemeral=True)
 
 
@@ -1026,12 +1077,17 @@ async def _run_text_response(
                 f"{'…' if len(request.utterance) > 200 else ''}"
             )
         )
+        last_hist_text = messages[-(n_new + 1)].content if len(messages) > n_new else ""
+        hist = (
+            f"  {ls.word(ls.trunc(last_hist_text), ls.LW)}\n" if last_hist_text else ""
+        )
         _logger.info(
-            "LLM request channel=%s messages=%d, %d new:\n%s",
-            channel_id,
-            len(messages),
-            n_new,
-            batch,
+            f"{ls.tag('🧠 LLM Text', ls.B)} "
+            f"{ls.kv('channel', str(channel_id), vc=ls.LB)} "
+            f"{ls.kv('messages', str(len(messages)), vc=ls.LB)} "
+            f"{ls.kv('new', str(n_new), vc=ls.LB)}\n"
+            f"{hist}"
+            f"{ls.word(batch, ls.LW)}"
         )
 
         # main reply isolation: catch ``LLMClient.chat`` raise set;

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -214,10 +215,18 @@ class ConversationMonitor:
         self._rng = rng if rng is not None else random.random  # noqa: S311
         self._buffers: dict[int, ChannelBuffer] = {}
         self._lull_tasks: set[asyncio.Task[None]] = set()
+        self._channel_names: dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def register_channel_name(self, channel_id: int, name: str) -> None:
+        """Store human-readable *name* for *channel_id* (used in log output)."""
+        self._channel_names[channel_id] = name
+
+    def _channel_label(self, channel_id: int) -> str:
+        return self._channel_names.get(channel_id, str(channel_id))
 
     async def on_message(
         self,
@@ -332,7 +341,10 @@ class ConversationMonitor:
 
     def _schedule_lull_evaluation(self, channel_id: int) -> None:
         """Sync callback from call_later — schedules async evaluation."""
-        _logger.info("conversational lull expired channel=%s", channel_id)
+        _logger.info(
+            f"{ls.tag('Conv Lull', ls.Y)} "
+            f"{ls.kv('channel', self._channel_label(channel_id))}"
+        )
         loop = asyncio.get_event_loop()
         task = loop.create_task(self._run_lull_evaluation(channel_id))
         # strong ref prevents GC before completion; done-callback cleans up
@@ -422,13 +434,15 @@ class ConversationMonitor:
             last_line.split()[-1].upper().rstrip(".,!") if last_line.split() else ""
         )
         decision = last_word == "YES"
+        decision_str = "YES" if decision else "NO"
+        dec_color = ls.G if decision else ls.R
         _logger.info(
-            "interjection channel=%s trigger=%s decision=%s msgs=%d reason=%r",
-            channel_id,
-            trigger_label,
-            "YES" if decision else "NO",
-            buf.message_counter,
-            reason,
+            f"{ls.tag('🗣️ Interject', ls.M)} "
+            f"{ls.kv('channel', self._channel_label(channel_id))} "
+            f"{ls.kv('trigger', trigger_label)} "
+            f"{ls.kv('decision', decision_str, vc=dec_color)} "
+            f"{ls.kv('msgs', str(buf.message_counter))} "
+            f"{ls.kv('reason', repr(reason), vc=ls.LM)}"
         )
         return decision
 

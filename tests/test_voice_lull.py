@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import pytest
 
 from familiar_connect.transcription import TranscriptionResult
 from familiar_connect.voice_lull import VoiceActivityEvent, VoiceLullMonitor
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 def _final(text: str, start: float = 0.0, end: float = 1.0) -> TranscriptionResult:
@@ -316,7 +323,7 @@ class TestVoiceLullMonitor:
             await asyncio.sleep(0.2)
 
         assert any(
-            r.levelno == logging.INFO and "voice lull expired" in r.message
+            r.levelno == logging.INFO and "Voice Lull" in _strip(r.message)
             for r in caplog.records
         )
 
@@ -569,6 +576,6 @@ class TestVoiceActivityEvents:
             monitor.on_speech_start(42)
             monitor.on_speech_end(42)
 
-        msgs = [r.message for r in caplog.records]
+        msgs = [_strip(r.message) for r in caplog.records]
         assert any("event=started" in m and "user=42" in m for m in msgs)
         assert any("event=ended" in m and "user=42" in m for m in msgs)

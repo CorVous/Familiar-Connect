@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -35,6 +36,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     import pytest
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -710,10 +717,10 @@ class TestSideModelEvaluation:
             for r in caplog.records
             if r.name == "familiar_connect.chattiness"
             and r.levelname == "INFO"
-            and "interjection" in r.getMessage()
+            and "Interject" in _strip(r.getMessage())
         ]
         assert len(matches) == 1
-        msg = matches[0].getMessage()
+        msg = _strip(matches[0].getMessage())
         assert "decision=YES" in msg
         assert "channel=42" in msg
         assert "trigger=direct_address" in msg
@@ -736,10 +743,10 @@ class TestSideModelEvaluation:
             for r in caplog.records
             if r.name == "familiar_connect.chattiness"
             and r.levelname == "INFO"
-            and "interjection" in r.getMessage()
+            and "Interject" in _strip(r.getMessage())
         ]
         assert len(matches) == 1
-        assert "decision=NO" in matches[0].getMessage()
+        assert "decision=NO" in _strip(matches[0].getMessage())
 
     def test_reason_logged_when_model_returns_two_lines(
         self, caplog: pytest.LogCaptureFixture
@@ -755,10 +762,11 @@ class TestSideModelEvaluation:
         record = next(
             r
             for r in caplog.records
-            if "interjection" in r.getMessage() and "decision=NO" in r.getMessage()
+            if "Interject" in _strip(r.getMessage())
+            and "decision=NO" in _strip(r.getMessage())
         )
-        assert "reason=" in record.getMessage()
-        assert "off-character" in record.getMessage()
+        assert "reason=" in _strip(record.getMessage())
+        assert "off-character" in _strip(record.getMessage())
 
     def test_reason_empty_when_model_returns_one_line(
         self, caplog: pytest.LogCaptureFixture
@@ -772,8 +780,10 @@ class TestSideModelEvaluation:
                 )
             )
         assert len(calls) == 1
-        record = next(r for r in caplog.records if "decision=YES" in r.getMessage())
-        assert "reason=''" in record.getMessage()
+        record = next(
+            r for r in caplog.records if "decision=YES" in _strip(r.getMessage())
+        )
+        assert "reason=''" in _strip(record.getMessage())
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +867,7 @@ class TestLullTimer:
             loop.close()
 
         assert any(
-            r.levelno == logging.INFO and "conversational lull expired" in r.message
+            r.levelno == logging.INFO and "Conv Lull" in _strip(r.message)
             for r in caplog.records
         )
 

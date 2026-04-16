@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from familiar_connect import log_style as ls
 from familiar_connect.config import LLM_SLOT_NAMES
 
 if TYPE_CHECKING:
@@ -228,10 +229,11 @@ def create_llm_clients(
             model=slot.model,
             temperature=slot.temperature,
         )
+        temp = slot.temperature if slot.temperature is not None else "default"
         _logger.info(
-            "LLM slot %s -> model=%s temperature=%s",
-            slot_name,
-            slot.model,
-            slot.temperature,
+            f"{ls.tag('Config', ls.W)} "
+            f"{ls.kv('slot', slot_name)} "
+            f"{ls.kv('model', str(slot.model))} "
+            f"{ls.kv('temperature', str(temp))}"
         )
     return clients

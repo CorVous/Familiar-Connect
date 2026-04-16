@@ -25,6 +25,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.metrics.types import StageSpan, TurnTrace
 
 if TYPE_CHECKING:
@@ -138,12 +139,12 @@ class TraceBuilder:
             tags=dict(self._tags),
         )
         _logger.info(
-            "metrics turn trace_id=%s channel=%s modality=%s total=%.3fs stages=%d",
-            self._trace_id,
-            self._channel_id,
-            self._modality,
-            total,
-            len(self._stages),
+            f"{ls.tag('Metrics', ls.LW)} "
+            f"{ls.kv('trace', str(self._trace_id), vc=ls.LW)} "
+            f"{ls.kv('channel', str(self._channel_id), vc=ls.LW)} "
+            f"{ls.kv('modality', self._modality, vc=ls.LW)} "
+            f"{ls.kv('total', f'{total:.3f}s', vc=ls.LW)} "
+            f"{ls.kv('stages', str(len(self._stages)), vc=ls.LW)}"
         )
         return trace
 
