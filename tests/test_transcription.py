@@ -15,10 +15,8 @@ from familiar_connect.transcription import (
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DeepgramTranscriber,
-    SpeechStartedEvent,
     TranscriptionEvent,
     TranscriptionResult,
-    UtteranceEndEvent,
     create_transcriber_from_env,
 )
 
@@ -134,7 +132,8 @@ class TestDeepgramTranscriber:
         assert params["sample_rate"] == ["48000"]
         assert params["channels"] == ["1"]
         assert params["encoding"] == ["linear16"]
-        assert params["vad_events"] == ["true"]
+        # VAD now runs locally via TEN VAD; Deepgram VAD events are off.
+        assert params["vad_events"] == ["false"]
         assert "diarize" not in params
 
     def test_builds_ws_url_omits_interim_results_by_default(self) -> None:
@@ -519,87 +518,14 @@ class TestDeepgramTranscriberLifecycle:
             assert queue.empty()
 
     @pytest.mark.asyncio
-    async def test_receive_loop_emits_speech_started_event(
+    async def test_receive_loop_drops_vad_events(
         self, client: DeepgramTranscriber
     ) -> None:
-        """Deepgram `SpeechStarted` message becomes `SpeechStartedEvent` on queue."""
-        payload = json.dumps({
-            "type": "SpeechStarted",
-            "channel": [0, 1],
-            "timestamp": 0.12,
-        })
-        ws_msg = MagicMock()
-        ws_msg.type = 1
-        ws_msg.data = payload
-
-        ws_mock = self._make_ws_mock(messages=[ws_msg])
-
-        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
-            await client.start(queue)
-            await asyncio.sleep(0.05)
-            await client.stop()
-
-            assert not queue.empty()
-            event = queue.get_nowait()
-            assert isinstance(event, SpeechStartedEvent)
-            assert event.timestamp == pytest.approx(0.12)
-
-    @pytest.mark.asyncio
-    async def test_receive_loop_emits_utterance_end_event(
-        self, client: DeepgramTranscriber
-    ) -> None:
-        """Deepgram `UtteranceEnd` message becomes `UtteranceEndEvent` on queue."""
-        payload = json.dumps({
-            "type": "UtteranceEnd",
-            "channel": [0, 1],
-            "last_word_end": 1.04,
-        })
-        ws_msg = MagicMock()
-        ws_msg.type = 1
-        ws_msg.data = payload
-
-        ws_mock = self._make_ws_mock(messages=[ws_msg])
-
-        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
-            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
-            await client.start(queue)
-            await asyncio.sleep(0.05)
-            await client.stop()
-
-            assert not queue.empty()
-            event = queue.get_nowait()
-            assert isinstance(event, UtteranceEndEvent)
-            assert event.last_word_end == pytest.approx(1.04)
-
-    @pytest.mark.asyncio
-    async def test_receive_loop_preserves_event_order(
-        self, client: DeepgramTranscriber
-    ) -> None:
-        """Results, final, and UtteranceEnd preserve wire order on the output queue."""
+        """`SpeechStarted` / `UtteranceEnd` are dropped — TEN VAD is the source."""
         msgs = []
         for payload in (
-            {
-                "type": "SpeechStarted",
-                "channel": [0, 1],
-                "timestamp": 0.1,
-            },
-            {
-                "type": "Results",
-                "channel": {
-                    "alternatives": [
-                        {"transcript": "hello", "confidence": 0.99},
-                    ],
-                },
-                "is_final": True,
-                "start": 0.0,
-                "duration": 1.0,
-            },
-            {
-                "type": "UtteranceEnd",
-                "channel": [0, 1],
-                "last_word_end": 1.0,
-            },
+            {"type": "SpeechStarted", "channel": [0, 1], "timestamp": 0.1},
+            {"type": "UtteranceEnd", "channel": [0, 1], "last_word_end": 1.0},
         ):
             m = MagicMock()
             m.type = 1
@@ -614,13 +540,46 @@ class TestDeepgramTranscriberLifecycle:
             await asyncio.sleep(0.05)
             await client.stop()
 
-            first = queue.get_nowait()
-            second = queue.get_nowait()
-            third = queue.get_nowait()
-            assert isinstance(first, SpeechStartedEvent)
-            assert isinstance(second, TranscriptionResult)
-            assert second.is_final is True
-            assert isinstance(third, UtteranceEndEvent)
+            assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_receive_loop_passes_results_through(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Only `Results` reach the output queue now that VAD events are dropped."""
+        msgs = []
+        for payload in (
+            {"type": "SpeechStarted", "channel": [0, 1], "timestamp": 0.1},
+            {
+                "type": "Results",
+                "channel": {
+                    "alternatives": [
+                        {"transcript": "hello", "confidence": 0.99},
+                    ],
+                },
+                "is_final": True,
+                "start": 0.0,
+                "duration": 1.0,
+            },
+            {"type": "UtteranceEnd", "channel": [0, 1], "last_word_end": 1.0},
+        ):
+            m = MagicMock()
+            m.type = 1
+            m.data = json.dumps(payload)
+            msgs.append(m)
+
+        ws_mock = self._make_ws_mock(messages=msgs)
+
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.05)
+            await client.stop()
+
+            event = queue.get_nowait()
+            assert isinstance(event, TranscriptionResult)
+            assert event.is_final is True
+            assert queue.empty()
 
 
 class TestDeepgramReconnect:

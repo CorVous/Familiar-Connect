@@ -12,10 +12,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from familiar_connect.transcription import (
-    SpeechStartedEvent,
     TranscriptionEvent,
     TranscriptionResult,
-    UtteranceEndEvent,
 )
 from familiar_connect.voice_pipeline import (
     PipelineError,
@@ -450,88 +448,35 @@ class TestTranscriptLogger:
                 await task
 
 
-class TestTranscriptLoggerVADEvents:
+class TestRouterFeedsVAD:
     @pytest.mark.asyncio
-    async def test_speech_started_invokes_on_speech_start(self) -> None:
-        """SpeechStartedEvent from Deepgram routes to pipeline.on_speech_start."""
-        calls: list[int] = []
-
-        def _on_start(user_id: int) -> None:
-            calls.append(user_id)
-
-        pipeline = _make_pipeline_stub({42: "Alice"}, on_speech_start=_on_start)
-        shared_queue = pipeline.shared_transcript_queue
-
-        await shared_queue.put((42, SpeechStartedEvent(timestamp=0.12)))
-
-        task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert calls == [42]
-
-    @pytest.mark.asyncio
-    async def test_utterance_end_invokes_on_speech_end(self) -> None:
-        """UtteranceEndEvent from Deepgram routes to pipeline.on_speech_end."""
-        calls: list[int] = []
-
-        def _on_end(user_id: int) -> None:
-            calls.append(user_id)
-
-        pipeline = _make_pipeline_stub({42: "Alice"}, on_speech_end=_on_end)
-        shared_queue = pipeline.shared_transcript_queue
-
-        await shared_queue.put((42, UtteranceEndEvent(last_word_end=1.0)))
-
-        task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert calls == [42]
-
-    @pytest.mark.asyncio
-    async def test_vad_hooks_optional(self) -> None:
-        """VAD events are a no-op when hooks are not wired."""
-        pipeline = _make_pipeline_stub({42: "Alice"})
-        shared_queue = pipeline.shared_transcript_queue
-
-        await shared_queue.put((42, SpeechStartedEvent(timestamp=0.0)))
-        await shared_queue.put((42, UtteranceEndEvent(last_word_end=1.0)))
-
-        task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        # must not raise
-
-
-class TestTranscriptForwarderVADEvents:
-    @pytest.mark.asyncio
-    async def test_forwards_speech_events_tagged_with_user_id(self) -> None:
-        """Non-result events flow through the forwarder with user tagging."""
-        user_queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+    async def test_audio_router_calls_feed_vad(self) -> None:
+        """Router invokes `feed_vad` for every tagged chunk."""
+        tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
         shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
+        template = _make_template()
+        fed: list[tuple[int, bytes]] = []
 
-        await user_queue.put(SpeechStartedEvent(timestamp=0.0))
-        await user_queue.put(UtteranceEndEvent(last_word_end=1.0))
+        pipeline = VoicePipeline(
+            template=template,
+            tagged_audio_queue=tagged_queue,
+            shared_transcript_queue=shared_queue,
+            router_task=MagicMock(),
+            logger_task=MagicMock(),
+            user_names={},
+            feed_vad=lambda uid, pcm: fed.append((uid, pcm)),
+        )
 
-        task = asyncio.create_task(_transcript_forwarder(7, user_queue, shared_queue))
-        await asyncio.sleep(0.05)
+        await tagged_queue.put((42, b"\x00\x01"))
+        await tagged_queue.put((42, b"\x02\x03"))
+
+        task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
+        await asyncio.sleep(0.1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        first = shared_queue.get_nowait()
-        second = shared_queue.get_nowait()
-        assert first[0] == 7
-        assert isinstance(first[1], SpeechStartedEvent)
-        assert second[0] == 7
-        assert isinstance(second[1], UtteranceEndEvent)
+        assert fed == [(42, b"\x00\x01"), (42, b"\x02\x03")]
 
 
 # ---------------------------------------------------------------------------

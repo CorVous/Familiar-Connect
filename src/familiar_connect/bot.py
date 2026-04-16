@@ -40,6 +40,7 @@ from familiar_connect.voice.interruption import (
     ResponseState,
     split_at_elapsed,
 )
+from familiar_connect.voice.ten_vad import TenVadDetector
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
@@ -827,6 +828,15 @@ async def subscribe_my_voice(
         # by text_lull_timeout inside ConversationMonitor
         familiar.extras["voice_lull_monitor"] = lull_monitor
 
+        # Local VAD: TEN VAD runs on the raw 48 kHz mono PCM from the
+        # sink, producing speech-start / speech-end edges that drive the
+        # lull monitor. Replaces Deepgram's hosted VAD events.
+        ten_vad = TenVadDetector(
+            on_speech_start=lull_monitor.on_speech_start,
+            on_speech_end=lull_monitor.on_speech_end,
+        )
+        familiar.extras["ten_vad_detector"] = ten_vad
+
         async def _route_transcript_to_monitor(  # noqa: RUF029
             user_id: int,
             result: TranscriptionResult,
@@ -844,6 +854,7 @@ async def subscribe_my_voice(
             response_handler=_route_transcript_to_monitor,
             on_speech_start=lull_monitor.on_speech_start,
             on_speech_end=lull_monitor.on_speech_end,
+            feed_vad=ten_vad.feed,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),

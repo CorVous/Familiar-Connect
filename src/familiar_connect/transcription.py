@@ -49,22 +49,9 @@ class TranscriptionResult:
         return Message(role="user", content=f"[Voice] {self.text}", name=name)
 
 
-@dataclass
-class SpeechStartedEvent:
-    """Deepgram VAD detected start of speech on the stream."""
-
-    timestamp: float
-
-
-@dataclass
-class UtteranceEndEvent:
-    """Deepgram VAD endpointed an utterance (``utterance_end_ms`` silence)."""
-
-    last_word_end: float
-
-
-# tagged union placed on transcriber output queue in wire order
-TranscriptionEvent = TranscriptionResult | SpeechStartedEvent | UtteranceEndEvent
+# TEN VAD now drives voice-activity edges locally; Deepgram is used
+# for transcription text only (``Results`` messages).
+TranscriptionEvent = TranscriptionResult
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +73,7 @@ class DeepgramTranscriber:
         diarize: bool = False,
         interim_results: bool = False,
         utterance_end_ms: int = 1000,
-        vad_events: bool = True,
+        vad_events: bool = False,
         endpointing_ms: int = 300,
     ) -> None:
         self.api_key = api_key
@@ -198,9 +185,9 @@ class DeepgramTranscriber:
     async def start(self: Self, output: asyncio.Queue[TranscriptionEvent]) -> None:
         """Connect to Deepgram and begin receiving transcription events.
 
-        Output queue carries a tagged union (:data:`TranscriptionEvent`):
-        :class:`TranscriptionResult`, :class:`SpeechStartedEvent`, or
-        :class:`UtteranceEndEvent`, in Deepgram wire order.
+        Output queue carries :class:`TranscriptionResult`s in wire order.
+        VAD edges are produced elsewhere (TEN VAD) and do not flow
+        through this queue.
         """
         url = self.build_ws_url()
         _logger.info("Connecting to Deepgram: %s", url)
@@ -322,20 +309,6 @@ class DeepgramTranscriber:
                             await output.put(result)
                             # got real data — reset reconnect counter
                             consecutive_reconnects = 0
-                    elif msg_type == "SpeechStarted":
-                        _logger.info("[Deepgram] %s: %s", msg_type, msg.data[:200])
-                        await output.put(
-                            SpeechStartedEvent(
-                                timestamp=float(data.get("timestamp", 0.0)),
-                            )
-                        )
-                    elif msg_type == "UtteranceEnd":
-                        _logger.info("[Deepgram] %s: %s", msg_type, msg.data[:200])
-                        await output.put(
-                            UtteranceEndEvent(
-                                last_word_end=float(data.get("last_word_end", 0.0)),
-                            )
-                        )
                     else:
                         _logger.info(
                             "[Deepgram] %s: %s",

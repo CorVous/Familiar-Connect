@@ -111,11 +111,15 @@ tracker guild=999 state: SPEAKING→IDLE (unsolicited=False)
 
 ### Signal source
 
-Discord audio frames flow through `VoiceLullMonitor`, which tracks per-user
-speaking state. Two events are exposed via an `on_voice_activity` callback:
+Discord audio chunks are fed into `TenVadDetector`
+(`src/familiar_connect/voice/ten_vad.py`) which runs [TEN VAD](https://github.com/TEN-framework/ten-vad)
+locally per speaker. TEN VAD's edge-triggered speech-start / speech-end
+callbacks drive `VoiceLullMonitor`, which re-exposes them via
+`on_voice_activity`:
 
-- `speech_started(user_id)` — first audio frame after a quiet period.
-- `speech_ended(user_id)` — silence watchdog fired.
+- `speech_started(user_id)` — TEN VAD speech-start edge.
+- `speech_ended(user_id)` — TEN VAD speech-end edge (silence hangover
+  expired) or Deepgram endpointed final for a speaking user.
 
 `InterruptionDetector` subscribes to this hook. It ignores all events when
 the tracker is `IDLE`.
