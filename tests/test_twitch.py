@@ -207,29 +207,35 @@ class TestFormatAdBreak:
 
 
 class TestTwitchWatcherConfig:
-    @pytest.mark.parametrize("attr,expected", [
-        ("subscriptions_enabled", True),
-        ("cheers_enabled", True),
-        ("follows_enabled", True),
-        ("ads_enabled", True),
-        ("ads_immediate", True),
-        ("redemption_names", []),
-    ])
+    @pytest.mark.parametrize(
+        ("attr", "expected"),
+        [
+            ("subscriptions_enabled", True),
+            ("cheers_enabled", True),
+            ("follows_enabled", True),
+            ("ads_enabled", True),
+            ("ads_immediate", True),
+            ("redemption_names", []),
+        ],
+    )
     def test_defaults(self, attr: str, expected: object) -> None:
         """All boolean flags default to True; redemption_names defaults to []."""
         config = TwitchWatcherConfig()
         assert getattr(config, attr) == expected
 
-    @pytest.mark.parametrize("field", [
-        "subscriptions_enabled",
-        "cheers_enabled",
-        "follows_enabled",
-        "ads_enabled",
-        "ads_immediate",
-    ])
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "subscriptions_enabled",
+            "cheers_enabled",
+            "follows_enabled",
+            "ads_enabled",
+            "ads_immediate",
+        ],
+    )
     def test_can_disable(self, field: str) -> None:
         """Each boolean flag can be toggled off at construction."""
-        config = TwitchWatcherConfig(**{field: False})
+        config = TwitchWatcherConfig(**{field: False})  # ty: ignore[invalid-argument-type]
         assert getattr(config, field) is False
 
     def test_can_set_redemption_names(self) -> None:

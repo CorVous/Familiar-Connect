@@ -241,7 +241,11 @@ class TestHandleSubscription:
     def test_tier_string_mapping(self) -> None:
         """Twitch tier strings '1000'/'2000'/'3000' map to integer tiers 1/2/3."""
         watcher = self._watcher(TwitchWatcherConfig(subscriptions_enabled=True))
-        for tier_str, label in [("1000", "tier 1"), ("2000", "tier 2"), ("3000", "tier 3")]:
+        for tier_str, label in [
+            ("1000", "tier 1"),
+            ("2000", "tier 2"),
+            ("3000", "tier 3"),
+        ]:
             event = watcher.handle_subscription(subscribe_data(tier=tier_str))
             assert event is not None, f"expected event for {tier_str}"
             assert label in event.text
@@ -457,7 +461,7 @@ class TestHandleChannelPointRedemption:
         assert event.text == "Alice has redeemed Talk to Sapphire and says: hello!"
 
     def test_event_text_without_user_input(self) -> None:
-        """Empty user_input omits the 'and says' clause (empty string coerced to None)."""
+        """Empty user_input omits the 'and says' clause (coerced to None)."""
         event = self._watcher(
             TwitchWatcherConfig(redemption_names=["Hydrate"])
         ).handle_channel_point_redemption(
@@ -489,7 +493,6 @@ class TestHandleAdBreakBegin:
             TwitchWatcherConfig(ads_enabled=False)
         ).handle_ad_break_begin(ad_break_data())
         assert event is None
-
 
 
 # ---------------------------------------------------------------------------

@@ -20,8 +20,6 @@ import pytest
 
 from familiar_connect.config import (
     DEFAULT_AZURE_TTS_VOICE,
-    DEFAULT_GEMINI_TTS_MODEL,
-    DEFAULT_GEMINI_TTS_VOICE,
     TTSConfig,
 )
 from familiar_connect.tts import (
