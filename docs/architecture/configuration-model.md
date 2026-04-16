@@ -143,7 +143,8 @@ data/
         ├── character.toml           # tuning + depth-inject config
         ├── subscriptions.toml       # persistent /subscribe-* state
         ├── channels/
-        │   └── <channel_id>.toml    # per-channel mode + backdrop + overrides
+        │   ├── <channel_id>.toml              # per-channel mode + backdrop + overrides
+        │   └── <channel_id>.last-context.json # last LLM context cache (written by bot)
         ├── modes/                   # familiar-specific mode instructions
         │   └── <mode>.md            # overrides _default/modes/<mode>.md
         ├── memory/                  # MemoryStore root
@@ -192,6 +193,12 @@ Threads and forum posts each get their own sidecar keyed by the thread's id. The
 **Why TOML:** human-and-machine-readable, matching the memory directory's plain-text principle. A user can edit their character's config in any text editor; the bot loads it on startup or on the next mutation. No schema migrations, no opaque blob format.
 
 **Why filesystem and not SQLite:** see [Design decisions](decisions.md) for the broader local-first principle. Per-character config is the kind of thing a user might want to back up, share, or version-control on their own; a filesystem layout makes that trivial.
+
+## Per-channel context cache
+
+Each time the familiar responds (text, voice, or voice-regen-after-interruption), it atomically writes the exact `list[Message]` sent to the LLM into `channels/<channel_id>.last-context.json`. The `/context` slash command reads this file and posts it as a `context.md` attachment — making the system prompt, memory search results, history window, and trigger utterance directly visible to the operator without guessing.
+
+The cache is bot-managed state (never edited by hand) and survives restarts, so `/context` works even after unsubscribing or restarting the process. Threads and forum posts each get their own `<channel_id>.last-context.json` sibling to the TOML sidecar.
 
 ## Identity model
 

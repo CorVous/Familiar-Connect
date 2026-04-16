@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from familiar_connect.channel_config import ChannelConfigStore
 from familiar_connect.chattiness import ConversationMonitor
 from familiar_connect.config import load_character_config
+from familiar_connect.context.last_context import LastContextCache
 from familiar_connect.context.pipeline import ContextPipeline
 from familiar_connect.context.processors.recast import RecastPostProcessor
 from familiar_connect.context.processors.stepped_thinking import (
@@ -80,6 +81,7 @@ class Familiar:
     post_processors: dict[str, PostProcessor]
     subscriptions: SubscriptionRegistry
     channel_configs: ChannelConfigStore
+    last_context_cache: LastContextCache
     monitor: ConversationMonitor
     memory_writer_scheduler: MemoryWriterScheduler
     tracker_registry: ResponseTrackerRegistry = field(
@@ -189,6 +191,7 @@ class Familiar:
             root=channels_root,
             character=character_config,
         )
+        last_context_cache = LastContextCache(channels_root=channels_root)
 
         # modes/ holds per-mode static instruction files; created on
         # first boot so users can drop <mode>.md files without mkdir.
@@ -255,6 +258,7 @@ class Familiar:
             post_processors=post_processors,
             subscriptions=subscriptions,
             channel_configs=channel_configs,
+            last_context_cache=last_context_cache,
             monitor=monitor,
             mood_evaluator=mood_evaluator,
             memory_writer_scheduler=memory_writer_scheduler,

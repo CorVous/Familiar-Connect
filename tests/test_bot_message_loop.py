@@ -38,6 +38,7 @@ from familiar_connect.bot import (
     _run_text_response,
     _run_voice_response,
     channel_backdrop,
+    context_command,
     create_bot,
     dispatch_interruption_regen,
     on_message,
@@ -3130,3 +3131,84 @@ class TestOnMessageCancellationHook:
         # no active tracker; on_message should flow through without error
         asyncio.run(on_message(msg, familiar))
         mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Last-context cache integration
+# ---------------------------------------------------------------------------
+
+
+class TestLastContextCache:
+    def test_text_response_populates_cache(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path, reply="Hello Alice.")
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.imitate_voice
+        )
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+
+        asyncio.run(
+            _run_text_response(
+                channel_id=12345,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hi",
+                buffer=buffer,
+                familiar=familiar,
+                channel=channel,
+            )
+        )
+
+        entry = familiar.last_context_cache.get(channel_id=12345)
+        assert entry is not None
+        assert entry.modality == "text"
+        # Messages match what the LLM received
+        llm = familiar.llm_clients["main_prose"]
+        assert isinstance(llm, _StubLLMClient)
+        main_calls = [c for c in llm.calls if c and c[0].role == "system"]
+        assert entry.messages == tuple(main_calls[0])
+
+
+class TestContextCommand:
+    def test_miss_replies_ephemeral(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_text_ctx(channel_id=12345)
+
+        asyncio.run(context_command(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        call_kwargs = ctx.respond.call_args
+        assert call_kwargs.kwargs.get("ephemeral") is True
+        assert "No context" in call_kwargs.args[0]
+
+    def test_hit_sends_file_attachment(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path, reply="Hi.")
+        familiar.channel_configs.set_mode(
+            channel_id=12345, mode=ChannelMode.imitate_voice
+        )
+        channel = _make_channel(12345)
+        buffer = [BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)]
+
+        asyncio.run(
+            _run_text_response(
+                channel_id=12345,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hello",
+                buffer=buffer,
+                familiar=familiar,
+                channel=channel,
+            )
+        )
+
+        ctx = _make_text_ctx(channel_id=12345)
+        asyncio.run(context_command(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        call_kwargs = ctx.respond.call_args
+        assert "file" in call_kwargs.kwargs
+        assert isinstance(call_kwargs.kwargs["file"], discord.File)
+        assert call_kwargs.kwargs["file"].filename == "context.md"
