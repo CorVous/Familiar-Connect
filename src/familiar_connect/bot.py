@@ -599,11 +599,12 @@ async def subscribe_my_voice(
             greetings = familiar.config.tts.greetings
             greeting_text = secrets.choice(greetings) if greetings else "Hello!"
             tts_cfg = familiar.config.tts
-            voice_id = (
-                tts_cfg.cartesia_voice_id
-                if tts_cfg.provider == "cartesia"
-                else tts_cfg.azure_voice
-            )
+            if tts_cfg.provider == "cartesia":
+                voice_id = tts_cfg.cartesia_voice_id
+            elif tts_cfg.provider == "gemini":
+                voice_id = tts_cfg.gemini_voice
+            else:
+                voice_id = tts_cfg.azure_voice
             tts_result = await get_cached_greeting_audio(
                 provider=tts_cfg.provider,
                 voice_id=voice_id or "",
