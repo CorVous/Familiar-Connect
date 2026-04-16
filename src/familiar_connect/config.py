@@ -734,6 +734,7 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
             msg = f"[tts].{key} must be a string"
             raise ConfigError(msg)
         return val or None
+
     greetings_raw = raw.get("greetings", [])
     if not isinstance(greetings_raw, list):
         msg = (

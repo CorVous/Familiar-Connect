@@ -246,7 +246,7 @@ async def get_cached_greeting_audio(
     provider: str,
     voice_id: str,
     greeting: str,
-    client: CartesiaTTSClient | AzureTTSClient,
+    client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient,
 ) -> TTSResult:
     """Return TTS audio for *greeting*.
 
