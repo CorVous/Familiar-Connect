@@ -3138,21 +3138,9 @@ class TestOnMessageCancellationHook:
 
 
 class TestShowContext:
-    def test_not_subscribed(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
-        ctx = _make_text_ctx(channel_id=12345)
-
-        asyncio.run(show_context(ctx, familiar))
-
-        ctx.respond.assert_awaited_once()
-        assert "not listening" in ctx.respond.call_args[0][0].lower()
-
     def test_sends_public_message(self, tmp_path: Path) -> None:
-        """Short context fits in one followup message with role labels."""
+        """Works without a subscription; short context fits in one followup message."""
         familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
         ctx = _make_text_ctx(channel_id=12345)
 
         fake_msg = MagicMock()
@@ -3175,15 +3163,12 @@ class TestShowContext:
     def test_sends_file_when_large(self, tmp_path: Path) -> None:
         """Oversized context is delivered as a context.md file attachment."""
         familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
         ctx = _make_text_ctx(channel_id=12345)
 
         fake_msg = MagicMock()
         fake_msg.author.bot = False
         fake_msg.author.display_name = "Alice"
-        fake_msg.content = "x" * 5000  # force oversized system prompt
+        fake_msg.content = "x" * 5000  # forces oversized output
 
         async def _history(**_kwargs: object):  # noqa: RUF029
             yield fake_msg

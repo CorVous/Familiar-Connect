@@ -1168,11 +1168,6 @@ async def show_context(
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
 
-    sub = familiar.subscriptions.get(channel_id=channel_id, kind=SubscriptionKind.text)
-    if sub is None:
-        await ctx.respond("I'm not listening in this channel.", ephemeral=True)
-        return
-
     await ctx.defer(ephemeral=False)
 
     # find the last non-bot message as the trigger utterance
