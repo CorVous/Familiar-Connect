@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -23,6 +24,13 @@ from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip(text: str) -> str:
+    """Strip ANSI escape codes for substring assertions on styled log lines."""
+    return _ANSI_RE.sub("", text)
 
 
 class TestResponseStateEnum:
@@ -103,7 +111,8 @@ class TestResponseTrackerTransition:
         ):
             t.transition(ResponseState.GENERATING)
         assert any(
-            "tracker guild=7" in rec.message and "IDLE→GENERATING" in rec.message
+            "guild=7" in _strip(rec.message)
+            and "IDLE→GENERATING" in _strip(rec.message)
             for rec in caplog.records
         )
 
@@ -120,7 +129,9 @@ class TestResponseTrackerTransition:
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             t.transition(ResponseState.GENERATING)
-        assert not any("GENERATING→GENERATING" in rec.message for rec in caplog.records)
+        assert not any(
+            "GENERATING→GENERATING" in _strip(rec.message) for rec in caplog.records
+        )
         assert t.state is ResponseState.GENERATING
 
     def test_same_state_idle_does_not_clear_scratch(self) -> None:
@@ -141,7 +152,7 @@ class TestResponseTrackerTransition:
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             t.transition(ResponseState.GENERATING)
-        assert any("unsolicited=True" in rec.message for rec in caplog.records)
+        assert any("unsolicited=True" in _strip(rec.message) for rec in caplog.records)
 
 
 class TestResponseTrackerRegistry:
@@ -321,7 +332,7 @@ class TestInterruptionDetectorIdle:
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
         assert not scheduler.is_armed
-        assert not any("interruption:" in rec.message for rec in caplog.records)
+        assert not any("Interrupt" in _strip(rec.message) for rec in caplog.records)
 
 
 class TestInterruptionDetectorClassification:
@@ -339,9 +350,10 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)  # lull timer expires
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
         assert "discarded" in msgs[0]
@@ -361,9 +373,10 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
         assert "short" in msgs[0]
@@ -383,9 +396,10 @@ class TestInterruptionDetectorClassification:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
         assert "long" in msgs[0]
@@ -419,9 +433,10 @@ class TestInterruptionDetectorMultiUser:
             scheduler.fire_for(detector._finalize_burst)
 
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
         # Total duration: 1.0 + 0.5 + 1.5 = 3.0s → short.
@@ -459,9 +474,10 @@ class TestInterruptionDetectorLullAggregation:
             scheduler.fire_for(detector._finalize_burst)  # now the full lull expires
 
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         # Single classification covering both sub-utterances.
         # Duration: 1.0 + 0.5 + 2.0 = 3.5s → short.
@@ -491,9 +507,10 @@ class TestInterruptionDetectorLullAggregation:
             scheduler.fire_for(detector._finalize_burst)  # second burst classified
 
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 2
         assert "short" in msgs[0]
@@ -523,12 +540,13 @@ class TestInterruptionDetectorStateUpgrade:
             scheduler.fire_for(detector._finalize_burst)
 
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
-        assert "during SPEAKING" in msgs[0]
+        assert "during=SPEAKING" in msgs[0]
         assert "GENERATING" not in msgs[0]
 
 
@@ -547,12 +565,13 @@ class TestInterruptionDetectorStarterUser:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
-        assert "by speaker=42" in msgs[0]
+        assert "speaker=42" in msgs[0]
 
     def test_min_crossed_log_includes_starter_user_id(
         self,
@@ -569,10 +588,12 @@ class TestInterruptionDetectorStarterUser:
             clock.advance(2.0)
             scheduler.fire_for(detector._on_min_crossed)
         crossed = [
-            r.message for r in caplog.records if "min threshold crossed" in r.message
+            _strip(r.message)
+            for r in caplog.records
+            if "min_threshold" in _strip(r.message)
         ]
         assert len(crossed) == 1
-        assert "by speaker=42" in crossed[0]
+        assert "speaker=42" in crossed[0]
 
     def test_starter_is_first_speaker_even_with_multiple_users(
         self,
@@ -591,12 +612,13 @@ class TestInterruptionDetectorStarterUser:
             detector.on_voice_activity(43, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
-        assert "by speaker=42" in msgs[0]
+        assert "speaker=42" in msgs[0]
         assert "speaker=43" not in msgs[0]
 
 
@@ -624,13 +646,14 @@ class TestInterruptionDetectorPreExistingSpeech:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
-        assert "during GENERATING" in msgs[0]
-        assert "by speaker=42" in msgs[0]
+        assert "during=GENERATING" in msgs[0]
+        assert "speaker=42" in msgs[0]
 
     def test_no_burst_started_when_idle_transition_has_no_speakers(
         self,
@@ -666,13 +689,14 @@ class TestInterruptionDetectorIdleTransition:
         ):
             scheduler.fire_for(detector._finalize_burst)
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert len(msgs) == 1
-        assert "during SPEAKING" in msgs[0]
-        assert "by speaker=42" in msgs[0]
+        assert "during=SPEAKING" in msgs[0]
+        assert "speaker=42" in msgs[0]
 
     def test_generating_to_idle_aborts_burst(
         self,
@@ -693,7 +717,7 @@ class TestInterruptionDetectorIdleTransition:
             tracker.transition(ResponseState.IDLE)
         assert not scheduler.has_pending(detector._finalize_burst)
         assert not scheduler.has_pending(detector._on_min_crossed)
-        assert not any("interruption:" in r.message for r in caplog.records)
+        assert not any("Interrupt" in _strip(r.message) for r in caplog.records)
 
     def test_generating_to_idle_while_speaking_keeps_burst(
         self,
@@ -731,7 +755,7 @@ class TestInterruptionDetectorMinThresholdLog:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
-        assert not any("min threshold crossed" in r.message for r in caplog.records)
+        assert not any("min_threshold" in _strip(r.message) for r in caplog.records)
 
     def test_still_speaking_at_min_fires_log(
         self,
@@ -750,10 +774,12 @@ class TestInterruptionDetectorMinThresholdLog:
             clock.advance(2.0)
             scheduler.fire_for(detector._on_min_crossed)
         crossed = [
-            r.message for r in caplog.records if "min threshold crossed" in r.message
+            _strip(r.message)
+            for r in caplog.records
+            if "min_threshold" in _strip(r.message)
         ]
         assert len(crossed) == 1
-        assert "during SPEAKING" in crossed[0]
+        assert "during=SPEAKING" in crossed[0]
         # No duration should be emitted — the log is about the
         # crossing event itself, not a measured duration.
         assert "s)" not in crossed[0]
@@ -780,12 +806,14 @@ class TestInterruptionDetectorMinThresholdLog:
             clock.advance(1.5)  # t=2.0 — timer would fire here
             scheduler.fire_for(detector._on_min_crossed)
             # Still silent, last_ended-started=0.5 < 2 → no log yet.
-            assert not any("min threshold crossed" in r.message for r in caplog.records)
+            assert not any("min_threshold" in _strip(r.message) for r in caplog.records)
             clock.advance(0.5)  # t=2.5
             # New speech: now-started = 2.5 ≥ 2 → log fires.
             detector.on_voice_activity(42, VoiceActivityEvent.started)
         crossed = [
-            r.message for r in caplog.records if "min threshold crossed" in r.message
+            _strip(r.message)
+            for r in caplog.records
+            if "min_threshold" in _strip(r.message)
         ]
         assert len(crossed) == 1
 
@@ -809,12 +837,14 @@ class TestInterruptionDetectorMinThresholdLog:
             scheduler.fire_for(detector._on_min_crossed)  # silent, no log
             clock.advance(1.0)  # t=1.5
             detector.on_voice_activity(42, VoiceActivityEvent.started)  # 1.5<2
-            assert not any("min threshold crossed" in r.message for r in caplog.records)
+            assert not any("min_threshold" in _strip(r.message) for r in caplog.records)
             clock.advance(1.0)  # t=2.5
             # ``last_ended_at - started_at`` = 2.5 ≥ 2 → log fires.
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
         crossed = [
-            r.message for r in caplog.records if "min threshold crossed" in r.message
+            _strip(r.message)
+            for r in caplog.records
+            if "min_threshold" in _strip(r.message)
         ]
         assert len(crossed) == 1
 
@@ -838,7 +868,9 @@ class TestInterruptionDetectorMinThresholdLog:
             # but the latch prevents a second log.
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
         crossed = [
-            r.message for r in caplog.records if "min threshold crossed" in r.message
+            _strip(r.message)
+            for r in caplog.records
+            if "min_threshold" in _strip(r.message)
         ]
         assert len(crossed) == 1
 
@@ -860,7 +892,7 @@ class TestInterruptionDetectorMinThresholdLog:
             # Min timer is still pending (lull arming doesn't cancel
             # it); fire it directly.
             scheduler.fire_for(detector._on_min_crossed)
-        assert not any("min threshold crossed" in r.message for r in caplog.records)
+        assert not any("min_threshold" in _strip(r.message) for r in caplog.records)
 
     def test_finalize_cancels_pending_min_timer(
         self,
@@ -879,7 +911,7 @@ class TestInterruptionDetectorMinThresholdLog:
         ):
             scheduler.fire_for(detector._finalize_burst)
         assert not scheduler.has_pending(detector._on_min_crossed)
-        assert not any("min threshold crossed" in r.message for r in caplog.records)
+        assert not any("min_threshold" in _strip(r.message) for r in caplog.records)
 
 
 class TestInterruptionClassEnum:
@@ -930,7 +962,7 @@ class TestResponseTrackerTolerance:
         ):
             keep = t.should_keep_talking(0.30, rng=lambda: 0.1)
         assert keep is True
-        assert any("→ keep_talking" in r.message for r in caplog.records)
+        assert any("→ keep_talking" in _strip(r.message) for r in caplog.records)
 
     def test_should_keep_talking_false_when_roll_above_tolerance(
         self,
@@ -942,7 +974,7 @@ class TestResponseTrackerTolerance:
         ):
             keep = t.should_keep_talking(0.30, rng=lambda: 0.9)
         assert keep is False
-        assert any("→ yield" in r.message for r in caplog.records)
+        assert any("→ yield" in _strip(r.message) for r in caplog.records)
 
     def test_should_keep_talking_log_includes_all_components(
         self,
@@ -953,7 +985,9 @@ class TestResponseTrackerTolerance:
             logging.INFO, logger="familiar_connect.voice.interruption"
         ):
             t.should_keep_talking(0.30, rng=lambda: 0.50)
-        msgs = [r.message for r in caplog.records if "toll:" in r.message]
+        msgs = [
+            _strip(r.message) for r in caplog.records if "Toll" in _strip(r.message)
+        ]
         assert len(msgs) == 1
         assert "base=0.30" in msgs[0]
         assert "mood=+0.10" in msgs[0]
@@ -977,7 +1011,9 @@ class TestInterruptionDetectorToleranceRoll:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(2.0)
             scheduler.fire_for(detector._on_min_crossed)
-        toll = [r.message for r in caplog.records if "toll:" in r.message]
+        toll = [
+            _strip(r.message) for r in caplog.records if "Toll" in _strip(r.message)
+        ]
         assert len(toll) == 1
         assert "→ yield" in toll[0]
 
@@ -998,7 +1034,7 @@ class TestInterruptionDetectorToleranceRoll:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(2.0)
             scheduler.fire_for(detector._on_min_crossed)
-        assert not any("toll:" in r.message for r in caplog.records)
+        assert not any("Toll" in _strip(r.message) for r in caplog.records)
 
     def test_roll_uses_tracker_unsolicited_flag(
         self,
@@ -1019,7 +1055,9 @@ class TestInterruptionDetectorToleranceRoll:
             detector.on_voice_activity(42, VoiceActivityEvent.started)
             clock.advance(2.0)
             scheduler.fire_for(detector._on_min_crossed)
-        toll = [r.message for r in caplog.records if "toll:" in r.message]
+        toll = [
+            _strip(r.message) for r in caplog.records if "Toll" in _strip(r.message)
+        ]
         assert len(toll) == 1
         assert "→ keep_talking" in toll[0]
         assert "unsolicited=+0.35" in toll[0]
@@ -1286,9 +1324,10 @@ class TestInterruptionDetectorLongDispatch:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         msgs = [
-            r.message
+            _strip(r.message)
             for r in caplog.records
-            if "interruption:" in r.message and "min threshold" not in r.message
+            if "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
         ]
         assert any("long" in m and "GENERATING" in m for m in msgs)
 
@@ -1310,7 +1349,7 @@ class TestInterruptionDetectorLongDispatch:
             clock.advance(5.0)
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
-        assert any("dispatch: long@GENERATING" in r.message for r in caplog.records)
+        assert any("long@GENERATING" in _strip(r.message) for r in caplog.records)
 
 
 class TestInterruptionDetectorDeliveryGate:
@@ -2072,7 +2111,9 @@ class TestShortGeneratingDispatch:
         with caplog.at_level(logging.INFO):
             scheduler.fire_for(detector._finalize_burst)
         assert any(
-            "dispatch: short@GENERATING → polite-wait speaker=42" in r.message
+            "Polite Wait" in _strip(r.message)
+            and "speaker=42" in _strip(r.message)
+            and "short@GENERATING" in _strip(r.message)
             for r in caplog.records
         )
 
@@ -2183,7 +2224,8 @@ class TestInterruptionLogNames:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._on_min_crossed)
         assert any(
-            "speaker=Alice" in r.message and "min threshold crossed" in r.message
+            "speaker=Alice" in _strip(r.message)
+            and "min_threshold" in _strip(r.message)
             for r in caplog.records
         )
 
@@ -2205,7 +2247,9 @@ class TestInterruptionLogNames:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         assert any(
-            "speaker=Alice" in r.message and "interruption:" in r.message
+            "speaker=Alice" in _strip(r.message)
+            and "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
             for r in caplog.records
         )
 
@@ -2224,7 +2268,9 @@ class TestInterruptionLogNames:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         assert any(
-            "speaker=42" in r.message and "interruption:" in r.message
+            "speaker=42" in _strip(r.message)
+            and "Interrupt" in _strip(r.message)
+            and "min_threshold" not in _strip(r.message)
             for r in caplog.records
         )
 
@@ -2268,7 +2314,8 @@ class TestLongSpeakingPushThrough:
             detector.on_voice_activity(42, VoiceActivityEvent.ended)
             scheduler.fire_for(detector._finalize_burst)
         assert any(
-            "dispatch: long@SPEAKING push-through" in r.message for r in caplog.records
+            "long@SPEAKING" in _strip(r.message) and "Push Through" in _strip(r.message)
+            for r in caplog.records
         )
 
     def test_push_through_callback_invoked(self) -> None:

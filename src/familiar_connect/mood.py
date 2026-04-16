@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -73,7 +74,11 @@ class MoodEvaluator:
             history empty, or LLM call fails.
         """
         if self._llm is None or self._store is None:
-            _logger.info("mood_modifier=0.00 (stub)")
+            _logger.info(
+                f"{ls.tag('Mood', ls.M)} "
+                f"{ls.kv('modifier', '0.00', vc=ls.LW)} "
+                f"{ls.kv('reason', 'stub', vc=ls.LW)}"
+            )
             return 0.0
 
         turns = self._store.recent(
@@ -82,7 +87,11 @@ class MoodEvaluator:
             limit=_HISTORY_LIMIT,
         )
         if not turns:
-            _logger.info("mood_modifier=0.00 (no history)")
+            _logger.info(
+                f"{ls.tag('Mood', ls.M)} "
+                f"{ls.kv('modifier', '0.00', vc=ls.LW)} "
+                f"{ls.kv('reason', 'no_history', vc=ls.LW)}"
+            )
             return 0.0
 
         prompt = _PROMPT.format(turns=_format_turns(turns))
@@ -93,5 +102,7 @@ class MoodEvaluator:
             _logger.warning("mood_eval failed: %s", exc, exc_info=True)
             return 0.0
 
-        _logger.info("mood_modifier=%.2f", modifier)
+        _logger.info(
+            f"{ls.tag('Mood', ls.M)} {ls.kv('modifier', f'{modifier:+.2f}', vc=ls.LM)}"
+        )
         return modifier

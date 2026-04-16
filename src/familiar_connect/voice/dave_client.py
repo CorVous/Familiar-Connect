@@ -16,6 +16,7 @@ import davey
 from discord import VoiceClient
 from discord.sinks.core import RawData
 
+from familiar_connect import log_style as ls
 from familiar_connect.voice.dave_ws import DaveVoiceWebSocket
 
 if TYPE_CHECKING:
@@ -77,10 +78,10 @@ class DaveVoiceClient(VoiceClient):
             channel_id,
         )
         _logger.info(
-            "DaveSession initialized (protocol_version=%d, user=%d, channel=%d)",
-            self.dave_protocol_version,
-            user_id,
-            channel_id,
+            f"{ls.tag('🔐 DAVE', ls.LB)} "
+            f"{ls.kv('event', 'initialized', vc=ls.LW)} "
+            f"{ls.kv('protocol_version', str(self.dave_protocol_version), vc=ls.LW)} "
+            f"{ls.kv('user', str(user_id), vc=ls.LC)}"
         )
 
         key_package = self.dave_session.get_serialized_key_package()

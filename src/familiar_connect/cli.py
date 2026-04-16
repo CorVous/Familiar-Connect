@@ -11,8 +11,9 @@ import sys
 
 from dotenv import load_dotenv
 
-from familiar_connect import __version__
+from familiar_connect import __version__, log_style
 from familiar_connect.commands import metrics_cmd, run_cmd, version_cmd
+from familiar_connect.log_style import StyledFormatter
 
 # Get package name dynamically from installed metadata
 try:
@@ -47,9 +48,12 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
         levels = [logging.WARNING, logging.INFO, logging.DEBUG]
         log_level = levels[min(verbose, len(levels) - 1)]
 
+    log_style.init()
+    handler = logging.StreamHandler()
+    handler.setFormatter(StyledFormatter())
     logging.basicConfig(
         level=log_level,
-        format="%(levelname)s: %(message)s",
+        handlers=[handler],
         force=True,  # Reconfigure if already configured
     )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import cast
 
 import pytest
@@ -11,6 +12,12 @@ import pytest
 from familiar_connect.context.pipeline import ProviderOutcome
 from familiar_connect.metrics.timing import TraceBuilder
 from familiar_connect.metrics.types import TurnTrace
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 def test_empty_trace_finalizes() -> None:
@@ -118,10 +125,10 @@ async def test_span_logs_debug_on_exit(
     debug_records = [
         r
         for r in caplog.records
-        if r.levelno == logging.DEBUG and "llm_call" in r.getMessage()
+        if r.levelno == logging.DEBUG and "llm_call" in _strip(r.getMessage())
     ]
     assert len(debug_records) == 1
-    msg = debug_records[0].getMessage()
+    msg = _strip(debug_records[0].getMessage())
     assert "duration=" in msg
     assert "model=glm-5.1" in msg
 
@@ -144,10 +151,10 @@ async def test_finalize_logs_info_summary(
     info_records = [
         r
         for r in caplog.records
-        if r.levelno == logging.INFO and "turn" in r.getMessage()
+        if r.levelno == logging.INFO and "Metrics" in _strip(r.getMessage())
     ]
     assert len(info_records) == 1
-    msg = info_records[0].getMessage()
+    msg = _strip(info_records[0].getMessage())
     assert trace.trace_id[:8] in msg  # at least a prefix present
     assert "channel=42" in msg
     assert "modality=text" in msg

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 
 _FAMILIAR = "aria"
 _CHANNEL = 42
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class _FakeLLMClient(LLMClient):
@@ -93,8 +96,8 @@ class TestMoodEvaluatorRealCall:
         evaluator, _ = _make_evaluator(["0.3"], ("user", "great!"))
         with caplog.at_level(logging.INFO, logger="familiar_connect.mood"):
             asyncio.run(evaluator.evaluate(channel_id=_CHANNEL, familiar_id=_FAMILIAR))
-        messages = [r.message for r in caplog.records]
-        assert any("mood_modifier" in m for m in messages)
+        messages = [_ANSI_RE.sub("", r.message) for r in caplog.records]
+        assert any("Mood" in m and "modifier=" in m for m in messages)
 
     def test_returns_zero_when_no_history(self) -> None:
         store = HistoryStore(":memory:")

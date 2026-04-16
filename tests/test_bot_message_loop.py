@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import re
 import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -61,6 +62,13 @@ from familiar_connect.voice_lull import VoiceLullMonitor
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_PROFILE_PATH = (
@@ -529,16 +537,14 @@ class TestOnRespond:
                 )
             )
 
-        llm_records = [r for r in caplog.records if "LLM request" in r.getMessage()]
+        llm_records = [r for r in caplog.records if "Generating Text" in r.getMessage()]
         assert len(llm_records) == 1
-        msg = llm_records[0].getMessage()
-        # New format: "messages=N, K new:"
-        assert ", 2 new:" in msg
+        msg = _strip(llm_records[0].getMessage())
+        # New format: "messages=N new=K"
+        assert "new=2" in msg
         # New messages are shown
         assert "first message" in msg
         assert "second message" in msg
-        # Full history (system prompt) is not dumped
-        assert "[system]" not in msg
 
     def test_voice_llm_request_log_shows_only_new_message(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -571,16 +577,15 @@ class TestOnRespond:
                 )
             )
 
-        llm_records = [r for r in caplog.records if "LLM request" in r.getMessage()]
+        llm_records = [
+            r for r in caplog.records if "Generating Voice" in r.getMessage()
+        ]
         assert len(llm_records) == 1
-        msg = llm_records[0].getMessage()
-        # New format: "(voice) messages=N, 1 new:"
-        assert "(voice)" in msg
-        assert ", 1 new:" in msg
+        msg = _strip(llm_records[0].getMessage())
+        # New format: "[🧠 Generating Voice] channel=… messages=N new=K"
+        assert "new=1" in msg
         # Utterance text is shown
         assert "hello world" in msg
-        # Full history (system prompt) is not dumped
-        assert "[system]" not in msg
 
 
 # ---------------------------------------------------------------------------

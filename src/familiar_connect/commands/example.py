@@ -16,6 +16,8 @@ Example registration in cli.py:
 import argparse
 import logging
 
+from familiar_connect import log_style as ls
+
 _logger = logging.getLogger(__name__)
 
 
@@ -57,10 +59,10 @@ def run(args: argparse.Namespace) -> int:
     :param args: Parsed command-line arguments
     :return: Exit code (0 for success, non-zero for error)
     """
-    _logger.info("Running example command with name=%s", args.name)
     _logger.debug("Greeting: %s", args.greeting)
 
-    # Your command logic here
-    print(f"{args.greeting}, {args.name}!")  # noqa: T201
+    print(  # noqa: T201
+        f"{ls.tag('👋 Example', ls.W)} {args.greeting}, {args.name}!"
+    )
 
     return 0

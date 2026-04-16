@@ -20,6 +20,7 @@ dependencies = [
     "ten-vad >= 1.0.6, < 2",
     "soxr >= 0.5, < 2",
     "numpy >= 2, < 3",
+    "colorama>=0.4.6",
     # local ONNX embeddings for ContentSearchProvider tier 2 — no third-party API
     "fastembed >= 0.4, < 1",
 ]
@@ -150,6 +151,7 @@ ignore = [
     "PLR2004", # Magic values aren't always bad. Sometimes, fewer lines are nice
     "COM812", # Broken, see: https://github.com/astral-sh/ruff/issues/9216
     "TRY400", # ??? https://docs.python.org/3/library/logging.html#logging-levels
+    "G004", # styled console logs compose ANSI sequences via f-strings
 ]
 
 [tool.ruff.lint.per-file-ignores]

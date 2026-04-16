@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.memory.store import MemoryStore, MemoryStoreError
 
@@ -354,12 +355,12 @@ class MemoryWriter:
         )
 
         _logger.info(
-            "memory writer: session=%s people=%d topics=%d turns=%d watermark=%d",
-            result_session,
-            len(result_people),
-            len(result_topics),
-            len(turns),
-            new_watermark,
+            f"{ls.tag('🧠 Memory', ls.LM)} "
+            f"{ls.kv('session', result_session or '', vc=ls.LW)} "
+            f"{ls.kv('people', str(len(result_people)), vc=ls.LW)} "
+            f"{ls.kv('topics', str(len(result_topics)), vc=ls.LW)} "
+            f"{ls.kv('turns', str(len(turns)), vc=ls.LW)} "
+            f"{ls.kv('watermark', str(new_watermark), vc=ls.LW)}"
         )
 
         return MemoryWriterResult(

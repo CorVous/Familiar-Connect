@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 from familiar_connect.memory.store import MemoryStoreError
@@ -127,10 +128,10 @@ def lookup_with_paths(
         est = estimate_tokens(text)
         if content_cap_tokens is not None and tokens_used + est > content_cap_tokens:
             _logger.info(
-                "people_lookup: dropped %s at content cap (used=%d, cap=%d)",
-                rel_path,
-                tokens_used,
-                content_cap_tokens,
+                f"{ls.tag('👥 People', ls.M)} "
+                f"{ls.kv('dropped', rel_path, vc=ls.LM)} "
+                f"{ls.kv('used', str(tokens_used), vc=ls.LM)} "
+                f"{ls.kv('cap', str(content_cap_tokens), vc=ls.LM)}"
             )
             break
         tokens_used += est

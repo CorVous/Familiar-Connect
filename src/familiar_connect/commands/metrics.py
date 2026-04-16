@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.metrics.report import (
     provider_success_rates,
     stage_breakdown,
@@ -94,13 +95,15 @@ def add_parser(
 def _resolve_db_path(args: argparse.Namespace) -> Path | None:
     """Return the metrics.db path for the requested familiar, or ``None``."""
     if not args.familiar:
-        print("error: --familiar ID is required")  # noqa: T201
+        print(f"{ls.tag('❌ Error', ls.R)} --familiar ID is required")  # noqa: T201
         return None
 
     root = Path(args.familiars_root) if args.familiars_root else _DEFAULT_FAMILIARS_ROOT
     db_path = root / args.familiar / "metrics.db"
     if not db_path.exists():
-        print(f"error: metrics.db not found at {db_path}")  # noqa: T201
+        print(  # noqa: T201
+            f"{ls.tag('❌ Error', ls.R)} metrics.db not found at {db_path}"
+        )
         return None
     return db_path
 
@@ -120,7 +123,9 @@ def run(args: argparse.Namespace) -> int:
     # apply --tag KEY=VALUE filter in-memory
     if args.tag:
         if "=" not in args.tag:
-            print(f"error: --tag must be KEY=VALUE, got: {args.tag}")  # noqa: T201
+            print(  # noqa: T201
+                f"{ls.tag('❌ Error', ls.R)} --tag must be KEY=VALUE, got: {args.tag}"
+            )
             return 1
         key, _, value = args.tag.partition("=")
         traces = [t for t in traces if t.tags.get(key) == value]
@@ -129,6 +134,7 @@ def run(args: argparse.Namespace) -> int:
     if args.stage:
         traces = [t for t in traces if any(s.name == args.stage for s in t.stages)]
 
+    print(ls.tag("Metrics", ls.LW))  # noqa: T201
     print(summary_stats(traces))  # noqa: T201
     print()  # noqa: T201
     print(throughput_stats(traces))  # noqa: T201
@@ -154,12 +160,13 @@ def _emit_plot_or_fallback(traces: Sequence[TurnTrace]) -> None:
 
         plt = importlib.import_module("matplotlib.pyplot")
     except ImportError:
-        print("matplotlib not installed; install to enable --plot")  # noqa: T201
+        msg = "matplotlib not installed; install to enable --plot"
+        print(f"{ls.tag('❌ Error', ls.R)} {msg}")  # noqa: T201
         return
 
     totals = [t.total_duration_s for t in traces]
     if not totals:
-        print("no traces to plot")  # noqa: T201
+        print(f"{ls.tag('❌ Error', ls.R)} no traces to plot")  # noqa: T201
         return
     plt.hist(totals, bins=20)
     plt.xlabel("total latency (s)")

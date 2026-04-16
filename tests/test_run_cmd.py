@@ -29,6 +29,11 @@ def _fake_character_config() -> MagicMock:
     config = MagicMock(name="character_config")
     config.tts.voice_id = "test-voice-id"
     config.tts.model = "test-model"
+    # numeric attrs the [Config] startup log formats inline
+    config.interrupt_tolerance.value = "medium"
+    config.interrupt_tolerance.base_probability = 0.5
+    config.min_interruption_s = 0.3
+    config.short_long_boundary_s = 2.0
     return config
 
 

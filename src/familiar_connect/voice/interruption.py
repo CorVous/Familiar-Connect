@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 
+from familiar_connect import log_style as ls
 from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
@@ -94,12 +95,12 @@ class ResponseTracker:
         if old is new_state:
             return
         self.state = new_state
+        state_str = f"{ls.LC}{old.value}{ls.RS}→{ls.LC}{new_state.value}{ls.RS}"
         _logger.info(
-            "tracker guild=%s state: %s→%s (unsolicited=%s)",
-            self.guild_id,
-            old.value,
-            new_state.value,
-            self.is_unsolicited,
+            f"{ls.tag('🔄 State', ls.C)} "
+            f"{ls.kv('guild', str(self.guild_id))} "
+            f"{ls.W}state={ls.RS}{state_str} "
+            f"{ls.kv('unsolicited', str(self.is_unsolicited), vc=ls.LW)}"
         )
         if new_state is ResponseState.IDLE:
             # reset per-response scratch
@@ -144,15 +145,17 @@ class ResponseTracker:
         roll = (rng if rng is not None else random.random)()  # noqa: S311
         keep = roll < tolerance
         bias = UNSOLICITED_TOLERANCE_BIAS if self.is_unsolicited else 0.0
+        outcome = "keep_talking" if keep else "yield"
+        out_color = ls.G if keep else ls.Y
         _logger.info(
-            "toll: base=%.2f mood=%+.2f unsolicited=%+.2f "
-            "effective=%.2f roll=%.2f → %s",
-            base,
-            self.mood_modifier,
-            bias,
-            tolerance,
-            roll,
-            "keep_talking" if keep else "yield",
+            f"{ls.tag('🎲 Toll', ls.C)} "
+            f"{ls.kv('base', f'{base:.2f}', vc=ls.LW)} "
+            f"{ls.kv('mood', f'{self.mood_modifier:+.2f}', vc=ls.LW)} "
+            f"{ls.kv('unsolicited', f'{bias:+.2f}', vc=ls.LW)} "
+            f"{ls.kv('effective', f'{tolerance:.2f}', vc=ls.LW)} "
+            f"{ls.kv('roll', f'{roll:.2f}', vc=ls.LW)} "
+            f"{ls.word('→', ls.W)} "
+            f"{ls.word(outcome, out_color)}"
         )
         return keep
 
@@ -508,8 +511,9 @@ class InterruptionDetector:
             return
         self._long_fired = True
         _logger.info(
-            "interruption: long boundary crossed early by user=%s",
-            self._burst_starter_id,
+            f"{ls.tag('⚠️ Interrupt', ls.LY)} "
+            f"{ls.kv('user', str(self._burst_starter_id), vc=ls.LC)} "
+            f"{ls.kv('type', 'long_boundary_early', vc=ls.LY)}"
         )
         self._on_long_boundary_crossed(self._burst_starter_id, self._burst_transcript)
 
@@ -538,12 +542,16 @@ class InterruptionDetector:
         if state is None:
             # tracker returned to IDLE; burst about to be aborted
             return
-        _logger.info(
-            "interruption: min threshold crossed by speaker=%s during %s",
+        speaker = (
             self._name_resolver(self._burst_starter_id)
             if self._name_resolver is not None
-            else self._burst_starter_id,
-            state.value,
+            else str(self._burst_starter_id)
+        )
+        _logger.info(
+            f"{ls.tag('⚠️ Interrupt', ls.LY)} "
+            f"{ls.kv('speaker', speaker, vc=ls.LC)} "
+            f"{ls.kv('during', state.value, vc=ls.LW)} "
+            f"{ls.kv('type', 'min_threshold', vc=ls.LY)}"
         )
         self._min_logged = True
         # Moment 1: burst crossed ``min`` while the familiar is speaking.
@@ -564,12 +572,11 @@ class InterruptionDetector:
                     )
                     self._remaining_timestamps = remaining_ts
                     _logger.info(
-                        "yield split: elapsed=%.0fms words=%d"
-                        " → delivered=%d remaining=%d",
-                        elapsed_ms,
-                        len(tracker.timestamps),
-                        len(delivered),
-                        len(remaining_ts),
+                        f"{ls.tag('Yield Split', ls.Y)} "
+                        f"{ls.kv('elapsed', f'{elapsed_ms:.0f}ms', vc=ls.LW)} "
+                        f"{ls.kv('words', str(len(tracker.timestamps)), vc=ls.LW)} "
+                        f"{ls.kv('delivered', str(len(delivered)), vc=ls.LW)} "
+                        f"{ls.kv('remaining', str(len(remaining_ts)), vc=ls.LW)}"
                     )
                 starter = self._burst_starter_id
                 tracker.interrupt_starter_name = (
@@ -617,14 +624,17 @@ class InterruptionDetector:
         classification = self._classify(duration)
         self._last_classification = classification
         self._delivery_gate.set()
-        _logger.info(
-            "interruption: %s (%.2fs) by speaker=%s during %s",
-            classification.value,
-            duration,
+        speaker = (
             self._name_resolver(starter_id)
             if self._name_resolver is not None
-            else starter_id,
-            state.value,
+            else str(starter_id)
+        )
+        _logger.info(
+            f"{ls.tag('⚠️ Interrupt', ls.Y)} "
+            f"{ls.kv('type', classification.value, vc=ls.LY)} "
+            f"{ls.kv('duration', f'{duration:.2f}s', vc=ls.LW)} "
+            f"{ls.kv('speaker', speaker, vc=ls.LC)} "
+            f"{ls.kv('during', state.value, vc=ls.LW)}"
         )
         # Step 8 dispatch: long burst during GENERATING → cancel + regen.
         if (
@@ -633,8 +643,9 @@ class InterruptionDetector:
             and self._on_long_during_generating is not None
         ):
             _logger.info(
-                "dispatch: long@GENERATING → cancel+regen user=%s",
-                starter_id,
+                f"{ls.tag('🔁 Cancel+Regen', ls.Y)} "
+                f"{ls.kv('speaker', str(starter_id), vc=ls.LC)} "
+                f"{ls.kv('trigger', 'long@GENERATING', vc=ls.LY)}"
             )
             self._on_long_during_generating(starter_id, transcript)
         # Step 11 dispatch: short interruption during SPEAKING.
@@ -642,10 +653,11 @@ class InterruptionDetector:
             classification is InterruptionClass.short
             and state is ResponseState.SPEAKING
         ):
+            outcome = "yield+resume" if did_yield else "push-through"
             _logger.info(
-                "dispatch: short@SPEAKING → %s speaker=%s",
-                "yield+resume" if did_yield else "push-through",
-                starter_id,
+                f"{ls.tag('✋ Yield', ls.Y)} "
+                f"{ls.kv('speaker', str(starter_id), vc=ls.LC)} "
+                f"{ls.kv('outcome', outcome, vc=ls.LY)}"
             )
             if did_yield:
                 cb = self._on_short_yield_resume
@@ -669,11 +681,15 @@ class InterruptionDetector:
             and state is ResponseState.SPEAKING
             and not did_yield
         ):
-            _logger.info(
-                "dispatch: long@SPEAKING push-through speaker=%s",
+            push_speaker = (
                 self._name_resolver(starter_id)
                 if self._name_resolver is not None
-                else starter_id,
+                else str(starter_id)
+            )
+            _logger.info(
+                f"{ls.tag('➡️ Push Through', ls.C)} "
+                f"{ls.kv('speaker', push_speaker, vc=ls.LC)} "
+                f"{ls.kv('trigger', 'long@SPEAKING', vc=ls.LW)}"
             )
             cb3 = self._on_push_through_transcript
             if cb3 is not None and transcript:
@@ -688,8 +704,9 @@ class InterruptionDetector:
             and state is ResponseState.GENERATING
         ):
             _logger.info(
-                "dispatch: short@GENERATING → polite-wait speaker=%s",
-                starter_id,
+                f"{ls.tag('⏳ Polite Wait', ls.C)} "
+                f"{ls.kv('speaker', str(starter_id), vc=ls.LC)} "
+                f"{ls.kv('trigger', 'short@GENERATING', vc=ls.LW)}"
             )
             if transcript.strip():
                 tracker = self._tracker_registry.get(self._guild_id)

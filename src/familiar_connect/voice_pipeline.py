@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.transcription import TranscriptionResult
 
 if TYPE_CHECKING:
@@ -64,6 +65,7 @@ class VoicePipeline:
     router_task: asyncio.Task[None] | None
     logger_task: asyncio.Task[None] | None
     user_names: dict[int, str]
+    channel_name: str = ""
     resolve_name: Callable[[int], str | None] | None = None
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
@@ -243,9 +245,9 @@ async def _audio_router(
         if user_id not in pipeline.streams:
             name = _get_user_name(pipeline, user_id)
             _logger.info(
-                "[Router] Creating transcription stream for %s (id=%d)",
-                name,
-                user_id,
+                f"{ls.tag('🎙️ Stream Started', ls.C)} "
+                f"{ls.kv('user', name, vc=ls.LC)} "
+                f"{ls.kv('id', str(user_id), vc=ls.LW)}"
             )
             stream = await _create_user_stream(
                 user_id,
@@ -297,7 +299,11 @@ async def _transcript_logger(
             continue
         name = _get_user_name(pipeline, user_id)
         if event.is_final:
-            _logger.info("[Transcription] %s: %s", name, event.text)
+            _logger.info(
+                f"{ls.tag('💬 Transcription', ls.LC)} "
+                f"{ls.kv('user', name, vc=ls.LC)} "
+                f"{ls.kv('text', ls.trunc(event.text))}"
+            )
             if pipeline.response_handler is not None:
                 task = asyncio.create_task(
                     _run_response_handler(
@@ -320,6 +326,7 @@ async def _transcript_logger(
 async def start_pipeline(  # noqa: RUF029
     template: DeepgramTranscriber,
     user_names: dict[int, str],
+    channel_name: str = "",
     resolve_name: Callable[[int], str | None] | None = None,
     response_handler: (
         Callable[[int, TranscriptionResult], Coroutine[Any, Any, None]] | None
@@ -332,6 +339,7 @@ async def start_pipeline(  # noqa: RUF029
 
     :param template: Transcriber whose settings are cloned per user stream.
     :param user_names: Mapping of Discord user IDs to display names.
+    :param channel_name: Human-readable channel name for log output.
     :param resolve_name: Optional display-name lookup for late joiners;
         resolved names are cached in *user_names*.
     :param response_handler: Optional async callback invoked with
@@ -358,6 +366,7 @@ async def start_pipeline(  # noqa: RUF029
         router_task=None,
         logger_task=None,
         user_names=user_names,
+        channel_name=channel_name,
         resolve_name=resolve_name,
         response_handler=response_handler,
         on_speech_start=on_speech_start,
@@ -373,7 +382,7 @@ async def start_pipeline(  # noqa: RUF029
     )
 
     set_pipeline(pipeline)
-    _logger.info("Voice transcription pipeline started")
+    _logger.info(f"{ls.tag('STT Start', ls.G)} {ls.kv('channel', channel_name)}")
     return pipeline
 
 
@@ -412,5 +421,6 @@ async def stop_pipeline() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await pipeline.logger_task
 
+    ch = pipeline.channel_name
     clear_pipeline()
-    _logger.info("Voice transcription pipeline stopped")
+    _logger.info(f"{ls.tag('STT Stop', ls.Y)} {ls.kv('channel', ch, vc=ls.Y)}")

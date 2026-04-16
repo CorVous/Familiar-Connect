@@ -273,9 +273,11 @@ class TestTranscriptLogger:
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-            mock_logger.info.assert_called_once_with(
-                "[Transcription] %s: %s", "Alice", "hello world"
-            )
+            assert mock_logger.info.call_count == 1
+            (msg,) = mock_logger.info.call_args.args
+            assert "Transcription" in msg
+            assert "Alice" in msg
+            assert "hello world" in msg
 
     @pytest.mark.asyncio
     async def test_logs_interim_at_debug(self) -> None:
@@ -314,9 +316,11 @@ class TestTranscriptLogger:
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-            mock_logger.info.assert_called_once_with(
-                "[Transcription] %s: %s", "User-99999", "hi"
-            )
+            assert mock_logger.info.call_count == 1
+            (msg,) = mock_logger.info.call_args.args
+            assert "Transcription" in msg
+            assert "User-99999" in msg
+            assert "hi" in msg
 
     @pytest.mark.asyncio
     async def test_resolve_name_callback_for_late_joiner(self) -> None:
@@ -336,9 +340,11 @@ class TestTranscriptLogger:
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-            mock_logger.info.assert_called_once_with(
-                "[Transcription] %s: %s", "Charlie", "hey"
-            )
+            assert mock_logger.info.call_count == 1
+            (msg,) = mock_logger.info.call_args.args
+            assert "Transcription" in msg
+            assert "Charlie" in msg
+            assert "hey" in msg
         # Cached for future lookups
         assert pipeline.user_names[77] == "Charlie"
 
@@ -437,7 +443,7 @@ class TestTranscriptLogger:
             info_calls = [
                 c
                 for c in mock_logger.info.call_args_list
-                if c[0][0] == "[Transcription] %s: %s"
+                if c.args and "Transcription" in c.args[0]
             ]
             assert len(info_calls) == 2
 

@@ -24,6 +24,7 @@ import logging
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.transcription import TranscriptionResult
 
 if TYPE_CHECKING:
@@ -51,10 +52,12 @@ class VoiceLullMonitor:
         lull_timeout: float,
         on_utterance_complete: Callable[[int, TranscriptionResult], Awaitable[None]],
         on_voice_activity: Callable[[int, VoiceActivityEvent], None] | None = None,
+        channel_name: str = "",
     ) -> None:
         self._lull_timeout = lull_timeout
         self._on_utterance_complete = on_utterance_complete
         self._on_voice_activity = on_voice_activity
+        self._channel_name = channel_name
 
         # users currently speaking per Deepgram VAD
         self._speaking: set[int] = set()
@@ -79,7 +82,12 @@ class VoiceLullMonitor:
         """
         if user_id not in self._speaking:
             self._speaking.add(user_id)
-            _logger.info("voice activity user=%s event=started", user_id)
+            _logger.info(
+                f"{ls.tag('🔊 Voice Active', ls.G)} "
+                f"{ls.kv('channel', self._channel_name)} "
+                f"{ls.kv('user', str(user_id), vc=ls.LC)} "
+                f"{ls.kv('event', 'started', vc=ls.G)}"
+            )
             self._emit_activity(user_id, VoiceActivityEvent.started)
         self._arm_lull()
 
@@ -88,7 +96,12 @@ class VoiceLullMonitor:
         if user_id not in self._speaking:
             return
         self._speaking.discard(user_id)
-        _logger.info("voice activity user=%s event=ended", user_id)
+        _logger.info(
+            f"{ls.tag('VAD End', ls.Y)} "
+            f"{ls.kv('channel', self._channel_name)} "
+            f"{ls.kv('user', str(user_id), vc=ls.LC)} "
+            f"{ls.kv('event', 'ended', vc=ls.Y)}"
+        )
         self._emit_activity(user_id, VoiceActivityEvent.ended)
 
     def on_transcript(self, user_id: int, result: TranscriptionResult) -> None:
@@ -106,7 +119,12 @@ class VoiceLullMonitor:
         self._arm_lull()
         if user_id in self._speaking:
             self._speaking.discard(user_id)
-            _logger.info("voice activity user=%s event=ended", user_id)
+            _logger.info(
+                f"{ls.tag('STT End', ls.Y)} "
+                f"{ls.kv('channel', self._channel_name)} "
+                f"{ls.kv('user', str(user_id), vc=ls.LC)} "
+                f"{ls.kv('event', 'ended', vc=ls.Y)}"
+            )
             self._emit_activity(user_id, VoiceActivityEvent.ended)
 
     def clear(self) -> None:
@@ -152,7 +170,11 @@ class VoiceLullMonitor:
             return
         finals = self._finals
         self._finals = []
-        _logger.info("voice lull expired: %d finals buffered", len(finals))
+        _logger.info(
+            f"{ls.tag('Voice Lull', ls.Y)} "
+            f"{ls.kv('channel', self._channel_name)} "
+            f"{ls.kv('total_lines', str(len(finals)))}"
+        )
 
         merged_text = " ".join(r.text for _, r in finals).strip()
         if not merged_text:

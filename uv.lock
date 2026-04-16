@@ -3,14 +3,14 @@ revision = 3
 requires-python = "==3.13.*"
 
 [options]
-exclude-newer = "2026-04-09T03:59:41.885775218Z"
+exclude-newer = "2026-04-09T05:44:59.128051863Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-defusedxml = { timestamp = "2026-04-15T03:59:41.886123214Z", span = "P1D" }
-ty = { timestamp = "2026-04-15T03:59:41.88738849Z", span = "P1D" }
-ruff = { timestamp = "2026-04-14T03:59:41.887385061Z", span = "P2D" }
-davey = { timestamp = "2026-04-15T03:59:41.887389734Z", span = "P1D" }
+defusedxml = { timestamp = "2026-04-15T05:44:59.128070306Z", span = "P1D" }
+ty = { timestamp = "2026-04-15T05:44:59.128090371Z", span = "P1D" }
+ruff = { timestamp = "2026-04-14T05:44:59.128089447Z", span = "P2D" }
+davey = { timestamp = "2026-04-15T05:44:59.128091302Z", span = "P1D" }
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -413,6 +413,7 @@ name = "familiar-connect"
 source = { editable = "." }
 dependencies = [
     { name = "azure-cognitiveservices-speech" },
+    { name = "colorama" },
     { name = "davey" },
     { name = "defusedxml" },
     { name = "fastembed" },
@@ -448,6 +449,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "azure-cognitiveservices-speech", specifier = ">=1.42.0,<2" },
+    { name = "colorama", specifier = ">=0.4.6" },
     { name = "davey", specifier = ">=0.1.5,<1" },
     { name = "defusedxml", specifier = ">=0.7.1,<1" },
     { name = "fastembed", specifier = ">=0.4,<1" },
