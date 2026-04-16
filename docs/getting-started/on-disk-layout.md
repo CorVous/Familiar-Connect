@@ -49,9 +49,7 @@ data/familiars/aria/modes/
 
 A **backdrop** is a custom author-note for a single channel that replaces the
 mode instruction for that channel. Set it with `/channel-backdrop` — a modal
-opens with a multi-line text field; submit to save, submit empty to clear.
-Pass `clear:True` to remove it without opening the modal:
-`/channel-backdrop clear:True`.
+opens with a multi-line text field; submit to save, submit blank to clear.
 
 The backdrop is stored in `data/familiars/<id>/channels/<channel_id>.toml`:
 

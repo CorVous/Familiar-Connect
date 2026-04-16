@@ -164,9 +164,9 @@ A **backdrop** is an author-note text injected into `Layer.author_note` of the s
 3. `_default/modes/<mode>.md` (repo default).
 4. Nothing → no author-note contribution.
 
-**Setting a backdrop:** run `/channel-backdrop` in the target channel. A Discord modal opens with a multi-line text field pre-filled with the current backdrop (if any). Submit to save; submit empty to clear.
+**Setting a backdrop:** run `/channel-backdrop` in the target channel. A Discord modal opens with a multi-line text field pre-filled with the current backdrop (if any). Submit to save.
 
-**Clearing a backdrop:** run `/channel-backdrop clear:True`. The backdrop is removed and the mode default resumes on the next turn.
+**Clearing a backdrop:** run `/channel-backdrop` and submit the modal with the text field blank. The backdrop is removed and the mode default resumes on the next turn.
 
 **TOML layout:**
 
@@ -211,7 +211,7 @@ The user explicitly trusts the admin. There is no per-user sandboxing, no resour
 | `/channel-full-rp` | Set the current channel's mode to `full_rp` (all providers, both processors, high budget) |
 | `/channel-text-conversation-rp` | Set to `text_conversation_rp` (character + history, `stepped_thinking` on, `recast` off, medium budget) |
 | `/channel-imitate-voice` | Set to `imitate_voice` (latency-tuned; `recast` on with voice flavour, `stepped_thinking` off) |
-| `/channel-backdrop` | Open a modal to set a custom author-note for this channel (replaces the mode default). Pass `clear:True` to remove it. |
+| `/channel-backdrop` | Open a modal to set a custom author-note for this channel (replaces the mode default). Submit the modal blank to clear. |
 
 The old `/awaken` / `/sleep` commands have been removed. Their role is now split between the subscription commands and the channel-mode commands — `/subscribe-my-voice` in a voice channel does what `/awaken` did, while `/subscribe-text` in a text channel replaces the text-channel branch of `/awaken`.
 

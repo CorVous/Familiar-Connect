@@ -984,28 +984,17 @@ class TestCreateBot:
         assert "awaken" not in names
         assert "sleep" not in names
 
-    def test_channel_backdrop_clear_option_is_well_formed(
-        self, tmp_path: Path
-    ) -> None:
-        """Regression: py-cord's invoke path does ``issubclass(_raw_type, Enum)``.
+    def test_channel_backdrop_has_no_options(self, tmp_path: Path) -> None:
+        """``/channel-backdrop`` takes no slash-command options.
 
-        With ``from __future__ import annotations``, using
-        ``discord.Option(...)`` as a type annotation turns into a string at
-        runtime and ``_raw_type`` is no longer a class. Declaring options via
-        the decorator's ``options=`` kwarg keeps ``_raw_type`` as the real
-        ``bool`` class.
+        All input flows through the Discord modal; submitting blank clears.
         """
         familiar = _make_familiar(tmp_path)
         bot = create_bot(familiar)
         cmd = next(
             c for c in bot.pending_application_commands if c.name == "channel-backdrop"
         )
-        (clear_opt,) = cmd.options
-        assert clear_opt.name == "clear"
-        assert isinstance(clear_opt._raw_type, type)  # would fail pre-fix
-        assert clear_opt._raw_type is bool
-        assert clear_opt.required is False
-        assert clear_opt.default is False
+        assert cmd.options == []
 
 
 # ---------------------------------------------------------------------------
