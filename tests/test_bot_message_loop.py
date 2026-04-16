@@ -33,6 +33,7 @@ import httpx
 import pytest
 
 from familiar_connect.bot import (
+    _default_backdrop_placeholder,
     _run_text_response,
     _run_voice_response,
     create_bot,
@@ -995,6 +996,34 @@ class TestCreateBot:
             c for c in bot.pending_application_commands if c.name == "channel-backdrop"
         )
         assert cmd.options == []
+
+
+class TestBackdropPlaceholder:
+    """Preview of the mode default shown as Discord modal placeholder text.
+
+    Discord caps InputText placeholder at 100 chars, so longer defaults
+    are collapsed to a single line and truncated.
+    """
+
+    def test_none_returns_generic_fallback(self) -> None:
+        out = _default_backdrop_placeholder(None)
+        assert "mode default" in out
+        assert len(out) <= 100
+
+    def test_short_default_passes_through(self) -> None:
+        out = _default_backdrop_placeholder("Talk like a pirate.")
+        assert out == "Talk like a pirate."
+
+    def test_long_default_truncated_with_ellipsis(self) -> None:
+        long_text = "a" * 200
+        out = _default_backdrop_placeholder(long_text)
+        assert len(out) == 100
+        assert out.endswith("\u2026")
+
+    def test_multiline_default_collapsed_to_single_line(self) -> None:
+        out = _default_backdrop_placeholder("line one\n\n  line two")
+        assert "\n" not in out
+        assert out == "line one line two"
 
 
 # ---------------------------------------------------------------------------

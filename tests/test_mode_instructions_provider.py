@@ -26,6 +26,7 @@ from familiar_connect.context.protocols import ContextProvider
 from familiar_connect.context.providers.mode_instructions import (
     MODE_INSTRUCTION_PRIORITY,
     ModeInstructionProvider,
+    resolve_mode_default,
 )
 from familiar_connect.context.types import (
     ContextRequest,
@@ -362,3 +363,70 @@ class TestDefaultsFallback:
         (c,) = await proc.contribute(_request())
         assert c.text == "Channel wins over default."
         assert c.source == "channel_backdrop:full_rp"
+
+
+# ---------------------------------------------------------------------------
+# resolve_mode_default helper
+# ---------------------------------------------------------------------------
+
+
+class TestResolveModeDefault:
+    def test_returns_familiar_file_when_present(self, tmp_path: Path) -> None:
+        (tmp_path / "full_rp.md").write_text("Familiar text.")
+        out = resolve_mode_default(modes_root=tmp_path, mode=ChannelMode.full_rp)
+        assert out == "Familiar text."
+
+    def test_falls_back_to_defaults(self, tmp_path: Path) -> None:
+        familiar = tmp_path / "familiar"
+        familiar.mkdir()
+        defaults = tmp_path / "default"
+        defaults.mkdir()
+        (defaults / "full_rp.md").write_text("Default text.")
+        out = resolve_mode_default(
+            modes_root=familiar,
+            mode=ChannelMode.full_rp,
+            defaults_modes_root=defaults,
+        )
+        assert out == "Default text."
+
+    def test_familiar_beats_defaults(self, tmp_path: Path) -> None:
+        familiar = tmp_path / "familiar"
+        familiar.mkdir()
+        defaults = tmp_path / "default"
+        defaults.mkdir()
+        (familiar / "full_rp.md").write_text("Familiar wins.")
+        (defaults / "full_rp.md").write_text("Default loses.")
+        out = resolve_mode_default(
+            modes_root=familiar,
+            mode=ChannelMode.full_rp,
+            defaults_modes_root=defaults,
+        )
+        assert out == "Familiar wins."
+
+    def test_missing_everywhere_returns_none(self, tmp_path: Path) -> None:
+        familiar = tmp_path / "familiar"
+        familiar.mkdir()
+        defaults = tmp_path / "default"
+        defaults.mkdir()
+        assert (
+            resolve_mode_default(
+                modes_root=familiar,
+                mode=ChannelMode.full_rp,
+                defaults_modes_root=defaults,
+            )
+            is None
+        )
+
+    def test_whitespace_only_falls_through(self, tmp_path: Path) -> None:
+        familiar = tmp_path / "familiar"
+        familiar.mkdir()
+        defaults = tmp_path / "default"
+        defaults.mkdir()
+        (familiar / "full_rp.md").write_text("   \n\n  ")
+        (defaults / "full_rp.md").write_text("Default kept.")
+        out = resolve_mode_default(
+            modes_root=familiar,
+            mode=ChannelMode.full_rp,
+            defaults_modes_root=defaults,
+        )
+        assert out == "Default kept."

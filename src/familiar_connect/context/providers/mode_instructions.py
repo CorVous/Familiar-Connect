@@ -117,3 +117,31 @@ class ModeInstructionProvider:
             estimated_tokens=estimate_tokens(text),
             source=source,
         )
+
+
+def resolve_mode_default(
+    *,
+    modes_root: Path,
+    mode: ChannelMode,
+    defaults_modes_root: Path | None = None,
+) -> str | None:
+    """Resolve the effective default-backdrop text for *mode*.
+
+    Mirrors the provider's precedence chain but ignores any per-channel
+    override: familiar's ``modes/<mode>.md`` first, then
+    ``defaults_modes_root/<mode>.md``. Returns stripped text or ``None``.
+    """
+    for root in (modes_root, defaults_modes_root):
+        if root is None:
+            continue
+        path = root / f"{mode.value}.md"
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        stripped = raw.strip()
+        if stripped:
+            return stripped
+    return None

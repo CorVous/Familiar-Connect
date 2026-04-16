@@ -23,6 +23,7 @@ import httpx
 from familiar_connect import log_style as ls
 from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
 from familiar_connect.config import ChannelMode
+from familiar_connect.context.providers.mode_instructions import resolve_mode_default
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
@@ -993,13 +994,29 @@ async def set_channel_mode(
     await ctx.respond(f"Channel mode set to **{mode.value}**.", ephemeral=True)
 
 
+_PLACEHOLDER_MAX = 100  # Discord hard limit on InputText placeholder length
+
+
+def _default_backdrop_placeholder(default: str | None) -> str:
+    """Build a ≤100-char single-line preview of *default* for the modal."""
+    fallback = "Author-note injected on every turn. Replaces the mode default."
+    if not default:
+        return fallback
+    single_line = " ".join(default.split())
+    if len(single_line) <= _PLACEHOLDER_MAX:
+        return single_line
+    return single_line[: _PLACEHOLDER_MAX - 1].rstrip() + "\u2026"
+
+
 def _make_backdrop_modal(
     familiar: Familiar,
     channel_id: int,
     channel_name: str,
     current: str | None,
+    mode_default: str | None,
 ) -> discord.ui.Modal:
     """Build and return the backdrop-editing modal for *channel_id*."""
+    placeholder = _default_backdrop_placeholder(mode_default)
 
     class ChannelBackdropModal(discord.ui.Modal):
         def __init__(self) -> None:
@@ -1008,10 +1025,7 @@ def _make_backdrop_modal(
                 discord.ui.InputText(
                     label="Backdrop",
                     style=discord.InputTextStyle.long,
-                    placeholder=(
-                        "Author-note injected on every turn in this channel. "
-                        "Replaces the mode default."
-                    ),
+                    placeholder=placeholder,
                     value=current or "",
                     required=False,
                     max_length=4000,
@@ -1055,7 +1069,15 @@ async def channel_backdrop(
 
     channel_name = getattr(ctx.channel, "name", str(channel_id))
     current = familiar.channel_configs.get_backdrop(channel_id=channel_id)
-    modal = _make_backdrop_modal(familiar, channel_id, channel_name, current)
+    channel_cfg = familiar.channel_configs.get(channel_id=channel_id)
+    mode_default = resolve_mode_default(
+        modes_root=familiar.root / "modes",
+        mode=channel_cfg.mode,
+        defaults_modes_root=familiar.root.parent / "_default" / "modes",
+    )
+    modal = _make_backdrop_modal(
+        familiar, channel_id, channel_name, current, mode_default
+    )
     await ctx.send_modal(modal)
 
 
