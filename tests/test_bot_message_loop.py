@@ -537,7 +537,7 @@ class TestOnRespond:
                 )
             )
 
-        llm_records = [r for r in caplog.records if "LLM Text" in r.getMessage()]
+        llm_records = [r for r in caplog.records if "Generating Text" in r.getMessage()]
         assert len(llm_records) == 1
         msg = _strip(llm_records[0].getMessage())
         # New format: "messages=N new=K"
@@ -577,10 +577,12 @@ class TestOnRespond:
                 )
             )
 
-        llm_records = [r for r in caplog.records if "LLM Voice" in r.getMessage()]
+        llm_records = [
+            r for r in caplog.records if "Generating Voice" in r.getMessage()
+        ]
         assert len(llm_records) == 1
         msg = _strip(llm_records[0].getMessage())
-        # New format: "[🧠 LLM Voice] channel=… messages=N new=K"
+        # New format: "[🧠 Generating Voice] channel=… messages=N new=K"
         assert "new=1" in msg
         # Utterance text is shown
         assert "hello world" in msg
