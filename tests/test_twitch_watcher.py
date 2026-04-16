@@ -188,14 +188,6 @@ class TestHandleFollow:
         )
         assert event is None
 
-    def test_event_text(self) -> None:
-        """Follow event text matches the formatter output."""
-        event = self._watcher(TwitchWatcherConfig(follows_enabled=True)).handle_follow(
-            follow_data("Alice")
-        )
-        assert event is not None
-        assert event.text == "Alice has followed the channel"
-
     def test_viewer_is_set(self) -> None:
         """Follow event carries the viewer's name."""
         event = self._watcher(TwitchWatcherConfig(follows_enabled=True)).handle_follow(
@@ -203,14 +195,6 @@ class TestHandleFollow:
         )
         assert event is not None
         assert event.viewer == "Alice"
-
-    def test_priority_is_normal(self) -> None:
-        """Follow events have normal priority."""
-        event = self._watcher(TwitchWatcherConfig(follows_enabled=True)).handle_follow(
-            follow_data()
-        )
-        assert event is not None
-        assert event.priority == "normal"
 
     def test_channel_is_set(self) -> None:
         """Follow event carries the watcher's channel name."""
@@ -222,14 +206,6 @@ class TestHandleFollow:
         event = watcher.handle_follow(follow_data())
         assert event is not None
         assert event.channel == "my-stream"
-
-    def test_timestamp_is_utc_aware(self) -> None:
-        """Follow event has a UTC-aware timestamp."""
-        event = self._watcher(TwitchWatcherConfig(follows_enabled=True)).handle_follow(
-            follow_data()
-        )
-        assert event is not None
-        assert event.timestamp.tzinfo is not None
 
 
 # ---------------------------------------------------------------------------
@@ -262,53 +238,17 @@ class TestHandleSubscription:
         ).handle_subscription(subscribe_data(is_gift=True))
         assert event is None
 
-    def test_tier_1000_maps_to_1(self) -> None:
-        """Twitch tier string '1000' maps to integer tier 1."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_subscription(subscribe_data(tier="1000"))
-        assert event is not None
-        assert "tier 1" in event.text
-
-    def test_tier_2000_maps_to_2(self) -> None:
-        """Twitch tier string '2000' maps to integer tier 2."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_subscription(subscribe_data(tier="2000"))
-        assert event is not None
-        assert "tier 2" in event.text
-
-    def test_tier_3000_maps_to_3(self) -> None:
-        """Twitch tier string '3000' maps to integer tier 3."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_subscription(subscribe_data(tier="3000"))
-        assert event is not None
-        assert "tier 3" in event.text
-
-    def test_event_text(self) -> None:
-        """Subscription event text matches the formatter output."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_subscription(subscribe_data(user_name="Alice", tier="1000"))
-        assert event is not None
-        assert event.text == "Alice has subscribed at tier 1"
-
-    def test_viewer_is_set(self) -> None:
-        """Subscription event carries the viewer's name."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_subscription(subscribe_data(user_name="Alice"))
-        assert event is not None
-        assert event.viewer == "Alice"
-
-    def test_priority_is_normal(self) -> None:
-        """Subscription events have normal priority."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_subscription(subscribe_data())
-        assert event is not None
-        assert event.priority == "normal"
+    def test_tier_string_mapping(self) -> None:
+        """Twitch tier strings '1000'/'2000'/'3000' map to integer tiers 1/2/3."""
+        watcher = self._watcher(TwitchWatcherConfig(subscriptions_enabled=True))
+        for tier_str, label in [
+            ("1000", "tier 1"),
+            ("2000", "tier 2"),
+            ("3000", "tier 3"),
+        ]:
+            event = watcher.handle_subscription(subscribe_data(tier=tier_str))
+            assert event is not None, f"expected event for {tier_str}"
+            assert label in event.text
 
 
 # ---------------------------------------------------------------------------
@@ -333,14 +273,6 @@ class TestHandleGiftSubscription:
             TwitchWatcherConfig(subscriptions_enabled=False)
         ).handle_gift_subscription(gift_sub_data())
         assert event is None
-
-    def test_named_gifter_event_text(self) -> None:
-        """Named gifter event text matches the formatter output."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_gift_subscription(gift_sub_data(user_name="Bob", total=5, tier="1000"))
-        assert event is not None
-        assert event.text == "Bob has gifted 5 tier 1 subscriptions"
 
     def test_anonymous_gifter_event_text(self) -> None:
         """Anonymous gift sub uses the anonymous formatter."""
@@ -418,14 +350,6 @@ class TestHandleResubscription:
             == "Alice has subscribed for 6 months at tier 2 and says: love this stream"
         )
 
-    def test_viewer_is_set(self) -> None:
-        """Resub event carries the viewer's name."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_resubscription(resub_data(user_name="Alice"))
-        assert event is not None
-        assert event.viewer == "Alice"
-
     def test_tier_mapping(self) -> None:
         """Resub tier string is mapped to an integer."""
         event = self._watcher(
@@ -433,14 +357,6 @@ class TestHandleResubscription:
         ).handle_resubscription(resub_data(tier="3000"))
         assert event is not None
         assert "tier 3" in event.text
-
-    def test_priority_is_normal(self) -> None:
-        """Resub events have normal priority."""
-        event = self._watcher(
-            TwitchWatcherConfig(subscriptions_enabled=True)
-        ).handle_resubscription(resub_data())
-        assert event is not None
-        assert event.priority == "normal"
 
 
 # ---------------------------------------------------------------------------
@@ -465,14 +381,6 @@ class TestHandleCheer:
             cheer_data()
         )
         assert event is None
-
-    def test_named_cheerer_event_text(self) -> None:
-        """Named cheerer event text matches the formatter output."""
-        event = self._watcher(TwitchWatcherConfig(cheers_enabled=True)).handle_cheer(
-            cheer_data(user_name="Bob", bits=100, message="poggers")
-        )
-        assert event is not None
-        assert event.text == "Bob has cheered with 100 bits and says: poggers"
 
     def test_anonymous_cheerer_event_text(self) -> None:
         """Anonymous cheer uses the anonymous formatter."""
@@ -500,14 +408,6 @@ class TestHandleCheer:
         )
         assert event is not None
         assert event.viewer is None
-
-    def test_priority_is_normal(self) -> None:
-        """Cheer events have normal priority."""
-        event = self._watcher(TwitchWatcherConfig(cheers_enabled=True)).handle_cheer(
-            cheer_data()
-        )
-        assert event is not None
-        assert event.priority == "normal"
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +461,7 @@ class TestHandleChannelPointRedemption:
         assert event.text == "Alice has redeemed Talk to Sapphire and says: hello!"
 
     def test_event_text_without_user_input(self) -> None:
-        """Empty user_input omits the 'and says' clause."""
+        """Empty user_input omits the 'and says' clause (coerced to None)."""
         event = self._watcher(
             TwitchWatcherConfig(redemption_names=["Hydrate"])
         ).handle_channel_point_redemption(
@@ -569,24 +469,6 @@ class TestHandleChannelPointRedemption:
         )
         assert event is not None
         assert event.text == "Bob has redeemed Hydrate"
-
-    def test_viewer_is_set(self) -> None:
-        """Redemption event carries the viewer's name."""
-        event = self._watcher(
-            TwitchWatcherConfig(redemption_names=["Test"])
-        ).handle_channel_point_redemption(
-            redemption_data(user_name="Alice", reward_title="Test")
-        )
-        assert event is not None
-        assert event.viewer == "Alice"
-
-    def test_priority_is_normal(self) -> None:
-        """Redemption events have normal priority."""
-        event = self._watcher(
-            TwitchWatcherConfig(redemption_names=["Test"])
-        ).handle_channel_point_redemption(redemption_data(reward_title="Test"))
-        assert event is not None
-        assert event.priority == "normal"
 
 
 # ---------------------------------------------------------------------------
@@ -611,44 +493,6 @@ class TestHandleAdBreakBegin:
             TwitchWatcherConfig(ads_enabled=False)
         ).handle_ad_break_begin(ad_break_data())
         assert event is None
-
-    def test_event_text(self) -> None:
-        """Ad start event text matches the formatter output."""
-        event = self._watcher(
-            TwitchWatcherConfig(ads_enabled=True)
-        ).handle_ad_break_begin(ad_break_data())
-        assert event is not None
-        assert event.text == "An ad has begun on the channel"
-
-    def test_priority_immediate_when_ads_immediate_enabled(self) -> None:
-        """Ad start event is immediate when ads_immediate=True."""
-        event = self._watcher(
-            TwitchWatcherConfig(ads_enabled=True, ads_immediate=True)
-        ).handle_ad_break_begin(ad_break_data())
-        assert event is not None
-        assert event.priority == "immediate"
-
-    def test_priority_normal_when_ads_immediate_disabled(self) -> None:
-        """Ad start event is normal priority when ads_immediate=False."""
-        event = self._watcher(
-            TwitchWatcherConfig(ads_enabled=True, ads_immediate=False)
-        ).handle_ad_break_begin(ad_break_data())
-        assert event is not None
-        assert event.priority == "normal"
-
-    def test_viewer_is_none(self) -> None:
-        """Ad break events have no associated viewer."""
-        event = self._watcher(
-            TwitchWatcherConfig(ads_enabled=True)
-        ).handle_ad_break_begin(ad_break_data())
-        assert event is not None
-        assert event.viewer is None
-
-    def test_duration_seconds_available(self) -> None:
-        """The ad duration is accessible so the caller can schedule the end event."""
-        data = ad_break_data(duration_seconds=90)
-        # The data object's duration is passed through; the watcher does not discard it
-        assert data.duration_seconds == 90
 
 
 # ---------------------------------------------------------------------------

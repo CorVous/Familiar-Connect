@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from familiar_connect.llm import Message
 from familiar_connect.twitch import (
     TwitchEvent,
@@ -36,8 +38,8 @@ from familiar_connect.twitch import (
 
 
 class TestTwitchEvent:
-    def test_has_channel_field(self) -> None:
-        """TwitchEvent carries the channel/session context."""
+    def test_required_fields(self) -> None:
+        """TwitchEvent stores channel, text, and priority."""
         event = TwitchEvent(
             channel="sapphire-stream",
             text="Alice has followed the channel",
@@ -45,25 +47,7 @@ class TestTwitchEvent:
             timestamp=datetime.now(UTC),
         )
         assert event.channel == "sapphire-stream"
-
-    def test_has_text_field(self) -> None:
-        """TwitchEvent carries a plain-text description."""
-        event = TwitchEvent(
-            channel="sapphire-stream",
-            text="Alice has followed the channel",
-            priority="normal",
-            timestamp=datetime.now(UTC),
-        )
         assert event.text == "Alice has followed the channel"
-
-    def test_priority_normal(self) -> None:
-        """TwitchEvent accepts 'normal' priority."""
-        event = TwitchEvent(
-            channel="ch",
-            text="something happened",
-            priority="normal",
-            timestamp=datetime.now(UTC),
-        )
         assert event.priority == "normal"
 
     def test_priority_immediate(self) -> None:
@@ -131,16 +115,6 @@ class TestFormatChannelPointRedemption:
         text = format_channel_point_redemption("Alice", "Talk to Sapphire", "")
         assert "says" not in text
 
-    def test_redemption_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_channel_point_redemption("Bob", "Hydrate!")
-        assert "Bob" in text
-
-    def test_redemption_name_in_output(self) -> None:
-        """The redemption name appears in the formatted string."""
-        text = format_channel_point_redemption("Bob", "Hydrate!")
-        assert "Hydrate!" in text
-
 
 class TestFormatSubscription:
     def test_tier_1(self) -> None:
@@ -157,11 +131,6 @@ class TestFormatSubscription:
         """New tier-3 subscription formatted correctly."""
         text = format_subscription("Bob", 3)
         assert text == "Bob has subscribed at tier 3"
-
-    def test_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_subscription("Charlie", 1)
-        assert "Charlie" in text
 
 
 class TestFormatGiftSubscription:
@@ -185,11 +154,6 @@ class TestFormatGiftSubscription:
         text = format_gift_subscription("Alice", 3, 2)
         assert "tier 2" in text
 
-    def test_gifter_name_in_output(self) -> None:
-        """The gifter's name appears in the formatted string."""
-        text = format_gift_subscription("Charlie", 2, 1)
-        assert "Charlie" in text
-
 
 class TestFormatResubscription:
     def test_basic_resub(self) -> None:
@@ -205,16 +169,6 @@ class TestFormatResubscription:
         text = format_resubscription("Bob", 1, 1, "woo")
         assert "1 month" in text
 
-    def test_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_resubscription("Dave", 12, 3, "still here!")
-        assert "Dave" in text
-
-    def test_message_in_output(self) -> None:
-        """The viewer's message appears in the formatted string."""
-        text = format_resubscription("Eve", 3, 1, "hi chat")
-        assert "hi chat" in text
-
 
 class TestFormatCheer:
     def test_named_cheerer_with_message(self) -> None:
@@ -227,32 +181,12 @@ class TestFormatCheer:
         text = format_cheer(None, 500, "hype")
         assert text == "An anonymous cheerer has cheered with 500 bits and says: hype"
 
-    def test_bit_count_in_output(self) -> None:
-        """The bit count appears in the formatted string."""
-        text = format_cheer("Alice", 1000, "nice")
-        assert "1000" in text
-
-    def test_message_in_output(self) -> None:
-        """The cheerer's message appears in the formatted string."""
-        text = format_cheer("Alice", 50, "GG")
-        assert "GG" in text
-
-    def test_cheerer_name_in_output(self) -> None:
-        """The cheerer's name appears in the formatted string."""
-        text = format_cheer("Zara", 200, "woo")
-        assert "Zara" in text
-
 
 class TestFormatFollow:
     def test_follow_message(self) -> None:
         """Follow event formats correctly."""
         text = format_follow("Alice")
         assert text == "Alice has followed the channel"
-
-    def test_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_follow("NewViewer")
-        assert "NewViewer" in text
 
 
 class TestFormatAdBreak:
@@ -273,60 +207,36 @@ class TestFormatAdBreak:
 
 
 class TestTwitchWatcherConfig:
-    def test_default_subscriptions_enabled(self) -> None:
-        """Subscriptions are enabled by default."""
+    @pytest.mark.parametrize(
+        ("attr", "expected"),
+        [
+            ("subscriptions_enabled", True),
+            ("cheers_enabled", True),
+            ("follows_enabled", True),
+            ("ads_enabled", True),
+            ("ads_immediate", True),
+            ("redemption_names", []),
+        ],
+    )
+    def test_defaults(self, attr: str, expected: object) -> None:
+        """All boolean flags default to True; redemption_names defaults to []."""
         config = TwitchWatcherConfig()
-        assert config.subscriptions_enabled is True
+        assert getattr(config, attr) == expected
 
-    def test_default_cheers_enabled(self) -> None:
-        """Cheers are enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.cheers_enabled is True
-
-    def test_default_follows_enabled(self) -> None:
-        """Follows are enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.follows_enabled is True
-
-    def test_default_ads_enabled(self) -> None:
-        """Ads are enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.ads_enabled is True
-
-    def test_default_ads_immediate(self) -> None:
-        """Ad immediate mode is enabled by default."""
-        config = TwitchWatcherConfig()
-        assert config.ads_immediate is True
-
-    def test_default_redemption_names_empty(self) -> None:
-        """Redemption name list is empty by default (none trigger messages)."""
-        config = TwitchWatcherConfig()
-        assert config.redemption_names == []
-
-    def test_can_disable_subscriptions(self) -> None:
-        """Subscriptions can be toggled off."""
-        config = TwitchWatcherConfig(subscriptions_enabled=False)
-        assert config.subscriptions_enabled is False
-
-    def test_can_disable_cheers(self) -> None:
-        """Cheers can be toggled off."""
-        config = TwitchWatcherConfig(cheers_enabled=False)
-        assert config.cheers_enabled is False
-
-    def test_can_disable_follows(self) -> None:
-        """Follows can be toggled off."""
-        config = TwitchWatcherConfig(follows_enabled=False)
-        assert config.follows_enabled is False
-
-    def test_can_disable_ads(self) -> None:
-        """Ads can be toggled off."""
-        config = TwitchWatcherConfig(ads_enabled=False)
-        assert config.ads_enabled is False
-
-    def test_can_disable_ads_immediate(self) -> None:
-        """Ad immediate mode can be toggled off."""
-        config = TwitchWatcherConfig(ads_immediate=False)
-        assert config.ads_immediate is False
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "subscriptions_enabled",
+            "cheers_enabled",
+            "follows_enabled",
+            "ads_enabled",
+            "ads_immediate",
+        ],
+    )
+    def test_can_disable(self, field: str) -> None:
+        """Each boolean flag can be toggled off at construction."""
+        config = TwitchWatcherConfig(**{field: False})  # ty: ignore[invalid-argument-type]
+        assert getattr(config, field) is False
 
     def test_can_set_redemption_names(self) -> None:
         """Redemption name list can be populated."""
