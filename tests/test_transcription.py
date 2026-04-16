@@ -811,6 +811,62 @@ class TestReplayBuffer:
             await client.stop()
 
     @pytest.mark.asyncio
+    async def test_replay_sends_finalize_after_drain(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """After draining the replay, Finalize flushes the replayed audio.
+
+        Without this, Deepgram holds the replayed segment until more audio
+        arrives (or endpointing silence — which our VAD-gated pump doesn't
+        send). The user sees no transcript until they speak again.
+        """
+        chunk = b"\xaa" * 100
+        ws1 = self._make_ws_mock()
+        ws1.closed = True  # already closed so send_audio buffers immediately
+        ws2 = self._make_open_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await client.send_audio(chunk)
+            await asyncio.sleep(0.2)  # let reconnect + drain run
+
+            finalize_calls = [
+                c.args[0]
+                for c in ws2.send_json.call_args_list
+                if c.args and c.args[0].get("type") == "Finalize"
+            ]
+            assert len(finalize_calls) == 1, (
+                f"expected exactly one Finalize after replay; got {finalize_calls}"
+            )
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_empty_replay_does_not_send_finalize(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Zero-chunk replay should not trigger a spurious Finalize."""
+        ws1 = self._make_ws_mock()  # closes without any buffered audio
+        ws2 = self._make_open_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(0.2)  # let reconnect run
+
+            finalize_calls = [
+                c.args[0]
+                for c in ws2.send_json.call_args_list
+                if c.args and c.args[0].get("type") == "Finalize"
+            ]
+            assert finalize_calls == []
+
+            await client.stop()
+
+    @pytest.mark.asyncio
     async def test_replay_buffer_trims_oldest_when_over_budget(
         self, client: DeepgramTranscriber
     ) -> None:

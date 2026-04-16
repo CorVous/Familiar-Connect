@@ -359,6 +359,13 @@ class DeepgramTranscriber:
                     await self._ws.send_bytes(chunk)
             self._replay_buffer.clear()
             self._replay_buffer_bytes = 0
+            # force Deepgram to emit a transcript for the replayed segment.
+            # without this, audio sits in-flight until the next speech burst
+            # — the VAD-gated pump doesn't send silence, and the burst-replay
+            # arrived too fast for server-side endpointing to trigger.
+            if chunks_replayed:
+                with contextlib.suppress(Exception):
+                    await self._ws.send_json({"type": "Finalize"})
         if chunks_replayed:
             _logger.info(
                 f"{ls.tag('🔁 Replay', ls.C)} "

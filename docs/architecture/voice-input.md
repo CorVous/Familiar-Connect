@@ -50,6 +50,8 @@ Every PCM chunk passed to `send_audio` is appended to a bounded sliding-window b
 
 Buffer budget: `replay_buffer_s × sample_rate × channels × 2` bytes. Oldest chunks are evicted when the budget is exceeded.
 
+After the drain, a `Finalize` control message is sent on the new connection. The replay arrives as a burst (much faster than real-time), so Deepgram's server-side endpointer never sees the trailing silence that would normally trigger a final transcript. Without the explicit flush the replayed audio sits in-flight until the user's next utterance — the pump is VAD-gated and stops feeding frames during silence. The Finalize splits any utterance that straddled the outage into two transcripts (the replayed portion plus the continuation), which is a minor tradeoff versus losing the replayed audio entirely.
+
 ### Reconnect timing
 
 - First reconnect attempt: **immediate** (no delay).
