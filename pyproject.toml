@@ -20,6 +20,7 @@ dependencies = [
     "ten-vad >= 1.0.6, < 2",
     "soxr >= 0.5, < 2",
     "numpy >= 2, < 3",
+    "colorama>=0.4.6",
 ]
 
 [project.scripts]
