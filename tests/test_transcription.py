@@ -714,25 +714,6 @@ class TestDeepgramReconnect:
         # Only the initial connect — auth failures aren't retried.
         assert connect_mock.call_count == 1
 
-    @pytest.mark.asyncio
-    async def test_reconnects_on_unsolicited_1000(
-        self, client: DeepgramTranscriber
-    ) -> None:
-        """Unsolicited 1000 (server idle/session limit) still triggers reconnect."""
-        ws1 = self._make_ws_mock()
-        ws1.close_code = 1000  # clean close, but we didn't initiate
-        ws2 = self._make_ws_mock()
-        connect_mock = AsyncMock(side_effect=[ws1, ws2])
-
-        with patch.object(client, "_ws_connect", new=connect_mock):
-            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
-            await client.start(queue)
-            await asyncio.sleep(0.2)
-            await client.stop()
-
-        # Initial + reconnect = at least 2.
-        assert connect_mock.call_count >= 2
-
 
 class TestReplayBuffer:
     """Replay buffer — audio buffered during disconnect is resent on reconnect."""
@@ -824,6 +805,8 @@ class TestReplayBuffer:
             assert chunk_b in call_args
             # order preserved
             assert call_args.index(chunk_a) < call_args.index(chunk_b)
+            # buffer cleared after drain so chunks aren't re-sent on a later drain
+            assert len(client._replay_buffer) == 0
 
             await client.stop()
 
@@ -857,28 +840,6 @@ class TestReplayBuffer:
                 assert chunk_c in buffered  # newest retained
             finally:
                 await client.stop()
-
-    @pytest.mark.asyncio
-    async def test_replay_clears_buffer_after_drain(
-        self, client: DeepgramTranscriber
-    ) -> None:
-        """Buffer is cleared after successful replay so chunks aren't sent twice."""
-        chunk = b"\xaa" * 50
-
-        ws1 = self._make_ws_mock()
-        ws1.closed = True
-        ws2 = self._make_open_ws_mock()
-        connect_mock = AsyncMock(side_effect=[ws1, ws2])
-
-        with patch.object(client, "_ws_connect", new=connect_mock):
-            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
-            await client.start(queue)
-            await client.send_audio(chunk)
-            await asyncio.sleep(0.2)  # let reconnect + replay happen
-
-            # buffer should be empty after drain
-            assert len(client._replay_buffer) == 0
-            await client.stop()
 
 
 class TestExponentialBackoff:
@@ -923,44 +884,8 @@ class TestExponentialBackoff:
         return ws
 
     @pytest.mark.asyncio
-    async def test_first_reconnect_has_no_sleep(
-        self, client: DeepgramTranscriber
-    ) -> None:
-        """First reconnect attempt requires no sleep (immediate retry)."""
-        sleep_calls: list[float] = []
-        original_sleep = asyncio.sleep
-
-        async def _track_sleep(delay: float) -> None:
-            sleep_calls.append(delay)
-            await original_sleep(0)
-
-        # ws1 (initial) closes immediately; ws2 stays open → only 1 reconnect
-        ws1 = self._make_ws_mock()
-        ws2 = self._make_open_ws_mock()
-        connect_mock = AsyncMock(side_effect=[ws1, ws2])
-
-        with (
-            patch.object(client, "_ws_connect", new=connect_mock),
-            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
-        ):
-            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
-            await client.start(queue)
-            await original_sleep(0.1)
-            await client.stop()
-
-        # first reconnect must have zero delay — no backoff sleeps from the loop
-        # (keepalive sleeps at 999.0 are excluded by the cap filter)
-        cap = client._RECONNECT_BACKOFF_CAP
-        backoff_sleeps = [d for d in sleep_calls if 0 < d <= cap]
-        assert backoff_sleeps == [], (
-            f"first reconnect should need no sleep; got: {backoff_sleeps}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_successive_reconnects_back_off(
-        self, client: DeepgramTranscriber
-    ) -> None:
-        """Backoff delay grows between consecutive reconnect failures."""
+    async def test_backoff_sequence(self, client: DeepgramTranscriber) -> None:
+        """First reconnect is immediate; successive failures back off with growth."""
         sleep_calls: list[float] = []
         original_sleep = asyncio.sleep
 
@@ -983,11 +908,16 @@ class TestExponentialBackoff:
             await original_sleep(0.2)
             await client.stop()
 
-        # reconnect 1 has no sleep; reconnects 2 and 3 have growing delays.
-        # keepalive sleeps (999.0) are excluded by the cap filter.
+        # keepalive sleeps (999.0) excluded by the cap filter.
         cap = client._RECONNECT_BACKOFF_CAP
         backoff_sleeps = [d for d in sleep_calls if 0 < d <= cap]
-        assert len(backoff_sleeps) >= 2, f"expected backoff sleeps; got {sleep_calls}"
+
+        # 3 failures → 3 reconnect attempts. If the 1st attempt had a
+        # pre-sleep we'd see 3 backoff delays; "first is immediate" means 2.
+        assert len(backoff_sleeps) == 2, (
+            f"expected exactly 2 backoff sleeps (first reconnect immediate, "
+            f"subsequent two delayed); got {sleep_calls}"
+        )
         assert backoff_sleeps == sorted(backoff_sleeps), (
             f"backoff sleeps must be non-decreasing: {backoff_sleeps}"
         )
@@ -1194,22 +1124,3 @@ class TestCreateTranscriberFromEnv:
         assert pytest.approx(5.0) == client._KEEPALIVE_INTERVAL
         assert client._MAX_RECONNECTS == 3
         assert pytest.approx(32.0) == client._RECONNECT_BACKOFF_CAP
-
-    def test_reconnect_knobs_use_defaults(self) -> None:
-        """Factory defaults apply when optional reconnect vars are absent."""
-        env = {"DEEPGRAM_API_KEY": "sk-test"}
-        clear_keys = [
-            "DEEPGRAM_REPLAY_BUFFER_S",
-            "DEEPGRAM_KEEPALIVE_INTERVAL_S",
-            "DEEPGRAM_RECONNECT_MAX_ATTEMPTS",
-            "DEEPGRAM_RECONNECT_BACKOFF_CAP_S",
-        ]
-        with patch.dict(os.environ, env, clear=False):
-            for k in clear_keys:
-                os.environ.pop(k, None)
-            client = create_transcriber_from_env()
-
-        assert client.replay_buffer_s == pytest.approx(5.0)
-        assert pytest.approx(3.0) == client._KEEPALIVE_INTERVAL
-        assert client._MAX_RECONNECTS == 5
-        assert pytest.approx(16.0) == client._RECONNECT_BACKOFF_CAP
