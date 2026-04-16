@@ -42,6 +42,7 @@ from familiar_connect.bot import (
     dispatch_interruption_regen,
     on_message,
     set_channel_mode,
+    show_context,
     subscribe_my_voice,
     subscribe_text,
     unsubscribe_text,
@@ -3129,3 +3130,69 @@ class TestOnMessageCancellationHook:
         # no active tracker; on_message should flow through without error
         asyncio.run(on_message(msg, familiar))
         mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# /context
+# ---------------------------------------------------------------------------
+
+
+class TestShowContext:
+    def test_not_subscribed(self, tmp_path: Path) -> None:
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_text_ctx(channel_id=12345)
+
+        asyncio.run(show_context(ctx, familiar))
+
+        ctx.respond.assert_awaited_once()
+        assert "not listening" in ctx.respond.call_args[0][0].lower()
+
+    def test_sends_public_message(self, tmp_path: Path) -> None:
+        """Short context fits in one followup message with role labels."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        ctx = _make_text_ctx(channel_id=12345)
+
+        fake_msg = MagicMock()
+        fake_msg.author.bot = False
+        fake_msg.author.display_name = "Alice"
+        fake_msg.content = "hello there"
+
+        async def _history(**_kwargs: object):  # noqa: RUF029
+            yield fake_msg
+
+        ctx.channel.history = _history
+
+        asyncio.run(show_context(ctx, familiar))
+
+        ctx.defer.assert_awaited_once_with(ephemeral=False)
+        ctx.followup.send.assert_awaited_once()
+        text: str = ctx.followup.send.call_args[0][0]
+        assert "[0]" in text or "system" in text.lower()
+
+    def test_sends_file_when_large(self, tmp_path: Path) -> None:
+        """Oversized context is delivered as a context.md file attachment."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        ctx = _make_text_ctx(channel_id=12345)
+
+        fake_msg = MagicMock()
+        fake_msg.author.bot = False
+        fake_msg.author.display_name = "Alice"
+        fake_msg.content = "x" * 5000  # force oversized system prompt
+
+        async def _history(**_kwargs: object):  # noqa: RUF029
+            yield fake_msg
+
+        ctx.channel.history = _history
+
+        asyncio.run(show_context(ctx, familiar))
+
+        ctx.followup.send.assert_awaited_once()
+        call_kwargs = ctx.followup.send.call_args[1]
+        assert "file" in call_kwargs
+        assert call_kwargs["file"].filename == "context.md"
