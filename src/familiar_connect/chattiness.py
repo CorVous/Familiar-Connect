@@ -274,8 +274,8 @@ class ConversationMonitor:
         """Return a compact human label for *channel_id*.
 
         - text channel: ``#general``
-        - thread: ``#general › feature-brainstorm (thread)``
-        - forum post: ``forum:announcements › hotfix (forum post)``
+        - thread: ``#general > feature-brainstorm (thread)``
+        - forum post: ``forum:announcements > hotfix (forum post)``
         - unknown: ``str(channel_id)``
         """
         ctx = self._channel_contexts.get(channel_id)
@@ -285,17 +285,17 @@ class ConversationMonitor:
             return f"#{ctx.name}"
         if ctx.kind == "thread":
             parent = ctx.parent_name or "?"
-            return f"#{parent} › {ctx.name} (thread)"
+            return f"#{parent} > {ctx.name} (thread)"
         # forum_post
         parent = ctx.parent_name or "?"
-        return f"forum:{parent} › {ctx.name} (forum post)"
+        return f"forum:{parent} > {ctx.name} (forum post)"
 
     def _channel_label(self, channel_id: int) -> str:
         ctx = self._channel_contexts.get(channel_id)
         if ctx is None:
             return str(channel_id)
         if ctx.parent_name and ctx.kind != "text":
-            return f"{ctx.parent_name} › {ctx.name}"
+            return f"{ctx.parent_name} > {ctx.name}"
         return ctx.name
 
     async def on_message(

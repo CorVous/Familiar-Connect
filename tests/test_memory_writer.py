@@ -483,13 +483,13 @@ class TestChannelContextBlock:
             llm_client=llm,
             familiar_id=_FAMILIAR,
             channel_context_lookup=lambda cid: (
-                "#general › brainstorm (thread)" if cid == 100 else str(cid)
+                "#general > brainstorm (thread)" if cid == 100 else str(cid)
             ),
         )
         asyncio.run(writer.run())
         prompt = llm.calls[0][1].content
         assert "## Context" in prompt
-        assert "- #general › brainstorm (thread)" in prompt
+        assert "- #general > brainstorm (thread)" in prompt
         # block sits at the top of the transcript body (above first turn)
         assert prompt.index("## Context") < prompt.index("user (Alice): turn 0")
 
@@ -523,7 +523,7 @@ class TestChannelContextBlock:
                 speaker="Alice",
             )
         llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
-        labels = {100: "#general", 200: "#general › thread (thread)"}
+        labels = {100: "#general", 200: "#general > thread (thread)"}
         writer = MemoryWriter(
             memory_store=mem_store,
             history_store=hist_store,
@@ -533,4 +533,4 @@ class TestChannelContextBlock:
         )
         asyncio.run(writer.run())
         prompt = llm.calls[0][1].content
-        assert "- #general\n- #general › thread (thread)" in prompt
+        assert "- #general\n- #general > thread (thread)" in prompt

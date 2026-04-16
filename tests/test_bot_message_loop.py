@@ -823,7 +823,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "#general › feature-brainstorm (thread)"
+        assert label == "#general > feature-brainstorm (thread)"
 
     def test_subscribe_text_in_forum_post_records_forum_context(
         self, tmp_path: Path
@@ -837,7 +837,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "forum:announcements › feature-brainstorm (forum post)"
+        assert label == "forum:announcements > feature-brainstorm (forum post)"
 
     def test_subscribe_text_in_thread_rejects_without_send_perm(
         self, tmp_path: Path
