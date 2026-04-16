@@ -21,7 +21,7 @@ import discord
 import httpx
 
 from familiar_connect import log_style as ls
-from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
+from familiar_connect.chattiness import BufferedMessage, ChannelKind, ResponseTrigger
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
@@ -80,7 +80,13 @@ async def subscribe_text(
     ctx: discord.ApplicationContext,
     familiar: Familiar,
 ) -> None:
-    """Register the current text channel as a text subscription."""
+    """Register the current text channel, thread, or forum post.
+
+    Threads (regular channel threads or forum posts) are accepted — a
+    forum post is itself a ``discord.Thread`` in Discord's API, so one
+    branch covers both. The forum channel root itself has no
+    conversation surface and is rejected.
+    """
     channel_id = ctx.channel_id
     if channel_id is None:
         await ctx.respond("Cannot determine channel.", ephemeral=True)
@@ -88,9 +94,19 @@ async def subscribe_text(
 
     guild = ctx.guild
     channel = ctx.channel
-    if guild is not None and isinstance(channel, discord.TextChannel):
+
+    if not isinstance(channel, discord.TextChannel | discord.Thread):
+        await ctx.respond(
+            "I can only be summoned to a text channel, a thread, or a forum post.",
+            ephemeral=True,
+        )
+        return
+    is_thread = isinstance(channel, discord.Thread)
+
+    if guild is not None:
         perms = channel.permissions_for(guild.me)
-        if not perms.view_channel or not perms.send_messages:
+        can_send = perms.send_messages_in_threads if is_thread else perms.send_messages
+        if not perms.view_channel or not can_send:
             await ctx.respond(
                 "My powers don't extend to this channel"
                 " \N{EM DASH} I lack the permissions to speak here.",
@@ -98,26 +114,54 @@ async def subscribe_text(
             )
             return
 
+    # threads must be joined explicitly; no-op for already-joined
+    # public threads. Swallow transient HTTP failures — subscription
+    # still proceeds, and py-cord auto-joins on first send.
+    if isinstance(channel, discord.Thread):
+        with contextlib.suppress(discord.HTTPException):
+            await channel.join()
+
     familiar.subscriptions.add(
         channel_id=channel_id,
         kind=SubscriptionKind.text,
         guild_id=ctx.guild_id,
     )
-    name = getattr(ctx.channel, "name", str(channel_id))
+    name = getattr(channel, "name", str(channel_id))
+    parent = getattr(channel, "parent", None) if is_thread else None
+    parent_name = getattr(parent, "name", None)
+    if is_thread:
+        kind: ChannelKind = (
+            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+        )
+    else:
+        kind = "text"
+    familiar.monitor.register_channel_context(
+        channel_id,
+        name=name,
+        kind=kind,
+        parent_name=parent_name,
+    )
+
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
     if channel_config:
         ch_mode = channel_config.mode.value
     else:
         ch_mode = familiar.config.default_mode.value
-    familiar.monitor.register_channel_name(channel_id, name)
+    label = familiar.monitor.format_channel_context(channel_id)
     _logger.info(
         f"{ls.tag('✨ Summoned', ls.G)} "
-        f"{ls.kv('type', 'text')} "
-        f"{ls.kv('channel', name, vc=ls.G)} "
+        f"{ls.kv('type', kind)} "
+        f"{ls.kv('channel', label, vc=ls.G)} "
         f"{ls.kv('id', str(channel_id))} "
         f"{ls.kv('mode', ch_mode)}"
     )
-    await ctx.respond(f"Subscribed to text in **#{name}**.", ephemeral=True)
+    if kind == "text":
+        reply = f"Subscribed to text in **#{name}**."
+    elif kind == "thread":
+        reply = f"Subscribed to thread **{name}**."
+    else:
+        reply = f"Subscribed to forum post **{name}**."
+    await ctx.respond(reply, ephemeral=True)
 
 
 async def unsubscribe_text(
@@ -1007,9 +1051,9 @@ async def _run_text_response(
     utterance: str,
     buffer: list[BufferedMessage],
     familiar: Familiar,
-    channel: discord.TextChannel,
+    channel: discord.TextChannel | discord.Thread,
 ) -> None:
-    """Full pipeline → LLM → reply path for a text channel.
+    """Full pipeline → LLM → reply path for a text channel or thread.
 
     Persists all buffered user messages to history (in order), then
     the assistant reply.
@@ -1017,6 +1061,17 @@ async def _run_text_response(
     :param buffer: messages accumulated since last response, including
         trigger; persisted after LLM call.
     """
+    # closed-thread guard: archived+locked == Discord's "thread closed"
+    # UX. also covers the offline case (thread closed while bot was
+    # down) because we check on every send, not on lifecycle events.
+    if isinstance(channel, discord.Thread) and channel.archived and channel.locked:
+        _logger.error(
+            f"{ls.tag('❌ Send skipped', ls.R)} "
+            f"{ls.kv('reason', 'thread_closed')} "
+            f"{ls.kv('channel_id', str(channel_id))}"
+        )
+        return
+
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
     builder = TraceBuilder(
@@ -1262,6 +1317,30 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
     if text_sub is None:
         return
 
+    # refresh channel context each message so renames propagate and
+    # subscriptions loaded from disk at startup pick up a label.
+    msg_channel = message.channel
+    channel_name = getattr(msg_channel, "name", None)
+    if channel_name is not None:
+        if isinstance(msg_channel, discord.Thread):
+            parent = msg_channel.parent
+            parent_name = getattr(parent, "name", None)
+            kind: ChannelKind = (
+                "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+            )
+            familiar.monitor.register_channel_context(
+                channel_id,
+                name=channel_name,
+                kind=kind,
+                parent_name=parent_name,
+            )
+        elif isinstance(msg_channel, discord.TextChannel):
+            familiar.monitor.register_channel_context(
+                channel_id,
+                name=channel_name,
+                kind="text",
+            )
+
     bot_user = familiar.extras.get("bot_user")
     is_mention = (
         message.guild is not None
@@ -1326,7 +1405,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
             return
 
         channel = bot.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, discord.TextChannel | discord.Thread):
             return
         sub = familiar.subscriptions.get(
             channel_id=channel_id,

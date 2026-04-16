@@ -37,6 +37,19 @@ A per-familiar `asyncio.Lock` serialises runs; overlapping triggers collapse int
 - The familiar's current `memory/people/` and `memory/topics/` files for anyone who participated.
 - The current character card. The rest of `memory/` is reachable via `MemoryStore` if the writer asks for it.
 
+### Channel context header
+
+When the writer is constructed with a `channel_context_lookup` callable (wired to `ConversationMonitor.format_channel_context` in the normal process), the prompt transcript is prefixed with a `## Context` block listing every distinct channel the turns came from — for example:
+
+```
+## Context
+- #general
+- #general -> feature-brainstorm (thread)
+- forum:announcements -> hotfix-rollout (forum post)
+```
+
+The labels come from `ConversationMonitor`, which stores a `ChannelContext(name, kind, parent_name)` for each subscribed channel. Threads and forum posts therefore surface in session summaries with their human-readable location rather than as bare numeric IDs. Unknown channels (no context registered) are suppressed, keeping the block empty in test setups and during early boot.
+
 ### Model
 
 A cheap side-model LLM (`LLMClient`) configured alongside the other side-model calls (rolling summary, side-model gate).

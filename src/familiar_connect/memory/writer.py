@@ -22,6 +22,8 @@ from familiar_connect.llm import LLMClient, Message
 from familiar_connect.memory.store import MemoryStore, MemoryStoreError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from familiar_connect.history.store import HistoryStore, HistoryTurn
 
 _logger = logging.getLogger(__name__)
@@ -251,6 +253,10 @@ class MemoryWriter:
     :param llm_client: The :class:`LLMClient` for the ``memory_writer``
         slot.
     :param familiar_id: The active familiar's id.
+    :param channel_context_lookup: Optional callable ``channel_id ->
+        label`` used to prefix the transcript with a ``## Context``
+        block (e.g. ``#general -> brainstorm (thread)``). Empty labels
+        or a missing lookup suppress the block.
     """
 
     def __init__(
@@ -260,11 +266,13 @@ class MemoryWriter:
         history_store: HistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
+        channel_context_lookup: Callable[[int], str] | None = None,
     ) -> None:
         self._memory_store = memory_store
         self._history_store = history_store
         self._llm_client = llm_client
         self._familiar_id = familiar_id
+        self._channel_context_lookup = channel_context_lookup
 
     async def run(self) -> MemoryWriterResult:
         """Execute the memory-writer pass.
@@ -288,6 +296,9 @@ class MemoryWriter:
 
         # Build the prompt with existing file context
         transcript = _render_turns(turns)
+        context_block = self._build_context_block(turns)
+        if context_block:
+            transcript = f"{context_block}\n\n{transcript}"
         existing_section = self._build_existing_files_section(
             turns,
             session_path=session_path,
@@ -370,6 +381,28 @@ class MemoryWriter:
             turns_summarized=len(turns),
             watermark_id=new_watermark,
         )
+
+    def _build_context_block(self, turns: list[HistoryTurn]) -> str:
+        """Render a ``## Context`` header listing channels in *turns*.
+
+        Resolves each distinct channel id through ``channel_context_lookup``.
+        Returns empty string when no lookup is wired, every label is
+        missing/blank, or every label equals the raw id (unknown).
+        """
+        if self._channel_context_lookup is None:
+            return ""
+        seen: list[int] = []
+        for t in turns:
+            if t.channel_id not in seen:
+                seen.append(t.channel_id)
+        labels: list[str] = []
+        for cid in seen:
+            label = self._channel_context_lookup(cid)
+            if label and label != str(cid):
+                labels.append(f"- {label}")
+        if not labels:
+            return ""
+        return "## Context\n" + "\n".join(labels)
 
     def _build_existing_files_section(
         self,

@@ -30,6 +30,28 @@ command surface.
    channel — the reply should also be spoken.
 5. `/unsubscribe-voice` then `/unsubscribe-text` to tear down cleanly.
 
+### Threads and forum posts
+
+`/subscribe-text` also works inside a thread or a forum post — both
+are `discord.Thread` instances under the hood. Running the command
+inside a thread subscribes the familiar to that thread only (not the
+parent channel), and `/unsubscribe-text` from the same thread removes
+it. The familiar joins the thread on subscribe so private threads and
+archived-then-unarchived threads behave identically to public ones.
+
+If the subscribed thread is later closed (archived **and** locked),
+the familiar will log an `❌ Send skipped reason=thread_closed` error
+next time it tries to post there and skip the send. Subscriptions are
+not auto-removed: clear stale rows with `/unsubscribe-text` (inside
+the thread, if still reachable) or by editing
+`data/familiars/<id>/subscriptions.toml`. Plain archival (auto-archive
+after inactivity) keeps posting intact, since threads can un-archive.
+
+The `✨ Summoned` log line labels the channel kind (`text`,
+`thread`, or `forum_post`) so you can tell them apart at a glance,
+and the memory-writer session summaries include a `## Context` header
+identifying the channel(s) a conversation happened in.
+
 Subscriptions and channel modes persist across restarts under
 `data/familiars/<id>/subscriptions.toml` and
 `data/familiars/<id>/channels/<channel_id>.toml`; delete those files
