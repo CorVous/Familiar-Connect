@@ -67,3 +67,24 @@ All comments, docstrings, and documentation must follow this style:
 **Scope:** telegraphic style applies strictly to docstrings and inline
 comments. Wiki pages (`docs/*.md`) keep full sentences for readability
 but should still be concise — trim wordiness, filler, and restating.
+
+## Logging
+
+How to add a new log call. Match existing style — don't invent a new one.
+
+* Per module: `_logger = logging.getLogger(__name__)` at top. Never root.
+* Compose with `from familiar_connect import log_style as ls`:
+    * `ls.tag(label, color)` — leading `[label]`
+    * `ls.kv(key, val, vc=color)` — `key=value` chunk
+    * `ls.trunc(text, limit=200)` — ellipsis-truncate payloads
+* Layout: one line, leading `ls.tag(...)` then space-separated
+  `ls.kv(...)` pairs. `StyledFormatter` repaints the leading tag for
+  `WARNING`/`ERROR` — keep the tag first. Example (`mood.py`):
+  ```python
+  _logger.info(
+      f"{ls.tag('Mood', ls.M)} "
+      f"{ls.kv('modifier', f'{modifier:+.2f}', vc=ls.LM)}"
+  )
+  ```
+* Emoji: reserve for notable transitions (✨ summon, 🎙️ stream).
+* One color per subsystem; stay consistent across that subsystem's logs.
