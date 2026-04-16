@@ -75,9 +75,10 @@ reset and the curve starts over from `starting_interval`.
 ## Triggers and `is_unsolicited`
 
 `ResponseTrigger` (`chattiness.py:33–47`) has three values. The
-voice path uses `trigger.is_unsolicited` (true for `interjection` and
-`lull`) to bias the interruption-tolerance RNG toward pushing through
-self-started remarks.
+voice path uses `trigger.is_unsolicited` (true only for `interjection`)
+to bias the interruption-tolerance RNG toward pushing through barge-in
+remarks. Lulls follow the base tolerance + mood modifier without the
+unsolicited bias.
 
 ## Follow-up: mid-response re-evaluation
 
