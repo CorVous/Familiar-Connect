@@ -695,6 +695,20 @@ async def subscribe_my_voice(
             # Always clear — we're now past the window where the lull needs
             # to be suppressed (regardless of whether we proceed to play).
             t.short_yield_pending = False
+            # _run_voice_response transitions SPEAKING→IDLE after draining.
+            # The resume task is scheduled via create_task before that
+            # transition, so we may arrive here while state is still SPEAKING.
+            # Poll briefly to let _run_voice_response settle; bail if a new
+            # response starts (GENERATING) or we time out.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2.0
+            while t.state is ResponseState.SPEAKING:
+                if loop.time() >= deadline:
+                    _logger.warning(
+                        "voice resume: timed out waiting for IDLE; skipping"
+                    )
+                    return
+                await asyncio.sleep(0.05)
             # If a new response started before the lull confirmed, skip.
             if t.state is not ResponseState.IDLE or familiar.tts_client is None:
                 return

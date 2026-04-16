@@ -3,14 +3,14 @@ revision = 3
 requires-python = "==3.13.*"
 
 [options]
-exclude-newer = "2026-04-08T23:20:24.66602498Z"
+exclude-newer = "2026-04-09T01:54:14.402735764Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-defusedxml = { timestamp = "2026-04-14T23:20:24.666049052Z", span = "P1D" }
-ty = { timestamp = "2026-04-14T23:20:24.666062964Z", span = "P1D" }
-ruff = { timestamp = "2026-04-13T23:20:24.666062409Z", span = "P2D" }
-davey = { timestamp = "2026-04-14T23:20:24.666063487Z", span = "P1D" }
+defusedxml = { timestamp = "2026-04-15T01:54:14.402760153Z", span = "P1D" }
+ty = { timestamp = "2026-04-15T01:54:14.40277461Z", span = "P1D" }
+ruff = { timestamp = "2026-04-14T01:54:14.402773839Z", span = "P2D" }
+davey = { timestamp = "2026-04-15T01:54:14.402775332Z", span = "P1D" }
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -86,6 +86,35 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
+]
+
+[[package]]
+name = "azure-cognitiveservices-speech"
+version = "1.49.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/c1/22cefd6ceb89656098d4b353eb073267ff9cbbe2f9325a224ee83cb6c87e/azure_cognitiveservices_speech-1.49.0-py3-none-macosx_10_14_x86_64.whl", hash = "sha256:a545140ee81b2691d79e7d918d2e59e622ac8c6aaa67a82475d888a3cf0e36d4", size = 3445919, upload-time = "2026-04-07T18:21:57.792Z" },
+    { url = "https://files.pythonhosted.org/packages/da/e1/413cb8189e8d5d0e9ebb580af82bc964f506477e1436992db9b9738b532f/azure_cognitiveservices_speech-1.49.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:6829fa8667da697ac6d0e007fef0990fbb97a4a54a89906bfed4f6f8abd7c937", size = 3244891, upload-time = "2026-04-07T18:22:00.022Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/4d/5165e31fa55bfb2dd76decd18b81e62b9678efb17824c9f643f63449ff23/azure_cognitiveservices_speech-1.49.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:3aa556354ae0663d0cfea0c5a4fd72ba203191cfd678be71058336ec560f8b44", size = 2773301, upload-time = "2026-04-07T18:22:01.915Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/b1/2cb152e10cbeb9f03eb4ae03b91b85634c1e73621df97ac514c1fa6cceda/azure_cognitiveservices_speech-1.49.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:e4cb429763c24bd069589b2736013c93d02282b0058c3afb2fc0c240cc5df92b", size = 2707645, upload-time = "2026-04-07T18:22:03.756Z" },
+    { url = "https://files.pythonhosted.org/packages/96/ba/a1beb6053e60d396f56765ec6194e76a339b53a2973bd6319922e5d507cc/azure_cognitiveservices_speech-1.49.0-py3-none-win_amd64.whl", hash = "sha256:48b00ab6ce982dcc3a0835ee232d667a869ed5c56cca74ad0f5e2c53d51b1b3f", size = 2587841, upload-time = "2026-04-07T18:22:05.592Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/12/bc2c90b3867c9331bdbaec92ccc29f147f1f6e2dcbdb093cba3f9624f55f/azure_cognitiveservices_speech-1.49.0-py3-none-win_arm64.whl", hash = "sha256:e2d23a535f2756bd855c62ff815cd5a6f36c004c056548c4eeb3bd3ede7e0347", size = 2340202, upload-time = "2026-04-07T18:22:07.119Z" },
+]
+
+[[package]]
+name = "azure-core"
+version = "1.39.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/34/83/bbde3faa84ddcb8eb0eca4b3ffb3221252281db4ce351300fe248c5c70b1/azure_core-1.39.0.tar.gz", hash = "sha256:8a90a562998dd44ce84597590fff6249701b98c0e8797c95fcdd695b54c35d74", size = 367531, upload-time = "2026-03-19T01:31:29.461Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/d6/8ebcd05b01a580f086ac9a97fb9fac65c09a4b012161cc97c21a336e880b/azure_core-1.39.0-py3-none-any.whl", hash = "sha256:4ac7b70fab5438c3f68770649a78daf97833caa83827f91df9c14e0e0ea7d34f", size = 218318, upload-time = "2026-03-19T01:31:31.25Z" },
 ]
 
 [[package]]
@@ -346,6 +375,7 @@ wheels = [
 name = "familiar-connect"
 source = { editable = "." }
 dependencies = [
+    { name = "azure-cognitiveservices-speech" },
     { name = "davey" },
     { name = "defusedxml" },
     { name = "httpx" },
@@ -378,6 +408,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "azure-cognitiveservices-speech", specifier = ">=1.42.0,<2" },
     { name = "davey", specifier = ">=0.1.5,<1" },
     { name = "defusedxml", specifier = ">=0.7.1,<1" },
     { name = "httpx", specifier = ">=0.28.0,<1" },
