@@ -190,6 +190,33 @@ class TestBackdrop:
         store.set_backdrop(channel_id=7, backdrop="Hello backdrop.")
         assert store.get_backdrop(channel_id=7) == "Hello backdrop."
 
+    def test_sidecar_writes_channel_name_at_top(self, tmp_path: Path) -> None:
+        """``channel_name`` must render as the first key in the written TOML.
+
+        Operators read these files by hand; keeping the human-readable
+        header at the top makes the sidecar scannable.
+        """
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(),
+        )
+        store.set_backdrop(channel_id=7, backdrop="Hello.", channel_name="general")
+
+        text = (tmp_path / "7.toml").read_text()
+        key_lines = [
+            line for line in text.splitlines() if line and not line.startswith(" ")
+        ]
+        assert key_lines[0].startswith("channel_name")
+        # mode should follow channel_name, before backdrop
+        channel_idx = next(
+            i for i, ln in enumerate(key_lines) if ln.startswith("channel_name")
+        )
+        mode_idx = next(i for i, ln in enumerate(key_lines) if ln.startswith("mode"))
+        backdrop_idx = next(
+            i for i, ln in enumerate(key_lines) if ln.startswith("backdrop")
+        )
+        assert channel_idx < mode_idx < backdrop_idx
+
 
 # ---------------------------------------------------------------------------
 # set_mode preservation (regression)

@@ -85,7 +85,7 @@ class ChannelConfigStore:
 
         existing = self._read_raw(sidecar)
         existing["mode"] = mode.value
-        sidecar.write_bytes(tomli_w.dumps(existing).encode())
+        self._write_sidecar(sidecar, existing)
 
         cfg = self._load_from_sidecar(sidecar)
         self._cache[channel_id] = cfg
@@ -120,7 +120,7 @@ class ChannelConfigStore:
         if channel_name is not None:
             existing["channel_name"] = channel_name
 
-        sidecar.write_bytes(tomli_w.dumps(existing).encode())
+        self._write_sidecar(sidecar, existing)
 
         cfg = self._load_from_sidecar(sidecar)
         self._cache[channel_id] = cfg
@@ -136,7 +136,7 @@ class ChannelConfigStore:
             existing["mode"] = self._character.default_mode.value
         existing.pop("backdrop", None)
 
-        sidecar.write_bytes(tomli_w.dumps(existing).encode())
+        self._write_sidecar(sidecar, existing)
 
         cfg = self._load_from_sidecar(sidecar)
         self._cache[channel_id] = cfg
@@ -173,6 +173,20 @@ class ChannelConfigStore:
             return {}
         with sidecar.open("rb") as f:
             return dict(tomllib.load(f))
+
+    def _write_sidecar(self, sidecar: Path, data: dict) -> None:
+        """Serialize *data* with canonical top-level key order.
+
+        ``channel_name`` first (human-readable header), then ``mode``,
+        then ``backdrop``, then any other scalars, then tables (which
+        ``tomli_w`` always emits after scalars).
+        """
+        preferred = ("channel_name", "mode", "backdrop")
+        ordered: dict = {k: data[k] for k in preferred if k in data}
+        for k, v in data.items():
+            if k not in ordered:
+                ordered[k] = v
+        sidecar.write_bytes(tomli_w.dumps(ordered).encode())
 
     def _sidecar_path(self, channel_id: int) -> Path:
         return self._root / f"{channel_id}.toml"
