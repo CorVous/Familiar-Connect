@@ -289,6 +289,8 @@ class Familiar:
                 ModeInstructionProvider(
                     modes_root=self.root / "modes",
                     mode=channel_config.mode,
+                    channel_backdrop_override=channel_config.backdrop_override,
+                    defaults_modes_root=self.root.parent / "_default" / "modes",
                 ),
             )
         active_pre = [

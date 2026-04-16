@@ -33,8 +33,11 @@ import httpx
 import pytest
 
 from familiar_connect.bot import (
+    _default_backdrop_placeholder,
+    _make_backdrop_modal,
     _run_text_response,
     _run_voice_response,
+    channel_backdrop,
     create_bot,
     dispatch_interruption_regen,
     on_message,
@@ -823,7 +826,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "#general -> feature-brainstorm (thread)"
+        assert label == "#general -> feature-brainstorm"
 
     def test_subscribe_text_in_forum_post_records_forum_context(
         self, tmp_path: Path
@@ -837,7 +840,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "forum:announcements -> feature-brainstorm (forum post)"
+        assert label == "forum:announcements -> feature-brainstorm"
 
     def test_subscribe_text_in_thread_rejects_without_send_perm(
         self, tmp_path: Path
@@ -1168,6 +1171,7 @@ class TestCreateBot:
             "channel-full-rp",
             "channel-text-conversation-rp",
             "channel-imitate-voice",
+            "channel-backdrop",
         ],
     )
     def test_create_bot_registers_slash_command(
@@ -1186,6 +1190,107 @@ class TestCreateBot:
         names = [cmd.name for cmd in bot.pending_application_commands]
         assert "awaken" not in names
         assert "sleep" not in names
+
+    def test_channel_backdrop_has_no_options(self, tmp_path: Path) -> None:
+        """``/channel-backdrop`` takes no slash-command options.
+
+        All input flows through the Discord modal; submitting blank clears.
+        """
+        familiar = _make_familiar(tmp_path)
+        bot = create_bot(familiar)
+        cmd = next(
+            c for c in bot.pending_application_commands if c.name == "channel-backdrop"
+        )
+        assert cmd.options == []
+
+
+class TestBackdropPlaceholder:
+    """Preview of the mode default shown as Discord modal placeholder text.
+
+    Discord caps InputText placeholder at 100 chars, so longer defaults
+    are collapsed to a single line and truncated.
+    """
+
+    def test_none_returns_generic_fallback(self) -> None:
+        out = _default_backdrop_placeholder(None)
+        assert "mode default" in out
+        assert len(out) <= 100
+
+    def test_short_default_passes_through(self) -> None:
+        out = _default_backdrop_placeholder("Talk like a pirate.")
+        assert out == "Talk like a pirate."
+
+    def test_long_default_truncated_with_ellipsis(self) -> None:
+        long_text = "a" * 200
+        out = _default_backdrop_placeholder(long_text)
+        assert len(out) == 100
+        assert out.endswith("\u2026")
+
+    def test_multiline_default_collapsed_to_single_line(self) -> None:
+        out = _default_backdrop_placeholder("line one\n\n  line two")
+        assert "\n" not in out
+        assert out == "line one line two"
+
+
+class TestBackdropModalRequiredFlag:
+    """Modal must send ``required=false`` so emptied text clears the backdrop.
+
+    Regression against a py-cord quirk where
+    ``InputText._generate_underlying`` collapses ``required=False`` to
+    ``None`` via ``False or self.required``, which Discord then defaults
+    to ``required=true``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_required_false_reaches_the_component_payload(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = _make_familiar(tmp_path)
+        modal = _make_backdrop_modal(
+            familiar,
+            channel_id=1,
+            channel_name="general",
+            current="Talk like a pirate.",
+            mode_default="Default text.",
+        )
+        field = modal.children[0]
+        assert field.required is False
+        assert field._underlying is not None
+        assert field._underlying.to_dict()["required"] is False
+
+
+# ---------------------------------------------------------------------------
+# /channel-backdrop in a thread writes a labelled channel_name to the sidecar
+# ---------------------------------------------------------------------------
+
+
+class TestChannelBackdropInThread:
+    @pytest.mark.asyncio
+    async def test_backdrop_in_thread_writes_labelled_channel_name(
+        self, tmp_path: Path
+    ) -> None:
+        """Sidecar ``channel_name`` shows ``#parent -> thread`` label.
+
+        Guards that ``channel_backdrop`` → modal callback writes the
+        human-readable label rather than the raw integer thread id.
+        """
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77, parent_name="general")
+        ctx.send_modal = AsyncMock()
+
+        await channel_backdrop(ctx, familiar)
+
+        modal = ctx.send_modal.call_args[0][0]
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+        modal.children[0].value = "Speak like a wizard."
+        await modal.callback(interaction)
+
+        sidecar = familiar.root / "channels" / "77.toml"
+        assert sidecar.exists()
+        cfg = familiar.channel_configs.get(channel_id=77)
+        assert cfg.channel_name == "#general -> feature-brainstorm"
 
 
 # ---------------------------------------------------------------------------

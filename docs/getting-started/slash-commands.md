@@ -52,6 +52,13 @@ The `✨ Summoned` log line labels the channel kind (`text`,
 and the memory-writer session summaries include a `## Context` header
 identifying the channel(s) a conversation happened in.
 
+The `/channel-full-rp`, `/channel-text-conversation-rp`,
+`/channel-imitate-voice`, and `/channel-backdrop` commands are all
+per-thread: each thread gets its own mode and backdrop stored in
+`channels/<thread_id>.toml`. The sidecar's `channel_name` field is
+written as `#parent -> thread` (or `forum:parent -> post`) so
+operators can identify entries by reading the files directly.
+
 Subscriptions and channel modes persist across restarts under
 `data/familiars/<id>/subscriptions.toml` and
 `data/familiars/<id>/channels/<channel_id>.toml`; delete those files

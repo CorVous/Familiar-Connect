@@ -38,7 +38,7 @@ Per-familiar configuration. The persona, behaviour knobs, pluggable component se
 - **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.
 - **TTS provider** — `[tts]` section selects the active provider (`azure` / `cartesia` / `gemini`) and carries the provider-specific voice and model fields. See [TTS providers](#tts-providers) below.
 - **Memory writer** — `[memory_writer]` section with `turn_threshold` (default 50) and `idle_timeout` (default 1800.0s / 30 min). Controls when the post-session writer pass runs to summarise conversation history into long-term memory files.
-- **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`. Channels may also carry a `[typing_simulation]` table — see [Typing simulation](typing-simulation.md).
+- **Per-channel overrides** — via `channels/<channel_id>.toml` sidecars written by the `/channel-*` slash commands. Each sidecar selects a `ChannelMode` (`full_rp`, `text_conversation_rp`, or `imitate_voice`); modes drive the provider / processor / budget table in `familiar_connect.config.channel_config_for_mode`. Channels may also carry a `backdrop` field (per-channel author note) and a `[typing_simulation]` table — see [Typing simulation](typing-simulation.md) and [Per-channel backdrop](#per-channel-backdrop).
 - **Typing simulation** — `[typing_simulation]` section on `character.toml` and/or per-channel sidecar, layered over per-mode defaults. Controls chunk-based delivery and mid-flight cancellation on text channels. See [Typing simulation](typing-simulation.md).
 - **Subscriptions** — which Discord channels the bot listens in, written to `subscriptions.toml` by `/subscribe-text` and `/subscribe-my-voice`.
 
@@ -74,9 +74,11 @@ All six clients share the same `OPENROUTER_API_KEY` and the process-wide rate-li
 
 ### Default profile
 
-A reference familiar lives at `data/familiars/_default/` and is checked into the repo. It contains a `character.toml` with every configurable option filled in and serves two purposes:
+A reference familiar lives at `data/familiars/_default/` and is checked into the repo. It serves two purposes:
 
-1. **Fallback source.** When loading a user's familiar, any `[llm.<slot>]` section (or `[tts]` field) missing from the user's `character.toml` falls back to the corresponding value in `_default/character.toml`. No hardcoded defaults live in Python — the default profile is the single source of truth for fallback values.
+1. **Fallback source.** When loading a user's familiar:
+   - Any `[llm.<slot>]` section (or `[tts]` field) missing from the user's `character.toml` falls back to the corresponding value in `_default/character.toml`. No hardcoded defaults live in Python — the default profile is the single source of truth for fallback values.
+   - Per-mode instruction files (`_default/modes/full_rp.md`, `text_conversation_rp.md`, `imitate_voice.md`) are loaded as runtime fallbacks when a familiar's own `modes/<mode>.md` is absent. Drop a file into `data/familiars/<id>/modes/` to override the default for that familiar.
 2. **Documentation-by-example.** A new operator copies `_default/` to `data/familiars/my-familiar/` and edits from there.
 
 The leading underscore is a convention to keep `FAMILIAR_ID=_default` from being a meaningful selection. `.gitignore` contains a `!data/familiars/_default/` exception so the default profile is checked in while user data stays ignored.
@@ -131,11 +133,19 @@ If two-character-per-process ever becomes desirable, the data model already carr
 ```
 data/
 └── familiars/
+    ├── _default/                    # checked-in reference profile
+    │   ├── character.toml           # fallback LLM/TTS defaults
+    │   └── modes/                   # fallback mode instruction files
+    │       ├── full_rp.md
+    │       ├── text_conversation_rp.md
+    │       └── imitate_voice.md
     └── <familiar_id>/               # one per alternate character
         ├── character.toml           # tuning + depth-inject config
         ├── subscriptions.toml       # persistent /subscribe-* state
         ├── channels/
-        │   └── <channel_id>.toml    # per-channel mode + overrides
+        │   └── <channel_id>.toml    # per-channel mode + backdrop + overrides
+        ├── modes/                   # familiar-specific mode instructions
+        │   └── <mode>.md            # overrides _default/modes/<mode>.md
         ├── memory/                  # MemoryStore root
         │   ├── self/                # unpacked from card on creation
         │   ├── people/
@@ -144,6 +154,40 @@ data/
         │   └── lore/
         └── history.db               # SQLite HistoryStore
 ```
+
+## Per-channel backdrop
+
+A **backdrop** is an author-note text injected into `Layer.author_note` of the system prompt on every turn in a specific channel. It replaces the mode-level instruction (from `modes/<mode>.md` or `_default/modes/<mode>.md`) entirely for that channel.
+
+**Precedence** (high → low):
+
+1. Per-channel `backdrop` in `channels/<channel_id>.toml` — set via `/channel-backdrop`.
+2. Familiar's own `modes/<mode>.md`.
+3. `_default/modes/<mode>.md` (repo default).
+4. Nothing → no author-note contribution.
+
+**Setting a backdrop:** run `/channel-backdrop` in the target channel. A Discord modal opens with a multi-line text field pre-filled with the current backdrop (if any). Submit to save.
+
+**Clearing a backdrop:** run `/channel-backdrop` and submit the modal with the text field blank. The backdrop is removed and the mode default resumes on the next turn.
+
+**TOML layout:**
+
+```toml
+channel_name = "general"   # informational; written by the slash command
+mode = "full_rp"
+
+backdrop = """
+Reply as a stern tavern keeper. Call the user "traveler."
+Keep it to two sentences.
+"""
+
+[typing_simulation]
+enabled = false
+```
+
+Existing sidecars without `backdrop` or `channel_name` continue to work unchanged. Switching modes with `/channel-full-rp` (and siblings) now preserves any `backdrop` and `channel_name` that was already set.
+
+Threads and forum posts each get their own sidecar keyed by the thread's id. The `channel_name` field is written as `#general -> brainstorm` (or `forum:announcements -> post (forum post)`) so the file is identifiable when browsing `channels/` by hand.
 
 **Why TOML:** human-and-machine-readable, matching the memory directory's plain-text principle. A user can edit their character's config in any text editor; the bot loads it on startup or on the next mutation. No schema migrations, no opaque blob format.
 
@@ -171,6 +215,7 @@ The user explicitly trusts the admin. There is no per-user sandboxing, no resour
 | `/channel-full-rp` | Set the current channel's mode to `full_rp` (all providers, both processors, high budget) |
 | `/channel-text-conversation-rp` | Set to `text_conversation_rp` (character + history, `stepped_thinking` on, `recast` off, medium budget) |
 | `/channel-imitate-voice` | Set to `imitate_voice` (latency-tuned; `recast` on with voice flavour, `stepped_thinking` off) |
+| `/channel-backdrop` | Open a modal to set a custom author-note for this channel (replaces the mode default). Submit the modal blank to clear. |
 
 The old `/awaken` / `/sleep` commands have been removed. Their role is now split between the subscription commands and the channel-mode commands — `/subscribe-my-voice` in a voice channel does what `/awaken` did, while `/subscribe-text` in a text channel replaces the text-channel branch of `/awaken`.
 

@@ -23,6 +23,7 @@ dependencies = [
     "colorama>=0.4.6",
     # local ONNX embeddings for ContentSearchProvider tier 2 — no third-party API
     "fastembed >= 0.4, < 1",
+    "tomli-w >= 1.2, < 2",
 ]
 
 [project.scripts]

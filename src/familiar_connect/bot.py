@@ -21,8 +21,14 @@ import discord
 import httpx
 
 from familiar_connect import log_style as ls
-from familiar_connect.chattiness import BufferedMessage, ChannelKind, ResponseTrigger
+from familiar_connect.chattiness import (
+    BufferedMessage,
+    ChannelContext,
+    ChannelKind,
+    ResponseTrigger,
+)
 from familiar_connect.config import ChannelMode
+from familiar_connect.context.providers.mode_instructions import resolve_mode_default
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
 from familiar_connect.llm import sanitize_name
@@ -69,6 +75,35 @@ async def _recording_finished_callback(  # noqa: RUF029
     py-cord awaits this internally; cleanup lives in :func:`unsubscribe_voice`.
     """
     del sink, args
+
+
+def _refresh_channel_context(
+    familiar: Familiar,
+    channel: discord.TextChannel | discord.Thread,
+) -> ChannelContext:
+    """Register channel into the monitor from a live Discord object.
+
+    Centralises the Thread/ForumChannel isinstance dance so
+    subscribe / on_message / slash-command call sites don't drift.
+    Returns the freshly-stored :class:`ChannelContext`.
+    """
+    name = getattr(channel, "name", str(channel.id))
+    if isinstance(channel, discord.Thread):
+        parent = channel.parent
+        parent_name = getattr(parent, "name", None)
+        kind: ChannelKind = (
+            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+        )
+    else:
+        parent_name = None
+        kind = "text"
+    familiar.monitor.register_channel_context(
+        channel.id,
+        name=name,
+        kind=kind,
+        parent_name=parent_name,
+    )
+    return ChannelContext(name=name, kind=kind, parent_name=parent_name)
 
 
 # ---------------------------------------------------------------------------
@@ -126,21 +161,9 @@ async def subscribe_text(
         kind=SubscriptionKind.text,
         guild_id=ctx.guild_id,
     )
-    name = getattr(channel, "name", str(channel_id))
-    parent = getattr(channel, "parent", None) if is_thread else None
-    parent_name = getattr(parent, "name", None)
-    if is_thread:
-        kind: ChannelKind = (
-            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-        )
-    else:
-        kind = "text"
-    familiar.monitor.register_channel_context(
-        channel_id,
-        name=name,
-        kind=kind,
-        parent_name=parent_name,
-    )
+    ctx_info = _refresh_channel_context(familiar, channel)
+    kind = ctx_info.kind
+    name = ctx_info.name
 
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
     if channel_config:
@@ -151,7 +174,7 @@ async def subscribe_text(
     _logger.info(
         f"{ls.tag('✨ Summoned', ls.G)} "
         f"{ls.kv('type', kind)} "
-        f"{ls.kv('channel', label, vc=ls.G)} "
+        f"{ls.word(label, ls.C)} "
         f"{ls.kv('id', str(channel_id))} "
         f"{ls.kv('mode', ch_mode)}"
     )
@@ -298,7 +321,7 @@ async def _run_voice_response(
     hist = f"  {ls.word(ls.trunc(last_hist), ls.LW)}\n" if last_hist else ""
     _logger.info(
         f"{ls.tag('🧠 Generating Voice', ls.G)} "
-        f"{ls.kv('channel', str(channel_id), vc=ls.LG)} "
+        f"{ls.word(str(channel_id), ls.C)} "
         f"{ls.kv('messages', str(len(messages)), vc=ls.LG)} "
         f"{ls.kv('new', str(n_new), vc=ls.LG)}\n"
         f"{hist}"
@@ -339,7 +362,7 @@ async def _run_voice_response(
         # generation task cancelled (interruption path)
         _logger.info(
             f"{ls.tag('❌ Cancelled', ls.Y)} "
-            f"{ls.kv('channel', str(channel_id))} "
+            f"{ls.word(str(channel_id), ls.C)} "
             f"{ls.kv('elapsed', f'{time.monotonic() - gen_start:.2f}s')} "
             f"{ls.kv('reason', 'interruption')} "
             f"{ls.kv('speaker', tracker.interrupt_starter_name or 'unknown', vc=ls.LC)}"
@@ -409,7 +432,7 @@ async def _run_voice_response(
             tracker.pending_interrupter_turns.clear()
             _logger.info(
                 f"{ls.tag('🔊 Voice', ls.G)} "
-                f"{ls.kv('channel', str(channel_id))} "
+                f"{ls.word(str(channel_id), ls.C)} "
                 f"{ls.kv('text', ls.trunc(reply_text), vc=ls.LG)}"
             )
             # Wait for any currently-playing audio to finish.
@@ -445,7 +468,7 @@ async def _run_voice_response(
                 )
                 _logger.info(
                     f"{ls.tag('⚡ Dispatch', ls.Y)} "
-                    f"{ls.kv('channel', str(channel_id))} "
+                    f"{ls.word(str(channel_id), ls.C)} "
                     f"{ls.kv('speaker', tracker.interrupt_starter_name, vc=ls.LC)} "
                     f"{ls.kv('event', 'long@SPEAKING→regen', vc=ls.LY)}"
                 )
@@ -502,7 +525,7 @@ async def _run_voice_response(
                 await familiar.memory_writer_scheduler.notify_turn()
                 _logger.info(
                     f"{ls.tag('🔊 Voice Regen', ls.LG)} "
-                    f"{ls.kv('channel', str(channel_id))} "
+                    f"{ls.word(str(channel_id), ls.C)} "
                     f"{ls.kv('text', ls.trunc(regen_text))}"
                 )
                 regen_tts = await familiar.tts_client.synthesize(regen_text)
@@ -555,7 +578,7 @@ async def _run_voice_response(
         await familiar.memory_writer_scheduler.notify_turn()
         _logger.info(
             f"{ls.tag('🔊 Voice', ls.G)} "
-            f"{ls.kv('channel', str(channel_id))} "
+            f"{ls.word(str(channel_id), ls.C)} "
             f"{ls.kv('text', ls.trunc(reply_text), vc=ls.LG)}"
         )
     tracker.transition(ResponseState.IDLE)
@@ -601,7 +624,7 @@ async def dispatch_interruption_regen(
     )
     _logger.info(
         f"{ls.tag('⚡ Dispatch', ls.Y)} "
-        f"{ls.kv('channel', str(channel_id))} "
+        f"{ls.word(str(channel_id), ls.C)} "
         f"{ls.kv('speaker', speaker, vc=ls.LC)} "
         f"{ls.kv('event', 'long@GENERATING→cancel+regen', vc=ls.LY)}"
     )
@@ -677,7 +700,7 @@ async def subscribe_my_voice(
     _logger.info(
         f"{ls.tag('✨ Summoned', ls.G)} "
         f"{ls.kv('type', 'voice')} "
-        f"{ls.kv('channel', channel.name, vc=ls.G)} "
+        f"{ls.word(channel.name, ls.C)} "
         f"{ls.kv('id', str(channel.id))}"
     )
 
@@ -1033,10 +1056,105 @@ async def set_channel_mode(
     familiar.channel_configs.set_mode(channel_id=channel_id, mode=mode)
     _logger.info(
         f"{ls.tag('Config', ls.W)} "
-        f"{ls.kv('channel', str(channel_id))} "
+        f"{ls.word(familiar.monitor.format_channel_context(channel_id), ls.C)} "
         f"{ls.kv('mode', mode.value)}"
     )
     await ctx.respond(f"Channel mode set to **{mode.value}**.", ephemeral=True)
+
+
+_PLACEHOLDER_MAX = 100  # Discord hard limit on InputText placeholder length
+
+
+def _default_backdrop_placeholder(default: str | None) -> str:
+    """Build a ≤100-char single-line preview of *default* for the modal."""
+    fallback = "Author-note injected on every turn. Replaces the mode default."
+    if not default:
+        return fallback
+    single_line = " ".join(default.split())
+    if len(single_line) <= _PLACEHOLDER_MAX:
+        return single_line
+    return single_line[: _PLACEHOLDER_MAX - 1].rstrip() + "\u2026"
+
+
+def _make_backdrop_modal(
+    familiar: Familiar,
+    channel_id: int,
+    channel_name: str,
+    current: str | None,
+    mode_default: str | None,
+) -> discord.ui.Modal:
+    """Build and return the backdrop-editing modal for *channel_id*."""
+    placeholder = _default_backdrop_placeholder(mode_default)
+
+    class ChannelBackdropModal(discord.ui.Modal):
+        def __init__(self) -> None:
+            super().__init__(title="Channel Backdrop")
+            field = discord.ui.InputText(
+                label="Backdrop",
+                style=discord.InputTextStyle.long,
+                placeholder=placeholder,
+                value=current or "",
+                required=False,
+                max_length=4000,
+            )
+            # py-cord 2.7.1 bug: _generate_underlying collapses
+            # ``required=False`` to ``None`` via ``False or self.required``;
+            # Discord treats ``null`` as required. Post-set to work around.
+            # Drop this line once py-cord ships the fix.
+            field.required = False
+            self.add_item(field)
+
+        async def callback(self, interaction: discord.Interaction) -> None:
+            text: str = self.children[0].value or ""  # type: ignore[union-attr]
+            familiar.channel_configs.set_backdrop(
+                channel_id=channel_id,
+                backdrop=text,
+                channel_name=channel_name,
+            )
+            label = familiar.monitor.format_channel_context(channel_id)
+            _logger.info(
+                f"{ls.tag('Config', ls.W)} "
+                f"{ls.word(label, ls.C)} "
+                f"{ls.kv('action', 'backdrop_set')}"
+            )
+            stripped = text.strip()
+            if stripped:
+                msg = "Channel backdrop saved."
+            else:
+                msg = (
+                    "Channel backdrop cleared"
+                    " — reverting to the mode default on next turn."
+                )
+            await interaction.response.send_message(msg, ephemeral=True)
+
+    return ChannelBackdropModal()
+
+
+async def channel_backdrop(
+    ctx: discord.ApplicationContext,
+    familiar: Familiar,
+) -> None:
+    """Handle ``/channel-backdrop``. Submit blank in the modal to clear."""
+    channel_id = ctx.channel_id
+    if channel_id is None:
+        await ctx.respond("Cannot determine channel.", ephemeral=True)
+        return
+
+    channel = ctx.channel
+    if isinstance(channel, discord.TextChannel | discord.Thread):
+        _refresh_channel_context(familiar, channel)
+    channel_name = familiar.monitor.format_channel_context(channel_id)
+    current = familiar.channel_configs.get_backdrop(channel_id=channel_id)
+    channel_cfg = familiar.channel_configs.get(channel_id=channel_id)
+    mode_default = resolve_mode_default(
+        modes_root=familiar.root / "modes",
+        mode=channel_cfg.mode,
+        defaults_modes_root=familiar.root.parent / "_default" / "modes",
+    )
+    modal = _make_backdrop_modal(
+        familiar, channel_id, channel_name, current, mode_default
+    )
+    await ctx.send_modal(modal)
 
 
 # ---------------------------------------------------------------------------
@@ -1138,9 +1256,10 @@ async def _run_text_response(
         hist = (
             f"  {ls.word(ls.trunc(last_hist_text), ls.LW)}\n" if last_hist_text else ""
         )
+        ch_label = familiar.monitor.format_channel_context(channel_id)
         _logger.info(
             f"{ls.tag('🧠 Generating Text', ls.G)} "
-            f"{ls.kv('channel', str(channel_id), vc=ls.LG)} "
+            f"{ls.word(ch_label, ls.C)} "
             f"{ls.kv('messages', str(len(messages)), vc=ls.LG)} "
             f"{ls.kv('new', str(n_new), vc=ls.LG)}\n"
             f"{hist}"
@@ -1320,26 +1439,8 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
     # refresh channel context each message so renames propagate and
     # subscriptions loaded from disk at startup pick up a label.
     msg_channel = message.channel
-    channel_name = getattr(msg_channel, "name", None)
-    if channel_name is not None:
-        if isinstance(msg_channel, discord.Thread):
-            parent = msg_channel.parent
-            parent_name = getattr(parent, "name", None)
-            kind: ChannelKind = (
-                "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-            )
-            familiar.monitor.register_channel_context(
-                channel_id,
-                name=channel_name,
-                kind=kind,
-                parent_name=parent_name,
-            )
-        elif isinstance(msg_channel, discord.TextChannel):
-            familiar.monitor.register_channel_context(
-                channel_id,
-                name=channel_name,
-                kind="text",
-            )
+    if isinstance(msg_channel, discord.TextChannel | discord.Thread):
+        _refresh_channel_context(familiar, msg_channel)
 
     bot_user = familiar.extras.get("bot_user")
     is_mention = (
@@ -1480,6 +1581,18 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         name="channel-imitate-voice",
         description="Tune this channel for low-latency voice imitation",
     )(_channel_imitate_voice_cmd)
+
+    @bot.slash_command(
+        name="channel-backdrop",
+        description=(
+            "Set a per-channel author-note (replaces the mode default)."
+            " Submit blank to clear."
+        ),
+    )
+    async def _channel_backdrop_cmd(
+        ctx: discord.ApplicationContext,
+    ) -> None:
+        await channel_backdrop(ctx, familiar)
 
     # --- message loop ---
     async def _on_message(message: discord.Message) -> None:

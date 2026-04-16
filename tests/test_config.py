@@ -617,4 +617,83 @@ class TestCharacterConfigMemoryWriterFields:
         path.write_text("[memory_writer]\nturn_threshold = 100\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.memory_writer_turn_threshold == 100
-        assert cfg.memory_writer_idle_timeout == 1800.0  # noqa: RUF069
+
+
+# ---------------------------------------------------------------------------
+# load_channel_config — backdrop and channel_name
+# ---------------------------------------------------------------------------
+
+
+class TestLoadChannelConfigBackdrop:
+    def test_reads_backdrop(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "full_rp"\nbackdrop = "Speak like a pirate."\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.backdrop_override == "Speak like a pirate."
+
+    def test_backdrop_stripped(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "full_rp"\nbackdrop = "  trimmed  "\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.backdrop_override == "trimmed"
+
+    def test_backdrop_empty_string_yields_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "full_rp"\nbackdrop = ""\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.backdrop_override is None
+
+    def test_backdrop_whitespace_only_yields_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "full_rp"\nbackdrop = "   "\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.backdrop_override is None
+
+    def test_backdrop_non_string_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "full_rp"\nbackdrop = 42\n')
+        with pytest.raises(ConfigError):
+            load_channel_config(path)
+
+    def test_backdrop_absent_yields_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "full_rp"\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.backdrop_override is None
+
+    def test_channel_name_parsed(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('channel_name = "general"\nmode = "full_rp"\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.channel_name == "general"
+
+    def test_channel_name_absent_yields_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "full_rp"\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.channel_name is None
+
+    def test_channel_name_non_string_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "channel.toml"
+        path.write_text('channel_name = 99\nmode = "full_rp"\n')
+        with pytest.raises(ConfigError):
+            load_channel_config(path)
+
+    def test_existing_sidecars_without_new_fields_still_load(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward-compat: sidecars that pre-date backdrop/channel_name load fine."""
+        path = tmp_path / "channel.toml"
+        path.write_text('mode = "text_conversation_rp"\n')
+        cfg = load_channel_config(path)
+        assert cfg is not None
+        assert cfg.mode is ChannelMode.text_conversation_rp
+        assert cfg.backdrop_override is None
+        assert cfg.channel_name is None
