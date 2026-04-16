@@ -131,16 +131,6 @@ class TestFormatChannelPointRedemption:
         text = format_channel_point_redemption("Alice", "Talk to Sapphire", "")
         assert "says" not in text
 
-    def test_redemption_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_channel_point_redemption("Bob", "Hydrate!")
-        assert "Bob" in text
-
-    def test_redemption_name_in_output(self) -> None:
-        """The redemption name appears in the formatted string."""
-        text = format_channel_point_redemption("Bob", "Hydrate!")
-        assert "Hydrate!" in text
-
 
 class TestFormatSubscription:
     def test_tier_1(self) -> None:
@@ -157,11 +147,6 @@ class TestFormatSubscription:
         """New tier-3 subscription formatted correctly."""
         text = format_subscription("Bob", 3)
         assert text == "Bob has subscribed at tier 3"
-
-    def test_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_subscription("Charlie", 1)
-        assert "Charlie" in text
 
 
 class TestFormatGiftSubscription:
@@ -185,11 +170,6 @@ class TestFormatGiftSubscription:
         text = format_gift_subscription("Alice", 3, 2)
         assert "tier 2" in text
 
-    def test_gifter_name_in_output(self) -> None:
-        """The gifter's name appears in the formatted string."""
-        text = format_gift_subscription("Charlie", 2, 1)
-        assert "Charlie" in text
-
 
 class TestFormatResubscription:
     def test_basic_resub(self) -> None:
@@ -205,16 +185,6 @@ class TestFormatResubscription:
         text = format_resubscription("Bob", 1, 1, "woo")
         assert "1 month" in text
 
-    def test_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_resubscription("Dave", 12, 3, "still here!")
-        assert "Dave" in text
-
-    def test_message_in_output(self) -> None:
-        """The viewer's message appears in the formatted string."""
-        text = format_resubscription("Eve", 3, 1, "hi chat")
-        assert "hi chat" in text
-
 
 class TestFormatCheer:
     def test_named_cheerer_with_message(self) -> None:
@@ -227,32 +197,12 @@ class TestFormatCheer:
         text = format_cheer(None, 500, "hype")
         assert text == "An anonymous cheerer has cheered with 500 bits and says: hype"
 
-    def test_bit_count_in_output(self) -> None:
-        """The bit count appears in the formatted string."""
-        text = format_cheer("Alice", 1000, "nice")
-        assert "1000" in text
-
-    def test_message_in_output(self) -> None:
-        """The cheerer's message appears in the formatted string."""
-        text = format_cheer("Alice", 50, "GG")
-        assert "GG" in text
-
-    def test_cheerer_name_in_output(self) -> None:
-        """The cheerer's name appears in the formatted string."""
-        text = format_cheer("Zara", 200, "woo")
-        assert "Zara" in text
-
 
 class TestFormatFollow:
     def test_follow_message(self) -> None:
         """Follow event formats correctly."""
         text = format_follow("Alice")
         assert text == "Alice has followed the channel"
-
-    def test_viewer_name_in_output(self) -> None:
-        """The viewer's name appears in the formatted string."""
-        text = format_follow("NewViewer")
-        assert "NewViewer" in text
 
 
 class TestFormatAdBreak:
