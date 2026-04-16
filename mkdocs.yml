@@ -79,7 +79,6 @@ nav:
   - Roadmap:
       - roadmap/index.md
       - roadmap/voice-logging.md
-      - roadmap/threads-and-forum-posts.md
       - roadmap/web-search.md
       - roadmap/gemini-tts-expressivity.md
   - Contributing: contributing.md
