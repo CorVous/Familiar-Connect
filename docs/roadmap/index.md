@@ -39,4 +39,4 @@ These have been considered and rejected. See [Design decisions](../architecture/
 - Embedding SillyTavern extensions via headless browser.
 - Adopting a large LLM orchestration framework (LangChain, LlamaIndex, Haystack) as a runtime.
 - Third-party managed memory services (mem0, Zep, etc.).
-- Any vector database for memory storage in the first pass. Vector search may return later as a *tool* the content search agent can call.
+- Any third-party vector database. Local embeddings ship behind `ContentSearchProvider`'s retriever tier (see [Memory → Derived indices](../architecture/memory.md#derived-indices)) — a SQLite `.index/embeddings.sqlite` populated by `fastembed`/ONNX, no external service.

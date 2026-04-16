@@ -22,7 +22,15 @@ from familiar_connect.context.processors.stepped_thinking import (
     SteppedThinkingPreProcessor,
 )
 from familiar_connect.context.providers.character import CharacterProvider
-from familiar_connect.context.providers.content_search import ContentSearchProvider
+from familiar_connect.context.providers.content_search import (
+    DEFAULT_EMBEDDING_DIM,
+    ContentSearchProvider,
+    EmbeddingRetriever,
+    FastEmbedModel,
+)
+from familiar_connect.context.providers.content_search.index.embeddings import (
+    EmbeddingIndex,
+)
 from familiar_connect.context.providers.history import HistoryProvider
 from familiar_connect.context.providers.mode_instructions import (
     ModeInstructionProvider,
@@ -134,11 +142,33 @@ class Familiar:
 
         history_store = HistoryStore(root / "history.db")
 
+        # embedding retriever — construction is cheap (model download
+        # and onnxruntime session load happen on first embed() call).
+        embedding_model = FastEmbedModel()
+        embedding_index = EmbeddingIndex(
+            memory_root / ".index" / "embeddings.sqlite",
+            dim=DEFAULT_EMBEDDING_DIM,
+        )
+        embedding_retriever = EmbeddingRetriever(
+            index=embedding_index, model=embedding_model
+        )
+
+        async def _build_embedding_index() -> None:
+            import asyncio  # noqa: PLC0415
+
+            await asyncio.to_thread(
+                embedding_index.build_if_stale,
+                memory_store,
+                embedding_model,
+            )
+
         providers: dict[str, ContextProvider] = {
             "character": CharacterProvider(memory_store),
             "content_search": ContentSearchProvider(
                 store=memory_store,
                 llm_client=llm_clients["memory_search"],
+                retriever=embedding_retriever,
+                index_build=_build_embedding_index,
             ),
         }
         pre_processors: dict[str, PreProcessor] = {
