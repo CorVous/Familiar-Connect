@@ -31,6 +31,16 @@ DEFAULT_HOP_SAMPLES: int = 256
 DEFAULT_HANGOVER_MS: int = 300
 """Silence before firing ``on_speech_end`` after last speech frame."""
 
+DEFAULT_THRESHOLD: float = 0.7
+"""Speech probability cut. TEN VAD's own default (0.5) flags pure tones
+and loud white noise; 0.7 keeps real speech (typ. 0.7-0.95) while
+rejecting non-speech onsets."""
+
+DEFAULT_MIN_SPEECH_FRAMES: int = 3
+"""Consecutive above-threshold hops required before ``speech_start``
+fires. Rejects single-frame spikes on noise onsets (keyboard clicks,
+door thuds) without meaningful latency cost (3 x 16 ms = 48 ms)."""
+
 _DISCORD_SAMPLE_RATE: int = 48000
 """Sink delivers mono int16 at Discord's native rate."""
 
@@ -41,8 +51,13 @@ _VAD_SAMPLE_RATE: int = 16000
 class _UserState:
     """Per-user resampler + VAD + streaming accumulator."""
 
-    def __init__(self, hop_samples: int, hangover_frames: int) -> None:
-        self.vad = TenVad()
+    def __init__(
+        self,
+        hop_samples: int,
+        hangover_frames: int,
+        threshold: float,
+    ) -> None:
+        self.vad = TenVad(hop_size=hop_samples, threshold=threshold)
         self.resampler = soxr.ResampleStream(
             _DISCORD_SAMPLE_RATE,
             _VAD_SAMPLE_RATE,
@@ -54,6 +69,7 @@ class _UserState:
         self.hangover_frames = hangover_frames
         self.speaking = False
         self.silence_run = 0
+        self.speech_run = 0
 
 
 class TenVadDetector:
@@ -66,7 +82,8 @@ class TenVadDetector:
         on_speech_end: Callable[[int], None],
         hop_samples: int = DEFAULT_HOP_SAMPLES,
         hangover_ms: int = DEFAULT_HANGOVER_MS,
-        threshold: float | None = None,
+        threshold: float = DEFAULT_THRESHOLD,
+        min_speech_frames: int = DEFAULT_MIN_SPEECH_FRAMES,
     ) -> None:
         self._on_speech_start = on_speech_start
         self._on_speech_end = on_speech_end
@@ -75,6 +92,7 @@ class TenVadDetector:
         hop_ms = hop_samples * 1000 // _VAD_SAMPLE_RATE
         self._hangover_frames = max(1, hangover_ms // max(1, hop_ms))
         self._threshold = threshold
+        self._min_speech_frames = max(1, min_speech_frames)
         self._users: dict[int, _UserState] = {}
 
     def feed(self, user_id: int, pcm48_mono: bytes) -> None:
@@ -88,7 +106,11 @@ class TenVadDetector:
 
         state = self._users.get(user_id)
         if state is None:
-            state = _UserState(self._hop_samples, self._hangover_frames)
+            state = _UserState(
+                self._hop_samples,
+                self._hangover_frames,
+                self._threshold,
+            )
             self._users[user_id] = state
 
         samples48 = np.frombuffer(pcm48_mono, dtype=np.int16)
@@ -102,11 +124,12 @@ class TenVadDetector:
         consumed = n_hops * state.hop_samples
         for i in range(n_hops):
             frame = buf[i * state.hop_samples : (i + 1) * state.hop_samples]
-            prob, flag = state.vad.process(frame)
-            is_speech = (
-                prob >= self._threshold if self._threshold is not None else flag == 1
+            prob, _flag = state.vad.process(frame)
+            self._step_state_machine(
+                user_id,
+                state,
+                is_speech=prob >= self._threshold,
             )
-            self._step_state_machine(user_id, state, is_speech=is_speech)
         state.buffer = buf[consumed:].copy()
 
     def _step_state_machine(
@@ -116,17 +139,25 @@ class TenVadDetector:
         *,
         is_speech: bool,
     ) -> None:
-        """Advance one hop of VAD output through the edge-detector."""
+        """Advance one hop of VAD output through the edge-detector.
+
+        ``speech_start`` requires ``min_speech_frames`` consecutive
+        above-threshold hops (attack debounce). ``speech_end`` requires
+        ``hangover_frames`` consecutive below-threshold hops.
+        """
         if is_speech:
-            if not state.speaking:
+            state.silence_run = 0
+            if state.speaking:
+                return
+            state.speech_run += 1
+            if state.speech_run >= self._min_speech_frames:
                 state.speaking = True
-                state.silence_run = 0
+                state.speech_run = 0
                 _logger.debug("ten_vad speech_start user=%s", user_id)
                 self._on_speech_start(user_id)
-            else:
-                state.silence_run = 0
             return
-        # non-speech frame
+        # non-speech frame: drop attack counter, advance hangover if speaking
+        state.speech_run = 0
         if state.speaking:
             state.silence_run += 1
             if state.silence_run >= state.hangover_frames:
