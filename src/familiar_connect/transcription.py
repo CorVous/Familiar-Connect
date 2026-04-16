@@ -27,6 +27,21 @@ DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen"
 DEFAULT_MODEL = "nova-3"
 DEFAULT_LANGUAGE = "en"
 
+DEFAULT_IDLE_FINALIZE_S: float = 0.5
+"""Silence gap before forcing a Deepgram ``Finalize``.
+
+Discord's client-side VAD stops RTP delivery during silence, so
+Deepgram's endpointer never sees the in-stream silence it needs and
+holds the buffered final until the next speech burst. After this many
+seconds of no chunks arriving, the pump sends ``{"type":"Finalize"}``
+to force Deepgram to emit immediately.
+
+Also used as the post-replay cushion in ``_reconnect``: after draining
+the replay buffer and sleeping for the real-time replay duration, an
+additional ``DEFAULT_IDLE_FINALIZE_S`` wait ensures the same silence
+window the endpointer expects in the normal flow.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Transcription result
@@ -297,9 +312,6 @@ class DeepgramTranscriber:
     _RECONNECT_DELAY: float = 1.0  # base delay; first attempt is immediate
     _RECONNECT_BACKOFF_CAP: float = 16.0  # max backoff in seconds
     _KEEPALIVE_INTERVAL: float = 3.0
-    # extra margin on top of real-time replay duration before Finalize,
-    # to absorb server-side processing jitter
-    _FINALIZE_POST_REPLAY_BUFFER_S: float = 0.25
 
     # close codes that indicate a permanent, non-recoverable condition
     # (auth, billing, policy). reconnecting would just fail identically.
@@ -371,9 +383,10 @@ class DeepgramTranscriber:
             # immediately produces a partial covering only the first few
             # chunks the server had time to process. sleep is outside the
             # send_lock so post-reconnect audio can flow through normally.
-            # add a small cushion on top of real-time for server jitter.
+            # DEFAULT_IDLE_FINALIZE_S cushion mirrors the silence window the
+            # endpointer sees in the normal idle-finalize path.
             replay_s = replay_bytes / (self.sample_rate * self.channels * 2)
-            await asyncio.sleep(replay_s + self._FINALIZE_POST_REPLAY_BUFFER_S)
+            await asyncio.sleep(replay_s + DEFAULT_IDLE_FINALIZE_S)
             async with self._send_lock:
                 ws = self._ws
                 if ws is not None and not ws.closed:

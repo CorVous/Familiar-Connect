@@ -12,6 +12,7 @@ import pytest
 
 from familiar_connect.transcription import (
     DEEPGRAM_WS_URL,
+    DEFAULT_IDLE_FINALIZE_S,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DeepgramTranscriber,
@@ -849,7 +850,7 @@ class TestReplayBuffer:
             await original_sleep(0.1)  # let reconnect + drain run
 
             # exactly one sleep ≈ replay duration (0.5 s) + cushion (0.25 s)
-            expected = 0.5 + client._FINALIZE_POST_REPLAY_BUFFER_S
+            expected = 0.5 + DEFAULT_IDLE_FINALIZE_S
             replay_sleeps = [
                 d for d in sleep_calls if expected - 0.05 < d < expected + 0.05
             ]
@@ -881,7 +882,7 @@ class TestReplayBuffer:
             await client.start(queue)
             await client.send_audio(chunk)
             # wait longer than the post-replay cushion so Finalize fires
-            await asyncio.sleep(client._FINALIZE_POST_REPLAY_BUFFER_S + 0.2)
+            await asyncio.sleep(DEFAULT_IDLE_FINALIZE_S + 0.2)
 
             finalize_calls = [
                 c.args[0]
