@@ -354,19 +354,27 @@ class DeepgramTranscriber:
         # queue behind the drain rather than interleaving
         async with self._send_lock:
             chunks_replayed = len(self._replay_buffer)
+            replay_bytes = self._replay_buffer_bytes
             for chunk in self._replay_buffer:
                 with contextlib.suppress(Exception):
                     await self._ws.send_bytes(chunk)
             self._replay_buffer.clear()
             self._replay_buffer_bytes = 0
-            # force Deepgram to emit a transcript for the replayed segment.
-            # without this, audio sits in-flight until the next speech burst
-            # — the VAD-gated pump doesn't send silence, and the burst-replay
-            # arrived too fast for server-side endpointing to trigger.
-            if chunks_replayed:
-                with contextlib.suppress(Exception):
-                    await self._ws.send_json({"type": "Finalize"})
+
         if chunks_replayed:
+            # wait ~replay duration before Finalize so Deepgram can process
+            # the burst. the replay arrives much faster than real-time, and
+            # Finalize emits "what's been transcribed so far" — firing it
+            # immediately produces a partial covering only the first few
+            # chunks the server had time to process. sleep is outside the
+            # send_lock so post-reconnect audio can flow through normally.
+            replay_s = replay_bytes / (self.sample_rate * self.channels * 2)
+            await asyncio.sleep(replay_s)
+            async with self._send_lock:
+                ws = self._ws
+                if ws is not None and not ws.closed:
+                    with contextlib.suppress(Exception):
+                        await ws.send_json({"type": "Finalize"})
             _logger.info(
                 f"{ls.tag('🔁 Replay', ls.C)} "
                 f"{ls.kv('chunks', str(chunks_replayed), vc=ls.LW)}"

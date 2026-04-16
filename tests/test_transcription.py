@@ -722,6 +722,8 @@ class TestReplayBuffer:
     def client(self) -> DeepgramTranscriber:
         t = DeepgramTranscriber(api_key="test-key")
         t._RECONNECT_DELAY = 0.01
+        # suppress keepalive so its sleep() calls don't pollute timing tests
+        t._KEEPALIVE_INTERVAL = 999.0
         return t
 
     def _make_ws_mock(
@@ -807,6 +809,49 @@ class TestReplayBuffer:
             assert call_args.index(chunk_a) < call_args.index(chunk_b)
             # buffer cleared after drain so chunks aren't re-sent on a later drain
             assert len(client._replay_buffer) == 0
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_finalize_delayed_by_replay_duration(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Finalize is delayed by the real-time duration of the replayed audio.
+
+        Deepgram processes incoming audio at ~real-time on its side.
+        Bursting ~1 s of buffered audio in milliseconds then firing
+        Finalize immediately causes Deepgram to emit a partial (only the
+        fraction it had time to process). The delay gives the server
+        time to consume the burst before we force flush.
+        """
+        # 48000 Hz * 1 channel * 2 bytes/sample * 0.5s = 48000 bytes
+        chunk = b"\xaa" * 48000  # exactly 0.5 s of mono 48 kHz linear16
+        ws1 = self._make_ws_mock()
+        ws1.closed = True
+        ws2 = self._make_open_ws_mock()
+        connect_mock = AsyncMock(side_effect=[ws1, ws2])
+
+        sleep_calls: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def _track_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+            await original_sleep(0)
+
+        with (
+            patch.object(client, "_ws_connect", new=connect_mock),
+            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
+        ):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await client.send_audio(chunk)
+            await original_sleep(0.1)  # let reconnect + drain run
+
+            # exactly one sleep close to the replay duration (0.5 s)
+            replay_sleeps = [d for d in sleep_calls if 0.4 < d < 0.6]
+            assert len(replay_sleeps) == 1, (
+                f"expected one ~0.5 s delay before Finalize; got {sleep_calls}"
+            )
 
             await client.stop()
 
