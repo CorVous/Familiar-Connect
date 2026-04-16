@@ -3138,46 +3138,66 @@ class TestOnMessageCancellationHook:
 
 
 class TestShowContext:
-    def test_sends_public_message(self, tmp_path: Path) -> None:
-        """Works without a subscription; short context fits in one followup message."""
+    def test_no_cache_responds_ephemeral(self, tmp_path: Path) -> None:
+        """No cached context → ephemeral error, no defer."""
         familiar = _make_familiar(tmp_path)
         ctx = _make_text_ctx(channel_id=12345)
 
-        fake_msg = MagicMock()
-        fake_msg.author.bot = False
-        fake_msg.author.display_name = "Alice"
-        fake_msg.content = "hello there"
+        asyncio.run(show_context(ctx, familiar))
 
-        async def _history(**_kwargs: object):  # noqa: RUF029
-            yield fake_msg
+        ctx.respond.assert_awaited_once()
+        assert "no context cached" in ctx.respond.call_args[0][0].lower()
+        ctx.defer.assert_not_awaited()
 
-        ctx.channel.history = _history
+    def test_sends_context_md_file(self, tmp_path: Path) -> None:
+        """Cached context → public defer + context.md file attachment."""
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_text_ctx(channel_id=12345)
+        familiar.channel_configs.set_last_context(
+            channel_id=12345,
+            messages=[
+                Message(role="system", content="sys prompt"),
+                Message(role="user", content="hello", name="Alice"),
+            ],
+        )
 
         asyncio.run(show_context(ctx, familiar))
 
         ctx.defer.assert_awaited_once_with(ephemeral=False)
         ctx.followup.send.assert_awaited_once()
-        text: str = ctx.followup.send.call_args[0][0]
-        assert "[0]" in text or "system" in text.lower()
-
-    def test_sends_file_when_large(self, tmp_path: Path) -> None:
-        """Oversized context is delivered as a context.md file attachment."""
-        familiar = _make_familiar(tmp_path)
-        ctx = _make_text_ctx(channel_id=12345)
-
-        fake_msg = MagicMock()
-        fake_msg.author.bot = False
-        fake_msg.author.display_name = "Alice"
-        fake_msg.content = "x" * 5000  # forces oversized output
-
-        async def _history(**_kwargs: object):  # noqa: RUF029
-            yield fake_msg
-
-        ctx.channel.history = _history
-
-        asyncio.run(show_context(ctx, familiar))
-
-        ctx.followup.send.assert_awaited_once()
         call_kwargs = ctx.followup.send.call_args[1]
         assert "file" in call_kwargs
         assert call_kwargs["file"].filename == "context.md"
+
+
+class TestTextResponseCaches:
+    def test_writes_last_context_after_response(self, tmp_path: Path) -> None:
+        """_run_text_response persists the assembled messages via set_last_context."""
+        familiar = _make_familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
+        )
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.id = 12345
+        channel.send = AsyncMock()
+        typing_cm = MagicMock()
+        typing_cm.__aenter__ = AsyncMock(return_value=None)
+        typing_cm.__aexit__ = AsyncMock(return_value=False)
+        channel.typing = MagicMock(return_value=typing_cm)
+
+        asyncio.run(
+            _run_text_response(
+                channel_id=12345,
+                guild_id=999,
+                speaker="Alice",
+                utterance="hello",
+                buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+                familiar=familiar,
+                channel=channel,
+            )
+        )
+
+        cached = familiar.channel_configs.get_last_context(channel_id=12345)
+        assert cached is not None
+        assert len(cached) >= 1
+        assert cached[0].role == "system"

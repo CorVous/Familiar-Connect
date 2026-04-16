@@ -299,6 +299,7 @@ async def _run_voice_response(
             display_tz=familiar.config.display_tz,
         )
         rmeta["message_count"] = len(messages)
+    familiar.channel_configs.set_last_context(channel_id=channel_id, messages=messages)
 
     n_new = len(request.pending_turns) if request.pending_turns else 1
     pending_lines = (
@@ -490,6 +491,9 @@ async def _run_voice_response(
                     depth_inject_role=familiar.config.depth_inject_role,
                     mode=channel_config.mode,
                     display_tz=familiar.config.display_tz,
+                )
+                familiar.channel_configs.set_last_context(
+                    channel_id=channel_id, messages=regen_messages
                 )
                 regen_task = asyncio.create_task(
                     familiar.llm_clients["main_prose"].chat(regen_messages),
@@ -1155,70 +1159,34 @@ async def channel_backdrop(
     await ctx.send_modal(modal)
 
 
-_CONTEXT_CHUNK = 1900  # Discord message limit with headroom
-
-
 async def show_context(
     ctx: discord.ApplicationContext,
     familiar: Familiar,
 ) -> None:
-    """Handle /context — post assembled pipeline context to the channel."""
+    """Handle /context — post the actual last assembled context as a .md file."""
     channel_id = ctx.channel_id
     if channel_id is None:
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
 
+    messages = familiar.channel_configs.get_last_context(channel_id=channel_id)
+    if not messages:
+        await ctx.respond(
+            "No context cached yet \N{EM DASH} I haven't responded in this channel.",
+            ephemeral=True,
+        )
+        return
+
     await ctx.defer(ephemeral=False)
-
-    # find the last non-bot message as the trigger utterance
-    speaker: str | None = None
-    utterance = ""
-    channel = ctx.channel
-    if isinstance(channel, discord.TextChannel | discord.Thread):
-        async for msg in channel.history(limit=10):
-            if not msg.author.bot:
-                raw_name = msg.author.display_name
-                speaker = sanitize_name(raw_name) or raw_name
-                utterance = msg.content
-                break
-
-    channel_config = familiar.channel_configs.get(channel_id=channel_id)
-    request = ContextRequest(
-        familiar_id=familiar.id,
-        channel_id=channel_id,
-        guild_id=ctx.guild_id,
-        speaker=speaker,
-        utterance=utterance,
-        modality=Modality.text,
-        budget_tokens=channel_config.budget_tokens,
-        deadline_s=channel_config.deadline_s,
-    )
-
-    pipeline = familiar.build_pipeline(channel_config)
-    pipeline_output = await pipeline.assemble(
-        request, budget_by_layer=channel_config.budget_by_layer
-    )
-    messages = assemble_chat_messages(
-        pipeline_output,
-        store=familiar.history_store,
-        history_window_size=familiar.config.history_window_size,
-        depth_inject_position=familiar.config.depth_inject_position,
-        depth_inject_role=familiar.config.depth_inject_role,
-        mode=channel_config.mode,
-        display_tz=familiar.config.display_tz,
-    )
 
     blocks: list[str] = []
     for i, m in enumerate(messages):
         header = f"[{i}] {m.role}" + (f" ({m.name})" if m.name else "")
-        blocks.append(f"**{header}**\n```\n{m.content}\n```")
+        blocks.append(f"## {header}\n\n{m.content}")
+    content = "\n\n---\n\n".join(blocks)
 
-    content = "\n\n".join(blocks)
-    if len(content) <= _CONTEXT_CHUNK:
-        await ctx.followup.send(content)
-    else:
-        fp = io.BytesIO(content.encode())
-        await ctx.followup.send(file=discord.File(fp, filename="context.md"))
+    fp = io.BytesIO(content.encode())
+    await ctx.followup.send(file=discord.File(fp, filename="context.md"))
 
 
 # ---------------------------------------------------------------------------
@@ -1301,6 +1269,9 @@ async def _run_text_response(
                 display_tz=familiar.config.display_tz,
             )
             rmeta["message_count"] = len(messages)
+        familiar.channel_configs.set_last_context(
+            channel_id=channel_id, messages=messages
+        )
 
         n_new = len(request.pending_turns) if request.pending_turns else 1
         batch = (

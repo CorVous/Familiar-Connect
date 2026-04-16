@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from familiar_connect.channel_config import ChannelConfigStore
 from familiar_connect.config import ChannelMode, CharacterConfig
+from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -222,3 +223,52 @@ class TestSetModePreservation:
 
         cfg = store.get(channel_id=7)
         assert cfg.channel_name == "general"
+
+
+# ---------------------------------------------------------------------------
+# last_context cache
+# ---------------------------------------------------------------------------
+
+
+class TestLastContext:
+    def test_roundtrip(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(root=tmp_path, character=CharacterConfig())
+        msgs = [
+            Message(role="system", content="sys"),
+            Message(role="user", content="hi", name="Alice"),
+            Message(role="assistant", content="hello"),
+        ]
+        store.set_last_context(channel_id=1, messages=msgs)
+        assert store.get_last_context(channel_id=1) == msgs
+
+    def test_preserves_mode_and_backdrop(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(root=tmp_path, character=CharacterConfig())
+        store.set_mode(channel_id=1, mode=ChannelMode.text_conversation_rp)
+        store.set_backdrop(channel_id=1, backdrop="a backdrop")
+        store.set_last_context(
+            channel_id=1, messages=[Message(role="system", content="sys")]
+        )
+        cfg = store.get(channel_id=1)
+        assert cfg.mode is ChannelMode.text_conversation_rp
+        assert cfg.backdrop_override == "a backdrop"
+
+    def test_empty_when_no_sidecar(self, tmp_path: Path) -> None:
+        store = ChannelConfigStore(root=tmp_path, character=CharacterConfig())
+        assert store.get_last_context(channel_id=99) is None
+
+    def test_last_context_trails_other_tables(self, tmp_path: Path) -> None:
+        """[[last_context]] must appear after [typing_simulation] in toml."""
+        store = ChannelConfigStore(root=tmp_path, character=CharacterConfig())
+        store.set_mode(channel_id=1, mode=ChannelMode.full_rp)
+        store.set_last_context(
+            channel_id=1, messages=[Message(role="system", content="x")]
+        )
+        sidecar = tmp_path / "1.toml"
+        text = sidecar.read_text()
+        ts_pos = (
+            text.find("[typing_simulation]") if "[typing_simulation]" in text else -1
+        )
+        lc_pos = text.find("[[last_context]]")
+        # if typing_simulation table is present, last_context must come after it
+        if ts_pos != -1:
+            assert lc_pos > ts_pos

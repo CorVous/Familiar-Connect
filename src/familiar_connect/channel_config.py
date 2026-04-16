@@ -29,6 +29,7 @@ from familiar_connect.config import (
     channel_config_for_mode,
     load_channel_config,
 )
+from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -130,6 +131,42 @@ class ChannelConfigStore:
         """Return current ``backdrop_override`` or ``None`` if unset."""
         return self.get(channel_id=channel_id).backdrop_override
 
+    def set_last_context(
+        self,
+        *,
+        channel_id: int,
+        messages: list[Message],
+    ) -> None:
+        """Persist *messages* as the channel's last assembled context."""
+        sidecar = self._sidecar_path(channel_id)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        existing = self._read_raw(sidecar)
+        if "mode" not in existing:
+            existing["mode"] = self._character.default_mode.value
+        existing["last_context"] = [
+            {
+                "role": m.role,
+                **({"name": m.name} if m.name else {}),
+                "content": m.content,
+            }
+            for m in messages
+        ]
+        self._write_sidecar(sidecar, existing)
+
+    def get_last_context(self, *, channel_id: int) -> list[Message] | None:
+        """Return cached messages, or ``None`` if no cache exists."""
+        sidecar = self._sidecar_path(channel_id)
+        if not sidecar.exists():
+            return None
+        raw = self._read_raw(sidecar)
+        entries = raw.get("last_context")
+        if not entries:
+            return None
+        return [
+            Message(role=e["role"], content=e["content"], name=e.get("name"))
+            for e in entries
+        ]
+
     def _fallback_for_mode(self, mode: ChannelMode) -> ChannelConfig:
         """Per-mode baseline with character-level ``typing_simulation`` applied."""
         base = channel_config_for_mode(mode)
@@ -162,14 +199,16 @@ class ChannelConfigStore:
         """Serialize *data* with canonical top-level key order.
 
         ``channel_name`` first (human-readable header), then ``mode``,
-        then ``backdrop``, then any other scalars, then tables (which
-        ``tomli_w`` always emits after scalars).
+        then ``backdrop``, then any other scalars/tables, then
+        ``last_context`` (large array-of-tables) always last.
         """
         preferred = ("channel_name", "mode", "backdrop")
         ordered: dict = {k: data[k] for k in preferred if k in data}
         for k, v in data.items():
-            if k not in ordered:
+            if k not in ordered and k != "last_context":
                 ordered[k] = v
+        if "last_context" in data:
+            ordered["last_context"] = data["last_context"]
         sidecar.write_bytes(tomli_w.dumps(ordered).encode())
 
     def _sidecar_path(self, channel_id: int) -> Path:

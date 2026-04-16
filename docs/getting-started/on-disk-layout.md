@@ -70,6 +70,29 @@ Threads and forum posts each get their own sidecar keyed by the thread id. The
 `channel_name` field is written as `#general -> brainstorm` so the
 file can be found by name when browsing `channels/` directly.
 
+### Last-context cache
+
+After every LLM response the bot appends a `[[last_context]]` array-of-tables
+to the sidecar, storing the exact `list[Message]` that was sent to the model:
+
+```toml
+[[last_context]]
+role = "system"
+content = """..."""
+
+[[last_context]]
+role = "user"
+name = "Alice"
+content = "hello"
+
+[[last_context]]
+role = "assistant"
+content = "Hello! How can I help?"
+```
+
+This is the data source for the `/context` slash command. It is written and
+managed entirely by the bot — do not edit it by hand.
+
 ## Example `character.toml`
 
 ```toml
