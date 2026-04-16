@@ -1029,10 +1029,10 @@ def _make_backdrop_modal(
                 required=False,
                 max_length=4000,
             )
-            # py-cord's _generate_underlying collapses ``required=False`` to
-            # ``None`` via ``False or self.required``; Discord then treats the
-            # field as required. Set the underlying flag directly so an empty
-            # submission (clearing the backdrop by deleting the text) works.
+            # py-cord 2.7.1 bug: _generate_underlying collapses
+            # ``required=False`` to ``None`` via ``False or self.required``;
+            # Discord treats ``null`` as required. Post-set to work around.
+            # Drop this line once py-cord ships the fix.
             field.required = False
             self.add_item(field)
 
