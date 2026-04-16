@@ -158,20 +158,35 @@ Delivered in one commit on top of step 10:
 
 Module: `familiar_connect.context.providers.content_search`.
 
-A small tool-using cheap-model loop scoped to a single familiar's `MemoryStore`. Tools registered with the cheap model on each call:
+A multi-tier provider scoped to a single familiar's `MemoryStore`. Each `contribute()` call runs the tiers in order and returns all emitted Contributions.
 
-- `list_dir(path)` → list of files and subdirectories.
-- `glob(pattern)` → paths matching a glob.
-- `grep(pattern, path="")` → matches with surrounding context.
-- `read_file(path)` → file contents.
+### Tier 1 — Deterministic people lookup
 
-**Loop** — up to K tool-call turns (default 3), hard deadline. The final turn is forced to a "no more tools; emit `ANSWER:` now with whatever you've seen" prompt so the provider returns a best-effort partial instead of nothing when the model would otherwise keep tool-calling.
+No LLM involvement. Runs first. For every `contribute()` call:
 
-**Redundant-call bail-out** — if the model repeats a `grep`/`read_file` arg pair already seen this turn, the loop jumps straight to the forced-answer turn rather than waste another iteration.
+- If `people/<slug(speaker)>.md` exists, load it verbatim.
+- Enumerate `people/*.md`, reverse-match each stem against utterance tokens (single-token stems match whole lowercase words; hyphenated stems match as space-separated phrases). Forward-match capitalized mid-sentence words as an additional candidate pass.
+- Each loaded file is truncated to ~800 tokens. Emitted at priority 85 with source `content_search.people`.
 
-**Output** — a single `Contribution(layer=Layer.content, ...)` with the concatenated snippets and the file paths they came from as `source`.
+This tier is the correctness floor — the people-file guarantee documented in [Memory → People lookup guarantee](memory.md#people-lookup-guarantee). It runs regardless of whether the agent-loop tier succeeds, fails, or returns empty.
 
-**Logging** — every tool call is written to a per-turn trace log so "why did the bot say X" has a reproducible answer.
+### Tier 2 — Embedding retrieval
+
+Optional semantic retrieval over the SQLite embedding cache (see [Memory → Derived indices](memory.md#derived-indices)). Embeds the utterance via `fastembed` / ONNX and returns the top-K chunks by cosine similarity. Chunks whose `rel_path` was already loaded by tier 1 are excluded so the filter doesn't see duplicates.
+
+The embedding index is built (or refreshed) as a fire-and-forget background task on the first `contribute()` call. A stale or missing index returns `[]` — tier 1 is the correctness floor.
+
+### Tier 3 — Single-shot filter
+
+One cheap-LLM call with the utterance, the top-K retrieved snippets (≤150 tokens each), and a note about which people files tier 1 already included. The model emits one of:
+
+- `ANSWER: <merged context>` — forwarded to the main model.
+- `ANSWER:` (empty) — nothing worth forwarding.
+- `ESCALATE: <reason>; GREP: <pattern>` — the filter runs one `store.grep(pattern)` call, feeds the results back in a second forced-answer prompt, and surfaces whatever the model says. 2 LLM calls max.
+
+**Output** — up to one `Contribution(layer=Layer.content, ...)` at priority 70 and source `content_search.rag`.
+
+**Graceful failure** — if the filter or the retriever raises, the deterministic tier's contributions are still returned.
 
 **Deterministic mode for tests** — the cheap model client is injectable so tests can substitute a scripted responder.
 
@@ -200,7 +215,7 @@ Both are **off by default for voice** (to protect TTFB) and **on by default for 
 
 Tracked so they don't sneak back in mid-implementation.
 
-- **Vector retrieval of any kind.** No `sqlite-vec`, no embedding API calls, no chunking strategy. Vector search becomes a *tool* the same `ContentSearchProvider` agent can call, added later, only if measurements show `grep` getting too slow.
+- **Any third-party vector store or embedding API.** Vector retrieval ships locally via `fastembed`/ONNX and a SQLite `.index/embeddings.sqlite` — see [Memory → Derived indices](memory.md#derived-indices).
 - **Any SillyTavern keyword/World Info runtime.** Imports flatten to Markdown; there is no keyword walker.
 - **Plugin discovery / dynamic loading.** Providers and processors are registered in code at startup.
 - **Cross-familiar shared memory.** Each familiar's memory directory is isolated; two familiars never see each other's memories.

@@ -21,6 +21,8 @@ dependencies = [
     "soxr >= 0.5, < 2",
     "numpy >= 2, < 3",
     "colorama>=0.4.6",
+    # local ONNX embeddings for ContentSearchProvider tier 2 — no third-party API
+    "fastembed >= 0.4, < 1",
 ]
 
 [project.scripts]

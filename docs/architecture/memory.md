@@ -138,14 +138,24 @@ Two patterns, in descending order of preference:
 
 ## Reading from memory
 
-Reads happen through `ContentSearchProvider` (see [Context pipeline](context-pipeline.md#8-contentsearchprovider)). The provider gives a cheap tool-using model a deadline-bounded loop with these tools scoped to the familiar's `MemoryStore`:
+Reads happen through `ContentSearchProvider` (see [Context pipeline](context-pipeline.md#8-contentsearchprovider)), which stacks three tiers:
 
-- `list_dir(path)`
-- `glob(pattern)`
-- `grep(pattern, path="")`
-- `read_file(path)`
+1. **Deterministic people lookup** — always runs first, no LLM. See [People lookup guarantee](#people-lookup-guarantee) below.
+2. **Embedding retrieval** — local fastembed/ONNX against the SQLite cache under `.index/embeddings.sqlite`. Feeds the top-K chunks to tier 3.
+3. **Single-shot filter** — one cheap-LLM call (with optional single grep escalation, 2 calls max) selecting what to forward to the main model.
 
-The model's job is to find and return the snippets of memory that are actually relevant to the current turn. The provider's job is to run that loop within a deadline, log the tool calls for debuggability, and emit the result as a single `Contribution` that the budgeter can place in the system prompt.
+The provider's job is to run all three tiers within a deadline, log decisions for debuggability, and emit the collected `Contribution`s for the budgeter to place in the system prompt.
+
+### People lookup guarantee
+
+Before tier 2/3 run, `ContentSearchProvider` always loads a fixed set of `people/*.md` files into `Layer.content`:
+
+- **Speaker's file.** If `people/<slug(request.speaker)>.md` exists, include it verbatim. The slug convention mirrors `memory/writer.py` exactly — lowercase, non-alphanumerics collapsed to single dashes, trimmed.
+- **Mentioned-name files.** For every `people/<stem>.md` in the store, check whether `<stem>` appears in the utterance. Single-token stems match as whole lowercase words (`"alice"` in `"tell me about alice"`). Hyphenated stems also reverse-match space-separated phrases (`people/bob-the-builder.md` ← `"where is bob the builder?"`). Capitalized mid-sentence words are an additional forward-match pass — `"Jane"` → slug `"jane"` → loaded if `people/jane.md` exists.
+
+Each loaded file is truncated to ~800 tokens before emission. The tier emits at priority 85 (between `CharacterProvider` at 100 and the filter tier at 70), with source `content_search.people`. On total-content overflow, the speaker's file is kept and utterance-order tail entries are dropped first.
+
+This tier runs regardless of tier-2/3 behaviour. Even if the filter emits an empty `ANSWER:`, the retriever returns nothing, or either raises, people files are still surfaced — the familiar does not forget someone it has notes on.
 
 ## `MemoryStore` API
 
@@ -166,12 +176,42 @@ API (all synchronous file I/O — these are small text files on local disk):
 
 **Audit log** — every write is logged (file, length, source) so "when did the bot's beliefs about Alice change" has a reproducible answer.
 
+## Derived indices
+
+Markdown is the source of truth. Any index built from it is a regenerable cache — deletable at any time, rebuilt from scratch on the next startup. Indices live under `memory/.index/` and that directory is automatically added to `memory/.gitignore` on first write.
+
+Currently materialised:
+
+- **`memory/.index/embeddings.sqlite`** — SQLite database populated by `ContentSearchProvider`'s embedding retriever (tier 2). Schema: one row per chunk holding the `heading_path`, `char_start`/`char_end`, `token_count`, `text`, and a 384-float `vector` column (little-endian `float32` BLOB, L2-normalised at write time so query is a plain dot product). A separate `documents` table keyed by `rel_path` tracks `mtime` so rebuilds only re-embed changed files.
+
+### Chunking convention
+
+When authoring memory files, write with H2-scoped sections so chunking cleanly follows topic boundaries:
+
+- Files under ~300 words are kept as a single whole-file chunk — fine for short people notes or a two-paragraph topic entry.
+- Longer files are sliced per H2 section, with the file's H1 + the H2 heading prepended to the embedding input. A preamble before the first H2 becomes its own chunk tagged with just the H1.
+- H2 sections over ~1200 tokens are further split into 800-token sliding windows with 200-token overlap, so a sentence near a boundary is never orphaned.
+
+### Embedding model
+
+The production model is **`BAAI/bge-small-en-v1.5`** (384-dim, ~68 MB INT8-quantised ONNX), loaded via [`fastembed`](https://github.com/qdrant/fastembed) on CPU. Total on-disk footprint including `fastembed` + its transitive deps (`onnxruntime`, `numpy`, `tokenizers`, `huggingface_hub`, `sympy`, `pillow`) is ~370 MB.
+
+**No third-party API calls.** On first run the model weights are fetched from HuggingFace and cached under `~/.cache/fastembed/` (override via `FASTEMBED_CACHE_PATH`). Every subsequent run is fully offline. Air-gapped deployments can pre-seed the cache directory.
+
+Model swap path: to upgrade to `BAAI/bge-base-en-v1.5` (768-dim, ~215 MB, +1.4 MTEB points), change the config key and delete `memory/.index/embeddings.sqlite`. The next startup rebuilds against the new model.
+
+### Rebuild freshness
+
+- **On startup** — `EmbeddingIndex.build_if_stale(store, model)` compares each `(rel_path, mtime)` against the `documents` table. Unchanged files are skipped; changed files are re-embedded transactionally (delete old chunks, insert new) in batches of 32 so ONNX session overhead is amortised. Vanished files are purged.
+- **On write** — the memory store is wrapped in an `IndexingMemoryStore` decorator that emits a `rel_path` event on every `write_file` / `append_file`; a background async worker drains the queue and re-embeds each dirty file. The plain `MemoryStore` itself stays index-agnostic.
+
+Because the deterministic people-lookup tier is the correctness floor, retrieval tolerates a missing or partially-built index — the retriever returns `[]`, the filter LLM falls back on just the speaker/mentioned-name files and its own tools.
+
 ## Future add-ons
 
 All optional enhancements on top of the "just text" baseline. None of them change the storage format.
 
 - **Graph traversal via Markdown links.** A tool (`follow_links(path)`) that the search agent can use to walk from a file to everything it links to, without having to `grep` for the link.
-- **Vector index as a second search tool.** If and only if measurements show `grep` getting too slow on large directories, add a `semantic_search(query, k)` tool backed by a local embedding model (e.g. `sentence-transformers`) and a simple on-disk or SQLite vector table. Grep remains the default.
 - **Housekeeping passes.** Cheap-model jobs that scan the directory for duplicate entries, conflicting information, stale beliefs, or notes ready to be promoted to their own files. They propose edits; a human reviews.
 - **Per-user personas as first-class people files.** A convention where a Discord user id maps to a `people/<user_id>.md` file.
 - **Markdown-link-aware duplicate detection.** The housekeeping pass notices two files that claim to be about the same person but aren't linked to each other, and flags them for merging.
