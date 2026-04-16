@@ -37,6 +37,7 @@ from familiar_connect.bot import (
     _make_backdrop_modal,
     _run_text_response,
     _run_voice_response,
+    channel_backdrop,
     create_bot,
     dispatch_interruption_regen,
     on_message,
@@ -825,7 +826,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "#general › feature-brainstorm (thread)"
+        assert label == "#general -> feature-brainstorm (thread)"
 
     def test_subscribe_text_in_forum_post_records_forum_context(
         self, tmp_path: Path
@@ -839,7 +840,7 @@ class TestSubscriptionCommands:
         asyncio.run(subscribe_text(ctx, familiar))
 
         label = familiar.monitor.format_channel_context(77)
-        assert label == "forum:announcements › feature-brainstorm (forum post)"
+        assert label == "forum:announcements -> feature-brainstorm (forum post)"
 
     def test_subscribe_text_in_thread_rejects_without_send_perm(
         self, tmp_path: Path
@@ -1255,6 +1256,40 @@ class TestBackdropModalRequiredFlag:
         field = modal.children[0]
         assert field.required is False
         assert field._underlying.to_dict()["required"] is False
+
+
+# ---------------------------------------------------------------------------
+# /channel-backdrop in a thread writes a labelled channel_name to the sidecar
+# ---------------------------------------------------------------------------
+
+
+class TestChannelBackdropInThread:
+    @pytest.mark.asyncio
+    async def test_backdrop_in_thread_writes_labelled_channel_name(
+        self, tmp_path: Path
+    ) -> None:
+        """Sidecar ``channel_name`` shows ``#parent -> thread (thread)`` label.
+
+        Guards that ``channel_backdrop`` → modal callback writes the
+        human-readable label rather than the raw integer thread id.
+        """
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_thread_ctx(channel_id=77, parent_name="general")
+        ctx.send_modal = AsyncMock()
+
+        await channel_backdrop(ctx, familiar)
+
+        modal = ctx.send_modal.call_args[0][0]
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+        modal.children[0].value = "Speak like a wizard."
+        await modal.callback(interaction)
+
+        sidecar = familiar.root / "channels" / "77.toml"
+        assert sidecar.exists()
+        cfg = familiar.channel_configs.get(channel_id=77)
+        assert cfg.channel_name == "#general -> feature-brainstorm (thread)"
 
 
 # ---------------------------------------------------------------------------

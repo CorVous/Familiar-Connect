@@ -66,6 +66,10 @@ Keep it to two sentences.
 Switching modes with `/channel-full-rp` and siblings now preserves any
 `backdrop` (and `[typing_simulation]` block) that was already in the sidecar.
 
+Threads and forum posts each get their own sidecar keyed by the thread id. The
+`channel_name` field is written as `#general -> brainstorm (thread)` so the
+file can be found by name when browsing `channels/` directly.
+
 ## Example `character.toml`
 
 ```toml

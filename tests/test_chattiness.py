@@ -942,7 +942,7 @@ class TestChannelContext:
         )
         assert (
             monitor.format_channel_context(42)
-            == "#general › feature-brainstorm (thread)"
+            == "#general -> feature-brainstorm (thread)"
         )
 
     def test_format_forum_post(self) -> None:
@@ -955,7 +955,7 @@ class TestChannelContext:
         )
         assert (
             monitor.format_channel_context(42)
-            == "forum:announcements › hotfix-rollout (forum post)"
+            == "forum:announcements -> hotfix-rollout (forum post)"
         )
 
     def test_register_channel_name_back_compat(self) -> None:

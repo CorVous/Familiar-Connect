@@ -185,6 +185,8 @@ enabled = false
 
 Existing sidecars without `backdrop` or `channel_name` continue to work unchanged. Switching modes with `/channel-full-rp` (and siblings) now preserves any `backdrop` and `channel_name` that was already set.
 
+Threads and forum posts each get their own sidecar keyed by the thread's id. The `channel_name` field is written as `#general -> brainstorm (thread)` (or `forum:announcements -> post (forum post)`) so the file is identifiable when browsing `channels/` by hand.
+
 **Why TOML:** human-and-machine-readable, matching the memory directory's plain-text principle. A user can edit their character's config in any text editor; the bot loads it on startup or on the next mutation. No schema migrations, no opaque blob format.
 
 **Why filesystem and not SQLite:** see [Design decisions](decisions.md) for the broader local-first principle. Per-character config is the kind of thing a user might want to back up, share, or version-control on their own; a filesystem layout makes that trivial.

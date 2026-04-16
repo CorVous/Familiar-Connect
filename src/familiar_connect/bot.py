@@ -21,7 +21,12 @@ import discord
 import httpx
 
 from familiar_connect import log_style as ls
-from familiar_connect.chattiness import BufferedMessage, ChannelKind, ResponseTrigger
+from familiar_connect.chattiness import (
+    BufferedMessage,
+    ChannelContext,
+    ChannelKind,
+    ResponseTrigger,
+)
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.providers.mode_instructions import resolve_mode_default
 from familiar_connect.context.render import assemble_chat_messages
@@ -70,6 +75,35 @@ async def _recording_finished_callback(  # noqa: RUF029
     py-cord awaits this internally; cleanup lives in :func:`unsubscribe_voice`.
     """
     del sink, args
+
+
+def _refresh_channel_context(
+    familiar: Familiar,
+    channel: discord.TextChannel | discord.Thread,
+) -> ChannelContext:
+    """Register channel into the monitor from a live Discord object.
+
+    Centralises the Thread/ForumChannel isinstance dance so
+    subscribe / on_message / slash-command call sites don't drift.
+    Returns the freshly-stored :class:`ChannelContext`.
+    """
+    name = getattr(channel, "name", str(channel.id))
+    if isinstance(channel, discord.Thread):
+        parent = channel.parent
+        parent_name = getattr(parent, "name", None)
+        kind: ChannelKind = (
+            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+        )
+    else:
+        parent_name = None
+        kind = "text"
+    familiar.monitor.register_channel_context(
+        channel.id,
+        name=name,
+        kind=kind,
+        parent_name=parent_name,
+    )
+    return ChannelContext(name=name, kind=kind, parent_name=parent_name)
 
 
 # ---------------------------------------------------------------------------
@@ -127,21 +161,9 @@ async def subscribe_text(
         kind=SubscriptionKind.text,
         guild_id=ctx.guild_id,
     )
-    name = getattr(channel, "name", str(channel_id))
-    parent = getattr(channel, "parent", None) if is_thread else None
-    parent_name = getattr(parent, "name", None)
-    if is_thread:
-        kind: ChannelKind = (
-            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-        )
-    else:
-        kind = "text"
-    familiar.monitor.register_channel_context(
-        channel_id,
-        name=name,
-        kind=kind,
-        parent_name=parent_name,
-    )
+    ctx_info = _refresh_channel_context(familiar, channel)
+    kind = ctx_info.kind
+    name = ctx_info.name
 
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
     if channel_config:
@@ -1032,7 +1054,7 @@ async def set_channel_mode(
     familiar.channel_configs.set_mode(channel_id=channel_id, mode=mode)
     _logger.info(
         f"{ls.tag('Config', ls.W)} "
-        f"{ls.kv('channel', str(channel_id))} "
+        f"{ls.kv('channel', familiar.monitor.format_channel_context(channel_id))} "
         f"{ls.kv('mode', mode.value)}"
     )
     await ctx.respond(f"Channel mode set to **{mode.value}**.", ephemeral=True)
@@ -1087,9 +1109,10 @@ def _make_backdrop_modal(
                 backdrop=text,
                 channel_name=channel_name,
             )
+            label = familiar.monitor.format_channel_context(channel_id)
             _logger.info(
                 f"{ls.tag('Config', ls.W)} "
-                f"{ls.kv('channel', str(channel_id))} "
+                f"{ls.kv('channel', label)} "
                 f"{ls.kv('action', 'backdrop_set')}"
             )
             stripped = text.strip()
@@ -1115,7 +1138,10 @@ async def channel_backdrop(
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
 
-    channel_name = getattr(ctx.channel, "name", str(channel_id))
+    channel = ctx.channel
+    if isinstance(channel, discord.TextChannel | discord.Thread):
+        _refresh_channel_context(familiar, channel)
+    channel_name = familiar.monitor.format_channel_context(channel_id)
     current = familiar.channel_configs.get_backdrop(channel_id=channel_id)
     channel_cfg = familiar.channel_configs.get(channel_id=channel_id)
     mode_default = resolve_mode_default(
@@ -1228,9 +1254,10 @@ async def _run_text_response(
         hist = (
             f"  {ls.word(ls.trunc(last_hist_text), ls.LW)}\n" if last_hist_text else ""
         )
+        ch_label = familiar.monitor.format_channel_context(channel_id)
         _logger.info(
             f"{ls.tag('🧠 Generating Text', ls.G)} "
-            f"{ls.kv('channel', str(channel_id), vc=ls.LG)} "
+            f"{ls.kv('channel', ch_label, vc=ls.LG)} "
             f"{ls.kv('messages', str(len(messages)), vc=ls.LG)} "
             f"{ls.kv('new', str(n_new), vc=ls.LG)}\n"
             f"{hist}"
@@ -1410,26 +1437,8 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
     # refresh channel context each message so renames propagate and
     # subscriptions loaded from disk at startup pick up a label.
     msg_channel = message.channel
-    channel_name = getattr(msg_channel, "name", None)
-    if channel_name is not None:
-        if isinstance(msg_channel, discord.Thread):
-            parent = msg_channel.parent
-            parent_name = getattr(parent, "name", None)
-            kind: ChannelKind = (
-                "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-            )
-            familiar.monitor.register_channel_context(
-                channel_id,
-                name=channel_name,
-                kind=kind,
-                parent_name=parent_name,
-            )
-        elif isinstance(msg_channel, discord.TextChannel):
-            familiar.monitor.register_channel_context(
-                channel_id,
-                name=channel_name,
-                kind="text",
-            )
+    if isinstance(msg_channel, discord.TextChannel | discord.Thread):
+        _refresh_channel_context(familiar, msg_channel)
 
     bot_user = familiar.extras.get("bot_user")
     is_mention = (
