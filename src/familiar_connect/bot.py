@@ -1494,6 +1494,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
             bool,
             description="Remove the existing backdrop and revert to the mode default",
             default=False,
+            required=False,
         ),
     ) -> None:
         await channel_backdrop(ctx, familiar, clear=clear)
