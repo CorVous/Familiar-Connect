@@ -1177,8 +1177,21 @@ async def context_command(
         return
     entry = familiar.last_context_cache.get(channel_id=channel_id)
     if entry is None:
+        label = familiar.monitor.format_channel_context(channel_id)
+        _logger.info(
+            f"{ls.tag('Context', ls.W)} "
+            f"{ls.word(label, ls.C)} "
+            f"{ls.kv('action', 'context_miss')}"
+        )
         await ctx.respond("No context cached for this channel yet.", ephemeral=True)
         return
+    label = familiar.monitor.format_channel_context(channel_id)
+    _logger.info(
+        f"{ls.tag('Context', ls.W)} "
+        f"{ls.word(label, ls.C)} "
+        f"{ls.kv('modality', entry.modality)} "
+        f"{ls.kv('messages', str(len(entry.messages)), vc=ls.LG)}"
+    )
     md = render_markdown(entry).encode("utf-8")
     await ctx.respond(file=discord.File(io.BytesIO(md), filename="context.md"))
 
