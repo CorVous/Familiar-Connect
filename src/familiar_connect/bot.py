@@ -253,10 +253,10 @@ async def _run_voice_response(
     )
     hist = f"  {ls.word(ls.trunc(last_hist), ls.LW)}\n" if last_hist else ""
     _logger.info(
-        f"{ls.tag('🧠 LLM Voice', ls.B)} "
-        f"{ls.kv('channel', str(channel_id), vc=ls.LB)} "
-        f"{ls.kv('messages', str(len(messages)), vc=ls.LB)} "
-        f"{ls.kv('new', str(n_new), vc=ls.LB)}\n"
+        f"{ls.tag('🧠 LLM Voice', ls.G)} "
+        f"{ls.kv('channel', str(channel_id), vc=ls.LG)} "
+        f"{ls.kv('messages', str(len(messages)), vc=ls.LG)} "
+        f"{ls.kv('new', str(n_new), vc=ls.LG)}\n"
         f"{hist}"
         f"{ls.word(pending_lines, ls.LW)}"
     )
