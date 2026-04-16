@@ -262,11 +262,11 @@ class TestLoadCharacterConfig:
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            '[tts]\nvoice_id = "user-voice"\nmodel = "sonic-4"\n',
+            '[tts]\ncartesia_voice_id = "user-voice"\ncartesia_model = "sonic-4"\n',
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.tts.voice_id == "user-voice"
-        assert cfg.tts.model == "sonic-4"
+        assert cfg.tts.cartesia_voice_id == "user-voice"
+        assert cfg.tts.cartesia_model == "sonic-4"
 
     def test_defaults_populate_every_llm_slot(
         self,

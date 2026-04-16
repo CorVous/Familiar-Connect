@@ -1,21 +1,25 @@
-"""Tests for the Cartesia TTS client (streaming WebSocket, word timestamps)."""
+"""Tests for TTS clients: Cartesia (WebSocket) and Azure (Speech SDK)."""
 
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
 from typing import Any
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import aiohttp
 import pytest
 
+from familiar_connect.config import DEFAULT_AZURE_TTS_VOICE, TTSConfig
 from familiar_connect.tts import (
     CARTESIA_API_VERSION,
     CARTESIA_BASE_URL,
     CARTESIA_WS_URL,
+    DEFAULT_AZURE_VOICE,
     DEFAULT_SAMPLE_RATE,
+    AzureTTSClient,
     CartesiaTTSClient,
     TTSResult,
     WordTimestamp,
@@ -333,34 +337,280 @@ class TestCartesiaTTSClientSynthesize:
 # ---------------------------------------------------------------------------
 
 
-class TestCreateTTSClient:
-    def test_creates_client_from_character_config(self) -> None:
+class TestCreateTTSClientCartesia:
+    def test_creates_client_from_tts_config(self) -> None:
+        cfg = TTSConfig(
+            provider="cartesia",
+            cartesia_voice_id="some-voice-uuid",
+            cartesia_model="sonic-turbo",
+        )
         with patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}):
-            client = create_tts_client(
-                voice_id="some-voice-uuid",
-                model="sonic-turbo",
-            )
+            client = create_tts_client(cfg)
+        assert isinstance(client, CartesiaTTSClient)
         assert client.api_key == "sk-cart-test-abc"
         assert client.voice_id == "some-voice-uuid"
         assert client.model == "sonic-turbo"
 
     def test_raises_when_api_key_missing(self) -> None:
+        cfg = TTSConfig(provider="cartesia", cartesia_voice_id="v", cartesia_model="m")
         with (
             patch.dict(os.environ, {}, clear=True),
             pytest.raises(ValueError, match=r"CARTESIA_API_KEY"),
         ):
-            create_tts_client(voice_id="v", model="m")
+            create_tts_client(cfg)
 
     def test_raises_when_voice_id_empty(self) -> None:
+        cfg = TTSConfig(
+            provider="cartesia", cartesia_voice_id="", cartesia_model="sonic-3"
+        )
         with (
             patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}),
             pytest.raises(ValueError, match=r"voice_id"),
         ):
-            create_tts_client(voice_id="", model="sonic-3")
+            create_tts_client(cfg)
 
     def test_raises_when_model_empty(self) -> None:
+        cfg = TTSConfig(
+            provider="cartesia", cartesia_voice_id="some-voice", cartesia_model=""
+        )
         with (
             patch.dict(os.environ, {"CARTESIA_API_KEY": "sk-cart-test-abc"}),
             pytest.raises(ValueError, match=r"model"),
         ):
-            create_tts_client(voice_id="some-voice", model="")
+            create_tts_client(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for Azure SDK mocking
+# ---------------------------------------------------------------------------
+
+_AZURE_COMPLETED = object()  # sentinel for ResultReason.SynthesizingAudioCompleted
+
+
+def _make_mock_speechsdk() -> MagicMock:
+    """Return a mock ``azure.cognitiveservices.speech`` module."""
+    sdk = MagicMock(name="speechsdk")
+    sdk.ResultReason.SynthesizingAudioCompleted = _AZURE_COMPLETED
+    sdk.SpeechSynthesisBoundaryType.Word = "Word"
+    return sdk
+
+
+def _make_fake_synth(
+    audio_bytes: bytes,
+    word_events: list[tuple[str, int, datetime.timedelta]],
+    *,
+    fail: bool = False,
+) -> tuple[MagicMock, MagicMock]:
+    """Return ``(mock_sdk, mock_synthesizer)`` for use with ``_make_synthesizer``.
+
+    Each entry in *word_events* is
+    ``(word_text, audio_offset_ticks, duration_timedelta)``.
+    When *fail* is True the result reason is not SynthesizingAudioCompleted.
+    """
+    sdk = _make_mock_speechsdk()
+
+    # Fake result
+    result = MagicMock()
+    result.audio_data = audio_bytes
+    result.reason = _AZURE_COMPLETED if not fail else object()
+
+    # Cancellation details for failure path
+    cancel = MagicMock()
+    cancel.reason = "Error"
+    cancel.error_details = "something went wrong"
+    sdk.CancellationDetails.from_result.return_value = cancel
+
+    # Build boundary event mocks from word_events list
+    boundary_events: list[MagicMock] = []
+    for word_text, offset_ticks, duration_td in word_events:
+        evt = MagicMock()
+        evt.text = word_text
+        evt.audio_offset = offset_ticks
+        evt.duration = duration_td
+        evt.boundary_type = "Word"  # matches sdk.SpeechSynthesisBoundaryType.Word
+        boundary_events.append(evt)
+
+    # Synthesizer: .synthesis_word_boundary.connect(cb) stores cb;
+    # .speak_text_async(text).get() fires stored callbacks then returns result.
+    callbacks: list[Any] = []
+
+    synth = MagicMock()
+    synth.synthesis_word_boundary.connect.side_effect = callbacks.append
+
+    def _get() -> MagicMock:
+        for evt in boundary_events:
+            for cb in callbacks:
+                cb(evt)
+        return result
+
+    synth.speak_text_async.return_value.get.side_effect = _get
+
+    return sdk, synth
+
+
+# ---------------------------------------------------------------------------
+# Azure TTS client
+# ---------------------------------------------------------------------------
+
+
+class TestAzureTTSClientInit:
+    def test_stores_subscription_key(self) -> None:
+        client = AzureTTSClient(subscription_key="sk-az", region="eastus")
+        assert client.subscription_key == "sk-az"
+
+    def test_stores_region(self) -> None:
+        client = AzureTTSClient(subscription_key="sk-az", region="westus2")
+        assert client.region == "westus2"
+
+    def test_default_voice_is_amber_neural(self) -> None:
+        client = AzureTTSClient(subscription_key="sk-az", region="eastus")
+        assert client.voice_name == DEFAULT_AZURE_VOICE
+        assert client.voice_name == DEFAULT_AZURE_TTS_VOICE
+
+    def test_custom_voice_stored(self) -> None:
+        client = AzureTTSClient(
+            subscription_key="k",
+            region="r",
+            voice_name="en-US-JennyNeural",
+        )
+        assert client.voice_name == "en-US-JennyNeural"
+
+    def test_default_sample_rate(self) -> None:
+        client = AzureTTSClient(subscription_key="k", region="r")
+        assert client.sample_rate == DEFAULT_SAMPLE_RATE
+
+
+class TestAzureTTSClientSynthesize:
+    """Tests for _synthesize_sync logic via _make_synthesizer mock."""
+
+    def _client(self) -> AzureTTSClient:
+        return AzureTTSClient(subscription_key="sk-az", region="eastus")
+
+    def test_returns_tts_result_with_audio(self) -> None:
+        pcm = b"\x10\x20\x30\x40"
+        sdk, synth = _make_fake_synth(pcm, [])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            result = client._synthesize_sync("Hello")
+        assert isinstance(result, TTSResult)
+        assert result.audio == pcm
+
+    def test_empty_timestamps_when_no_word_events(self) -> None:
+        sdk, synth = _make_fake_synth(b"\x00", [])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            result = client._synthesize_sync("Hi")
+        assert result.timestamps == []
+
+    def test_word_boundary_ticks_converted_to_ms(self) -> None:
+        # audio_offset=100_000 ticks → 10ms; duration=50ms timedelta → end=60ms
+        events = [
+            ("Hello", 100_000, datetime.timedelta(milliseconds=50)),
+            ("world", 700_000, datetime.timedelta(milliseconds=80)),
+        ]
+        sdk, synth = _make_fake_synth(b"\x00", events)
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            result = client._synthesize_sync("Hello world")
+        assert result.timestamps == [
+            WordTimestamp("Hello", 10.0, 60.0),
+            WordTimestamp("world", 70.0, 150.0),
+        ]
+
+    def test_non_word_boundary_events_skipped(self) -> None:
+        """Punctuation and sentence boundary events must be ignored."""
+        sdk, synth = _make_fake_synth(b"\x00", [])
+        client = self._client()
+
+        # Inject a punctuation event directly by monkeypatching connect
+        punct_evt = MagicMock()
+        punct_evt.text = ","
+        punct_evt.audio_offset = 50_000
+        punct_evt.duration = datetime.timedelta(milliseconds=10)
+        # differs from sdk.SpeechSynthesisBoundaryType.Word
+        punct_evt.boundary_type = "Punctuation"
+
+        captured: list[Any] = []
+        synth.synthesis_word_boundary.connect.side_effect = captured.append
+
+        def _get() -> MagicMock:
+            for cb in captured:
+                cb(punct_evt)
+            r = MagicMock()
+            r.reason = _AZURE_COMPLETED
+            r.audio_data = b"\x00"
+            return r
+
+        synth.speak_text_async.return_value.get.side_effect = _get
+
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            result = client._synthesize_sync("Hello,")
+        assert result.timestamps == []
+
+    def test_raises_runtime_error_on_synthesis_failure(self) -> None:
+        sdk, synth = _make_fake_synth(b"", [], fail=True)
+        client = self._client()
+        with (
+            patch.object(client, "_make_synthesizer", return_value=(sdk, synth)),
+            pytest.raises(RuntimeError, match="Azure TTS"),
+        ):
+            client._synthesize_sync("Hello")
+
+    @pytest.mark.asyncio
+    async def test_synthesize_runs_in_executor(self) -> None:
+        """synthesize() delegates to _synthesize_sync via run_in_executor."""
+        expected = TTSResult(audio=b"\xab\xcd", timestamps=[])
+        client = self._client()
+        with patch.object(
+            client,
+            "_synthesize_sync",
+            return_value=expected,
+        ) as mock_sync:
+            result = await client.synthesize("Hello")
+        assert result is expected
+        mock_sync.assert_called_once_with("Hello")
+
+
+# ---------------------------------------------------------------------------
+# Azure factory
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTTSClientAzure:
+    def test_creates_azure_client(self) -> None:
+        cfg = TTSConfig(provider="azure", azure_voice="en-US-AmberNeural")
+        with patch.dict(
+            os.environ,
+            {"AZURE_SPEECH_KEY": "az-key", "AZURE_SPEECH_REGION": "eastus"},
+        ):
+            client = create_tts_client(cfg)
+        assert isinstance(client, AzureTTSClient)
+        assert client.subscription_key == "az-key"
+        assert client.region == "eastus"
+        assert client.voice_name == "en-US-AmberNeural"
+
+    def test_azure_client_uses_tts_config_voice(self) -> None:
+        cfg = TTSConfig(provider="azure", azure_voice="en-US-JennyNeural")
+        with patch.dict(
+            os.environ,
+            {"AZURE_SPEECH_KEY": "k", "AZURE_SPEECH_REGION": "westus2"},
+        ):
+            client = create_tts_client(cfg)
+        assert isinstance(client, AzureTTSClient)
+        assert client.voice_name == "en-US-JennyNeural"
+
+    def test_raises_when_azure_key_missing(self) -> None:
+        cfg = TTSConfig(provider="azure")
+        with (
+            patch.dict(os.environ, {"AZURE_SPEECH_REGION": "eastus"}, clear=True),
+            pytest.raises(ValueError, match=r"AZURE_SPEECH_KEY"),
+        ):
+            create_tts_client(cfg)
+
+    def test_raises_when_azure_region_missing(self) -> None:
+        cfg = TTSConfig(provider="azure")
+        with (
+            patch.dict(os.environ, {"AZURE_SPEECH_KEY": "k"}, clear=True),
+            pytest.raises(ValueError, match=r"AZURE_SPEECH_REGION"),
+        ):
+            create_tts_client(cfg)
