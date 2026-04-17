@@ -52,8 +52,12 @@ class TestLastContextCache:
         cache.put(channel_id=1, messages=msgs_a, modality="text")
         cache.put(channel_id=2, messages=msgs_b, modality="voice")
 
-        assert cache.get(channel_id=1).messages == msgs_a  # type: ignore[union-attr]
-        assert cache.get(channel_id=2).messages == msgs_b  # type: ignore[union-attr]
+        got_a = cache.get(channel_id=1)
+        got_b = cache.get(channel_id=2)
+        assert got_a is not None
+        assert got_b is not None
+        assert got_a.messages == msgs_a
+        assert got_b.messages == msgs_b
 
     def test_file_is_sibling_json(self, tmp_path: Path) -> None:
         cache = LastContextCache(channels_root=tmp_path)
