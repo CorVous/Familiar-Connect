@@ -95,44 +95,43 @@ def _refresh_channel_context(
     name: str
     kind: ChannelKind
     parent_name: str | None = None
-
-    if isinstance(channel, discord.Thread):
-        name = getattr(channel, "name", str(channel.id))
-        parent = channel.parent
-        parent_name = getattr(parent, "name", None)
-        kind = "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-    elif isinstance(channel, discord.DMChannel):
-        recipient = getattr(channel, "recipient", None)
-        name = getattr(recipient, "display_name", None) or str(channel.id)
-        kind = "dm"
-    elif isinstance(channel, discord.GroupChannel):
-        name = getattr(channel, "name", None) or "Group DM"
-        kind = "group_dm"
-    elif isinstance(channel, discord.StageChannel):
-        name = getattr(channel, "name", str(channel.id))
-        guild = getattr(channel, "guild", None)
-        parent_name = getattr(guild, "name", None)
-        kind = "stage"
-    elif isinstance(channel, discord.VoiceChannel):
-        name = getattr(channel, "name", str(channel.id))
-        guild = getattr(channel, "guild", None)
-        parent_name = getattr(guild, "name", None)
-        kind = "voice"
-    elif isinstance(channel, discord.ForumChannel):
-        name = getattr(channel, "name", str(channel.id))
-        guild = getattr(channel, "guild", None)
-        parent_name = getattr(guild, "name", None)
-        kind = "forum_root"
-    elif isinstance(channel, discord.CategoryChannel):
-        name = getattr(channel, "name", str(channel.id))
-        guild = getattr(channel, "guild", None)
-        parent_name = getattr(guild, "name", None)
-        kind = "category"
-    elif isinstance(channel, discord.TextChannel):
-        name = getattr(channel, "name", str(channel.id))
-        kind = "text"
-    else:
-        return None
+    # order matters: StageChannel subclasses VoiceChannel in py-cord
+    match channel:
+        case discord.Thread():
+            name = getattr(channel, "name", str(channel.id))
+            parent = channel.parent
+            parent_name = getattr(parent, "name", None)
+            kind = (
+                "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+            )
+        case discord.DMChannel():
+            recipient = getattr(channel, "recipient", None)
+            name = getattr(recipient, "display_name", None) or str(channel.id)
+            kind = "dm"
+        case discord.GroupChannel():
+            name = getattr(channel, "name", None) or "Group DM"
+            kind = "group_dm"
+        case discord.StageChannel():
+            name = getattr(channel, "name", str(channel.id))
+            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            kind = "stage"
+        case discord.VoiceChannel():
+            name = getattr(channel, "name", str(channel.id))
+            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            kind = "voice"
+        case discord.ForumChannel():
+            name = getattr(channel, "name", str(channel.id))
+            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            kind = "forum_root"
+        case discord.CategoryChannel():
+            name = getattr(channel, "name", str(channel.id))
+            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            kind = "category"
+        case discord.TextChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "text"
+        case _:
+            return None
 
     familiar.monitor.register_channel_context(
         channel.id,
@@ -198,8 +197,8 @@ async def subscribe_text(
         kind=SubscriptionKind.text,
         guild_id=ctx.guild_id,
     )
-    ctx_info = _refresh_channel_context(familiar, channel)
-    assert ctx_info is not None  # subscribe_text guards TextChannel | Thread above
+    # TextChannel | Thread gate above means refresh always returns a context
+    ctx_info = cast("ChannelContext", _refresh_channel_context(familiar, channel))
     kind = ctx_info.kind
     name = ctx_info.name
 
