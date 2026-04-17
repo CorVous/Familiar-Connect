@@ -3173,13 +3173,13 @@ class TestLastContextCache:
             channel_id=12345, mode=ChannelMode.imitate_voice
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hi",
                 buffer=buffer,
                 familiar=familiar,
@@ -3217,13 +3217,13 @@ class TestContextCommand:
             channel_id=12345, mode=ChannelMode.imitate_voice
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hello",
                 buffer=buffer,
                 familiar=familiar,
