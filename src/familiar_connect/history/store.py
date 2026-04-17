@@ -178,7 +178,7 @@ class HistoryStore:
         # author_* columns. Legacy speaker strings are preserved as
         # ``author_display_name`` with a synthesised ``legacy-discord``
         # platform key so historical turns keep their attribution.
-        # TODO(cleanup): remove this branch + the related legacy test
+        # Cleanup debt: remove this branch + the related legacy test
         # once every live install has been upgraded past the speaker
         # schema. See docs/architecture/memory.md § Legacy history
         # migration.
