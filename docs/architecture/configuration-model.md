@@ -64,6 +64,7 @@ Each slot takes the same shape in `character.toml`:
 [llm.main_prose]
 model       = "z-ai/glm-5.1"
 temperature = 0.7
+providers   = ["anthropic", "google-vertex"]  # optional; left = highest priority
 
 [llm.post_process_style]
 model       = "mistralai/mistral-small-2603"

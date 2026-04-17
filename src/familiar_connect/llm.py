@@ -114,11 +114,13 @@ class LLMClient:
         model: str,
         base_url: str = OPENROUTER_BASE_URL,
         temperature: float | None = None,
+        providers: tuple[str, ...] = (),
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
+        self.providers = providers
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
@@ -149,6 +151,8 @@ class LLMClient:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if self.providers:
+            payload["provider"] = {"order": list(self.providers)}
         return payload
 
     async def _post(
@@ -228,12 +232,16 @@ def create_llm_clients(
             api_key=api_key,
             model=slot.model,
             temperature=slot.temperature,
+            providers=slot.providers,
         )
         temp = slot.temperature if slot.temperature is not None else "default"
-        _logger.info(
+        log_msg = (
             f"{ls.tag('Config', ls.W)} "
             f"{ls.kv('slot', slot_name)} "
             f"{ls.kv('model', str(slot.model))} "
             f"{ls.kv('temperature', str(temp))}"
         )
+        if slot.providers:
+            log_msg += f" {ls.kv('providers', ','.join(slot.providers))}"
+        _logger.info(log_msg)
     return clients

@@ -109,6 +109,8 @@ greetings  = []
 # latency, and quality per call site independently.
 #
 # Unset slots in a familiar's own character.toml inherit from this file.
+#
+# Optional `providers` array: left = highest priority. Omit for default routing.
 
 # Main reply path: the familiar's spoken reply to a Discord message.
 [llm.main_prose]

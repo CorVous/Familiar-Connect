@@ -251,6 +251,41 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match=r"temperature must be in"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_llm_slot_providers_parsed(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.main_prose]\nmodel = "user/m"\nproviders = ["anthropic", "openai"]\n',
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm["main_prose"].providers == ("anthropic", "openai")
+        # Slot without providers defaults to empty tuple.
+        assert cfg.llm["reasoning_context"].providers == ()
+
+    @pytest.mark.parametrize(
+        "providers_value",
+        [
+            '"anthropic"',  # scalar string, not a list
+            '["anthropic", 42]',  # list with a non-string element
+            '["anthropic", ""]',  # list with an empty string
+        ],
+    )
+    def test_llm_slot_providers_rejects_bad_input(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+        providers_value: str,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            f'[llm.main_prose]\nmodel = "user/m"\nproviders = {providers_value}\n',
+        )
+        with pytest.raises(ConfigError, match="providers"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_tts_section_parsed(
         self,
         tmp_path: Path,

@@ -201,6 +201,26 @@ class TestLLMClient:
         payload = client.build_payload(messages)
         assert payload["temperature"] == pytest.approx(0.7)
 
+    def test_build_payload_provider_order(self) -> None:
+        """Provider order is included in payload when set, omitted when empty."""
+        # Without providers
+        client = LLMClient(
+            api_key="test-key",
+            model="openai/gpt-4o",
+        )
+        messages = [Message(role="user", content="Hi", name="Alice")]
+        payload = client.build_payload(messages)
+        assert "provider" not in payload
+
+        # With providers
+        client = LLMClient(
+            api_key="test-key",
+            model="openai/gpt-4o",
+            providers=("anthropic", "google-vertex"),
+        )
+        payload = client.build_payload(messages)
+        assert payload["provider"] == {"order": ["anthropic", "google-vertex"]}
+
 
 class TestLLMClientChat:
     @pytest.fixture

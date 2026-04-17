@@ -126,6 +126,7 @@ class LLMSlotConfig:
 
     model: str
     temperature: float | None = None
+    providers: tuple[str, ...] = ()
 
 
 _TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia", "gemini"})
@@ -584,7 +585,23 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
                 f"got {type(temperature_raw).__name__}"
             )
             raise ConfigError(msg)
-        slots[name] = LLMSlotConfig(model=model, temperature=temperature)
+        providers_raw = section.get("providers")
+        providers: tuple[str, ...]
+        if providers_raw is None:
+            providers = ()
+        elif isinstance(providers_raw, list):
+            if not all(isinstance(p, str) and p for p in providers_raw):
+                msg = f"[llm.{name}].providers must be a list of non-empty strings"
+                raise ConfigError(msg)
+            providers = tuple(providers_raw)
+        else:
+            msg = f"[llm.{name}].providers must be a list of non-empty strings"
+            raise ConfigError(msg)
+        slots[name] = LLMSlotConfig(
+            model=model,
+            temperature=temperature,
+            providers=providers,
+        )
     return slots
 
 
