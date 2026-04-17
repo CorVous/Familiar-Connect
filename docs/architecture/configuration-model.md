@@ -143,8 +143,8 @@ data/
         ├── character.toml           # tuning + depth-inject config
         ├── subscriptions.toml       # persistent /subscribe-* state
         ├── channels/
-        │   ├── <channel_id>.toml              # per-channel mode + backdrop + overrides
-        │   └── <channel_id>.last-context.json # last LLM context cache (written by bot)
+        │   ├── <channel_id>.toml            # per-channel mode + backdrop + overrides
+        │   └── <channel_id>.last-context.md # last LLM context cache (written by bot)
         ├── modes/                   # familiar-specific mode instructions
         │   └── <mode>.md            # overrides _default/modes/<mode>.md
         ├── memory/                  # MemoryStore root
@@ -200,27 +200,33 @@ The bot caches the exact `list[Message]` it sent to the LLM for the most recent 
 
 **Refresh points:** the cache is atomically rewritten on every text response, voice response, and voice-regen-after-interruption. It is never read during response generation — consumed only by `/context`.
 
-**Reading the cache:** run `/context` in the target channel. The bot posts a `context.md` attachment with each message under a numbered heading (`## [0] system`, `## [1] user (Alice)`, `## [2] assistant`, …) separated by horizontal rules. If the familiar hasn't responded in the channel yet, an ephemeral "No context cached for this channel yet." notice replies instead.
+**Reading the cache:** run `/context` in the target channel. The bot posts the cached file as a `context.md` attachment — byte-identical to what's on disk. If the familiar hasn't responded in the channel yet, an ephemeral "No context cached for this channel yet." notice replies instead.
 
-**JSON layout:**
+**Markdown layout:** each message appears under a numbered heading with role and (optional) speaker name, separated by horizontal rules:
 
-```json
-{
-  "captured_at": "2026-04-16T14:22:07.431+00:00",
-  "modality": "text",
-  "messages": [
-    {"role": "system", "content": "You are Aria, …"},
-    {"role": "user",   "content": "hi",  "name": "Alice"},
-    {"role": "assistant", "content": "Hello."}
-  ]
-}
+```markdown
+# Last context (captured 2026-04-16T14:22:07.431+00:00, modality=text, 3 messages)
+
+## [0] system
+
+You are Aria, …
+
+---
+
+## [1] user (Alice)
+
+hi
+
+---
+
+## [2] assistant
+
+Hello.
 ```
 
-Threads and forum posts each get their own `<channel_id>.last-context.json` sibling to the TOML sidecar, keyed by the thread's id.
+Threads and forum posts each get their own `<channel_id>.last-context.md` sibling to the TOML sidecar, keyed by the thread's id.
 
-**Why sibling JSON and not embedded in the TOML:** the cache is bot-managed state rewritten every turn and frequently hundreds of KB, while the TOML sidecar is operator-edited config. Keeping them separate preserves the TOML's hand-edit ergonomics and avoids pointless diff churn.
-
-**Why filesystem and not SQLite:** same local-first reasoning as the TOML sidecar — operators can `cat` or `jq` the cache directly when debugging, back it up, or delete it to reset.
+**Why markdown and not JSON or SQLite:** the on-disk file is the same bytes the operator will see when they run `/context`. `cat`-ing it during debugging gives identical output to downloading the attachment. No parsing step, no schema, no extra tooling.
 
 ## Identity model
 

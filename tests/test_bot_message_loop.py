@@ -3162,14 +3162,16 @@ class TestLastContextCache:
             )
         )
 
-        entry = familiar.last_context_cache.get(channel_id=12345)
-        assert entry is not None
-        assert entry.modality == "text"
-        # Messages match what the LLM received
+        raw = familiar.last_context_cache.get(channel_id=12345)
+        assert raw is not None
+        text = raw.decode("utf-8")
+        assert "modality=text" in text
+        # Each LLM message appears under a numbered heading
         llm = familiar.llm_clients["main_prose"]
         assert isinstance(llm, _StubLLMClient)
         main_calls = [c for c in llm.calls if c and c[0].role == "system"]
-        assert entry.messages == tuple(main_calls[0])
+        for i, msg in enumerate(main_calls[0]):
+            assert f"## [{i}] {msg.role}" in text
 
 
 class TestContextCommand:

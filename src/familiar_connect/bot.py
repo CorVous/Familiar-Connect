@@ -28,7 +28,6 @@ from familiar_connect.chattiness import (
     ResponseTrigger,
 )
 from familiar_connect.config import ChannelMode
-from familiar_connect.context.last_context import render_markdown
 from familiar_connect.context.providers.mode_instructions import resolve_mode_default
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
@@ -1179,8 +1178,8 @@ async def context_command(
     if isinstance(channel, discord.TextChannel | discord.Thread):
         _refresh_channel_context(familiar, channel)
     label = familiar.monitor.format_channel_context(channel_id)
-    entry = familiar.last_context_cache.get(channel_id=channel_id)
-    if entry is None:
+    raw = familiar.last_context_cache.get(channel_id=channel_id)
+    if raw is None:
         _logger.info(
             f"{ls.tag('Context', ls.W)} "
             f"{ls.word(label, ls.C)} "
@@ -1191,11 +1190,10 @@ async def context_command(
     _logger.info(
         f"{ls.tag('Context', ls.W)} "
         f"{ls.word(label, ls.C)} "
-        f"{ls.kv('modality', entry.modality)} "
-        f"{ls.kv('messages', str(len(entry.messages)), vc=ls.LG)}"
+        f"{ls.kv('action', 'context_sent')} "
+        f"{ls.kv('bytes', str(len(raw)), vc=ls.LG)}"
     )
-    md = render_markdown(entry).encode("utf-8")
-    await ctx.respond(file=discord.File(io.BytesIO(md), filename="context.md"))
+    await ctx.respond(file=discord.File(io.BytesIO(raw), filename="context.md"))
 
 
 # ---------------------------------------------------------------------------
