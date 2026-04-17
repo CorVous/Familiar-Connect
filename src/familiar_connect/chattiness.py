@@ -297,26 +297,30 @@ class ConversationMonitor:
         ctx = self._channel_contexts.get(channel_id)
         if ctx is None:
             return str(channel_id)
-        if ctx.kind == "text":
-            return f"#{ctx.name}"
-        if ctx.kind == "thread":
-            parent = ctx.parent_name or "?"
-            return f"#{parent} -> {ctx.name}"
-        if ctx.kind == "forum_post":
-            parent = ctx.parent_name or "?"
-            return f"forum:{parent} -> {ctx.name}"
-        if ctx.kind == "dm":
-            return f"DM:{ctx.name}"
-        if ctx.kind == "group_dm":
-            return f"GroupDM:{ctx.name}"
-        if ctx.kind == "voice":
-            return f"voice:#{ctx.name}"
-        if ctx.kind == "stage":
-            return f"stage:#{ctx.name}"
-        if ctx.kind == "forum_root":
-            return f"forum-root:#{ctx.name}"
-        # category
-        return f"category:#{ctx.name}"
+
+        match ctx.kind:
+            case "text":
+                return f"#{ctx.name}"
+            case "thread":
+                parent = ctx.parent_name or "?"
+                return f"#{parent} -> {ctx.name}"
+            case "forum_post":
+                parent = ctx.parent_name or "?"
+                return f"forum:{parent} -> {ctx.name}"
+            case "dm":
+                return f"DM:{ctx.name}"
+            case "group_dm":
+                return f"GroupDM:{ctx.name}"
+            case "voice":
+                return f"voice:#{ctx.name}"
+            case "stage":
+                return f"stage:#{ctx.name}"
+            case "forum_root":
+                return f"forum-root:#{ctx.name}"
+            case "category":
+                return f"category:#{ctx.name}"
+            case _:
+                return str(channel_id)
 
     def _channel_label(self, channel_id: int) -> str:
         ctx = self._channel_contexts.get(channel_id)

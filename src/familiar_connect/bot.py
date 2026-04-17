@@ -77,6 +77,12 @@ async def _recording_finished_callback(  # noqa: RUF029
     del sink, args
 
 
+def _get_guild_name(channel: object) -> str | None:
+    """Guild name from channel; handles absent .guild or .name."""
+    guild = getattr(channel, "guild", None)
+    return getattr(guild, "name", None) if guild else None
+
+
 def _refresh_channel_context(
     familiar: Familiar,
     channel: (
@@ -113,19 +119,19 @@ def _refresh_channel_context(
             kind = "group_dm"
         case discord.StageChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            parent_name = _get_guild_name(channel)
             kind = "stage"
         case discord.VoiceChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            parent_name = _get_guild_name(channel)
             kind = "voice"
         case discord.ForumChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            parent_name = _get_guild_name(channel)
             kind = "forum_root"
         case discord.CategoryChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = getattr(getattr(channel, "guild", None), "name", None)
+            parent_name = _get_guild_name(channel)
             kind = "category"
         case discord.TextChannel():
             name = getattr(channel, "name", str(channel.id))
@@ -197,7 +203,6 @@ async def subscribe_text(
         kind=SubscriptionKind.text,
         guild_id=ctx.guild_id,
     )
-    # TextChannel | Thread gate above means refresh always returns a context
     ctx_info = cast("ChannelContext", _refresh_channel_context(familiar, channel))
     kind = ctx_info.kind
     name = ctx_info.name
