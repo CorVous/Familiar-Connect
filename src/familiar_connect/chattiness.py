@@ -27,10 +27,21 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.config import Interjection
+    from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
 
 
-ChannelKind = Literal["text", "thread", "forum_post"]
+ChannelKind = Literal[
+    "text",
+    "thread",
+    "forum_post",
+    "dm",
+    "group_dm",
+    "voice",
+    "stage",
+    "forum_root",
+    "category",
+]
 
 
 @dataclass(frozen=True)
@@ -76,7 +87,7 @@ class ResponseTrigger(Enum):
 class BufferedMessage:
     """Single message accumulated in a channel buffer."""
 
-    speaker: str
+    author: Author
     text: str
     timestamp: float
 
@@ -192,7 +203,7 @@ Should {familiar_name} interject?"""
 
 
 def _format_buffer(buffer: list[BufferedMessage]) -> str:
-    return "\n".join(f"{m.speaker}: {m.text}" for m in buffer)
+    return "\n".join(f"{m.author.label}: {m.text}" for m in buffer)
 
 
 # ---------------------------------------------------------------------------
@@ -276,32 +287,56 @@ class ConversationMonitor:
         - text channel: ``#general``
         - thread: ``#general -> feature-brainstorm``
         - forum post: ``forum:announcements -> hotfix``
+        - DM: ``DM:alice``
+        - group DM: ``GroupDM:squad``
+        - voice: ``voice:#lounge``
+        - stage: ``stage:#announcements``
+        - forum root: ``forum-root:#ideas``
+        - category: ``category:#off-topic``
         - unknown: ``str(channel_id)``
         """
         ctx = self._channel_contexts.get(channel_id)
         if ctx is None:
             return str(channel_id)
-        if ctx.kind == "text":
-            return f"#{ctx.name}"
-        if ctx.kind == "thread":
-            parent = ctx.parent_name or "?"
-            return f"#{parent} -> {ctx.name}"
-        # forum_post
-        parent = ctx.parent_name or "?"
-        return f"forum:{parent} -> {ctx.name}"
+
+        match ctx.kind:
+            case "text":
+                return f"#{ctx.name}"
+            case "thread":
+                parent = ctx.parent_name or "?"
+                return f"#{parent} -> {ctx.name}"
+            case "forum_post":
+                parent = ctx.parent_name or "?"
+                return f"forum:{parent} -> {ctx.name}"
+            case "dm":
+                return f"DM:{ctx.name}"
+            case "group_dm":
+                return f"GroupDM:{ctx.name}"
+            case "voice":
+                return f"voice:#{ctx.name}"
+            case "stage":
+                return f"stage:#{ctx.name}"
+            case "forum_root":
+                return f"forum-root:#{ctx.name}"
+            case "category":
+                return f"category:#{ctx.name}"
+            case _:
+                return str(channel_id)
 
     def _channel_label(self, channel_id: int) -> str:
         ctx = self._channel_contexts.get(channel_id)
         if ctx is None:
             return str(channel_id)
-        if ctx.parent_name and ctx.kind != "text":
+        # only thread/forum_post carry a meaningful parent_name (channel name);
+        # other kinds either leave it None or store unrelated context
+        if ctx.kind in {"thread", "forum_post"} and ctx.parent_name:
             return f"{ctx.parent_name} -> {ctx.name}"
         return ctx.name
 
     async def on_message(
         self,
         channel_id: int,
-        speaker: str,
+        author: Author,
         text: str,
         *,
         is_mention: bool,
@@ -320,7 +355,7 @@ class ConversationMonitor:
 
         # 2. append to buffer and increment counter
         buf.buffer.append(
-            BufferedMessage(speaker=speaker, text=text, timestamp=time.monotonic())
+            BufferedMessage(author=author, text=text, timestamp=time.monotonic())
         )
         buf.message_counter += 1
 

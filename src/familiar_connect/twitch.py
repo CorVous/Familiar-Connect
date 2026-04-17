@@ -11,6 +11,8 @@ from familiar_connect.llm import Message
 if TYPE_CHECKING:
     from typing import Literal, Self
 
+    from familiar_connect.identity import Author
+
 
 # ---------------------------------------------------------------------------
 # Event shape
@@ -25,19 +27,19 @@ class TwitchEvent:
     text: str
     priority: Literal["normal", "immediate"]
     timestamp: datetime
-    viewer: str | None = None
+    viewer: Author | None = None
 
     def to_message(self: Self) -> Message:
         """Convert to an LLM Message.
 
         Content is prefixed with '[Twitch] ' so the model can identify the
-        source. The message name is the viewer's name when one is associated
-        with the event, otherwise 'Twitch'.
+        source. The message name is the viewer's ``openai_name`` when one
+        is associated with the event, otherwise 'Twitch'.
         """
         return Message(
             role="user",
             content=f"[Twitch] {self.text}",
-            name=self.viewer if self.viewer is not None else "Twitch",
+            name=self.viewer.openai_name if self.viewer is not None else "Twitch",
         )
 
 
@@ -129,7 +131,7 @@ def build_channel_point_event(
     *,
     config: TwitchWatcherConfig,
     channel: str,
-    viewer: str,
+    viewer: Author,
     redemption_name: str,
     user_input: str | None = None,
 ) -> TwitchEvent | None:
@@ -138,7 +140,7 @@ def build_channel_point_event(
         return None
     return TwitchEvent(
         channel=channel,
-        text=format_channel_point_redemption(viewer, redemption_name, user_input),
+        text=format_channel_point_redemption(viewer.label, redemption_name, user_input),
         priority="normal",
         timestamp=_now(),
         viewer=viewer,
@@ -149,7 +151,7 @@ def build_subscription_event(
     *,
     config: TwitchWatcherConfig,
     channel: str,
-    viewer: str,
+    viewer: Author,
     tier: int,
 ) -> TwitchEvent | None:
     """Build a new subscription event, or None if subscriptions are disabled."""
@@ -157,7 +159,7 @@ def build_subscription_event(
         return None
     return TwitchEvent(
         channel=channel,
-        text=format_subscription(viewer, tier),
+        text=format_subscription(viewer.label, tier),
         priority="normal",
         timestamp=_now(),
         viewer=viewer,
@@ -168,7 +170,7 @@ def build_gift_subscription_event(
     *,
     config: TwitchWatcherConfig,
     channel: str,
-    gifter: str | None,
+    gifter: Author | None,
     count: int,
     tier: int,
 ) -> TwitchEvent | None:
@@ -177,7 +179,9 @@ def build_gift_subscription_event(
         return None
     return TwitchEvent(
         channel=channel,
-        text=format_gift_subscription(gifter, count, tier),
+        text=format_gift_subscription(
+            gifter.label if gifter is not None else None, count, tier
+        ),
         priority="normal",
         timestamp=_now(),
         viewer=gifter,
@@ -188,7 +192,7 @@ def build_resubscription_event(
     *,
     config: TwitchWatcherConfig,
     channel: str,
-    viewer: str,
+    viewer: Author,
     months: int,
     tier: int,
     message: str,
@@ -198,7 +202,7 @@ def build_resubscription_event(
         return None
     return TwitchEvent(
         channel=channel,
-        text=format_resubscription(viewer, months, tier, message),
+        text=format_resubscription(viewer.label, months, tier, message),
         priority="normal",
         timestamp=_now(),
         viewer=viewer,
@@ -209,7 +213,7 @@ def build_cheer_event(
     *,
     config: TwitchWatcherConfig,
     channel: str,
-    viewer: str | None,
+    viewer: Author | None,
     bits: int,
     message: str,
 ) -> TwitchEvent | None:
@@ -218,7 +222,7 @@ def build_cheer_event(
         return None
     return TwitchEvent(
         channel=channel,
-        text=format_cheer(viewer, bits, message),
+        text=format_cheer(viewer.label if viewer is not None else None, bits, message),
         priority="normal",
         timestamp=_now(),
         viewer=viewer,
@@ -229,14 +233,14 @@ def build_follow_event(
     *,
     config: TwitchWatcherConfig,
     channel: str,
-    viewer: str,
+    viewer: Author,
 ) -> TwitchEvent | None:
     """Build a follow event, or None if follows are disabled."""
     if not config.follows_enabled:
         return None
     return TwitchEvent(
         channel=channel,
-        text=format_follow(viewer),
+        text=format_follow(viewer.label),
         priority="normal",
         timestamp=_now(),
         viewer=viewer,

@@ -26,6 +26,7 @@ from familiar_connect.context.types import (
     Modality,
 )
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,13 +40,32 @@ if TYPE_CHECKING:
 _CHANNEL = 100
 _FAMILIAR = "aria"
 
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
+_BOB = Author(platform="discord", user_id="2", username="bob", display_name="Bob")
+
+
+def _author_for(name: str | None) -> Author | None:
+    if name is None:
+        return None
+    if name == "Alice":
+        return _ALICE
+    if name == "Bob":
+        return _BOB
+    # auto-mint stable ids per unique display name for other test fixtures
+    return Author(
+        platform="discord",
+        user_id=str(abs(hash(name)) % 10_000_000),
+        username=name.lower(),
+        display_name=name,
+    )
+
 
 def _request(**overrides: object) -> ContextRequest:
     defaults: dict[str, Any] = {
         "familiar_id": _FAMILIAR,
         "channel_id": _CHANNEL,
         "guild_id": 1,
-        "speaker": "Alice",
+        "author": _ALICE,
         "utterance": "latest thing Alice said",
         "modality": Modality.text,
         "budget_tokens": 2048,
@@ -59,17 +79,55 @@ def _store_with(
     tmp_path: Path,
     contents: list[tuple[str, str, str | None]],
 ) -> HistoryStore:
-    """Populate a fresh store with ``(role, content, speaker)`` turns."""
+    """Populate a fresh store with ``(role, content, speaker_name)`` turns."""
     store = HistoryStore(tmp_path / "history.db")
-    for role, content, speaker in contents:
+    for role, content, speaker_name in contents:
         store.append_turn(
             familiar_id=_FAMILIAR,
             channel_id=_CHANNEL,
             role=role,
             content=content,
-            speaker=speaker,
+            author=_author_for(speaker_name),
         )
     return store
+
+
+def _raw_insert_turn(
+    store: HistoryStore,
+    *,
+    role: str,
+    speaker_name: str | None,
+    content: str,
+    timestamp: datetime,
+    mode: str,
+    channel_id: int = _CHANNEL,
+) -> None:
+    """Insert a turn with a controlled timestamp via raw SQL.
+
+    Bypasses ``append_turn`` (which stamps ``now``) so gap-hint tests
+    can exercise exact time deltas. Author columns are filled from
+    ``_author_for(speaker_name)``.
+    """
+    a = _author_for(speaker_name)
+    store._conn.execute(
+        "INSERT INTO turns (familiar_id, channel_id, role,"
+        " author_platform, author_user_id, author_username,"
+        " author_display_name, content, timestamp, mode)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            _FAMILIAR,
+            channel_id,
+            role,
+            a.platform if a else None,
+            a.user_id if a else None,
+            a.username if a else None,
+            a.display_name if a else None,
+            content,
+            timestamp.isoformat(),
+            mode,
+        ),
+    )
+    store._conn.commit()
 
 
 def _pipeline_output(
@@ -215,7 +273,7 @@ class TestSpeakerPrefix:
         tmp_path: Path,
     ) -> None:
         store = _store_with(tmp_path, [])
-        request = _request(speaker="Alice", utterance="latest thing Alice said")
+        request = _request(author=_ALICE, utterance="latest thing Alice said")
         output = _pipeline_output(
             request=request,
             by_layer={Layer.core: "core"},
@@ -240,7 +298,7 @@ class TestSpeakerPrefix:
             [("user", "hi", "Alice")],
         )
         output = _pipeline_output(
-            request=_request(speaker="Alice"),
+            request=_request(author=_ALICE),
             by_layer={Layer.core: "core"},
         )
 
@@ -264,7 +322,7 @@ class TestSpeakerPrefix:
             [("user", "from the void", None)],
         )
         output = _pipeline_output(
-            request=_request(speaker=None, utterance="latest"),
+            request=_request(author=None, utterance="latest"),
             by_layer={Layer.core: "core"},
         )
 
@@ -526,7 +584,7 @@ class TestModeFilteredHistory:
             channel_id=_CHANNEL,
             role="user",
             content="rp action",
-            speaker="Alice",
+            author=_ALICE,
             mode=ChannelMode.full_rp,
         )
         store.append_turn(
@@ -534,7 +592,7 @@ class TestModeFilteredHistory:
             channel_id=_CHANNEL,
             role="user",
             content="voice line",
-            speaker="Alice",
+            author=_ALICE,
             mode=ChannelMode.imitate_voice,
         )
         store.append_turn(
@@ -542,7 +600,7 @@ class TestModeFilteredHistory:
             channel_id=_CHANNEL,
             role="user",
             content="another rp",
-            speaker="Alice",
+            author=_ALICE,
             mode=ChannelMode.full_rp,
         )
 
@@ -576,7 +634,7 @@ class TestTextConversationTimestamps:
             channel_id=_CHANNEL,
             role="user",
             content="hello there",
-            speaker="Alice",
+            author=_ALICE,
             mode=ChannelMode.text_conversation_rp,
         )
 
@@ -627,36 +685,24 @@ class TestImitateVoiceGapHints:
     def test_gap_over_30s_adds_breadcrumb(self, tmp_path: Path) -> None:
         """A gap >= 30s between turns produces a time-gap prefix."""
         store = HistoryStore(tmp_path / "history.db")
-        # We need control over timestamps, so insert via raw SQL.
         t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
         t2 = t1 + timedelta(minutes=3)
-        store._conn.execute(
-            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
-            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
-            (
-                _FAMILIAR,
-                _CHANNEL,
-                "user",
-                "Alice",
-                "first",
-                t1.isoformat(),
-                "imitate_voice",
-            ),
+        _raw_insert_turn(
+            store,
+            role="user",
+            speaker_name="Alice",
+            content="first",
+            timestamp=t1,
+            mode="imitate_voice",
         )
-        store._conn.execute(
-            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
-            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
-            (
-                _FAMILIAR,
-                _CHANNEL,
-                "user",
-                "Alice",
-                "second",
-                t2.isoformat(),
-                "imitate_voice",
-            ),
+        _raw_insert_turn(
+            store,
+            role="user",
+            speaker_name="Alice",
+            content="second",
+            timestamp=t2,
+            mode="imitate_voice",
         )
-        store._conn.commit()
 
         request = _request(utterance="third")
         output = _pipeline_output(request=request)
@@ -676,33 +722,22 @@ class TestImitateVoiceGapHints:
         store = HistoryStore(tmp_path / "history.db")
         t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
         t2 = t1 + timedelta(seconds=10)
-        store._conn.execute(
-            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
-            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
-            (
-                _FAMILIAR,
-                _CHANNEL,
-                "user",
-                "Alice",
-                "first",
-                t1.isoformat(),
-                "imitate_voice",
-            ),
+        _raw_insert_turn(
+            store,
+            role="user",
+            speaker_name="Alice",
+            content="first",
+            timestamp=t1,
+            mode="imitate_voice",
         )
-        store._conn.execute(
-            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
-            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
-            (
-                _FAMILIAR,
-                _CHANNEL,
-                "user",
-                "Alice",
-                "second",
-                t2.isoformat(),
-                "imitate_voice",
-            ),
+        _raw_insert_turn(
+            store,
+            role="user",
+            speaker_name="Alice",
+            content="second",
+            timestamp=t2,
+            mode="imitate_voice",
         )
-        store._conn.commit()
 
         request = _request(utterance="third")
         output = _pipeline_output(request=request)
@@ -721,20 +756,14 @@ class TestImitateVoiceGapHints:
         """The very first turn never gets a gap prefix."""
         store = HistoryStore(tmp_path / "history.db")
         t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
-        store._conn.execute(
-            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
-            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
-            (
-                _FAMILIAR,
-                _CHANNEL,
-                "user",
-                "Alice",
-                "only one",
-                t1.isoformat(),
-                "imitate_voice",
-            ),
+        _raw_insert_turn(
+            store,
+            role="user",
+            speaker_name="Alice",
+            content="only one",
+            timestamp=t1,
+            mode="imitate_voice",
         )
-        store._conn.commit()
 
         request = _request(utterance="reply")
         output = _pipeline_output(request=request)
@@ -758,7 +787,7 @@ class TestFullRpNoTimestamps:
             channel_id=_CHANNEL,
             role="user",
             content="she walks in",
-            speaker="Alice",
+            author=_ALICE,
             mode=ChannelMode.full_rp,
         )
 
@@ -798,20 +827,14 @@ class TestFullRpGapBreadcrumbs:
         t1 = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
         t2 = t1 + gap
         for ts, content in [(t1, "scene start"), (t2, "scene resume")]:
-            store._conn.execute(
-                "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
-                " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
-                (
-                    _FAMILIAR,
-                    _CHANNEL,
-                    "user",
-                    "Alice",
-                    content,
-                    ts.isoformat(),
-                    "full_rp",
-                ),
+            _raw_insert_turn(
+                store,
+                role="user",
+                speaker_name="Alice",
+                content=content,
+                timestamp=ts,
+                mode="full_rp",
             )
-        store._conn.commit()
 
     def _seed_other_channel_activity(
         self,
@@ -821,20 +844,15 @@ class TestFullRpGapBreadcrumbs:
         channel_id: int = 200,
     ) -> None:
         """Insert a turn in another channel and cache a cross-context summary."""
-        store._conn.execute(
-            "INSERT INTO turns (familiar_id, channel_id, role, speaker,"
-            " content, timestamp, mode) VALUES (?,?,?,?,?,?,?)",
-            (
-                _FAMILIAR,
-                channel_id,
-                "user",
-                "Bob",
-                "hey in text chat",
-                activity_time.isoformat(),
-                "text_conversation_rp",
-            ),
+        _raw_insert_turn(
+            store,
+            role="user",
+            speaker_name="Bob",
+            content="hey in text chat",
+            timestamp=activity_time,
+            mode="text_conversation_rp",
+            channel_id=channel_id,
         )
-        store._conn.commit()
         # Cache a cross-context summary so the renderer can find it.
         store.put_cross_context(
             familiar_id=_FAMILIAR,

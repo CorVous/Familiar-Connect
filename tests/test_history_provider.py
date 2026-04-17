@@ -35,6 +35,7 @@ from familiar_connect.context.types import (
     Modality,
 )
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 _CHANNEL = 100
 _FAMILIAR = "aria"
 _GUILD = 1  # observability only
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 
 def _request(**overrides: object) -> ContextRequest:
@@ -56,7 +58,7 @@ def _request(**overrides: object) -> ContextRequest:
         "familiar_id": _FAMILIAR,
         "channel_id": _CHANNEL,
         "guild_id": _GUILD,
-        "speaker": "Alice",
+        "author": _ALICE,
         "utterance": "hello",
         "modality": Modality.text,
         "budget_tokens": 2048,
@@ -70,13 +72,13 @@ def _seed(store: HistoryStore, n: int, *, channel_id: int = _CHANNEL) -> None:
     """Append *n* alternating user/assistant turns to the test channel."""
     for i in range(n):
         role = "user" if i % 2 == 0 else "assistant"
-        speaker = "Alice" if role == "user" else None
+        author = _ALICE if role == "user" else None
         store.append_turn(
             channel_id=channel_id,
             familiar_id=_FAMILIAR,
             role=role,
             content=f"turn {i}",
-            speaker=speaker,
+            author=author,
         )
 
 
@@ -255,7 +257,7 @@ class TestSummaryPath:
                 familiar_id=_FAMILIAR,
                 role="user",
                 content=f"new {i}",
-                speaker="Alice",
+                author=_ALICE,
             )
 
         # Flip response before triggering the refresh so the bg task
@@ -334,7 +336,7 @@ class TestSummariserFailures:
                 familiar_id=_FAMILIAR,
                 role="user",
                 content=f"new {i}",
-                speaker="Alice",
+                author=_ALICE,
             )
 
         slow = _StubLLMClient(response="never returned", delay_s=2.0)
@@ -372,13 +374,13 @@ def _seed_with_mode(
     """Append *n* alternating user/assistant turns with an explicit mode."""
     for i in range(n):
         role = "user" if i % 2 == 0 else "assistant"
-        speaker = "Alice" if role == "user" else None
+        author = _ALICE if role == "user" else None
         store.append_turn(
             channel_id=channel_id,
             familiar_id=_FAMILIAR,
             role=role,
             content=f"{mode.value} turn {i}",
-            speaker=speaker,
+            author=author,
             mode=mode,
         )
 

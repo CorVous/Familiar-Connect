@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from familiar_connect.identity import Author
 from familiar_connect.twitch import TwitchEvent, TwitchWatcherConfig
 from familiar_connect.twitch_watcher import TwitchWatcher
 
@@ -37,8 +38,29 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _user_fields(
+    user_name: str | None,
+    user_id: str | None = None,
+    user_login: str | None = None,
+) -> dict[str, str | None]:
+    """Return the three ``user_*`` fields every twitchAPI event data object carries.
+
+    Defaults to a stable ``user_id`` derived from the name so each
+    named viewer resolves to the same Author slug across tests.
+    """
+    if user_id is None:
+        user_id = f"uid-{user_name}" if user_name else "uid-anon"
+    if user_login is None:
+        user_login = user_name.lower() if user_name else None
+    return {
+        "user_id": user_id,
+        "user_login": user_login,
+        "user_name": user_name,
+    }
+
+
 def follow_data(user_name: str = "Alice") -> ChannelFollowData:
-    return cast("ChannelFollowData", SimpleNamespace(user_name=user_name))
+    return cast("ChannelFollowData", SimpleNamespace(**_user_fields(user_name)))
 
 
 def subscribe_data(
@@ -49,7 +71,7 @@ def subscribe_data(
 ) -> ChannelSubscribeData:
     return cast(
         "ChannelSubscribeData",
-        SimpleNamespace(user_name=user_name, tier=tier, is_gift=is_gift),
+        SimpleNamespace(**_user_fields(user_name), tier=tier, is_gift=is_gift),
     )
 
 
@@ -63,7 +85,10 @@ def gift_sub_data(
     return cast(
         "ChannelSubscriptionGiftData",
         SimpleNamespace(
-            user_name=user_name, total=total, tier=tier, is_anonymous=is_anonymous
+            **_user_fields(user_name),
+            total=total,
+            tier=tier,
+            is_anonymous=is_anonymous,
         ),
     )
 
@@ -78,7 +103,7 @@ def resub_data(
     return cast(
         "ChannelSubscriptionMessageData",
         SimpleNamespace(
-            user_name=user_name,
+            **_user_fields(user_name),
             cumulative_months=cumulative_months,
             tier=tier,
             message=msg,
@@ -96,7 +121,10 @@ def cheer_data(
     return cast(
         "ChannelCheerData",
         SimpleNamespace(
-            user_name=user_name, bits=bits, message=message, is_anonymous=is_anonymous
+            **_user_fields(user_name),
+            bits=bits,
+            message=message,
+            is_anonymous=is_anonymous,
         ),
     )
 
@@ -109,7 +137,9 @@ def redemption_data(
     reward = SimpleNamespace(title=reward_title)
     return cast(
         "ChannelPointsCustomRewardRedemptionData",
-        SimpleNamespace(user_name=user_name, reward=reward, user_input=user_input),
+        SimpleNamespace(
+            **_user_fields(user_name), reward=reward, user_input=user_input
+        ),
     )
 
 
@@ -189,12 +219,14 @@ class TestHandleFollow:
         assert event is None
 
     def test_viewer_is_set(self) -> None:
-        """Follow event carries the viewer's name."""
+        """Follow event carries the viewer's Author."""
         event = self._watcher(TwitchWatcherConfig(follows_enabled=True)).handle_follow(
             follow_data("Alice")
         )
         assert event is not None
-        assert event.viewer == "Alice"
+        assert isinstance(event.viewer, Author)
+        assert event.viewer.display_name == "Alice"
+        assert event.viewer.platform == "twitch"
 
     def test_channel_is_set(self) -> None:
         """Follow event carries the watcher's channel name."""
@@ -285,12 +317,13 @@ class TestHandleGiftSubscription:
         assert "anonymous" in event.text.lower()
 
     def test_named_gifter_viewer_is_set(self) -> None:
-        """Named gifter event carries the gifter's name as viewer."""
+        """Named gifter event carries the gifter's Author as viewer."""
         event = self._watcher(
             TwitchWatcherConfig(subscriptions_enabled=True)
         ).handle_gift_subscription(gift_sub_data(user_name="Bob"))
         assert event is not None
-        assert event.viewer == "Bob"
+        assert isinstance(event.viewer, Author)
+        assert event.viewer.display_name == "Bob"
 
     def test_anonymous_gifter_viewer_is_none(self) -> None:
         """Anonymous gift sub has no viewer."""
@@ -394,12 +427,13 @@ class TestHandleCheer:
         )
 
     def test_named_viewer_is_set(self) -> None:
-        """Named cheer event carries the viewer's name."""
+        """Named cheer event carries the viewer's Author."""
         event = self._watcher(TwitchWatcherConfig(cheers_enabled=True)).handle_cheer(
             cheer_data(user_name="Bob")
         )
         assert event is not None
-        assert event.viewer == "Bob"
+        assert isinstance(event.viewer, Author)
+        assert event.viewer.display_name == "Bob"
 
     def test_anonymous_viewer_is_none(self) -> None:
         """Anonymous cheer has no viewer."""
@@ -800,7 +834,8 @@ class TestRun:
 
         result = send.get_nowait()
         assert isinstance(result, TwitchEvent)
-        assert result.viewer == "Alice"
+        assert isinstance(result.viewer, Author)
+        assert result.viewer.display_name == "Alice"
         assert result.text == "Alice has followed the channel"
 
     @pytest.mark.asyncio

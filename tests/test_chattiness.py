@@ -30,6 +30,7 @@ from familiar_connect.chattiness import (
     is_direct_address,
 )
 from familiar_connect.config import Interjection
+from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -42,6 +43,16 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def _strip(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+def _author(name: str) -> Author:
+    """Build a stable Author per display name for test call sites."""
+    return Author(
+        platform="discord",
+        user_id=str(abs(hash(name)) % 10_000_000),
+        username=name.lower(),
+        display_name=name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +163,10 @@ class TestIsDirectAddress:
 
 class TestBufferedMessage:
     def test_fields(self) -> None:
-        msg = BufferedMessage(speaker="Alice", text="hello", timestamp=1.0)
-        assert msg.speaker == "Alice"
+        alice = _author("Alice")
+        msg = BufferedMessage(author=alice, text="hello", timestamp=1.0)
+        assert msg.author is alice
+        assert msg.author.label == "Alice"
         assert msg.text == "hello"
         assert msg.timestamp == 1.0  # noqa: RUF069
 
@@ -276,7 +289,9 @@ class TestConversationMonitorJitter:
             side_model_reply="NO",
         )
         asyncio.run(
-            monitor.on_message(channel_id=1, speaker="Bob", text="hi", is_mention=False)
+            monitor.on_message(
+                channel_id=1, author=_author("Bob"), text="hi", is_mention=False
+            )
         )
         buf = monitor._buffers[1]
         # average starting_interval=9, jitter=-2 → next_interjection_at=7
@@ -296,7 +311,10 @@ class TestConversationMonitorJitter:
         for i in range(7):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         buf = monitor._buffers[1]
@@ -315,7 +333,10 @@ class TestConversationMonitorJitter:
         for i in range(7):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         assert len(calls) == 1
@@ -335,7 +356,10 @@ class TestConversationMonitorDirectAddress:
         monitor, calls = _make_monitor(side_model_reply="YES")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="hey aria!", is_mention=False
+                channel_id=1,
+                author=_author("Alice"),
+                text="hey aria!",
+                is_mention=False,
             )
         )
         assert len(calls) == 1
@@ -345,7 +369,7 @@ class TestConversationMonitorDirectAddress:
         monitor, calls = _make_monitor(side_model_reply="YES")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="blah", is_mention=True
+                channel_id=1, author=_author("Alice"), text="blah", is_mention=True
             )
         )
         assert len(calls) == 1
@@ -358,7 +382,7 @@ class TestConversationMonitorDirectAddress:
         monitor, calls = _make_monitor(side_model_reply="NO")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         assert len(calls) == 0
@@ -374,7 +398,10 @@ class TestConversationMonitorDirectAddress:
         for i in range(8):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         assert len(calls) == 0
@@ -384,7 +411,10 @@ class TestConversationMonitorDirectAddress:
         for i in range(5):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         buf = monitor._buffers[1]
@@ -394,17 +424,17 @@ class TestConversationMonitorDirectAddress:
         monitor, _ = _make_monitor(side_model_reply="NO")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="first", is_mention=False
+                channel_id=1, author=_author("Alice"), text="first", is_mention=False
             )
         )
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Bob", text="second", is_mention=False
+                channel_id=1, author=_author("Bob"), text="second", is_mention=False
             )
         )
         buf = monitor._buffers[1]
         assert len(buf.buffer) == 2
-        assert buf.buffer[0].speaker == "Alice"
+        assert buf.buffer[0].author.label == "Alice"
         assert buf.buffer[1].text == "second"
 
 
@@ -417,7 +447,10 @@ class TestConversationMonitorInterjection:
         for i in range(9):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         assert len(calls) == 1
@@ -429,7 +462,10 @@ class TestConversationMonitorInterjection:
         for i in range(3):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         assert len(calls) == 1
@@ -444,7 +480,10 @@ class TestConversationMonitorInterjection:
         for i in range(9):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         assert len(calls) == 0
@@ -455,7 +494,10 @@ class TestConversationMonitorInterjection:
         for i in range(6):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg2 {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg2 {i}",
+                    is_mention=False,
                 )
             )
         assert buf.check_count == 2
@@ -467,7 +509,10 @@ class TestConversationMonitorInterjection:
         for i in range(9):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         assert len(calls) == 1
@@ -484,14 +529,20 @@ class TestConversationMonitorInterjection:
         for i in range(3):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text=f"msg {i}", is_mention=False
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         # 2 messages on channel 2 → no fire yet
         for i in range(2):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=2, speaker="Carol", text=f"msg {i}", is_mention=False
+                    channel_id=2,
+                    author=_author("Carol"),
+                    text=f"msg {i}",
+                    is_mention=False,
                 )
             )
         assert sum(1 for call in calls if call[0] == 1) == 1
@@ -509,7 +560,7 @@ class TestSideModelEvaluation:
         monitor, _ = _make_monitor(side_model_reply="YES")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         llm_client = monitor._llm_client
@@ -523,7 +574,7 @@ class TestSideModelEvaluation:
         monitor, calls = _make_monitor(side_model_reply="YES")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         assert len(calls) == 1
@@ -532,7 +583,7 @@ class TestSideModelEvaluation:
         monitor, calls = _make_monitor(side_model_reply="YES")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         assert len(calls) == 1
@@ -548,7 +599,7 @@ class TestSideModelEvaluation:
             asyncio.run(
                 monitor.on_message(
                     channel_id=1,
-                    speaker="Alice",
+                    author=_author("Alice"),
                     text=f"msg {i}",
                     is_mention=False,
                 )
@@ -562,7 +613,7 @@ class TestSideModelEvaluation:
         asyncio.run(
             monitor.on_message(
                 channel_id=1,
-                speaker="Alice",
+                author=_author("Alice"),
                 text="some thought",
                 is_mention=False,
                 is_lull_endpoint=True,
@@ -576,7 +627,7 @@ class TestSideModelEvaluation:
         monitor, calls = _make_monitor(side_model_reply="NO")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         assert len(calls) == 0
@@ -587,7 +638,7 @@ class TestSideModelEvaluation:
         )
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         assert len(calls) == 1
@@ -608,7 +659,7 @@ class TestSideModelEvaluation:
         )
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         assert len(calls) == 0
@@ -618,7 +669,7 @@ class TestSideModelEvaluation:
         monitor, calls = _make_monitor(side_model_reply="YES.")
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                channel_id=1, author=_author("Alice"), text="aria?", is_mention=False
             )
         )
         assert len(calls) == 1
@@ -629,24 +680,24 @@ class TestSideModelEvaluation:
         )
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Alice", text="hello", is_mention=False
+                channel_id=1, author=_author("Alice"), text="hello", is_mention=False
             )
         )
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Bob", text="world", is_mention=False
+                channel_id=1, author=_author("Bob"), text="world", is_mention=False
             )
         )
         asyncio.run(
             monitor.on_message(
-                channel_id=1, speaker="Carol", text="yes", is_mention=False
+                channel_id=1, author=_author("Carol"), text="yes", is_mention=False
             )
         )
         # very_eager threshold = 3 → fires on 3rd message
         assert len(calls) == 1
         _, buf_snapshot, _ = calls[0]
         assert len(buf_snapshot) == 3
-        assert buf_snapshot[0].speaker == "Alice"
+        assert buf_snapshot[0].author.label == "Alice"
 
     def test_lull_endpoint_evaluates_inline_without_starting_timer(self) -> None:
         """Voice path: ``is_lull_endpoint=True`` runs the lull eval inline.
@@ -665,7 +716,7 @@ class TestSideModelEvaluation:
         asyncio.run(
             monitor.on_message(
                 channel_id=99,
-                speaker="Alice",
+                author=_author("Alice"),
                 text="hey there",
                 is_mention=False,
                 is_lull_endpoint=True,
@@ -687,7 +738,7 @@ class TestSideModelEvaluation:
         asyncio.run(
             monitor.on_message(
                 channel_id=99,
-                speaker="Alice",
+                author=_author("Alice"),
                 text="hey there",
                 is_mention=False,
                 is_lull_endpoint=True,
@@ -709,7 +760,10 @@ class TestSideModelEvaluation:
         with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=42, speaker="Alice", text="aria?", is_mention=False
+                    channel_id=42,
+                    author=_author("Alice"),
+                    text="aria?",
+                    is_mention=False,
                 )
             )
         matches = [
@@ -735,7 +789,10 @@ class TestSideModelEvaluation:
         with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=7, speaker="Alice", text="aria?", is_mention=False
+                    channel_id=7,
+                    author=_author("Alice"),
+                    text="aria?",
+                    is_mention=False,
                 )
             )
         matches = [
@@ -756,7 +813,10 @@ class TestSideModelEvaluation:
         with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=7, speaker="Alice", text="aria?", is_mention=False
+                    channel_id=7,
+                    author=_author("Alice"),
+                    text="aria?",
+                    is_mention=False,
                 )
             )
         record = next(
@@ -776,7 +836,10 @@ class TestSideModelEvaluation:
         with caplog.at_level("INFO", logger="familiar_connect.chattiness"):
             asyncio.run(
                 monitor.on_message(
-                    channel_id=1, speaker="Alice", text="aria?", is_mention=False
+                    channel_id=1,
+                    author=_author("Alice"),
+                    text="aria?",
+                    is_mention=False,
                 )
             )
         assert len(calls) == 1
@@ -804,7 +867,7 @@ class TestLullTimer:
         try:
             loop.run_until_complete(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text="hello", is_mention=False
+                    channel_id=1, author=_author("Bob"), text="hello", is_mention=False
                 )
             )
             # Wait for lull timer to fire
@@ -827,14 +890,14 @@ class TestLullTimer:
             # First message starts timer
             loop.run_until_complete(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text="hi", is_mention=False
+                    channel_id=1, author=_author("Bob"), text="hi", is_mention=False
                 )
             )
             # Second message before 100ms cancels and resets timer
             loop.run_until_complete(asyncio.sleep(0.04))
             loop.run_until_complete(
                 monitor.on_message(
-                    channel_id=1, speaker="Carol", text="hey", is_mention=False
+                    channel_id=1, author=_author("Carol"), text="hey", is_mention=False
                 )
             )
             # Wait past the first timer but not the second
@@ -858,7 +921,7 @@ class TestLullTimer:
         try:
             loop.run_until_complete(
                 monitor.on_message(
-                    channel_id=1, speaker="Bob", text="hello", is_mention=False
+                    channel_id=1, author=_author("Bob"), text="hello", is_mention=False
                 )
             )
             with caplog.at_level(logging.INFO, logger="familiar_connect.chattiness"):
@@ -882,7 +945,7 @@ class TestClearChannel:
         monitor, _ = _make_monitor(side_model_reply="NO")
         asyncio.run(
             monitor.on_message(
-                channel_id=5, speaker="Alice", text="hello", is_mention=False
+                channel_id=5, author=_author("Alice"), text="hello", is_mention=False
             )
         )
         assert 5 in monitor._buffers
@@ -900,7 +963,10 @@ class TestClearChannel:
         try:
             loop.run_until_complete(
                 monitor.on_message(
-                    channel_id=5, speaker="Alice", text="hello", is_mention=False
+                    channel_id=5,
+                    author=_author("Alice"),
+                    text="hello",
+                    is_mention=False,
                 )
             )
             monitor.clear_channel(5)
@@ -982,3 +1048,42 @@ class TestChannelContext:
         assert ctx.name == "brainstorm"
         assert ctx.kind == "thread"
         assert ctx.parent_name == "general"
+
+    def test_format_dm(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="alice", kind="dm")
+        assert monitor.format_channel_context(42) == "DM:alice"
+
+    def test_format_group_dm(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="squad", kind="group_dm")
+        assert monitor.format_channel_context(42) == "GroupDM:squad"
+
+    def test_format_voice(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="lounge", kind="voice")
+        assert monitor.format_channel_context(42) == "voice:#lounge"
+
+    def test_format_stage(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="announcements", kind="stage")
+        assert monitor.format_channel_context(42) == "stage:#announcements"
+
+    def test_format_forum_root(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="ideas", kind="forum_root")
+        assert monitor.format_channel_context(42) == "forum-root:#ideas"
+
+    def test_format_category(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="off-topic", kind="category")
+        assert monitor.format_channel_context(42) == "category:#off-topic"
+
+    def test_channel_context_getter_dm(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="bob", kind="dm")
+        ctx = monitor.channel_context(42)
+        assert ctx is not None
+        assert ctx.kind == "dm"
+        assert ctx.name == "bob"
+        assert ctx.parent_name is None

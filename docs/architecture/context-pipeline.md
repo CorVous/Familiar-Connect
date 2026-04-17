@@ -11,7 +11,7 @@ The context pipeline is the single path between "something happened" and "call t
 
 ```mermaid
 flowchart TB
-    req([ContextRequest<br/>speaker + utterance + modality + deadline])
+    req([ContextRequest<br/>author + utterance + modality + deadline])
     req --> tg
 
     subgraph tg[asyncio.TaskGroup - providers run in parallel]
@@ -59,7 +59,7 @@ Package: `familiar_connect.context`.
 
 Shapes:
 
-- **`ContextRequest`** — triggering event, `familiar_id`, originating `channel_id`, originating `guild_id` (observability only), speaker, utterance, `Modality` (`"voice"` or `"text"`), target token budget, and a deadline.
+- **`ContextRequest`** — triggering event, `familiar_id`, originating `channel_id`, originating `guild_id` (observability only), `author: Author | None` (see [Identity model](configuration-model.md#identity-model)), utterance, `Modality` (`"voice"` or `"text"`), target token budget, and a deadline.
 - **`Contribution`** — `layer: Layer`, `priority: int`, `text: str`, `estimated_tokens: int`, `source: str`.
 - **`Layer` enum** — `core`, `character`, `content`, `history_summary`, `recent_history`, `author_note`, `depth_inject`.
 - **`ContextProvider`** — `Protocol` with `async def contribute(request: ContextRequest) -> list[Contribution]`.
@@ -164,8 +164,8 @@ A multi-tier provider scoped to a single familiar's `MemoryStore`. Each `contrib
 
 No LLM involvement. Runs first. For every `contribute()` call:
 
-- If `people/<slug(speaker)>.md` exists, load it verbatim.
-- Enumerate `people/*.md`, reverse-match each stem against utterance tokens (single-token stems match whole lowercase words; hyphenated stems match as space-separated phrases). Forward-match capitalized mid-sentence words as an additional candidate pass.
+- If `people/<request.author.slug>.md` exists, load it verbatim (exact lookup by canonical platform-id slug).
+- Tokenize the utterance (single words, capitalized mid-sentence words, hyphenated phrases) and resolve each candidate against `people/_aliases.json` — the writer-maintained `{ "lowercased-name": "author-slug" }` index — then load the mapped canonical file.
 - Each loaded file is truncated to ~800 tokens. Emitted at priority 85 with source `content_search.people`.
 
 This tier is the correctness floor — the people-file guarantee documented in [Memory → People lookup guarantee](memory.md#people-lookup-guarantee). It runs regardless of whether the agent-loop tier succeeds, fails, or returns empty.

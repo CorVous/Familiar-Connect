@@ -46,9 +46,15 @@ When the writer is constructed with a `channel_context_lookup` callable (wired t
 - #general
 - #general -> feature-brainstorm
 - forum:announcements -> hotfix-rollout
+- DM:alice
+- GroupDM:squad
+- voice:#lounge
+- stage:#announcements
+- forum-root:#ideas
+- category:#off-topic
 ```
 
-The labels come from `ConversationMonitor`, which stores a `ChannelContext(name, kind, parent_name)` for each subscribed channel. Threads and forum posts therefore surface in session summaries with their human-readable location rather than as bare numeric IDs. Unknown channels (no context registered) are suppressed, keeping the block empty in test setups and during early boot.
+The labels come from `ConversationMonitor`, which stores a `ChannelContext(name, kind, parent_name)` for each channel. The `kind` field controls the prefix style. Unknown channels (no context registered) are suppressed, keeping the block empty in test setups and during early boot.
 
 ### Model
 
@@ -59,7 +65,7 @@ A cheap side-model LLM (`LLMClient`) configured alongside the other side-model c
 Three kinds of file mutation, all routed through `MemoryStore` so they hit the audit log under the `memory_writer` source:
 
 1. **A new `sessions/<date>-<slot>.md` file.** One per session. The slot suffix disambiguates multiple sessions on one day.
-2. **Edits (append or rewrite) to `people/<name>.md`** for each person who showed up. Updates impressions, adds notable moments, flags multi-username suspicions (see [Memory § multi-username handling](memory.md#peoplenamemd-someone-the-familiar-has-interacted-with)).
+2. **Edits (append or rewrite) to `people/<platform>-<user_id>.md`** for each person who showed up. Updates impressions, adds notable moments, harvests new display names into the `## Aliases` section (see [Memory § multi-username handling](memory.md#peopleplatform-user_idmd-someone-the-familiar-has-interacted-with)).
 3. **Edits to `topics/<slug>.md`** for recurring subjects. Updates opinions, adds events, links back to the session file.
 
 After a successful run the writer advances the watermark in `HistoryStore` so the same turns are never written twice.

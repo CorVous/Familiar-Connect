@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from familiar_connect.identity import Author
 from familiar_connect.tts import WordTimestamp
 from familiar_connect.voice.interruption import (
     UNSOLICITED_TOLERANCE_BIAS,
@@ -277,7 +278,7 @@ def _make_detector(
     rng: Callable[[], float] | None = None,
     on_long_during_generating: Callable[[int, str], None] | None = None,
     on_long_boundary_crossed: Callable[[int, str], None] | None = None,
-    name_resolver: Callable[[int], str] | None = None,
+    author_resolver: Callable[[int], Author] | None = None,
 ) -> tuple[InterruptionDetector, ResponseTrackerRegistry, _FakeClock, _FakeScheduler]:
     registry = ResponseTrackerRegistry()
     clock = _FakeClock()
@@ -298,9 +299,18 @@ def _make_detector(
         rng=rng,
         on_long_during_generating=on_long_during_generating,
         on_long_boundary_crossed=on_long_boundary_crossed,
-        name_resolver=name_resolver,
+        author_resolver=author_resolver,
     )
     return detector, registry, clock, scheduler
+
+
+def _author_named(label: str, user_id: int = 0) -> Author:
+    return Author(
+        platform="discord",
+        user_id=str(user_id),
+        username=label.lower(),
+        display_name=label,
+    )
 
 
 class TestInterruptionDetectorIdle:
@@ -2054,7 +2064,7 @@ class TestLongSpeakingYieldDispatch:
             clock=clock,
             scheduler=scheduler,
             rng=lambda: 0.99,  # roll > tolerance → yield
-            name_resolver=lambda uid: f"Resolved-{uid}",
+            author_resolver=lambda uid: _author_named(f"Resolved-{uid}", uid),
         )
         tracker = registry.get(1)
         tracker.state = ResponseState.SPEAKING
@@ -2102,10 +2112,11 @@ class TestShortGeneratingDispatch:
         )
 
     def test_transcript_stashed_on_tracker(self) -> None:
+        name_author = _author_named("Name-42", 42)
         detector, registry, clock, scheduler = _make_detector(
             min_s=1.5,
             boundary_s=4.0,
-            name_resolver=lambda uid: f"Name-{uid}",
+            author_resolver=lambda _uid: name_author,
         )
         tracker = registry.get(1)
         tracker.state = ResponseState.GENERATING
@@ -2114,7 +2125,7 @@ class TestShortGeneratingDispatch:
         detector.on_transcript(42, "hello")
         detector.on_voice_activity(42, VoiceActivityEvent.ended)
         scheduler.fire_for(detector._finalize_burst)
-        assert tracker.pending_interrupter_turns == [("Name-42", "hello")]
+        assert tracker.pending_interrupter_turns == [(name_author, "hello")]
 
     def test_transcript_stashed_without_resolver_uses_fallback(self) -> None:
         detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
@@ -2125,7 +2136,11 @@ class TestShortGeneratingDispatch:
         detector.on_transcript(42, "hello")
         detector.on_voice_activity(42, VoiceActivityEvent.ended)
         scheduler.fire_for(detector._finalize_burst)
-        assert tracker.pending_interrupter_turns == [("User-42", "hello")]
+        assert len(tracker.pending_interrupter_turns) == 1
+        fallback_author, text = tracker.pending_interrupter_turns[0]
+        assert fallback_author.display_name == "User-42"
+        assert fallback_author.user_id == "42"
+        assert text == "hello"
 
     def test_llm_generation_task_not_cancelled(self) -> None:
         detector, registry, clock, scheduler = _make_detector(min_s=1.5, boundary_s=4.0)
@@ -2158,7 +2173,7 @@ class TestShortGeneratingDispatch:
         detector, registry, clock, scheduler = _make_detector(
             min_s=1.5,
             boundary_s=4.0,
-            name_resolver=lambda uid: f"Name-{uid}",
+            author_resolver=lambda uid: _author_named(f"Name-{uid}", uid),
         )
         tracker = registry.get(1)
         tracker.state = ResponseState.GENERATING
@@ -2175,7 +2190,7 @@ class TestShortGeneratingDispatch:
         detector, registry, clock, scheduler = _make_detector(
             min_s=1.5,
             boundary_s=4.0,
-            name_resolver=lambda uid: f"Name-{uid}",
+            author_resolver=lambda uid: _author_named(f"Name-{uid}", uid),
         )
         tracker = registry.get(1)
         tracker.state = ResponseState.GENERATING
@@ -2197,7 +2212,7 @@ class TestInterruptionLogNames:
         detector, registry, clock, scheduler = _make_detector(
             min_s=1.5,
             boundary_s=4.0,
-            name_resolver=lambda _uid: "Alice",
+            author_resolver=lambda _uid: _author_named("Alice", 42),
         )
         registry.get(1).state = ResponseState.GENERATING
         with caplog.at_level(
@@ -2220,7 +2235,7 @@ class TestInterruptionLogNames:
         detector, registry, clock, scheduler = _make_detector(
             min_s=1.5,
             boundary_s=4.0,
-            name_resolver=lambda _uid: "Alice",
+            author_resolver=lambda _uid: _author_named("Alice", 42),
         )
         registry.get(1).state = ResponseState.GENERATING
         with caplog.at_level(

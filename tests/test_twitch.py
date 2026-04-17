@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 from familiar_connect.twitch import (
     TwitchEvent,
@@ -31,6 +32,10 @@ from familiar_connect.twitch import (
     format_resubscription,
     format_subscription,
 )
+
+_ALICE = Author.from_twitch(user_id="uid-Alice", user_login="alice", user_name="Alice")
+_BOB = Author.from_twitch(user_id="uid-Bob", user_login="bob", user_name="Bob")
+_CAROL = Author.from_twitch(user_id="uid-Carol", user_login="carol", user_name="Carol")
 
 # ---------------------------------------------------------------------------
 # TwitchEvent shape
@@ -79,9 +84,9 @@ class TestTwitchEvent:
             text="Alice has followed the channel",
             priority="normal",
             timestamp=datetime.now(UTC),
-            viewer="Alice",
+            viewer=_ALICE,
         )
-        assert event.viewer == "Alice"
+        assert event.viewer == _ALICE
 
     def test_viewer_field_defaults_to_none(self) -> None:
         """Viewer defaults to None for events with no associated person."""
@@ -264,7 +269,7 @@ class TestBuildChannelPointEvent:
         event = build_channel_point_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             redemption_name="Talk to Sapphire",
         )
         assert event is not None
@@ -276,7 +281,7 @@ class TestBuildChannelPointEvent:
         event = build_channel_point_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             redemption_name="Something Else",
         )
         assert event is None
@@ -287,7 +292,7 @@ class TestBuildChannelPointEvent:
         event = build_channel_point_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             redemption_name="Talk to Sapphire",
         )
         assert event is None
@@ -298,7 +303,7 @@ class TestBuildChannelPointEvent:
         event = build_channel_point_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             redemption_name="Talk to Sapphire",
             user_input="hello!",
         )
@@ -313,7 +318,7 @@ class TestBuildChannelPointEvent:
         event = build_channel_point_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             redemption_name="Talk to Sapphire",
         )
         assert event is not None
@@ -325,17 +330,17 @@ class TestBuildChannelPointEvent:
         event = build_channel_point_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             redemption_name="Talk to Sapphire",
         )
         assert event is not None
-        assert event.viewer == "Alice"
+        assert event.viewer == _ALICE
 
     def test_event_channel_set_correctly(self) -> None:
         """The channel field reflects the provided channel."""
         config = TwitchWatcherConfig(redemption_names=["Test"])
         event = build_channel_point_event(
-            config=config, channel="my-channel", viewer="Alice", redemption_name="Test"
+            config=config, channel="my-channel", viewer=_ALICE, redemption_name="Test"
         )
         assert event is not None
         assert event.channel == "my-channel"
@@ -344,7 +349,7 @@ class TestBuildChannelPointEvent:
         """The event timestamp is UTC-aware."""
         config = TwitchWatcherConfig(redemption_names=["Test"])
         event = build_channel_point_event(
-            config=config, channel="ch", viewer="Alice", redemption_name="Test"
+            config=config, channel="ch", viewer=_ALICE, redemption_name="Test"
         )
         assert event is not None
         assert event.timestamp.tzinfo is not None
@@ -355,7 +360,7 @@ class TestBuildSubscriptionEvent:
         """Subscription event produced when subscriptions are enabled."""
         config = TwitchWatcherConfig(subscriptions_enabled=True)
         event = build_subscription_event(
-            config=config, channel="ch", viewer="Alice", tier=1
+            config=config, channel="ch", viewer=_ALICE, tier=1
         )
         assert event is not None
         assert isinstance(event, TwitchEvent)
@@ -364,7 +369,7 @@ class TestBuildSubscriptionEvent:
         """No event produced when subscriptions are disabled."""
         config = TwitchWatcherConfig(subscriptions_enabled=False)
         event = build_subscription_event(
-            config=config, channel="ch", viewer="Alice", tier=1
+            config=config, channel="ch", viewer=_ALICE, tier=1
         )
         assert event is None
 
@@ -372,7 +377,7 @@ class TestBuildSubscriptionEvent:
         """Event text matches format_subscription output."""
         config = TwitchWatcherConfig(subscriptions_enabled=True)
         event = build_subscription_event(
-            config=config, channel="ch", viewer="Alice", tier=2
+            config=config, channel="ch", viewer=_ALICE, tier=2
         )
         assert event is not None
         assert event.text == format_subscription("Alice", 2)
@@ -381,7 +386,7 @@ class TestBuildSubscriptionEvent:
         """Subscription events have normal priority."""
         config = TwitchWatcherConfig(subscriptions_enabled=True)
         event = build_subscription_event(
-            config=config, channel="ch", viewer="Alice", tier=1
+            config=config, channel="ch", viewer=_ALICE, tier=1
         )
         assert event is not None
         assert event.priority == "normal"
@@ -390,10 +395,10 @@ class TestBuildSubscriptionEvent:
         """Subscription event carries the viewer's name."""
         config = TwitchWatcherConfig(subscriptions_enabled=True)
         event = build_subscription_event(
-            config=config, channel="ch", viewer="Alice", tier=1
+            config=config, channel="ch", viewer=_ALICE, tier=1
         )
         assert event is not None
-        assert event.viewer == "Alice"
+        assert event.viewer == _ALICE
 
 
 class TestBuildGiftSubscriptionEvent:
@@ -401,7 +406,7 @@ class TestBuildGiftSubscriptionEvent:
         """Gift sub event produced when subscriptions are enabled."""
         config = TwitchWatcherConfig(subscriptions_enabled=True)
         event = build_gift_subscription_event(
-            config=config, channel="ch", gifter="Bob", count=5, tier=1
+            config=config, channel="ch", gifter=_BOB, count=5, tier=1
         )
         assert event is not None
 
@@ -409,7 +414,7 @@ class TestBuildGiftSubscriptionEvent:
         """No event produced when subscriptions are disabled."""
         config = TwitchWatcherConfig(subscriptions_enabled=False)
         event = build_gift_subscription_event(
-            config=config, channel="ch", gifter="Bob", count=5, tier=1
+            config=config, channel="ch", gifter=_BOB, count=5, tier=1
         )
         assert event is None
 
@@ -426,7 +431,7 @@ class TestBuildGiftSubscriptionEvent:
         """Event text matches format_gift_subscription output."""
         config = TwitchWatcherConfig(subscriptions_enabled=True)
         event = build_gift_subscription_event(
-            config=config, channel="ch", gifter="Bob", count=5, tier=1
+            config=config, channel="ch", gifter=_BOB, count=5, tier=1
         )
         assert event is not None
         assert event.text == format_gift_subscription("Bob", 5, 1)
@@ -435,10 +440,10 @@ class TestBuildGiftSubscriptionEvent:
         """Gift sub event carries the gifter's name when not anonymous."""
         config = TwitchWatcherConfig(subscriptions_enabled=True)
         event = build_gift_subscription_event(
-            config=config, channel="ch", gifter="Bob", count=5, tier=1
+            config=config, channel="ch", gifter=_BOB, count=5, tier=1
         )
         assert event is not None
-        assert event.viewer == "Bob"
+        assert event.viewer == _BOB
 
     def test_anonymous_gifter_viewer_is_none(self) -> None:
         """Gift sub event has no viewer when the gifter is anonymous."""
@@ -457,7 +462,7 @@ class TestBuildResubscriptionEvent:
         event = build_resubscription_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             months=6,
             tier=2,
             message="love this stream",
@@ -470,7 +475,7 @@ class TestBuildResubscriptionEvent:
         event = build_resubscription_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             months=6,
             tier=2,
             message="love this stream",
@@ -483,7 +488,7 @@ class TestBuildResubscriptionEvent:
         event = build_resubscription_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             months=6,
             tier=2,
             message="love this stream",
@@ -497,7 +502,7 @@ class TestBuildResubscriptionEvent:
         event = build_resubscription_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             months=3,
             tier=1,
             message="woo",
@@ -511,13 +516,13 @@ class TestBuildResubscriptionEvent:
         event = build_resubscription_event(
             config=config,
             channel="ch",
-            viewer="Alice",
+            viewer=_ALICE,
             months=6,
             tier=2,
             message="love this stream",
         )
         assert event is not None
-        assert event.viewer == "Alice"
+        assert event.viewer == _ALICE
 
 
 class TestBuildCheerEvent:
@@ -525,7 +530,7 @@ class TestBuildCheerEvent:
         """Cheer event produced when cheers are enabled."""
         config = TwitchWatcherConfig(cheers_enabled=True)
         event = build_cheer_event(
-            config=config, channel="ch", viewer="Bob", bits=100, message="poggers"
+            config=config, channel="ch", viewer=_BOB, bits=100, message="poggers"
         )
         assert event is not None
 
@@ -533,7 +538,7 @@ class TestBuildCheerEvent:
         """No event produced when cheers are disabled."""
         config = TwitchWatcherConfig(cheers_enabled=False)
         event = build_cheer_event(
-            config=config, channel="ch", viewer="Bob", bits=100, message="poggers"
+            config=config, channel="ch", viewer=_BOB, bits=100, message="poggers"
         )
         assert event is None
 
@@ -550,7 +555,7 @@ class TestBuildCheerEvent:
         """Event text matches format_cheer output."""
         config = TwitchWatcherConfig(cheers_enabled=True)
         event = build_cheer_event(
-            config=config, channel="ch", viewer="Bob", bits=100, message="poggers"
+            config=config, channel="ch", viewer=_BOB, bits=100, message="poggers"
         )
         assert event is not None
         assert event.text == format_cheer("Bob", 100, "poggers")
@@ -559,7 +564,7 @@ class TestBuildCheerEvent:
         """Cheer events have normal priority."""
         config = TwitchWatcherConfig(cheers_enabled=True)
         event = build_cheer_event(
-            config=config, channel="ch", viewer="Bob", bits=50, message="nice"
+            config=config, channel="ch", viewer=_BOB, bits=50, message="nice"
         )
         assert event is not None
         assert event.priority == "normal"
@@ -568,10 +573,10 @@ class TestBuildCheerEvent:
         """Cheer event carries the viewer's name when not anonymous."""
         config = TwitchWatcherConfig(cheers_enabled=True)
         event = build_cheer_event(
-            config=config, channel="ch", viewer="Bob", bits=100, message="poggers"
+            config=config, channel="ch", viewer=_BOB, bits=100, message="poggers"
         )
         assert event is not None
-        assert event.viewer == "Bob"
+        assert event.viewer == _BOB
 
     def test_anonymous_viewer_is_none(self) -> None:
         """Cheer event has no viewer when the cheerer is anonymous."""
@@ -587,35 +592,35 @@ class TestBuildFollowEvent:
     def test_produces_event_when_enabled(self) -> None:
         """Follow event produced when follows are enabled."""
         config = TwitchWatcherConfig(follows_enabled=True)
-        event = build_follow_event(config=config, channel="ch", viewer="Alice")
+        event = build_follow_event(config=config, channel="ch", viewer=_ALICE)
         assert event is not None
 
     def test_returns_none_when_disabled(self) -> None:
         """No event produced when follows are disabled."""
         config = TwitchWatcherConfig(follows_enabled=False)
-        event = build_follow_event(config=config, channel="ch", viewer="Alice")
+        event = build_follow_event(config=config, channel="ch", viewer=_ALICE)
         assert event is None
 
     def test_event_text_matches_formatter(self) -> None:
         """Event text matches format_follow output."""
         config = TwitchWatcherConfig(follows_enabled=True)
-        event = build_follow_event(config=config, channel="ch", viewer="Alice")
+        event = build_follow_event(config=config, channel="ch", viewer=_ALICE)
         assert event is not None
         assert event.text == format_follow("Alice")
 
     def test_event_priority_is_normal(self) -> None:
         """Follow events have normal priority."""
         config = TwitchWatcherConfig(follows_enabled=True)
-        event = build_follow_event(config=config, channel="ch", viewer="Alice")
+        event = build_follow_event(config=config, channel="ch", viewer=_ALICE)
         assert event is not None
         assert event.priority == "normal"
 
     def test_event_viewer_is_set(self) -> None:
         """Follow event carries the viewer's name."""
         config = TwitchWatcherConfig(follows_enabled=True)
-        event = build_follow_event(config=config, channel="ch", viewer="Alice")
+        event = build_follow_event(config=config, channel="ch", viewer=_ALICE)
         assert event is not None
-        assert event.viewer == "Alice"
+        assert event.viewer == _ALICE
 
 
 class TestBuildAdStartEvent:
@@ -746,7 +751,7 @@ class TestTwitchEventToMessage:
             text="Alice has followed the channel",
             priority="normal",
             timestamp=datetime.now(UTC),
-            viewer="Alice",
+            viewer=_ALICE,
         )
         assert event.to_message().name == "Alice"
 
@@ -768,7 +773,7 @@ class TestTwitchEventToMessage:
             text="Alice has followed the channel",
             priority="normal",
             timestamp=datetime.now(UTC),
-            viewer="Alice",
+            viewer=_ALICE,
         )
         d = event.to_message().to_dict()
         assert d == {
@@ -821,12 +826,12 @@ class TestTwitchEventToMessage:
             redemption_names=["Talk to Sapphire"],
         )
         raw_events = [
-            build_follow_event(config=config, channel="ch", viewer="Alice"),
-            build_subscription_event(config=config, channel="ch", viewer="Bob", tier=1),
+            build_follow_event(config=config, channel="ch", viewer=_ALICE),
+            build_subscription_event(config=config, channel="ch", viewer=_BOB, tier=1),
             build_channel_point_event(
                 config=config,
                 channel="ch",
-                viewer="Carol",
+                viewer=_CAROL,
                 redemption_name="Talk to Sapphire",
                 user_input="hello!",
             ),

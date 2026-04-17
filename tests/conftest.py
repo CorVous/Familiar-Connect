@@ -12,6 +12,7 @@ import pytest
 from familiar_connect.config import LLM_SLOT_NAMES
 from familiar_connect.context.providers.content_search import retrieval
 from familiar_connect.context.types import ContextRequest, Modality
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 
 if TYPE_CHECKING:
@@ -87,13 +88,16 @@ def make_context_request() -> Callable[..., ContextRequest]:
     utterance or deadline pass overrides directly:
     ``make_context_request(utterance="hi", deadline_s=10.0)``.
     """
+    alice = Author(
+        platform="discord", user_id="1", username="alice", display_name="Alice"
+    )
 
     def _factory(**overrides: Any) -> ContextRequest:  # noqa: ANN401
         defaults: dict[str, Any] = {
             "familiar_id": "aria",
             "channel_id": 100,
             "guild_id": 1,
-            "speaker": "Alice",
+            "author": alice,
             "utterance": "hello",
             "modality": Modality.text,
             "budget_tokens": 2048,

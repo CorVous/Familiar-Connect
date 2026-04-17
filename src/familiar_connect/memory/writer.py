@@ -11,6 +11,7 @@ writer follows.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
+from familiar_connect.identity import Author, format_turn_for_transcript
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.memory.store import MemoryStore, MemoryStoreError
 
@@ -29,6 +31,11 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 _AUDIT_SOURCE = "memory_writer"
+_ALIAS_INDEX_PATH = "people/_aliases.json"
+_ALIASES_HEADER_RE = re.compile(
+    r"^\s*##\s+Aliases\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # ---------------------------------------------------------------------------
 # Result
@@ -68,11 +75,16 @@ events, decisions, emotional beats, and anything worth remembering. \
 
 ===PEOPLE===
 For each person worth remembering or updating, write:
----FILE: <filename>.md---
+---FILE: <canonical-slug>.md---
 <Full markdown content for this person's file. Start with an H1 of their \
-name. Include who they are, notable interactions, the character's feelings \
-about them, and any relevant details. If updating an existing file, preserve \
-and extend its content — do not drop existing information.>
+human-readable name. Include who they are, notable interactions, the \
+character's feelings about them, and any relevant details. If updating an \
+existing file, preserve and extend its content — do not drop existing \
+information.
+
+If the person is known by multiple names (display name, username, nicknames), \
+record every name you have seen them called under an ``## Aliases`` section, \
+one name per line as a bullet list.>
 ---END_FILE---
 ===END_PEOPLE===
 
@@ -87,9 +99,13 @@ its content — do not drop existing information.>
 ===END_TOPICS===
 
 Rules:
-- Filenames must be lowercase, use hyphens for spaces, and end in .md
-- Filenames must be a basename only — never include a directory prefix \
-  (write ``alice.md``, not ``people/alice.md``)
+- For people files: the filename MUST be the exact canonical slug listed \
+  in the Authors table below (e.g. ``discord-123456789.md``). Do not use \
+  display names or nicknames as filenames — those belong inside the file, \
+  not in the filename.
+- For topic files: filenames must be lowercase, use hyphens for spaces, \
+  and end in .md
+- Filenames must be a basename only — never include a directory prefix
 - Only create/update people and topic files that are genuinely worth \
   remembering long-term
 - Write from {familiar_name}'s perspective
@@ -99,12 +115,19 @@ Rules:
 
 
 _WRITER_USER_PROMPT = """\
-{existing_files_section}\
+{author_roster}{existing_files_section}\
 ----- conversation transcript -----
 {transcript}
 ----- end transcript -----
 
 Produce the structured memory update now."""
+
+
+_AUTHOR_ROSTER_HEADER = """\
+Authors in this transcript — use the canonical slug as the filename \
+when writing or updating a person's file:
+
+"""
 
 
 _EXISTING_FILES_HEADER = """\
@@ -198,14 +221,69 @@ def _parse_file_blocks(section: str) -> dict[str, str]:
 
 
 def _render_turns(turns: list[HistoryTurn]) -> str:
-    """Render turns as a text transcript."""
-    lines: list[str] = []
+    """Render turns as a text transcript — shared helper from identity."""
+    return "\n".join(
+        format_turn_for_transcript(t.role, t.author, t.content) for t in turns
+    )
+
+
+def _collect_authors(turns: list[HistoryTurn]) -> list[Author]:
+    """Return unique authors from user turns, in first-appearance order."""
+    seen: set[str] = set()
+    authors: list[Author] = []
     for t in turns:
-        if t.role == "user" and t.speaker:
-            lines.append(f"{t.role} ({t.speaker}): {t.content}")
-        else:
-            lines.append(f"{t.role}: {t.content}")
-    return "\n".join(lines)
+        if t.role != "user" or t.author is None:
+            continue
+        key = t.author.canonical_key
+        if key in seen:
+            continue
+        seen.add(key)
+        authors.append(t.author)
+    return authors
+
+
+def _format_author_roster(authors: list[Author]) -> str:
+    """Render the author roster block shown to the writer LLM.
+
+    Each entry: canonical slug + display label + every known name. An
+    empty list returns an empty string — no header, no noise.
+    """
+    if not authors:
+        return ""
+    lines: list[str] = []
+    for a in authors:
+        names = sorted(a.all_known_names)
+        names_text = ", ".join(names) if names else a.label
+        lines.append(
+            f"- canonical slug: {a.slug}, "
+            f"display name: {a.label}, "
+            f"known names: {names_text}"
+        )
+    return _AUTHOR_ROSTER_HEADER + "\n".join(lines) + "\n\n"
+
+
+def _extract_aliases(markdown: str) -> list[str]:
+    """Pull alias entries from a ``## Aliases`` section in a people file.
+
+    Accepts bullet-list entries (``- name`` / ``* name``) until the next
+    ``##`` header or end of file. Returns the raw name strings; callers
+    lowercase them when building the index.
+    """
+    match = _ALIASES_HEADER_RE.search(markdown)
+    if not match:
+        return []
+    after = markdown[match.end() :]
+    # stop at the next ## header
+    end_match = re.search(r"^\s*##\s", after, re.MULTILINE)
+    section = after[: end_match.start()] if end_match else after
+    aliases: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("-", "*")):
+            entry = stripped.lstrip("-*").strip()
+            if entry:
+                aliases.append(entry)
+    return aliases
 
 
 # ---------------------------------------------------------------------------
@@ -295,19 +373,22 @@ class MemoryWriter:
         session_path = _session_filename(now)
 
         # Build the prompt with existing file context
+        authors = _collect_authors(turns)
         transcript = _render_turns(turns)
         context_block = self._build_context_block(turns)
         if context_block:
             transcript = f"{context_block}\n\n{transcript}"
         existing_section = self._build_existing_files_section(
-            turns,
+            authors,
             session_path=session_path,
         )
+        author_roster = _format_author_roster(authors)
 
         system_prompt = _WRITER_SYSTEM_PROMPT.format(
             familiar_name=self._familiar_id,
         )
         user_prompt = _WRITER_USER_PROMPT.format(
+            author_roster=author_roster,
             existing_files_section=existing_section,
             transcript=transcript,
         )
@@ -359,6 +440,10 @@ class MemoryWriter:
             )
             result_topics.append(rel_path)
 
+        # Rebuild alias index from transcript authors + each file's ## Aliases
+        # section, so recall can resolve any known name to the canonical slug.
+        self._rebuild_alias_index(authors)
+
         # Advance the watermark only after all writes succeed
         self._history_store.put_writer_watermark(
             familiar_id=self._familiar_id,
@@ -406,7 +491,7 @@ class MemoryWriter:
 
     def _build_existing_files_section(
         self,
-        turns: list[HistoryTurn],
+        authors: list[Author],
         *,
         session_path: str | None = None,
     ) -> str:
@@ -435,16 +520,11 @@ class MemoryWriter:
                     )
                 )
 
-        # Collect speaker names from user turns
-        speakers: set[str] = set()
-        for t in turns:
-            if t.role == "user" and t.speaker:
-                speakers.add(t.speaker)
-
-        # Load existing people files matching speaker names
+        # Load existing people files keyed by Author.slug — canonical,
+        # so a rename doesn't orphan the file.
         people_loaded = 0
-        for speaker in sorted(speakers):
-            slug = re.sub(r"[^a-z0-9]+", "-", speaker.lower()).strip("-")
+        for author in authors:
+            slug = author.slug
             if not slug:
                 continue
             rel_path = f"people/{slug}.md"
@@ -491,3 +571,51 @@ class MemoryWriter:
             return ""
 
         return _EXISTING_FILES_HEADER + "".join(section_parts) + "\n"
+
+    def _rebuild_alias_index(self, authors: list[Author]) -> None:
+        """Write ``people/_aliases.json`` mapping lowercased names → slugs.
+
+        Merges two sources: every known name on each ``Author`` from the
+        transcript, plus any ``## Aliases`` section inside each
+        ``people/*.md`` file. Skips write when no entries — cleaner than
+        leaving an empty JSON object behind.
+        """
+        index: dict[str, str] = {}
+
+        for author in authors:
+            slug = author.slug
+            if not slug:
+                continue
+            for name in author.all_known_names:
+                lowered = name.strip().lower()
+                if lowered:
+                    index[lowered] = slug
+
+        try:
+            files = self._memory_store.glob("people/*.md")
+        except MemoryStoreError:
+            files = []
+        for rel_path in files:
+            filename = rel_path.split("/")[-1]
+            if filename.startswith("_"):
+                continue
+            slug = filename.removesuffix(".md")
+            if not slug:
+                continue
+            try:
+                content = self._memory_store.read_file(rel_path)
+            except MemoryStoreError:
+                continue
+            for alias in _extract_aliases(content):
+                lowered = alias.strip().lower()
+                if lowered:
+                    index[lowered] = slug
+
+        if not index:
+            return
+        payload = json.dumps(index, sort_keys=True, indent=2)
+        self._memory_store.write_file(
+            _ALIAS_INDEX_PATH,
+            payload,
+            source=_AUDIT_SOURCE,
+        )

@@ -51,6 +51,7 @@ from familiar_connect.bot import (
 from familiar_connect.chattiness import BufferedMessage, ResponseTrigger
 from familiar_connect.config import LLM_SLOT_NAMES, ChannelMode
 from familiar_connect.familiar import Familiar
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.transcription import TranscriptionResult
@@ -154,6 +155,23 @@ class _SlowLLMClient(LLMClient):
         return Message(role="assistant", content=self.reply)
 
 
+def _author(name: str, user_id: int | None = None) -> Author:
+    """Build a Discord-style Author for tests."""
+    if user_id is None:
+        user_id = abs(hash(name)) % 10_000_000
+    return Author(
+        platform="discord",
+        user_id=str(user_id),
+        username=name.lower(),
+        display_name=name,
+    )
+
+
+_ALICE = _author("Alice", user_id=1)
+_BOB = _author("Bob", user_id=2)
+_CAROL = _author("Carol", user_id=3)
+
+
 def _make_llm_clients(reply: str = "I am here.") -> dict[str, LLMClient]:
     """Return a ``slot_name -> LLMClient`` dict with a stub in every slot.
 
@@ -213,6 +231,8 @@ def _make_message(
 
     author = MagicMock(spec=discord.Member)
     author.bot = author_bot
+    author.id = 1
+    author.name = "alice"
     author.display_name = "Alice"
     msg.author = author
 
@@ -419,7 +439,12 @@ class TestOnMessageMonitorRouting:
         call_kwargs = mock.call_args.kwargs
         assert call_kwargs["channel_id"] == 12345
         assert call_kwargs["text"] == "hi"
-        assert call_kwargs["speaker"] == "Alice"
+        author = call_kwargs["author"]
+        assert isinstance(author, Author)
+        assert author.platform == "discord"
+        assert author.user_id == "1"
+        assert author.username == "alice"
+        assert author.display_name == "Alice"
 
     def test_on_message_passes_is_mention(
         self, tmp_familiar: Callable[..., Familiar]
@@ -464,13 +489,13 @@ class TestOnRespond:
             channel_id=12345, mode=ChannelMode.imitate_voice
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hi",
                 buffer=buffer,
                 familiar=familiar,
@@ -498,13 +523,13 @@ class TestOnRespond:
             channel_id=12345, mode=ChannelMode.imitate_voice
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hi",
                 buffer=buffer,
                 familiar=familiar,
@@ -525,13 +550,13 @@ class TestOnRespond:
             channel_id=12345, mode=ChannelMode.imitate_voice
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi there", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi there", timestamp=0.0)]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hi there",
                 buffer=buffer,
                 familiar=familiar,
@@ -563,16 +588,16 @@ class TestOnRespond:
         )
         channel = _make_channel(12345)
         buffer = [
-            BufferedMessage(speaker="Alice", text="msg1", timestamp=0.0),
-            BufferedMessage(speaker="Bob", text="msg2", timestamp=1.0),
-            BufferedMessage(speaker="Alice", text="msg3", timestamp=2.0),
+            BufferedMessage(author=_ALICE, text="msg1", timestamp=0.0),
+            BufferedMessage(author=_BOB, text="msg2", timestamp=1.0),
+            BufferedMessage(author=_ALICE, text="msg3", timestamp=2.0),
         ]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="msg3",
                 buffer=buffer,
                 familiar=familiar,
@@ -604,8 +629,8 @@ class TestOnRespond:
         )
         channel = _make_channel(12345)
         buffer = [
-            BufferedMessage(speaker="Alice", text="first message", timestamp=0.0),
-            BufferedMessage(speaker="Bob", text="second message", timestamp=1.0),
+            BufferedMessage(author=_ALICE, text="first message", timestamp=0.0),
+            BufferedMessage(author=_BOB, text="second message", timestamp=1.0),
         ]
 
         with caplog.at_level("INFO", logger="familiar_connect.bot"):
@@ -613,7 +638,7 @@ class TestOnRespond:
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Bob",
+                    author=_BOB,
                     utterance="second message",
                     buffer=buffer,
                     familiar=familiar,
@@ -644,7 +669,7 @@ class TestOnRespond:
         vc.is_playing = MagicMock(return_value=False)
 
         buffer = [
-            BufferedMessage(speaker="Alice", text="hello world", timestamp=0.0),
+            BufferedMessage(author=_ALICE, text="hello world", timestamp=0.0),
         ]
 
         with caplog.at_level("INFO", logger="familiar_connect.bot"):
@@ -652,7 +677,7 @@ class TestOnRespond:
                 _run_voice_response(
                     channel_id=9000,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hello world",
                     buffer=buffer,
                     familiar=familiar,
@@ -690,14 +715,14 @@ class TestOnRespond:
         typing_cm.__aexit__ = AsyncMock(return_value=False)
         thread.typing = MagicMock(return_value=typing_cm)
 
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with caplog.at_level("ERROR", logger="familiar_connect.bot"):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -933,6 +958,34 @@ class TestSubscriptionCommands:
         assert (
             familiar.subscriptions.get(
                 channel_id=77,
+                kind=SubscriptionKind.text,
+            )
+            is None
+        )
+
+    def test_subscribe_text_rejects_dm(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        """DMs are not valid text subscription targets; respond ephemeral, no sub."""
+        familiar = tmp_familiar()
+        ctx = MagicMock(spec=discord.ApplicationContext)
+        ctx.respond = AsyncMock()
+
+        dm_channel = MagicMock(spec=discord.DMChannel)
+        dm_channel.id = 55
+        type(ctx).channel = PropertyMock(return_value=dm_channel)
+        type(ctx).channel_id = PropertyMock(return_value=55)
+        type(ctx).guild = PropertyMock(return_value=None)
+        type(ctx).guild_id = PropertyMock(return_value=None)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(
+                channel_id=55,
                 kind=SubscriptionKind.text,
             )
             is None
@@ -1357,6 +1410,57 @@ class TestChannelBackdropInThread:
 
 
 # ---------------------------------------------------------------------------
+# /channel-backdrop in a DM writes a labelled channel_name to the sidecar
+# ---------------------------------------------------------------------------
+
+
+def _make_dm_ctx(*, channel_id: int = 88, recipient_name: str = "alice") -> MagicMock:
+    """Build a fake ``discord.ApplicationContext`` whose channel is a DMChannel."""
+    ctx = MagicMock(spec=discord.ApplicationContext)
+    ctx.respond = AsyncMock()
+    ctx.send_modal = AsyncMock()
+
+    recipient = MagicMock(spec=discord.User)
+    recipient.display_name = recipient_name
+
+    dm_channel = MagicMock(spec=discord.DMChannel)
+    dm_channel.id = channel_id
+    dm_channel.recipient = recipient
+
+    type(ctx).channel = PropertyMock(return_value=dm_channel)
+    type(ctx).channel_id = PropertyMock(return_value=channel_id)
+    type(ctx).guild = PropertyMock(return_value=None)
+    type(ctx).guild_id = PropertyMock(return_value=None)
+    return ctx
+
+
+class TestChannelBackdropInDM:
+    @pytest.mark.asyncio
+    async def test_backdrop_in_dm_writes_labelled_channel_name(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        """Sidecar ``channel_name`` shows ``DM:{recipient}`` label.
+
+        Guards that ``channel_backdrop`` in a DM builds a human-readable
+        label rather than persisting the raw integer channel id.
+        """
+        familiar = tmp_familiar()
+        ctx = _make_dm_ctx(channel_id=88, recipient_name="alice")
+
+        await channel_backdrop(ctx, familiar)
+
+        modal = ctx.send_modal.call_args[0][0]
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+        modal.children[0].value = "Speak like a pirate."
+        await modal.callback(interaction)
+
+        cfg = familiar.channel_configs.get(channel_id=88)
+        assert cfg.channel_name == "DM:alice"
+
+
+# ---------------------------------------------------------------------------
 # Main-reply resilience — failing LLMClient.chat does not poison the channel
 # ---------------------------------------------------------------------------
 
@@ -1398,14 +1502,14 @@ class TestMainReplyResilience:
         failing = _RaisingLLMClient(httpx.ConnectTimeout("boom"))
         familiar.llm_clients["main_prose"] = failing
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with caplog.at_level("WARNING", logger="familiar_connect.bot"):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -1444,14 +1548,14 @@ class TestMainReplyResilience:
         failing = _RaisingLLMClient(_make_http_status_error(500))
         familiar.llm_clients["main_prose"] = failing
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with caplog.at_level("WARNING", logger="familiar_connect.bot"):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -1492,14 +1596,14 @@ class TestMainReplyResilience:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
 
-        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hello there", timestamp=0.0)]
 
         with caplog.at_level("WARNING", logger="familiar_connect.bot"):
             asyncio.run(
                 _run_voice_response(
                     channel_id=9000,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hello there",
                     buffer=buffer,
                     familiar=familiar,
@@ -1559,13 +1663,13 @@ class TestVoicePreProcessorsSuppressed:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
 
-        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hello there", timestamp=0.0)]
 
         asyncio.run(
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hello there",
                 buffer=buffer,
                 familiar=familiar,
@@ -1719,7 +1823,7 @@ class TestVoiceInterjectionRouting:
         bot = create_bot(familiar)
         del bot  # we only need the side-effect: monitor.on_respond installed
 
-        buffer = [BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)]
 
         async def _invoke() -> None:
             await familiar.monitor.on_respond(
@@ -1766,7 +1870,7 @@ class TestVoiceInterjectionRouting:
                 return_value=text_channel,
             )
 
-            buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+            buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
             async def _invoke() -> None:
                 await familiar.monitor.on_respond(
@@ -1801,16 +1905,16 @@ class TestVoiceInterjectionRouting:
         vc.play = MagicMock()
         vc.is_playing = MagicMock(return_value=False)
         buffer = [
-            BufferedMessage(speaker="Alice", text="hey", timestamp=0.0),
-            BufferedMessage(speaker="Bob", text="what's up", timestamp=1.0),
-            BufferedMessage(speaker="Alice", text="aria you there", timestamp=2.0),
+            BufferedMessage(author=_ALICE, text="hey", timestamp=0.0),
+            BufferedMessage(author=_BOB, text="what's up", timestamp=1.0),
+            BufferedMessage(author=_ALICE, text="aria you there", timestamp=2.0),
         ]
 
         asyncio.run(
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="aria you there",
                 buffer=buffer,
                 familiar=familiar,
@@ -1862,9 +1966,9 @@ class TestVoiceGenerationCancellation:
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hey",
-                buffer=[BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)],
+                buffer=[BufferedMessage(author=_ALICE, text="hey", timestamp=0.0)],
                 familiar=familiar,
                 vc=vc,
                 trigger=ResponseTrigger.direct_address,
@@ -1901,11 +2005,9 @@ class TestVoiceGenerationCancellation:
                 _run_voice_response(
                     channel_id=9000,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hey",
-                    buffer=[
-                        BufferedMessage(speaker="Alice", text="hey", timestamp=0.0)
-                    ],
+                    buffer=[BufferedMessage(author=_ALICE, text="hey", timestamp=0.0)],
                     familiar=familiar,
                     vc=vc,
                     trigger=ResponseTrigger.direct_address,
@@ -1971,11 +2073,9 @@ class TestDispatchInterruptionRegen:
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="original",
-                buffer=[
-                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
-                ],
+                buffer=[BufferedMessage(author=_ALICE, text="original", timestamp=0.0)],
                 familiar=familiar,
                 vc=vc,
                 trigger=ResponseTrigger.direct_address,
@@ -1993,7 +2093,7 @@ class TestDispatchInterruptionRegen:
             dispatch_interruption_regen(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 transcript="hey stop",
                 familiar=familiar,
                 vc=vc,
@@ -2024,11 +2124,9 @@ class TestDispatchInterruptionRegen:
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="original",
-                buffer=[
-                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
-                ],
+                buffer=[BufferedMessage(author=_ALICE, text="original", timestamp=0.0)],
                 familiar=familiar,
                 vc=vc,
                 trigger=ResponseTrigger.direct_address,
@@ -2043,7 +2141,7 @@ class TestDispatchInterruptionRegen:
             dispatch_interruption_regen(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 transcript="hey stop",
                 familiar=familiar,
                 vc=vc,
@@ -2079,11 +2177,9 @@ class TestDispatchInterruptionRegen:
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="original",
-                buffer=[
-                    BufferedMessage(speaker="Alice", text="original", timestamp=0.0)
-                ],
+                buffer=[BufferedMessage(author=_ALICE, text="original", timestamp=0.0)],
                 familiar=familiar,
                 vc=vc,
                 trigger=ResponseTrigger.direct_address,
@@ -2098,7 +2194,7 @@ class TestDispatchInterruptionRegen:
             dispatch_interruption_regen(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 transcript="hey stop",
                 familiar=familiar,
                 vc=vc,
@@ -2168,9 +2264,9 @@ class TestDeliveryGate:
         await _run_voice_response(
             channel_id=9000,
             guild_id=999,
-            speaker="Alice",
+            author=_ALICE,
             utterance="hello",
-            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            buffer=[BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)],
             familiar=familiar,
             vc=vc,
             trigger=ResponseTrigger.direct_address,
@@ -2201,9 +2297,9 @@ class TestDeliveryGate:
         await _run_voice_response(
             channel_id=9000,
             guild_id=999,
-            speaker="Alice",
+            author=_ALICE,
             utterance="hello",
-            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            buffer=[BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)],
             familiar=familiar,
             vc=vc,
             trigger=ResponseTrigger.direct_address,
@@ -2237,9 +2333,9 @@ class TestDeliveryGate:
         await _run_voice_response(
             channel_id=9000,
             guild_id=999,
-            speaker="Alice",
+            author=_ALICE,
             utterance="hello",
-            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            buffer=[BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)],
             familiar=familiar,
             vc=vc,
             trigger=ResponseTrigger.direct_address,
@@ -2268,9 +2364,9 @@ class TestDeliveryGate:
         await _run_voice_response(
             channel_id=9000,
             guild_id=999,
-            speaker="Alice",
+            author=_ALICE,
             utterance="hello",
-            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            buffer=[BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)],
             familiar=familiar,
             vc=vc,
             trigger=ResponseTrigger.direct_address,
@@ -2486,12 +2582,12 @@ class TestLongSpeakingYield:
 
         vc.play = MagicMock(side_effect=_inject_interrupt)
 
-        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hello there", timestamp=0.0)]
         asyncio.run(
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hello there",
                 buffer=buffer,
                 familiar=familiar,
@@ -2529,12 +2625,12 @@ class TestLongSpeakingYield:
 
         vc.play = MagicMock(side_effect=_inject_interrupt)
 
-        buffer = [BufferedMessage(speaker="Alice", text="hello there", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hello there", timestamp=0.0)]
         asyncio.run(
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hello there",
                 buffer=buffer,
                 familiar=familiar,
@@ -2586,7 +2682,7 @@ class TestShortGeneratingFlush:
             InterruptionClass.short
         )
         tracker = familiar.tracker_registry.get(999)
-        tracker.pending_interrupter_turns = [("Bob", "wait what")]
+        tracker.pending_interrupter_turns = [(_BOB, "wait what")]
 
         vc = MagicMock(spec=discord.VoiceClient)
         vc.play = MagicMock()
@@ -2595,9 +2691,9 @@ class TestShortGeneratingFlush:
         await _run_voice_response(
             channel_id=9000,
             guild_id=999,
-            speaker="Alice",
+            author=_ALICE,
             utterance="hello",
-            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            buffer=[BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)],
             familiar=familiar,
             vc=vc,
             trigger=ResponseTrigger.direct_address,
@@ -2608,7 +2704,15 @@ class TestShortGeneratingFlush:
         )
         # Expected: Alice "hello" (buffer), Bob "wait what" (interrupter),
         # assistant reply "my reply".
-        assert [(t.role, t.speaker, t.content) for t in turns] == [
+        observed = [
+            (
+                t.role,
+                t.author.display_name if t.author else None,
+                t.content,
+            )
+            for t in turns
+        ]
+        assert observed == [
             ("user", "Alice", "hello"),
             ("user", "Bob", "wait what"),
             ("assistant", None, "my reply"),
@@ -2630,7 +2734,7 @@ class TestShortGeneratingFlush:
             InterruptionClass.short
         )
         tracker = familiar.tracker_registry.get(999)
-        tracker.pending_interrupter_turns = [("Bob", "hi"), ("Carol", "hey")]
+        tracker.pending_interrupter_turns = [(_BOB, "hi"), (_CAROL, "hey")]
 
         vc = MagicMock(spec=discord.VoiceClient)
         vc.play = MagicMock()
@@ -2639,9 +2743,9 @@ class TestShortGeneratingFlush:
         await _run_voice_response(
             channel_id=9000,
             guild_id=999,
-            speaker="Alice",
+            author=_ALICE,
             utterance="hello",
-            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            buffer=[BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)],
             familiar=familiar,
             vc=vc,
             trigger=ResponseTrigger.direct_address,
@@ -2666,7 +2770,7 @@ class TestShortGeneratingFlush:
             InterruptionClass.long
         )
         tracker = familiar.tracker_registry.get(999)
-        tracker.pending_interrupter_turns = [("Bob", "wait what")]
+        tracker.pending_interrupter_turns = [(_BOB, "wait what")]
 
         vc = MagicMock(spec=discord.VoiceClient)
         vc.play = MagicMock()
@@ -2675,9 +2779,9 @@ class TestShortGeneratingFlush:
         await _run_voice_response(
             channel_id=9000,
             guild_id=999,
-            speaker="Alice",
+            author=_ALICE,
             utterance="hello",
-            buffer=[BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)],
+            buffer=[BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)],
             familiar=familiar,
             vc=vc,
             trigger=ResponseTrigger.direct_address,
@@ -2746,12 +2850,12 @@ class TestShortSpeakingYieldHistory:
 
         vc.play = MagicMock(side_effect=_inject_interrupt)
 
-        buffer = [BufferedMessage(speaker="Alice", text="go ahead", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="go ahead", timestamp=0.0)]
         asyncio.run(
             _run_voice_response(
                 channel_id=9000,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="go ahead",
                 buffer=buffer,
                 familiar=familiar,
@@ -2879,14 +2983,14 @@ class TestTypingSimulationDelivery:
         self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         familiar, channel = self._setup_channel_rp(tmp_familiar, reply="Hello Alice.")
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -2904,14 +3008,14 @@ class TestTypingSimulationDelivery:
     ) -> None:
         reply = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
         familiar, channel = self._setup_channel_rp(tmp_familiar, reply=reply)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -2932,14 +3036,14 @@ class TestTypingSimulationDelivery:
     ) -> None:
         reply = "Para one.\n\nPara two."
         familiar, channel = self._setup_channel_rp(tmp_familiar, reply=reply)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -2957,14 +3061,14 @@ class TestTypingSimulationDelivery:
     ) -> None:
         reply = "First.\n\nSecond."
         familiar, channel = self._setup_channel_rp(tmp_familiar, reply=reply)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -2989,14 +3093,14 @@ class TestTypingSimulationDelivery:
         tmp_familiar: Callable[..., Familiar],
     ) -> None:
         familiar, channel = self._setup_channel_rp(tmp_familiar, reply="Hello.")
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
             asyncio.run(
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -3028,7 +3132,7 @@ class TestTypingSimulationCancellation:
             mode=ChannelMode.text_conversation_rp,
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         # Channel.send blocks on the second call so we can cancel mid-way.
         send_gate = asyncio.Event()
@@ -3051,7 +3155,7 @@ class TestTypingSimulationCancellation:
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -3116,7 +3220,7 @@ class TestTypingSimulationCancellation:
         guild.voice_client = vc
         type(channel).guild = PropertyMock(return_value=guild)
 
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         send_gate = asyncio.Event()
         sends_done = 0
@@ -3135,7 +3239,7 @@ class TestTypingSimulationCancellation:
                 _run_text_response(
                     channel_id=12345,
                     guild_id=999,
-                    speaker="Alice",
+                    author=_ALICE,
                     utterance="hi",
                     buffer=buffer,
                     familiar=familiar,
@@ -3236,13 +3340,13 @@ class TestLastContextCache:
             channel_id=12345, mode=ChannelMode.imitate_voice
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hi",
                 buffer=buffer,
                 familiar=familiar,
@@ -3284,13 +3388,13 @@ class TestContextCommand:
             channel_id=12345, mode=ChannelMode.imitate_voice
         )
         channel = _make_channel(12345)
-        buffer = [BufferedMessage(speaker="Alice", text="hello", timestamp=0.0)]
+        buffer = [BufferedMessage(author=_ALICE, text="hello", timestamp=0.0)]
 
         asyncio.run(
             _run_text_response(
                 channel_id=12345,
                 guild_id=999,
-                speaker="Alice",
+                author=_ALICE,
                 utterance="hello",
                 buffer=buffer,
                 familiar=familiar,

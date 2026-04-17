@@ -162,7 +162,7 @@ def _first_prompt(
     deterministic: list[Contribution],
 ) -> str:
     return _FIRST_PROMPT_TEMPLATE.format(
-        speaker=request.speaker or "(unknown)",
+        speaker=request.author.label if request.author else "(unknown)",
         utterance=request.utterance,
         retrieved=_format_retrieved(retrieved),
         already_included=_format_deterministic(deterministic),
@@ -178,7 +178,7 @@ def _forced_prompt(
     grep_results: str,
 ) -> str:
     return _FORCED_PROMPT_TEMPLATE.format(
-        speaker=request.speaker or "(unknown)",
+        speaker=request.author.label if request.author else "(unknown)",
         utterance=request.utterance,
         retrieved=_format_retrieved(retrieved),
         already_included=_format_deterministic(deterministic),

@@ -27,6 +27,7 @@ from familiar_connect.llm import Message
 if TYPE_CHECKING:
     from familiar_connect.context.pipeline import PipelineOutput
     from familiar_connect.history.store import HistoryStore
+    from familiar_connect.identity import Author
 
 _SECTION_SEPARATOR = "\n\n"
 
@@ -50,9 +51,11 @@ Layers not listed here are deliberately excluded:
 _SPEAKER_PREFIX_PREAMBLE = (
     "User messages in this conversation are prefixed with the speaker's "
     'display name followed by a colon — for example, "Alice: hello". '
-    "Different prefixes mean different people. When replying, address "
-    "users by name when it's natural; do NOT prefix your own replies with "
-    "your name — just write the reply directly."
+    "Different prefixes usually mean different people. The same label "
+    "can occasionally refer to different people if someone changes their "
+    "name — trust the surrounding context over the name alone. When "
+    "replying, address users by name when it's natural; do NOT prefix "
+    "your own replies with your name — just write the reply directly."
 )
 """Fixed preamble prepended to every system prompt.
 
@@ -64,20 +67,20 @@ replies. Kept as a module-level constant (rather than a provider) so
 the invariant moves with the code that enforces it."""
 
 
-def _prefix_user_content(speaker: str | None, content: str) -> str:
-    """Prepend ``Speaker: `` to user content when a speaker is known.
+def _prefix_user_content(author: Author | None, content: str) -> str:
+    """Prepend ``Label: `` to user content when the author is known.
 
-    The prefix is redundant with :attr:`Message.name` for backends
-    that honour the OpenAI ``name`` field, but it's the only way
-    non-OpenAI models routed through OpenRouter ever see the
-    speaker — see the module docstring for the rationale. A
-    ``None`` speaker (system-generated events, sanitised-to-empty
-    display names) renders bare rather than producing literal
-    ``None: content``.
+    Uses :attr:`Author.label` — the display_name → username → user_id
+    fallback. Prefix is redundant with :attr:`Message.name` for
+    backends that honour the OpenAI ``name`` field, but it's the only
+    way non-OpenAI models routed through OpenRouter ever see the
+    speaker — see the module docstring for the rationale. A ``None``
+    author (system-generated events) renders bare rather than
+    producing a literal ``None: content``.
     """
-    if not speaker:
+    if author is None:
         return content
-    return f"{speaker}: {content}"
+    return f"{author.label}: {content}"
 
 
 def _format_timestamp(ts: datetime, tz_name: str) -> str:
@@ -208,12 +211,12 @@ def assemble_chat_messages(
             if mode is ChannelMode.text_conversation_rp:
                 ts_prefix = _format_timestamp(turn.timestamp, display_tz)
                 content = _prefix_user_content(
-                    turn.speaker,
+                    turn.author,
                     turn.content,
                 )
                 content = f"{ts_prefix} {content}"
             else:
-                content = _prefix_user_content(turn.speaker, turn.content)
+                content = _prefix_user_content(turn.author, turn.content)
 
         # imitate_voice gap hints: prefix the *next* turn's content
         # when the gap from the previous turn exceeds the threshold.
@@ -230,7 +233,7 @@ def assemble_chat_messages(
                 Message(
                     role="user",
                     content=content,
-                    name=turn.speaker,
+                    name=turn.author.openai_name if turn.author else None,
                 ),
             )
         else:
@@ -251,8 +254,8 @@ def assemble_chat_messages(
         messages.extend(
             Message(
                 role="user",
-                content=_prefix_user_content(pt.speaker, pt.text),
-                name=pt.speaker,
+                content=_prefix_user_content(pt.author, pt.text),
+                name=pt.author.openai_name if pt.author else None,
             )
             for pt in request.pending_turns
         )
@@ -260,8 +263,8 @@ def assemble_chat_messages(
         messages.append(
             Message(
                 role="user",
-                content=_prefix_user_content(request.speaker, request.utterance),
-                name=request.speaker,
+                content=_prefix_user_content(request.author, request.utterance),
+                name=request.author.openai_name if request.author else None,
             ),
         )
 

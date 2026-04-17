@@ -10,12 +10,14 @@ Covers familiar_connect.memory.writer.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.identity import Author
 from familiar_connect.memory.store import MemoryStore
 from familiar_connect.memory.writer import (
     MemoryWriter,
@@ -38,6 +40,9 @@ from tests.conftest import FakeLLMClient
 
 _FAMILIAR = "aria"
 
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
+_BOB = Author(platform="discord", user_id="2", username="bob", display_name="Bob")
+
 
 def _make_stores(tmp_path: Path) -> tuple[MemoryStore, HistoryStore]:
     mem_root = tmp_path / "memory"
@@ -49,13 +54,13 @@ def _seed_turns(store: HistoryStore, n: int) -> None:
     """Append *n* alternating user/assistant turns."""
     for i in range(n):
         role = "user" if i % 2 == 0 else "assistant"
-        speaker = "Alice" if role == "user" else None
+        author = _ALICE if role == "user" else None
         store.append_turn(
             familiar_id=_FAMILIAR,
             channel_id=100,
             role=role,
             content=f"turn {i}",
-            speaker=speaker,
+            author=author,
         )
 
 
@@ -65,13 +70,17 @@ Alice and the familiar had a brief exchange about greetings.
 ===END_SESSION_SUMMARY===
 
 ===PEOPLE===
----FILE: alice.md---
+---FILE: discord-1.md---
 # Alice
 
 Alice is a friendly person who greeted the familiar.
 
 ## Impressions
 - Seems warm and approachable
+
+## Aliases
+- Alice
+- alice
 ---END_FILE---
 ===END_PEOPLE===
 
@@ -96,8 +105,8 @@ class TestParseWriterOutput:
     def test_parses_all_sections(self) -> None:
         session, people, topics = _parse_writer_output(_STRUCTURED_OUTPUT)
         assert "Alice and the familiar" in session
-        assert "alice.md" in people
-        assert "# Alice" in people["alice.md"]
+        assert "discord-1.md" in people
+        assert "# Alice" in people["discord-1.md"]
         assert "greetings.md" in topics
         assert "# Greetings" in topics["greetings.md"]
 
@@ -210,8 +219,8 @@ class TestMemoryWriterRun:
             familiar_id=_FAMILIAR,
         )
         result = asyncio.run(writer.run())
-        assert "people/alice.md" in result.people_files
-        content = mem_store.read_file("people/alice.md")
+        assert "people/discord-1.md" in result.people_files
+        content = mem_store.read_file("people/discord-1.md")
         assert "# Alice" in content
 
     def test_creates_topic_file(self, tmp_path: Path) -> None:
@@ -282,9 +291,9 @@ class TestMemoryWriterRun:
 
     def test_existing_people_file_included_in_prompt(self, tmp_path: Path) -> None:
         mem_store, hist_store = _make_stores(tmp_path)
-        # Create an existing people file for Alice
+        # Create an existing people file for Alice keyed by canonical slug
         mem_store.write_file(
-            "people/alice.md",
+            "people/discord-1.md",
             "# Alice\nExisting info about Alice.",
             source="test",
         )
@@ -408,10 +417,10 @@ class TestMemoryWriterRun:
     def test_filenames_with_directory_prefix_are_normalized(
         self, tmp_path: Path
     ) -> None:
-        """LLM emitting ``people/alice.md`` must not produce ``people/people/alice.md``.
+        """LLM emitting ``people/<slug>.md`` must not produce nested directories.
 
         Regression test: the existing-files section shows paths like
-        ``people/<name>.md``, so the model can mirror that in its output.
+        ``people/<slug>.md``, so the model can mirror that in its output.
         """
         prefixed_output = """\
 ===SESSION_SUMMARY===
@@ -419,7 +428,7 @@ Alice and the familiar had a brief exchange.
 ===END_SESSION_SUMMARY===
 
 ===PEOPLE===
----FILE: people/alice.md---
+---FILE: people/discord-1.md---
 # Alice
 
 Alice is a friendly person.
@@ -444,12 +453,12 @@ A casual chat.
         )
         result = asyncio.run(writer.run())
 
-        assert "people/alice.md" in result.people_files
-        assert "people/people/alice.md" not in result.people_files
+        assert "people/discord-1.md" in result.people_files
+        assert "people/people/discord-1.md" not in result.people_files
         assert "topics/greetings.md" in result.topic_files
         assert "topics/topics/greetings.md" not in result.topic_files
         # and the files on disk live at the flat location
-        assert mem_store.read_file("people/alice.md").startswith("# Alice")
+        assert mem_store.read_file("people/discord-1.md").startswith("# Alice")
         assert mem_store.read_file("topics/greetings.md").startswith("# Greetings")
 
 
@@ -520,7 +529,7 @@ class TestChannelContextBlock:
                 channel_id=cid,
                 role="user",
                 content=f"msg {i}",
-                speaker="Alice",
+                author=_ALICE,
             )
         llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
         labels = {100: "#general", 200: "#general -> thread"}
@@ -534,3 +543,117 @@ class TestChannelContextBlock:
         asyncio.run(writer.run())
         prompt = llm.calls[0][1].content
         assert "- #general\n- #general -> thread" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Author roster + alias index — canonical slug as filename
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorRoster:
+    def test_roster_includes_canonical_slug_and_known_names(
+        self, tmp_path: Path
+    ) -> None:
+        """Prompt roster lists each transcript author with their canonical slug."""
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 4)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+        prompt = llm.calls[0][1].content
+        assert "canonical slug: discord-1" in prompt
+        assert "Alice" in prompt
+
+    def test_roster_absent_when_no_user_turns(self, tmp_path: Path) -> None:
+        """Assistant-only transcripts emit no author roster block."""
+        mem_store, hist_store = _make_stores(tmp_path)
+        for i in range(4):
+            hist_store.append_turn(
+                familiar_id=_FAMILIAR,
+                channel_id=100,
+                role="assistant",
+                content=f"t{i}",
+            )
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+        prompt = llm.calls[0][1].content
+        assert "canonical slug" not in prompt
+
+
+class TestAliasIndex:
+    def test_alias_index_written_after_people_pass(self, tmp_path: Path) -> None:
+        """``people/_aliases.json`` maps every known name to the canonical slug."""
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 4)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+
+        raw = mem_store.read_file("people/_aliases.json")
+        index = json.loads(raw)
+        assert index["alice"] == "discord-1"
+
+    def test_alias_section_in_file_feeds_index(self, tmp_path: Path) -> None:
+        """Any ``## Aliases`` bullet list in a people file is picked up."""
+        mem_store, hist_store = _make_stores(tmp_path)
+        _seed_turns(hist_store, 4)
+        llm = FakeLLMClient(replies=[_STRUCTURED_OUTPUT])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+
+        # Alice's file (from _STRUCTURED_OUTPUT) includes ## Aliases: Alice, alice.
+        raw = mem_store.read_file("people/_aliases.json")
+        index = json.loads(raw)
+        assert index.get("alice") == "discord-1"
+
+    def test_no_index_written_when_no_authors_or_files(self, tmp_path: Path) -> None:
+        """Assistant-only run with no people writes skips the index."""
+        mem_store, hist_store = _make_stores(tmp_path)
+        for i in range(4):
+            hist_store.append_turn(
+                familiar_id=_FAMILIAR,
+                channel_id=100,
+                role="assistant",
+                content=f"t{i}",
+            )
+        # Output with no people files
+        empty_people_output = """\
+===SESSION_SUMMARY===
+Quiet.
+===END_SESSION_SUMMARY===
+
+===PEOPLE===
+===END_PEOPLE===
+
+===TOPICS===
+===END_TOPICS==="""
+        llm = FakeLLMClient(replies=[empty_people_output])
+        writer = MemoryWriter(
+            memory_store=mem_store,
+            history_store=hist_store,
+            llm_client=llm,
+            familiar_id=_FAMILIAR,
+        )
+        asyncio.run(writer.run())
+        assert mem_store.glob("people/_aliases.json") == []

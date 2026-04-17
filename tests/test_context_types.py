@@ -16,6 +16,9 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
+from familiar_connect.identity import Author
+
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 
 class TestLayer:
@@ -104,7 +107,7 @@ class TestContextRequest:
             "familiar_id": "aria",
             "channel_id": 100,
             "guild_id": 1,
-            "speaker": "Alice",
+            "author": _ALICE,
             "utterance": "hello",
             "modality": Modality.text,
             "budget_tokens": 2048,
@@ -118,16 +121,16 @@ class TestContextRequest:
         assert req.familiar_id == "aria"
         assert req.channel_id == 100
         assert req.guild_id == 1
-        assert req.speaker == "Alice"
+        assert req.author == _ALICE
         assert req.utterance == "hello"
         assert req.modality is Modality.text
         assert req.budget_tokens == 2048
         assert math.isclose(req.deadline_s, 5.0)
 
-    def test_speaker_is_optional(self) -> None:
-        """A Twitch event or system-generated turn may not have a speaker."""
-        req = self._make(speaker=None)
-        assert req.speaker is None
+    def test_author_is_optional(self) -> None:
+        """A system-generated turn may not have an author."""
+        req = self._make(author=None)
+        assert req.author is None
 
     def test_guild_id_is_optional(self) -> None:
         """Non-Discord events (Twitch, scheduled tasks) have no guild."""

@@ -31,7 +31,7 @@ from familiar_connect.config import ChannelMode
 from familiar_connect.context.providers.mode_instructions import resolve_mode_default
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
-from familiar_connect.llm import sanitize_name
+from familiar_connect.identity import Author
 from familiar_connect.metrics import TraceBuilder
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.text.delivery import (
@@ -79,24 +79,57 @@ async def _recording_finished_callback(  # noqa: RUF029
 
 def _refresh_channel_context(
     familiar: Familiar,
-    channel: discord.TextChannel | discord.Thread,
-) -> ChannelContext:
+    channel: (
+        discord.abc.GuildChannel
+        | discord.abc.PrivateChannel
+        | discord.Thread
+        | discord.PartialMessageable
+    ),
+) -> ChannelContext | None:
     """Register channel into the monitor from a live Discord object.
 
-    Centralises the Thread/ForumChannel isinstance dance so
-    subscribe / on_message / slash-command call sites don't drift.
-    Returns the freshly-stored :class:`ChannelContext`.
+    Dispatches on channel type so all call sites share one implementation.
+    Returns the freshly-stored :class:`ChannelContext`, or ``None`` for
+    unrecognised types (e.g. ``PartialMessageable``).
     """
-    name = getattr(channel, "name", str(channel.id))
-    if isinstance(channel, discord.Thread):
-        parent = channel.parent
-        parent_name = getattr(parent, "name", None)
-        kind: ChannelKind = (
-            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-        )
-    else:
-        parent_name = None
-        kind = "text"
+    name: str
+    kind: ChannelKind
+    parent_name: str | None = None
+    # StageChannel and VoiceChannel are siblings under VocalGuildChannel;
+    # ordering is defensive in case py-cord ever merges them.
+    match channel:
+        case discord.Thread():
+            name = getattr(channel, "name", str(channel.id))
+            parent = channel.parent
+            parent_name = getattr(parent, "name", None)
+            kind = (
+                "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+            )
+        case discord.DMChannel():
+            recipient = getattr(channel, "recipient", None)
+            name = getattr(recipient, "display_name", None) or str(channel.id)
+            kind = "dm"
+        case discord.GroupChannel():
+            name = getattr(channel, "name", None) or str(channel.id)
+            kind = "group_dm"
+        case discord.StageChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "stage"
+        case discord.VoiceChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "voice"
+        case discord.ForumChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "forum_root"
+        case discord.CategoryChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "category"
+        case discord.TextChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "text"
+        case _:
+            return None
+
     familiar.monitor.register_channel_context(
         channel.id,
         name=name,
@@ -161,7 +194,8 @@ async def subscribe_text(
         kind=SubscriptionKind.text,
         guild_id=ctx.guild_id,
     )
-    ctx_info = _refresh_channel_context(familiar, channel)
+    ctx_info = cast("ChannelContext", _refresh_channel_context(familiar, channel))
+    assert ctx_info is not None  # noqa: S101 — isinstance guard above ensures TextChannel | Thread
     kind = ctx_info.kind
     name = ctx_info.name
 
@@ -219,7 +253,7 @@ async def unsubscribe_text(
 async def _run_voice_response(
     channel_id: int,
     guild_id: int | None,
-    speaker: str,
+    author: Author,
     utterance: str,
     buffer: list[BufferedMessage],
     familiar: Familiar,
@@ -260,14 +294,12 @@ async def _run_voice_response(
         familiar_id=familiar.id,
         channel_id=channel_id,
         guild_id=guild_id,
-        speaker=speaker,
+        author=author,
         utterance=utterance,
         modality=Modality.voice,
         budget_tokens=channel_config.budget_tokens,
         deadline_s=channel_config.deadline_s,
-        pending_turns=tuple(
-            PendingTurn(speaker=m.speaker, text=m.text) for m in buffer
-        ),
+        pending_turns=tuple(PendingTurn(author=m.author, text=m.text) for m in buffer),
         interruption_context=interruption_context,
     )
 
@@ -278,7 +310,7 @@ async def _run_voice_response(
         modality="voice",
     )
     builder.tag("channel_mode", channel_config.mode.value)
-    builder.tag("speaker", speaker)
+    builder.tag("speaker", author.label)
 
     pipeline = familiar.build_pipeline(channel_config)
     async with builder.span("pipeline_assembly") as pa_meta:
@@ -306,13 +338,13 @@ async def _run_voice_response(
     n_new = len(request.pending_turns) if request.pending_turns else 1
     pending_lines = (
         "\n".join(
-            f"  [{pt.speaker or '?'}]: "
+            f"  [{pt.author.label if pt.author else '?'}]: "
             f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
             for pt in request.pending_turns
         )
         if request.pending_turns
         else (
-            f"  [{request.speaker or '?'}]: "
+            f"  [{request.author.label if request.author else '?'}]: "
             f"{request.utterance[:200]}{'…' if len(request.utterance) > 200 else ''}"
         )
     )
@@ -415,21 +447,20 @@ async def _run_voice_response(
                     guild_id=guild_id,
                     role="user",
                     content=msg.text,
-                    speaker=msg.speaker,
+                    author=msg.author,
                     mode=channel_config.mode,
                 )
             # Step 9 — flush interrupter turns captured during GENERATING
             # (short@GENERATING dispatch stashed them on the tracker).
             # Ordering: after buffer, before assistant reply → chronology.
-            for raw_name, text in tracker.pending_interrupter_turns:
-                safe_name = sanitize_name(raw_name) or raw_name
+            for interrupter_author, text in tracker.pending_interrupter_turns:
                 familiar.history_store.append_turn(
                     familiar_id=familiar.id,
                     channel_id=channel_id,
                     guild_id=guild_id,
                     role="user",
                     content=text,
-                    speaker=safe_name,
+                    author=interrupter_author,
                     mode=channel_config.mode,
                 )
             tracker.pending_interrupter_turns.clear()
@@ -572,7 +603,7 @@ async def _run_voice_response(
                 guild_id=guild_id,
                 role="user",
                 content=msg.text,
-                speaker=msg.speaker,
+                author=msg.author,
                 mode=channel_config.mode,
             )
         familiar.history_store.append_turn(
@@ -596,7 +627,7 @@ async def _run_voice_response(
 async def dispatch_interruption_regen(
     channel_id: int,
     guild_id: int | None,
-    speaker: str,
+    author: Author,
     transcript: str,
     familiar: Familiar,
     vc: discord.VoiceClient,
@@ -627,23 +658,23 @@ async def dispatch_interruption_regen(
     if tracker.state is not ResponseState.IDLE:
         tracker.transition(ResponseState.IDLE)
     note = (
-        f"{speaker} interrupted while you were forming a response."
+        f"{author.label} interrupted while you were forming a response."
         f' They said: "{transcript}"'
     )
     _logger.info(
         f"{ls.tag('⚡ Dispatch', ls.Y)} "
         f"{ls.word(str(channel_id), ls.C)} "
-        f"{ls.kv('speaker', speaker, vc=ls.LC)} "
+        f"{ls.kv('speaker', author.label, vc=ls.LC)} "
         f"{ls.kv('event', 'long@GENERATING→cancel+regen', vc=ls.LY)}"
     )
     await _run_voice_response(
         channel_id=channel_id,
         guild_id=guild_id,
-        speaker=speaker,
+        author=author,
         utterance=transcript,
         buffer=[
             BufferedMessage(
-                speaker=speaker,
+                author=author,
                 text=transcript,
                 timestamp=time.monotonic(),
             )
@@ -741,7 +772,10 @@ async def subscribe_my_voice(
             _logger.exception("Opening greeting TTS failed")
 
     if familiar.transcriber is not None:
-        user_names = {m.id: m.display_name for m in channel.members}
+        voice_authors: dict[int, Author] = {
+            m.id: Author.from_discord_member(m) for m in channel.members
+        }
+        user_names = {uid: a.label for uid, a in voice_authors.items()}
         voice_channel_id = channel.id
         voice_guild_id = ctx.guild_id
 
@@ -750,6 +784,23 @@ async def subscribe_my_voice(
                 if member.id == user_id:
                     return member.display_name
             return None
+
+        def _author_for(user_id: int) -> Author:
+            cached = voice_authors.get(user_id)
+            if cached is not None:
+                return cached
+            # fallback: look up via live channel members (may have joined late)
+            for member in channel.members:
+                if member.id == user_id:
+                    author = Author.from_discord_member(member)
+                    voice_authors[user_id] = author
+                    return author
+            return Author(
+                platform="discord",
+                user_id=str(user_id),
+                username=None,
+                display_name=f"User-{user_id}",
+            )
 
         # per-voice-channel response handler; dispatched by on_respond
         async def _voice_response_handler(
@@ -763,7 +814,7 @@ async def subscribe_my_voice(
             await _run_voice_response(
                 channel_id=channel_id,
                 guild_id=voice_guild_id,
-                speaker=last.speaker,
+                author=last.author,
                 utterance=last.text,
                 buffer=buffer,
                 familiar=familiar,
@@ -782,8 +833,7 @@ async def subscribe_my_voice(
             user_id: int,
             merged: TranscriptionResult,
         ) -> None:
-            raw_name = user_names.get(user_id, f"User-{user_id}")
-            safe_name = sanitize_name(raw_name) or raw_name
+            author = _author_for(user_id)
             tracker = familiar.tracker_registry.get(
                 voice_guild_id if voice_guild_id is not None else 0,
             )
@@ -814,7 +864,7 @@ async def subscribe_my_voice(
             try:
                 await familiar.monitor.on_message(
                     channel_id=voice_channel_id,
-                    speaker=safe_name,
+                    author=author,
                     text=merged.text,
                     is_mention=False,
                     # already debounced by VoiceLullMonitor; skip lull timer
@@ -873,8 +923,7 @@ async def subscribe_my_voice(
         def _on_push_through_transcript(user_id: int, transcript: str) -> None:
             if not transcript.strip():
                 return
-            raw_name = user_names.get(user_id, f"User-{user_id}")
-            safe_name = sanitize_name(raw_name) or raw_name
+            author = _author_for(user_id)
             ch_cfg = familiar.channel_configs.get(channel_id=voice_channel_id)
             familiar.history_store.append_turn(
                 familiar_id=familiar.id,
@@ -882,7 +931,7 @@ async def subscribe_my_voice(
                 guild_id=voice_guild_id,
                 role="user",
                 content=transcript,
-                speaker=safe_name,
+                author=author,
                 mode=ch_cfg.mode,
             )
 
@@ -900,8 +949,7 @@ async def subscribe_my_voice(
         regen_tasks: set[asyncio.Task[None]] = set()
 
         def _on_long_during_generating(starter_id: int, transcript: str) -> None:
-            raw_name = user_names.get(starter_id, f"User-{starter_id}")
-            safe_name = sanitize_name(raw_name) or raw_name
+            author = _author_for(starter_id)
             # Set before creating the task so _deliver_to_monitor (which
             # fires in the same event-loop tick via _fire_lull) sees it.
             familiar.extras["_regen_pending"] = True
@@ -909,7 +957,7 @@ async def subscribe_my_voice(
                 dispatch_interruption_regen(
                     channel_id=voice_channel_id,
                     guild_id=voice_guild_id,
-                    speaker=safe_name,
+                    author=author,
                     transcript=transcript,
                     familiar=familiar,
                     vc=vc,
@@ -940,7 +988,7 @@ async def subscribe_my_voice(
             on_long_boundary_crossed=_on_long_boundary_crossed,
             on_short_yield_resume=_on_short_yield_resume,
             on_push_through_transcript=_on_push_through_transcript,
-            name_resolver=lambda uid: user_names.get(uid, f"User-{uid}"),
+            author_resolver=_author_for,
         )
         familiar.extras["interruption_detector"] = interruption_detector
 
@@ -1149,7 +1197,7 @@ async def channel_backdrop(
         return
 
     channel = ctx.channel
-    if isinstance(channel, discord.TextChannel | discord.Thread):
+    if channel is not None:
         _refresh_channel_context(familiar, channel)
     channel_name = familiar.monitor.format_channel_context(channel_id)
     current = familiar.channel_configs.get_backdrop(channel_id=channel_id)
@@ -1175,7 +1223,7 @@ async def context_command(
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
     channel = ctx.channel
-    if isinstance(channel, discord.TextChannel | discord.Thread):
+    if channel is not None:
         _refresh_channel_context(familiar, channel)
     label = familiar.monitor.format_channel_context(channel_id)
     raw = familiar.last_context_cache.get(channel_id=channel_id)
@@ -1204,7 +1252,7 @@ async def context_command(
 async def _run_text_response(
     channel_id: int,
     guild_id: int | None,
-    speaker: str,
+    author: Author,
     utterance: str,
     buffer: list[BufferedMessage],
     familiar: Familiar,
@@ -1238,20 +1286,18 @@ async def _run_text_response(
         modality="text",
     )
     builder.tag("channel_mode", channel_config.mode.value)
-    builder.tag("speaker", speaker)
+    builder.tag("speaker", author.label)
 
     request = ContextRequest(
         familiar_id=familiar.id,
         channel_id=channel_id,
         guild_id=guild_id,
-        speaker=speaker,
+        author=author,
         utterance=utterance,
         modality=Modality.text,
         budget_tokens=channel_config.budget_tokens,
         deadline_s=channel_config.deadline_s,
-        pending_turns=tuple(
-            PendingTurn(speaker=m.speaker, text=m.text) for m in buffer
-        ),
+        pending_turns=tuple(PendingTurn(author=m.author, text=m.text) for m in buffer),
     )
 
     # typing indicator spans pipeline assembly + LLM + post-proc so
@@ -1283,13 +1329,13 @@ async def _run_text_response(
         n_new = len(request.pending_turns) if request.pending_turns else 1
         batch = (
             "\n".join(
-                f"  [{pt.speaker or '?'}]: "
+                f"  [{pt.author.label if pt.author else '?'}]: "
                 f"{pt.text[:200]}{'…' if len(pt.text) > 200 else ''}"
                 for pt in request.pending_turns
             )
             if request.pending_turns
             else (
-                f"  [{request.speaker or '?'}]: "
+                f"  [{request.author.label if request.author else '?'}]: "
                 f"{request.utterance[:200]}"
                 f"{'…' if len(request.utterance) > 200 else ''}"
             )
@@ -1351,7 +1397,7 @@ async def _run_text_response(
                     guild_id=guild_id,
                     role="user",
                     content=msg.text,
-                    speaker=msg.speaker,
+                    author=msg.author,
                     mode=channel_config.mode,
                 )
             hw_meta["turns_written"] = len(buffer)
@@ -1419,7 +1465,7 @@ async def _run_text_response(
                     guild_id=guild_id,
                     role="user",
                     content=msg.text,
-                    speaker=msg.speaker,
+                    author=msg.author,
                     mode=channel_config.mode,
                 )
                 turns_written += 1
@@ -1498,11 +1544,10 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
     if tracker.is_active():
         await tracker.cancel_and_wait()
 
-    raw_name = message.author.display_name
-    speaker = sanitize_name(raw_name) or raw_name
+    author = Author.from_discord_member(message.author)
     await familiar.monitor.on_message(
         channel_id=channel_id,
-        speaker=speaker,
+        author=author,
         text=message.content,
         is_mention=is_mention,
     )
@@ -1562,7 +1607,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         await _run_text_response(
             channel_id=channel_id,
             guild_id=sub.guild_id,
-            speaker=last.speaker,
+            author=last.author,
             utterance=last.text,
             buffer=buffer,
             familiar=familiar,
