@@ -31,6 +31,12 @@ from familiar_connect.config import ChannelMode
 from familiar_connect.context.providers.mode_instructions import resolve_mode_default
 from familiar_connect.context.render import assemble_chat_messages
 from familiar_connect.context.types import ContextRequest, Modality, PendingTurn
+from familiar_connect.discord_features import (
+    ReplyContext,
+    build_mention_roster,
+    extract_channel_link_refs,
+    normalise_inbound_content,
+)
 from familiar_connect.identity import Author
 from familiar_connect.metrics import TraceBuilder
 from familiar_connect.subscriptions import SubscriptionKind
@@ -59,6 +65,88 @@ if TYPE_CHECKING:
     from familiar_connect.tts import WordTimestamp
 
 _logger = logging.getLogger(__name__)
+
+
+# Default outbound safety: never broadcast-ping even if the LLM writes
+# ``@everyone`` / ``@here`` / a role mention verbatim. User pings pass
+# through — the LLM is expected to use ``<@id>`` from the mention roster.
+# ``replied_user=False`` keeps the native reply arrow without double-pinging
+# the replied author.
+_DEFAULT_ALLOWED_MENTIONS = discord.AllowedMentions(
+    everyone=False,
+    roles=False,
+    users=True,
+    replied_user=False,
+)
+
+
+_REPLY_PREVIEW_LIMIT = 140
+
+
+def _truncate_preview(text: str, limit: int = _REPLY_PREVIEW_LIMIT) -> str:
+    """Ellipsis-truncate a multi-line quote to a single short line."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _resolve_reply_target_id(
+    buffer: list[BufferedMessage],
+    trigger: ResponseTrigger | None,
+) -> int | None:
+    """Return the message id to reply to, or ``None`` for a plain send.
+
+    Native replies fire only on :attr:`ResponseTrigger.direct_address`
+    so interjections / lulls stay unobtrusive. Voice-path buffers
+    carry no ``source_message_id`` and fall through to a plain send.
+    """
+    if trigger is not ResponseTrigger.direct_address:
+        return None
+    if not buffer:
+        return None
+    return buffer[-1].source_message_id
+
+
+async def _send_with_reply(
+    channel: discord.TextChannel | discord.Thread,
+    content: str,
+    *,
+    reference_message_id: int | None,
+) -> None:
+    """Send *content* to *channel*, optionally as a native reply.
+
+    Always applies :data:`_DEFAULT_ALLOWED_MENTIONS`. If the referenced
+    message has been deleted, Discord raises ``HTTPException``; we fall
+    back to a plain send rather than dropping the reply text entirely.
+    """
+    reference: discord.MessageReference | None = None
+    if reference_message_id is not None:
+        reference = discord.MessageReference(
+            message_id=reference_message_id,
+            channel_id=channel.id,
+            fail_if_not_exists=False,
+        )
+    try:
+        if reference is not None:
+            await channel.send(
+                content,
+                reference=reference,
+                allowed_mentions=_DEFAULT_ALLOWED_MENTIONS,
+            )
+        else:
+            await channel.send(
+                content,
+                allowed_mentions=_DEFAULT_ALLOWED_MENTIONS,
+            )
+    except discord.HTTPException:
+        # reply target deleted or otherwise unacceptable; retry without it
+        if reference is None:
+            raise
+        await channel.send(
+            content,
+            allowed_mentions=_DEFAULT_ALLOWED_MENTIONS,
+        )
 
 
 def _timestamps_to_text(timestamps: list[WordTimestamp]) -> str:
@@ -1257,6 +1345,7 @@ async def _run_text_response(
     buffer: list[BufferedMessage],
     familiar: Familiar,
     channel: discord.TextChannel | discord.Thread,
+    trigger: ResponseTrigger | None = None,
 ) -> None:
     """Full pipeline → LLM → reply path for a text channel or thread.
 
@@ -1265,6 +1354,10 @@ async def _run_text_response(
 
     :param buffer: messages accumulated since last response, including
         trigger; persisted after LLM call.
+    :param trigger: which monitor gate fired. When
+        :attr:`ResponseTrigger.direct_address`, the first outbound
+        chunk is sent as a Discord native reply referencing the
+        trigger message.
     """
     # closed-thread guard: archived+locked == Discord's "thread closed"
     # UX. also covers the offline case (thread closed while bot was
@@ -1288,6 +1381,7 @@ async def _run_text_response(
     builder.tag("channel_mode", channel_config.mode.value)
     builder.tag("speaker", author.label)
 
+    mention_roster = tuple(build_mention_roster(m.author for m in buffer))
     request = ContextRequest(
         familiar_id=familiar.id,
         channel_id=channel_id,
@@ -1298,6 +1392,7 @@ async def _run_text_response(
         budget_tokens=channel_config.budget_tokens,
         deadline_s=channel_config.deadline_s,
         pending_turns=tuple(PendingTurn(author=m.author, text=m.text) for m in buffer),
+        mention_roster=mention_roster,
     )
 
     # typing indicator spans pipeline assembly + LLM + post-proc so
@@ -1407,13 +1502,21 @@ async def _run_text_response(
             sentence_split_threshold=ts_cfg.sentence_split_threshold,
         )
         tracker = familiar.text_delivery_registry.get(channel_id)
+        reply_target_id = _resolve_reply_target_id(buffer, trigger)
 
         async def _deliver() -> None:
             for i, chunk in enumerate(chunks):
                 delay = compute_typing_delay(chunk, ts_cfg)
                 async with channel.typing():
                     await asyncio.sleep(delay)
-                await channel.send(chunk)
+                # first chunk only gets the native reply arrow; later
+                # chunks fall back to plain sends to avoid spamming it
+                reference = reply_target_id if i == 0 else None
+                await _send_with_reply(
+                    channel,
+                    chunk,
+                    reference_message_id=reference,
+                )
                 tracker.mark_sent(chunk)
                 if i < len(chunks) - 1:
                     await asyncio.sleep(ts_cfg.inter_line_pause_s)
@@ -1482,7 +1585,12 @@ async def _run_text_response(
         await familiar.memory_writer_scheduler.notify_turn()
 
         async with builder.span("discord_send"):
-            await channel.send(reply_text)
+            reply_target_id = _resolve_reply_target_id(buffer, trigger)
+            await _send_with_reply(
+                channel,
+                reply_text,
+                reference_message_id=reply_target_id,
+            )
 
     # TTS fan-out: speak reply in voice if a voice sub exists in guild
     guild = getattr(channel, "guild", None)
@@ -1509,6 +1617,177 @@ async def _run_text_response(
 # ---------------------------------------------------------------------------
 # Message loop
 # ---------------------------------------------------------------------------
+
+
+def _build_message_lookups(
+    message: discord.Message,
+) -> tuple[
+    Callable[[int], str | None],
+    Callable[[int], str | None],
+    Callable[[int], str | None],
+]:
+    """Return ``(user, channel, role)`` id→label lookups for a message.
+
+    Built from py-cord's already-resolved mention lists and the live
+    ``Guild`` object. Each callable returns ``None`` on a miss so
+    :func:`normalise_inbound_content` can fall through to a stable
+    placeholder.
+    """
+    users: dict[int, str] = {u.id: u.display_name for u in message.mentions}
+    roles: dict[int, str] = {r.id: r.name for r in message.role_mentions}
+    channels: dict[int, str] = {}
+    for ch in message.channel_mentions:
+        name = getattr(ch, "name", None)
+        if name:
+            channels[ch.id] = name
+    guild = message.guild
+
+    def user_lookup(user_id: int) -> str | None:
+        name = users.get(user_id)
+        if name is not None:
+            return name
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member.display_name
+        return None
+
+    def channel_lookup(channel_id: int) -> str | None:
+        name = channels.get(channel_id)
+        if name is not None:
+            return name
+        if guild is not None:
+            ch = guild.get_channel(channel_id)
+            if ch is not None:
+                return getattr(ch, "name", None)
+        return None
+
+    def role_lookup(role_id: int) -> str | None:
+        name = roles.get(role_id)
+        if name is not None:
+            return name
+        if guild is not None:
+            role = guild.get_role(role_id)
+            if role is not None:
+                return role.name
+        return None
+
+    return user_lookup, channel_lookup, role_lookup
+
+
+async def _resolve_channel_link_refs(
+    message: discord.Message,
+    normalised_text: str,
+    familiar: Familiar,
+) -> str:
+    """Append ``(#channel-name)`` annotations next to Discord links.
+
+    Scope rule (see ``docs/architecture/overview.md``):
+
+    * same-channel or subscribed channel → resolve channel name **and**
+      fetch linked message body (one-shot, best-effort).
+    * accessible but not subscribed → name only, never fetch the body.
+    * inaccessible → leave the raw URL untouched.
+    """
+    refs = extract_channel_link_refs(normalised_text)
+    if not refs:
+        return normalised_text
+
+    guild = message.guild
+    current_channel_id = message.channel.id
+    out = normalised_text
+    for ref in refs:
+        if guild is None or guild.id != ref.guild_id:
+            continue  # cross-guild or DM; leave raw
+        target = guild.get_channel(ref.channel_id)
+        channel_name = getattr(target, "name", None) if target is not None else None
+        if channel_name is None:
+            continue
+
+        annotation = f"#{channel_name}"
+        in_scope = ref.channel_id == current_channel_id or (
+            familiar.subscriptions.get(
+                channel_id=ref.channel_id,
+                kind=SubscriptionKind.text,
+            )
+            is not None
+        )
+        if (
+            in_scope
+            and ref.message_id is not None
+            and isinstance(target, discord.abc.Messageable)
+        ):
+            body = await _safe_fetch_message_preview(target, ref.message_id)
+            if body is not None:
+                annotation = f'#{channel_name}: "{body}"'
+        out = out.replace(ref.raw, f"{ref.raw} ({annotation})", 1)
+    return out
+
+
+async def _safe_fetch_message_preview(
+    channel: discord.abc.Messageable,
+    message_id: int,
+) -> str | None:
+    """Fetch a short preview of *message_id* from *channel*, or ``None``.
+
+    Swallows Discord errors so a broken link never blocks the hot path.
+    """
+    try:
+        target = await channel.fetch_message(message_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+    return _truncate_preview(target.content or "")
+
+
+async def _resolve_reply_context(
+    message: discord.Message,
+    user_lookup: Callable[[int], str | None],
+    channel_lookup: Callable[[int], str | None],
+    role_lookup: Callable[[int], str | None],
+) -> ReplyContext | None:
+    """Build a :class:`ReplyContext` from ``message.reference`` if present.
+
+    Only handles ``MessageReferenceType.default`` (i.e. plain replies).
+    Cross-channel forwards are a separate feature and are ignored here.
+    """
+    ref = message.reference
+    if ref is None:
+        return None
+    # Older py-cord versions don't expose `type`; default ref means reply.
+    ref_type = getattr(ref, "type", None)
+    default_type = getattr(discord, "MessageReferenceType", None)
+    if (
+        ref_type is not None
+        and default_type is not None
+        and ref_type != default_type.default
+    ):
+        return None
+
+    replied: discord.Message | None = None
+    resolved = getattr(ref, "resolved", None)
+    if isinstance(resolved, discord.Message):
+        replied = resolved
+    elif ref.message_id is not None:
+        try:
+            replied = await message.channel.fetch_message(ref.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            replied = None
+    if replied is None:
+        return None
+
+    quoted = normalise_inbound_content(
+        replied.content or "",
+        user_lookup=user_lookup,
+        channel_lookup=channel_lookup,
+        role_lookup=role_lookup,
+    )
+    author_label = getattr(replied.author, "display_name", None) or getattr(
+        replied.author, "name", "?"
+    )
+    return ReplyContext(
+        author_label=author_label,
+        content_preview=_truncate_preview(quoted),
+    )
 
 
 async def on_message(message: discord.Message, familiar: Familiar) -> None:
@@ -1544,12 +1823,26 @@ async def on_message(message: discord.Message, familiar: Familiar) -> None:
     if tracker.is_active():
         await tracker.cancel_and_wait()
 
+    user_lookup, channel_lookup, role_lookup = _build_message_lookups(message)
+    normalised = normalise_inbound_content(
+        message.content,
+        user_lookup=user_lookup,
+        channel_lookup=channel_lookup,
+        role_lookup=role_lookup,
+    )
+    normalised = await _resolve_channel_link_refs(message, normalised, familiar)
+    reply_to = await _resolve_reply_context(
+        message, user_lookup, channel_lookup, role_lookup
+    )
+
     author = Author.from_discord_member(message.author)
     await familiar.monitor.on_message(
         channel_id=channel_id,
         author=author,
-        text=message.content,
+        text=normalised,
         is_mention=is_mention,
+        reply_to=reply_to,
+        source_message_id=message.id,
     )
 
 
@@ -1612,6 +1905,7 @@ def create_bot(familiar: Familiar) -> discord.Bot:
             buffer=buffer,
             familiar=familiar,
             channel=channel,
+            trigger=trigger,
         )
 
     familiar.monitor.on_respond = _on_respond

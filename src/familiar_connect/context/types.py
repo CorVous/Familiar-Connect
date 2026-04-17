@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from familiar_connect.discord_features import MentionRosterEntry
     from familiar_connect.identity import Author
 
 
@@ -112,3 +113,9 @@ class ContextRequest:
     interruption_context: str | None = None
     """System note for voice interruptions; rendered before final user
     turn. ``None`` (default) = no note."""
+    mention_roster: tuple[MentionRosterEntry, ...] = field(default_factory=tuple)
+    """Discord-side ``(user_id, label)`` pairs the familiar may ping.
+
+    Rendered into the system prompt so the LLM can emit correct
+    ``<@user_id>`` tokens. Empty = no roster (voice path, tests, or
+    non-Discord platforms)."""

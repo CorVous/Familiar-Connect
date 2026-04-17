@@ -81,4 +81,5 @@ nav:
       - roadmap/voice-logging.md
       - roadmap/web-search.md
       - roadmap/gemini-tts-expressivity.md
+      - roadmap/proactive-cross-channel-reading.md
   - Contributing: contributing.md
