@@ -1179,7 +1179,7 @@ async def context_command(
     if entry is None:
         label = familiar.monitor.format_channel_context(channel_id)
         _logger.info(
-            f"{ls.tag('Context', ls.W)} "
+            f"{ls.tag('Config', ls.W)} "
             f"{ls.word(label, ls.C)} "
             f"{ls.kv('action', 'context_miss')}"
         )
@@ -1187,7 +1187,7 @@ async def context_command(
         return
     label = familiar.monitor.format_channel_context(channel_id)
     _logger.info(
-        f"{ls.tag('Context', ls.W)} "
+        f"{ls.tag('Config', ls.W)} "
         f"{ls.word(label, ls.C)} "
         f"{ls.kv('modality', entry.modality)} "
         f"{ls.kv('messages', str(len(entry.messages)), vc=ls.LG)}"
