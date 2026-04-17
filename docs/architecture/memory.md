@@ -89,6 +89,8 @@ Suggested (not required) sections:
 
 **On multi-username handling.** The canonical slug is immutable — a display-name change does not create a new file. When a new name is observed, the writer appends it under `## Aliases` in the existing file and rebuilds `_aliases.json`. Cross-platform identity (the same human on Discord and Twitch) is *not* automatically merged: each platform gets its own file. A human editor (or a future housekeeping pass) can link or merge them.
 
+**Legacy history migration.** When upgrading from a pre-`Author` install, `HistoryStore` migrates any `speaker` column into `author_display_name` with a synthesised `legacy-discord` platform tag so historical turns keep their attribution. Pre-existing `people/<name>.md` files are left in place; the memory-writer rewrites them under canonical slugs the next time that person speaks.
+
 ### `topics/<slug>.md` — recurring subjects
 
 Suggested sections:

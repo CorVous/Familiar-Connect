@@ -175,12 +175,33 @@ class HistoryStore:
             self._conn.commit()
 
         # identity migration: drop bare ``speaker`` in favour of four
-        # author_* columns. Old rows' speaker strings are dropped —
-        # callers warned to back up ``data/familiars/`` before
-        # upgrading.
+        # author_* columns. Legacy speaker strings are preserved as
+        # ``author_display_name`` with a synthesised ``legacy-discord``
+        # platform key so historical turns keep their attribution.
         if "speaker" in columns:
+            for col in (
+                "author_platform",
+                "author_user_id",
+                "author_username",
+                "author_display_name",
+            ):
+                if col not in columns:
+                    self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
+            self._conn.execute("""
+                UPDATE turns
+                   SET author_display_name = speaker,
+                       author_platform = 'legacy-discord',
+                       author_user_id = speaker
+                 WHERE speaker IS NOT NULL
+                   AND author_platform IS NULL
+            """)
             self._conn.execute("ALTER TABLE turns DROP COLUMN speaker")
             self._conn.commit()
+            columns = {
+                col["name"]
+                for col in self._conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
+
         for col in (
             "author_platform",
             "author_user_id",

@@ -547,7 +547,12 @@ class TestModeColumn:
         assert [t.content for t in voice_turns] == ["voice turn"]
 
     def test_migration_adds_mode_column_to_existing_db(self, tmp_path: Path) -> None:
-        """Opening a DB created before the mode column migrates it."""
+        """Opening a DB created before the mode column migrates it.
+
+        Legacy ``speaker`` strings are preserved as ``author_display_name``
+        with a synthesised ``legacy-discord`` platform key so historical
+        turns retain their attribution after the schema change.
+        """
         import sqlite3  # noqa: PLC0415
 
         db_path = tmp_path / "legacy.db"
@@ -566,9 +571,28 @@ class TestModeColumn:
             );
         """)
         conn.execute(
+            "INSERT INTO turns "
+            "(familiar_id, channel_id, role, speaker, content, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "user",
+                "Alice",
+                "named turn",
+                "2025-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
             "INSERT INTO turns (familiar_id, channel_id, role, content, timestamp) "
             "VALUES (?, ?, ?, ?, ?)",
-            (_FAMILIAR, _CHANNEL, "user", "old turn", "2025-01-01T00:00:00+00:00"),
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "assistant",
+                "bare turn",
+                "2025-01-01T00:00:01+00:00",
+            ),
         )
         conn.commit()
         conn.close()
@@ -576,10 +600,18 @@ class TestModeColumn:
         # Re-open with HistoryStore — migration should add mode + author cols.
         s = HistoryStore(db_path)
         turns = s.recent(channel_id=_CHANNEL, familiar_id=_FAMILIAR, limit=10)
-        assert len(turns) == 1
-        assert turns[0].content == "old turn"
-        # legacy speaker strings are dropped; author is None for migrated rows
-        assert turns[0].author is None
+        assert len(turns) == 2
+
+        named, bare = turns
+        assert named.content == "named turn"
+        assert named.author is not None
+        assert named.author.display_name == "Alice"
+        assert named.author.platform == "legacy-discord"
+
+        # A row with a NULL speaker stays author-less.
+        assert bare.content == "bare turn"
+        assert bare.author is None
+
         # New turns can use mode + Author.
         s.append_turn(
             channel_id=_CHANNEL,
