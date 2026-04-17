@@ -77,12 +77,6 @@ async def _recording_finished_callback(  # noqa: RUF029
     del sink, args
 
 
-def _get_guild_name(channel: object) -> str | None:
-    """Guild name from channel; handles absent .guild or .name."""
-    guild = getattr(channel, "guild", None)
-    return getattr(guild, "name", None) if guild else None
-
-
 def _refresh_channel_context(
     familiar: Familiar,
     channel: (
@@ -101,7 +95,8 @@ def _refresh_channel_context(
     name: str
     kind: ChannelKind
     parent_name: str | None = None
-    # order matters: StageChannel subclasses VoiceChannel in py-cord
+    # StageChannel and VoiceChannel are siblings under VocalGuildChannel;
+    # ordering is defensive in case py-cord ever merges them.
     match channel:
         case discord.Thread():
             name = getattr(channel, "name", str(channel.id))
@@ -115,23 +110,19 @@ def _refresh_channel_context(
             name = getattr(recipient, "display_name", None) or str(channel.id)
             kind = "dm"
         case discord.GroupChannel():
-            name = getattr(channel, "name", None) or "Group DM"
+            name = getattr(channel, "name", None) or str(channel.id)
             kind = "group_dm"
         case discord.StageChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = _get_guild_name(channel)
             kind = "stage"
         case discord.VoiceChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = _get_guild_name(channel)
             kind = "voice"
         case discord.ForumChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = _get_guild_name(channel)
             kind = "forum_root"
         case discord.CategoryChannel():
             name = getattr(channel, "name", str(channel.id))
-            parent_name = _get_guild_name(channel)
             kind = "category"
         case discord.TextChannel():
             name = getattr(channel, "name", str(channel.id))
@@ -204,6 +195,7 @@ async def subscribe_text(
         guild_id=ctx.guild_id,
     )
     ctx_info = cast("ChannelContext", _refresh_channel_context(familiar, channel))
+    assert ctx_info is not None  # noqa: S101 — isinstance guard above ensures TextChannel | Thread
     kind = ctx_info.kind
     name = ctx_info.name
 

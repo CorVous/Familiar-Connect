@@ -894,6 +894,32 @@ class TestSubscriptionCommands:
             is None
         )
 
+    def test_subscribe_text_rejects_dm(self, tmp_path: Path) -> None:
+        """DMs are not valid text subscription targets; respond ephemeral, no sub."""
+        familiar = _make_familiar(tmp_path)
+        ctx = MagicMock(spec=discord.ApplicationContext)
+        ctx.respond = AsyncMock()
+
+        dm_channel = MagicMock(spec=discord.DMChannel)
+        dm_channel.id = 55
+        type(ctx).channel = PropertyMock(return_value=dm_channel)
+        type(ctx).channel_id = PropertyMock(return_value=55)
+        type(ctx).guild = PropertyMock(return_value=None)
+        type(ctx).guild_id = PropertyMock(return_value=None)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(
+                channel_id=55,
+                kind=SubscriptionKind.text,
+            )
+            is None
+        )
+
     def test_subscribe_text_thread_join_http_error_is_swallowed(
         self, tmp_path: Path
     ) -> None:

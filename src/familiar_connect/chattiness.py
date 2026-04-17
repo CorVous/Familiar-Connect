@@ -326,6 +326,8 @@ class ConversationMonitor:
         ctx = self._channel_contexts.get(channel_id)
         if ctx is None:
             return str(channel_id)
+        # only thread/forum_post carry a meaningful parent_name (channel name);
+        # other kinds either leave it None or store unrelated context
         if ctx.kind in {"thread", "forum_post"} and ctx.parent_name:
             return f"{ctx.parent_name} -> {ctx.name}"
         return ctx.name
