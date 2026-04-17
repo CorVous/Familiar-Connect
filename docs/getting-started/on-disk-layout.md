@@ -65,9 +65,9 @@ Keep it to two sentences.
 
 Switching modes with `/channel-full-rp` and siblings now preserves any
 `backdrop` (and `[typing_simulation]` block) that was already in the sidecar.
-A malformed sidecar (bad hand-edit, torn write) is silently discarded on the
-next `/channel-<mode>` or `/channel-backdrop` invocation, which rewrites it
-with valid TOML — so recovery never requires shell access.
+A malformed sidecar (bad hand-edit, torn write) is discarded with a warning
+log on the next `/channel-<mode>` or `/channel-backdrop` invocation, which
+rewrites it with valid TOML — so recovery never requires shell access.
 
 Threads and forum posts each get their own sidecar keyed by the thread id. The
 `channel_name` field is written as `#general -> brainstorm` so the

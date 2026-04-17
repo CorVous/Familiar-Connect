@@ -18,12 +18,14 @@ Sidecar schema::
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import tomli_w
 
+from familiar_connect import log_style as ls
 from familiar_connect.config import (
     _resolve_typing_simulation,
     channel_config_for_mode,
@@ -38,6 +40,8 @@ if TYPE_CHECKING:
         ChannelMode,
         CharacterConfig,
     )
+
+_logger = logging.getLogger(__name__)
 
 
 class ChannelConfigStore:
@@ -154,7 +158,7 @@ class ChannelConfigStore:
     def _read_raw(self, sidecar: Path) -> dict:
         """Return raw TOML dict from *sidecar*; empty if absent or malformed.
 
-        Malformed sidecar (operator hand-edit, torn write) → empty dict,
+        Malformed sidecar (operator hand-edit, torn write) → empty dict + warning,
         letting next ``_write_sidecar`` self-heal.
         """
         if not sidecar.exists():
@@ -162,7 +166,13 @@ class ChannelConfigStore:
         with sidecar.open("rb") as f:
             try:
                 return dict(tomllib.load(f))
-            except tomllib.TOMLDecodeError:
+            except tomllib.TOMLDecodeError as exc:
+                _logger.warning(
+                    f"{ls.tag('ChannelConfig', ls.C)} "
+                    f"{ls.kv('event', 'malformed_self_heal', vc=ls.LC)} "
+                    f"{ls.kv('sidecar', str(sidecar), vc=ls.LC)} "
+                    f"{ls.kv('error', ls.trunc(str(exc), 120), vc=ls.LY)}"
+                )
                 return {}
 
     def _write_sidecar(self, sidecar: Path, data: dict) -> None:

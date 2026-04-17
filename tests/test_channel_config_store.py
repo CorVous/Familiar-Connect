@@ -10,6 +10,7 @@ Covers familiar_connect.channel_config, which doesn't exist yet.
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,8 @@ from familiar_connect.config import ChannelMode, CharacterConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +234,9 @@ class TestSetModePreservation:
 
 
 class TestMalformedSidecar:
-    def test_set_mode_self_heals_malformed_sidecar(self, tmp_path: Path) -> None:
+    def test_set_mode_self_heals_malformed_sidecar(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         sidecar = tmp_path / "7.toml"
         sidecar.write_text("this is not valid toml ===")
 
@@ -239,12 +244,16 @@ class TestMalformedSidecar:
             root=tmp_path,
             character=CharacterConfig(default_mode=ChannelMode.text_conversation_rp),
         )
-        cfg = store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
+        with caplog.at_level(logging.WARNING, logger="familiar_connect.channel_config"):
+            cfg = store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
 
         assert cfg.mode is ChannelMode.full_rp
         tomllib.loads(sidecar.read_text())  # must be valid TOML after self-heal
+        assert any("malformed_self_heal" in r.message for r in caplog.records)
 
-    def test_set_backdrop_self_heals_malformed_sidecar(self, tmp_path: Path) -> None:
+    def test_set_backdrop_self_heals_malformed_sidecar(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         sidecar = tmp_path / "7.toml"
         sidecar.write_text("this is not valid toml ===")
 
@@ -252,7 +261,9 @@ class TestMalformedSidecar:
             root=tmp_path,
             character=CharacterConfig(default_mode=ChannelMode.imitate_voice),
         )
-        cfg = store.set_backdrop(channel_id=7, backdrop="custom note")
+        with caplog.at_level(logging.WARNING, logger="familiar_connect.channel_config"):
+            cfg = store.set_backdrop(channel_id=7, backdrop="custom note")
 
         assert cfg.backdrop_override == "custom note"
         assert cfg.mode is ChannelMode.imitate_voice
+        assert any("malformed_self_heal" in r.message for r in caplog.records)
