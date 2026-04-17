@@ -10,6 +10,7 @@
   `message_content`, `messages`, and `voice_states` intents enabled
 - An OpenRouter API key
 - *(optional, voice only)* One of: Azure Cognitive Services key + region, a Cartesia API key, or a Google Gemini API key
+- *(optional, voice only)* A Deepgram API key for speech transcription
 
 ## Environment variables
 
@@ -38,7 +39,7 @@ CARTESIA_API_KEY=<cartesia key>
 # Google Gemini TTS (provider="gemini"):
 GOOGLE_API_KEY=<google ai studio key>
 
-# optional — Deepgram transcription secret (voice channels only)
+# optional — Deepgram speech transcription (voice channels only)
 DEEPGRAM_API_KEY=<deepgram key>
 ```
 
