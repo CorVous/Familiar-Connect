@@ -168,7 +168,7 @@ Recent conversation summary:
 Recent messages:
 {buffer}
 
-There has been a pause in the conversation. Should {familiar_name} respond?"""
+Should {familiar_name} respond?"""
 
 _DIRECT_ADDRESS_PROMPT = """\
 Character: {familiar_name}
