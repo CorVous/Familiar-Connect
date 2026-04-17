@@ -18,6 +18,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from familiar_connect import log_style as ls
+from familiar_connect.identity import Author
 from familiar_connect.voice_lull import VoiceActivityEvent
 
 if TYPE_CHECKING:
@@ -34,6 +35,19 @@ _logger = logging.getLogger(__name__)
 UNSOLICITED_TOLERANCE_BIAS = 0.35
 """Bias added for unsolicited interjections. With ``average`` base
 (0.30) yields 0.65 effective — 65% push-through probability."""
+
+
+def _synthetic_discord_author(user_id: int) -> Author:
+    """Fallback Author when voice roster lookup misses.
+
+    Used when a burst starter left the channel before resolution runs.
+    """
+    return Author(
+        platform="discord",
+        user_id=str(user_id),
+        username=None,
+        display_name=f"User-{user_id}",
+    )
 
 
 class ResponseState(Enum):
@@ -79,8 +93,8 @@ class ResponseTracker:
     # Step 9 — transcripts captured from short@GENERATING bursts. Stashed
     # here so _run_voice_response can flush them after the original
     # buffer write (preserves chronology: buffer → interrupter →
-    # assistant reply). Each entry is (resolved_name, transcript).
-    pending_interrupter_turns: list[tuple[str, str]] = field(default_factory=list)
+    # assistant reply). Each entry is (author, transcript).
+    pending_interrupter_turns: list[tuple[Author, str]] = field(default_factory=list)
     # Step 11 bug-fix — set by InterruptionDetector when a short@SPEAKING
     # yield+resume task is in flight. _deliver_to_monitor checks this flag
     # and skips the lull if set, preventing the concurrent voice endpointing
@@ -243,7 +257,7 @@ class InterruptionDetector:
             Callable[[list[WordTimestamp]], Coroutine[Any, Any, None]] | None
         ) = None,
         on_push_through_transcript: Callable[[int, str], None] | None = None,
-        name_resolver: Callable[[int], str] | None = None,
+        author_resolver: Callable[[int], Author] | None = None,
     ) -> None:
         self._tracker_registry = tracker_registry
         self._guild_id = guild_id
@@ -271,10 +285,10 @@ class InterruptionDetector:
         #   interrupter's transcript when tolerance chose push-through.
         self._on_short_yield_resume = on_short_yield_resume
         self._on_push_through_transcript = on_push_through_transcript
-        # Step 12: resolver maps user_id → display name for the long@SPEAKING
-        # regen interruption_context ("Alice interrupted you"). bot.py
-        # supplies ``lambda uid: user_names.get(uid, f"User-{uid}")``.
-        self._name_resolver = name_resolver
+        # Step 12: resolver maps user_id → Author for the long@SPEAKING
+        # regen interruption_context and Step 9 pending turns. bot.py
+        # supplies a lookup into the voice roster with a synthetic fallback.
+        self._author_resolver = author_resolver
 
         # users currently speaking (tracked even during IDLE)
         self._speaking: set[int] = set()
@@ -543,8 +557,8 @@ class InterruptionDetector:
             # tracker returned to IDLE; burst about to be aborted
             return
         speaker = (
-            self._name_resolver(self._burst_starter_id)
-            if self._name_resolver is not None
+            self._author_resolver(self._burst_starter_id).label
+            if self._author_resolver is not None
             else str(self._burst_starter_id)
         )
         _logger.info(
@@ -580,8 +594,8 @@ class InterruptionDetector:
                     )
                 starter = self._burst_starter_id
                 tracker.interrupt_starter_name = (
-                    self._name_resolver(starter)
-                    if self._name_resolver is not None and starter is not None
+                    self._author_resolver(starter).label
+                    if self._author_resolver is not None and starter is not None
                     else f"User {starter}"
                 )
                 tracker.interrupt_event = asyncio.Event()
@@ -625,8 +639,8 @@ class InterruptionDetector:
         self._last_classification = classification
         self._delivery_gate.set()
         speaker = (
-            self._name_resolver(starter_id)
-            if self._name_resolver is not None
+            self._author_resolver(starter_id).label
+            if self._author_resolver is not None
             else str(starter_id)
         )
         _logger.info(
@@ -682,8 +696,8 @@ class InterruptionDetector:
             and not did_yield
         ):
             push_speaker = (
-                self._name_resolver(starter_id)
-                if self._name_resolver is not None
+                self._author_resolver(starter_id).label
+                if self._author_resolver is not None
                 else str(starter_id)
             )
             _logger.info(
@@ -711,9 +725,9 @@ class InterruptionDetector:
             if transcript.strip():
                 tracker = self._tracker_registry.get(self._guild_id)
                 resolved = (
-                    self._name_resolver(starter_id)
-                    if self._name_resolver is not None
-                    else f"User-{starter_id}"
+                    self._author_resolver(starter_id)
+                    if self._author_resolver is not None
+                    else _synthetic_discord_author(starter_id)
                 )
                 tracker.pending_interrupter_turns.append((resolved, transcript))
         # Step 12: if yield was decided at Moment 1, deliver classification

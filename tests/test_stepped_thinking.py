@@ -27,7 +27,10 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
+
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -39,7 +42,7 @@ def _request(**overrides: object) -> ContextRequest:
         "familiar_id": "aria",
         "channel_id": 100,
         "guild_id": 1,
-        "speaker": "Alice",
+        "author": _ALICE,
         "utterance": "what do you think about ska music?",
         "modality": Modality.text,
         "budget_tokens": 2048,
@@ -142,7 +145,7 @@ class TestHappyPath:
             familiar_id=original.familiar_id,
             channel_id=original.channel_id,
             guild_id=original.guild_id,
-            speaker=original.speaker,
+            author=original.author,
             utterance=original.utterance,
             modality=original.modality,
             budget_tokens=original.budget_tokens,

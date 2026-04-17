@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     )
 
 
+from familiar_connect.identity import Author
 from familiar_connect.twitch import (
     TwitchEvent,
     TwitchWatcherConfig,
@@ -85,7 +86,7 @@ class TwitchWatcher:
         return build_follow_event(
             config=self.config,
             channel=self.channel,
-            viewer=data.user_name,
+            viewer=_author_from_data(data),
         )
 
     def handle_subscription(self, data: ChannelSubscribeData) -> TwitchEvent | None:
@@ -98,7 +99,7 @@ class TwitchWatcher:
         return build_subscription_event(
             config=self.config,
             channel=self.channel,
-            viewer=data.user_name,
+            viewer=_author_from_data(data),
             tier=_tier(data.tier),
         )
 
@@ -106,7 +107,7 @@ class TwitchWatcher:
         self, data: ChannelSubscriptionGiftData
     ) -> TwitchEvent | None:
         """Convert a ChannelSubscriptionGiftData into a TwitchEvent."""
-        gifter = None if data.is_anonymous else data.user_name
+        gifter = None if data.is_anonymous else _author_from_data(data)
         return build_gift_subscription_event(
             config=self.config,
             channel=self.channel,
@@ -131,7 +132,7 @@ class TwitchWatcher:
         return build_resubscription_event(
             config=self.config,
             channel=self.channel,
-            viewer=data.user_name,
+            viewer=_author_from_data(data),
             months=months,
             tier=_tier(data.tier),
             message=data.message.text,
@@ -139,7 +140,7 @@ class TwitchWatcher:
 
     def handle_cheer(self, data: ChannelCheerData) -> TwitchEvent | None:
         """Convert a ChannelCheerData into a TwitchEvent."""
-        viewer = None if data.is_anonymous else data.user_name
+        viewer = None if data.is_anonymous else _author_from_data(data)
         return build_cheer_event(
             config=self.config,
             channel=self.channel,
@@ -155,7 +156,7 @@ class TwitchWatcher:
         return build_channel_point_event(
             config=self.config,
             channel=self.channel,
-            viewer=data.user_name,
+            viewer=_author_from_data(data),
             redemption_name=data.reward.title,
             user_input=data.user_input or None,
         )
@@ -314,3 +315,18 @@ async def _send_if_present(
     """Send *event* to *send* if both are non-None."""
     if event is not None and send is not None:
         await send.put(event)
+
+
+def _author_from_data(data: object) -> Author:
+    """Build an Author from a twitchAPI event data object.
+
+    Every user-bearing event carries ``user_id`` + ``user_login`` +
+    ``user_name``. :class:`Author` is immutably keyed on ``user_id`` so
+    repeat viewers resolve to the same ``people/twitch-<id>.md`` file
+    regardless of display-name changes.
+    """
+    return Author.from_twitch(
+        user_id=str(data.user_id),  # ty: ignore[unresolved-attribute]
+        user_login=data.user_login,  # ty: ignore[unresolved-attribute]
+        user_name=data.user_name,  # ty: ignore[unresolved-attribute]
+    )

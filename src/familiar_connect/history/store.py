@@ -3,7 +3,8 @@
 One database per familiar. Two core tables:
 
 - ``turns`` — every turn scoped by ``(familiar_id, channel_id)``;
-  monotonic PK, role, optional speaker, content, optional guild_id, UTC ts
+  monotonic PK, role, optional :class:`Author`, content, optional
+  guild_id, UTC ts
 - ``summaries`` — at most one rolling summary per (familiar, channel)
   with a ``last_summarised_id`` watermark for cache freshness.
   See ``docs/architecture/context-pipeline.md`` for rationale.
@@ -22,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from familiar_connect.identity import Author
+
 if TYPE_CHECKING:
     from familiar_connect.config import ChannelMode
 
@@ -35,7 +38,7 @@ class HistoryTurn:
     id: int
     timestamp: datetime
     role: str
-    speaker: str | None
+    author: Author | None
     content: str
     channel_id: int = 0
 
@@ -78,15 +81,18 @@ class WatermarkEntry:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    familiar_id    TEXT    NOT NULL,
-    channel_id     INTEGER NOT NULL,
-    guild_id       INTEGER,
-    role           TEXT    NOT NULL,
-    speaker        TEXT,
-    content        TEXT    NOT NULL,
-    timestamp      TEXT    NOT NULL,
-    mode           TEXT
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id          TEXT    NOT NULL,
+    channel_id           INTEGER NOT NULL,
+    guild_id             INTEGER,
+    role                 TEXT    NOT NULL,
+    author_platform      TEXT,
+    author_user_id       TEXT,
+    author_username      TEXT,
+    author_display_name  TEXT,
+    content              TEXT    NOT NULL,
+    timestamp            TEXT    NOT NULL,
+    mode                 TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -124,6 +130,11 @@ CREATE TABLE IF NOT EXISTS memory_writer_watermark (
 );
 """
 
+_TURN_COLS = (
+    "id, timestamp, role, author_platform, author_user_id, "
+    "author_username, author_display_name, content, channel_id"
+)
+
 
 class HistoryStore:
     """Persistent SQLite store for turns + rolling summaries.
@@ -146,8 +157,7 @@ class HistoryStore:
         self._conn.commit()
 
     def _migrate_if_needed(self) -> None:
-        """Idempotent migrations (currently: add ``mode`` column to turns)."""
-        # check whether turns table exists — if not, _SCHEMA handles it
+        """Idempotent migrations for the ``turns`` and ``summaries`` tables."""
         row = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='turns'"
         ).fetchone()
@@ -158,11 +168,30 @@ class HistoryStore:
             col["name"]
             for col in self._conn.execute("PRAGMA table_info(turns)").fetchall()
         }
+
+        # legacy: add mode column if missing
         if "mode" not in columns:
             self._conn.execute("ALTER TABLE turns ADD COLUMN mode TEXT")
             self._conn.commit()
 
-        # migrate summaries: old PK was (familiar_id) only; new adds channel_id.
+        # identity migration: drop bare ``speaker`` in favour of four
+        # author_* columns. Old rows' speaker strings are dropped —
+        # callers warned to back up ``data/familiars/`` before
+        # upgrading.
+        if "speaker" in columns:
+            self._conn.execute("ALTER TABLE turns DROP COLUMN speaker")
+            self._conn.commit()
+        for col in (
+            "author_platform",
+            "author_user_id",
+            "author_username",
+            "author_display_name",
+        ):
+            if col not in columns:
+                self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
+        self._conn.commit()
+
+        # summaries: old PK was (familiar_id) only; new adds channel_id.
         # summaries are a cache — drop + recreate is safe
         summary_row = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='summaries'"
@@ -195,26 +224,35 @@ class HistoryStore:
         channel_id: int,
         role: str,
         content: str,
-        speaker: str | None = None,
+        author: Author | None = None,
         guild_id: int | None = None,
         mode: ChannelMode | None = None,
     ) -> HistoryTurn:
         """Append a single turn and return its persisted form."""
         timestamp = datetime.now(tz=UTC)
         mode_value = mode.value if mode is not None else None
+        platform = author.platform if author is not None else None
+        user_id = author.user_id if author is not None else None
+        username = author.username if author is not None else None
+        display_name = author.display_name if author is not None else None
         cur = self._conn.execute(
             """
             INSERT INTO turns
                 (familiar_id, channel_id, guild_id,
-                 role, speaker, content, timestamp, mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 role, author_platform, author_user_id,
+                 author_username, author_display_name,
+                 content, timestamp, mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
                 channel_id,
                 guild_id,
                 role,
-                speaker,
+                platform,
+                user_id,
+                username,
+                display_name,
                 content,
                 timestamp.isoformat(),
                 mode_value,
@@ -225,8 +263,9 @@ class HistoryStore:
             id=int(cur.lastrowid or 0),
             timestamp=timestamp,
             role=role,
-            speaker=speaker,
+            author=author,
             content=content,
+            channel_id=channel_id,
         )
 
     def recent(
@@ -247,24 +286,24 @@ class HistoryStore:
             return []
         if mode is not None:
             rows = self._conn.execute(
-                """
-                SELECT id, timestamp, role, speaker, content
+                f"""
+                SELECT {_TURN_COLS}
                   FROM turns
                  WHERE familiar_id = ? AND channel_id = ? AND mode = ?
                  ORDER BY id DESC
                  LIMIT ?
-                """,
+                """,  # noqa: S608
                 (familiar_id, channel_id, mode.value, limit),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                """
-                SELECT id, timestamp, role, speaker, content
+                f"""
+                SELECT {_TURN_COLS}
                   FROM turns
                  WHERE familiar_id = ? AND channel_id = ?
                  ORDER BY id DESC
                  LIMIT ?
-                """,
+                """,  # noqa: S608
                 (familiar_id, channel_id, limit),
             ).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
@@ -283,27 +322,27 @@ class HistoryStore:
         """
         if channel_id is not None:
             rows = self._conn.execute(
-                """
-                SELECT id, timestamp, role, speaker, content
+                f"""
+                SELECT {_TURN_COLS}
                   FROM turns
                  WHERE familiar_id = ?
                    AND channel_id = ?
                    AND id <= ?
                  ORDER BY id ASC
                  LIMIT ?
-                """,
+                """,  # noqa: S608
                 (familiar_id, channel_id, max_id, limit),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                """
-                SELECT id, timestamp, role, speaker, content
+                f"""
+                SELECT {_TURN_COLS}
                   FROM turns
                  WHERE familiar_id = ?
                    AND id <= ?
                  ORDER BY id ASC
                  LIMIT ?
-                """,
+                """,  # noqa: S608
                 (familiar_id, max_id, limit),
             ).fetchall()
         return [_row_to_turn(r) for r in rows]
@@ -582,32 +621,48 @@ class HistoryStore:
         wm = self.get_writer_watermark(familiar_id=familiar_id)
         min_id = wm.last_written_id if wm is not None else 0
         rows = self._conn.execute(
-            """
-            SELECT id, timestamp, role, speaker, content, channel_id
+            f"""
+            SELECT {_TURN_COLS}
               FROM turns
              WHERE familiar_id = ?
                AND id > ?
              ORDER BY id ASC
              LIMIT ?
-            """,
+            """,  # noqa: S608
             (familiar_id, min_id, limit),
         ).fetchall()
         return [_row_to_turn(r) for r in rows]
 
 
 def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
-    # channel_id missing from older SELECTs that don't need it; fall
-    # back to 0 so those callers keep working. Writer-facing SELECTs
-    # include it explicitly.
+    """Rebuild a HistoryTurn from a SELECT row. Author is reconstructed.
+
+    channel_id missing from older SELECTs that don't need it; fall
+    back to 0 so those callers keep working. Writer-facing SELECTs
+    include it explicitly.
+    """
     try:
         channel_id = int(row["channel_id"])
     except (IndexError, KeyError):
         channel_id = 0
+
+    platform = row["author_platform"]
+    user_id = row["author_user_id"]
+    if platform is not None and user_id is not None:
+        author: Author | None = Author(
+            platform=str(platform),
+            user_id=str(user_id),
+            username=row["author_username"],
+            display_name=row["author_display_name"],
+        )
+    else:
+        author = None
+
     return HistoryTurn(
         id=int(row["id"]),
         timestamp=datetime.fromisoformat(row["timestamp"]),
         role=str(row["role"]),
-        speaker=row["speaker"] if row["speaker"] is not None else None,
+        author=author,
         content=str(row["content"]),
         channel_id=channel_id,
     )

@@ -198,7 +198,7 @@ Threads and forum posts each get their own sidecar keyed by the thread's id. The
 - **`familiar_id`** is the folder name under `data/familiars/`. Kebab-case by convention (`aria`, `my-cat-familiar`). Used as the partition key for `HistoryStore` entries, though in practice there's only one active familiar per install.
 - **Display name** is not stored separately — the character card carries it, and the bot reads it from the unpacked `memory/self/` files.
 
-The speaker in a conversation (the Discord user who triggered a turn) is tracked separately as `ContextRequest.speaker`, and is the Discord display name (a string), not a user id.
+The speaker in a conversation is tracked as `ContextRequest.author: Author | None`. `Author` (in `familiar_connect.identity`) is a frozen dataclass of `platform` + immutable `user_id` + `username` + `display_name` + `aliases`. Storage keys on `author.slug` (e.g. `discord-123456789`), rendering uses `author.label` (display name when available), and recall uses `author.all_known_names` via `people/_aliases.json`.
 
 ## Trust model
 
@@ -237,6 +237,6 @@ A future extension could add per-guild *overrides* on top of this — for exampl
 
 - `MemoryStore` is rooted at `data/familiars/<familiar_id>/memory/`.
 - `HistoryStore` lives at `data/familiars/<familiar_id>/history.db` and partitions turns by `(familiar_id, channel_id)` for the per-channel recent window and `(familiar_id,)` for the global rolling summary.
-- `ContextRequest` carries `familiar_id`, `channel_id`, `speaker`, `modality`, and `guild_id` (observability only).
+- `ContextRequest` carries `familiar_id`, `channel_id`, `author`, `modality`, and `guild_id` (observability only).
 - `ChannelConfigStore` lives at `data/familiars/<familiar_id>/channels/`.
 - `SubscriptionRegistry` lives at `data/familiars/<familiar_id>/subscriptions.toml`.

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from familiar_connect.identity import Author
 
 
 class Layer(Enum):
@@ -73,7 +77,7 @@ class PendingTurn:
     into the chat payload sent to the LLM.
     """
 
-    speaker: str | None
+    author: Author | None
     text: str
 
 
@@ -94,7 +98,7 @@ class ContextRequest:
     familiar_id: str
     channel_id: int
     guild_id: int | None
-    speaker: str | None
+    author: Author | None
     utterance: str
     modality: Modality
     budget_tokens: int
@@ -103,7 +107,7 @@ class ContextRequest:
     """User messages buffered by the conversation monitor since the last
     response. When non-empty, the renderer appends *all* of these as
     user turns instead of the single ``utterance``. The last entry
-    should match ``utterance`` / ``speaker``."""
+    should match ``utterance`` / ``author``."""
     preprocessor_contributions: tuple[Contribution, ...] = ()
     interruption_context: str | None = None
     """System note for voice interruptions; rendered before final user

@@ -27,6 +27,7 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.memory.store import MemoryStore
 
@@ -34,12 +35,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
+
+
 def _request(utterance: str = "tell me about Alice") -> ContextRequest:
     return ContextRequest(
         familiar_id="aria",
         channel_id=100,
         guild_id=1,
-        speaker="Alice",
+        author=_ALICE,
         utterance=utterance,
         modality=Modality.text,
         budget_tokens=2048,

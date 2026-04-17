@@ -16,7 +16,10 @@ import pytest
 from familiar_connect.context.processors.recast import RecastPostProcessor
 from familiar_connect.context.protocols import PostProcessor
 from familiar_connect.context.types import ContextRequest, Modality
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
+
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -28,7 +31,7 @@ def _request(**overrides: object) -> ContextRequest:
         "familiar_id": "aria",
         "channel_id": 100,
         "guild_id": 1,
-        "speaker": "Alice",
+        "author": _ALICE,
         "utterance": "hello",
         "modality": Modality.text,
         "budget_tokens": 2048,

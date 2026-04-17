@@ -24,6 +24,7 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
+from familiar_connect.identity import Author
 from familiar_connect.memory.store import MemoryStore
 
 if TYPE_CHECKING:
@@ -36,12 +37,15 @@ def store(tmp_path: Path) -> MemoryStore:
     return MemoryStore(tmp_path / "memory")
 
 
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
+
+
 def _make_request() -> ContextRequest:
     return ContextRequest(
         familiar_id="aria",
         channel_id=100,
         guild_id=1,
-        speaker="Alice",
+        author=_ALICE,
         utterance="hello",
         modality=Modality.text,
         budget_tokens=2048,

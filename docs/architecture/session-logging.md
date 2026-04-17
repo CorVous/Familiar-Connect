@@ -59,7 +59,7 @@ A cheap side-model LLM (`LLMClient`) configured alongside the other side-model c
 Three kinds of file mutation, all routed through `MemoryStore` so they hit the audit log under the `memory_writer` source:
 
 1. **A new `sessions/<date>-<slot>.md` file.** One per session. The slot suffix disambiguates multiple sessions on one day.
-2. **Edits (append or rewrite) to `people/<name>.md`** for each person who showed up. Updates impressions, adds notable moments, flags multi-username suspicions (see [Memory § multi-username handling](memory.md#peoplenamemd-someone-the-familiar-has-interacted-with)).
+2. **Edits (append or rewrite) to `people/<platform>-<user_id>.md`** for each person who showed up. Updates impressions, adds notable moments, harvests new display names into the `## Aliases` section (see [Memory § multi-username handling](memory.md#peopleplatform-user_idmd-someone-the-familiar-has-interacted-with)).
 3. **Edits to `topics/<slug>.md`** for recurring subjects. Updates opinions, adds events, links back to the session file.
 
 After a successful run the writer advances the watermark in `HistoryStore` so the same turns are never written twice.
