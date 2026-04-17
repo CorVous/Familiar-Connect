@@ -79,24 +79,61 @@ async def _recording_finished_callback(  # noqa: RUF029
 
 def _refresh_channel_context(
     familiar: Familiar,
-    channel: discord.TextChannel | discord.Thread,
-) -> ChannelContext:
+    channel: (
+        discord.abc.GuildChannel
+        | discord.abc.PrivateChannel
+        | discord.Thread
+        | discord.PartialMessageable
+    ),
+) -> ChannelContext | None:
     """Register channel into the monitor from a live Discord object.
 
-    Centralises the Thread/ForumChannel isinstance dance so
-    subscribe / on_message / slash-command call sites don't drift.
-    Returns the freshly-stored :class:`ChannelContext`.
+    Dispatches on channel type so all call sites share one implementation.
+    Returns the freshly-stored :class:`ChannelContext`, or ``None`` for
+    unrecognised types (e.g. ``PartialMessageable``).
     """
-    name = getattr(channel, "name", str(channel.id))
+    name: str
+    kind: ChannelKind
+    parent_name: str | None = None
+
     if isinstance(channel, discord.Thread):
+        name = getattr(channel, "name", str(channel.id))
         parent = channel.parent
         parent_name = getattr(parent, "name", None)
-        kind: ChannelKind = (
-            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-        )
-    else:
-        parent_name = None
+        kind = "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+    elif isinstance(channel, discord.DMChannel):
+        recipient = getattr(channel, "recipient", None)
+        name = getattr(recipient, "display_name", None) or str(channel.id)
+        kind = "dm"
+    elif isinstance(channel, discord.GroupChannel):
+        name = getattr(channel, "name", None) or "Group DM"
+        kind = "group_dm"
+    elif isinstance(channel, discord.StageChannel):
+        name = getattr(channel, "name", str(channel.id))
+        guild = getattr(channel, "guild", None)
+        parent_name = getattr(guild, "name", None)
+        kind = "stage"
+    elif isinstance(channel, discord.VoiceChannel):
+        name = getattr(channel, "name", str(channel.id))
+        guild = getattr(channel, "guild", None)
+        parent_name = getattr(guild, "name", None)
+        kind = "voice"
+    elif isinstance(channel, discord.ForumChannel):
+        name = getattr(channel, "name", str(channel.id))
+        guild = getattr(channel, "guild", None)
+        parent_name = getattr(guild, "name", None)
+        kind = "forum_root"
+    elif isinstance(channel, discord.CategoryChannel):
+        name = getattr(channel, "name", str(channel.id))
+        guild = getattr(channel, "guild", None)
+        parent_name = getattr(guild, "name", None)
+        kind = "category"
+    elif isinstance(channel, discord.TextChannel):
+        name = getattr(channel, "name", str(channel.id))
         kind = "text"
+    else:
+        return None
+
     familiar.monitor.register_channel_context(
         channel.id,
         name=name,
@@ -162,6 +199,7 @@ async def subscribe_text(
         guild_id=ctx.guild_id,
     )
     ctx_info = _refresh_channel_context(familiar, channel)
+    assert ctx_info is not None  # subscribe_text guards TextChannel | Thread above
     kind = ctx_info.kind
     name = ctx_info.name
 
@@ -1149,7 +1187,7 @@ async def channel_backdrop(
         return
 
     channel = ctx.channel
-    if isinstance(channel, discord.TextChannel | discord.Thread):
+    if channel is not None:
         _refresh_channel_context(familiar, channel)
     channel_name = familiar.monitor.format_channel_context(channel_id)
     current = familiar.channel_configs.get_backdrop(channel_id=channel_id)
@@ -1175,7 +1213,7 @@ async def context_command(
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
     channel = ctx.channel
-    if isinstance(channel, discord.TextChannel | discord.Thread):
+    if channel is not None:
         _refresh_channel_context(familiar, channel)
     label = familiar.monitor.format_channel_context(channel_id)
     raw = familiar.last_context_cache.get(channel_id=channel_id)

@@ -30,7 +30,17 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
 
-ChannelKind = Literal["text", "thread", "forum_post"]
+ChannelKind = Literal[
+    "text",
+    "thread",
+    "forum_post",
+    "dm",
+    "group_dm",
+    "voice",
+    "stage",
+    "forum_root",
+    "category",
+]
 
 
 @dataclass(frozen=True)
@@ -276,6 +286,12 @@ class ConversationMonitor:
         - text channel: ``#general``
         - thread: ``#general -> feature-brainstorm``
         - forum post: ``forum:announcements -> hotfix``
+        - DM: ``DM:alice``
+        - group DM: ``GroupDM:squad``
+        - voice: ``voice:#lounge``
+        - stage: ``stage:#announcements``
+        - forum root: ``forum-root:#ideas``
+        - category: ``category:#off-topic``
         - unknown: ``str(channel_id)``
         """
         ctx = self._channel_contexts.get(channel_id)
@@ -286,15 +302,27 @@ class ConversationMonitor:
         if ctx.kind == "thread":
             parent = ctx.parent_name or "?"
             return f"#{parent} -> {ctx.name}"
-        # forum_post
-        parent = ctx.parent_name or "?"
-        return f"forum:{parent} -> {ctx.name}"
+        if ctx.kind == "forum_post":
+            parent = ctx.parent_name or "?"
+            return f"forum:{parent} -> {ctx.name}"
+        if ctx.kind == "dm":
+            return f"DM:{ctx.name}"
+        if ctx.kind == "group_dm":
+            return f"GroupDM:{ctx.name}"
+        if ctx.kind == "voice":
+            return f"voice:#{ctx.name}"
+        if ctx.kind == "stage":
+            return f"stage:#{ctx.name}"
+        if ctx.kind == "forum_root":
+            return f"forum-root:#{ctx.name}"
+        # category
+        return f"category:#{ctx.name}"
 
     def _channel_label(self, channel_id: int) -> str:
         ctx = self._channel_contexts.get(channel_id)
         if ctx is None:
             return str(channel_id)
-        if ctx.parent_name and ctx.kind != "text":
+        if ctx.kind in {"thread", "forum_post"} and ctx.parent_name:
             return f"{ctx.parent_name} -> {ctx.name}"
         return ctx.name
 

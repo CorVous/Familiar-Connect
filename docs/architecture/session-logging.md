@@ -46,9 +46,15 @@ When the writer is constructed with a `channel_context_lookup` callable (wired t
 - #general
 - #general -> feature-brainstorm
 - forum:announcements -> hotfix-rollout
+- DM:alice
+- GroupDM:squad
+- voice:#lounge
+- stage:#announcements
+- forum-root:#ideas
+- category:#off-topic
 ```
 
-The labels come from `ConversationMonitor`, which stores a `ChannelContext(name, kind, parent_name)` for each subscribed channel. Threads and forum posts therefore surface in session summaries with their human-readable location rather than as bare numeric IDs. Unknown channels (no context registered) are suppressed, keeping the block empty in test setups and during early boot.
+The labels come from `ConversationMonitor`, which stores a `ChannelContext(name, kind, parent_name)` for each channel. The `kind` field controls the prefix style. Unknown channels (no context registered) are suppressed, keeping the block empty in test setups and during early boot.
 
 ### Model
 
