@@ -18,17 +18,22 @@ Sidecar schema::
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import tomli_w
 
+from familiar_connect import log_style as ls
 from familiar_connect.config import (
+    ConfigError,
     _resolve_typing_simulation,
     channel_config_for_mode,
     load_channel_config,
 )
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,14 +64,20 @@ class ChannelConfigStore:
             return cached
 
         sidecar = self._sidecar_path(channel_id)
-        loaded = (
-            load_channel_config(
-                sidecar,
-                character_overrides=self._character.typing_simulation_overrides,
-            )
-            if sidecar.exists()
-            else None
-        )
+        loaded: ChannelConfig | None = None
+        if sidecar.exists():
+            try:
+                loaded = load_channel_config(
+                    sidecar,
+                    character_overrides=self._character.typing_simulation_overrides,
+                )
+            except ConfigError as exc:
+                _logger.warning(
+                    f"{ls.tag('ChannelConfig', ls.C)} "
+                    f"{ls.kv('sidecar', str(sidecar), vc=ls.LY)} "
+                    f"{ls.kv('event', 'read-fallback', vc=ls.Y)} "
+                    f"{ls.kv('error', ls.trunc(str(exc), 120), vc=ls.R)}"
+                )
         if loaded is None:
             loaded = self._fallback_for_mode(self._character.default_mode)
 
@@ -151,21 +162,27 @@ class ChannelConfigStore:
             return self._fallback_for_mode(self._character.default_mode)
         return cfg
 
-    def _read_raw(self, sidecar: Path) -> dict:
+    def _read_raw(self, sidecar: Path) -> dict[str, object]:
         """Return raw TOML dict from *sidecar*; empty if absent or malformed.
 
-        Malformed sidecar (operator hand-edit, torn write) → empty dict,
-        letting next ``_write_sidecar`` self-heal.
+        Malformed sidecar (operator hand-edit, torn write) → empty dict
+        + warning log, letting next ``_write_sidecar`` self-heal.
         """
         if not sidecar.exists():
             return {}
         with sidecar.open("rb") as f:
             try:
                 return dict(tomllib.load(f))
-            except tomllib.TOMLDecodeError:
+            except tomllib.TOMLDecodeError as exc:
+                _logger.warning(
+                    f"{ls.tag('ChannelConfig', ls.C)} "
+                    f"{ls.kv('sidecar', str(sidecar), vc=ls.LY)} "
+                    f"{ls.kv('event', 'malformed-discarded', vc=ls.Y)} "
+                    f"{ls.kv('error', ls.trunc(str(exc), 120), vc=ls.R)}"
+                )
                 return {}
 
-    def _write_sidecar(self, sidecar: Path, data: dict) -> None:
+    def _write_sidecar(self, sidecar: Path, data: dict[str, object]) -> None:
         """Serialize *data* with canonical top-level key order.
 
         ``channel_name`` first (human-readable header), then ``mode``,
@@ -173,7 +190,7 @@ class ChannelConfigStore:
         ``tomli_w`` always emits after scalars).
         """
         preferred = ("channel_name", "mode", "backdrop")
-        ordered: dict = {k: data[k] for k in preferred if k in data}
+        ordered: dict[str, object] = {k: data[k] for k in preferred if k in data}
         for k, v in data.items():
             if k not in ordered:
                 ordered[k] = v

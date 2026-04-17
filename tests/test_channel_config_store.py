@@ -13,6 +13,8 @@ from __future__ import annotations
 import tomllib
 from typing import TYPE_CHECKING
 
+import pytest
+
 from familiar_connect.channel_config import ChannelConfigStore
 from familiar_connect.config import ChannelMode, CharacterConfig
 
@@ -229,11 +231,21 @@ class TestSetModePreservation:
 # Malformed sidecar self-healing
 # ---------------------------------------------------------------------------
 
+MALFORMED_INPUTS = [
+    pytest.param("this is not valid toml ===", id="pure-garbage"),
+    # torn write: writer crashed mid triple-quoted string
+    pytest.param(
+        'channel_name = "general"\nmode = "full_rp"\nbackdrop = """\nHalf-written',
+        id="torn-write",
+    ),
+]
+
 
 class TestMalformedSidecar:
-    def test_set_mode_self_heals_malformed_sidecar(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("bad_toml", MALFORMED_INPUTS)
+    def test_set_mode_self_heals(self, tmp_path: Path, bad_toml: str) -> None:
         sidecar = tmp_path / "7.toml"
-        sidecar.write_text("this is not valid toml ===")
+        sidecar.write_text(bad_toml)
 
         store = ChannelConfigStore(
             root=tmp_path,
@@ -244,9 +256,10 @@ class TestMalformedSidecar:
         assert cfg.mode is ChannelMode.full_rp
         tomllib.loads(sidecar.read_text())  # must be valid TOML after self-heal
 
-    def test_set_backdrop_self_heals_malformed_sidecar(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("bad_toml", MALFORMED_INPUTS)
+    def test_set_backdrop_self_heals(self, tmp_path: Path, bad_toml: str) -> None:
         sidecar = tmp_path / "7.toml"
-        sidecar.write_text("this is not valid toml ===")
+        sidecar.write_text(bad_toml)
 
         store = ChannelConfigStore(
             root=tmp_path,
@@ -256,3 +269,24 @@ class TestMalformedSidecar:
 
         assert cfg.backdrop_override == "custom note"
         assert cfg.mode is ChannelMode.imitate_voice
+
+    @pytest.mark.parametrize("bad_toml", MALFORMED_INPUTS)
+    def test_get_falls_back_on_malformed_sidecar(
+        self,
+        tmp_path: Path,
+        bad_toml: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Read path degrades to character default + warns, doesn't raise."""
+        sidecar = tmp_path / "7.toml"
+        sidecar.write_text(bad_toml)
+
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(default_mode=ChannelMode.imitate_voice),
+        )
+        with caplog.at_level("WARNING", logger="familiar_connect.channel_config"):
+            cfg = store.get(channel_id=7)
+
+        assert cfg.mode is ChannelMode.imitate_voice
+        assert any("read-fallback" in rec.message for rec in caplog.records)
