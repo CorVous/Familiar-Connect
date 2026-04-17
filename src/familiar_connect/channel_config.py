@@ -152,11 +152,18 @@ class ChannelConfigStore:
         return cfg
 
     def _read_raw(self, sidecar: Path) -> dict:
-        """Return raw TOML dict from *sidecar*, or empty dict if absent."""
+        """Return raw TOML dict from *sidecar*; empty if absent or malformed.
+
+        Malformed sidecar (operator hand-edit, torn write) → empty dict,
+        letting next ``_write_sidecar`` self-heal.
+        """
         if not sidecar.exists():
             return {}
         with sidecar.open("rb") as f:
-            return dict(tomllib.load(f))
+            try:
+                return dict(tomllib.load(f))
+            except tomllib.TOMLDecodeError:
+                return {}
 
     def _write_sidecar(self, sidecar: Path, data: dict) -> None:
         """Serialize *data* with canonical top-level key order.

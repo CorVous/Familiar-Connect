@@ -10,6 +10,7 @@ Covers familiar_connect.channel_config, which doesn't exist yet.
 
 from __future__ import annotations
 
+import tomllib
 from typing import TYPE_CHECKING
 
 from familiar_connect.channel_config import ChannelConfigStore
@@ -222,3 +223,36 @@ class TestSetModePreservation:
 
         cfg = store.get(channel_id=7)
         assert cfg.channel_name == "general"
+
+
+# ---------------------------------------------------------------------------
+# Malformed sidecar self-healing
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedSidecar:
+    def test_set_mode_self_heals_malformed_sidecar(self, tmp_path: Path) -> None:
+        sidecar = tmp_path / "7.toml"
+        sidecar.write_text("this is not valid toml ===")
+
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(default_mode=ChannelMode.text_conversation_rp),
+        )
+        cfg = store.set_mode(channel_id=7, mode=ChannelMode.full_rp)
+
+        assert cfg.mode is ChannelMode.full_rp
+        tomllib.loads(sidecar.read_text())  # must be valid TOML after self-heal
+
+    def test_set_backdrop_self_heals_malformed_sidecar(self, tmp_path: Path) -> None:
+        sidecar = tmp_path / "7.toml"
+        sidecar.write_text("this is not valid toml ===")
+
+        store = ChannelConfigStore(
+            root=tmp_path,
+            character=CharacterConfig(default_mode=ChannelMode.imitate_voice),
+        )
+        cfg = store.set_backdrop(channel_id=7, backdrop="custom note")
+
+        assert cfg.backdrop_override == "custom note"
+        assert cfg.mode is ChannelMode.imitate_voice
