@@ -91,6 +91,15 @@ Suggested (not required) sections:
 
 **Legacy history migration.** When upgrading from a pre-`Author` install, `HistoryStore` migrates any `speaker` column into `author_display_name` with a synthesised `legacy-discord` platform tag so historical turns keep their attribution. Pre-existing `people/<name>.md` files are left in place; the memory-writer rewrites them under canonical slugs the next time that person speaks.
 
+!!! note "TODO: cleanup debt from the Author refactor"
+    The following is scaffolding that exists only to carry live installs across the speaker → `Author` schema change. Delete once every install has been upgraded:
+
+    - `_migrate_if_needed` branch guarded by `if "speaker" in columns:` in `src/familiar_connect/history/store.py` (copies the old column into `author_display_name` and drops it).
+    - The corresponding `test_migration_adds_mode_column_to_existing_db` legacy-schema case in `tests/test_history_store.py`.
+    - This note and the "Legacy history migration" paragraph above.
+
+    No `people/<display-name>.md` renamer ships — the writer regenerates under canonical slugs organically, so the old files can be deleted by hand after the cutover.
+
 ### `topics/<slug>.md` — recurring subjects
 
 Suggested sections:
