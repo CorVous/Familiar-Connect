@@ -1182,14 +1182,14 @@ async def context_command(
     entry = familiar.last_context_cache.get(channel_id=channel_id)
     if entry is None:
         _logger.info(
-            f"{ls.tag('Config', ls.W)} "
+            f"{ls.tag('Context', ls.W)} "
             f"{ls.word(label, ls.C)} "
             f"{ls.kv('action', 'context_miss')}"
         )
         await ctx.respond("No context cached for this channel yet.", ephemeral=True)
         return
     _logger.info(
-        f"{ls.tag('Config', ls.W)} "
+        f"{ls.tag('Context', ls.W)} "
         f"{ls.word(label, ls.C)} "
         f"{ls.kv('modality', entry.modality)} "
         f"{ls.kv('messages', str(len(entry.messages)), vc=ls.LG)}"
