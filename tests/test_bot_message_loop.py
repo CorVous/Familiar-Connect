@@ -919,6 +919,32 @@ class TestSubscriptionCommands:
             is None
         )
 
+    def test_subscribe_text_rejects_dm(self, tmp_path: Path) -> None:
+        """DMs are not valid text subscription targets; respond ephemeral, no sub."""
+        familiar = _make_familiar(tmp_path)
+        ctx = MagicMock(spec=discord.ApplicationContext)
+        ctx.respond = AsyncMock()
+
+        dm_channel = MagicMock(spec=discord.DMChannel)
+        dm_channel.id = 55
+        type(ctx).channel = PropertyMock(return_value=dm_channel)
+        type(ctx).channel_id = PropertyMock(return_value=55)
+        type(ctx).guild = PropertyMock(return_value=None)
+        type(ctx).guild_id = PropertyMock(return_value=None)
+
+        asyncio.run(subscribe_text(ctx, familiar))
+
+        ctx.respond.assert_called_once()
+        _, kwargs = ctx.respond.call_args
+        assert kwargs.get("ephemeral") is True
+        assert (
+            familiar.subscriptions.get(
+                channel_id=55,
+                kind=SubscriptionKind.text,
+            )
+            is None
+        )
+
     def test_subscribe_text_thread_join_http_error_is_swallowed(
         self, tmp_path: Path
     ) -> None:
@@ -1317,6 +1343,57 @@ class TestChannelBackdropInThread:
         assert sidecar.exists()
         cfg = familiar.channel_configs.get(channel_id=77)
         assert cfg.channel_name == "#general -> feature-brainstorm"
+
+
+# ---------------------------------------------------------------------------
+# /channel-backdrop in a DM writes a labelled channel_name to the sidecar
+# ---------------------------------------------------------------------------
+
+
+def _make_dm_ctx(*, channel_id: int = 88, recipient_name: str = "alice") -> MagicMock:
+    """Build a fake ``discord.ApplicationContext`` whose channel is a DMChannel."""
+    ctx = MagicMock(spec=discord.ApplicationContext)
+    ctx.respond = AsyncMock()
+    ctx.send_modal = AsyncMock()
+
+    recipient = MagicMock(spec=discord.User)
+    recipient.display_name = recipient_name
+
+    dm_channel = MagicMock(spec=discord.DMChannel)
+    dm_channel.id = channel_id
+    dm_channel.recipient = recipient
+
+    type(ctx).channel = PropertyMock(return_value=dm_channel)
+    type(ctx).channel_id = PropertyMock(return_value=channel_id)
+    type(ctx).guild = PropertyMock(return_value=None)
+    type(ctx).guild_id = PropertyMock(return_value=None)
+    return ctx
+
+
+class TestChannelBackdropInDM:
+    @pytest.mark.asyncio
+    async def test_backdrop_in_dm_writes_labelled_channel_name(
+        self, tmp_path: Path
+    ) -> None:
+        """Sidecar ``channel_name`` shows ``DM:{recipient}`` label.
+
+        Guards that ``channel_backdrop`` in a DM builds a human-readable
+        label rather than persisting the raw integer channel id.
+        """
+        familiar = _make_familiar(tmp_path)
+        ctx = _make_dm_ctx(channel_id=88, recipient_name="alice")
+
+        await channel_backdrop(ctx, familiar)
+
+        modal = ctx.send_modal.call_args[0][0]
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+        modal.children[0].value = "Speak like a pirate."
+        await modal.callback(interaction)
+
+        cfg = familiar.channel_configs.get(channel_id=88)
+        assert cfg.channel_name == "DM:alice"
 
 
 # ---------------------------------------------------------------------------

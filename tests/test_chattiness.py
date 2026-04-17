@@ -1048,3 +1048,42 @@ class TestChannelContext:
         assert ctx.name == "brainstorm"
         assert ctx.kind == "thread"
         assert ctx.parent_name == "general"
+
+    def test_format_dm(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="alice", kind="dm")
+        assert monitor.format_channel_context(42) == "DM:alice"
+
+    def test_format_group_dm(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="squad", kind="group_dm")
+        assert monitor.format_channel_context(42) == "GroupDM:squad"
+
+    def test_format_voice(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="lounge", kind="voice")
+        assert monitor.format_channel_context(42) == "voice:#lounge"
+
+    def test_format_stage(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="announcements", kind="stage")
+        assert monitor.format_channel_context(42) == "stage:#announcements"
+
+    def test_format_forum_root(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="ideas", kind="forum_root")
+        assert monitor.format_channel_context(42) == "forum-root:#ideas"
+
+    def test_format_category(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="off-topic", kind="category")
+        assert monitor.format_channel_context(42) == "category:#off-topic"
+
+    def test_channel_context_getter_dm(self) -> None:
+        monitor, _ = _make_monitor()
+        monitor.register_channel_context(42, name="bob", kind="dm")
+        ctx = monitor.channel_context(42)
+        assert ctx is not None
+        assert ctx.kind == "dm"
+        assert ctx.name == "bob"
+        assert ctx.parent_name is None

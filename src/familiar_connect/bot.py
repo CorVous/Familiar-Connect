@@ -79,24 +79,57 @@ async def _recording_finished_callback(  # noqa: RUF029
 
 def _refresh_channel_context(
     familiar: Familiar,
-    channel: discord.TextChannel | discord.Thread,
-) -> ChannelContext:
+    channel: (
+        discord.abc.GuildChannel
+        | discord.abc.PrivateChannel
+        | discord.Thread
+        | discord.PartialMessageable
+    ),
+) -> ChannelContext | None:
     """Register channel into the monitor from a live Discord object.
 
-    Centralises the Thread/ForumChannel isinstance dance so
-    subscribe / on_message / slash-command call sites don't drift.
-    Returns the freshly-stored :class:`ChannelContext`.
+    Dispatches on channel type so all call sites share one implementation.
+    Returns the freshly-stored :class:`ChannelContext`, or ``None`` for
+    unrecognised types (e.g. ``PartialMessageable``).
     """
-    name = getattr(channel, "name", str(channel.id))
-    if isinstance(channel, discord.Thread):
-        parent = channel.parent
-        parent_name = getattr(parent, "name", None)
-        kind: ChannelKind = (
-            "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
-        )
-    else:
-        parent_name = None
-        kind = "text"
+    name: str
+    kind: ChannelKind
+    parent_name: str | None = None
+    # StageChannel and VoiceChannel are siblings under VocalGuildChannel;
+    # ordering is defensive in case py-cord ever merges them.
+    match channel:
+        case discord.Thread():
+            name = getattr(channel, "name", str(channel.id))
+            parent = channel.parent
+            parent_name = getattr(parent, "name", None)
+            kind = (
+                "forum_post" if isinstance(parent, discord.ForumChannel) else "thread"
+            )
+        case discord.DMChannel():
+            recipient = getattr(channel, "recipient", None)
+            name = getattr(recipient, "display_name", None) or str(channel.id)
+            kind = "dm"
+        case discord.GroupChannel():
+            name = getattr(channel, "name", None) or str(channel.id)
+            kind = "group_dm"
+        case discord.StageChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "stage"
+        case discord.VoiceChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "voice"
+        case discord.ForumChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "forum_root"
+        case discord.CategoryChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "category"
+        case discord.TextChannel():
+            name = getattr(channel, "name", str(channel.id))
+            kind = "text"
+        case _:
+            return None
+
     familiar.monitor.register_channel_context(
         channel.id,
         name=name,
@@ -161,7 +194,8 @@ async def subscribe_text(
         kind=SubscriptionKind.text,
         guild_id=ctx.guild_id,
     )
-    ctx_info = _refresh_channel_context(familiar, channel)
+    ctx_info = cast("ChannelContext", _refresh_channel_context(familiar, channel))
+    assert ctx_info is not None  # noqa: S101 — isinstance guard above ensures TextChannel | Thread
     kind = ctx_info.kind
     name = ctx_info.name
 
@@ -1163,7 +1197,7 @@ async def channel_backdrop(
         return
 
     channel = ctx.channel
-    if isinstance(channel, discord.TextChannel | discord.Thread):
+    if channel is not None:
         _refresh_channel_context(familiar, channel)
     channel_name = familiar.monitor.format_channel_context(channel_id)
     current = familiar.channel_configs.get_backdrop(channel_id=channel_id)
@@ -1189,7 +1223,7 @@ async def context_command(
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
     channel = ctx.channel
-    if isinstance(channel, discord.TextChannel | discord.Thread):
+    if channel is not None:
         _refresh_channel_context(familiar, channel)
     label = familiar.monitor.format_channel_context(channel_id)
     raw = familiar.last_context_cache.get(channel_id=channel_id)
