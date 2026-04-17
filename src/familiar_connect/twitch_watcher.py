@@ -86,7 +86,7 @@ class TwitchWatcher:
         return build_follow_event(
             config=self.config,
             channel=self.channel,
-            viewer=_author_from_data(data),
+            viewer=_build_author(data.user_id, data.user_login, data.user_name),
         )
 
     def handle_subscription(self, data: ChannelSubscribeData) -> TwitchEvent | None:
@@ -99,7 +99,7 @@ class TwitchWatcher:
         return build_subscription_event(
             config=self.config,
             channel=self.channel,
-            viewer=_author_from_data(data),
+            viewer=_build_author(data.user_id, data.user_login, data.user_name),
             tier=_tier(data.tier),
         )
 
@@ -107,7 +107,11 @@ class TwitchWatcher:
         self, data: ChannelSubscriptionGiftData
     ) -> TwitchEvent | None:
         """Convert a ChannelSubscriptionGiftData into a TwitchEvent."""
-        gifter = None if data.is_anonymous else _author_from_data(data)
+        gifter = (
+            None
+            if data.is_anonymous
+            else _build_author(data.user_id, data.user_login, data.user_name)
+        )
         return build_gift_subscription_event(
             config=self.config,
             channel=self.channel,
@@ -132,7 +136,7 @@ class TwitchWatcher:
         return build_resubscription_event(
             config=self.config,
             channel=self.channel,
-            viewer=_author_from_data(data),
+            viewer=_build_author(data.user_id, data.user_login, data.user_name),
             months=months,
             tier=_tier(data.tier),
             message=data.message.text,
@@ -140,7 +144,11 @@ class TwitchWatcher:
 
     def handle_cheer(self, data: ChannelCheerData) -> TwitchEvent | None:
         """Convert a ChannelCheerData into a TwitchEvent."""
-        viewer = None if data.is_anonymous else _author_from_data(data)
+        viewer = (
+            None
+            if data.is_anonymous
+            else _build_author(data.user_id, data.user_login, data.user_name)
+        )
         return build_cheer_event(
             config=self.config,
             channel=self.channel,
@@ -156,7 +164,7 @@ class TwitchWatcher:
         return build_channel_point_event(
             config=self.config,
             channel=self.channel,
-            viewer=_author_from_data(data),
+            viewer=_build_author(data.user_id, data.user_login, data.user_name),
             redemption_name=data.reward.title,
             user_input=data.user_input or None,
         )
@@ -317,16 +325,20 @@ async def _send_if_present(
         await send.put(event)
 
 
-def _author_from_data(data: object) -> Author:
-    """Build an Author from a twitchAPI event data object.
+def _build_author(
+    user_id: str | None,
+    user_login: str | None,
+    user_name: str | None,
+) -> Author:
+    """Build an Author from raw twitchAPI identity fields.
 
-    Every user-bearing event carries ``user_id`` + ``user_login`` +
-    ``user_name``. :class:`Author` is immutably keyed on ``user_id`` so
-    repeat viewers resolve to the same ``people/twitch-<id>.md`` file
-    regardless of display-name changes.
+    :class:`Author` is immutably keyed on ``user_id`` so repeat viewers
+    resolve to the same ``people/twitch-<id>.md`` file regardless of
+    display-name changes. Optional-typed fields are coerced to empty
+    strings; callers in anonymous-capable flows must guard first.
     """
     return Author.from_twitch(
-        user_id=str(data.user_id),  # ty: ignore[unresolved-attribute]
-        user_login=data.user_login,  # ty: ignore[unresolved-attribute]
-        user_name=data.user_name,  # ty: ignore[unresolved-attribute]
+        user_id=str(user_id or ""),
+        user_login=user_login or "",
+        user_name=user_name or "",
     )
