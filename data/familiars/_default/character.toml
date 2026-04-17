@@ -116,6 +116,7 @@ greetings  = []
 [llm.main_prose]
 model       = "z-ai/glm-5.1"
 temperature = 0.7
+# providers   = ["anthropic", "google-vertex"]  # optional; left = highest priority
 
 # Recast post-processor: rewrite the reply for tone or spoken delivery.
 [llm.post_process_style]
