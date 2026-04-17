@@ -1175,9 +1175,12 @@ async def context_command(
     if channel_id is None:
         await ctx.respond("Cannot determine channel.", ephemeral=True)
         return
+    channel = ctx.channel
+    if isinstance(channel, discord.TextChannel | discord.Thread):
+        _refresh_channel_context(familiar, channel)
+    label = familiar.monitor.format_channel_context(channel_id)
     entry = familiar.last_context_cache.get(channel_id=channel_id)
     if entry is None:
-        label = familiar.monitor.format_channel_context(channel_id)
         _logger.info(
             f"{ls.tag('Config', ls.W)} "
             f"{ls.word(label, ls.C)} "
@@ -1185,7 +1188,6 @@ async def context_command(
         )
         await ctx.respond("No context cached for this channel yet.", ephemeral=True)
         return
-    label = familiar.monitor.format_channel_context(channel_id)
     _logger.info(
         f"{ls.tag('Config', ls.W)} "
         f"{ls.word(label, ls.C)} "
