@@ -321,6 +321,53 @@ class _AsyncIter:
             raise StopAsyncIteration from None
 
 
+def _ws_mock(
+    messages: list[object] | None = None,
+    *,
+    closed: bool = False,
+    close_code: int | None = None,
+) -> MagicMock:
+    """Module-level WS mock — exhausts *messages* then raises StopAsyncIteration."""
+    ws = MagicMock()
+    ws.send_bytes = AsyncMock()
+    ws.send_json = AsyncMock()
+    ws.close = AsyncMock()
+    ws.closed = closed
+    if close_code is not None:
+        ws.close_code = close_code
+    ws.__aiter__ = MagicMock(return_value=_AsyncIter(messages or []))
+    return ws
+
+
+def _open_ws_mock(
+    messages: list[object] | None = None,
+    *,
+    close_code: int | None = None,
+) -> MagicMock:
+    """Module-level WS mock that drains *messages* then blocks indefinitely."""
+    ws = MagicMock()
+    ws.send_bytes = AsyncMock()
+    ws.send_json = AsyncMock()
+    ws.close = AsyncMock()
+    ws.closed = False
+    ws.close_code = close_code
+    items: list[object] = list(messages or [])
+    pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
+
+    class _Never:
+        def __aiter__(self) -> _Never:
+            return self
+
+        async def __anext__(self) -> object:
+            if items:
+                return items.pop(0)
+            await pending
+            raise StopAsyncIteration
+
+    ws.__aiter__ = MagicMock(return_value=_Never())
+    return ws
+
+
 class TestDeepgramTranscriberLifecycle:
     """Tests for start/send_audio/stop WebSocket lifecycle."""
 
@@ -328,21 +375,10 @@ class TestDeepgramTranscriberLifecycle:
     def client(self) -> DeepgramTranscriber:
         return DeepgramTranscriber(api_key="test-key")
 
-    def _make_ws_mock(self, messages: list[object] | None = None) -> MagicMock:
-        """Create a mock WebSocket with async methods."""
-        ws = MagicMock()
-        ws.send_bytes = AsyncMock()
-        ws.send_json = AsyncMock()
-        ws.close = AsyncMock()
-        ws.closed = False
-        items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
-        return ws
-
     @pytest.mark.asyncio
     async def test_start_connects_websocket(self, client: DeepgramTranscriber) -> None:
         """start() creates a session and connects via WebSocket."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _ws_mock()
         connect_mock = AsyncMock(return_value=ws_mock)
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -356,7 +392,7 @@ class TestDeepgramTranscriberLifecycle:
     @pytest.mark.asyncio
     async def test_send_audio_sends_bytes(self, client: DeepgramTranscriber) -> None:
         """send_audio() sends raw bytes over the WebSocket."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -381,7 +417,7 @@ class TestDeepgramTranscriberLifecycle:
         self, client: DeepgramTranscriber
     ) -> None:
         """send_audio() silently returns when the WebSocket is already closed."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _ws_mock()
         ws_mock.closed = True
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
@@ -399,7 +435,7 @@ class TestDeepgramTranscriberLifecycle:
         self, client: DeepgramTranscriber
     ) -> None:
         """finalize() sends Deepgram ``{"type":"Finalize"}`` to flush buffer."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -415,7 +451,7 @@ class TestDeepgramTranscriberLifecycle:
         self, client: DeepgramTranscriber
     ) -> None:
         """finalize() silently no-ops when the WebSocket is already closed."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _ws_mock()
         ws_mock.closed = True
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
@@ -437,7 +473,7 @@ class TestDeepgramTranscriberLifecycle:
     @pytest.mark.asyncio
     async def test_stop_sends_close_stream(self, client: DeepgramTranscriber) -> None:
         """stop() sends the CloseStream message and closes the WebSocket."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -450,7 +486,7 @@ class TestDeepgramTranscriberLifecycle:
     @pytest.mark.asyncio
     async def test_stop_is_idempotent(self, client: DeepgramTranscriber) -> None:
         """Calling stop() twice does not raise."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -479,7 +515,7 @@ class TestDeepgramTranscriberLifecycle:
         ws_msg.type = 1  # aiohttp.WSMsgType.TEXT = 1
         ws_msg.data = deepgram_response
 
-        ws_mock = self._make_ws_mock(messages=[ws_msg])
+        ws_mock = _ws_mock(messages=[ws_msg])
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -509,7 +545,7 @@ class TestDeepgramTranscriberLifecycle:
         ws_msg.type = 1  # aiohttp.WSMsgType.TEXT
         ws_msg.data = metadata_response
 
-        ws_mock = self._make_ws_mock(messages=[ws_msg])
+        ws_mock = _ws_mock(messages=[ws_msg])
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -535,7 +571,7 @@ class TestDeepgramTranscriberLifecycle:
             m.data = json.dumps(payload)
             msgs.append(m)
 
-        ws_mock = self._make_ws_mock(messages=msgs)
+        ws_mock = _ws_mock(messages=msgs)
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -571,7 +607,7 @@ class TestDeepgramTranscriberLifecycle:
             m.data = json.dumps(payload)
             msgs.append(m)
 
-        ws_mock = self._make_ws_mock(messages=msgs)
+        ws_mock = _ws_mock(messages=msgs)
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -595,24 +631,13 @@ class TestDeepgramReconnect:
         t._RECONNECT_DELAY = 0.01
         return t
 
-    def _make_ws_mock(self, messages: list[object] | None = None) -> MagicMock:
-        ws = MagicMock()
-        ws.send_bytes = AsyncMock()
-        ws.send_json = AsyncMock()
-        ws.close = AsyncMock()
-        ws.closed = False
-        ws.close_code = 1006
-        items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
-        return ws
-
     @pytest.mark.asyncio
     async def test_reconnects_when_ws_closes(self, client: DeepgramTranscriber) -> None:
         """The receive loop reconnects when the WebSocket closes unexpectedly."""
         # First WS: empty iterator (simulates immediate close)
-        ws1 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=1006)
         # Second WS: also empty, but proves reconnect happened
-        ws2 = self._make_ws_mock()
+        ws2 = _ws_mock(close_code=1006)
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -630,9 +655,9 @@ class TestDeepgramReconnect:
         self, client: DeepgramTranscriber
     ) -> None:
         """After reconnection, send_audio sends to the new WebSocket."""
-        ws1 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=1006)
         ws1.closed = True  # Mark closed so send_audio skips it
-        ws2 = self._make_ws_mock()
+        ws2 = _ws_mock(close_code=1006)
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -652,9 +677,7 @@ class TestDeepgramReconnect:
         """The receive loop stops retrying after max consecutive failures."""
 
         def _make_dying_ws() -> MagicMock:
-            ws = self._make_ws_mock()
-            ws.close_code = 1006
-            return ws
+            return _ws_mock(close_code=1006)
 
         # Produce enough dying WSes for initial + max_reconnects + extra
         connect_mock = AsyncMock(side_effect=[_make_dying_ws() for _ in range(20)])
@@ -679,9 +702,8 @@ class TestDeepgramReconnect:
         Simulates the race where ``stop()`` flips the flag before the
         receive loop notices the close frame.
         """
-        ws1 = self._make_ws_mock()
-        ws1.close_code = 1000  # clean close
-        ws2 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=1000)  # clean close
+        ws2 = _ws_mock(close_code=1006)
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -701,9 +723,8 @@ class TestDeepgramReconnect:
         client: DeepgramTranscriber,
     ) -> None:
         """Auth-style close codes (1008, 4001, 4008) must not be retried."""
-        ws1 = self._make_ws_mock()
-        ws1.close_code = 4001  # Deepgram auth failure style
-        ws2 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=4001)  # Deepgram auth failure style
+        ws2 = _ws_mock(close_code=1006)
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -727,46 +748,12 @@ class TestReplayBuffer:
         t._KEEPALIVE_INTERVAL = 999.0
         return t
 
-    def _make_ws_mock(
-        self, messages: list[object] | None = None, *, close_code: int = 1006
-    ) -> MagicMock:
-        ws = MagicMock()
-        ws.send_bytes = AsyncMock()
-        ws.send_json = AsyncMock()
-        ws.close = AsyncMock()
-        ws.closed = False
-        ws.close_code = close_code
-        items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
-        return ws
-
-    def _make_open_ws_mock(self) -> MagicMock:
-        """WS that stays open forever (pending future aiter)."""
-        ws = MagicMock()
-        ws.send_bytes = AsyncMock()
-        ws.send_json = AsyncMock()
-        ws.close = AsyncMock()
-        ws.closed = False
-        ws.close_code = None
-        pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
-
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
-
-            async def __anext__(self) -> object:
-                await pending
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
-        return ws
-
     @pytest.mark.asyncio
     async def test_send_audio_buffers_chunk_when_ws_closed(
         self, client: DeepgramTranscriber
     ) -> None:
         """send_audio on a closed WS adds the chunk to the replay buffer."""
-        ws = self._make_open_ws_mock()
+        ws = _open_ws_mock()
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
@@ -787,9 +774,9 @@ class TestReplayBuffer:
         chunk_a = b"\xaa" * 100
         chunk_b = b"\xbb" * 100
 
-        ws1 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=1006)
         ws1.closed = True  # already closed so send_audio buffers immediately
-        ws2 = self._make_open_ws_mock()
+        ws2 = _open_ws_mock()
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -828,9 +815,9 @@ class TestReplayBuffer:
         """
         # 48000 Hz * 1 channel * 2 bytes/sample * 0.5s = 48000 bytes
         chunk = b"\xaa" * 48000  # exactly 0.5 s of mono 48 kHz linear16
-        ws1 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=1006)
         ws1.closed = True
-        ws2 = self._make_open_ws_mock()
+        ws2 = _open_ws_mock()
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         sleep_calls: list[float] = []
@@ -872,9 +859,9 @@ class TestReplayBuffer:
         send). The user sees no transcript until they speak again.
         """
         chunk = b"\xaa" * 100
-        ws1 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=1006)
         ws1.closed = True  # already closed so send_audio buffers immediately
-        ws2 = self._make_open_ws_mock()
+        ws2 = _open_ws_mock()
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -900,8 +887,8 @@ class TestReplayBuffer:
         self, client: DeepgramTranscriber
     ) -> None:
         """Zero-chunk replay should not trigger a spurious Finalize."""
-        ws1 = self._make_ws_mock()  # closes without any buffered audio
-        ws2 = self._make_open_ws_mock()
+        ws1 = _ws_mock(close_code=1006)  # closes without any buffered audio
+        ws2 = _open_ws_mock()
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):
@@ -927,7 +914,7 @@ class TestReplayBuffer:
         client.sample_rate = 1
         client.channels = 1
 
-        ws = self._make_open_ws_mock()
+        ws = _open_ws_mock()
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
@@ -960,37 +947,6 @@ class TestExponentialBackoff:
         t._KEEPALIVE_INTERVAL = 999.0
         return t
 
-    def _make_ws_mock(self, close_code: int = 1006) -> MagicMock:
-        ws = MagicMock()
-        ws.send_bytes = AsyncMock()
-        ws.send_json = AsyncMock()
-        ws.close = AsyncMock()
-        ws.closed = False
-        ws.close_code = close_code
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
-        return ws
-
-    def _make_open_ws_mock(self) -> MagicMock:
-        """WS that stays open indefinitely (never emits messages)."""
-        ws = MagicMock()
-        ws.send_bytes = AsyncMock()
-        ws.send_json = AsyncMock()
-        ws.close = AsyncMock()
-        ws.closed = False
-        ws.close_code = None
-        pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
-
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
-
-            async def __anext__(self) -> object:
-                await pending
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
-        return ws
-
     @pytest.mark.asyncio
     async def test_backoff_sequence(self, client: DeepgramTranscriber) -> None:
         """First reconnect is immediate; successive failures back off with growth."""
@@ -1003,8 +959,8 @@ class TestExponentialBackoff:
 
         # ws1+ws2+ws3 die immediately; ws4 stays open
         # reconnects: 1st (no sleep), 2nd (sleep 1.0), 3rd (sleep 2.0)
-        dying = [self._make_ws_mock() for _ in range(3)]
-        ws_list = [*dying, self._make_open_ws_mock()]
+        dying = [_ws_mock(close_code=1006) for _ in range(3)]
+        ws_list = [*dying, _open_ws_mock()]
         connect_mock = AsyncMock(side_effect=ws_list)
 
         with (
@@ -1044,31 +1000,6 @@ class TestDeepgramKeepAlive:
         t._KEEPALIVE_INTERVAL = 0.02
         return t
 
-    def _make_ws_mock(self, messages: list[object] | None = None) -> MagicMock:
-        ws = MagicMock()
-        ws.send_bytes = AsyncMock()
-        ws.send_json = AsyncMock()
-        ws.close = AsyncMock()
-        ws.closed = False
-        ws.close_code = None
-        items = messages if messages is not None else []
-        # Keep the aiter alive for the duration of the test so the receive
-        # loop doesn't exit and trigger a reconnect during keepalive checks.
-        pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
-
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
-
-            async def __anext__(self) -> object:
-                if items:
-                    return items.pop(0)
-                await pending  # wait forever — test will cancel via stop()
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
-        return ws
-
     @staticmethod
     def _keepalive_calls(ws: MagicMock) -> list[object]:
         return [
@@ -1082,7 +1013,7 @@ class TestDeepgramKeepAlive:
         self, client: DeepgramTranscriber
     ) -> None:
         """The KeepAlive loop ticks periodically while the WebSocket is open."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _open_ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -1099,7 +1030,7 @@ class TestDeepgramKeepAlive:
         self, client: DeepgramTranscriber
     ) -> None:
         """stop() cancels the keepalive task and no further KeepAlives fire."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _open_ws_mock()
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
@@ -1119,7 +1050,7 @@ class TestDeepgramKeepAlive:
         self, client: DeepgramTranscriber
     ) -> None:
         """No KeepAlive frames are sent while the WS reports closed."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _open_ws_mock()
         ws_mock.closed = True
 
         with patch.object(client, "_ws_connect", new=AsyncMock(return_value=ws_mock)):
@@ -1136,7 +1067,7 @@ class TestDeepgramKeepAlive:
         self, client: DeepgramTranscriber
     ) -> None:
         """A transient send failure does not kill the keepalive loop."""
-        ws_mock = self._make_ws_mock()
+        ws_mock = _open_ws_mock()
         # First call raises; subsequent calls succeed.
         ws_mock.send_json = AsyncMock(
             side_effect=[RuntimeError("transient"), None, None, None, None, None]
@@ -1159,15 +1090,8 @@ class TestDeepgramKeepAlive:
         """After reconnect, KeepAlive targets the new WebSocket."""
         client._RECONNECT_DELAY = 0.01
         # ws1 closes immediately (empty async iter). ws2 stays open.
-        ws1 = MagicMock()
-        ws1.send_bytes = AsyncMock()
-        ws1.send_json = AsyncMock()
-        ws1.close = AsyncMock()
-        ws1.closed = False
-        ws1.close_code = 1006
-        ws1.__aiter__ = MagicMock(return_value=_AsyncIter([]))
-
-        ws2 = self._make_ws_mock()
+        ws1 = _ws_mock(close_code=1006)
+        ws2 = _open_ws_mock()
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
 
         with patch.object(client, "_ws_connect", new=connect_mock):

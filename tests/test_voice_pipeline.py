@@ -8,9 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
 from familiar_connect.transcription import (
     TranscriptionEvent,
     TranscriptionResult,
@@ -28,6 +25,24 @@ from familiar_connect.voice_pipeline import (
     start_pipeline,
     stop_pipeline,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+async def _wait_until(
+    pred: Callable[[], bool],
+    *,
+    timeout: float = 1.0,  # noqa: ASYNC109
+    interval: float = 0.001,
+) -> None:
+    """Poll *pred* until True (event-driven replacement for sleep-pacing)."""
+
+    async def _inner() -> None:
+        while not pred():  # noqa: ASYNC110
+            await asyncio.sleep(interval)
+
+    await asyncio.wait_for(_inner(), timeout=timeout)
 
 
 @pytest.fixture(autouse=True)
@@ -88,7 +103,7 @@ class TestAudioPump:
         await audio_queue.put(b"\x00\x01\x02\x03")
 
         task = asyncio.create_task(_audio_pump(audio_queue, transcriber))
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: transcriber.send_audio.call_count >= 1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -107,7 +122,7 @@ class TestAudioPump:
         await audio_queue.put(b"\x02")
 
         task = asyncio.create_task(_audio_pump(audio_queue, transcriber))
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: transcriber.send_audio.call_count >= 2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -131,7 +146,7 @@ class TestAudioPump:
         task = asyncio.create_task(
             _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
         )
-        await asyncio.sleep(0.2)
+        await _wait_until(lambda: transcriber.finalize.call_count >= 1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -149,7 +164,9 @@ class TestAudioPump:
         task = asyncio.create_task(
             _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
         )
-        await asyncio.sleep(0.2)
+        # Sleep past two idle windows — confirms finalize is not triggered
+        # without prior audio (can't be event-driven since we're testing absence).
+        await asyncio.sleep(0.1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -169,8 +186,10 @@ class TestAudioPump:
         task = asyncio.create_task(
             _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
         )
-        # Run for several idle windows.
-        await asyncio.sleep(0.3)
+        # Wait for the first (and only expected) finalize, then pause briefly
+        # to confirm no second call fires before cancelling.
+        await _wait_until(lambda: transcriber.finalize.call_count >= 1)
+        await asyncio.sleep(0.1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -195,7 +214,8 @@ class TestAudioPump:
         pump_task = asyncio.create_task(
             _audio_pump(audio_queue, transcriber, idle_finalize_s=0.05)
         )
-        await asyncio.sleep(0.4)
+        # Wait for both finalizes rather than sleeping a fixed 0.4 s.
+        await _wait_until(lambda: transcriber.finalize.call_count >= 2)
         pump_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pump_task
@@ -216,13 +236,11 @@ class TestTranscriptForwarder:
         await user_queue.put(result)
 
         task = asyncio.create_task(_transcript_forwarder(42, user_queue, shared_queue))
-        await asyncio.sleep(0.05)
+        user_id, tagged_result = await asyncio.wait_for(shared_queue.get(), timeout=1.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert not shared_queue.empty()
-        user_id, tagged_result = shared_queue.get_nowait()
         assert user_id == 42
         assert tagged_result is result
 
@@ -268,7 +286,7 @@ class TestTranscriptLogger:
 
         with patch("familiar_connect.voice_pipeline._logger") as mock_logger:
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_logger.info.call_count >= 1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -290,7 +308,7 @@ class TestTranscriptLogger:
 
         with patch("familiar_connect.voice_pipeline._logger") as mock_logger:
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_logger.debug.call_count >= 1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -311,7 +329,7 @@ class TestTranscriptLogger:
 
         with patch("familiar_connect.voice_pipeline._logger") as mock_logger:
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_logger.info.call_count >= 1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -335,7 +353,7 @@ class TestTranscriptLogger:
 
         with patch("familiar_connect.voice_pipeline._logger") as mock_logger:
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: mock_logger.info.call_count >= 1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -360,7 +378,7 @@ class TestTranscriptLogger:
 
         with patch("familiar_connect.voice_pipeline._logger"):
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.05)
+            await _wait_until(lambda: handler.await_count >= 1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -377,9 +395,10 @@ class TestTranscriptLogger:
         result = TranscriptionResult(text="hel", is_final=False, start=0.0, end=0.3)
         await shared_queue.put((42, result))
 
-        with patch("familiar_connect.voice_pipeline._logger"):
+        with patch("familiar_connect.voice_pipeline._logger") as mock_logger:
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.05)
+            # Interim results trigger a debug log; wait for that before cancelling.
+            await _wait_until(lambda: mock_logger.debug.call_count >= 1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -400,7 +419,7 @@ class TestTranscriptLogger:
 
         with patch("familiar_connect.voice_pipeline._logger"):
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
-            await asyncio.sleep(0.1)
+            await _wait_until(lambda: handler.await_count >= 2)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -434,10 +453,19 @@ class TestTranscriptLogger:
         with patch("familiar_connect.voice_pipeline._logger") as mock_logger:
             task = asyncio.create_task(_transcript_logger(shared_queue, pipeline))
 
-            # Wait for handler to start processing r1
+            # Wait for handler to start processing r1, then wait for both
+            # log entries — confirms logger isn't blocked by the stuck handler.
             await asyncio.wait_for(handler_entered.wait(), timeout=1.0)
-            # Give logger a moment to process r2 while handler is blocked
-            await asyncio.sleep(0.05)
+            await _wait_until(
+                lambda: (
+                    len([
+                        c
+                        for c in mock_logger.info.call_args_list
+                        if c.args and "Transcription" in c.args[0]
+                    ])
+                    >= 2
+                )
+            )
 
             # BOTH transcriptions should be logged even though handler is stuck
             info_calls = [
@@ -448,7 +476,6 @@ class TestTranscriptLogger:
             assert len(info_calls) == 2
 
             handler_release.set()
-            await asyncio.sleep(0.05)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -477,7 +504,7 @@ class TestRouterFeedsVAD:
         await tagged_queue.put((42, b"\x02\x03"))
 
         task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: len(fed) >= 2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -524,7 +551,7 @@ class TestAudioRouter:
         await tagged_queue.put((42, b"\x00\x01"))
 
         task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: template.clone.call_count >= 1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -551,7 +578,7 @@ class TestAudioRouter:
         await tagged_queue.put((42, b"\x02"))
 
         task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: template.clone.call_count >= 1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -579,7 +606,7 @@ class TestAudioRouter:
         await tagged_queue.put((99, b"\x02"))
 
         task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: template.clone.call_count >= 2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -651,7 +678,7 @@ class TestStopPipeline:
         # Simulate two users by pushing tagged audio through the router
         await pipeline.tagged_audio_queue.put((42, b"\x01"))
         await pipeline.tagged_audio_queue.put((99, b"\x02"))
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: len(pipeline.streams) >= 2)
 
         await stop_pipeline()
 

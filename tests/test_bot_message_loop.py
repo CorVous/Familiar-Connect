@@ -65,7 +65,7 @@ from familiar_connect.voice.interruption import (
 from familiar_connect.voice_lull import VoiceLullMonitor
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -167,14 +167,28 @@ def _make_llm_clients(reply: str = "I am here.") -> dict[str, LLMClient]:
     return {slot: _StubLLMClient(reply=reply) for slot in LLM_SLOT_NAMES}
 
 
-def _make_familiar(tmp_path: Path, *, reply: str = "I am here.") -> Familiar:
-    root = tmp_path / "aria"
-    root.mkdir()
-    return Familiar.load_from_disk(
-        root,
-        llm_clients=_make_llm_clients(reply=reply),
-        defaults_path=_DEFAULT_PROFILE_PATH,
-    )
+@pytest.fixture
+def tmp_familiar(
+    tmp_path: Path,
+    default_profile_path: Path,
+) -> Callable[..., Familiar]:
+    """Return a factory that builds a Familiar with an optional ``reply`` kwarg.
+
+    Each test gets an isolated ``tmp_path``; the factory creates (or
+    reuses) ``tmp_path/aria`` so multiple calls within one test share
+    the same root.
+    """
+
+    def _factory(*, reply: str = "I am here.") -> Familiar:
+        root = tmp_path / "aria"
+        root.mkdir(exist_ok=True)
+        return Familiar.load_from_disk(
+            root,
+            llm_clients=_make_llm_clients(reply=reply),
+            defaults_path=default_profile_path,
+        )
+
+    return _factory
 
 
 def _make_message(
@@ -363,16 +377,20 @@ def _make_channel(channel_id: int = 12345) -> MagicMock:
 class TestOnMessageMonitorRouting:
     """on_message now delegates to familiar.monitor.on_message."""
 
-    def test_message_outside_subscription_is_ignored(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_message_outside_subscription_is_ignored(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         mock = AsyncMock()
         familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
         msg = _make_message()
         asyncio.run(on_message(msg, familiar))
         mock.assert_not_called()
 
-    def test_bot_messages_are_ignored(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_bot_messages_are_ignored(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=12345,
             kind=SubscriptionKind.text,
@@ -384,8 +402,10 @@ class TestOnMessageMonitorRouting:
         asyncio.run(on_message(msg, familiar))
         mock.assert_not_called()
 
-    def test_subscribed_message_calls_monitor(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_subscribed_message_calls_monitor(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=12345,
             kind=SubscriptionKind.text,
@@ -401,9 +421,11 @@ class TestOnMessageMonitorRouting:
         assert call_kwargs["text"] == "hi"
         assert call_kwargs["speaker"] == "Alice"
 
-    def test_on_message_passes_is_mention(self, tmp_path: Path) -> None:
+    def test_on_message_passes_is_mention(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """Bot @mention is passed through to the monitor."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=12345,
             kind=SubscriptionKind.text,
@@ -431,8 +453,10 @@ class TestOnMessageMonitorRouting:
 class TestOnRespond:
     """_run_text_response exercises the full pipeline + LLM + reply path."""
 
-    def test_subscribed_message_reaches_llm(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="Hello Alice.")
+    def test_subscribed_message_reaches_llm(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar(reply="Hello Alice.")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -463,8 +487,10 @@ class TestOnRespond:
         assert messages[-1].role == "user"
         assert messages[-1].content == "Alice: hi"
 
-    def test_reply_posted_to_channel(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="Hello Alice.")
+    def test_reply_posted_to_channel(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar(reply="Hello Alice.")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -488,8 +514,10 @@ class TestOnRespond:
 
         channel.send.assert_called_once_with("Hello Alice.")
 
-    def test_turns_are_persisted_to_history(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="Hello.")
+    def test_turns_are_persisted_to_history(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar(reply="Hello.")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -522,9 +550,11 @@ class TestOnRespond:
         assert turns[1].role == "assistant"
         assert turns[1].content == "Hello."
 
-    def test_multiple_buffered_messages_all_persisted(self, tmp_path: Path) -> None:
+    def test_multiple_buffered_messages_all_persisted(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """All buffered user messages are persisted, not just the trigger."""
-        familiar = _make_familiar(tmp_path, reply="Sure.")
+        familiar = tmp_familiar(reply="Sure.")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -562,10 +592,10 @@ class TestOnRespond:
         assert user_turns[2].content == "msg3"
 
     def test_llm_request_log_shows_only_new_messages(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_familiar: Callable[..., Familiar], caplog: pytest.LogCaptureFixture
     ) -> None:
         """LLM request log shows total message count and new messages only."""
-        familiar = _make_familiar(tmp_path, reply="Hello.")
+        familiar = tmp_familiar(reply="Hello.")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -601,10 +631,10 @@ class TestOnRespond:
         assert "second message" in msg
 
     def test_voice_llm_request_log_shows_only_new_message(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_familiar: Callable[..., Familiar], caplog: pytest.LogCaptureFixture
     ) -> None:
         """Voice LLM request log shows total count and the utterance only."""
-        familiar = _make_familiar(tmp_path, reply="I hear you.")
+        familiar = tmp_familiar(reply="I hear you.")
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -642,10 +672,10 @@ class TestOnRespond:
         assert "hello world" in msg
 
     def test_run_text_response_skips_closed_thread(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_familiar: Callable[..., Familiar], caplog: pytest.LogCaptureFixture
     ) -> None:
         """Archived+locked thread: log error, do not call send or LLM."""
-        familiar = _make_familiar(tmp_path, reply="should not be sent")
+        familiar = tmp_familiar(reply="should not be sent")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -690,8 +720,10 @@ class TestOnRespond:
 
 
 class TestSubscriptionCommands:
-    def test_subscribe_text_registers_channel(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_subscribe_text_registers_channel(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         ctx = _make_text_ctx(channel_id=42, guild_id=999)
 
         asyncio.run(subscribe_text(ctx, familiar))
@@ -702,8 +734,10 @@ class TestSubscriptionCommands:
         )
         ctx.respond.assert_called_once_with(ANY, ephemeral=True)
 
-    def test_subscribe_text_persists_across_reload(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_subscribe_text_persists_across_reload(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         ctx = _make_text_ctx(channel_id=42, guild_id=999)
         asyncio.run(subscribe_text(ctx, familiar))
 
@@ -718,8 +752,10 @@ class TestSubscriptionCommands:
             is not None
         )
 
-    def test_unsubscribe_text_removes_channel(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_unsubscribe_text_removes_channel(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=42,
             kind=SubscriptionKind.text,
@@ -737,9 +773,11 @@ class TestSubscriptionCommands:
         ctx.defer.assert_called_once_with(ephemeral=True)
         ctx.followup.send.assert_called_once_with(ANY, ephemeral=True)
 
-    def test_unsubscribe_text_defers_before_flush(self, tmp_path: Path) -> None:
+    def test_unsubscribe_text_defers_before_flush(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """Defer must happen before flush so slow flush can't expire interaction."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=42,
             kind=SubscriptionKind.text,
@@ -755,8 +793,10 @@ class TestSubscriptionCommands:
 
         assert call_order == ["defer", "flush"]
 
-    def test_unsubscribe_text_clears_monitor_state(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_unsubscribe_text_clears_monitor_state(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=42,
             kind=SubscriptionKind.text,
@@ -771,9 +811,9 @@ class TestSubscriptionCommands:
         mock_clear.assert_called_once_with(42)
 
     def test_subscribe_text_no_send_permission_returns_ephemeral(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_text_ctx(channel_id=42, guild_id=999, send_messages=False)
 
         asyncio.run(subscribe_text(ctx, familiar))
@@ -787,9 +827,9 @@ class TestSubscriptionCommands:
         )
 
     def test_subscribe_text_no_view_permission_returns_ephemeral(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_text_ctx(channel_id=42, guild_id=999, view_channel=False)
 
         asyncio.run(subscribe_text(ctx, familiar))
@@ -802,9 +842,11 @@ class TestSubscriptionCommands:
             is None
         )
 
-    def test_subscribe_text_in_thread_registers_channel(self, tmp_path: Path) -> None:
+    def test_subscribe_text_in_thread_registers_channel(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """Thread subscription is accepted + thread.join is awaited."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_thread_ctx(channel_id=77, guild_id=999)
 
         asyncio.run(subscribe_text(ctx, familiar))
@@ -820,9 +862,9 @@ class TestSubscriptionCommands:
         ctx.respond.assert_called_once_with(ANY, ephemeral=True)
 
     def test_subscribe_text_in_thread_records_thread_context(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_thread_ctx(channel_id=77, parent_name="general")
         asyncio.run(subscribe_text(ctx, familiar))
 
@@ -830,9 +872,9 @@ class TestSubscriptionCommands:
         assert label == "#general -> feature-brainstorm"
 
     def test_subscribe_text_in_forum_post_records_forum_context(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_thread_ctx(
             channel_id=77,
             parent_name="announcements",
@@ -844,9 +886,9 @@ class TestSubscriptionCommands:
         assert label == "forum:announcements -> feature-brainstorm"
 
     def test_subscribe_text_in_thread_rejects_without_send_perm(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_thread_ctx(
             channel_id=77,
             send_messages_in_threads=False,
@@ -865,9 +907,11 @@ class TestSubscriptionCommands:
         )
         ctx.channel.join.assert_not_called()
 
-    def test_subscribe_text_rejects_forum_root(self, tmp_path: Path) -> None:
+    def test_subscribe_text_rejects_forum_root(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """The forum channel itself has no messages — reject, explain."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = MagicMock(spec=discord.ApplicationContext)
         ctx.respond = AsyncMock()
         forum = MagicMock(spec=discord.ForumChannel)
@@ -895,10 +939,10 @@ class TestSubscriptionCommands:
         )
 
     def test_subscribe_text_thread_join_http_error_is_swallowed(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Transient join failure still registers the subscription."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_thread_ctx(channel_id=77)
         ctx.channel.join = AsyncMock(
             side_effect=discord.HTTPException(MagicMock(), "boom"),
@@ -921,8 +965,10 @@ class TestSubscriptionCommands:
 
 
 class TestVoiceSubscription:
-    def test_subscribe_my_voice_joins_and_registers(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_subscribe_my_voice_joins_and_registers(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         ctx = _make_voice_ctx()
 
         asyncio.run(subscribe_my_voice(ctx, familiar))
@@ -935,10 +981,10 @@ class TestVoiceSubscription:
 
     def test_subscribe_my_voice_skips_transcription_when_no_transcriber(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
         """Without a transcriber, the bot joins and greets but doesn't record."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         assert familiar.transcriber is None
         ctx = _make_voice_ctx()
 
@@ -954,7 +1000,7 @@ class TestVoiceSubscription:
 
     def test_subscribe_my_voice_starts_pipeline_when_transcriber_present(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
         """``familiar.transcriber`` being set fires ``start_pipeline``.
 
@@ -962,7 +1008,7 @@ class TestVoiceSubscription:
         backed by the pipeline's tagged queue. This is the PR #17
         wiring, retargeted at the subscription surface.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.transcriber = MagicMock(name="transcriber")
         ctx = _make_voice_ctx()
 
@@ -987,8 +1033,10 @@ class TestVoiceSubscription:
         voice_channel = ctx.author.voice.channel
         voice_channel.connect.return_value.start_recording.assert_called_once()
 
-    def test_unsubscribe_voice_disconnects(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_unsubscribe_voice_disconnects(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000,
             kind=SubscriptionKind.voice,
@@ -1005,9 +1053,11 @@ class TestVoiceSubscription:
         ctx.defer.assert_called_once_with(ephemeral=True)
         ctx.followup.send.assert_called_once_with(ANY, ephemeral=True)
 
-    def test_unsubscribe_voice_defers_before_flush(self, tmp_path: Path) -> None:
+    def test_unsubscribe_voice_defers_before_flush(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """Defer must precede disconnect+flush so they can't expire interaction."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000,
             kind=SubscriptionKind.voice,
@@ -1028,13 +1078,15 @@ class TestVoiceSubscription:
         assert "flush" in call_order
         assert call_order.index("defer") < call_order.index("flush")
 
-    def test_unsubscribe_voice_stops_active_pipeline(self, tmp_path: Path) -> None:
+    def test_unsubscribe_voice_stops_active_pipeline(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """Active voice pipeline is torn down before the voice client disconnects.
 
         Mirrors the intent of main's ``TestSleepPipelineTeardown``,
         retargeted at ``/unsubscribe-voice``.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000,
             kind=SubscriptionKind.voice,
@@ -1062,10 +1114,10 @@ class TestVoiceSubscription:
         ctx.voice_client.disconnect.assert_called_once()
 
     def test_unsubscribe_voice_not_connected_returns_ephemeral(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Trying to leave voice when not in a channel should report an error."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_voice_ctx(already_connected=False)
 
         asyncio.run(unsubscribe_voice(ctx, familiar))
@@ -1075,10 +1127,10 @@ class TestVoiceSubscription:
         assert kwargs.get("ephemeral") is True
 
     def test_subscribe_my_voice_connect_failure_does_not_register(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """If channel.connect() raises, no subscription should be created."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_voice_ctx()
         ctx.author.voice.channel.connect = AsyncMock(
             side_effect=discord.errors.ClientException("cannot connect"),
@@ -1093,9 +1145,9 @@ class TestVoiceSubscription:
         assert familiar.subscriptions.voice_in_guild(999) is None
 
     def test_subscribe_my_voice_no_connect_permission_returns_ephemeral(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_voice_ctx(connect=False)
 
         asyncio.run(subscribe_my_voice(ctx, familiar))
@@ -1108,9 +1160,9 @@ class TestVoiceSubscription:
         assert familiar.subscriptions.voice_in_guild(999) is None
 
     def test_subscribe_my_voice_no_speak_permission_returns_ephemeral(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_voice_ctx(speak=False)
 
         asyncio.run(subscribe_my_voice(ctx, familiar))
@@ -1128,8 +1180,10 @@ class TestVoiceSubscription:
 
 
 class TestChannelModeCommands:
-    def test_set_channel_mode_writes_sidecar(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_set_channel_mode_writes_sidecar(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         ctx = _make_text_ctx(channel_id=77)
 
         asyncio.run(set_channel_mode(ctx, familiar, ChannelMode.full_rp))
@@ -1137,8 +1191,10 @@ class TestChannelModeCommands:
         assert familiar.channel_configs.get(channel_id=77).mode is ChannelMode.full_rp
         ctx.respond.assert_called_once_with(ANY, ephemeral=True)
 
-    def test_set_channel_mode_persists_across_reload(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_set_channel_mode_persists_across_reload(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         ctx = _make_text_ctx(channel_id=77)
         asyncio.run(set_channel_mode(ctx, familiar, ChannelMode.imitate_voice))
 
@@ -1157,8 +1213,10 @@ class TestChannelModeCommands:
 
 
 class TestCreateBot:
-    def test_create_bot_returns_discord_bot(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_create_bot_returns_discord_bot(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         bot = create_bot(familiar)
         assert isinstance(bot, discord.Bot)
 
@@ -1177,27 +1235,31 @@ class TestCreateBot:
     )
     def test_create_bot_registers_slash_command(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
         expected: str,
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         bot = create_bot(familiar)
         names = [cmd.name for cmd in bot.pending_application_commands]
         assert expected in names
 
-    def test_create_bot_does_not_register_awaken_or_sleep(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_create_bot_does_not_register_awaken_or_sleep(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         bot = create_bot(familiar)
         names = [cmd.name for cmd in bot.pending_application_commands]
         assert "awaken" not in names
         assert "sleep" not in names
 
-    def test_channel_backdrop_has_no_options(self, tmp_path: Path) -> None:
+    def test_channel_backdrop_has_no_options(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """``/channel-backdrop`` takes no slash-command options.
 
         All input flows through the Discord modal; submitting blank clears.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         bot = create_bot(familiar)
         cmd = next(
             c for c in bot.pending_application_commands if c.name == "channel-backdrop"
@@ -1244,9 +1306,9 @@ class TestBackdropModalRequiredFlag:
 
     @pytest.mark.asyncio
     async def test_required_false_reaches_the_component_payload(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         modal = _make_backdrop_modal(
             familiar,
             channel_id=1,
@@ -1268,14 +1330,14 @@ class TestBackdropModalRequiredFlag:
 class TestChannelBackdropInThread:
     @pytest.mark.asyncio
     async def test_backdrop_in_thread_writes_labelled_channel_name(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Sidecar ``channel_name`` shows ``#parent -> thread`` label.
 
         Guards that ``channel_backdrop`` → modal callback writes the
         human-readable label rather than the raw integer thread id.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         ctx = _make_thread_ctx(channel_id=77, parent_name="general")
         ctx.send_modal = AsyncMock()
 
@@ -1322,11 +1384,11 @@ class TestMainReplyResilience:
 
     def test_text_main_reply_llm_failure_does_not_crash(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """httpx.ConnectTimeout from the main LLM is caught and logged."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -1368,11 +1430,11 @@ class TestMainReplyResilience:
 
     def test_text_main_reply_http_500_does_not_crash(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A 5xx HTTPStatusError from the main LLM is caught and logged."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -1409,7 +1471,7 @@ class TestMainReplyResilience:
 
     def test_voice_main_reply_failure_does_not_crash(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A failing main LLM on the voice path returns cleanly.
@@ -1417,7 +1479,7 @@ class TestMainReplyResilience:
         No TTS call, no history write, and the handler does not raise
         — the transcriber's callback loop stays alive.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         # No tts_client on the stub Familiar, so TTS is implicitly not
         # exercised; the assertion is instead that we never reach it.
         familiar.subscriptions.add(
@@ -1477,7 +1539,7 @@ class TestVoicePreProcessorsSuppressed:
 
     def test_voice_handler_does_not_call_reasoning_context_or_post_process_style(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
         """Neither side-model slot is called when handling a voice turn.
 
@@ -1485,7 +1547,7 @@ class TestVoicePreProcessorsSuppressed:
         (preprocessor) and recast (postprocessor) — so the suppression is
         confirmed against the most permissive baseline.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1544,7 +1606,7 @@ class TestVoiceInterjectionRouting:
     """
 
     def test_voice_lull_merged_utterance_routed_to_monitor(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """VoiceLullMonitor fires → ConversationMonitor.on_message(voice_id, …).
 
@@ -1553,7 +1615,7 @@ class TestVoiceInterjectionRouting:
         ``is_mention=False``. The monitor's own direct-address scan
         picks up name/alias hits from the transcript text.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.transcriber = MagicMock(name="transcriber")
         ctx = _make_voice_ctx(channel_id=9000)
 
@@ -1596,10 +1658,10 @@ class TestVoiceInterjectionRouting:
         assert kwargs["is_lull_endpoint"] is True
 
     def test_subscribe_my_voice_registers_voice_response_handler(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """A per-channel voice response handler is stashed on familiar.extras."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.transcriber = MagicMock(name="transcriber")
         ctx = _make_voice_ctx(channel_id=9000)
 
@@ -1618,10 +1680,10 @@ class TestVoiceInterjectionRouting:
         assert callable(handlers[9000])
 
     def test_unsubscribe_voice_drops_response_handler_and_monitor_state(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Cleanup removes the dispatch entry and clears monitor state."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1637,7 +1699,9 @@ class TestVoiceInterjectionRouting:
         assert 9000 not in handlers
         clear_spy.assert_called_once_with(9000)
 
-    def test_on_respond_dispatches_to_voice_handler(self, tmp_path: Path) -> None:
+    def test_on_respond_dispatches_to_voice_handler(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """create_bot's on_respond hands voice channels to the voice handler.
 
         When a voice-channel handler is registered in
@@ -1645,7 +1709,7 @@ class TestVoiceInterjectionRouting:
         ``on_respond`` callback routes there instead of attempting the
         text-channel path.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1671,7 +1735,7 @@ class TestVoiceInterjectionRouting:
         assert args[2] is ResponseTrigger.direct_address
 
     def test_on_respond_text_channel_bypasses_voice_handler_lookup(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Regression guard: text channels are unaffected by voice wiring.
 
@@ -1681,7 +1745,7 @@ class TestVoiceInterjectionRouting:
         subscription (populates the handlers dict) and a text
         subscription.
         """
-        familiar = _make_familiar(tmp_path, reply="Hello.")
+        familiar = tmp_familiar(reply="Hello.")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -1722,14 +1786,14 @@ class TestVoiceInterjectionRouting:
         voice_handlers[9000].assert_not_called()
 
     def test_run_voice_response_persists_all_buffered_turns(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Every utterance in the buffer is persisted, then the reply.
 
         Parallels TestOnRespond.test_multiple_buffered_messages_all_persisted
         for voice.
         """
-        familiar = _make_familiar(tmp_path, reply="Sure thing.")
+        familiar = tmp_familiar(reply="Sure thing.")
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1783,10 +1847,10 @@ class TestVoiceGenerationCancellation:
     """
 
     def test_generation_task_cleared_after_normal_completion(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """A successful voice turn leaves ``generation_task = None``."""
-        familiar = _make_familiar(tmp_path, reply="Sure thing.")
+        familiar = tmp_familiar(reply="Sure thing.")
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1812,7 +1876,7 @@ class TestVoiceGenerationCancellation:
         assert tracker.state is ResponseState.IDLE
 
     def test_cancelling_generation_task_mid_flight_exits_cleanly(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Cancelling ``tracker.generation_task`` aborts the voice turn.
 
@@ -1821,7 +1885,7 @@ class TestVoiceGenerationCancellation:
         nothing is persisted to history, no audio is played, and the
         tracker returns to ``IDLE``.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1889,10 +1953,10 @@ class TestDispatchInterruptionRegen:
 
     @pytest.mark.asyncio
     async def test_long_interruption_during_generating_cancels_task(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Generation task receives ``CancelledError`` when dispatch fires."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1942,10 +2006,10 @@ class TestDispatchInterruptionRegen:
 
     @pytest.mark.asyncio
     async def test_long_interruption_during_generating_regens_with_context(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """New LLM call contains the interruption_context note."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -1997,10 +2061,10 @@ class TestDispatchInterruptionRegen:
 
     @pytest.mark.asyncio
     async def test_long_interruption_during_generating_no_history_from_cancelled_turn(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """The cancelled generation must not write any history turns."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2082,9 +2146,11 @@ class TestDeliveryGate:
     """Delivery gate: _run_voice_response awaits wait_for_lull() after TTS synthesis."""
 
     @pytest.mark.asyncio
-    async def test_long_burst_during_tts_prevents_play(self, tmp_path: Path) -> None:
+    async def test_long_burst_during_tts_prevents_play(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """wait_for_lull → long → vc.play not called."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2113,9 +2179,11 @@ class TestDeliveryGate:
         vc.play.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_long_burst_during_tts_skips_history(self, tmp_path: Path) -> None:
+    async def test_long_burst_during_tts_skips_history(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """wait_for_lull → long → no history turns written."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2147,9 +2215,11 @@ class TestDeliveryGate:
         assert len(turns) == 0
 
     @pytest.mark.asyncio
-    async def test_short_burst_during_tts_allows_play(self, tmp_path: Path) -> None:
+    async def test_short_burst_during_tts_allows_play(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """wait_for_lull → short → vc.play IS called."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2178,9 +2248,11 @@ class TestDeliveryGate:
         vc.play.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_no_burst_gate_skipped(self, tmp_path: Path) -> None:
+    async def test_no_burst_gate_skipped(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """wait_for_lull → None → play happens normally."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2211,10 +2283,10 @@ class TestDeliverToMonitorGuard:
     """_deliver_to_monitor skips if _regen_pending is set or tracker is not IDLE."""
 
     def test_deliver_to_monitor_skipped_when_regen_pending(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """extras['_regen_pending'] → on_message never called."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.transcriber = MagicMock(name="transcriber")
         ctx = _make_voice_ctx(channel_id=9000)
 
@@ -2252,10 +2324,10 @@ class TestDeliverToMonitorGuard:
         monitor_spy.assert_not_called()
 
     def test_deliver_to_monitor_skipped_when_tracker_not_idle(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """tracker.state = GENERATING → on_message never called."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.transcriber = MagicMock(name="transcriber")
         ctx = _make_voice_ctx(channel_id=9000)
 
@@ -2292,7 +2364,7 @@ class TestDeliverToMonitorGuard:
         monitor_spy.assert_not_called()
 
     def test_deliver_to_monitor_skipped_when_short_yield_pending(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """tracker.short_yield_pending=True → on_message never called.
 
@@ -2301,7 +2373,7 @@ class TestDeliverToMonitorGuard:
         short@SPEAKING yield. Without the flag the lull transitions
         IDLE→GENERATING, which causes _on_short_yield_resume to bail.
         """
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.transcriber = MagicMock(name="transcriber")
         ctx = _make_voice_ctx(channel_id=9000)
 
@@ -2377,9 +2449,9 @@ class TestLongSpeakingYield:
     ]
 
     def _make_tts_familiar(
-        self, tmp_path: Path, *, reply: str = "I am here."
+        self, tmp_familiar: Callable[..., Familiar], *, reply: str = "I am here."
     ) -> Familiar:
-        familiar = _make_familiar(tmp_path, reply=reply)
+        familiar = tmp_familiar(reply=reply)
         tts_mock = MagicMock()
         tts_mock.synthesize = AsyncMock(
             return_value=TTSResult(audio=b"\x00" * 4, timestamps=list(self._WORDS))
@@ -2391,14 +2463,14 @@ class TestLongSpeakingYield:
         return familiar
 
     def test_long_speaking_yield_history_records_delivered_only(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """History assistant turn = delivered portion only, not full reply.
 
         elapsed_ms=350 falls between "hello"@300 and "world"@400,
         so only "hello" was delivered before the interrupt.
         """
-        familiar = self._make_tts_familiar(tmp_path, reply="hello world goodbye")
+        familiar = self._make_tts_familiar(tmp_familiar, reply="hello world goodbye")
         tracker = familiar.tracker_registry.get(999)
 
         vc = MagicMock(spec=discord.VoiceClient)
@@ -2438,10 +2510,10 @@ class TestLongSpeakingYield:
         assert len(assistant_turns) == 2
 
     def test_long_speaking_yield_regen_contains_partial_and_transcript(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """Regen LLM call receives system message with delivered text + transcript."""
-        familiar = self._make_tts_familiar(tmp_path, reply="hello world goodbye")
+        familiar = self._make_tts_familiar(tmp_familiar, reply="hello world goodbye")
         tracker = familiar.tracker_registry.get(999)
 
         vc = MagicMock(spec=discord.VoiceClient)
@@ -2499,10 +2571,10 @@ class TestShortGeneratingFlush:
 
     @pytest.mark.asyncio
     async def test_chronology_buffer_interrupter_assistant(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
         """History order: buffer user turn → interrupter turn → assistant."""
-        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar = tmp_familiar(reply="my reply")
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2543,8 +2615,10 @@ class TestShortGeneratingFlush:
         ]
 
     @pytest.mark.asyncio
-    async def test_pending_cleared_after_flush(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="my reply")
+    async def test_pending_cleared_after_flush(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar(reply="my reply")
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2576,9 +2650,11 @@ class TestShortGeneratingFlush:
         assert tracker.pending_interrupter_turns == []
 
     @pytest.mark.asyncio
-    async def test_pending_cleared_on_long_discard(self, tmp_path: Path) -> None:
+    async def test_pending_cleared_on_long_discard(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """wait_for_lull → long → pending turns cleared, not written."""
-        familiar = _make_familiar(tmp_path, reply="my reply")
+        familiar = tmp_familiar(reply="my reply")
         familiar.subscriptions.add(
             channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
         )
@@ -2642,9 +2718,9 @@ class TestShortSpeakingYieldHistory:
     """
 
     def test_short_speaking_yield_writes_full_reply_to_history(
-        self, tmp_path: Path
+        self, tmp_familiar: Callable[..., Familiar]
     ) -> None:
-        familiar = _make_familiar(tmp_path, reply="hello world goodbye")
+        familiar = tmp_familiar(reply="hello world goodbye")
         tts_mock = MagicMock()
         tts_mock.synthesize = AsyncMock(
             return_value=TTSResult(
@@ -2703,9 +2779,11 @@ class TestShortYieldResumeRace:
     so TTS is never called for the remaining words.
     """
 
-    def test_resume_waits_for_idle_when_still_speaking(self, tmp_path: Path) -> None:
+    def test_resume_waits_for_idle_when_still_speaking(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """Resume callback synthesizes remaining words even if called while SPEAKING."""
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         # Transcriber must be set so subscribe_my_voice creates the
         # interruption_detector (the detector is only built when a
         # transcriber is present).
@@ -2781,13 +2859,13 @@ class TestTypingSimulationDelivery:
     """
 
     def _setup_channel_rp(
-        self, tmp_path: Path, *, reply: str
+        self, tmp_familiar: Callable[..., Familiar], *, reply: str
     ) -> tuple[
         Familiar,
         MagicMock,
     ]:
         """Build familiar + subscribed text-rp channel + fake channel."""
-        familiar = _make_familiar(tmp_path, reply=reply)
+        familiar = tmp_familiar(reply=reply)
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -2797,8 +2875,10 @@ class TestTypingSimulationDelivery:
         channel = _make_channel(12345)
         return familiar, channel
 
-    def test_single_paragraph_sent_as_single_message(self, tmp_path: Path) -> None:
-        familiar, channel = self._setup_channel_rp(tmp_path, reply="Hello Alice.")
+    def test_single_paragraph_sent_as_single_message(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar, channel = self._setup_channel_rp(tmp_familiar, reply="Hello Alice.")
         buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
@@ -2820,10 +2900,10 @@ class TestTypingSimulationDelivery:
 
     def test_multi_paragraph_sent_as_separate_messages(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
         reply = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
-        familiar, channel = self._setup_channel_rp(tmp_path, reply=reply)
+        familiar, channel = self._setup_channel_rp(tmp_familiar, reply=reply)
         buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
@@ -2847,9 +2927,11 @@ class TestTypingSimulationDelivery:
             "Third paragraph.",
         ]
 
-    def test_typing_indicator_entered_per_chunk(self, tmp_path: Path) -> None:
+    def test_typing_indicator_entered_per_chunk(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         reply = "Para one.\n\nPara two."
-        familiar, channel = self._setup_channel_rp(tmp_path, reply=reply)
+        familiar, channel = self._setup_channel_rp(tmp_familiar, reply=reply)
         buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
@@ -2871,10 +2953,10 @@ class TestTypingSimulationDelivery:
 
     def test_full_reply_persisted_when_delivery_completes(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
         reply = "First.\n\nSecond."
-        familiar, channel = self._setup_channel_rp(tmp_path, reply=reply)
+        familiar, channel = self._setup_channel_rp(tmp_familiar, reply=reply)
         buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
@@ -2904,9 +2986,9 @@ class TestTypingSimulationDelivery:
 
     def test_tracker_cleared_after_successful_delivery(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
-        familiar, channel = self._setup_channel_rp(tmp_path, reply="Hello.")
+        familiar, channel = self._setup_channel_rp(tmp_familiar, reply="Hello.")
         buffer = [BufferedMessage(speaker="Alice", text="hi", timestamp=0.0)]
 
         with patch("familiar_connect.bot.asyncio.sleep", new=AsyncMock()):
@@ -2932,10 +3014,10 @@ class TestTypingSimulationCancellation:
 
     def test_cancelled_delivery_persists_sent_chunks_only(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
         reply = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
-        familiar = _make_familiar(tmp_path, reply=reply)
+        familiar = tmp_familiar(reply=reply)
         familiar.subscriptions.add(
             channel_id=12345,
             kind=SubscriptionKind.text,
@@ -2998,10 +3080,12 @@ class TestTypingSimulationCancellation:
         assert len(assistant_turns) == 1
         assert assistant_turns[0].content == "First paragraph."
 
-    def test_cancelled_delivery_skips_tts(self, tmp_path: Path) -> None:
+    def test_cancelled_delivery_skips_tts(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
         """TTS fan-out should not fire when delivery was cancelled."""
         reply = "One.\n\nTwo.\n\nThree."
-        familiar = _make_familiar(tmp_path, reply=reply)
+        familiar = tmp_familiar(reply=reply)
         # install a TTS client so fan-out would fire otherwise
         tts_client = MagicMock()
         tts_client.synthesize = AsyncMock(
@@ -3073,8 +3157,10 @@ class TestTypingSimulationCancellation:
 class TestOnMessageCancellationHook:
     """on_message cancels any in-flight text delivery before routing."""
 
-    def test_on_message_cancels_active_tracker(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_on_message_cancels_active_tracker(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=12345,
             kind=SubscriptionKind.text,
@@ -3115,9 +3201,9 @@ class TestOnMessageCancellationHook:
 
     def test_on_message_does_not_cancel_idle_tracker(
         self,
-        tmp_path: Path,
+        tmp_familiar: Callable[..., Familiar],
     ) -> None:
-        familiar = _make_familiar(tmp_path)
+        familiar = tmp_familiar()
         familiar.subscriptions.add(
             channel_id=12345,
             kind=SubscriptionKind.text,
@@ -3139,8 +3225,10 @@ class TestOnMessageCancellationHook:
 
 
 class TestLastContextCache:
-    def test_text_response_populates_cache(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="Hello Alice.")
+    def test_text_response_populates_cache(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar(reply="Hello Alice.")
         familiar.subscriptions.add(
             channel_id=12345, kind=SubscriptionKind.text, guild_id=999
         )
@@ -3175,8 +3263,10 @@ class TestLastContextCache:
 
 
 class TestContextCommand:
-    def test_miss_replies_ephemeral(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path)
+    def test_miss_replies_ephemeral(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar()
         ctx = _make_text_ctx(channel_id=12345)
 
         asyncio.run(context_command(ctx, familiar))
@@ -3186,8 +3276,10 @@ class TestContextCommand:
         assert call_kwargs.kwargs.get("ephemeral") is True
         assert "No context" in call_kwargs.args[0]
 
-    def test_hit_sends_file_attachment(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="Hi.")
+    def test_hit_sends_file_attachment(
+        self, tmp_familiar: Callable[..., Familiar]
+    ) -> None:
+        familiar = tmp_familiar(reply="Hi.")
         familiar.channel_configs.set_mode(
             channel_id=12345, mode=ChannelMode.imitate_voice
         )

@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from familiar_connect.context.pipeline import (
     ContextPipeline,
@@ -36,27 +39,11 @@ from familiar_connect.context.types import (
     ContextRequest,
     Contribution,
     Layer,
-    Modality,
 )
 
 # ---------------------------------------------------------------------------
 # Test helpers — stub providers and pre-processors
 # ---------------------------------------------------------------------------
-
-
-def _make_request(**overrides: object) -> ContextRequest:
-    defaults: dict[str, Any] = {
-        "familiar_id": "aria",
-        "channel_id": 100,
-        "guild_id": 1,
-        "speaker": "Alice",
-        "utterance": "hello",
-        "modality": Modality.text,
-        "budget_tokens": 2048,
-        "deadline_s": 5.0,
-    }
-    defaults.update(overrides)
-    return ContextRequest(**defaults)  # type: ignore[arg-type]
 
 
 class _StubProvider:
@@ -196,9 +183,11 @@ class TestProtocolsAreRuntimeCheckable:
 
 class TestEmptyPipeline:
     @pytest.mark.asyncio
-    async def test_empty_pipeline_returns_empty_output(self) -> None:
+    async def test_empty_pipeline_returns_empty_output(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         pipeline = ContextPipeline(providers=[])
-        req = _make_request()
+        req = make_context_request()
         result = await pipeline.assemble(req, budget_by_layer={})
 
         assert isinstance(result, PipelineOutput)
@@ -215,7 +204,9 @@ class TestEmptyPipeline:
 
 class TestProviderFanOut:
     @pytest.mark.asyncio
-    async def test_single_provider_contributions_reach_result(self) -> None:
+    async def test_single_provider_contributions_reach_result(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         contribution = Contribution(
             layer=Layer.character,
             priority=10,
@@ -226,7 +217,7 @@ class TestProviderFanOut:
         pipeline = ContextPipeline(providers=[_StubProvider("stub", [contribution])])
 
         result = await pipeline.assemble(
-            _make_request(),
+            make_context_request(),
             budget_by_layer={Layer.character: 100},
         )
 
@@ -239,7 +230,9 @@ class TestProviderFanOut:
         assert outcome.contributions == [contribution]
 
     @pytest.mark.asyncio
-    async def test_multiple_providers_run_concurrently(self) -> None:
+    async def test_multiple_providers_run_concurrently(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         """Providers fan out under the TaskGroup.
 
         Two providers each sleeping 0.1s should finish in well under
@@ -275,7 +268,7 @@ class TestProviderFanOut:
 
         start = asyncio.get_event_loop().time()
         result = await pipeline.assemble(
-            _make_request(),
+            make_context_request(),
             budget_by_layer={Layer.character: 100, Layer.content: 100},
         )
         elapsed = asyncio.get_event_loop().time() - start
@@ -297,7 +290,9 @@ class TestProviderFanOut:
 
 class TestFailingProviderIsIsolated:
     @pytest.mark.asyncio
-    async def test_raising_provider_does_not_prevent_others(self) -> None:
+    async def test_raising_provider_does_not_prevent_others(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         good = _StubProvider(
             "good",
             [
@@ -314,7 +309,7 @@ class TestFailingProviderIsIsolated:
         pipeline = ContextPipeline(providers=[bad, good])
 
         result = await pipeline.assemble(
-            _make_request(),
+            make_context_request(),
             budget_by_layer={Layer.character: 100},
         )
 
@@ -328,7 +323,9 @@ class TestFailingProviderIsIsolated:
         assert "kaboom" in by_id["bad"].error_message
 
     @pytest.mark.asyncio
-    async def test_slow_provider_past_deadline_is_dropped(self) -> None:
+    async def test_slow_provider_past_deadline_is_dropped(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         good = _StubProvider(
             "good",
             [
@@ -359,7 +356,7 @@ class TestFailingProviderIsIsolated:
         pipeline = ContextPipeline(providers=[good, slow])
 
         result = await pipeline.assemble(
-            _make_request(),
+            make_context_request(),
             budget_by_layer={Layer.character: 100, Layer.content: 100},
         )
 
@@ -380,7 +377,9 @@ class TestFailingProviderIsIsolated:
 
 class TestPreProcessors:
     @pytest.mark.asyncio
-    async def test_pre_processor_mutates_request_seen_by_provider(self) -> None:
+    async def test_pre_processor_mutates_request_seen_by_provider(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         pre = _StubPreProcessor("pre", "rewritten utterance")
         provider = _StubProvider("p", [])
 
@@ -388,7 +387,7 @@ class TestPreProcessors:
             providers=[provider],
             pre_processors=[pre],
         )
-        result = await pipeline.assemble(_make_request(), budget_by_layer={})
+        result = await pipeline.assemble(make_context_request(), budget_by_layer={})
 
         assert provider.last_request is not None
         assert provider.last_request.utterance == "rewritten utterance"
@@ -396,7 +395,9 @@ class TestPreProcessors:
         assert result.request.utterance == "rewritten utterance"
 
     @pytest.mark.asyncio
-    async def test_multiple_pre_processors_run_in_registration_order(self) -> None:
+    async def test_multiple_pre_processors_run_in_registration_order(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         first = _StubPreProcessor("first", "pass-1")
         second = _StubPreProcessor("second", "pass-2")  # overrides first
         provider = _StubProvider("p", [])
@@ -405,12 +406,14 @@ class TestPreProcessors:
             providers=[provider],
             pre_processors=[first, second],
         )
-        result = await pipeline.assemble(_make_request(), budget_by_layer={})
+        result = await pipeline.assemble(make_context_request(), budget_by_layer={})
         # second ran after first, so it wins
         assert result.request.utterance == "pass-2"
 
     @pytest.mark.asyncio
-    async def test_preprocessor_contributions_reach_budgeter(self) -> None:
+    async def test_preprocessor_contributions_reach_budgeter(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         """Pre-processor contributions are merged into the budgeter input.
 
         A Contribution stashed on the request via the
@@ -436,7 +439,7 @@ class TestPreProcessors:
             pre_processors=[_ContributingPreProcessor("pre", pre_contribution)],
         )
         result = await pipeline.assemble(
-            _make_request(),
+            make_context_request(),
             budget_by_layer={Layer.character: 100, Layer.depth_inject: 100},
         )
 
@@ -468,29 +471,35 @@ class TestPostProcessors:
     """
 
     @pytest.mark.asyncio
-    async def test_no_post_processors_returns_reply_unchanged(self) -> None:
+    async def test_no_post_processors_returns_reply_unchanged(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         pipeline = ContextPipeline(providers=[])
-        result = await pipeline.run_post_processors("original", _make_request())
+        result = await pipeline.run_post_processors("original", make_context_request())
         assert result == "original"
 
     @pytest.mark.asyncio
-    async def test_single_post_processor_sees_reply(self) -> None:
+    async def test_single_post_processor_sees_reply(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         post = _RecordingPostProcessor("p", "A")
         pipeline = ContextPipeline(providers=[], post_processors=[post])
 
-        result = await pipeline.run_post_processors("hello", _make_request())
+        result = await pipeline.run_post_processors("hello", make_context_request())
 
         assert post.seen == ["hello"]
         assert result == "hello|A"
 
     @pytest.mark.asyncio
-    async def test_post_processors_run_in_reverse_registration_order(self) -> None:
+    async def test_post_processors_run_in_reverse_registration_order(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         """Later processors run first so they wrap earlier ones symmetrically."""
         inner = _RecordingPostProcessor("inner", "inner")
         outer = _RecordingPostProcessor("outer", "outer")
         pipeline = ContextPipeline(providers=[], post_processors=[inner, outer])
 
-        result = await pipeline.run_post_processors("hi", _make_request())
+        result = await pipeline.run_post_processors("hi", make_context_request())
 
         # Outer runs first (sees the raw reply), then inner sees outer's output.
         assert outer.seen == ["hi"]
@@ -498,7 +507,9 @@ class TestPostProcessors:
         assert result == "hi|outer|inner"
 
     @pytest.mark.asyncio
-    async def test_failing_post_processor_is_skipped(self) -> None:
+    async def test_failing_post_processor_is_skipped(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         """A raising post-processor degrades to a no-op for just that stage."""
         post = _RecordingPostProcessor("good", "tag")
         bad = _FailingPostProcessor("bad", RuntimeError("kaboom"))
@@ -507,7 +518,7 @@ class TestPostProcessors:
             post_processors=[post, bad],
         )
 
-        result = await pipeline.run_post_processors("hi", _make_request())
+        result = await pipeline.run_post_processors("hi", make_context_request())
 
         # bad runs first (reverse order), raises, gets skipped; then post runs
         # and sees the untransformed text.
@@ -532,6 +543,7 @@ class TestPreProcessorIsolation:
     async def test_assemble_continues_when_preprocessor_raises_preprocessor_error(
         self,
         caplog: pytest.LogCaptureFixture,
+        make_context_request: Callable[..., ContextRequest],
     ) -> None:
         """A pre-processor that raises ``PreProcessorError`` is skipped.
 
@@ -551,7 +563,7 @@ class TestPreProcessorIsolation:
         )
 
         with caplog.at_level("WARNING", logger="familiar_connect.context.pipeline"):
-            result = await pipeline.assemble(_make_request(), budget_by_layer={})
+            result = await pipeline.assemble(make_context_request(), budget_by_layer={})
 
         # Pipeline ran to completion and the downstream pre-processor's
         # mutation is visible on the final request.
@@ -569,7 +581,9 @@ class TestPreProcessorIsolation:
         )
 
     @pytest.mark.asyncio
-    async def test_assemble_propagates_contract_violations(self) -> None:
+    async def test_assemble_propagates_contract_violations(
+        self, make_context_request: Callable[..., ContextRequest]
+    ) -> None:
         """A non-``PreProcessorError`` raise from a pre-processor crashes the pipeline.
 
         This pins the "contract violations surface loudly" guarantee:
@@ -583,4 +597,4 @@ class TestPreProcessorIsolation:
         )
 
         with pytest.raises(RuntimeError, match="kaboom"):
-            await pipeline.assemble(_make_request(), budget_by_layer={})
+            await pipeline.assemble(make_context_request(), budget_by_layer={})

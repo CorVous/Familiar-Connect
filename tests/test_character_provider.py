@@ -19,34 +19,22 @@ from familiar_connect.context.providers.character import (
     CharacterProvider,
 )
 from familiar_connect.context.types import (
-    ContextRequest,
     Contribution,
     Layer,
-    Modality,
 )
 from familiar_connect.memory.store import MemoryStore
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from familiar_connect.context.types import ContextRequest
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
     """Return a fresh MemoryStore for each test."""
     return MemoryStore(tmp_path / "memory")
-
-
-def _make_request() -> ContextRequest:
-    return ContextRequest(
-        familiar_id="aria",
-        channel_id=100,
-        guild_id=1,
-        speaker="Alice",
-        utterance="hello",
-        modality=Modality.text,
-        budget_tokens=2048,
-        deadline_s=5.0,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -73,22 +61,26 @@ class TestConstructionAndProtocol:
 class TestReadsSelfFiles:
     @pytest.mark.asyncio
     async def test_empty_self_returns_no_contributions(
-        self, store: MemoryStore
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
     ) -> None:
         provider = CharacterProvider(store)
-        contributions = await provider.contribute(_make_request())
+        contributions = await provider.contribute(make_context_request())
         assert contributions == []
 
     @pytest.mark.asyncio
     async def test_returns_one_contribution_per_self_file(
-        self, store: MemoryStore
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
     ) -> None:
         store.write_file("self/description.md", "A small cat-shaped familiar.")
         store.write_file("self/personality.md", "Curious and sly.")
         store.write_file("self/scenario.md", "Late evening in the study.")
 
         provider = CharacterProvider(store)
-        contributions = await provider.contribute(_make_request())
+        contributions = await provider.contribute(make_context_request())
 
         assert len(contributions) == 3
         for c in contributions:
@@ -98,79 +90,103 @@ class TestReadsSelfFiles:
 
     @pytest.mark.asyncio
     async def test_contribution_text_matches_file_contents(
-        self, store: MemoryStore
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
     ) -> None:
         store.write_file("self/description.md", "A small cat-shaped familiar.")
 
         provider = CharacterProvider(store)
-        contributions = await provider.contribute(_make_request())
+        contributions = await provider.contribute(make_context_request())
 
         assert len(contributions) == 1
         assert contributions[0].text == "A small cat-shaped familiar."
 
     @pytest.mark.asyncio
-    async def test_source_identifies_field(self, store: MemoryStore) -> None:
+    async def test_source_identifies_field(
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
+    ) -> None:
         store.write_file("self/personality.md", "Sly.")
 
         provider = CharacterProvider(store)
-        (c,) = await provider.contribute(_make_request())
+        (c,) = await provider.contribute(make_context_request())
 
         assert "personality" in c.source
 
     @pytest.mark.asyncio
-    async def test_skips_empty_files(self, store: MemoryStore) -> None:
+    async def test_skips_empty_files(
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
+    ) -> None:
         store.write_file("self/description.md", "non-empty")
         store.write_file("self/personality.md", "")
 
         provider = CharacterProvider(store)
-        contributions = await provider.contribute(_make_request())
+        contributions = await provider.contribute(make_context_request())
 
         assert len(contributions) == 1
         assert contributions[0].text == "non-empty"
 
     @pytest.mark.asyncio
-    async def test_skips_non_markdown_files(self, store: MemoryStore) -> None:
+    async def test_skips_non_markdown_files(
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
+    ) -> None:
         store.write_file("self/description.md", "kept")
         store.write_file("self/notes.txt", "ignored")
         store.write_file("self/scratch.json", "{}")
 
         provider = CharacterProvider(store)
-        contributions = await provider.contribute(_make_request())
+        contributions = await provider.contribute(make_context_request())
 
         assert len(contributions) == 1
         assert contributions[0].text == "kept"
 
     @pytest.mark.asyncio
-    async def test_skips_subdirectories_inside_self(self, store: MemoryStore) -> None:
+    async def test_skips_subdirectories_inside_self(
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
+    ) -> None:
         """``self/`` is a flat namespace; nested directories are not unpacked."""
         store.write_file("self/description.md", "kept")
         store.write_file("self/extras/extra.md", "ignored")
 
         provider = CharacterProvider(store)
-        contributions = await provider.contribute(_make_request())
+        contributions = await provider.contribute(make_context_request())
 
         rels = [c.source for c in contributions]
         assert any("description" in s for s in rels)
         assert not any("extra" in s for s in rels)
 
     @pytest.mark.asyncio
-    async def test_estimated_tokens_is_set(self, store: MemoryStore) -> None:
+    async def test_estimated_tokens_is_set(
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
+    ) -> None:
         store.write_file("self/description.md", "x" * 40)
         provider = CharacterProvider(store)
-        (c,) = await provider.contribute(_make_request())
+        (c,) = await provider.contribute(make_context_request())
         # Char-count heuristic puts 40 chars at ~10 tokens.
         assert c.estimated_tokens > 0
 
     @pytest.mark.asyncio
     async def test_returns_contributions_in_deterministic_order(
-        self, store: MemoryStore
+        self,
+        store: MemoryStore,
+        make_context_request: Callable[..., ContextRequest],
     ) -> None:
         store.write_file("self/description.md", "d")
         store.write_file("self/personality.md", "p")
         store.write_file("self/scenario.md", "s")
 
         provider = CharacterProvider(store)
-        first = await provider.contribute(_make_request())
-        second = await provider.contribute(_make_request())
+        first = await provider.contribute(make_context_request())
+        second = await provider.contribute(make_context_request())
 
         assert [c.source for c in first] == [c.source for c in second]

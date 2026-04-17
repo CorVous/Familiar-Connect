@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import importlib.metadata
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
 
 from familiar_connect.config import LLM_SLOT_NAMES
 from familiar_connect.context.providers.content_search import retrieval
+from familiar_connect.context.types import ContextRequest, Modality
 from familiar_connect.llm import LLMClient, Message
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_PROFILE_PATH = (
@@ -75,6 +76,33 @@ def default_profile_path() -> Path:
     codebase.
     """
     return _DEFAULT_PROFILE_PATH
+
+
+@pytest.fixture
+def make_context_request() -> Callable[..., ContextRequest]:
+    """Return a factory for ContextRequest with optional keyword overrides.
+
+    Canonical defaults match the original ``_make_request`` helper
+    from ``test_context_pipeline.py``. Tests that need a non-standard
+    utterance or deadline pass overrides directly:
+    ``make_context_request(utterance="hi", deadline_s=10.0)``.
+    """
+
+    def _factory(**overrides: Any) -> ContextRequest:  # noqa: ANN401
+        defaults: dict[str, Any] = {
+            "familiar_id": "aria",
+            "channel_id": 100,
+            "guild_id": 1,
+            "speaker": "Alice",
+            "utterance": "hello",
+            "modality": Modality.text,
+            "budget_tokens": 2048,
+            "deadline_s": 5.0,
+        }
+        defaults.update(overrides)
+        return ContextRequest(**defaults)  # type: ignore[arg-type]
+
+    return _factory
 
 
 class FakeLLMClient(LLMClient):
