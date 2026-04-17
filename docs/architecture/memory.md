@@ -37,8 +37,9 @@ memory/
         post_history_instructions.md
         .original.png              # original character card bytes
     people/
-        alice.md
-        bob.md
+        discord-123456789.md
+        twitch-U99.md
+        _aliases.json             # display-name → canonical-slug index
     topics/
         elden-ring.md
         last-tuesdays-argument-about-ska.md
@@ -75,20 +76,29 @@ These are *conventions*, not requirements. A familiar that doesn't use them is f
 - The familiar does not normally edit these files. A human can edit them to tune the familiar's persona without re-importing a card.
 - `self/.original.png` preserves the original card bytes so a future unpacker revision can re-run against the source.
 
-### `people/<name>.md` — someone the familiar has interacted with
+### `people/<platform>-<user_id>.md` — someone the familiar has interacted with
+
+Files are keyed on the platform-scoped immutable user id (`Author.slug`), so a Discord display-name change keeps the same file and a repeat Twitch viewer resolves to the same notes across event types. Discord gives `people/discord-<id>.md`; Twitch gives `people/twitch-<id>.md`.
 
 Suggested (not required) sections:
 
 - Who they are, in a sentence or two.
-- Usernames the familiar has seen them under, and the contexts each was used in. Notes on whether these are suspected-same-person or confirmed-same-person.
+- `## Aliases` — display names, usernames, and nicknames the familiar has seen. The writer pass harvests this list back into `people/_aliases.json` so recall finds the file by any known name.
 - The familiar's feelings about them — impressions, trust level, emotional history, memorable moments. Updated over time.
 - Links to topic files where this person shows up often.
 
-**On multi-username handling.** When a person appears under a new name, the familiar should:
+**On multi-username handling.** The canonical slug is immutable — a display-name change does not create a new file. When a new name is observed, the writer appends it under `## Aliases` in the existing file and rebuilds `_aliases.json`. Cross-platform identity (the same human on Discord and Twitch) is *not* automatically merged: each platform gets its own file. A human editor (or a future housekeeping pass) can link or merge them.
 
-1. Look for clues it may be the same person (they mention a previous conversation, same writing style, explicit self-disclosure, etc.).
-2. If it's a *guess*, write a new person file with a note linking to the suspected match, rather than silently merging.
-3. If it's *confirmed* (by the person, or by a server admin), the old and new files are merged by the post-session writer pass (or by a human editor).
+**Legacy history migration.** When upgrading from a pre-`Author` install, `HistoryStore` migrates any `speaker` column into `author_display_name` with a synthesised `legacy-discord` platform tag so historical turns keep their attribution. Pre-existing `people/<name>.md` files are left in place; the memory-writer rewrites them under canonical slugs the next time that person speaks.
+
+!!! note "Cleanup debt from the Author refactor"
+    The following is scaffolding that exists only to carry live installs across the speaker → `Author` schema change. Delete once every install has been upgraded:
+
+    - `_migrate_if_needed` branch guarded by `if "speaker" in columns:` in `src/familiar_connect/history/store.py` (copies the old column into `author_display_name` and drops it).
+    - The corresponding `test_migration_adds_mode_column_to_existing_db` legacy-schema case in `tests/test_history_store.py`.
+    - This note and the "Legacy history migration" paragraph above.
+
+    No `people/<display-name>.md` renamer ships — the writer regenerates under canonical slugs organically, so the old files can be deleted by hand after the cutover.
 
 ### `topics/<slug>.md` — recurring subjects
 
@@ -150,8 +160,8 @@ The provider's job is to run all three tiers within a deadline, log decisions fo
 
 Before tier 2/3 run, `ContentSearchProvider` always loads a fixed set of `people/*.md` files into `Layer.content`:
 
-- **Speaker's file.** If `people/<slug(request.speaker)>.md` exists, include it verbatim. The slug convention mirrors `memory/writer.py` exactly — lowercase, non-alphanumerics collapsed to single dashes, trimmed.
-- **Mentioned-name files.** For every `people/<stem>.md` in the store, check whether `<stem>` appears in the utterance. Single-token stems match as whole lowercase words (`"alice"` in `"tell me about alice"`). Hyphenated stems also reverse-match space-separated phrases (`people/bob-the-builder.md` ← `"where is bob the builder?"`). Capitalized mid-sentence words are an additional forward-match pass — `"Jane"` → slug `"jane"` → loaded if `people/jane.md` exists.
+- **Speaker's file.** `people/<request.author.slug>.md` — an exact lookup by canonical slug (e.g. `discord-123456789`). No fuzzy matching, because the slug comes from the immutable platform id carried on `Author`.
+- **Mentioned-name files.** Resolved via `people/_aliases.json`, a `{ "lowercased-name": "author-slug" }` index rebuilt by the writer. The utterance is tokenized (single words, capitalized mid-sentence words, hyphenated phrases); each candidate is looked up in the alias map and the resolved canonical file is loaded.
 
 Each loaded file is truncated to ~800 tokens before emission. The tier emits at priority 85 (between `CharacterProvider` at 100 and the filter tier at 70), with source `content_search.people`. On total-content overflow, the speaker's file is kept and utterance-order tail entries are dropped first.
 
@@ -213,6 +223,5 @@ All optional enhancements on top of the "just text" baseline. None of them chang
 
 - **Graph traversal via Markdown links.** A tool (`follow_links(path)`) that the search agent can use to walk from a file to everything it links to, without having to `grep` for the link.
 - **Housekeeping passes.** Cheap-model jobs that scan the directory for duplicate entries, conflicting information, stale beliefs, or notes ready to be promoted to their own files. They propose edits; a human reviews.
-- **Per-user personas as first-class people files.** A convention where a Discord user id maps to a `people/<user_id>.md` file.
 - **Markdown-link-aware duplicate detection.** The housekeeping pass notices two files that claim to be about the same person but aren't linked to each other, and flags them for merging.
 - **Export to SillyTavern lorebook JSON.** The reverse of the importer.

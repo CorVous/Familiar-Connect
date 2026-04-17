@@ -25,6 +25,7 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.memory.store import MemoryStore
 
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 
 _CHANNEL = 100
 _FAMILIAR = "aria"
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 
 def _request(utterance: str = "what do you know about Alice?") -> ContextRequest:
@@ -46,7 +48,7 @@ def _request(utterance: str = "what do you know about Alice?") -> ContextRequest
         familiar_id=_FAMILIAR,
         channel_id=_CHANNEL,
         guild_id=1,
-        speaker="Alice",
+        author=_ALICE,
         utterance=utterance,
         modality=Modality.text,
         budget_tokens=2048,
@@ -150,7 +152,7 @@ class TestPeopleAndFilter:
     async def test_speaker_file_plus_filter_two_contributions(
         self, store: MemoryStore
     ) -> None:
-        store.write_file("people/alice.md", "Alice is a ska fan from York.")
+        store.write_file("people/discord-1.md", "Alice is a ska fan from York.")
         side = _ScriptedLLMClient(["ANSWER: She's into ska."])
         provider = ContentSearchProvider(store=store, llm_client=side)
         contribs = await provider.contribute(_request())
@@ -186,7 +188,7 @@ class TestPeopleLookupInvariant:
     async def test_speaker_file_included_when_filter_returns_empty(
         self, store: MemoryStore
     ) -> None:
-        store.write_file("people/alice.md", "Alice is a ska fan from York.")
+        store.write_file("people/discord-1.md", "Alice is a ska fan from York.")
         side = _ScriptedLLMClient(["ANSWER:"])
         provider = ContentSearchProvider(store=store, llm_client=side)
         contribs = await provider.contribute(_request(utterance="hi"))
@@ -199,7 +201,7 @@ class TestPeopleLookupInvariant:
     async def test_speaker_file_included_when_filter_raises(
         self, store: MemoryStore
     ) -> None:
-        store.write_file("people/alice.md", "Alice's notes.")
+        store.write_file("people/discord-1.md", "Alice's notes.")
 
         class _ExplodingClient(LLMClient):
             def __init__(self) -> None:

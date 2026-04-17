@@ -110,7 +110,7 @@ class ConversationMonitor:
     async def on_message(
         self,
         channel_id: int,
-        speaker: str,
+        author: Author | None,
         text: str,
         is_mention: bool,
     ) -> None:
@@ -124,7 +124,7 @@ class ConversationMonitor:
 
 The monitor holds a `dict[int, ChannelBuffer]` keyed by channel ID. Each `ChannelBuffer` contains:
 
-- **`buffer: list[BufferedMessage]`** — messages accumulated since the bot last responded (or last cleared). Each entry is speaker + text + timestamp.
+- **`buffer: list[BufferedMessage]`** — messages accumulated since the bot last responded (or last cleared). Each entry is author + text + timestamp.
 - **`message_counter: int`** — count of messages since last response. Drives the interjection check schedule.
 - **`check_count: int`** — how many interjection checks have been made since the last response. Drives the step-down curve.
 - **`lull_timer_handle: asyncio.TimerHandle | None`** — handle to the pending lull callback, cancelled and reset on every new message.
@@ -252,7 +252,7 @@ message arrives on subscribed channel
     ├─ subscription check (existing)
     │
     ▼
-familiar.monitor.on_message(channel_id, speaker, text, is_mention)
+familiar.monitor.on_message(channel_id, author, text, is_mention)
     │
     ├─ cancel existing lull timer
     ├─ append message to channel buffer

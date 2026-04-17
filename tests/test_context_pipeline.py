@@ -38,6 +38,9 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
+from familiar_connect.identity import Author
+
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 # ---------------------------------------------------------------------------
 # Test helpers — stub providers and pre-processors
@@ -49,7 +52,7 @@ def _make_request(**overrides: object) -> ContextRequest:
         "familiar_id": "aria",
         "channel_id": 100,
         "guild_id": 1,
-        "speaker": "Alice",
+        "author": _ALICE,
         "utterance": "hello",
         "modality": Modality.text,
         "budget_tokens": 2048,

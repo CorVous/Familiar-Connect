@@ -1,17 +1,19 @@
 """Deterministic people-file lookup — tier 1 of ContentSearchProvider.
 
-No LLM. Always injects the speaker's ``people/<slug>.md`` and any
-file whose stem matches a name mentioned in the utterance. The
-correctness floor — guarantees the familiar never forgets someone it
-has notes on, regardless of LLM behaviour in the later tiers.
+No LLM. Always injects the speaker's ``people/<author.slug>.md`` and
+any file whose canonical slug resolves from a name mentioned in the
+utterance (via ``people/_aliases.json``). Correctness floor —
+guarantees the familiar never forgets someone it has notes on.
 
-Slug convention mirrors ``memory/writer.py`` exactly: lowercase the
-name, replace any run of non-alphanumeric chars with a single dash,
-strip leading/trailing dashes.
+Files are keyed by :attr:`Author.slug` (e.g. ``people/discord-123.md``)
+so renames never orphan a file. The alias index maps lowercased
+human-readable names — display names, usernames, nicknames — to those
+canonical slugs and is rebuilt each memory-writer pass.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -46,20 +48,11 @@ DEFAULT_MAX_TOKENS_PER_FILE = 800
 a single oversized bio can't starve other people files."""
 
 _PEOPLE_DIR = "people"
-_SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+_ALIAS_INDEX_PATH = f"{_PEOPLE_DIR}/_aliases.json"
 _UTTERANCE_TOKEN = re.compile(r"[a-z0-9]+")
 _SENTENCE_SPLIT = re.compile(r"[.!?]+")
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9'-]*")
 _TRUNCATION_MARKER = "\n\n[…truncated]"
-
-
-def slug(name: str) -> str:
-    """Slugify *name* to match ``memory/writer.py`` exactly.
-
-    Mirrors the write-side convention so a file created as
-    ``people/<slug(speaker)>.md`` is guaranteed to round-trip here.
-    """
-    return _SLUG_NON_ALNUM.sub("-", name.lower()).strip("-")
 
 
 @dataclass(frozen=True)
@@ -84,8 +77,7 @@ def lookup(
 ) -> list[Contribution]:
     """Return Contributions for speaker + mentioned-name people files.
 
-    Ordering: speaker first, then utterance order (pass-a candidates
-    before pass-b reverse matches). Overflow against
+    Ordering: speaker first, then utterance order. Overflow against
     *content_cap_tokens* drops the tail, preserving the speaker.
     """
     return lookup_with_paths(
@@ -104,24 +96,20 @@ def lookup_with_paths(
     max_tokens_per_file: int = DEFAULT_MAX_TOKENS_PER_FILE,
 ) -> LookupResult:
     """Return contributions plus the loaded rel_paths for retriever exclusion."""
-    stems = _list_people_stems(store)
-    if not stems:
-        return LookupResult()
-
-    ordered_stems = _select_stems(stems, request)
-    if not ordered_stems:
+    aliases = _load_alias_index(store)
+    ordered_slugs = _select_slugs(store, request, aliases)
+    if not ordered_slugs:
         return LookupResult()
 
     contributions: list[Contribution] = []
     rel_paths: list[str] = []
     tokens_used = 0
-    for stem in ordered_stems:
-        rel_path = f"{_PEOPLE_DIR}/{stem}.md"
+    for slug in ordered_slugs:
+        rel_path = f"{_PEOPLE_DIR}/{slug}.md"
         try:
             raw = store.read_file(rel_path)
         except MemoryStoreError:
-            # File listed by glob but unreadable (size cap, permissions)
-            # — skip; deterministic tier degrades gracefully.
+            # alias points to a stale slug — degrade gracefully
             continue
 
         text = _truncate(raw, max_tokens_per_file)
@@ -154,53 +142,84 @@ def lookup_with_paths(
 # ---------------------------------------------------------------------------
 
 
-def _list_people_stems(store: MemoryStore) -> set[str]:
-    """Return the set of ``people/<stem>.md`` stems present in the store."""
+def _load_alias_index(store: MemoryStore) -> dict[str, str]:
+    """Return ``{lower_name: canonical_slug}`` from ``people/_aliases.json``.
+
+    Silent fallback to an empty dict if the file is missing or malformed —
+    deterministic tier degrades gracefully and mention-pass simply finds
+    nothing.
+    """
     try:
-        matches = store.glob(f"{_PEOPLE_DIR}/*.md")
+        raw = store.read_file(_ALIAS_INDEX_PATH)
     except MemoryStoreError:
-        return set()
-    stems: set[str] = set()
-    prefix = f"{_PEOPLE_DIR}/"
-    for rel in matches:
-        if rel.startswith(prefix) and rel.endswith(".md"):
-            stem = rel[len(prefix) : -len(".md")]
-            if stem:
-                stems.add(stem)
-    return stems
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        _logger.warning("alias index %s malformed; ignoring", _ALIAS_INDEX_PATH)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, value in data.items():
+        if isinstance(key, str) and isinstance(value, str):
+            result[key.lower()] = value
+    return result
 
 
-def _select_stems(stems: set[str], request: ContextRequest) -> list[str]:
-    """Pick which stems to load, in priority order (speaker → mentions)."""
+def _file_exists(store: MemoryStore, rel_path: str) -> bool:
+    try:
+        store.read_file(rel_path)
+    except MemoryStoreError:
+        return False
+    return True
+
+
+def _select_slugs(
+    store: MemoryStore,
+    request: ContextRequest,
+    aliases: dict[str, str],
+) -> list[str]:
+    """Pick which canonical slugs to load, in priority order."""
     seen: set[str] = set()
     ordered: list[str] = []
 
-    # speaker file first
-    if request.speaker:
-        s = slug(request.speaker)
-        if s and s in stems:
-            seen.add(s)
-            ordered.append(s)
+    # speaker file first — keyed directly by Author.slug
+    if request.author is not None:
+        slug = request.author.slug
+        if slug and _file_exists(store, f"{_PEOPLE_DIR}/{slug}.md"):
+            seen.add(slug)
+            ordered.append(slug)
 
     utterance = request.utterance
     lower = utterance.lower()
     tokens = _UTTERANCE_TOKEN.findall(lower)
-    token_set = set(tokens)
 
-    # pass (a): capitalized mid-sentence words → slug → check exists
+    # pass (a): capitalized mid-sentence words → alias index
     for word in _capitalized_candidates(utterance):
-        candidate = slug(word)
-        if candidate and candidate in stems and candidate not in seen:
-            seen.add(candidate)
-            ordered.append(candidate)
+        slug = aliases.get(word.lower())
+        if slug and slug not in seen:
+            seen.add(slug)
+            ordered.append(slug)
 
-    # pass (b): reverse match each stem against utterance tokens/phrases
-    for stem in sorted(stems):
-        if stem in seen:
+    # pass (b): single-word tokens → alias index
+    for token in tokens:
+        slug = aliases.get(token)
+        if slug and slug not in seen:
+            seen.add(slug)
+            ordered.append(slug)
+
+    # pass (c): multi-word aliases (phrases with spaces or hyphens)
+    for alias_name, slug in aliases.items():
+        if slug in seen:
             continue
-        if _stem_matches(stem, token_set, lower):
-            seen.add(stem)
-            ordered.append(stem)
+        if " " in alias_name and alias_name in lower:
+            seen.add(slug)
+            ordered.append(slug)
+            continue
+        if "-" in alias_name and alias_name in lower:
+            seen.add(slug)
+            ordered.append(slug)
 
     return ordered
 
@@ -209,30 +228,14 @@ def _capitalized_candidates(utterance: str) -> list[str]:
     """Capitalized words not at sentence start.
 
     Naive sentence split on ``[.!?]`` — good enough: we only use the
-    output as a set of slug candidates, and the stem-existence check
-    filters out false positives.
+    output to look up the alias index, and the miss there filters out
+    false positives.
     """
     candidates: list[str] = []
     for sentence in _SENTENCE_SPLIT.split(utterance):
         words = _WORD.findall(sentence)
         candidates.extend(word for word in words[1:] if word[0].isupper())
     return candidates
-
-
-def _stem_matches(stem: str, token_set: set[str], utterance_lower: str) -> bool:
-    """Reverse-match a file stem against the utterance.
-
-    - single-token stem (``alice``): match as whole word
-    - hyphenated stem (``bob-the-builder``): match as space-separated
-      phrase ("bob the builder") OR as the literal hyphenated form.
-    """
-    parts = stem.split("-")
-    if len(parts) == 1:
-        return parts[0] in token_set
-    if stem in utterance_lower:
-        return True
-    phrase = " ".join(parts)
-    return phrase in utterance_lower
 
 
 def _truncate(text: str, max_tokens: int) -> str:

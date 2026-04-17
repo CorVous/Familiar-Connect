@@ -46,7 +46,7 @@ def _format_turns(turns: list[HistoryTurn]) -> str:
     """Render turns as role-prefixed lines for the mood prompt."""
     lines: list[str] = []
     for t in turns:
-        prefix = f"{t.speaker} (user)" if t.role == "user" and t.speaker else t.role
+        prefix = f"{t.author.label} (user)" if t.role == "user" and t.author else t.role
         lines.append(f"{prefix}: {t.content}")
     return "\n".join(lines)
 

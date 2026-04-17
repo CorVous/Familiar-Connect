@@ -27,6 +27,7 @@ from familiar_connect.history.store import (
     SummaryEntry,
     WatermarkEntry,
 )
+from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,6 +41,8 @@ if TYPE_CHECKING:
 _CHANNEL = 200
 _FAMILIAR = "aria"
 
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
+
 
 def _store(tmp_path: Path) -> HistoryStore:
     return HistoryStore(tmp_path / "history.db")
@@ -50,14 +53,14 @@ def _seed(store: HistoryStore, n: int) -> list[HistoryTurn]:
     out: list[HistoryTurn] = []
     for i in range(n):
         role = "user" if i % 2 == 0 else "assistant"
-        speaker = "Alice" if role == "user" else None
+        author = _ALICE if role == "user" else None
         out.append(
             store.append_turn(
                 channel_id=_CHANNEL,
                 familiar_id=_FAMILIAR,
                 role=role,
                 content=f"turn {i}",
-                speaker=speaker,
+                author=author,
             )
         )
     return out
@@ -108,16 +111,32 @@ class TestAppendTurn:
             familiar_id=_FAMILIAR,
             role="user",
             content="hello",
-            speaker="Alice",
+            author=_ALICE,
         )
         assert isinstance(turn, HistoryTurn)
         assert turn.id > 0
         assert turn.role == "user"
         assert turn.content == "hello"
-        assert turn.speaker == "Alice"
+        assert turn.author == _ALICE
         assert isinstance(turn.timestamp, datetime)
 
-    def test_assistant_turn_has_no_speaker(self, tmp_path: Path) -> None:
+    def test_author_round_trips_through_select(self, tmp_path: Path) -> None:
+        """Author fields are persisted via the four author_* columns."""
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="hello",
+            author=_ALICE,
+        )
+        [turn] = s.recent(channel_id=_CHANNEL, familiar_id=_FAMILIAR, limit=1)
+        assert turn.author is not None
+        assert turn.author.canonical_key == "discord:1"
+        assert turn.author.display_name == "Alice"
+        assert turn.author.username == "alice"
+
+    def test_assistant_turn_has_no_author(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         turn = s.append_turn(
             channel_id=_CHANNEL,
@@ -125,7 +144,7 @@ class TestAppendTurn:
             role="assistant",
             content="hi back",
         )
-        assert turn.speaker is None
+        assert turn.author is None
 
     def test_optional_guild_id_observability(self, tmp_path: Path) -> None:
         """guild_id is observability-only — accepted but never partitioning."""
@@ -528,7 +547,12 @@ class TestModeColumn:
         assert [t.content for t in voice_turns] == ["voice turn"]
 
     def test_migration_adds_mode_column_to_existing_db(self, tmp_path: Path) -> None:
-        """Opening a DB created before the mode column migrates it."""
+        """Opening a DB created before the mode column migrates it.
+
+        Legacy ``speaker`` strings are preserved as ``author_display_name``
+        with a synthesised ``legacy-discord`` platform key so historical
+        turns retain their attribution after the schema change.
+        """
         import sqlite3  # noqa: PLC0415
 
         db_path = tmp_path / "legacy.db"
@@ -547,30 +571,61 @@ class TestModeColumn:
             );
         """)
         conn.execute(
+            "INSERT INTO turns "
+            "(familiar_id, channel_id, role, speaker, content, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "user",
+                "Alice",
+                "named turn",
+                "2025-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
             "INSERT INTO turns (familiar_id, channel_id, role, content, timestamp) "
             "VALUES (?, ?, ?, ?, ?)",
-            (_FAMILIAR, _CHANNEL, "user", "old turn", "2025-01-01T00:00:00+00:00"),
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "assistant",
+                "bare turn",
+                "2025-01-01T00:00:01+00:00",
+            ),
         )
         conn.commit()
         conn.close()
 
-        # Re-open with HistoryStore — migration should add the mode column.
+        # Re-open with HistoryStore — migration should add mode + author cols.
         s = HistoryStore(db_path)
         turns = s.recent(channel_id=_CHANNEL, familiar_id=_FAMILIAR, limit=10)
-        assert len(turns) == 1
-        assert turns[0].content == "old turn"
-        # New turns can use mode.
+        assert len(turns) == 2
+
+        named, bare = turns
+        assert named.content == "named turn"
+        assert named.author is not None
+        assert named.author.display_name == "Alice"
+        assert named.author.platform == "legacy-discord"
+
+        # A row with a NULL speaker stays author-less.
+        assert bare.content == "bare turn"
+        assert bare.author is None
+
+        # New turns can use mode + Author.
         s.append_turn(
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
             content="new turn",
+            author=_ALICE,
             mode=ChannelMode.full_rp,
         )
         row = s._conn.execute(
-            "SELECT mode FROM turns WHERE content = 'new turn'"
+            "SELECT mode, author_platform FROM turns WHERE content = 'new turn'"
         ).fetchone()
         assert row["mode"] == "full_rp"
+        assert row["author_platform"] == "discord"
 
     def test_recent_without_mode_returns_all(self, tmp_path: Path) -> None:
         """Without a mode filter, recent() returns all turns."""

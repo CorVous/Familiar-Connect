@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.identity import Author
 from familiar_connect.memory.scheduler import MemoryWriterScheduler
 from familiar_connect.memory.store import MemoryStore
 from familiar_connect.memory.writer import MemoryWriter
@@ -30,6 +31,7 @@ from tests.conftest import FakeLLMClient
 
 _FAMILIAR = "aria"
 _CHANNEL = 100
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 
 def _make_scheduler(
@@ -63,13 +65,13 @@ def _make_scheduler(
 def _seed(hist_store: HistoryStore, n: int) -> None:
     for i in range(n):
         role = "user" if i % 2 == 0 else "assistant"
-        speaker = "Alice" if role == "user" else None
+        author = _ALICE if role == "user" else None
         hist_store.append_turn(
             familiar_id=_FAMILIAR,
             channel_id=_CHANNEL,
             role=role,
             content=f"turn {i}",
-            speaker=speaker,
+            author=author,
         )
 
 

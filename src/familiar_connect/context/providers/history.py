@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
+from familiar_connect.identity import format_turn_for_transcript
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -461,15 +462,9 @@ class HistoryProvider:
 def _render_turns(turns: list[HistoryTurn]) -> str:
     """Render a list of HistoryTurns as a single text block.
 
-    Format is intentionally simple: one ``<role>[: speaker]: content``
-    line per turn. The speaker is included for user turns so the
-    familiar can address callers by name; assistant turns are labelled
-    with their role only.
+    Delegates line formatting to :func:`identity.format_turn_for_transcript`
+    so the history-summary provider and memory writer stay in sync.
     """
-    lines: list[str] = []
-    for t in turns:
-        if t.role == "user" and t.speaker:
-            lines.append(f"{t.role} ({t.speaker}): {t.content}")
-        else:
-            lines.append(f"{t.role}: {t.content}")
-    return "\n".join(lines)
+    return "\n".join(
+        format_turn_for_transcript(t.role, t.author, t.content) for t in turns
+    )

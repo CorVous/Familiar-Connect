@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.config import Interjection
+    from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
 
 
@@ -76,7 +77,7 @@ class ResponseTrigger(Enum):
 class BufferedMessage:
     """Single message accumulated in a channel buffer."""
 
-    speaker: str
+    author: Author
     text: str
     timestamp: float
 
@@ -192,7 +193,7 @@ Should {familiar_name} interject?"""
 
 
 def _format_buffer(buffer: list[BufferedMessage]) -> str:
-    return "\n".join(f"{m.speaker}: {m.text}" for m in buffer)
+    return "\n".join(f"{m.author.label}: {m.text}" for m in buffer)
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +302,7 @@ class ConversationMonitor:
     async def on_message(
         self,
         channel_id: int,
-        speaker: str,
+        author: Author,
         text: str,
         *,
         is_mention: bool,
@@ -320,7 +321,7 @@ class ConversationMonitor:
 
         # 2. append to buffer and increment counter
         buf.buffer.append(
-            BufferedMessage(speaker=speaker, text=text, timestamp=time.monotonic())
+            BufferedMessage(author=author, text=text, timestamp=time.monotonic())
         )
         buf.message_counter += 1
 

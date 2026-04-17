@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.mood import MoodEvaluator
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 _FAMILIAR = "aria"
 _CHANNEL = 42
+_ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -44,13 +46,13 @@ def _make_store(*turns: tuple[str, str]) -> HistoryStore:
     """Return in-memory store seeded with (role, content) turns."""
     store = HistoryStore(":memory:")
     for role, content in turns:
-        speaker = "Alice" if role == "user" else None
+        author = _ALICE if role == "user" else None
         store.append_turn(
             familiar_id=_FAMILIAR,
             channel_id=_CHANNEL,
             role=role,
             content=content,
-            speaker=speaker,
+            author=author,
         )
     return store
 

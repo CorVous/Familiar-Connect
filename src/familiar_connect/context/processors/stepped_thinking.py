@@ -78,7 +78,7 @@ class SteppedThinkingPreProcessor:
         exception, empty response).
         """
         prompt = _PROMPT_TEMPLATE.format(
-            speaker=request.speaker or "(unknown)",
+            speaker=request.author.label if request.author else "(unknown)",
             utterance=request.utterance,
             max_tokens=_MAX_THINKING_TOKENS_HINT,
         )

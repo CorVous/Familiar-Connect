@@ -20,7 +20,7 @@ sequenceDiagram
     participant Store as HistoryStore
 
     Discord->>Bot: message event
-    Bot->>Monitor: on_message(channel, speaker, text, is_mention)
+    Bot->>Monitor: on_message(channel, author, text, is_mention)
     Monitor->>Buf: append BufferedMessage
     Monitor->>Monitor: cancel existing lull timer
 
