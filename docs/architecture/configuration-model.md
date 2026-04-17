@@ -144,7 +144,8 @@ data/
         ├── character.toml           # tuning + depth-inject config
         ├── subscriptions.toml       # persistent /subscribe-* state
         ├── channels/
-        │   └── <channel_id>.toml    # per-channel mode + backdrop + overrides
+        │   ├── <channel_id>.toml            # per-channel mode + backdrop + overrides
+        │   └── <channel_id>.last-context.md # last LLM context cache (written by bot)
         ├── modes/                   # familiar-specific mode instructions
         │   └── <mode>.md            # overrides _default/modes/<mode>.md
         ├── memory/                  # MemoryStore root
@@ -194,6 +195,40 @@ Threads and forum posts each get their own sidecar keyed by the thread's id. The
 
 **Why filesystem and not SQLite:** see [Design decisions](decisions.md) for the broader local-first principle. Per-character config is the kind of thing a user might want to back up, share, or version-control on their own; a filesystem layout makes that trivial.
 
+## Per-channel context cache
+
+The bot caches the exact `list[Message]` it sent to the LLM for the most recent response in every channel, so operators can inspect after the fact what the model actually received — system prompt, character card, mode instructions, memory search hits, history window, and trigger utterance.
+
+**Refresh points:** the cache is atomically rewritten on every text response, voice response, and voice-regen-after-interruption. It is never read during response generation — consumed only by `/context`.
+
+**Reading the cache:** run `/context` in the target channel. The bot posts the cached file as a `context.md` attachment — byte-identical to what's on disk. If the familiar hasn't responded in the channel yet, an ephemeral "No context cached for this channel yet." notice replies instead.
+
+**Markdown layout:** each message appears under a numbered heading with role and (optional) speaker name, separated by horizontal rules:
+
+```markdown
+# Last context (captured 2026-04-16T14:22:07.431+00:00, modality=text, 3 messages)
+
+## [0] system
+
+You are Aria, …
+
+---
+
+## [1] user (Alice)
+
+hi
+
+---
+
+## [2] assistant
+
+Hello.
+```
+
+Threads and forum posts each get their own `<channel_id>.last-context.md` sibling to the TOML sidecar, keyed by the thread's id.
+
+**Why markdown and not JSON or SQLite:** the on-disk file is the same bytes the operator will see when they run `/context`. `cat`-ing it during debugging gives identical output to downloading the attachment. No parsing step, no schema, no extra tooling.
+
 ## Identity model
 
 - **`familiar_id`** is the folder name under `data/familiars/`. Kebab-case by convention (`aria`, `my-cat-familiar`). Used as the partition key for `HistoryStore` entries, though in practice there's only one active familiar per install.
@@ -217,6 +252,7 @@ The user explicitly trusts the admin. There is no per-user sandboxing, no resour
 | `/channel-text-conversation-rp` | Set to `text_conversation_rp` (character + history, `stepped_thinking` on, `recast` off, medium budget) |
 | `/channel-imitate-voice` | Set to `imitate_voice` (latency-tuned; `recast` on with voice flavour, `stepped_thinking` off) |
 | `/channel-backdrop` | Open a modal to set a custom author-note for this channel (replaces the mode default). Submit the modal blank to clear. |
+| `/context` | Post a `context.md` attachment containing the exact LLM context sent for the channel's most recent response. Replies ephemerally if no response has been cached yet. |
 
 The old `/awaken` / `/sleep` commands have been removed. Their role is now split between the subscription commands and the channel-mode commands — `/subscribe-my-voice` in a voice channel does what `/awaken` did, while `/subscribe-text` in a text channel replaces the text-channel branch of `/awaken`.
 

@@ -297,6 +297,9 @@ async def _run_voice_response(
             display_tz=familiar.config.display_tz,
         )
         rmeta["message_count"] = len(messages)
+    familiar.last_context_cache.put(
+        channel_id=channel_id, messages=messages, modality="voice"
+    )
 
     n_new = len(request.pending_turns) if request.pending_turns else 1
     pending_lines = (
@@ -487,6 +490,11 @@ async def _run_voice_response(
                     depth_inject_role=familiar.config.depth_inject_role,
                     mode=channel_config.mode,
                     display_tz=familiar.config.display_tz,
+                )
+                familiar.last_context_cache.put(
+                    channel_id=channel_id,
+                    messages=regen_messages,
+                    modality="voice-regen",
                 )
                 regen_task = asyncio.create_task(
                     familiar.llm_clients["main_prose"].chat(regen_messages),
@@ -1171,6 +1179,37 @@ async def channel_backdrop(
     await ctx.send_modal(modal)
 
 
+async def context_command(
+    ctx: discord.ApplicationContext,
+    familiar: Familiar,
+) -> None:
+    """Handle ``/context``. Posts last-used LLM context as ``context.md``."""
+    channel_id = ctx.channel_id
+    if channel_id is None:
+        await ctx.respond("Cannot determine channel.", ephemeral=True)
+        return
+    channel = ctx.channel
+    if isinstance(channel, discord.TextChannel | discord.Thread):
+        _refresh_channel_context(familiar, channel)
+    label = familiar.monitor.format_channel_context(channel_id)
+    raw = familiar.last_context_cache.get(channel_id=channel_id)
+    if raw is None:
+        _logger.info(
+            f"{ls.tag('Context', ls.W)} "
+            f"{ls.word(label, ls.C)} "
+            f"{ls.kv('action', 'context_miss')}"
+        )
+        await ctx.respond("No context cached for this channel yet.", ephemeral=True)
+        return
+    _logger.info(
+        f"{ls.tag('Context', ls.W)} "
+        f"{ls.word(label, ls.C)} "
+        f"{ls.kv('action', 'context_sent')} "
+        f"{ls.kv('bytes', str(len(raw)), vc=ls.LG)}"
+    )
+    await ctx.respond(file=discord.File(io.BytesIO(raw), filename="context.md"))
+
+
 # ---------------------------------------------------------------------------
 # Pipeline response path
 # ---------------------------------------------------------------------------
@@ -1249,6 +1288,9 @@ async def _run_text_response(
                 display_tz=familiar.config.display_tz,
             )
             rmeta["message_count"] = len(messages)
+        familiar.last_context_cache.put(
+            channel_id=channel_id, messages=messages, modality="text"
+        )
 
         n_new = len(request.pending_turns) if request.pending_turns else 1
         batch = (
@@ -1604,6 +1646,13 @@ def create_bot(familiar: Familiar) -> discord.Bot:
         ctx: discord.ApplicationContext,
     ) -> None:
         await channel_backdrop(ctx, familiar)
+
+    @bot.slash_command(
+        name="context",
+        description="Post a context.md dump of the last LLM context for this channel.",
+    )
+    async def _context_cmd(ctx: discord.ApplicationContext) -> None:
+        await context_command(ctx, familiar)
 
     # --- message loop ---
     async def _on_message(message: discord.Message) -> None:
