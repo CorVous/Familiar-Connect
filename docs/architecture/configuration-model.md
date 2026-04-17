@@ -196,9 +196,31 @@ Threads and forum posts each get their own sidecar keyed by the thread's id. The
 
 ## Per-channel context cache
 
-Each time the familiar responds (text, voice, or voice-regen-after-interruption), it atomically writes the exact `list[Message]` sent to the LLM into `channels/<channel_id>.last-context.json`. The `/context` slash command reads this file and posts it as a `context.md` attachment — making the system prompt, memory search results, history window, and trigger utterance directly visible to the operator without guessing.
+The bot caches the exact `list[Message]` it sent to the LLM for the most recent response in every channel, so operators can inspect after the fact what the model actually received — system prompt, character card, mode instructions, memory search hits, history window, and trigger utterance.
 
-The cache is bot-managed state (never edited by hand) and survives restarts, so `/context` works even after unsubscribing or restarting the process. Threads and forum posts each get their own `<channel_id>.last-context.json` sibling to the TOML sidecar.
+**Refresh points:** the cache is atomically rewritten on every text response, voice response, and voice-regen-after-interruption. It is never read during response generation — consumed only by `/context`.
+
+**Reading the cache:** run `/context` in the target channel. The bot posts a `context.md` attachment with each message under a numbered heading (`## [0] system`, `## [1] user (Alice)`, `## [2] assistant`, …) separated by horizontal rules. If the familiar hasn't responded in the channel yet, an ephemeral "No context cached for this channel yet." notice replies instead.
+
+**JSON layout:**
+
+```json
+{
+  "captured_at": "2026-04-16T14:22:07.431+00:00",
+  "modality": "text",
+  "messages": [
+    {"role": "system", "content": "You are Aria, …"},
+    {"role": "user",   "content": "hi",  "name": "Alice"},
+    {"role": "assistant", "content": "Hello."}
+  ]
+}
+```
+
+Threads and forum posts each get their own `<channel_id>.last-context.json` sibling to the TOML sidecar, keyed by the thread's id.
+
+**Why sibling JSON and not embedded in the TOML:** the cache is bot-managed state rewritten every turn and frequently hundreds of KB, while the TOML sidecar is operator-edited config. Keeping them separate preserves the TOML's hand-edit ergonomics and avoids pointless diff churn.
+
+**Why filesystem and not SQLite:** same local-first reasoning as the TOML sidecar — operators can `cat` or `jq` the cache directly when debugging, back it up, or delete it to reset.
 
 ## Identity model
 
@@ -223,6 +245,7 @@ The user explicitly trusts the admin. There is no per-user sandboxing, no resour
 | `/channel-text-conversation-rp` | Set to `text_conversation_rp` (character + history, `stepped_thinking` on, `recast` off, medium budget) |
 | `/channel-imitate-voice` | Set to `imitate_voice` (latency-tuned; `recast` on with voice flavour, `stepped_thinking` off) |
 | `/channel-backdrop` | Open a modal to set a custom author-note for this channel (replaces the mode default). Submit the modal blank to clear. |
+| `/context` | Post a `context.md` attachment containing the exact LLM context sent for the channel's most recent response. Replies ephemerally if no response has been cached yet. |
 
 The old `/awaken` / `/sleep` commands have been removed. Their role is now split between the subscription commands and the channel-mode commands — `/subscribe-my-voice` in a voice channel does what `/awaken` did, while `/subscribe-text` in a text channel replaces the text-channel branch of `/awaken`.
 
