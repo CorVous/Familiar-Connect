@@ -16,10 +16,12 @@ Single source of truth for chat layout. Four rules live here:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+from familiar_connect import log_style as ls
 from familiar_connect.config import ChannelMode
 from familiar_connect.context.types import Layer
 from familiar_connect.llm import Message
@@ -31,6 +33,9 @@ if TYPE_CHECKING:
     from familiar_connect.discord_features import MentionRosterEntry
     from familiar_connect.history.store import HistoryStore
     from familiar_connect.identity import Author
+
+
+_logger = logging.getLogger(__name__)
 
 _SECTION_SEPARATOR = "\n\n"
 
@@ -310,7 +315,27 @@ def assemble_chat_messages(
             Message(role=depth_inject_role, content=depth_text),
         )
 
+    _log_final_messages(messages)
     return messages
+
+
+def _log_final_messages(messages: list[Message]) -> None:
+    """Dump the fully-assembled chat payload at INFO level."""
+    roles = "/".join(m.role for m in messages)
+    total_chars = sum(len(m.content) for m in messages)
+    _logger.info(
+        f"{ls.tag('📝 Prompt', ls.G)} "
+        f"{ls.kv('messages', str(len(messages)), vc=ls.LG)} "
+        f"{ls.kv('chars', str(total_chars), vc=ls.LG)} "
+        f"{ls.kv('roles', roles, vc=ls.LW)}"
+    )
+    for idx, msg in enumerate(messages):
+        _logger.info(
+            f"{ls.tag('📝 Prompt', ls.G)} "
+            f"{ls.kv('idx', str(idx), vc=ls.LG)} "
+            f"{ls.kv('role', msg.role, vc=ls.LG)} "
+            f"{ls.kv('content', ls.trunc(msg.content, 500), vc=ls.LW)}"
+        )
 
 
 def _build_system_prompt(

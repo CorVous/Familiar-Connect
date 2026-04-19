@@ -89,12 +89,24 @@ class ContentSearchProvider:
         )
         deterministic = lookup_result.contributions
         exclude = set(lookup_result.rel_paths)
+        people_files = ", ".join(lookup_result.rel_paths) or "(none)"
+        _logger.info(
+            f"{ls.tag('👥 People', ls.M)} "
+            f"{ls.kv('count', str(len(lookup_result.rel_paths)), vc=ls.LM)} "
+            f"{ls.kv('files', people_files, vc=ls.LW)}"
+        )
 
         # Fire-and-forget the first-time index build. Uses whatever's
         # already in the index for the current turn.
         self._maybe_start_index_build()
 
         retrieved = await self._retrieve(request, exclude=exclude)
+        retrieved_files = ", ".join(c.rel_path for c in retrieved) or "(none)"
+        _logger.info(
+            f"{ls.tag('📚 Content', ls.M)} "
+            f"{ls.kv('retrieved', str(len(retrieved)), vc=ls.LM)} "
+            f"{ls.kv('files', retrieved_files, vc=ls.LW)}"
+        )
 
         try:
             filtered = await _filter.run(

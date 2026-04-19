@@ -10,8 +10,10 @@ See docs/architecture/context-pipeline.md.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 from familiar_connect.memory.store import MemoryStoreError
@@ -19,6 +21,9 @@ from familiar_connect.memory.store import MemoryStoreError
 if TYPE_CHECKING:
     from familiar_connect.context.types import ContextRequest
     from familiar_connect.memory.store import MemoryStore
+
+
+_logger = logging.getLogger(__name__)
 
 
 CHARACTER_PRIORITY = 100
@@ -88,4 +93,10 @@ class CharacterProvider:
                 )
             )
 
+        files = ", ".join(c.source.split(":", 1)[1] for c in contributions) or "(none)"
+        _logger.info(
+            f"{ls.tag('🎭 Character', ls.C)} "
+            f"{ls.kv('count', str(len(contributions)), vc=ls.LC)} "
+            f"{ls.kv('files', files, vc=ls.LW)}"
+        )
         return contributions
