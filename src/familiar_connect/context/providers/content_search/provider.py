@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
@@ -89,12 +90,29 @@ class ContentSearchProvider:
         )
         deterministic = lookup_result.contributions
         exclude = set(lookup_result.rel_paths)
+        people_files = (
+            ", ".join(PurePosixPath(p).name for p in lookup_result.rel_paths)
+            or "(none)"
+        )
+        _logger.info(
+            f"{ls.tag('👥 People', ls.M)} "
+            f"{ls.kv('count', str(len(lookup_result.rel_paths)), vc=ls.LM)} "
+            f"{ls.kv('files', people_files, vc=ls.LM)}"
+        )
 
         # Fire-and-forget the first-time index build. Uses whatever's
         # already in the index for the current turn.
         self._maybe_start_index_build()
 
         retrieved = await self._retrieve(request, exclude=exclude)
+        retrieved_files = (
+            ", ".join(PurePosixPath(c.rel_path).name for c in retrieved) or "(none)"
+        )
+        _logger.info(
+            f"{ls.tag('📚 Content', ls.M)} "
+            f"{ls.kv('retrieved', str(len(retrieved)), vc=ls.LM)} "
+            f"{ls.kv('files', retrieved_files, vc=ls.LM)}"
+        )
 
         try:
             filtered = await _filter.run(

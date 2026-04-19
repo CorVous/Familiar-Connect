@@ -20,8 +20,10 @@ contribution at their tier and cause the next tier to be tried.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+from familiar_connect import log_style as ls
 from familiar_connect.context.budget import estimate_tokens
 from familiar_connect.context.types import Contribution, Layer
 
@@ -30,6 +32,9 @@ if TYPE_CHECKING:
 
     from familiar_connect.config import ChannelMode
     from familiar_connect.context.types import ContextRequest
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _read_mode_file(root: Path, mode: ChannelMode) -> str | None:
@@ -91,24 +96,36 @@ class ModeInstructionProvider:
         if self._backdrop is not None:
             stripped = self._backdrop.strip()
             if stripped:
+                self._log_source("channel-backdrop", self._mode.value)
                 return [self._make(stripped, f"channel_backdrop:{self._mode.value}")]
 
         # 2. familiar-specific modes/<mode>.md
         text = _read_mode_file(self._modes_root, self._mode)
         if text is not None:
+            self._log_source("familiar", f"{self._mode.value}.md")
             return [self._make(text, f"mode_instructions:{self._mode.value}")]
 
         # 3. _default/modes/<mode>.md fallback
         if self._defaults_root is not None:
             text = _read_mode_file(self._defaults_root, self._mode)
             if text is not None:
+                self._log_source("default", f"{self._mode.value}.md")
                 return [
                     self._make(text, f"mode_instructions_default:{self._mode.value}")
                 ]
 
+        self._log_source("none", "(no file)")
         return []
 
     # ------------------------------------------------------------------
+
+    def _log_source(self, tier: str, file: str) -> None:
+        _logger.info(
+            f"{ls.tag('🎬 Mode', ls.B)} "
+            f"{ls.kv('mode', self._mode.value, vc=ls.LB)} "
+            f"{ls.kv('tier', tier, vc=ls.LB)} "
+            f"{ls.kv('file', file, vc=ls.LB)}"
+        )
 
     def _make(self, text: str, source: str) -> Contribution:
         return Contribution(
