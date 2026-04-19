@@ -102,16 +102,14 @@ class ModeInstructionProvider:
         # 2. familiar-specific modes/<mode>.md
         text = _read_mode_file(self._modes_root, self._mode)
         if text is not None:
-            path = self._modes_root / f"{self._mode.value}.md"
-            self._log_source("familiar", str(path))
+            self._log_source("familiar", f"{self._mode.value}.md")
             return [self._make(text, f"mode_instructions:{self._mode.value}")]
 
         # 3. _default/modes/<mode>.md fallback
         if self._defaults_root is not None:
             text = _read_mode_file(self._defaults_root, self._mode)
             if text is not None:
-                path = self._defaults_root / f"{self._mode.value}.md"
-                self._log_source("default", str(path))
+                self._log_source("default", f"{self._mode.value}.md")
                 return [
                     self._make(text, f"mode_instructions_default:{self._mode.value}")
                 ]
