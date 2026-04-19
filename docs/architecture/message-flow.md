@@ -94,3 +94,67 @@ sequenceDiagram
   DEBUG `stage=… duration_ms=…` line and contributes to a per-turn
   `TurnTrace` persisted under `data/familiars/<id>/metrics.db`. See
   [metrics guide](../guides/metrics.md).
+
+## Discord feature normalisation
+
+`on_message` rewrites raw Discord markup before handing text to the
+monitor, so both the buffered prompt and the persisted history store
+the same human-readable form. Helpers live in
+`src/familiar_connect/discord_features.py` — pure regex + roster
+builders with no py-cord dependency, so they're unit-testable in
+isolation.
+
+Inbound rewrites:
+
+- `<@id>` / `<@!id>` → `@DisplayName` (via `message.mentions` +
+  guild cache fallback)
+- `<@&id>` → `@RoleName` (via `message.role_mentions`)
+- `<#id>` → `#channel-name` (via `message.channel_mentions`)
+- Native reply (`message.reference` with `MessageReferenceType.default`)
+  → rendered line becomes
+  `Alice (replying to Bob: "quote"): text`. Forwarded messages and
+  non-default reference types are treated as "no reply context".
+- `https://discord.com/channels/<g>/<c>/<m>` links — see the
+  subscribed-vs-accessible scope rule below.
+
+Outbound:
+
+- Every `channel.send` in `bot.py` goes through `_send_with_reply`
+  which always attaches
+  `discord.AllowedMentions(everyone=False, roles=False, users=True,
+  replied_user=False)`. `@everyone` / role broadcast stays gated on
+  the bot's server-side role permission, not on a string strip.
+- On `ResponseTrigger.direct_address` the first chunk is sent as a
+  native reply (`reference=message_id`, `fail_if_not_exists=False`);
+  interjections and lulls stay plain to avoid cluttering timelines.
+- A mention roster (`Participants you can mention: - Alice → <@123>`)
+  is rendered into the system prompt so the LLM can emit working
+  `<@id>` tokens for anyone in the current channel buffer.
+
+### Subscribed vs. accessible channels
+
+Two distinct axes govern what the familiar may read:
+
+- **Subscribed** — operator opted-in via `/subscribe-text`, tracked
+  in `SubscriptionRegistry`. The familiar actively listens and
+  responds here.
+- **Accessible** — any channel the bot's Discord role has
+  `read_messages` on. A superset; may be much larger than
+  *subscribed*.
+
+Policy for `discord.com/channels/...` links in incoming text:
+
+| Target channel                | Resolve name (`#general`) | Fetch linked message body |
+|-------------------------------|---------------------------|---------------------------|
+| Same channel as current       | ✅                        | ✅                        |
+| Subscribed, different channel | ✅                        | ✅                        |
+| Accessible but not subscribed | ✅                        | ❌ — name only            |
+| Inaccessible / unknown guild  | keep raw URL              | ❌                        |
+
+Rationale: the channel name is already visible to the sender inside
+the raw `<#id>` token Discord renders, so surfacing it to the LLM
+leaks nothing new. Pulling a **message body** across channels is
+proactive cross-channel reading — out of scope for this code path.
+See
+[Proactive cross-channel reading](../roadmap/proactive-cross-channel-reading.md)
+for the successor question.

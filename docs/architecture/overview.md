@@ -109,6 +109,21 @@ Discord's DAVE (Audio/Video E2E Encryption) protocol. The subscription
 surface and channel-mode slash commands are documented in
 [Slash commands](../getting-started/slash-commands.md).
 
+Inbound messages are normalised in `bot.py::on_message` via
+[`discord_features`](message-flow.md#discord-feature-normalisation):
+replies, user/role/channel mentions, and channel-link URLs are
+rewritten into human-readable text before the monitor sees them, and
+every outbound `channel.send` attaches
+`AllowedMentions(everyone=False, roles=False, users=True,
+replied_user=False)` so `@everyone` / role broadcast is gated on the
+bot's server-side permission rather than a string strip. Direct-address
+replies ride Discord's native reply arrow; interjections and lulls
+stay plain. See
+[Message flow § Subscribed vs. accessible
+channels](message-flow.md#subscribed-vs-accessible-channels) for the
+rule that limits cross-channel link resolution to subscribed
+channels.
+
 ### Transcription
 
 **Primary: Deepgram (Nova-2, streaming)**

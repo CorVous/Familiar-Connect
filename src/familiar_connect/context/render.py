@@ -25,7 +25,10 @@ from familiar_connect.context.types import Layer
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from familiar_connect.context.pipeline import PipelineOutput
+    from familiar_connect.discord_features import MentionRosterEntry
     from familiar_connect.history.store import HistoryStore
     from familiar_connect.identity import Author
 
@@ -65,6 +68,34 @@ character or mode can tune. It tells the LLM how to interpret the
 explicitly instructs it not to echo the prefix back in its own
 replies. Kept as a module-level constant (rather than a provider) so
 the invariant moves with the code that enforces it."""
+
+
+_DISCORD_SYNTAX_GUIDE = (
+    "Discord syntax: to ping a user write <@user_id> (angle brackets and all); "
+    "to link a channel write <#channel_id>; to link a specific message use "
+    "https://discord.com/channels/<guild_id>/<channel_id>/<message_id>. "
+    "Only ever use an id that has been explicitly provided to you — never "
+    "invent one. If a message you see was a reply to someone else it will be "
+    'tagged like ``Alice (replying to Bob: "…"): text``; you may reply in '
+    "kind by addressing Bob, or simply answer Alice directly."
+)
+"""Discord-aware addendum to the preamble.
+
+Always included (even on the voice path) so the LLM has a single
+stable contract; the voice post-processor strips angle brackets and
+URL tokens before TTS anyway."""
+
+
+def _render_mention_roster(
+    roster: tuple[MentionRosterEntry, ...] | Iterable[MentionRosterEntry],
+) -> str:
+    """Render the ``Participants you can mention`` block or ``""``."""
+    entries = list(roster)
+    if not entries:
+        return ""
+    lines = ["Participants you can mention:"]
+    lines.extend(f"- {e.label} → <@{e.user_id}>" for e in entries)
+    return "\n".join(lines)
 
 
 def _prefix_user_content(author: Author | None, content: str) -> str:
@@ -154,7 +185,7 @@ def assemble_chat_messages(
     by_layer = output.budget.by_layer
 
     # 1. system prompt: every layer except recent_history and depth_inject
-    system_prompt = _build_system_prompt(by_layer)
+    system_prompt = _build_system_prompt(by_layer, request.mention_roster)
     messages: list[Message] = [Message(role="system", content=system_prompt)]
 
     # 2. recent history as discrete messages; user turns get Speaker:
@@ -282,10 +313,18 @@ def assemble_chat_messages(
     return messages
 
 
-def _build_system_prompt(by_layer: dict[Layer, str]) -> str:
+def _build_system_prompt(
+    by_layer: dict[Layer, str],
+    mention_roster: tuple[MentionRosterEntry, ...] | Iterable[MentionRosterEntry] = (),
+) -> str:
     # speaker-prefix preamble always first so the LLM reads the
-    # rendering convention before any character or mode content
-    sections: list[str] = [_SPEAKER_PREFIX_PREAMBLE]
+    # rendering convention before any character or mode content;
+    # Discord-syntax guide and mention roster follow so the LLM sees
+    # the "how to format IDs" contract before character content
+    sections: list[str] = [_SPEAKER_PREFIX_PREAMBLE, _DISCORD_SYNTAX_GUIDE]
+    roster_block = _render_mention_roster(mention_roster)
+    if roster_block:
+        sections.append(roster_block)
     for layer in _SYSTEM_PROMPT_LAYER_ORDER:
         text = by_layer.get(layer, "").strip()
         if text:
