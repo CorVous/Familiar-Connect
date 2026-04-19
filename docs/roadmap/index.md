@@ -9,7 +9,6 @@ Everything on this page is *planned, not shipped*. The shipped surface is descri
 | Voice channel logging (passive listeners) | Design | [Voice logging](voice-logging.md) |
 | Web search provider | Design | [Web search](web-search.md) |
 | Gemini TTS: dynamic audio tags + situational style prompts | Design | [Gemini TTS expressivity](gemini-tts-expressivity.md) |
-| Proactive cross-channel reading (follow links outside subscribed channels) | Deferred | [Proactive cross-channel reading](proactive-cross-channel-reading.md) |
 | Per-turn monitoring dashboard | Partial — data exists, no UI | [Context pipeline § deferred](../architecture/context-pipeline.md) |
 | `/context` slash command | Deferred | [Context pipeline § deferred](../architecture/context-pipeline.md) |
 | `familiar init --from-card` subcommand | Deferred | [Context pipeline § deferred](../architecture/context-pipeline.md) |

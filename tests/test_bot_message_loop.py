@@ -202,20 +202,13 @@ def _make_message(
     author_bot: bool = False,
     in_guild: bool = True,
     guild_id: int = 999,
-    message_id: int = 1001,
 ) -> MagicMock:
     msg = MagicMock(spec=discord.Message)
     msg.content = content
-    msg.id = message_id
-    msg.mentions = []
-    msg.role_mentions = []
-    msg.channel_mentions = []
-    msg.reference = None
 
     channel = MagicMock(spec=discord.TextChannel)
     channel.id = channel_id
     channel.send = AsyncMock()
-    channel.fetch_message = AsyncMock()
     typing_cm = MagicMock()
     typing_cm.__aenter__ = AsyncMock(return_value=None)
     typing_cm.__aexit__ = AsyncMock(return_value=False)
@@ -233,9 +226,6 @@ def _make_message(
         guild = MagicMock(spec=discord.Guild)
         guild.id = guild_id
         guild.voice_client = None
-        guild.get_member = MagicMock(return_value=None)
-        guild.get_channel = MagicMock(return_value=None)
-        guild.get_role = MagicMock(return_value=None)
         msg.guild = guild
     else:
         msg.guild = None
@@ -453,138 +443,9 @@ class TestOnMessageMonitorRouting:
         msg.mentions = [bot_user]
         msg.guild = MagicMock()
         msg.guild.id = 999
-        msg.guild.get_member = MagicMock(return_value=None)
-        msg.guild.get_channel = MagicMock(return_value=None)
-        msg.guild.get_role = MagicMock(return_value=None)
         asyncio.run(on_message(msg, familiar))
         call_kwargs = mock.call_args.kwargs
         assert call_kwargs["is_mention"] is True
-
-    def test_on_message_resolves_user_mentions(self, tmp_path: Path) -> None:
-        """``<@id>`` is rewritten to ``@Label`` before reaching the monitor."""
-        familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        mock = AsyncMock()
-        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
-        msg = _make_message(content="hey <@42> look at this", channel_id=12345)
-        bob = MagicMock()
-        bob.id = 42
-        bob.display_name = "Bob"
-        msg.mentions = [bob]
-        asyncio.run(on_message(msg, familiar))
-        assert mock.call_args.kwargs["text"] == "hey @Bob look at this"
-
-    def test_on_message_resolves_channel_mention(self, tmp_path: Path) -> None:
-        """``<#id>`` is rewritten to ``#channel-name``."""
-        familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        mock = AsyncMock()
-        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
-        msg = _make_message(content="see <#77>", channel_id=12345)
-        other = MagicMock()
-        other.id = 77
-        other.name = "off-topic"
-        msg.channel_mentions = [other]
-        asyncio.run(on_message(msg, familiar))
-        assert mock.call_args.kwargs["text"] == "see #off-topic"
-
-    def test_on_message_captures_reply_reference(self, tmp_path: Path) -> None:
-        """``message.reference.resolved`` becomes a ReplyContext."""
-        familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        mock = AsyncMock()
-        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
-        msg = _make_message(content="I agree", channel_id=12345)
-
-        replied = MagicMock(spec=discord.Message)
-        replied.content = "earlier thought"
-        replied_author = MagicMock()
-        replied_author.display_name = "Bob"
-        replied.author = replied_author
-
-        ref = MagicMock(spec=discord.MessageReference)
-        ref.resolved = replied
-        ref.message_id = 900
-        ref.type = discord.MessageReferenceType.default
-        msg.reference = ref
-
-        asyncio.run(on_message(msg, familiar))
-        rc = mock.call_args.kwargs["reply_to"]
-        assert rc is not None
-        assert rc.author_label == "Bob"
-        assert rc.content_preview == "earlier thought"
-
-    def test_on_message_expands_same_channel_link(self, tmp_path: Path) -> None:
-        """Same-channel message link gets resolved with body preview."""
-        familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        mock = AsyncMock()
-        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
-
-        link = "https://discord.com/channels/999/12345/50"
-        msg = _make_message(content=f"look: {link}", channel_id=12345)
-
-        linked_target = MagicMock(spec=discord.Message)
-        linked_target.content = "hello from the past"
-        msg.channel.fetch_message = AsyncMock(return_value=linked_target)
-
-        same_channel = MagicMock(spec=discord.TextChannel)
-        same_channel.id = 12345
-        same_channel.name = "general"
-        same_channel.fetch_message = msg.channel.fetch_message
-        msg.guild.get_channel = MagicMock(return_value=same_channel)
-
-        asyncio.run(on_message(msg, familiar))
-        text = mock.call_args.kwargs["text"]
-        assert link in text
-        assert "#general" in text
-        assert "hello from the past" in text
-
-    def test_on_message_link_to_unsubscribed_channel_shows_name_only(
-        self, tmp_path: Path
-    ) -> None:
-        """Accessible but unsubscribed target → name only, no fetch."""
-        familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        mock = AsyncMock()
-        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
-
-        link = "https://discord.com/channels/999/7777/42"
-        msg = _make_message(content=f"fyi {link}", channel_id=12345)
-
-        other_channel = MagicMock()
-        other_channel.id = 7777
-        other_channel.name = "staff"
-        other_channel.fetch_message = AsyncMock()
-        msg.guild.get_channel = MagicMock(return_value=other_channel)
-
-        asyncio.run(on_message(msg, familiar))
-        text = mock.call_args.kwargs["text"]
-        assert "#staff" in text
-        # name-only, no body fetched
-        assert other_channel.fetch_message.await_count == 0
-
-    def test_on_message_passes_source_message_id(self, tmp_path: Path) -> None:
-        """``source_message_id`` is piped to the monitor for native reply."""
-        familiar = _make_familiar(tmp_path)
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        mock = AsyncMock()
-        familiar.monitor.on_message = mock  # ty: ignore[invalid-assignment]
-        msg = _make_message(content="hi", channel_id=12345, message_id=5555)
-        asyncio.run(on_message(msg, familiar))
-        assert mock.call_args.kwargs["source_message_id"] == 5555
 
 
 # ---------------------------------------------------------------------------
@@ -650,78 +511,7 @@ class TestOnRespond:
             )
         )
 
-        assert channel.send.call_count == 1
-        call = channel.send.call_args
-        assert call.args == ("Hello Alice.",)
-        assert call.kwargs.get("reference") is None
-        assert call.kwargs.get("allowed_mentions") is not None
-
-    def test_direct_address_uses_native_reply(self, tmp_path: Path) -> None:
-        """A direct-address trigger emits a Discord native reply."""
-        familiar = _make_familiar(tmp_path, reply="Hi Alice.")
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        familiar.channel_configs.set_mode(
-            channel_id=12345, mode=ChannelMode.imitate_voice
-        )
-        channel = _make_channel(12345)
-        buffer = [
-            BufferedMessage(
-                author=_ALICE,
-                text="hi",
-                timestamp=0.0,
-                source_message_id=7777,
-            )
-        ]
-        asyncio.run(
-            _run_text_response(
-                channel_id=12345,
-                guild_id=999,
-                author=_ALICE,
-                utterance="hi",
-                buffer=buffer,
-                familiar=familiar,
-                channel=channel,
-                trigger=ResponseTrigger.direct_address,
-            )
-        )
-
-        assert channel.send.call_count == 1
-        ref = channel.send.call_args.kwargs["reference"]
-        assert ref is not None
-        assert ref.message_id == 7777
-
-    def test_interjection_does_not_use_native_reply(self, tmp_path: Path) -> None:
-        familiar = _make_familiar(tmp_path, reply="…")
-        familiar.subscriptions.add(
-            channel_id=12345, kind=SubscriptionKind.text, guild_id=999
-        )
-        familiar.channel_configs.set_mode(
-            channel_id=12345, mode=ChannelMode.imitate_voice
-        )
-        channel = _make_channel(12345)
-        buffer = [
-            BufferedMessage(
-                author=_ALICE,
-                text="hi",
-                timestamp=0.0,
-                source_message_id=7777,
-            )
-        ]
-        asyncio.run(
-            _run_text_response(
-                channel_id=12345,
-                guild_id=999,
-                author=_ALICE,
-                utterance="hi",
-                buffer=buffer,
-                familiar=familiar,
-                channel=channel,
-                trigger=ResponseTrigger.interjection,
-            )
-        )
-        assert channel.send.call_args.kwargs.get("reference") is None
+        channel.send.assert_called_once_with("Hello Alice.")
 
     def test_turns_are_persisted_to_history(self, tmp_path: Path) -> None:
         familiar = _make_familiar(tmp_path, reply="Hello.")
@@ -3128,7 +2918,7 @@ class TestTypingSimulationDelivery:
 
         # single-paragraph → one send call with full text
         assert channel.send.call_count == 1
-        assert channel.send.call_args.args == ("Hello Alice.",)
+        channel.send.assert_called_once_with("Hello Alice.")
 
     def test_multi_paragraph_sent_as_separate_messages(
         self,
@@ -3264,7 +3054,7 @@ class TestTypingSimulationCancellation:
         send_gate = asyncio.Event()
         sends_done = 0
 
-        async def fake_send(text: str, **_: object) -> None:  # noqa: ARG001
+        async def fake_send(text: str) -> None:  # noqa: ARG001
             nonlocal sends_done
             sends_done += 1
             if sends_done == 2:
@@ -3349,7 +3139,7 @@ class TestTypingSimulationCancellation:
         send_gate = asyncio.Event()
         sends_done = 0
 
-        async def fake_send(text: str, **_: object) -> None:  # noqa: ARG001
+        async def fake_send(text: str) -> None:  # noqa: ARG001
             nonlocal sends_done
             sends_done += 1
             if sends_done == 1:

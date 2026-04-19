@@ -26,12 +26,10 @@ from familiar_connect.chattiness import (
     ChannelBuffer,
     ConversationMonitor,
     ResponseTrigger,
-    _format_buffer,
     _interjection_interval,
     is_direct_address,
 )
 from familiar_connect.config import Interjection
-from familiar_connect.discord_features import ReplyContext
 from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 
@@ -171,43 +169,6 @@ class TestBufferedMessage:
         assert msg.author.label == "Alice"
         assert msg.text == "hello"
         assert msg.timestamp == 1.0  # noqa: RUF069
-        assert msg.reply_to is None
-        assert msg.source_message_id is None
-
-    def test_reply_to_field(self) -> None:
-        alice = _author("Alice")
-        rc = ReplyContext(author_label="Bob", content_preview="earlier")
-        msg = BufferedMessage(
-            author=alice,
-            text="oh?",
-            timestamp=1.0,
-            reply_to=rc,
-            source_message_id=42,
-        )
-        assert msg.reply_to is rc
-        assert msg.source_message_id == 42
-
-
-class TestFormatBuffer:
-    def test_plain_line(self) -> None:
-        buf = [BufferedMessage(author=_author("Alice"), text="hi", timestamp=0.0)]
-        assert _format_buffer(buf) == "Alice: hi"
-
-    def test_reply_line_prefixes_quoted_author(self) -> None:
-        rc = ReplyContext(author_label="Bob", content_preview="earlier thought")
-        buf = [
-            BufferedMessage(
-                author=_author("Alice"),
-                text="I agree",
-                timestamp=0.0,
-                reply_to=rc,
-            )
-        ]
-        rendered = _format_buffer(buf)
-        assert "Alice" in rendered
-        assert "replying to Bob" in rendered
-        assert '"earlier thought"' in rendered
-        assert rendered.endswith("I agree")
 
 
 class TestChannelBuffer:

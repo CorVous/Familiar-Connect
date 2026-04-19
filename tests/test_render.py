@@ -25,7 +25,6 @@ from familiar_connect.context.types import (
     Layer,
     Modality,
 )
-from familiar_connect.discord_features import MentionRosterEntry
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 
@@ -226,43 +225,6 @@ class TestSystemPrompt:
         )
         core_idx = system.find("CORE SENTINEL")
         assert 0 <= convention_idx < core_idx
-
-    def test_system_prompt_includes_discord_syntax_guide(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """The system prompt teaches the LLM Discord's mention/link syntax."""
-        store = _store_with(tmp_path, [])
-        output = _pipeline_output(request=_request(), by_layer={})
-        messages = assemble_chat_messages(output, store=store)
-        system = messages[0].content
-        assert "<@user_id>" in system
-        assert "<#channel_id>" in system
-        assert "https://discord.com/channels/" in system
-
-    def test_system_prompt_renders_mention_roster(self, tmp_path: Path) -> None:
-        """A non-empty roster surfaces ``Label → <@id>`` pairs in the prompt."""
-        store = _store_with(tmp_path, [])
-        output = _pipeline_output(
-            request=_request(
-                mention_roster=(
-                    MentionRosterEntry(user_id="1", label="Alice"),
-                    MentionRosterEntry(user_id="2", label="Bob"),
-                ),
-            ),
-            by_layer={},
-        )
-        messages = assemble_chat_messages(output, store=store)
-        system = messages[0].content
-        assert "Participants you can mention" in system
-        assert "Alice → <@1>" in system
-        assert "Bob → <@2>" in system
-
-    def test_system_prompt_omits_roster_when_empty(self, tmp_path: Path) -> None:
-        store = _store_with(tmp_path, [])
-        output = _pipeline_output(request=_request(), by_layer={})
-        messages = assemble_chat_messages(output, store=store)
-        assert "Participants you can mention" not in messages[0].content
 
 
 # ---------------------------------------------------------------------------

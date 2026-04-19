@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.config import Interjection
-    from familiar_connect.discord_features import ReplyContext
     from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
 
@@ -91,11 +90,6 @@ class BufferedMessage:
     author: Author
     text: str
     timestamp: float
-    reply_to: ReplyContext | None = None
-    # Discord message id of the inbound message; used by the responder to
-    # emit a native reply when the trigger is a direct address. ``None``
-    # for synthetic buffers (e.g. voice transcription).
-    source_message_id: int | None = None
 
 
 @dataclass
@@ -209,18 +203,7 @@ Should {familiar_name} interject?"""
 
 
 def _format_buffer(buffer: list[BufferedMessage]) -> str:
-    return "\n".join(_format_buffered_line(m) for m in buffer)
-
-
-def _format_buffered_line(m: BufferedMessage) -> str:
-    """Render one buffered message, surfacing reply context if any."""
-    if m.reply_to is None:
-        return f"{m.author.label}: {m.text}"
-    quoted = m.reply_to.content_preview
-    return (
-        f'{m.author.label} (replying to {m.reply_to.author_label}: "{quoted}"): '
-        f"{m.text}"
-    )
+    return "\n".join(f"{m.author.label}: {m.text}" for m in buffer)
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +341,6 @@ class ConversationMonitor:
         *,
         is_mention: bool,
         is_lull_endpoint: bool = False,
-        reply_to: ReplyContext | None = None,
-        source_message_id: int | None = None,
     ) -> None:
         """Process incoming message on subscribed channel.
 
@@ -374,13 +355,7 @@ class ConversationMonitor:
 
         # 2. append to buffer and increment counter
         buf.buffer.append(
-            BufferedMessage(
-                author=author,
-                text=text,
-                timestamp=time.monotonic(),
-                reply_to=reply_to,
-                source_message_id=source_message_id,
-            )
+            BufferedMessage(author=author, text=text, timestamp=time.monotonic())
         )
         buf.message_counter += 1
 
