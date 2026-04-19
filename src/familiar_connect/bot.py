@@ -508,6 +508,13 @@ async def _run_voice_response(
         reply_text = await pipeline.run_post_processors(reply.content, request)
     tracker.response_text = reply_text
 
+    _logger.info(
+        f"{ls.tag('🔊 Generated Voice', ls.G)} "
+        f"{ls.word(familiar.monitor.format_channel_context(channel_id), ls.C)} "
+        f"{ls.kv('chars', str(len(reply_text)), vc=ls.LG)}\n"
+        f"  {ls.word(ls.trunc(reply_text, 500), ls.LG)}"
+    )
+
     if familiar.tts_client is not None:
         try:
             tts_result = await familiar.tts_client.synthesize(reply_text)
@@ -1477,6 +1484,13 @@ async def _run_text_response(
 
         async with builder.span("post_processing"):
             reply_text = await pipeline.run_post_processors(reply.content, request)
+
+        _logger.info(
+            f"{ls.tag('💬 Generated Text', ls.G)} "
+            f"{ls.word(ch_label, ls.C)} "
+            f"{ls.kv('chars', str(len(reply_text)), vc=ls.LG)}\n"
+            f"  {ls.word(ls.trunc(reply_text, 500), ls.LG)}"
+        )
 
     ts_cfg = channel_config.typing_simulation
 
