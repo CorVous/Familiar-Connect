@@ -97,6 +97,6 @@ class CharacterProvider:
         _logger.info(
             f"{ls.tag('🎭 Character', ls.C)} "
             f"{ls.kv('count', str(len(contributions)), vc=ls.LC)} "
-            f"{ls.kv('files', files, vc=ls.LW)}"
+            f"{ls.kv('files', files, vc=ls.LC)}"
         )
         return contributions

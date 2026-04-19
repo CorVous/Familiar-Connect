@@ -124,7 +124,7 @@ class ModeInstructionProvider:
             f"{ls.tag('🎬 Mode', ls.B)} "
             f"{ls.kv('mode', self._mode.value, vc=ls.LB)} "
             f"{ls.kv('tier', tier, vc=ls.LB)} "
-            f"{ls.kv('file', file, vc=ls.LW)}"
+            f"{ls.kv('file', file, vc=ls.LB)}"
         )
 
     def _make(self, text: str, source: str) -> Contribution:

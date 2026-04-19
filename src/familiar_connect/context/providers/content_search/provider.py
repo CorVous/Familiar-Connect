@@ -97,7 +97,7 @@ class ContentSearchProvider:
         _logger.info(
             f"{ls.tag('👥 People', ls.M)} "
             f"{ls.kv('count', str(len(lookup_result.rel_paths)), vc=ls.LM)} "
-            f"{ls.kv('files', people_files, vc=ls.LW)}"
+            f"{ls.kv('files', people_files, vc=ls.LM)}"
         )
 
         # Fire-and-forget the first-time index build. Uses whatever's
@@ -111,7 +111,7 @@ class ContentSearchProvider:
         _logger.info(
             f"{ls.tag('📚 Content', ls.M)} "
             f"{ls.kv('retrieved', str(len(retrieved)), vc=ls.LM)} "
-            f"{ls.kv('files', retrieved_files, vc=ls.LW)}"
+            f"{ls.kv('files', retrieved_files, vc=ls.LM)}"
         )
 
         try:
