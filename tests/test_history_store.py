@@ -285,6 +285,126 @@ class TestRecent:
 
 
 # ---------------------------------------------------------------------------
+# recent_distinct_authors (per channel — powers the user-fetch step)
+# ---------------------------------------------------------------------------
+
+
+_BOB = Author(platform="discord", user_id="2", username="bob", display_name="Bob")
+_CAROL = Author(platform="discord", user_id="3", username="carol", display_name="Carol")
+_DAVE = Author(platform="discord", user_id="4", username="dave", display_name="Dave")
+
+
+class TestRecentDistinctAuthors:
+    def test_empty_returns_empty(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert (
+            s.recent_distinct_authors(
+                familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=5
+            )
+            == []
+        )
+
+    def test_most_recent_first_distinct(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        for author in (_ALICE, _BOB, _ALICE, _CAROL):
+            s.append_turn(
+                channel_id=_CHANNEL,
+                familiar_id=_FAMILIAR,
+                role="user",
+                content="x",
+                author=author,
+            )
+        authors = s.recent_distinct_authors(
+            familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=5
+        )
+        # most-recent unique first; Alice dedupes to her latest slot
+        assert [a.canonical_key for a in authors] == [
+            _CAROL.canonical_key,
+            _ALICE.canonical_key,
+            _BOB.canonical_key,
+        ]
+
+    def test_respects_limit(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        for author in (_ALICE, _BOB, _CAROL, _DAVE):
+            s.append_turn(
+                channel_id=_CHANNEL,
+                familiar_id=_FAMILIAR,
+                role="user",
+                content="x",
+                author=author,
+            )
+        authors = s.recent_distinct_authors(
+            familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=2
+        )
+        assert [a.canonical_key for a in authors] == [
+            _DAVE.canonical_key,
+            _CAROL.canonical_key,
+        ]
+
+    def test_skips_assistant_turns(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="hi",
+            author=_ALICE,
+        )
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="hi back",
+        )
+        authors = s.recent_distinct_authors(
+            familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=5
+        )
+        assert [a.canonical_key for a in authors] == [_ALICE.canonical_key]
+
+    def test_scoped_per_channel(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=200,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="x",
+            author=_ALICE,
+        )
+        s.append_turn(
+            channel_id=300,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="x",
+            author=_BOB,
+        )
+        ch200 = s.recent_distinct_authors(
+            familiar_id=_FAMILIAR, channel_id=200, limit=5
+        )
+        ch300 = s.recent_distinct_authors(
+            familiar_id=_FAMILIAR, channel_id=300, limit=5
+        )
+        assert [a.canonical_key for a in ch200] == [_ALICE.canonical_key]
+        assert [a.canonical_key for a in ch300] == [_BOB.canonical_key]
+
+    def test_zero_limit_returns_empty(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="x",
+            author=_ALICE,
+        )
+        assert (
+            s.recent_distinct_authors(
+                familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=0
+            )
+            == []
+        )
+
+
+# ---------------------------------------------------------------------------
 # older_than (global per familiar — not partitioned by channel)
 # ---------------------------------------------------------------------------
 

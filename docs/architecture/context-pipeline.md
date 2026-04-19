@@ -162,11 +162,14 @@ A multi-tier provider scoped to a single familiar's `MemoryStore`. Each `contrib
 
 ### Tier 1 — Deterministic people lookup
 
-No LLM involvement. Runs first. For every `contribute()` call:
+No LLM involvement. Runs first. For every `contribute()` call, loads `people/<slug>.md` for each author in a priority-ordered set, deduplicated and preserved head-first under budget pressure:
 
-- If `people/<request.author.slug>.md` exists, load it verbatim (exact lookup by canonical platform-id slug).
-- Tokenize the utterance (single words, capitalized mid-sentence words, hyphenated phrases) and resolve each candidate against `people/_aliases.json` — the writer-maintained `{ "lowercased-name": "author-slug" }` index — then load the mapped canonical file.
-- Each loaded file is truncated to ~800 tokens. Emitted at priority 85 with source `content_search.people`.
+1. **Speaker** — `request.author`, the most recent user to respond.
+2. **Pending-turn batch** — every distinct author in `request.pending_turns` (the buffered messages being responded to).
+3. **Recent channel participants** — the 5 most-recently-seen distinct users in the channel, fetched via `HistoryStore.recent_distinct_authors`. Tunable via `ContentSearchProvider(recent_author_limit=...)`.
+4. **Utterance mentions** — tokenize the utterance (single words, capitalized mid-sentence words, hyphenated phrases) and resolve each candidate against `people/_aliases.json` — the writer-maintained `{ "lowercased-name": "author-slug" }` index — then load the mapped canonical file.
+
+Each loaded file is truncated to ~800 tokens. When the combined total exceeds `content_cap_tokens`, tail files are dropped in that same order — the speaker always survives, pending-batch and recent-history authors survive ahead of mere utterance mentions. Emitted at priority 85 with source `content_search.people`.
 
 This tier is the correctness floor — the people-file guarantee documented in [Memory → People lookup guarantee](memory.md#people-lookup-guarantee). It runs regardless of whether the agent-loop tier succeeds, fails, or returns empty.
 

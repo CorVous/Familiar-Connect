@@ -19,7 +19,12 @@ from familiar_connect.context.providers.content_search.people_lookup import (
     PEOPLE_LOOKUP_SOURCE,
     lookup,
 )
-from familiar_connect.context.types import ContextRequest, Layer, Modality
+from familiar_connect.context.types import (
+    ContextRequest,
+    Layer,
+    Modality,
+    PendingTurn,
+)
 from familiar_connect.identity import Author
 from familiar_connect.memory.store import MemoryStore
 
@@ -29,12 +34,15 @@ if TYPE_CHECKING:
 
 _ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
 _BOB = Author(platform="discord", user_id="2", username="bob", display_name="Bob")
+_CAROL = Author(platform="discord", user_id="3", username="carol", display_name="Carol")
+_DAVE = Author(platform="discord", user_id="4", username="dave", display_name="Dave")
 
 
 def _request(
     *,
     utterance: str = "hi",
     author: Author | None = _ALICE,
+    pending_turns: tuple[PendingTurn, ...] = (),
 ) -> ContextRequest:
     return ContextRequest(
         familiar_id="aria",
@@ -45,6 +53,7 @@ def _request(
         modality=Modality.text,
         budget_tokens=2048,
         deadline_s=10.0,
+        pending_turns=pending_turns,
     )
 
 
@@ -229,4 +238,130 @@ class TestBudget:
         )
 
         # speaker (Alice) wins; Bob dropped
+        assert len(contributions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Pending-turn batch — all authors in the batch being responded to
+# ---------------------------------------------------------------------------
+
+
+class TestPendingBatch:
+    def test_all_batch_authors_included_after_speaker(self, store: MemoryStore) -> None:
+        store.write_file("people/discord-1.md", "A")
+        store.write_file("people/discord-2.md", "B")
+        store.write_file("people/discord-3.md", "C")
+
+        contributions = lookup(
+            store,
+            _request(
+                author=_ALICE,
+                pending_turns=(
+                    PendingTurn(author=_BOB, text="hey"),
+                    PendingTurn(author=_CAROL, text="yo"),
+                    PendingTurn(author=_ALICE, text="hi"),
+                ),
+            ),
+        )
+
+        # speaker first, then batch in order, deduped
+        assert [c.text.strip() for c in contributions] == ["A", "B", "C"]
+
+    def test_batch_skips_none_author(self, store: MemoryStore) -> None:
+        store.write_file("people/discord-1.md", "A")
+        store.write_file("people/discord-2.md", "B")
+
+        contributions = lookup(
+            store,
+            _request(
+                author=_ALICE,
+                pending_turns=(
+                    PendingTurn(author=None, text="system note"),
+                    PendingTurn(author=_BOB, text="hey"),
+                ),
+            ),
+        )
+        assert [c.text.strip() for c in contributions] == ["A", "B"]
+
+    def test_batch_skips_authors_without_people_file(self, store: MemoryStore) -> None:
+        store.write_file("people/discord-1.md", "A")
+        # Bob has no file on disk
+        contributions = lookup(
+            store,
+            _request(
+                author=_ALICE,
+                pending_turns=(PendingTurn(author=_BOB, text="hey"),),
+            ),
+        )
+        assert [c.text.strip() for c in contributions] == ["A"]
+
+
+# ---------------------------------------------------------------------------
+# Recent-history authors — 5 most recent users in the channel
+# ---------------------------------------------------------------------------
+
+
+class TestRecentAuthors:
+    def test_recent_authors_included_after_batch(self, store: MemoryStore) -> None:
+        for slug, text in (
+            ("discord-1", "A"),
+            ("discord-2", "B"),
+            ("discord-3", "C"),
+            ("discord-4", "D"),
+        ):
+            store.write_file(f"people/{slug}.md", text)
+
+        contributions = lookup(
+            store,
+            _request(
+                author=_ALICE,
+                pending_turns=(PendingTurn(author=_BOB, text="hey"),),
+            ),
+            recent_authors=(_CAROL, _DAVE),
+        )
+
+        assert [c.text.strip() for c in contributions] == ["A", "B", "C", "D"]
+
+    def test_recent_authors_dedupe_with_speaker_and_batch(
+        self, store: MemoryStore
+    ) -> None:
+        store.write_file("people/discord-1.md", "A")
+        store.write_file("people/discord-2.md", "B")
+        store.write_file("people/discord-3.md", "C")
+
+        contributions = lookup(
+            store,
+            _request(
+                author=_ALICE,
+                pending_turns=(PendingTurn(author=_BOB, text="hey"),),
+            ),
+            recent_authors=(_ALICE, _BOB, _CAROL),
+        )
+
+        # Alice + Bob already in; only Carol added from recent
+        assert [c.text.strip() for c in contributions] == ["A", "B", "C"]
+
+    def test_recent_authors_skip_missing_files(self, store: MemoryStore) -> None:
+        store.write_file("people/discord-1.md", "A")
+        # Carol has no file
+        contributions = lookup(
+            store,
+            _request(author=_ALICE),
+            recent_authors=(_CAROL,),
+        )
+        assert [c.text.strip() for c in contributions] == ["A"]
+
+    def test_budget_drops_recent_before_speaker(self, store: MemoryStore) -> None:
+        long_text = "word " * 1000
+        store.write_file("people/discord-1.md", long_text)
+        store.write_file("people/discord-3.md", long_text)
+
+        contributions = lookup(
+            store,
+            _request(author=_ALICE),
+            recent_authors=(_CAROL,),
+            content_cap_tokens=900,  # leaves room for exactly one file
+        )
+
+        # speaker wins; recent tail dropped
         assert len(contributions) == 1

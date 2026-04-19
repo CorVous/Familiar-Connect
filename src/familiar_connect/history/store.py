@@ -333,6 +333,47 @@ class HistoryStore:
             ).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
 
+    def recent_distinct_authors(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int,
+        limit: int,
+    ) -> list[Author]:
+        """Return up to *limit* most-recently-seen distinct user authors.
+
+        Most-recent-first ordering by canonical key (platform + user_id).
+        Skips turns without an author (assistant replies, system events).
+        Scoped to one channel — matches :meth:`recent`.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT author_platform, author_user_id,
+                   author_username, author_display_name,
+                   MAX(id) AS max_id
+              FROM turns
+             WHERE familiar_id = ?
+               AND channel_id = ?
+               AND author_platform IS NOT NULL
+               AND author_user_id IS NOT NULL
+             GROUP BY author_platform, author_user_id
+             ORDER BY max_id DESC
+             LIMIT ?
+            """,
+            (familiar_id, channel_id, limit),
+        ).fetchall()
+        return [
+            Author(
+                platform=str(row["author_platform"]),
+                user_id=str(row["author_user_id"]),
+                username=row["author_username"],
+                display_name=row["author_display_name"],
+            )
+            for row in rows
+        ]
+
     def older_than(
         self,
         *,
