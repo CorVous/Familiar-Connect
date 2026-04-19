@@ -101,6 +101,12 @@ class ContentSearchProvider:
         self._maybe_start_index_build()
 
         retrieved = await self._retrieve(request, exclude=exclude)
+        retrieved_files = ", ".join(c.rel_path for c in retrieved) or "(none)"
+        _logger.info(
+            f"{ls.tag('📚 Content', ls.M)} "
+            f"{ls.kv('retrieved', str(len(retrieved)), vc=ls.LM)} "
+            f"{ls.kv('files', retrieved_files, vc=ls.LW)}"
+        )
 
         try:
             filtered = await _filter.run(
