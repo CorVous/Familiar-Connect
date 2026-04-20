@@ -21,12 +21,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 from familiar_connect import log_style as ls
+from familiar_connect.identity import format_turn_for_transcript
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.config import Interjection
+    from familiar_connect.history.store import HistoryStore
     from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
 
@@ -149,6 +151,8 @@ def _interjection_interval(
 # Prompt assembly
 # ---------------------------------------------------------------------------
 
+_RECENT_HISTORY_LIMIT = 5
+
 _EVALUATION_SYSTEM_PROMPT = """\
 You are a conversation monitor. Your ONLY job is to decide whether \
 {familiar_name} should respond. Reply with exactly two lines:
@@ -162,8 +166,8 @@ Character: {familiar_name}
 
 Conversational personality: {chattiness}
 
-Recent conversation summary:
-{conversation_summary}
+Recent conversation:
+{recent_history}
 
 Recent messages:
 {buffer}
@@ -177,8 +181,8 @@ Character: {familiar_name}
 
 Conversational personality: {chattiness}
 
-Recent conversation summary:
-{conversation_summary}
+Recent conversation:
+{recent_history}
 
 Recent messages:
 {buffer}
@@ -192,8 +196,8 @@ Character: {familiar_name}
 
 Conversational personality: {chattiness}
 
-Recent conversation summary:
-{conversation_summary}
+Recent conversation:
+{recent_history}
 
 Recent messages:
 {buffer}
@@ -227,6 +231,7 @@ class ConversationMonitor:
         lull_timeout: float,
         llm_client: LLMClient,
         character_card: str,
+        history_store: HistoryStore,
         on_respond: Callable[
             [int, list[BufferedMessage], ResponseTrigger],
             Awaitable[None],
@@ -240,6 +245,7 @@ class ConversationMonitor:
         self._lull_timeout = lull_timeout
         self._llm_client = llm_client
         self._character_card = character_card
+        self._history_store = history_store
         self.on_respond = on_respond
         self._rng = rng if rng is not None else random.random  # noqa: S311
         self._buffers: dict[int, ChannelBuffer] = {}
@@ -487,12 +493,20 @@ class ConversationMonitor:
             len(buf.buffer),
         )
 
+        turns = self._history_store.recent(
+            familiar_id=self._familiar_name,
+            channel_id=channel_id,
+            limit=_RECENT_HISTORY_LIMIT,
+        )
+        recent_history = "\n".join(
+            format_turn_for_transcript(t.role, t.author, t.content) for t in turns
+        )
         buffer_text = _format_buffer(buf.buffer)
         fmt = {
             "familiar_name": self._familiar_name,
             "character_card": self._character_card,
             "chattiness": self._chattiness,
-            "conversation_summary": "",
+            "recent_history": recent_history,
             "buffer": buffer_text,
         }
         if trigger_label == "lull":

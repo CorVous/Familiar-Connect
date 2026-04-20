@@ -30,6 +30,7 @@ from familiar_connect.chattiness import (
     is_direct_address,
 )
 from familiar_connect.config import Interjection
+from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 
@@ -60,6 +61,11 @@ def _author(name: str) -> Author:
 # ---------------------------------------------------------------------------
 
 
+def _make_history_store() -> HistoryStore:
+    """Return an empty in-memory HistoryStore."""
+    return HistoryStore(":memory:")
+
+
 def _make_monitor(
     *,
     familiar_name: str = "aria",
@@ -69,6 +75,7 @@ def _make_monitor(
     lull_timeout: float = 100.0,  # large default so lull never fires unintentionally
     side_model_reply: str = "YES",
     rng: Callable[[], float] = lambda: 0.5,  # zero jitter by default
+    history_store: HistoryStore | None = None,
     on_respond: (
         Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]] | None
     ) = None,
@@ -103,6 +110,9 @@ def _make_monitor(
         lull_timeout=lull_timeout,
         llm_client=llm_client,
         character_card="You are Aria.",
+        history_store=(
+            history_store if history_store is not None else _make_history_store()
+        ),
         rng=rng,
         on_respond=on_respond if on_respond is not None else _default_on_respond,
     )
@@ -1087,3 +1097,69 @@ class TestChannelContext:
         assert ctx.kind == "dm"
         assert ctx.name == "bob"
         assert ctx.parent_name is None
+
+
+# ---------------------------------------------------------------------------
+# History injection into evaluation prompt
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateHistoryInjection:
+    """_evaluate pulls the 5 most recent HistoryStore turns into the prompt."""
+
+    @staticmethod
+    def _seed_turns(
+        store: HistoryStore,
+        channel_id: int,
+        familiar_id: str,
+        n: int,
+    ) -> None:
+        """Append *n* alternating user/assistant turns."""
+        alice = _author("Alice")
+        for i in range(n):
+            role = "user" if i % 2 == 0 else "assistant"
+            author = alice if role == "user" else None
+            store.append_turn(
+                familiar_id=familiar_id,
+                channel_id=channel_id,
+                role=role,
+                content=f"turn {i}",
+                author=author,
+            )
+
+    @staticmethod
+    def _captured_user_prompt(monitor: ConversationMonitor) -> str:
+        """Return the user-message content from the last llm_client.chat call."""
+        messages = monitor._llm_client.chat.await_args.args[0]  # ty: ignore
+        return messages[1].content
+
+    def test_recent_history_injected_into_prompt(self) -> None:
+        store = _make_history_store()
+        self._seed_turns(store, channel_id=1, familiar_id="aria", n=7)
+        monitor, _ = _make_monitor(history_store=store, side_model_reply="reason\nYES")
+
+        asyncio.run(
+            monitor.on_message(1, _author("Alice"), "aria hello", is_mention=True)
+        )
+
+        user_prompt = self._captured_user_prompt(monitor)
+        assert "turn 2" in user_prompt
+        assert "turn 6" in user_prompt
+        assert "turn 0" not in user_prompt
+        assert "turn 1" not in user_prompt
+
+    def test_empty_history_renders_blank(self) -> None:
+        monitor, _ = _make_monitor(side_model_reply="reason\nNO")
+
+        asyncio.run(monitor.on_message(1, _author("Alice"), "aria?", is_mention=True))
+
+        assert "Recent conversation:" in self._captured_user_prompt(monitor)
+
+    def test_history_scoped_per_channel(self) -> None:
+        store = _make_history_store()
+        self._seed_turns(store, channel_id=99, familiar_id="aria", n=3)
+        monitor, _ = _make_monitor(history_store=store, side_model_reply="reason\nNO")
+
+        asyncio.run(monitor.on_message(1, _author("Alice"), "aria?", is_mention=True))
+
+        assert "turn 0" not in self._captured_user_prompt(monitor)

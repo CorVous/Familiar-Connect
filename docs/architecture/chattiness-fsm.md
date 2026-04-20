@@ -72,6 +72,23 @@ interjection shrinks the distance to the next check by 3, flooring
 at 3. After a successful interjection or direct address, state is
 reset and the curve starts over from `starting_interval`.
 
+## Evaluation prompt inputs
+
+`_evaluate` builds a two-message prompt (system + user) for the
+interjection-decision LLM. The user message contains:
+
+| Field | Source | Notes |
+|-------|--------|-------|
+| `familiar_name` | constructor arg | static per familiar |
+| `character_card` | `memory/self/*.md` files | pre-loaded at construction |
+| `chattiness` | config personality string | static per familiar |
+| `recent_history` | `HistoryStore.recent(limit=5)` | 5 most recent turns for the channel; empty string if none |
+| `buffer` | `ChannelBuffer.buffer` | unpersisted messages since last response |
+
+Three templates select the closing question:
+`_LULL_PROMPT`, `_DIRECT_ADDRESS_PROMPT`, `_INTERJECTION_PROMPT`
+(the interjection variant also includes `message_count`).
+
 ## Triggers and `is_unsolicited`
 
 `ResponseTrigger` (`chattiness.py:33–47`) has three values. The

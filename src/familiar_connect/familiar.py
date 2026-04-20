@@ -222,6 +222,7 @@ class Familiar:
             lull_timeout=character_config.text_lull_timeout,
             llm_client=llm_clients["interjection_decision"],
             character_card=character_card,
+            history_store=history_store,
             on_respond=_noop_respond,
         )
 
