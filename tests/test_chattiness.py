@@ -30,6 +30,7 @@ from familiar_connect.chattiness import (
     is_direct_address,
 )
 from familiar_connect.config import Interjection
+from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 
@@ -60,15 +61,22 @@ def _author(name: str) -> Author:
 # ---------------------------------------------------------------------------
 
 
+def _make_history_store() -> HistoryStore:
+    """Return an empty in-memory HistoryStore."""
+    return HistoryStore(":memory:")
+
+
 def _make_monitor(
     *,
     familiar_name: str = "aria",
+    familiar_id: str = "aria",
     aliases: list[str] | None = None,
     chattiness: str = "Curious",
     interjection: Interjection = Interjection.average,
     lull_timeout: float = 100.0,  # large default so lull never fires unintentionally
     side_model_reply: str = "YES",
     rng: Callable[[], float] = lambda: 0.5,  # zero jitter by default
+    history_store: HistoryStore | None = None,
     on_respond: (
         Callable[[int, list[BufferedMessage], ResponseTrigger], Awaitable[None]] | None
     ) = None,
@@ -97,12 +105,16 @@ def _make_monitor(
 
     monitor = ConversationMonitor(
         familiar_name=familiar_name,
+        familiar_id=familiar_id,
         aliases=aliases or [],
         chattiness=chattiness,
         interjection=interjection,
         lull_timeout=lull_timeout,
         llm_client=llm_client,
         character_card="You are Aria.",
+        history_store=(
+            history_store if history_store is not None else _make_history_store()
+        ),
         rng=rng,
         on_respond=on_respond if on_respond is not None else _default_on_respond,
     )
@@ -1087,3 +1099,151 @@ class TestChannelContext:
         assert ctx.kind == "dm"
         assert ctx.name == "bob"
         assert ctx.parent_name is None
+
+
+# ---------------------------------------------------------------------------
+# History injection into evaluation prompt
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateHistoryInjection:
+    """_evaluate pulls the 5 most recent HistoryStore turns into the prompt."""
+
+    @staticmethod
+    def _seed_turns(
+        store: HistoryStore,
+        channel_id: int,
+        familiar_id: str,
+        n: int,
+    ) -> None:
+        """Append *n* alternating user/assistant turns."""
+        alice = _author("Alice")
+        for i in range(n):
+            role = "user" if i % 2 == 0 else "assistant"
+            author = alice if role == "user" else None
+            store.append_turn(
+                familiar_id=familiar_id,
+                channel_id=channel_id,
+                role=role,
+                content=f"turn {i}",
+                author=author,
+            )
+
+    def test_recent_history_injected_into_prompt(self) -> None:
+        """5 most recent turns appear in the user-prompt sent to LLM."""
+        store = _make_history_store()
+        channel_id = 1
+        familiar_id = "aria"
+        # seed 7 turns; only last 5 should appear
+        self._seed_turns(store, channel_id, familiar_id, 7)
+
+        captured: list[list[Message]] = []
+
+        def _side_effect(messages: list[Message]) -> Message:
+            captured.append(messages)
+            return Message(role="assistant", content="reason\nYES")
+
+        llm_client = MagicMock()
+        llm_client.chat = AsyncMock(side_effect=_side_effect)
+
+        monitor = ConversationMonitor(
+            familiar_name=familiar_id,
+            familiar_id=familiar_id,
+            aliases=[],
+            chattiness="Curious",
+            interjection=Interjection.average,
+            lull_timeout=100.0,
+            llm_client=llm_client,
+            character_card="You are Aria.",
+            history_store=store,
+            rng=lambda: 0.5,
+            on_respond=AsyncMock(),
+        )
+
+        asyncio.run(
+            monitor.on_message(
+                channel_id,
+                _author("Alice"),
+                "aria hello",
+                is_mention=True,
+            )
+        )
+
+        assert captured, "LLM was not called"
+        user_prompt = captured[0][1].content  # index 1 = user message
+
+        # turns 2-6 (the last 5 of 7) should appear; turn 0 and 1 should not
+        assert "turn 2" in user_prompt
+        assert "turn 6" in user_prompt
+        assert "turn 0" not in user_prompt
+        assert "turn 1" not in user_prompt
+
+    def test_empty_history_renders_blank(self) -> None:
+        """No history → recent_history slot is empty, prompt still valid."""
+        store = _make_history_store()
+        captured: list[list[Message]] = []
+
+        def _side_effect(messages: list[Message]) -> Message:
+            captured.append(messages)
+            return Message(role="assistant", content="reason\nNO")
+
+        llm_client = MagicMock()
+        llm_client.chat = AsyncMock(side_effect=_side_effect)
+
+        monitor = ConversationMonitor(
+            familiar_name="aria",
+            familiar_id="aria",
+            aliases=[],
+            chattiness="Curious",
+            interjection=Interjection.average,
+            lull_timeout=100.0,
+            llm_client=llm_client,
+            character_card="You are Aria.",
+            history_store=store,
+            rng=lambda: 0.5,
+            on_respond=AsyncMock(),
+        )
+
+        asyncio.run(monitor.on_message(1, _author("Alice"), "aria?", is_mention=True))
+
+        assert captured
+        user_prompt = captured[0][1].content
+        assert "Recent conversation:" in user_prompt
+
+    def test_history_scoped_per_channel(self) -> None:
+        """Turns from a different channel do not bleed into the prompt."""
+        store = _make_history_store()
+        familiar_id = "aria"
+        # seed turns on channel 99 only
+        self._seed_turns(store, 99, familiar_id, 3)
+
+        captured: list[list[Message]] = []
+
+        def _side_effect(messages: list[Message]) -> Message:
+            captured.append(messages)
+            return Message(role="assistant", content="reason\nNO")
+
+        llm_client = MagicMock()
+        llm_client.chat = AsyncMock(side_effect=_side_effect)
+
+        monitor = ConversationMonitor(
+            familiar_name=familiar_id,
+            familiar_id=familiar_id,
+            aliases=[],
+            chattiness="Curious",
+            interjection=Interjection.average,
+            lull_timeout=100.0,
+            llm_client=llm_client,
+            character_card="You are Aria.",
+            history_store=store,
+            rng=lambda: 0.5,
+            on_respond=AsyncMock(),
+        )
+
+        # evaluate on channel 1, not channel 99
+        asyncio.run(monitor.on_message(1, _author("Alice"), "aria?", is_mention=True))
+
+        assert captured
+        user_prompt = captured[0][1].content
+        # channel 99's turns must not appear
+        assert "turn 0" not in user_prompt
