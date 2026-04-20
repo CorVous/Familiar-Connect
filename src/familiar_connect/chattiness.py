@@ -21,6 +21,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 from familiar_connect import log_style as ls
+from familiar_connect.identity import format_turn_for_transcript
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -224,7 +225,6 @@ class ConversationMonitor:
     def __init__(
         self,
         familiar_name: str,
-        familiar_id: str,
         aliases: list[str],
         chattiness: str,
         interjection: Interjection,
@@ -239,7 +239,6 @@ class ConversationMonitor:
         rng: Callable[[], float] | None = None,
     ) -> None:
         self._familiar_name = familiar_name
-        self._familiar_id = familiar_id
         self._aliases = aliases
         self._chattiness = chattiness
         self._interjection = interjection
@@ -495,12 +494,12 @@ class ConversationMonitor:
         )
 
         turns = self._history_store.recent(
-            familiar_id=self._familiar_id,
+            familiar_id=self._familiar_name,
             channel_id=channel_id,
             limit=_RECENT_HISTORY_LIMIT,
         )
         recent_history = "\n".join(
-            f"{t.author.label if t.author else t.role}: {t.content}" for t in turns
+            format_turn_for_transcript(t.role, t.author, t.content) for t in turns
         )
         buffer_text = _format_buffer(buf.buffer)
         fmt = {

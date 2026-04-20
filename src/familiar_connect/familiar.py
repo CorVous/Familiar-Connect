@@ -216,7 +216,6 @@ class Familiar:
 
         monitor = ConversationMonitor(
             familiar_name=familiar_id,
-            familiar_id=familiar_id,
             aliases=character_config.aliases,
             chattiness=character_config.chattiness,
             interjection=character_config.interjection,
