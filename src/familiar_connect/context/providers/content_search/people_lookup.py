@@ -1,9 +1,15 @@
 """Deterministic people-file lookup — tier 1 of ContentSearchProvider.
 
-No LLM. Always injects the speaker's ``people/<author.slug>.md`` and
-any file whose canonical slug resolves from a name mentioned in the
-utterance (via ``people/_aliases.json``). Correctness floor —
-guarantees the familiar never forgets someone it has notes on.
+No LLM. Always injects people files for a prioritised author set:
+
+1. speaker (``request.author``) — most recent user to respond
+2. every author in the pending-turn batch being responded to
+3. the N most-recently-seen users in the channel (supplied by caller)
+4. any file whose canonical slug resolves from a name mentioned in
+   the utterance (via ``people/_aliases.json``)
+
+Correctness floor — guarantees the familiar never forgets someone
+it has notes on, and keeps recent participants warm across turns.
 
 Files are keyed by :attr:`Author.slug` (e.g. ``people/discord-123.md``)
 so renames never orphan a file. The alias index maps lowercased
@@ -25,7 +31,10 @@ from familiar_connect.context.types import Contribution, Layer
 from familiar_connect.memory.store import MemoryStoreError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from familiar_connect.context.types import ContextRequest
+    from familiar_connect.identity import Author
     from familiar_connect.memory.store import MemoryStore
 
 
@@ -72,17 +81,20 @@ def lookup(
     store: MemoryStore,
     request: ContextRequest,
     *,
+    recent_authors: Sequence[Author] = (),
     content_cap_tokens: int | None = None,
     max_tokens_per_file: int = DEFAULT_MAX_TOKENS_PER_FILE,
 ) -> list[Contribution]:
-    """Return Contributions for speaker + mentioned-name people files.
+    """Return Contributions for speaker + batch + recent + mentioned names.
 
-    Ordering: speaker first, then utterance order. Overflow against
-    *content_cap_tokens* drops the tail, preserving the speaker.
+    Ordering: speaker, pending-batch authors, *recent_authors*, then
+    utterance-mentioned names. Overflow against *content_cap_tokens*
+    drops the tail, preserving the speaker.
     """
     return lookup_with_paths(
         store,
         request,
+        recent_authors=recent_authors,
         content_cap_tokens=content_cap_tokens,
         max_tokens_per_file=max_tokens_per_file,
     ).contributions
@@ -92,12 +104,17 @@ def lookup_with_paths(
     store: MemoryStore,
     request: ContextRequest,
     *,
+    recent_authors: Sequence[Author] = (),
     content_cap_tokens: int | None = None,
     max_tokens_per_file: int = DEFAULT_MAX_TOKENS_PER_FILE,
 ) -> LookupResult:
-    """Return contributions plus the loaded rel_paths for retriever exclusion."""
+    """Return contributions plus loaded rel_paths for retriever exclusion.
+
+    *recent_authors*: most-recent-first distinct users the caller wants
+    kept warm (e.g. 5 most recent channel participants from history).
+    """
     aliases = _load_alias_index(store)
-    ordered_slugs = _select_slugs(store, request, aliases)
+    ordered_slugs = _select_slugs(store, request, aliases, recent_authors)
     if not ordered_slugs:
         return LookupResult()
 
@@ -179,17 +196,33 @@ def _select_slugs(
     store: MemoryStore,
     request: ContextRequest,
     aliases: dict[str, str],
+    recent_authors: Sequence[Author],
 ) -> list[str]:
     """Pick which canonical slugs to load, in priority order."""
     seen: set[str] = set()
     ordered: list[str] = []
 
-    # speaker file first — keyed directly by Author.slug
-    if request.author is not None:
-        slug = request.author.slug
-        if slug and _file_exists(store, f"{_PEOPLE_DIR}/{slug}.md"):
-            seen.add(slug)
-            ordered.append(slug)
+    def _add_author(author: Author | None) -> None:
+        if author is None:
+            return
+        slug = author.slug
+        if not slug or slug in seen:
+            return
+        if not _file_exists(store, f"{_PEOPLE_DIR}/{slug}.md"):
+            return
+        seen.add(slug)
+        ordered.append(slug)
+
+    # 1. speaker — most recent user to respond
+    _add_author(request.author)
+
+    # 2. authors in the pending-turn batch being responded to
+    for pending in request.pending_turns:
+        _add_author(pending.author)
+
+    # 3. most-recent channel participants supplied by caller
+    for author in recent_authors:
+        _add_author(author)
 
     utterance = request.utterance
     lower = utterance.lower()

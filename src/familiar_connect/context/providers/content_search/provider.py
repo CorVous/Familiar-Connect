@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         Retriever,
     )
     from familiar_connect.context.types import ContextRequest, Contribution
+    from familiar_connect.history.store import HistoryStore
     from familiar_connect.llm import LLMClient
     from familiar_connect.memory.store import MemoryStore
 
@@ -51,6 +52,9 @@ DEFAULT_DEADLINE_S = 15.0
 DEFAULT_TOP_K = 8
 """Top-K embedding hits requested from the retriever."""
 
+DEFAULT_RECENT_AUTHOR_LIMIT = 5
+"""How many most-recently-seen channel users to keep warm via people_lookup."""
+
 
 class ContentSearchProvider:
     """ContextProvider composing the three tiers."""
@@ -63,28 +67,34 @@ class ContentSearchProvider:
         *,
         store: MemoryStore,
         llm_client: LLMClient,
+        history_store: HistoryStore | None = None,
         retriever: Retriever | None = None,
         index_build: Callable[[], Awaitable[None]] | None = None,
         top_k: int = DEFAULT_TOP_K,
         content_cap_tokens: int | None = None,
         max_tokens_per_file: int = DEFAULT_MAX_TOKENS_PER_FILE,
+        recent_author_limit: int = DEFAULT_RECENT_AUTHOR_LIMIT,
     ) -> None:
         self._store = store
         self._llm_client = llm_client
+        self._history_store = history_store
         self._retriever = retriever
         self._index_build = index_build
         self._top_k = top_k
         self._content_cap_tokens = content_cap_tokens
         self._max_tokens_per_file = max_tokens_per_file
+        self._recent_author_limit = recent_author_limit
         self._build_task: asyncio.Task[None] | None = None
 
     async def contribute(
         self,
         request: ContextRequest,
     ) -> list[Contribution]:
+        recent_authors = self._fetch_recent_authors(request)
         lookup_result = lookup_with_paths(
             self._store,
             request,
+            recent_authors=recent_authors,
             content_cap_tokens=self._content_cap_tokens,
             max_tokens_per_file=self._max_tokens_per_file,
         )
@@ -137,6 +147,16 @@ class ContentSearchProvider:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _fetch_recent_authors(self, request: ContextRequest) -> list:
+        """Pull N most-recent distinct users from history, if wired."""
+        if self._history_store is None or self._recent_author_limit <= 0:
+            return []
+        return self._history_store.recent_distinct_authors(
+            familiar_id=request.familiar_id,
+            channel_id=request.channel_id,
+            limit=self._recent_author_limit,
+        )
 
     def _maybe_start_index_build(self) -> None:
         if self._index_build is None or self._build_task is not None:

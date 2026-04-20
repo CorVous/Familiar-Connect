@@ -169,6 +169,7 @@ class Familiar:
             "content_search": ContentSearchProvider(
                 store=memory_store,
                 llm_client=llm_clients["memory_search"],
+                history_store=history_store,
                 retriever=embedding_retriever,
                 index_build=_build_embedding_index,
             ),

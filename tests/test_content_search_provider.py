@@ -24,7 +24,9 @@ from familiar_connect.context.types import (
     Contribution,
     Layer,
     Modality,
+    PendingTurn,
 )
+from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.memory.store import MemoryStore
@@ -41,9 +43,15 @@ if TYPE_CHECKING:
 _CHANNEL = 100
 _FAMILIAR = "aria"
 _ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
+_BOB = Author(platform="discord", user_id="2", username="bob", display_name="Bob")
+_CAROL = Author(platform="discord", user_id="3", username="carol", display_name="Carol")
 
 
-def _request(utterance: str = "what do you know about Alice?") -> ContextRequest:
+def _request(
+    utterance: str = "what do you know about Alice?",
+    *,
+    pending_turns: tuple[PendingTurn, ...] = (),
+) -> ContextRequest:
     return ContextRequest(
         familiar_id=_FAMILIAR,
         channel_id=_CHANNEL,
@@ -53,6 +61,7 @@ def _request(utterance: str = "what do you know about Alice?") -> ContextRequest
         modality=Modality.text,
         budget_tokens=2048,
         deadline_s=10.0,
+        pending_turns=pending_turns,
     )
 
 
@@ -222,6 +231,47 @@ class TestPeopleLookupInvariant:
         assert len(contribs) == 1
         assert contribs[0].source == PEOPLE_LOOKUP_SOURCE
         assert "Alice's notes" in contribs[0].text
+
+
+# ---------------------------------------------------------------------------
+# Recent-history + batch wiring into people_lookup
+# ---------------------------------------------------------------------------
+
+
+class TestUserFetchWiring:
+    @pytest.mark.asyncio
+    async def test_recent_history_authors_and_batch_surface_people_files(
+        self, store: MemoryStore, tmp_path: Path
+    ) -> None:
+        """ContentSearchProvider should pass batch + recent history into lookup."""
+        store.write_file("people/discord-1.md", "A")
+        store.write_file("people/discord-2.md", "B")
+        store.write_file("people/discord-3.md", "C")
+
+        history = HistoryStore(tmp_path / "history.db")
+        history.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="older",
+            author=_CAROL,
+        )
+
+        side = _ScriptedLLMClient(["ANSWER:"])
+        provider = ContentSearchProvider(
+            store=store,
+            llm_client=side,
+            history_store=history,
+        )
+        contribs = await provider.contribute(
+            _request(
+                utterance="hi",
+                pending_turns=(PendingTurn(author=_BOB, text="hey"),),
+            )
+        )
+
+        texts = [c.text.strip() for c in contribs if c.source == PEOPLE_LOOKUP_SOURCE]
+        assert texts == ["A", "B", "C"]
 
 
 # ---------------------------------------------------------------------------

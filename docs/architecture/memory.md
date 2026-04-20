@@ -158,12 +158,14 @@ The provider's job is to run all three tiers within a deadline, log decisions fo
 
 ### People lookup guarantee
 
-Before tier 2/3 run, `ContentSearchProvider` always loads a fixed set of `people/*.md` files into `Layer.content`:
+Before tier 2/3 run, `ContentSearchProvider` always loads a priority-ordered set of `people/*.md` files into `Layer.content`:
 
-- **Speaker's file.** `people/<request.author.slug>.md` — an exact lookup by canonical slug (e.g. `discord-123456789`). No fuzzy matching, because the slug comes from the immutable platform id carried on `Author`.
-- **Mentioned-name files.** Resolved via `people/_aliases.json`, a `{ "lowercased-name": "author-slug" }` index rebuilt by the writer. The utterance is tokenized (single words, capitalized mid-sentence words, hyphenated phrases); each candidate is looked up in the alias map and the resolved canonical file is loaded.
+1. **Speaker's file.** `people/<request.author.slug>.md` — an exact lookup by canonical slug (e.g. `discord-123456789`). No fuzzy matching, because the slug comes from the immutable platform id carried on `Author`.
+2. **Pending-turn batch.** Every distinct author in `request.pending_turns` — the buffered user messages being responded to. Ensures everyone in the current exchange is on the page.
+3. **Recent channel participants.** Up to 5 most-recently-seen distinct users in the channel, via `HistoryStore.recent_distinct_authors`. Keeps the familiar warm on regulars across turns. Limit tunable via `ContentSearchProvider(recent_author_limit=...)`.
+4. **Mentioned-name files.** Resolved via `people/_aliases.json`, a `{ "lowercased-name": "author-slug" }` index rebuilt by the writer. The utterance is tokenized (single words, capitalized mid-sentence words, hyphenated phrases); each candidate is looked up in the alias map and the resolved canonical file is loaded.
 
-Each loaded file is truncated to ~800 tokens before emission. The tier emits at priority 85 (between `CharacterProvider` at 100 and the filter tier at 70), with source `content_search.people`. On total-content overflow, the speaker's file is kept and utterance-order tail entries are dropped first.
+Each loaded file is truncated to ~800 tokens before emission. The tier emits at priority 85 (between `CharacterProvider` at 100 and the filter tier at 70), with source `content_search.people`. On total-content overflow, tail files are dropped in the same 1→4 order — the speaker always survives, then the batch, then recent participants, with utterance-only mentions dropped first.
 
 This tier runs regardless of tier-2/3 behaviour. Even if the filter emits an empty `ANSWER:`, the retriever returns nothing, or either raises, people files are still surfaced — the familiar does not forget someone it has notes on.
 
