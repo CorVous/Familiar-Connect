@@ -251,26 +251,62 @@ async def unsubscribe_text(
 
 
 def _current_voice_participants(vc: discord.VoiceClient) -> tuple[Author, ...]:
-    """Snapshot non-bot members of the voice channel as :class:`Author` s.
+    """Snapshot non-bot occupants of the voice channel as :class:`Author` s.
 
-    Read off ``vc.channel.members`` at response time so late-joiners
-    are included and leavers are dropped. Bots are filtered out —
-    other bots aren't conversational peers and our own bot would
-    otherwise list itself as a participant. Returns ``()`` when the
-    channel or member list isn't reachable (disconnected client,
-    test mock without the attribute).
+    Uses ``channel.voice_states`` — the authoritative per-channel
+    roster sourced from the ``voice_states`` intent — rather than
+    ``channel.members``. ``channel.members`` silently drops users
+    whose Member object isn't in the guild cache (which happens
+    whenever the privileged ``members`` intent is off), so a voice
+    call with 4 people can surface only 2 to the LLM.
+
+    Each voice-state user id is resolved in order: guild Member
+    (full display name), global User (username only), else a stub
+    ``Author`` carrying the raw user id. Bots are filtered at
+    whichever tier first surfaces the ``.bot`` flag.
     """
     channel = getattr(vc, "channel", None)
-    members = getattr(channel, "members", None) if channel is not None else None
-    if not members:
+    if channel is None:
         return ()
-    try:
-        iter(members)
-    except TypeError:
+    voice_states = getattr(channel, "voice_states", None)
+    if not isinstance(voice_states, dict) or not voice_states:
         return ()
-    return tuple(
-        Author.from_discord_member(m) for m in members if not getattr(m, "bot", False)
-    )
+
+    guild = getattr(channel, "guild", None)
+    client = getattr(vc, "client", None)
+    authors: list[Author] = []
+    for user_id in voice_states:
+        member = guild.get_member(user_id) if guild is not None else None
+        if member is not None:
+            if getattr(member, "bot", False):
+                continue
+            authors.append(Author.from_discord_member(member))
+            continue
+        user = client.get_user(user_id) if client is not None else None
+        if user is not None:
+            if getattr(user, "bot", False):
+                continue
+            authors.append(
+                Author(
+                    platform="discord",
+                    user_id=str(user_id),
+                    username=getattr(user, "name", None),
+                    display_name=getattr(user, "global_name", None)
+                    or getattr(user, "display_name", None),
+                )
+            )
+            continue
+        # Nothing cached — emit a stub so the LLM at least sees the
+        # extra seat in the room, rather than silently dropping them.
+        authors.append(
+            Author(
+                platform="discord",
+                user_id=str(user_id),
+                username=None,
+                display_name=None,
+            )
+        )
+    return tuple(authors)
 
 
 async def _run_voice_response(
@@ -1606,6 +1642,11 @@ def create_bot(familiar: Familiar) -> discord.Bot:
     intents.voice_states = True
     intents.message_content = True
     intents.messages = True
+    # members intent (privileged) gives the voice roster real guild
+    # nicknames instead of usernames. Not enabled by default — the Dev
+    # Portal toggle must be on first or py-cord refuses to connect.
+    # _current_voice_participants falls back to voice_states + user
+    # cache so the roster is still complete without it.
     bot = discord.Bot(intents=intents)
 
     # stash bot.user for @mention detection in on_message

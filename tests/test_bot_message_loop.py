@@ -172,6 +172,48 @@ _BOB = _author("Bob", user_id=2)
 _CAROL = _author("Carol", user_id=3)
 
 
+def _make_voice_client_with_members(
+    cached_members: list[Any] | None = None,
+    *,
+    extra_user_ids: list[int] | None = None,
+    users_by_id: dict[int, Any] | None = None,
+) -> MagicMock:
+    """Build a VoiceClient mock with realistic voice-state + member caches.
+
+    ``cached_members`` land in both ``guild.get_member`` and the
+    voice-state set (simulating users whose Member is cached).
+    ``extra_user_ids`` join the voice-state set without being in
+    ``guild.get_member`` (simulating the incomplete-cache case —
+    no ``members`` intent enabled). ``users_by_id`` supplies
+    ``bot.get_user`` entries for those.
+    """
+    cached_members = cached_members or []
+    extra_user_ids = extra_user_ids or []
+    users_by_id = users_by_id or {}
+
+    member_by_id = {m.id: m for m in cached_members}
+    voice_state_ids = [m.id for m in cached_members] + list(extra_user_ids)
+    voice_states = {uid: MagicMock() for uid in voice_state_ids}
+
+    guild = MagicMock()
+    guild.get_member = MagicMock(side_effect=member_by_id.get)
+
+    channel = MagicMock()
+    channel.members = list(cached_members)
+    channel.voice_states = voice_states
+    channel.guild = guild
+
+    client = MagicMock()
+    client.get_user = MagicMock(side_effect=users_by_id.get)
+
+    vc = MagicMock(spec=discord.VoiceClient)
+    vc.play = MagicMock()
+    vc.is_playing = MagicMock(return_value=False)
+    vc.channel = channel
+    vc.client = client
+    return vc
+
+
 def _make_llm_clients(reply: str = "I am here.") -> dict[str, LLMClient]:
     """Return a ``slot_name -> LLMClient`` dict with a stub in every slot.
 
@@ -692,11 +734,9 @@ class TestOnRespond:
         bot_member.display_name = "Familiar"
         bot_member.bot = True
 
-        vc = MagicMock(spec=discord.VoiceClient)
-        vc.play = MagicMock()
-        vc.is_playing = MagicMock(return_value=False)
-        vc.channel = MagicMock()
-        vc.channel.members = [alice_member, bob_member, bot_member]
+        vc = _make_voice_client_with_members(
+            [alice_member, bob_member, bot_member],
+        )
 
         buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
 
@@ -722,6 +762,73 @@ class TestOnRespond:
         assert "Bob" in system_prompt
         # the familiar's own account must not be listed as a participant
         assert "Familiar" not in system_prompt
+
+    def test_voice_roster_uses_voice_states_when_member_cache_is_incomplete(
+        self, tmp_path: Path
+    ) -> None:
+        """Surface voice-state entries even when member cache is stale.
+
+        Without the members intent, ``channel.members`` silently drops
+        users whose Member object isn't cached. The roster must still
+        surface them via ``channel.voice_states`` so the LLM sees
+        everyone on the call, not just whoever happens to be cached.
+        """
+        familiar = _make_familiar(tmp_path, reply="ack")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+
+        alice_member = MagicMock()
+        alice_member.id = 1
+        alice_member.name = "alice"
+        alice_member.display_name = "Alice"
+        alice_member.bot = False
+        bob_member = MagicMock()
+        bob_member.id = 2
+        bob_member.name = "bob"
+        bob_member.display_name = "Bob"
+        bob_member.bot = False
+        # Carol and Dan are in the voice channel but not in the guild's
+        # member cache — only their user accounts are cached.
+        carol_user = MagicMock()
+        carol_user.name = "carol"
+        carol_user.global_name = None
+        carol_user.display_name = "Carol"
+        carol_user.bot = False
+        # Dan isn't even in the user cache.
+
+        vc = _make_voice_client_with_members(
+            cached_members=[alice_member, bob_member],
+            extra_user_ids=[3, 4],  # carol, dan — in voice but not in members
+            users_by_id={3: carol_user},  # only carol in user cache
+        )
+
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
+
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                author=_ALICE,
+                utterance="hi",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        llm = familiar.llm_clients["main_prose"]
+        assert isinstance(llm, _StubLLMClient)
+        main_calls = [c for c in llm.calls if c and c[0].role == "system"]
+        assert len(main_calls) == 1
+        system_prompt = main_calls[0][0].content
+        # Four people are in the call; all four must show up somehow.
+        assert "Alice" in system_prompt
+        assert "Bob" in system_prompt
+        assert "Carol" in system_prompt
+        # Dan's not cached anywhere — surface a user_id stub rather than dropping.
+        assert "4" in system_prompt  # user id "4" as the last-resort label
 
     def test_run_text_response_skips_closed_thread(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

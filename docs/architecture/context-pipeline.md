@@ -221,15 +221,32 @@ Snapshots the live voice-channel roster and emits a single short
 so the LLM knows it is talking to a room, not just the last speaker.
 
 - Reads `ContextRequest.voice_participants`, populated by
-  `_run_voice_response` from `vc.channel.members` at response time
-  (late-joiners included, leavers dropped). Other bots and the
-  familiar itself are filtered out before the request is built.
+  `_run_voice_response` at response time (late-joiners included,
+  leavers dropped). Other bots and the familiar itself are
+  filtered out before the request is built.
 - Inert for text turns and for voice turns with no participants —
   returns `[]` — so the provider is safe to enable in any channel
   mode. `_run_voice_response` force-enables it regardless of the
   channel config; the `imitate_voice` default config lists it too.
 - Pure Python, no I/O; priority 90 (below `CharacterProvider`,
   above `ModeInstructionProvider`).
+
+### Roster resolution
+
+`_current_voice_participants` walks `channel.voice_states` rather
+than `channel.members`. The `voice_states` intent is non-privileged
+and carries the authoritative list of who is in the channel right
+now; `channel.members` silently drops users whose `Member` object
+isn't in the guild cache, which happens whenever the privileged
+`members` intent isn't enabled — producing the "four people in the
+call, only two in the prompt" symptom.
+
+Each user id resolves in order: guild `Member` (full display name),
+then client `User` (username only), else a stub `Author` carrying
+the raw user id. Enabling the `members` intent in the Discord
+Developer Portal plus `intents.members = True` in `create_bot`
+upgrades everyone to the first tier; the stub path is only hit for
+users the gateway never sent us any payload for.
 
 ---
 
