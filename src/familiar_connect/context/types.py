@@ -112,3 +112,8 @@ class ContextRequest:
     interruption_context: str | None = None
     """System note for voice interruptions; rendered before final user
     turn. ``None`` (default) = no note."""
+    voice_participants: tuple[Author, ...] = ()
+    """Everyone currently in the voice channel, populated by the voice
+    response path from ``channel.members``. Empty on text turns and on
+    voice turns where membership is unknown. ``VoiceParticipantsProvider``
+    renders these so the LLM knows who else is on the call."""

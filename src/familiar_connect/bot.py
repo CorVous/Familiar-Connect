@@ -250,6 +250,29 @@ async def unsubscribe_text(
     await ctx.followup.send("No longer listening here.", ephemeral=True)
 
 
+def _current_voice_participants(vc: discord.VoiceClient) -> tuple[Author, ...]:
+    """Snapshot non-bot members of the voice channel as :class:`Author` s.
+
+    Read off ``vc.channel.members`` at response time so late-joiners
+    are included and leavers are dropped. Bots are filtered out —
+    other bots aren't conversational peers and our own bot would
+    otherwise list itself as a participant. Returns ``()`` when the
+    channel or member list isn't reachable (disconnected client,
+    test mock without the attribute).
+    """
+    channel = getattr(vc, "channel", None)
+    members = getattr(channel, "members", None) if channel is not None else None
+    if not members:
+        return ()
+    try:
+        iter(members)
+    except TypeError:
+        return ()
+    return tuple(
+        Author.from_discord_member(m) for m in members if not getattr(m, "bot", False)
+    )
+
+
 async def _run_voice_response(
     channel_id: int,
     guild_id: int | None,
@@ -278,14 +301,14 @@ async def _run_voice_response(
     channel_config = familiar.channel_configs.get(channel_id=channel_id)
 
     # disable LLM-calling providers and processors for voice to reduce
-    # real-time latency; remove this replace() call to re-enable
+    # real-time latency; voice_participants is added unconditionally
+    # so the LLM always sees who is on the call regardless of channel mode
     channel_config = dataclasses.replace(
         channel_config,
-        providers_enabled=channel_config.providers_enabled
-        - {
-            "content_search",
-            "history",
-        },
+        providers_enabled=(
+            channel_config.providers_enabled - {"content_search", "history"}
+        )
+        | {"voice_participants"},
         preprocessors_enabled=frozenset(),
         postprocessors_enabled=frozenset(),
     )
@@ -301,6 +324,7 @@ async def _run_voice_response(
         deadline_s=channel_config.deadline_s,
         pending_turns=tuple(PendingTurn(author=m.author, text=m.text) for m in buffer),
         interruption_context=interruption_context,
+        voice_participants=_current_voice_participants(vc),
     )
 
     builder = TraceBuilder(

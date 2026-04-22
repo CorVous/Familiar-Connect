@@ -666,6 +666,63 @@ class TestOnRespond:
         # Utterance text is shown
         assert "hello world" in msg
 
+    def test_voice_response_injects_channel_roster_into_system_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        """All non-bot voice-channel members reach the LLM's system prompt."""
+        familiar = _make_familiar(tmp_path, reply="ack")
+        familiar.subscriptions.add(
+            channel_id=9000, kind=SubscriptionKind.voice, guild_id=999
+        )
+
+        # two humans + the familiar's own bot account in the call
+        alice_member = MagicMock()
+        alice_member.id = 1
+        alice_member.name = "alice"
+        alice_member.display_name = "Alice"
+        alice_member.bot = False
+        bob_member = MagicMock()
+        bob_member.id = 2
+        bob_member.name = "bob"
+        bob_member.display_name = "Bob"
+        bob_member.bot = False
+        bot_member = MagicMock()
+        bot_member.id = 99
+        bot_member.name = "familiar"
+        bot_member.display_name = "Familiar"
+        bot_member.bot = True
+
+        vc = MagicMock(spec=discord.VoiceClient)
+        vc.play = MagicMock()
+        vc.is_playing = MagicMock(return_value=False)
+        vc.channel = MagicMock()
+        vc.channel.members = [alice_member, bob_member, bot_member]
+
+        buffer = [BufferedMessage(author=_ALICE, text="hi", timestamp=0.0)]
+
+        asyncio.run(
+            _run_voice_response(
+                channel_id=9000,
+                guild_id=999,
+                author=_ALICE,
+                utterance="hi",
+                buffer=buffer,
+                familiar=familiar,
+                vc=vc,
+                trigger=ResponseTrigger.direct_address,
+            )
+        )
+
+        llm = familiar.llm_clients["main_prose"]
+        assert isinstance(llm, _StubLLMClient)
+        main_calls = [c for c in llm.calls if c and c[0].role == "system"]
+        assert len(main_calls) == 1
+        system_prompt = main_calls[0][0].content
+        assert "Alice" in system_prompt
+        assert "Bob" in system_prompt
+        # the familiar's own account must not be listed as a participant
+        assert "Familiar" not in system_prompt
+
     def test_run_text_response_skips_closed_thread(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:

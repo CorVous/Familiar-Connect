@@ -36,6 +36,9 @@ from familiar_connect.context.providers.history import HistoryProvider
 from familiar_connect.context.providers.mode_instructions import (
     ModeInstructionProvider,
 )
+from familiar_connect.context.providers.voice_participants import (
+    VoiceParticipantsProvider,
+)
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.memory.scheduler import MemoryWriterScheduler
 from familiar_connect.memory.store import MemoryStore
@@ -173,6 +176,7 @@ class Familiar:
                 retriever=embedding_retriever,
                 index_build=_build_embedding_index,
             ),
+            "voice_participants": VoiceParticipantsProvider(),
         }
         pre_processors: dict[str, PreProcessor] = {
             "stepped_thinking": SteppedThinkingPreProcessor(

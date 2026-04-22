@@ -153,6 +153,7 @@ class TestLoadFromDisk:
         assert set(familiar.providers.keys()) == {
             "character",
             "content_search",
+            "voice_participants",
         }
 
     def test_processors_registered(

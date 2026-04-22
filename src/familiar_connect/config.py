@@ -330,7 +330,14 @@ def channel_config_for_mode(mode: ChannelMode) -> ChannelConfig:
                 Layer.author_note: 150,
                 Layer.depth_inject: 100,
             },
-            providers_enabled=frozenset({"character", "history", "mode_instructions"}),
+            providers_enabled=frozenset(
+                {
+                    "character",
+                    "history",
+                    "mode_instructions",
+                    "voice_participants",
+                },
+            ),
             preprocessors_enabled=frozenset(),
             postprocessors_enabled=frozenset({"recast"}),
         )

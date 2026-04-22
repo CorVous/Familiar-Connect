@@ -147,3 +147,18 @@ class TestContextRequest:
         # checker correctly rejects such calls, so it's not a runtime concern.
         req = self._make(deadline_s=0.25)
         assert math.isclose(req.deadline_s, 0.25)
+
+    def test_voice_participants_defaults_to_empty_tuple(self) -> None:
+        """Text turns and voice turns without membership data carry ()."""
+        req = self._make()
+        assert req.voice_participants == ()
+
+    def test_voice_participants_is_populated_on_voice_turns(self) -> None:
+        bob = Author(
+            platform="discord", user_id="2", username="bob", display_name="Bob"
+        )
+        req = self._make(
+            modality=Modality.voice,
+            voice_participants=(_ALICE, bob),
+        )
+        assert req.voice_participants == (_ALICE, bob)

@@ -212,6 +212,25 @@ Modules:
 
 Both are **off by default for voice** (to protect TTFB) and **on by default for text**.
 
+## 11. `VoiceParticipantsProvider`
+
+Module: `familiar_connect.context.providers.voice_participants`.
+
+Snapshots the live voice-channel roster and emits a single short
+`Layer.author_note` contribution naming everyone else on the call —
+so the LLM knows it is talking to a room, not just the last speaker.
+
+- Reads `ContextRequest.voice_participants`, populated by
+  `_run_voice_response` from `vc.channel.members` at response time
+  (late-joiners included, leavers dropped). Other bots and the
+  familiar itself are filtered out before the request is built.
+- Inert for text turns and for voice turns with no participants —
+  returns `[]` — so the provider is safe to enable in any channel
+  mode. `_run_voice_response` force-enables it regardless of the
+  channel config; the `imitate_voice` default config lists it too.
+- Pure Python, no I/O; priority 90 (below `CharacterProvider`,
+  above `ModeInstructionProvider`).
+
 ---
 
 ## Non-goals for the first pass
