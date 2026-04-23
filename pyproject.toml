@@ -17,12 +17,7 @@ dependencies = [
     "tzdata >= 2025.1",
     "azure-cognitiveservices-speech >= 1.42.0, < 2",
     "google-genai >= 1.51.0, < 2",
-    "ten-vad >= 1.0.6, < 2",
-    "soxr >= 0.5, < 2",
-    "numpy >= 2, < 3",
     "colorama>=0.4.6",
-    # local ONNX embeddings for ContentSearchProvider tier 2 — no third-party API
-    "fastembed >= 0.4, < 1",
     "tomli-w >= 1.2, < 2",
 ]
 
@@ -169,19 +164,7 @@ ignore = [
     "FBT003", # Boolean positional args common in mock assertions
     "ANN202", # Private helper annotations not critical in tests
     "PLC2701", # Tests import private names for unit testing
-    "TID251", # Bootstrap-package banned-api is runtime-only; tests may import it
 ]
-# The bootstrap package is what the banned-api rule is pointing at — its own
-# modules don't import themselves across the banned boundary, but the guard
-# rule below wouldn't distinguish, so silence it here defensively.
-"src/familiar_connect/bootstrap/**/*.py" = ["TID251"]
-
-[tool.ruff.lint.flake8-tidy-imports.banned-api]
-# Runtime reply pipeline (bot.py, familiar.py, commands/run.py) must never
-# import from this one-shot operator subpackage. See docs/guides/bootstrapping.md
-# for rationale. Bootstrap tests and the bootstrap modules themselves are
-# exempted via per-file-ignores above.
-"familiar_connect.bootstrap".msg = "Bootstrap utilities are operator-only and must not be imported by the runtime. If you need a helper at runtime, promote it to a runtime module first. See docs/guides/bootstrapping.md."
 
 [tool.ruff.format]
 preview = true # No cowards allowed!

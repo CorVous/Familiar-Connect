@@ -14,7 +14,7 @@ The overall trust model is single-operator: the admin who runs the bot has full 
 ## Transport & network
 
 - All external API calls (Deepgram, Cartesia, Azure, OpenRouter, Twitch) must use TLS (HTTPS / WSS) — never downgrade to plaintext.
-- The monitoring dashboard (when built — see [Roadmap](../roadmap/index.md)) should bind to `127.0.0.1` by default, not `0.0.0.0`, to avoid exposing it to the network.
+- The monitoring dashboard (when built — see Roadmap) should bind to `127.0.0.1` by default, not `0.0.0.0`, to avoid exposing it to the network.
 - If the dashboard is exposed externally, require authentication (even a simple shared secret or token header).
 
 ## Logging & error handling

@@ -69,4 +69,4 @@ to reset.
 `/subscribe-my-voice` joins the voice channel, keeps a PCM sink open for
 TTS replies, and streams incoming audio through Deepgram into the same
 `ConversationMonitor` that handles text. See
-[Voice input](../architecture/voice-input.md) for the full wiring.
+Voice input for the full wiring.

@@ -392,12 +392,12 @@ class TestCreateLLMClients:
         for client in clients.values():
             assert client.api_key == "sk-or-test-abc"
 
-    def test_user_override_changes_only_that_slot(
+    def test_user_override_changes_slot(
         self,
         tmp_path: Path,
         default_profile_path: Path,
     ) -> None:
-        """Overriding one slot in the user file doesn't leak into others."""
+        """User config overrides the main_prose slot from the default profile."""
         path = tmp_path / "character.toml"
         path.write_text(
             '[llm.main_prose]\nmodel = "user/custom-prose"\ntemperature = 0.9\n',
@@ -406,8 +406,6 @@ class TestCreateLLMClients:
         clients = create_llm_clients("sk-or-test-abc", cfg)
         assert clients["main_prose"].model == "user/custom-prose"
         assert clients["main_prose"].temperature == pytest.approx(0.9)
-        # Other slots still carry the default profile's values.
-        assert clients["post_process_style"].model != "user/custom-prose"
 
     def test_returns_distinct_client_instances(
         self,

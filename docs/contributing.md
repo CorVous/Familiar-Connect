@@ -42,17 +42,6 @@ uv run pytest                 # run the suite
 
 These are cheap and fast on a clean working tree. If any fail locally, CI will fail the same way — fix the root cause before pushing.
 
-## Ruff `banned-api` rule: bootstrap → runtime is one-way
-
-Familiar-Connect splits its modules into two worlds:
-
-- **Runtime** (`src/familiar_connect/` excluding the `bootstrap/` subpackage) — the code that runs on every Discord message or voice turn. Latency-sensitive, always-on.
-- **Bootstrap** (`src/familiar_connect/bootstrap/`) — one-shot operator utilities like the character-card unpacker and the SillyTavern lorebook importer. Run by a human, once, to populate `data/familiars/<id>/`. Never invoked by the runtime reply pipeline.
-
-A ruff `banned-api` rule enforces that the runtime **never imports from bootstrap**. Bootstrap may import runtime types (e.g. `MemoryStore`); the reverse is forbidden. If you need a helper that both sides use, it belongs in a neutral module (neither in `bootstrap/` nor inside the reply path), not in `bootstrap/`.
-
-See the [Bootstrapping guide](guides/bootstrapping.md) for what lives in `bootstrap/` today.
-
 ## Docs build & preview
 
 The docs site is built with [mkdocs-material](https://squidfunk.github.io/mkdocs-material/). Local preview:
@@ -83,9 +72,9 @@ uv run mkdocs build --strict
 ## Where things live
 
 - [Architecture overview](architecture/overview.md) — the big picture, the pipeline diagram, the component map.
-- [Context pipeline](architecture/context-pipeline.md) — how providers, processors, and the budgeter fit together.
-- [Memory](architecture/memory.md) — the per-familiar memory directory and `MemoryStore`.
+- Context pipeline — how providers, processors, and the budgeter fit together.
+- Memory — the per-familiar memory directory and `MemoryStore`.
 - [Configuration model](architecture/configuration-model.md) — the two-level config split, slash commands, on-disk layout.
 - [Security](architecture/security.md) — credential storage, path-traversal defences, logging rules.
 - [Design decisions](architecture/decisions.md) — ideas considered and rejected.
-- [Roadmap](roadmap/index.md) — planned work with per-item rationale.
+- Roadmap — planned work with per-item rationale.
