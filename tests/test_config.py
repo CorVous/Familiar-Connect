@@ -14,6 +14,7 @@ import pytest
 
 from familiar_connect.config import (
     LLM_SLOT_NAMES,
+    ChannelOverrides,
     CharacterConfig,
     ConfigError,
     LLMSlotConfig,
@@ -97,3 +98,64 @@ class TestLoadCharacterConfig:
         path.write_text("[providers.history]\nwindow_size = 50\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.history_window_size == 50
+
+
+class TestChannelOverrides:
+    def test_no_channels_section_is_empty_map(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.channels == {}
+
+    def test_channel_overrides_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[channels.12345]\n"
+            "history_window_size = 8\n"
+            'message_rendering = "name_only"\n'
+            'prompt_layers = ["core_instructions", "character_card"]\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        over = cfg.channels[12345]
+        assert over.history_window_size == 8
+        assert over.message_rendering == "name_only"
+        assert over.prompt_layers == ("core_instructions", "character_card")
+
+    def test_window_size_for_falls_back_to_default(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.history]\nwindow_size = 20\n\n"
+            "[channels.12345]\nhistory_window_size = 8\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.window_size_for(12345) == 8  # override
+        assert cfg.window_size_for(99999) == 20  # default
+        assert cfg.window_size_for(None) == 20  # no channel → default
+
+    def test_invalid_window_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\nhistory_window_size = 0\n")
+        with pytest.raises(ConfigError, match="must be positive"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_invalid_message_rendering_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[channels.12345]\nmessage_rendering = "garble"\n')
+        with pytest.raises(ConfigError, match="message_rendering"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_channel_overrides_dataclass_default(self) -> None:
+        over = ChannelOverrides()
+        assert over.history_window_size is None
+        assert over.prompt_layers is None
+        assert over.message_rendering is None

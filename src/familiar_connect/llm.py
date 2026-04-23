@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -14,6 +16,7 @@ from familiar_connect import log_style as ls
 from familiar_connect.config import LLM_SLOT_NAMES
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from typing import Any, Self
 
     from familiar_connect.config import CharacterConfig
@@ -210,6 +213,81 @@ class LLMClient:
 
         reply = choices[0]["message"]
         return Message(role=reply["role"], content=reply["content"])
+
+    async def chat_stream(
+        self: Self,
+        messages: list[Message],
+    ) -> AsyncIterator[str]:
+        """Stream assistant content deltas.
+
+        Required for barge-in: TTS can begin on the first delta and
+        cancellation mid-stream actually saves work.
+
+        Unlike :meth:`chat`, no retry loop — retries on a streaming
+        call would hold the rate-limit slot during sleeps and starve
+        cancellation. On 429 the caller sees
+        :class:`httpx.HTTPStatusError`.
+
+        Yields:
+            str: content delta as it arrives from the server.
+
+        """
+        url = f"{self.base_url}/chat/completions"
+        headers = self.build_headers()
+        payload = self.build_payload(messages)
+        payload["stream"] = True
+
+        http = self._get_http()
+        # Acquire the rate-limit slot only for the HTTP request *initiation*.
+        # Holding the semaphore across the entire stream would starve
+        # barge-in cancellation: a stalled reader would pin the slot.
+        # Release as soon as the server has accepted the request.
+        stream_cm = http.stream("POST", url, headers=headers, json=payload)
+        semaphore = get_request_semaphore()
+        await semaphore.acquire()
+        response = None
+        try:
+            response = await stream_cm.__aenter__()  # noqa: PLC2801
+            response.raise_for_status()
+        except BaseException:
+            if response is not None:
+                with contextlib.suppress(Exception):
+                    await stream_cm.__aexit__(None, None, None)
+            semaphore.release()
+            raise
+        semaphore.release()
+        try:
+            async for line in response.aiter_lines():
+                for delta in _parse_sse_deltas(line):
+                    yield delta
+        finally:
+            with contextlib.suppress(Exception):
+                await stream_cm.__aexit__(None, None, None)
+
+
+def _parse_sse_deltas(line: str) -> list[str]:
+    """Extract content deltas from one SSE line.
+
+    Ignores comments, blank lines, and non-``data:`` prefixes.
+    Returns ``[]`` on ``[DONE]`` or on events that carry no content.
+    """
+    line = line.strip()
+    if not line or not line.startswith("data:"):
+        return []
+    payload = line[len("data:") :].strip()
+    if payload == "[DONE]":
+        return []
+    try:
+        obj = json.loads(payload)
+    except ValueError:
+        return []
+    choices = obj.get("choices") or []
+    out: list[str] = []
+    for choice in choices:
+        delta = (choice.get("delta") or {}).get("content")
+        if isinstance(delta, str) and delta:
+            out.append(delta)
+    return out
 
 
 def create_llm_clients(

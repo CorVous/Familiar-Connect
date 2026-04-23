@@ -20,14 +20,23 @@ from familiar_connect.bot import create_bot
 from familiar_connect.bus.topics import (
     TOPIC_DISCORD_TEXT,
     TOPIC_TWITCH_EVENT,
+    TOPIC_VOICE_ACTIVITY_START,
     TOPIC_VOICE_TRANSCRIPT_FINAL,
 )
 from familiar_connect.config import ConfigError, load_character_config
+from familiar_connect.context import (
+    Assembler,
+    CharacterCardLayer,
+    CoreInstructionsLayer,
+    OperatingModeLayer,
+    RecentHistoryLayer,
+)
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
-from familiar_connect.processors import DebugLoggerProcessor
+from familiar_connect.processors import DebugLoggerProcessor, VoiceResponder
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
+from familiar_connect.tts_player import LoggingTTSPlayer
 
 _logger = logging.getLogger(__name__)
 
@@ -88,6 +97,7 @@ def _resolve_familiar_root(args: argparse.Namespace) -> Path:
 _DEBUG_TOPICS: tuple[str, ...] = (
     TOPIC_DISCORD_TEXT,
     TOPIC_TWITCH_EVENT,
+    TOPIC_VOICE_ACTIVITY_START,
     TOPIC_VOICE_TRANSCRIPT_FINAL,
 )
 
@@ -95,25 +105,80 @@ _DEBUG_TOPICS: tuple[str, ...] = (
 async def _run_debug_processor(familiar: Familiar) -> None:
     """Drain subscribed topics into the debug logger.
 
-    Phase-1 signal: proves the bus is carrying traffic. Replaced by
-    real responders in Phase 2+.
+    Proves the bus is carrying traffic. Responders handle their own
+    topics below; the debug logger is a passive observer.
     """
     proc = DebugLoggerProcessor(topics=_DEBUG_TOPICS)
     async for event in familiar.bus.subscribe(proc.topics):
         await proc.handle(event, familiar.bus)
 
 
+def _default_assembler(familiar: Familiar) -> Assembler:
+    """Build the Phase-2 reduced layer stack.
+
+    Cross-channel, summary, and rag layers come online in Phase 3 once
+    the side-indices are populated.
+    """
+    root = familiar.root
+    core_path = root.parent / "_default" / "core_instructions.md"
+    card_path = root / "character.md"
+    return Assembler(
+        layers=[
+            CoreInstructionsLayer(path=core_path),
+            CharacterCardLayer(card_path=card_path),
+            OperatingModeLayer(
+                modes={
+                    "voice": (
+                        "You are speaking aloud. Keep replies short "
+                        "(one or two sentences). Avoid markdown."
+                    ),
+                    "text": (
+                        "You are chatting in a text channel. Markdown "
+                        "and multi-line replies are fine."
+                    ),
+                }
+            ),
+            RecentHistoryLayer(
+                store=familiar.history_store,
+                window_size=familiar.config.history_window_size,
+            ),
+        ]
+    )
+
+
+async def _run_voice_responder(familiar: Familiar, responder: VoiceResponder) -> None:
+    """Drain voice-topic events into the :class:`VoiceResponder`."""
+    async for event in familiar.bus.subscribe(responder.topics):
+        await responder.handle(event, familiar.bus)
+
+
 async def _async_main(token: str, familiar: Familiar) -> None:
-    """Asyncio entry point: bring up bus, debug processor, bot.
+    """Asyncio entry point: bring up bus, responders, bot.
 
     :param token: Discord bot token.
     :param familiar: The loaded :class:`Familiar` bundle.
     """
     bot = create_bot(familiar)
     await familiar.bus.start()
+
+    assembler = _default_assembler(familiar)
+    tts_player = LoggingTTSPlayer()
+    voice_responder = VoiceResponder(
+        assembler=assembler,
+        llm_client=familiar.llm_clients["main_prose"],
+        tts_player=tts_player,
+        history_store=familiar.history_store,
+        router=familiar.router,
+        familiar_id=familiar.id,
+    )
+
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_run_debug_processor(familiar), name="debug-logger")
+            tg.create_task(
+                _run_voice_responder(familiar, voice_responder),
+                name="voice-responder",
+            )
             tg.create_task(bot.start(token), name="discord-bot")
     finally:
         familiar.router.shutdown()

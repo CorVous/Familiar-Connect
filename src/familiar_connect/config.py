@@ -57,6 +57,28 @@ class TTSConfig:
 
 
 @dataclass(frozen=True)
+class ChannelOverrides:
+    """Per-channel overrides for latency-sensitive knobs.
+
+    Layered over the global defaults so test channels can be tuned
+    independently. See plan § Design.4 *Channel-aware composition
+    order*.
+
+    :param history_window_size: override for
+        :attr:`CharacterConfig.history_window_size`.
+    :param prompt_layers: ordered list of layer names; ``None`` means
+        inherit the default order.
+    :param message_rendering: ``"prefixed"`` (always include
+        ``[display_name]`` prefix) or ``"name_only"`` (rely on the
+        OpenAI ``name`` field alone — save tokens in DMs).
+    """
+
+    history_window_size: int | None = None
+    prompt_layers: tuple[str, ...] | None = None
+    message_rendering: str | None = None
+
+
+@dataclass(frozen=True)
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``."""
 
@@ -65,6 +87,22 @@ class CharacterConfig:
     aliases: list[str] = field(default_factory=list)
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
+    channels: dict[int, ChannelOverrides] = field(default_factory=dict)
+
+    def for_channel(self, channel_id: int | None) -> ChannelOverrides:
+        """Return overrides for ``channel_id``; empty overrides if none."""
+        if channel_id is None:
+            return ChannelOverrides()
+        return self.channels.get(channel_id, ChannelOverrides())
+
+    def window_size_for(self, channel_id: int | None) -> int:
+        """Resolve the history window size for ``channel_id``.
+
+        Returns the per-channel override if present; otherwise the
+        global default.
+        """
+        override = self.for_channel(channel_id).history_window_size
+        return override if override is not None else self.history_window_size
 
 
 # ---------------------------------------------------------------------------
@@ -119,13 +157,92 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     tts = _parse_tts_config(tts_raw)
 
+    channels_raw = data.get("channels", {})
+    if not isinstance(channels_raw, dict):
+        msg = f"[channels] must be a table, got {type(channels_raw).__name__}"
+        raise ConfigError(msg)
+    channels = _parse_channel_overrides(channels_raw)
+
     return CharacterConfig(
         history_window_size=history_window_size,
         display_tz=display_tz,
         aliases=aliases,
         llm=llm,
         tts=tts,
+        channels=channels,
     )
+
+
+_VALID_MESSAGE_RENDERING: frozenset[str] = frozenset({"prefixed", "name_only"})
+
+
+def _parse_channel_overrides(raw: dict) -> dict[int, ChannelOverrides]:
+    """Parse ``[channels.<id>]`` TOML blocks into typed overrides.
+
+    Channel keys are TOML strings (TOML table keys are strings); we
+    coerce to ``int`` here since Discord channel IDs are snowflakes.
+    """
+    out: dict[int, ChannelOverrides] = {}
+    for key, section in raw.items():
+        try:
+            channel_id = int(key)
+        except (TypeError, ValueError) as exc:
+            msg = f"[channels.{key}] key must be an integer channel id"
+            raise ConfigError(msg) from exc
+        if not isinstance(section, dict):
+            msg = f"[channels.{key}] must be a table, got {type(section).__name__}"
+            raise ConfigError(msg)
+
+        window_raw = section.get("history_window_size")
+        window: int | None
+        if window_raw is None:
+            window = None
+        elif isinstance(window_raw, int) and not isinstance(window_raw, bool):
+            if window_raw <= 0:
+                msg = (
+                    f"[channels.{key}].history_window_size must be positive, "
+                    f"got {window_raw}"
+                )
+                raise ConfigError(msg)
+            window = window_raw
+        else:
+            msg = (
+                f"[channels.{key}].history_window_size must be an integer, "
+                f"got {type(window_raw).__name__}"
+            )
+            raise ConfigError(msg)
+
+        layers_raw = section.get("prompt_layers")
+        layers: tuple[str, ...] | None
+        if layers_raw is None:
+            layers = None
+        elif isinstance(layers_raw, list) and all(
+            isinstance(x, str) for x in layers_raw
+        ):
+            layers = tuple(layers_raw)
+        else:
+            msg = f"[channels.{key}].prompt_layers must be a list of strings"
+            raise ConfigError(msg)
+
+        rendering = section.get("message_rendering")
+        if rendering is not None:
+            if not isinstance(rendering, str):
+                msg = f"[channels.{key}].message_rendering must be a string"
+                raise ConfigError(msg)
+            if rendering not in _VALID_MESSAGE_RENDERING:
+                valid = ", ".join(sorted(_VALID_MESSAGE_RENDERING))
+                msg = (
+                    f"[channels.{key}].message_rendering={rendering!r} "
+                    f"unknown; valid options: {valid}"
+                )
+                raise ConfigError(msg)
+
+        out[channel_id] = ChannelOverrides(
+            history_window_size=window,
+            prompt_layers=layers,
+            message_rendering=rendering,
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------

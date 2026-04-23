@@ -1,0 +1,33 @@
+"""Prompt composition — layered system-prompt assembly.
+
+Each ``Layer`` owns one segment of the system prompt with its own
+invalidation signal. The :class:`Assembler` composes non-empty layers
+into :class:`familiar_connect.llm.SystemPromptLayers`. See plan
+§ Design.4 *Prompt composition*.
+"""
+
+from __future__ import annotations
+
+from familiar_connect.context.assembler import (
+    AssembledPrompt,
+    Assembler,
+    AssemblyContext,
+)
+from familiar_connect.context.layers import (
+    CharacterCardLayer,
+    CoreInstructionsLayer,
+    Layer,
+    OperatingModeLayer,
+    RecentHistoryLayer,
+)
+
+__all__ = [
+    "AssembledPrompt",
+    "Assembler",
+    "AssemblyContext",
+    "CharacterCardLayer",
+    "CoreInstructionsLayer",
+    "Layer",
+    "OperatingModeLayer",
+    "RecentHistoryLayer",
+]
