@@ -11,6 +11,7 @@ Steps covered:
   6. Lull timer — start, reset, expiry
   7. Side-model evaluation wiring — YES/NO parsing
   8. on_respond callback invocation and state reset
+  9. on_silence callback — buffer drained to history on NO decisions
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1163,3 +1165,208 @@ class TestEvaluateHistoryInjection:
         asyncio.run(monitor.on_message(1, _author("Alice"), "aria?", is_mention=True))
 
         assert "turn 0" not in self._captured_user_prompt(monitor)
+
+
+# ---------------------------------------------------------------------------
+# Step 9 — on_silence callback: buffer drained to history on NO decisions
+# ---------------------------------------------------------------------------
+
+
+class TestOnSilenceCallback:
+    """on_silence fires with the evaluated buffer snapshot on any NO decision."""
+
+    def _make_with_silence(
+        self,
+        *,
+        side_model_reply: str = "NO",
+        interjection: Interjection = Interjection.average,
+    ) -> tuple[
+        ConversationMonitor,
+        list[tuple[int, list[BufferedMessage], ResponseTrigger]],
+        list[tuple[int, list[BufferedMessage], ResponseTrigger]],
+    ]:
+        """Return (monitor, respond_calls, silence_calls)."""
+        silence_calls: list[tuple[int, list[BufferedMessage], ResponseTrigger]] = []
+
+        async def _on_silence(  # noqa: RUF029
+            channel_id: int,
+            snapshot: list[BufferedMessage],
+            trigger: ResponseTrigger,
+        ) -> None:
+            silence_calls.append((channel_id, list(snapshot), trigger))
+
+        monitor, respond_calls = _make_monitor(
+            side_model_reply=side_model_reply,
+            interjection=interjection,
+        )
+        monitor.on_silence = _on_silence
+        return monitor, respond_calls, silence_calls
+
+    def test_interjection_no_drains_buffer_to_silence_callback(self) -> None:
+        """Interjection NO: silence callback receives all 9 buffered messages."""
+        monitor, _, silence_calls = self._make_with_silence(
+            side_model_reply="NO",
+            interjection=Interjection.average,
+        )
+        for i in range(9):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
+                )
+            )
+        assert len(silence_calls) == 1
+        channel_id, snapshot, trigger = silence_calls[0]
+        assert channel_id == 1
+        assert len(snapshot) == 9
+        assert trigger is ResponseTrigger.interjection
+        buf = monitor._buffers[1]
+        assert buf.buffer == []
+
+    def test_interjection_no_preserves_counters(self) -> None:
+        """Interjection NO: step-down counters advance; message_counter unchanged."""
+        monitor, _, _ = self._make_with_silence(
+            side_model_reply="NO",
+            interjection=Interjection.average,
+        )
+        for i in range(9):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
+                )
+            )
+        buf = monitor._buffers[1]
+        assert buf.check_count == 1
+        assert buf.message_counter == 9
+
+    def test_direct_address_no_drains_buffer_to_silence_callback(self) -> None:
+        """Direct address NO: silence callback invoked with triggering message."""
+        monitor, respond_calls, silence_calls = self._make_with_silence(
+            side_model_reply="NO",
+        )
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1,
+                author=_author("Alice"),
+                text="aria?",
+                is_mention=False,
+            )
+        )
+        assert len(respond_calls) == 0
+        assert len(silence_calls) == 1
+        _, snapshot, trigger = silence_calls[0]
+        assert len(snapshot) == 1
+        assert snapshot[0].text == "aria?"
+        assert trigger is ResponseTrigger.direct_address
+        buf = monitor._buffers.get(1)
+        assert buf is None or buf.buffer == []
+
+    def test_lull_no_drains_buffer_to_silence_callback(self) -> None:
+        """Lull (is_lull_endpoint=True) NO: silence callback invoked."""
+        monitor, respond_calls, silence_calls = self._make_with_silence(
+            side_model_reply="NO",
+        )
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1,
+                author=_author("Alice"),
+                text="hello",
+                is_mention=False,
+                is_lull_endpoint=True,
+            )
+        )
+        assert len(respond_calls) == 0
+        assert len(silence_calls) == 1
+        _, snapshot, trigger = silence_calls[0]
+        assert len(snapshot) == 1
+        assert snapshot[0].text == "hello"
+        assert trigger is ResponseTrigger.lull
+        buf = monitor._buffers.get(1)
+        assert buf is None or buf.buffer == []
+
+    def test_silence_snapshot_is_independent_of_buffer(self) -> None:
+        """Mutating the silence snapshot doesn't affect internal buffer state."""
+        silence_calls: list[tuple[int, list[BufferedMessage], ResponseTrigger]] = []
+
+        async def _capture(  # noqa: RUF029
+            channel_id: int,
+            snapshot: list[BufferedMessage],
+            trigger: ResponseTrigger,
+        ) -> None:
+            silence_calls.append((channel_id, snapshot, trigger))
+
+        monitor, _ = _make_monitor(
+            side_model_reply="NO",
+        )
+        monitor.on_silence = _capture
+
+        asyncio.run(
+            monitor.on_message(
+                channel_id=1,
+                author=_author("Alice"),
+                text="aria?",
+                is_mention=False,
+            )
+        )
+
+        assert len(silence_calls) == 1
+        _, snapshot, _ = silence_calls[0]
+        snapshot.clear()
+
+        buf = monitor._buffers.get(1)
+        # buffer should already be empty (cleared by drain) independent of snapshot
+        assert buf is None or buf.buffer == []
+
+    def test_straggler_survives_drain(self) -> None:
+        """Messages appended after evaluated snapshot stay in buffer after drain."""
+        silence_calls: list[tuple[int, list[BufferedMessage], ResponseTrigger]] = []
+
+        straggler = BufferedMessage(
+            author=_author("Eve"), text="straggler", timestamp=time.monotonic()
+        )
+
+        async def _no_with_straggler(messages: list[Message]) -> Message:  # noqa: RUF029
+            # simulate another on_message appending during the LLM await
+            _ = messages
+            monitor._buffers[1].buffer.append(straggler)
+            return Message(role="assistant", content="NO")
+
+        async def _capture(  # noqa: RUF029
+            channel_id: int,
+            snapshot: list[BufferedMessage],
+            trigger: ResponseTrigger,
+        ) -> None:
+            silence_calls.append((channel_id, list(snapshot), trigger))
+
+        monitor, _ = _make_monitor(
+            side_model_reply="NO",
+            interjection=Interjection.average,
+        )
+        monitor.on_silence = _capture
+        monitor._llm_client.chat = AsyncMock(side_effect=_no_with_straggler)  # type: ignore[assignment]
+
+        for i in range(9):
+            asyncio.run(
+                monitor.on_message(
+                    channel_id=1,
+                    author=_author("Bob"),
+                    text=f"msg {i}",
+                    is_mention=False,
+                )
+            )
+
+        assert len(silence_calls) == 1
+        _, snapshot, _ = silence_calls[0]
+        # snapshot contains only the 9 pre-eval messages, not the straggler
+        assert len(snapshot) == 9
+        assert all(m.text.startswith("msg") for m in snapshot)
+
+        buf = monitor._buffers[1]
+        # straggler survived in the live buffer
+        assert len(buf.buffer) == 1
+        assert buf.buffer[0].text == "straggler"

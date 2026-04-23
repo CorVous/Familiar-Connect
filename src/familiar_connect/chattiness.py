@@ -236,6 +236,13 @@ class ConversationMonitor:
             [int, list[BufferedMessage], ResponseTrigger],
             Awaitable[None],
         ],
+        on_silence: (
+            Callable[
+                [int, list[BufferedMessage], ResponseTrigger],
+                Awaitable[None],
+            ]
+            | None
+        ) = None,
         rng: Callable[[], float] | None = None,
     ) -> None:
         self._familiar_name = familiar_name
@@ -247,6 +254,7 @@ class ConversationMonitor:
         self._character_card = character_card
         self._history_store = history_store
         self.on_respond = on_respond
+        self.on_silence = on_silence
         self._rng = rng if rng is not None else random.random  # noqa: S311
         self._buffers: dict[int, ChannelBuffer] = {}
         self._lull_tasks: set[asyncio.Task[None]] = set()
@@ -370,6 +378,9 @@ class ConversationMonitor:
             text, self._familiar_name, self._aliases, is_mention=is_mention
         ):
             async with buf.lock:
+                if not buf.buffer:
+                    return
+                evaluated = list(buf.buffer)
                 yes = await self._evaluate(
                     channel_id,
                     buf,
@@ -382,6 +393,9 @@ class ConversationMonitor:
                         channel_id, buf, ResponseTrigger.direct_address
                     )
                 else:
+                    await self._fire_silence(
+                        channel_id, buf, evaluated, ResponseTrigger.direct_address
+                    )
                     # still reset on direct address, per spec
                     self._reset_buffer(buf)
             return
@@ -389,6 +403,9 @@ class ConversationMonitor:
         # 4. interjection check
         if buf.message_counter >= buf.next_interjection_at:
             async with buf.lock:
+                if not buf.buffer:
+                    return
+                evaluated = list(buf.buffer)
                 trigger = (
                     f"{buf.message_counter} messages have been said"
                     " without you speaking."
@@ -399,7 +416,10 @@ class ConversationMonitor:
                         channel_id, buf, ResponseTrigger.interjection
                     )
                     return
-                # no → advance step-down curve
+                # no → drain evaluated messages to silence callback, then step-down
+                await self._fire_silence(
+                    channel_id, buf, evaluated, ResponseTrigger.interjection
+                )
                 buf.check_count += 1
                 buf.next_interjection_at += _interjection_interval(
                     self._interjection, buf.check_count, rng=self._rng
@@ -410,9 +430,16 @@ class ConversationMonitor:
             # voice path: caller already debounced silence, so this
             # call is itself the lull — evaluate inline without a timer
             async with buf.lock:
+                if not buf.buffer:
+                    return
+                evaluated = list(buf.buffer)
                 yes = await self._evaluate(channel_id, buf, trigger_context=None)
                 if yes:
                     await self._fire_respond(channel_id, buf, ResponseTrigger.lull)
+                else:
+                    await self._fire_silence(
+                        channel_id, buf, evaluated, ResponseTrigger.lull
+                    )
         else:
             # text path: wait ``lull_timeout`` seconds for more messages
             self._start_lull_timer(channel_id, buf)
@@ -467,9 +494,16 @@ class ConversationMonitor:
         if buf is None or not buf.buffer:
             return
         async with buf.lock:
+            if not buf.buffer:
+                return
+            evaluated = list(buf.buffer)
             yes = await self._evaluate(channel_id, buf, trigger_context=None)
             if yes:
                 await self._fire_respond(channel_id, buf, ResponseTrigger.lull)
+            else:
+                await self._fire_silence(
+                    channel_id, buf, evaluated, ResponseTrigger.lull
+                )
 
     async def _evaluate(
         self,
@@ -575,6 +609,24 @@ class ConversationMonitor:
         snapshot = list(buf.buffer)
         self._reset_buffer(buf)
         await self.on_respond(channel_id, snapshot, trigger)
+
+    async def _fire_silence(
+        self,
+        channel_id: int,
+        buf: ChannelBuffer,
+        evaluated: list[BufferedMessage],
+        trigger: ResponseTrigger,
+    ) -> None:
+        """Drain evaluated messages from buffer and invoke on_silence if set.
+
+        Only removes the messages that were present at eval entry (len(evaluated)
+        items from the head); stragglers appended during the LLM call survive.
+        """
+        if not evaluated:
+            return
+        del buf.buffer[: len(evaluated)]
+        if self.on_silence is not None:
+            await self.on_silence(channel_id, evaluated, trigger)
 
     def _reset_buffer(self, buf: ChannelBuffer) -> None:
         """Reset all per-channel state after a response (or direct address)."""

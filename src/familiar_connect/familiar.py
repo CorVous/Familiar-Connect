@@ -215,6 +215,13 @@ class Familiar:
         ) -> None:
             """Act as a no-op until create_bot wires the real callback."""
 
+        async def _noop_silence(
+            channel_id: int,
+            buffer: object,
+            trigger: object,
+        ) -> None:
+            """Act as a no-op until create_bot wires the real callback."""
+
         monitor = ConversationMonitor(
             familiar_name=familiar_id,
             aliases=character_config.aliases,
@@ -225,6 +232,7 @@ class Familiar:
             character_card=character_card,
             history_store=history_store,
             on_respond=_noop_respond,
+            on_silence=_noop_silence,
         )
 
         mood_evaluator = MoodEvaluator(

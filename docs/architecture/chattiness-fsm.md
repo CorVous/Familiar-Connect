@@ -24,15 +24,17 @@ stateDiagram-v2
     LullPending --> EvalLull : timer expires
 
     EvalDirectAddress --> Firing : decision=YES
-    EvalDirectAddress --> Resetting : decision=NO<br/>(buffer always resets on direct address)
+    EvalDirectAddress --> Silencing : decision=NO<br/>(evaluated msgs → on_silence; then reset)
 
     EvalInterjection --> Firing : decision=YES
-    EvalInterjection --> Buffering : decision=NO<br/>check_count++; next_interjection_at advances<br/>(floor 3)
+    EvalInterjection --> Silencing : decision=NO<br/>evaluated msgs → on_silence<br/>check_count++; next_interjection_at advances (floor 3)
 
     EvalLull --> Firing : decision=YES
-    EvalLull --> Buffering : decision=NO (no reset)
+    EvalLull --> Silencing : decision=NO<br/>evaluated msgs → on_silence
 
     Firing --> Resetting : snapshot buffer → on_respond callback
+    Silencing --> Resetting : drain evaluated msgs; on_silence callback
+    Silencing --> Buffering : interjection/lull NO — counters preserved; stragglers remain
     Resetting --> Idle : clear buffer, counters, lull timer
 
     Idle --> [*] : clear_channel(channel_id)
@@ -49,9 +51,11 @@ stateDiagram-v2
 | `LullPending` | `Buffering` | next `on_message` arrives | `_cancel_lull_timer` |
 | `LullPending` | `EvalLull` | timer expires | schedule async task, `buf.lock` |
 | any `Eval*` | `Firing` | `_evaluate` returns `YES` | call `_fire_respond` |
-| `EvalInterjection` | `Buffering` (NO) | LLM says NO | `check_count++`; `next_interjection_at += _interjection_interval(tier, check_count)` (floor 3 from `starting_interval - 3·n`) |
-| `EvalDirectAddress` | `Resetting` (NO) | LLM says NO | `_reset_buffer` regardless — direct address always clears |
+| `EvalInterjection` | `Silencing` (NO) | LLM says NO | `_fire_silence(evaluated)`; `check_count++`; `next_interjection_at += _interjection_interval(tier, check_count)` (floor 3) |
+| `EvalLull` | `Silencing` (NO) | LLM says NO | `_fire_silence(evaluated)`; counters unchanged |
+| `EvalDirectAddress` | `Silencing` → `Resetting` (NO) | LLM says NO | `_fire_silence(evaluated)`; then `_reset_buffer` |
 | `Firing` | `Resetting` | — | `snapshot = list(buf.buffer)`; `_reset_buffer`; `await on_respond(channel_id, snapshot, trigger)` |
+| `Silencing` | `Resetting` / `Buffering` | — | `del buf.buffer[:len(evaluated)]`; `await on_silence(channel_id, evaluated, trigger)` |
 
 ## Lock discipline
 
@@ -60,9 +64,10 @@ stateDiagram-v2
   runs at a time per channel.
 - **Not** held during the main reply LLM call or pipeline assembly —
   those live downstream of the `on_respond` callback.
-- New messages arriving during an `Eval*` state queue up in the
-  buffer lock-free; the current evaluator sees a snapshot, subsequent
-  messages are evaluated next cycle.
+- `evaluated = list(buf.buffer)` is captured at lock entry (before `_evaluate`) so the
+  set of messages the LLM sees and the set that get drained on NO are exactly the same.
+  Messages appended to the buffer during the LLM call (stragglers) survive in the buffer
+  for the next evaluation cycle; they are not included in the drain.
 
 ## Step-down interjection curve
 
