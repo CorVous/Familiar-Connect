@@ -8,12 +8,14 @@ Phase-1 aggregator.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
 import time
 from typing import TYPE_CHECKING, Any, cast
 
 from familiar_connect import log_style as ls
+from familiar_connect.diagnostics.collector import get_span_collector
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -70,3 +72,6 @@ def _emit(name: str, t0: float, status: str) -> None:
         f"{ls.kv('ms', str(elapsed_ms), vc=ls.LC)} "
         f"{ls.kv('status', status, vc=ls.LG if status == 'ok' else ls.R)}"
     )
+    # Span recording must never raise. Suppress broadly.
+    with contextlib.suppress(Exception):
+        get_span_collector().record(name=name, ms=elapsed_ms, status=status)

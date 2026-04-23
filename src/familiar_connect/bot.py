@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 import discord
 
 from familiar_connect import log_style as ls
+from familiar_connect.diagnostics.collector import get_span_collector
+from familiar_connect.diagnostics.report import render_summary_table
 from familiar_connect.identity import Author
 from familiar_connect.sources import DiscordTextSource
 from familiar_connect.subscriptions import SubscriptionKind
@@ -139,6 +141,15 @@ def _register_slash_commands(bot: discord.Bot, familiar: Familiar) -> None:
             guild_id=ctx.guild_id,
         )
         await ctx.respond(f"Joined {channel.name}.", ephemeral=True)
+
+    @bot.slash_command(
+        name="diagnostics",
+        description="Show span timings (last p50/p95 per span).",
+    )
+    async def diagnostics(ctx: discord.ApplicationContext) -> None:
+        summary = get_span_collector().summary()
+        text = render_summary_table(summary)
+        await ctx.respond(text, ephemeral=True)
 
     @bot.slash_command(
         name="unsubscribe-voice",

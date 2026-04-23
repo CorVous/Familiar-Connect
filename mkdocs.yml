@@ -60,6 +60,7 @@ nav:
   - Architecture:
       - architecture/overview.md
       - architecture/context-pipeline.md
+      - architecture/streaming-bus.md
       - architecture/configuration-model.md
       - architecture/security.md
       - architecture/decisions.md

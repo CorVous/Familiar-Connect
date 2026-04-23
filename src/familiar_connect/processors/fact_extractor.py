@@ -89,9 +89,7 @@ class FactExtractor:
             source_ids: list[int] = []
             if isinstance(raw_sources, list):
                 source_ids = [
-                    int(i)
-                    for i in raw_sources
-                    if isinstance(i, int) and i in valid_ids
+                    int(i) for i in raw_sources if isinstance(i, int) and i in valid_ids
                 ]
             if not source_ids:
                 # fall back to the whole batch rather than dropping the fact
