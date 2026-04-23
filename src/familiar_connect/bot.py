@@ -1,14 +1,12 @@
-"""Discord bot shell for the re-arch demolition branch.
+"""Discord bot shell.
 
-Reply orchestration is a stub. This module owns:
+Owns:
 
 - Discord client construction (``py-cord`` + DAVE voice)
 - Subscribe / unsubscribe slash commands (text + voice)
 - ``on_message`` and ``on_voice_state_update`` event handlers
-- :func:`ingest_event` — the symmetric log-and-drop stub the text,
-  voice, and Twitch event paths all funnel through. Stays symmetric
-  on purpose so the future unified event-stream abstraction has one
-  seam to hook into.
+- :func:`ingest_event` — text, voice, and Twitch events funnel through
+  here and are logged and dropped.
 """
 
 from __future__ import annotations
@@ -30,11 +28,11 @@ _logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Symmetric event stub — all ingest paths flow through here
+# Event ingest — all paths flow through here
 # ---------------------------------------------------------------------------
 
 
-async def ingest_event(  # noqa: RUF029 — async reserved for the future reply path
+async def ingest_event(  # noqa: RUF029 — async to match awaitable call sites
     *,
     source: str,
     familiar: Familiar,
@@ -43,13 +41,8 @@ async def ingest_event(  # noqa: RUF029 — async reserved for the future reply 
     author_label: str,
     text: str,
 ) -> None:
-    """Log and drop. Placeholder for the next reply-path design.
-
-    Text messages, voice utterances, and Twitch events all funnel here
-    with the same call signature so the upcoming unified event-stream
-    abstraction has one seam to replace.
-    """
-    del familiar  # will be used by the future reply path
+    """Log and drop."""
+    del familiar
     _logger.info(
         f"{ls.tag('📥 Event', ls.LG)} "
         f"{ls.kv('source', source, vc=ls.LG)} "
@@ -132,11 +125,6 @@ def _register_slash_commands(bot: discord.Bot, familiar: Familiar) -> None:
             _logger.warning("voice connect failed: %s", exc)
             await ctx.respond("Could not join voice.", ephemeral=True)
             return
-
-        # Intentional: no start_recording here. The reply path is a
-        # stub, so an audio pump would have nowhere to deliver PCM.
-        # The RecordingSink + Deepgram wiring returns when the next
-        # reply design wants incoming audio.
 
         familiar.subscriptions.add(
             channel_id=channel.id,
@@ -222,9 +210,6 @@ def _register_events(bot: discord.Bot, familiar: Familiar) -> None:
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        # Purely informational during the demolition pass. Keeps
-        # voice-channel presence visible in the log without wiring any
-        # of the prior interjection / interruption behaviour.
         del before
         if familiar.bot_user_id is not None and member.id == familiar.bot_user_id:
             return

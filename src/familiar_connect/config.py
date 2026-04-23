@@ -1,10 +1,7 @@
 """Per-character configuration from TOML.
 
 Loads ``character.toml`` once on startup, deep-merged over the
-``_default/character.toml`` defaults. The reply-orchestration layers
-that shaped the prototype have been ripped out; what remains is the
-minimum a Discord bot shell still needs plus the seams the next
-reply-path design will build on (LLM slot table, TTS config).
+``_default/character.toml`` defaults.
 """
 
 from __future__ import annotations
@@ -22,12 +19,7 @@ class ConfigError(Exception):
 
 
 LLM_SLOT_NAMES: frozenset[str] = frozenset({"main_prose"})
-"""Canonical LLM call-site slot names.
-
-The prototype had eight; demolition pass trimmed to one. Slot shape
-is kept (rather than collapsed to a single client) so the cache-reuse
-redesign can reintroduce slots without churn.
-"""
+"""Canonical LLM call-site slot names."""
 
 
 @dataclass(frozen=True)

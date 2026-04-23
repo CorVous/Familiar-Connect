@@ -16,8 +16,8 @@
 
 Create a `.env` in the repo root (loaded automatically on startup).
 Only install-wide secrets and the active-familiar selector live here;
-everything tunable about the familiar — LLM model per call site, TTS
-voice, chattiness — lives in `data/familiars/<id>/character.toml`.
+everything tunable about the familiar — LLM model, TTS voice — lives
+in `data/familiars/<id>/character.toml`.
 
 ```bash
 # required
@@ -46,34 +46,19 @@ DEEPGRAM_API_KEY=<deepgram key>
 ### Per-familiar model choice
 
 LLM model selection is per-call-site and lives in the familiar's
-`character.toml` under one `[llm.<slot>]` table per call site:
-`main_prose`, `post_process_style`, `reasoning_context`,
-`history_summary`, `memory_search`, and `interjection_decision`.
+`character.toml` under a `[llm.<slot>]` table. The only slot today is
+`main_prose`.
 
 The checked-in reference profile at
-`data/familiars/_default/character.toml` fills in every slot with
-sensible defaults. A user's own `character.toml` only needs to
-override the fields it wants to change — missing slots inherit from
-the default profile on load. Copy the default to start a new
-familiar:
+`data/familiars/_default/character.toml` fills in the slot with a
+sensible default. A user's own `character.toml` only needs to
+override the fields it wants to change. Copy the default to start a
+new familiar:
 
 ```bash
 cp -r data/familiars/_default data/familiars/my-familiar
 # then edit data/familiars/my-familiar/character.toml
 ```
-
-Good slot-level starting points for cheap / fast models (everything
-except `main_prose`):
-
-- `openai/gpt-4o-mini` — cheapest OpenAI, fast, honours the `name`
-  field, strong structured-output for the content-search TOOL/ANSWER
-  protocol.
-- `anthropic/claude-3.5-haiku` — similar tier / price on the
-  Anthropic side.
-- `meta-llama/llama-3.1-8b-instruct` — very cheap via OpenRouter,
-  decent for simple summarisation.
-
-The startup log prints each slot's resolved model on every launch.
 
 ## Start
 
@@ -86,7 +71,7 @@ uv run familiar-connect -vv run --familiar aria
 
 The `run` subcommand resolves the active familiar via `--familiar`
 first, then `FAMILIAR_ID`. `-v` / `-vv` / `-vvv` tune logging
-verbosity — `-vv` is the sweet spot for smoke tests.
+verbosity.
 
 ## CLI reference
 
@@ -99,4 +84,4 @@ parser in `src/familiar_connect/cli.py`. Run `uv run familiar-connect
 <!-- @cli-help: familiar-connect run -->
 
 Once the bot is online, see [Slash commands](slash-commands.md) for
-the smoke-test surface.
+the subscription surface.

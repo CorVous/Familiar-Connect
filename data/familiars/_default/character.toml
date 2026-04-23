@@ -37,10 +37,6 @@ gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
 
 # --- LLM slots -------------------------------------------------------------
-#
-# Main reply path. Reply orchestration is a stub during the re-arch
-# demolition; this slot exists so the next reply-path design can
-# plug in without churn.
 
 [llm.main_prose]
 model       = "z-ai/glm-5.1"
