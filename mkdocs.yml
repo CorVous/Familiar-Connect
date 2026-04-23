@@ -57,8 +57,6 @@ nav:
       - getting-started/on-disk-layout.md
       - getting-started/slash-commands.md
       - getting-started/troubleshooting.md
-  - Guides:
-      - guides/twitch.md
   - Architecture:
       - architecture/overview.md
       - architecture/configuration-model.md

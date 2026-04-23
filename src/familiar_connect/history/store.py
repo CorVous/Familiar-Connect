@@ -251,9 +251,7 @@ class HistoryStore:
     ) -> HistoryTurn:
         """Append a single turn and return its persisted form.
 
-        *mode* is a free-form string tag on the legacy ``turns.mode``
-        column — retained so pre-rearch rows still read back, but not
-        populated by the demolition-branch reply path (which is a stub).
+        *mode* is a free-form string tag on the ``turns.mode`` column.
         """
         timestamp = datetime.now(tz=UTC)
         mode_value = mode

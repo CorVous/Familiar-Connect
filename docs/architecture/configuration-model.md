@@ -2,12 +2,6 @@
 
 Two config levels.
 
-!!! warning "Demolition in progress"
-    Many prior config knobs (channel modes, interjection, interrupt
-    tolerance, typing simulation, memory writer, most LLM slots) have
-    been cut along with the reply orchestration layer. This page
-    reflects what still loads.
-
 ## 1. Bot instance config
 
 Secrets and install selector the host needs to run the bot at all.

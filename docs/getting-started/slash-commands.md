@@ -9,64 +9,9 @@ The table above is generated at build time from
 `bot.slash_command(...)` calls in `src/familiar_connect/bot.py` — edit
 the source to change a description and this page updates automatically.
 
-The channel-mode commands map to config names: `/channel-full-rp` sets
-`full_rp` (all providers on), `/channel-text-conversation-rp` sets
-`text_conversation_rp`, and `/channel-imitate-voice` sets
-`imitate_voice` (tight budget, low TTFB).
+Subscriptions persist across restarts under
+`data/familiars/<id>/subscriptions.toml`; delete that file to reset.
 
-See also the [Twitch guide](../guides/twitch.md) for the `/twitch *`
-command surface.
-
-## Full end-to-end smoke test
-
-1. `uv run familiar-connect -vv run --familiar aria`
-2. In a test text channel, run `/subscribe-text`. Send a message — the
-   bot should reply.
-3. Run `/channel-full-rp` and send another — the log line
-   `pipeline channel=… provider=… status=ok duration=…` should now
-   show `content_search` running alongside `character` and `history`.
-4. Join a voice channel and run `/subscribe-my-voice`. The bot should
-   join and greet. Post another message in the subscribed text
-   channel — the reply should also be spoken.
-5. `/unsubscribe-voice` then `/unsubscribe-text` to tear down cleanly.
-
-### Threads and forum posts
-
-`/subscribe-text` also works inside a thread or a forum post — both
-are `discord.Thread` instances under the hood. Running the command
-inside a thread subscribes the familiar to that thread only (not the
-parent channel), and `/unsubscribe-text` from the same thread removes
-it. The familiar joins the thread on subscribe so private threads and
-archived-then-unarchived threads behave identically to public ones.
-
-If the subscribed thread is later closed (archived **and** locked),
-the familiar will log an `❌ Send skipped reason=thread_closed` error
-next time it tries to post there and skip the send. Subscriptions are
-not auto-removed: clear stale rows with `/unsubscribe-text` (inside
-the thread, if still reachable) or by editing
-`data/familiars/<id>/subscriptions.toml`. Plain archival (auto-archive
-after inactivity) keeps posting intact, since threads can un-archive.
-
-The `✨ Summoned` log line labels the channel kind (`text`,
-`thread`, or `forum_post`) so you can tell them apart at a glance,
-and the memory-writer session summaries include a `## Context` header
-identifying the channel(s) a conversation happened in.
-
-The `/channel-full-rp`, `/channel-text-conversation-rp`,
-`/channel-imitate-voice`, and `/channel-backdrop` commands are all
-per-thread: each thread gets its own mode and backdrop stored in
-`channels/<thread_id>.toml`. The sidecar's `channel_name` field is
-written as `#parent -> thread` (or `forum:parent -> post`) so
-operators can identify entries by reading the files directly.
-
-Subscriptions and channel modes persist across restarts under
-`data/familiars/<id>/subscriptions.toml` and
-`data/familiars/<id>/channels/<channel_id>.toml`; delete those files
-to reset.
-
-## Voice input
-
-`/subscribe-my-voice` joins the voice channel, keeps a PCM sink open for
-TTS replies, and streams incoming audio through Deepgram into the same
-`ConversationMonitor` that handles text. See
-Voice input for the full wiring.
+Threads and forum posts are `discord.Thread` instances: running
+`/subscribe-text` inside a thread subscribes the familiar to that
+thread only.

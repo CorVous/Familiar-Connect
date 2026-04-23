@@ -2,9 +2,7 @@
 
 One process runs one character (selected by ``FAMILIAR_ID``).
 :class:`Familiar` carries config, history store, LLM client, and
-subscriptions — the reply-path components that used to live here
-(context pipeline, providers, processors, mood, memory writer,
-interjection monitor, tracker registries) are gone.
+subscriptions.
 
 - :meth:`load_from_disk` — sole constructor; walks ``data/familiars/<id>/``
 """
@@ -44,8 +42,7 @@ class Familiar:
     transcriber: DeepgramTranscriber | None
     subscriptions: SubscriptionRegistry
     bot_user_id: int | None = None
-    """Discord snowflake for the logged-in bot user; set by
-    :func:`familiar_connect.bot.create_bot` once the gateway is up."""
+    """Discord snowflake for the logged-in bot user."""
 
     @classmethod
     def load_from_disk(

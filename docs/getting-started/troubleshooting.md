@@ -7,10 +7,7 @@ Common startup errors and what they mean:
 - **`No familiar selected`** — neither `FAMILIAR_ID` nor `--familiar`
   was given.
 - **`Familiar folder does not exist`** — create `data/familiars/<id>/`.
-- **`LLM client unavailable: OPENROUTER_API_KEY environment variable
-  is required`** — missing OpenRouter key.
+- **`OPENROUTER_API_KEY environment variable is required`** — missing
+  OpenRouter key.
 - **`Opus library not found — voice playback will not work`** — voice
   commands still run, but no audio; install libopus.
-- **Bot joins but doesn't reply** — confirm `/subscribe-text` was
-  issued in that exact channel, and check the log for
-  `pipeline channel=… status=…` lines.
