@@ -17,13 +17,18 @@ needed.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from familiar_connect.identity import Author
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 PathLike = str | Path
 
@@ -76,6 +81,22 @@ class WatermarkEntry:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class Fact:
+    """Atomic fact extracted from one or more turns.
+
+    :param source_turn_ids: ids in ``turns`` the fact was distilled
+        from — forever provenance, per plan § Design.5.
+    """
+
+    id: int
+    familiar_id: str
+    channel_id: int | None
+    text: str
+    source_turn_ids: tuple[int, ...]
+    created_at: datetime
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,6 +146,36 @@ CREATE TABLE IF NOT EXISTS memory_writer_watermark (
     last_written_id   INTEGER NOT NULL,
     created_at        TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS facts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id       TEXT    NOT NULL,
+    channel_id        INTEGER,
+    text              TEXT    NOT NULL,
+    source_turn_ids   TEXT    NOT NULL,  -- JSON array of ids in ``turns``
+    created_at        TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_familiar
+    ON facts (familiar_id, id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
+    text,
+    content='facts',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS facts_ai_fts
+AFTER INSERT ON facts BEGIN
+    INSERT INTO fts_facts (rowid, text) VALUES (new.id, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_ad_fts
+AFTER DELETE ON facts BEGIN
+    INSERT INTO fts_facts (fts_facts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+END;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_turns USING fts5(
     content,
@@ -832,6 +883,108 @@ class HistoryStore:
         ).fetchone()
         max_id = row["max_id"] if row is not None else None
         return int(max_id) if max_id is not None else 0
+
+    # ------------------------------------------------------------------
+    # Facts — atomic distilled statements with provenance
+    # ------------------------------------------------------------------
+
+    def append_fact(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int | None,
+        text: str,
+        source_turn_ids: Iterable[int],
+    ) -> Fact:
+        """Persist one fact. ``source_turn_ids`` is stored as JSON."""
+        ids = [int(i) for i in source_turn_ids]
+        ts = datetime.now(tz=UTC)
+        cur = self._conn.execute(
+            """
+            INSERT INTO facts (familiar_id, channel_id, text,
+                               source_turn_ids, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (familiar_id, channel_id, text, json.dumps(ids), ts.isoformat()),
+        )
+        self._conn.commit()
+        return Fact(
+            id=int(cur.lastrowid or 0),
+            familiar_id=familiar_id,
+            channel_id=channel_id,
+            text=text,
+            source_turn_ids=tuple(ids),
+            created_at=ts,
+        )
+
+    def recent_facts(self, *, familiar_id: str, limit: int) -> list[Fact]:
+        """Return the ``limit`` most recent facts, newest first."""
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at
+              FROM facts
+             WHERE familiar_id = ?
+             ORDER BY id DESC
+             LIMIT ?
+            """,
+            (familiar_id, limit),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def search_facts(self, *, familiar_id: str, query: str, limit: int) -> list[Fact]:
+        """FTS search over ``facts.text``.
+
+        See :meth:`search_turns` for tokenisation notes.
+        """
+        if limit <= 0:
+            return []
+        tokens = [t for t in _tokenize_fts_query(query) if t]
+        if not tokens:
+            return []
+        match_expr = " ".join(tokens)
+        rows = self._conn.execute(
+            """
+            SELECT f.id, f.familiar_id, f.channel_id, f.text,
+                   f.source_turn_ids, f.created_at
+              FROM fts_facts AS fts
+              JOIN facts AS f ON f.id = fts.rowid
+             WHERE fts_facts MATCH ?
+               AND f.familiar_id = ?
+             ORDER BY bm25(fts_facts) ASC, f.id DESC
+             LIMIT ?
+            """,
+            (match_expr, familiar_id, limit),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def latest_fact_id(self, *, familiar_id: str) -> int:
+        """Return highest ``facts.id`` for ``familiar_id``; 0 if none."""
+        row = self._conn.execute(
+            "SELECT MAX(id) AS max_id FROM facts WHERE familiar_id = ?",
+            (familiar_id,),
+        ).fetchone()
+        max_id = row["max_id"] if row is not None else None
+        return int(max_id) if max_id is not None else 0
+
+
+def _row_to_fact(row: sqlite3.Row) -> Fact:
+    ids_raw = row["source_turn_ids"]
+    try:
+        ids = tuple(int(x) for x in json.loads(ids_raw))
+    except (ValueError, TypeError):
+        ids = ()
+    channel = row["channel_id"]
+    return Fact(
+        id=int(row["id"]),
+        familiar_id=str(row["familiar_id"]),
+        channel_id=int(channel) if channel is not None else None,
+        text=str(row["text"]),
+        source_turn_ids=ids,
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
 
 
 def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:

@@ -37,6 +37,7 @@ from familiar_connect.context import (
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
 from familiar_connect.processors import DebugLoggerProcessor, VoiceResponder
+from familiar_connect.processors.fact_extractor import FactExtractor
 from familiar_connect.processors.history_writer import HistoryWriter
 from familiar_connect.processors.summary_worker import SummaryWorker
 from familiar_connect.transcription import create_transcriber_from_env
@@ -201,6 +202,12 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         familiar_id=familiar.id,
         turns_threshold=10,
     )
+    fact_extractor = FactExtractor(
+        store=familiar.history_store,
+        llm_client=familiar.llm_clients["main_prose"],
+        familiar_id=familiar.id,
+        batch_size=10,
+    )
 
     try:
         async with asyncio.TaskGroup() as tg:
@@ -214,6 +221,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 name="history-writer",
             )
             tg.create_task(summary_worker.run(), name="summary-worker")
+            tg.create_task(fact_extractor.run(), name="fact-extractor")
             tg.create_task(bot.start(token), name="discord-bot")
     finally:
         familiar.router.shutdown()

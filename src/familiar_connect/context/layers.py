@@ -150,6 +150,12 @@ class RecentHistoryLayer:
         ]
 
 
+def _display_for(author: Author | None, role: str) -> str:
+    if author is not None and author.display_name:
+        return author.display_name
+    return role
+
+
 def _turn_to_message(role: str, content: str, author: Author | None) -> Message:
     """Render a :class:`HistoryTurn`-like tuple into an LLM :class:`Message`."""
     if role == "assistant" or author is None:
@@ -268,23 +274,30 @@ class CrossChannelContextLayer:
 
 
 class RagContextLayer:
-    """FTS-backed retrieval of relevant historical turns.
+    """FTS-backed retrieval of relevant historical turns *and* facts.
 
     :meth:`set_current_cue` is called by the responder with the query
     derived from the inbound user turn. When unset (or empty), the
     layer opts out.
 
-    Invalidation: ``(cue, latest_fts_id)``. The latest id moves when
-    new turns are written, so the cache flips automatically after a
-    fresh user message without needing the layer to re-run against
-    the same cue twice unnecessarily.
+    Invalidation: ``(cue, latest_fts_id, latest_fact_id)``. Both
+    watermarks move when new turns or facts are written, so the
+    cache flips automatically. Phase 4 adds facts alongside turns;
+    Phase 3 only surfaced turns.
     """
 
     name: str = "rag_context"
 
-    def __init__(self, *, store: HistoryStore, max_results: int = 5) -> None:
+    def __init__(
+        self,
+        *,
+        store: HistoryStore,
+        max_results: int = 5,
+        max_facts: int = 3,
+    ) -> None:
         self._store = store
         self._max_results = max_results
+        self._max_facts = max_facts
         self._current_cue: str = ""
 
     def set_current_cue(self, cue: str) -> None:
@@ -294,24 +307,35 @@ class RagContextLayer:
         cue = self._current_cue
         if not cue:
             return ""
-        results = self._store.search_turns(
+        turn_results = self._store.search_turns(
             familiar_id=ctx.familiar_id,
             query=cue,
             limit=self._max_results,
         )
-        if not results:
+        fact_results = self._store.search_facts(
+            familiar_id=ctx.familiar_id,
+            query=cue,
+            limit=self._max_facts,
+        )
+        if not turn_results and not fact_results:
             return ""
-        lines: list[str] = ["## Possibly relevant earlier turns\n"]
-        for t in results:
-            who = (
-                t.author.display_name
-                if t.author is not None and t.author.display_name
-                else t.role
+
+        sections: list[str] = []
+        if fact_results:
+            lines = ["## Possibly relevant facts\n"]
+            lines.extend(f"- {f.text}" for f in fact_results)
+            sections.append("\n".join(lines))
+        if turn_results:
+            lines = ["## Possibly relevant earlier turns\n"]
+            lines.extend(
+                f"- [{_display_for(t.author, t.role)}] {t.content}"
+                for t in turn_results
             )
-            lines.append(f"- [{who}] {t.content}")
-        return "\n".join(lines)
+            sections.append("\n".join(lines))
+        return "\n\n".join(sections)
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         cue = self._current_cue
-        latest = self._store.latest_fts_id(familiar_id=ctx.familiar_id)
-        return f"{cue}|{latest}"
+        latest_turn = self._store.latest_fts_id(familiar_id=ctx.familiar_id)
+        latest_fact = self._store.latest_fact_id(familiar_id=ctx.familiar_id)
+        return f"{cue}|t{latest_turn}|f{latest_fact}"

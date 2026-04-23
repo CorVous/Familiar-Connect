@@ -21,11 +21,15 @@ flowchart TB
         summaries[(summaries)]
         cross[(cross_context_summaries)]
         fts[(fts_turns FTS5)]
+        facts[(facts)]
+        fts_facts[(fts_facts FTS5)]
     end
 
     turns -->|trigger| fts
     turns -->|SummaryWorker| summaries
     turns -->|SummaryWorker| cross
+    turns -->|FactExtractor| facts
+    facts -->|trigger| fts_facts
 
     subgraph Assembler[Prompt assembly]
         core[CoreInstructionsLayer]
@@ -40,6 +44,7 @@ flowchart TB
     cross --> xc
     summaries --> sum
     fts --> rag
+    fts_facts --> rag
     turns --> hist
 ```
 
@@ -74,7 +79,7 @@ whose key has changed.
 |---|---|---|
 | `ConversationSummaryLayer` | `summaries` table | `ch<id>:wm<last_summarised_id>` |
 | `CrossChannelContextLayer` | `cross_context_summaries` table, per-viewer map | `<source>:wm<source_last_id>` concatenated |
-| `RagContextLayer` | `fts_turns` FTS5 search | `(current_cue, latest_fts_id)` |
+| `RagContextLayer` | `fts_turns` + `fts_facts` FTS5 search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent(channel_id, window_size)` | not cached — it *is* the query |
 
 The `recent_history` layer does not contribute to the system prompt.
@@ -118,6 +123,23 @@ kept in sync by SQLite triggers:
 No worker loop; writes are synchronous with `HistoryStore.append_turn`.
 `HistoryStore.rebuild_fts()` drops and repopulates the index from
 `turns` — useful if triggers ever desync.
+
+`fts_facts` mirrors the pattern over `facts.text` with
+`facts_ai_fts` / `facts_ad_fts` triggers. Only insert + delete are
+needed; fact rows aren't updated in place.
+
+### `FactExtractor`
+
+Watermark-driven off `memory_writer_watermark`. Every
+`tick_interval_s` (default 15 s), `turns_since_watermark(limit=batch_size)`
+returns up to `batch_size` un-processed turns; if fewer than
+`batch_size` are available the tick is a no-op (wait for more).
+Otherwise a single LLM call extracts a JSON list of
+`{text, source_turn_ids}` facts, which are persisted with provenance
+pointing back to the originating turn ids. The watermark advances to
+the last processed turn id **whether or not** extraction produced
+any facts — otherwise a malformed response would stall the worker on
+the same batch forever.
 
 ## Expiry semantics for cross-channel summaries
 

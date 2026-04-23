@@ -1,0 +1,164 @@
+"""Tests for :class:`FactExtractor` — watermark-driven fact extraction."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import pytest
+
+from familiar_connect.history.store import HistoryStore
+from familiar_connect.llm import LLMClient, Message
+from familiar_connect.processors.fact_extractor import FactExtractor
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+
+class _ScriptedLLM(LLMClient):
+    """LLM stub returning canned JSON fact replies."""
+
+    def __init__(self, *, replies: list[str]) -> None:
+        super().__init__(api_key="k", model="m")
+        self._replies = list(replies)
+        self.calls: list[list[Message]] = []
+
+    async def chat(self, messages: list[Message]) -> Message:
+        self.calls.append(list(messages))
+        if not self._replies:
+            return Message(role="assistant", content="[]")
+        return Message(role="assistant", content=self._replies.pop(0))
+
+    async def chat_stream(  # type: ignore[override]
+        self, messages: list[Message]
+    ) -> AsyncIterator[str]:
+        reply = await self.chat(messages)
+        yield reply.content
+
+
+def _facts_json(items: list[dict[str, object]]) -> str:
+    return json.dumps(items)
+
+
+def _seed_turns(store: HistoryStore, count: int, channel_id: int = 1) -> list[int]:
+    ids = []
+    for i in range(count):
+        t = store.append_turn(
+            familiar_id="fam",
+            channel_id=channel_id,
+            role="user" if i % 2 == 0 else "assistant",
+            content=f"turn {i}",
+            author=None,
+        )
+        ids.append(t.id)
+    return ids
+
+
+class TestFactExtractorTick:
+    @pytest.mark.asyncio
+    async def test_extracts_facts_from_new_turns(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 12)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {"text": "Aria likes strawberries.", "source_turn_ids": [1, 3]},
+                    {
+                        "text": "Boris works nights on Tuesdays.",
+                        "source_turn_ids": [5, 7],
+                    },
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store,
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 2
+        texts = {f.text for f in facts}
+        assert "Aria likes strawberries." in texts
+        assert "Boris works nights on Tuesdays." in texts
+
+    @pytest.mark.asyncio
+    async def test_advances_watermark_after_extract(self) -> None:
+        store = HistoryStore(":memory:")
+        ids = _seed_turns(store, 12)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        wm = store.get_writer_watermark(familiar_id="fam")
+        assert wm is not None
+        # Processed the first batch_size=10 turns; watermark = id of the 10th.
+        assert wm.last_written_id == ids[9]
+
+    @pytest.mark.asyncio
+    async def test_second_tick_processes_only_new_turns(self) -> None:
+        """Each tick sees only turns past the watermark.
+
+        With ``batch_size=5``, a first tick of 10 turns processes 5
+        and advances; a second tick processes the next 5.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([]), _facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=5
+        )
+        await extractor.tick()
+        await extractor.tick()
+
+        assert _turn_count_in_prompt(llm.calls[0]) == 5
+        assert _turn_count_in_prompt(llm.calls[1]) == 5
+
+    @pytest.mark.asyncio
+    async def test_noop_below_batch_size(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 2)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        assert llm.calls == []
+        # watermark not advanced
+        assert store.get_writer_watermark(familiar_id="fam") is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_reply_is_tolerated(self) -> None:
+        """Malformed LLM output should not crash the worker.
+
+        Watermark should still advance — otherwise we'd loop forever
+        on the same bad turns.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=["not json at all, sorry"])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        assert store.recent_facts(familiar_id="fam", limit=10) == []
+        wm = store.get_writer_watermark(familiar_id="fam")
+        assert wm is not None  # still advanced
+
+
+def _turn_count_in_prompt(messages: list[Message]) -> int:
+    """Count how many ``- [role] ...`` lines appear in the user message.
+
+    Mirrors the worker's prompt layout; a test-level proxy for "how
+    many turns did this extraction see?".
+    """
+    user_msg = next((m for m in messages if m.role == "user"), None)
+    if user_msg is None:
+        return 0
+    return sum(1 for line in user_msg.content.splitlines() if line.startswith("- "))
