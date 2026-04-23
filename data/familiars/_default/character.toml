@@ -144,8 +144,3 @@ temperature = 0.3
 [llm.interjection_decision]
 model       = "mistralai/mistral-small-2603"
 temperature = 0.5
-
-# Mood evaluator: classify emotional context of recent turns → interrupt bias.
-[llm.mood_eval]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.3

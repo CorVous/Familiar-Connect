@@ -41,7 +41,6 @@ from familiar_connect.memory.scheduler import MemoryWriterScheduler
 from familiar_connect.memory.store import MemoryStore
 from familiar_connect.memory.writer import MemoryWriter
 from familiar_connect.metrics import MetricsCollector, NullCollector
-from familiar_connect.mood import MoodEvaluator
 from familiar_connect.subscriptions import SubscriptionRegistry
 from familiar_connect.text.delivery import TextDeliveryRegistry
 from familiar_connect.voice.interruption import ResponseTrackerRegistry
@@ -98,9 +97,6 @@ class Familiar:
     track in-flight chunked delivery and cancel it on new incoming
     user messages.
     """
-    mood_evaluator: MoodEvaluator = field(default_factory=MoodEvaluator)
-    """Per-response mood modifier source. Real LLM call when wired
-    with ``llm_client`` + ``history_store``; stub (0.0) otherwise."""
     metrics_collector: MetricsCollector = field(default_factory=NullCollector)
     """sink for per-turn ``TurnTrace`` records; ``NullCollector`` by default
     so tests don't need to opt out. Replaced by ``SQLiteCollector`` in ``run``."""
@@ -227,10 +223,6 @@ class Familiar:
             on_respond=_noop_respond,
         )
 
-        mood_evaluator = MoodEvaluator(
-            llm_client=llm_clients["mood_eval"],
-            history_store=history_store,
-        )
         memory_writer = MemoryWriter(
             memory_store=memory_store,
             history_store=history_store,
@@ -262,7 +254,6 @@ class Familiar:
             channel_configs=channel_configs,
             last_context_cache=last_context_cache,
             monitor=monitor,
-            mood_evaluator=mood_evaluator,
             memory_writer_scheduler=memory_writer_scheduler,
         )
 

@@ -110,7 +110,6 @@ LLM_SLOT_NAMES: frozenset[str] = frozenset(
         "memory_search",
         "memory_writer",
         "interjection_decision",
-        "mood_eval",
     },
 )
 """Canonical LLM call-site slot names.
