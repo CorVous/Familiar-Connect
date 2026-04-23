@@ -5,8 +5,8 @@ Owns:
 - Discord client construction (``py-cord`` + DAVE voice)
 - Subscribe / unsubscribe slash commands (text + voice)
 - ``on_message`` and ``on_voice_state_update`` event handlers
-- :func:`ingest_event` — text, voice, and Twitch events funnel through
-  here and are logged and dropped.
+- :func:`ingest_event` — text and voice events publish to the event
+  bus via :class:`DiscordTextSource`. Twitch has its own source.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 import discord
 
 from familiar_connect import log_style as ls
+from familiar_connect.identity import Author
+from familiar_connect.sources import DiscordTextSource
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient
 
@@ -28,28 +30,31 @@ _logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Event ingest — all paths flow through here
+# Event ingest — publishes onto the bus
 # ---------------------------------------------------------------------------
 
 
-async def ingest_event(  # noqa: RUF029 — async to match awaitable call sites
+async def ingest_event(
     *,
-    source: str,
+    source: DiscordTextSource,
     familiar: Familiar,
-    channel_id: int | None,
+    channel_id: int,
     guild_id: int | None,
-    author_label: str,
+    author: Author,
     text: str,
 ) -> None:
-    """Log and drop."""
-    del familiar
-    _logger.info(
-        f"{ls.tag('📥 Event', ls.LG)} "
-        f"{ls.kv('source', source, vc=ls.LG)} "
-        f"{ls.kv('channel', str(channel_id), vc=ls.LC)} "
-        f"{ls.kv('guild', str(guild_id), vc=ls.LC)} "
-        f"{ls.kv('author', author_label, vc=ls.LC)} "
-        f"{ls.kv('text', ls.trunc(text, 200), vc=ls.LW)}"
+    """Publish a text event onto the bus.
+
+    Kept as a named function so callers (currently only ``on_message``)
+    have a single seam to point at. Logging moves into the debug
+    processor; this function stays narrow.
+    """
+    del familiar  # unused — reserved for future per-familiar routing
+    await source.publish_text(
+        channel_id=channel_id,
+        guild_id=guild_id,
+        author=author,
+        content=text,
     )
 
 
@@ -66,8 +71,10 @@ def create_bot(familiar: Familiar) -> discord.Bot:
 
     bot = discord.Bot(intents=intents)
 
+    text_source = DiscordTextSource(bus=familiar.bus, familiar_id=familiar.id)
+
     _register_slash_commands(bot, familiar)
-    _register_events(bot, familiar)
+    _register_events(bot, familiar, text_source)
 
     return bot
 
@@ -165,7 +172,11 @@ def _register_slash_commands(bot: discord.Bot, familiar: Familiar) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _register_events(bot: discord.Bot, familiar: Familiar) -> None:
+def _register_events(
+    bot: discord.Bot,
+    familiar: Familiar,
+    text_source: DiscordTextSource,
+) -> None:
     @bot.event
     async def on_ready() -> None:  # noqa: RUF029 — Discord event handler contract
         user = bot.user
@@ -196,11 +207,11 @@ def _register_events(bot: discord.Bot, familiar: Familiar) -> None:
             return
 
         await ingest_event(
-            source="discord-text",
+            source=text_source,
             familiar=familiar,
             channel_id=message.channel.id,
             guild_id=message.guild.id if message.guild else None,
-            author_label=f"{message.author.name}#{message.author.id}",
+            author=Author.from_discord_member(message.author),
             text=message.content,
         )
 

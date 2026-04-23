@@ -1,17 +1,18 @@
 """Runtime bundle for the single active character.
 
 One process runs one character (selected by ``FAMILIAR_ID``).
-:class:`Familiar` carries config, history store, LLM client, and
-subscriptions.
+:class:`Familiar` carries config, history store, LLM client, bus,
+router, and subscriptions.
 
 - :meth:`load_from_disk` — sole constructor; walks ``data/familiars/<id>/``
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from familiar_connect.bus import InProcessEventBus, TurnRouter
 from familiar_connect.config import load_character_config
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.subscriptions import SubscriptionRegistry
@@ -19,6 +20,7 @@ from familiar_connect.subscriptions import SubscriptionRegistry
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from familiar_connect.bus.protocols import EventBus
     from familiar_connect.config import CharacterConfig
     from familiar_connect.llm import LLMClient
     from familiar_connect.transcription import DeepgramTranscriber
@@ -31,6 +33,8 @@ class Familiar:
 
     :param transcriber: when ``None``, voice subscription joins for TTS
         playback only — no incoming audio is transcribed.
+    :param bus: event bus — sources publish, processors consume.
+    :param router: per-session turn routing + cancel-prior-scope.
     """
 
     id: str
@@ -41,6 +45,8 @@ class Familiar:
     tts_client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | None
     transcriber: DeepgramTranscriber | None
     subscriptions: SubscriptionRegistry
+    bus: EventBus = field(default_factory=InProcessEventBus)
+    router: TurnRouter = field(default_factory=TurnRouter)
     bot_user_id: int | None = None
     """Discord snowflake for the logged-in bot user."""
 

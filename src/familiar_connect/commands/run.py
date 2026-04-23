@@ -17,9 +17,15 @@ import discord
 
 from familiar_connect import log_style as ls
 from familiar_connect.bot import create_bot
+from familiar_connect.bus.topics import (
+    TOPIC_DISCORD_TEXT,
+    TOPIC_TWITCH_EVENT,
+    TOPIC_VOICE_TRANSCRIPT_FINAL,
+)
 from familiar_connect.config import ConfigError, load_character_config
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
+from familiar_connect.processors import DebugLoggerProcessor
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
 
@@ -79,16 +85,39 @@ def _resolve_familiar_root(args: argparse.Namespace) -> Path:
     return root
 
 
+_DEBUG_TOPICS: tuple[str, ...] = (
+    TOPIC_DISCORD_TEXT,
+    TOPIC_TWITCH_EVENT,
+    TOPIC_VOICE_TRANSCRIPT_FINAL,
+)
+
+
+async def _run_debug_processor(familiar: Familiar) -> None:
+    """Drain subscribed topics into the debug logger.
+
+    Phase-1 signal: proves the bus is carrying traffic. Replaced by
+    real responders in Phase 2+.
+    """
+    proc = DebugLoggerProcessor(topics=_DEBUG_TOPICS)
+    async for event in familiar.bus.subscribe(proc.topics):
+        await proc.handle(event, familiar.bus)
+
+
 async def _async_main(token: str, familiar: Familiar) -> None:
-    """Asyncio entry point: build the bot and start it.
+    """Asyncio entry point: bring up bus, debug processor, bot.
 
     :param token: Discord bot token.
     :param familiar: The loaded :class:`Familiar` bundle.
     """
     bot = create_bot(familiar)
+    await familiar.bus.start()
     try:
-        await bot.start(token)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_run_debug_processor(familiar), name="debug-logger")
+            tg.create_task(bot.start(token), name="discord-bot")
     finally:
+        familiar.router.shutdown()
+        await familiar.bus.shutdown()
         for client in familiar.llm_clients.values():
             await client.close()
 
