@@ -27,13 +27,9 @@ def _fake_character_config() -> MagicMock:
     itself uses (``tts.voice_id`` / ``tts.model``).
     """
     config = MagicMock(name="character_config")
+    config.tts.provider = "azure"
     config.tts.voice_id = "test-voice-id"
     config.tts.model = "test-model"
-    # numeric attrs the [Config] startup log formats inline
-    config.interrupt_tolerance.value = "medium"
-    config.interrupt_tolerance.base_probability = 0.5
-    config.min_interruption_s = 0.3
-    config.short_long_boundary_s = 2.0
     return config
 
 
@@ -258,7 +254,7 @@ def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
             "familiar_connect.commands.run.Familiar.load_from_disk",
             return_value=MagicMock(
                 id="aria",
-                config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                config=MagicMock(),
             ),
         ),
         patch("familiar_connect.commands.run.load_opus"),
@@ -317,7 +313,7 @@ def test_run_loads_config_before_building_clients(tmp_path: Path) -> None:
             "familiar_connect.commands.run.Familiar.load_from_disk",
             return_value=MagicMock(
                 id="aria",
-                config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                config=MagicMock(),
             ),
         ),
         patch("familiar_connect.commands.run.load_opus"),
@@ -389,7 +385,7 @@ class TestRunTranscriberIntegration:
                 "familiar_connect.commands.run.Familiar.load_from_disk",
                 return_value=MagicMock(
                     id="aria",
-                    config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                    config=MagicMock(),
                 ),
             ) as mock_load,
             patch("familiar_connect.commands.run.load_opus"),
@@ -440,7 +436,7 @@ class TestRunTranscriberIntegration:
                 "familiar_connect.commands.run.Familiar.load_from_disk",
                 return_value=MagicMock(
                     id="aria",
-                    config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                    config=MagicMock(),
                 ),
             ) as mock_load,
             patch("familiar_connect.commands.run.load_opus"),

@@ -3,48 +3,28 @@
 An AI "familiar" that joins Discord voice channels, listens to users,
 understands speech, and talks back using real AI voices.
 
-## What it does today
+!!! warning "Demolition in progress"
+    The `claude/re-arch-*` branch has removed the reply orchestration
+    layer. What remains is a Discord bot shell with working plumbing
+    for text, voice, Twitch EventSub, STT, TTS, OpenRouter, and
+    SQLite history — but every event currently log-and-drops. The
+    next reply-path design will fill this back in.
 
-- Joins Discord text and voice channels via per-channel subscription
-  commands (`/subscribe-text`, `/subscribe-my-voice`).
-- Runs every reply through a **context pipeline** of pluggable providers
-  (character card, recent history + rolling summary, agentic memory
-  search) and processors (stepped-thinking pre-processor, recast
-  post-processor).
-- Replies via OpenRouter (main model + a cheap side-model slot for
-  sub-tasks) and Cartesia TTS for voice playback.
-- Watches Twitch channels via EventSub and feeds events (subs, bits,
-  cheers, follows, ad breaks, channel-point redemptions) into the same
-  conversation pipeline.
-- Stores every transcript verbatim in SQLite; stores every familiar's
-  long-term memory as plain Markdown files under
-  `data/familiars/<id>/memory/`.
+## What still boots
+
+- CLI entry point: `familiar-connect run --familiar <id>`.
+- Discord text + voice subscriptions (`/subscribe-text`,
+  `/subscribe-voice`, plus their `unsubscribe-*` counterparts).
+- Twitch EventSub client.
+- SQLite transcript store (`data/familiars/<id>/history.db`).
+- OpenRouter `LLMClient`, Deepgram / faster-whisper STT, Azure /
+  Cartesia / Gemini TTS — instantiated on startup, not yet called
+  from a reply path.
 
 ## Where to look next
 
 - **Running the bot:** [Installation](getting-started/installation.md)
   → [On-disk layout](getting-started/on-disk-layout.md)
   → [Slash commands](getting-started/slash-commands.md).
-- **Understanding the architecture:**
-  [Architecture overview](architecture/overview.md) is the entry point;
-  [Context pipeline](architecture/context-pipeline.md) is the biggest
-  design document.
-- **What's still planned:** [Roadmap](roadmap/index.md) — carries a
-  status banner on every page so you can tell at a glance what's
-  shipped, what's partially wired, and what's still paper.
-
-## Status at a glance
-
-| Area | Status |
-|---|---|
-| Context pipeline, providers, processors, budgeter | **Shipped** |
-| Memory directory + `MemoryStore` + `ContentSearchProvider` | **Shipped** |
-| Per-channel subscriptions + channel modes + configuration model | **Shipped** |
-| Twitch EventSub integration | **Shipped** |
-| [Metrics and profiling](guides/metrics.md) (per-turn traces + CLI report) | **Shipped** |
-| [Conversation monitor](architecture/conversation-flow.md) (chattiness / interjection / lull) | **Shipped** |
-| [Voice speech-to-text wired into the reply path](architecture/voice-input.md) | **Shipped** |
-| [Typing simulation for text-RP channels](architecture/typing-simulation.md) | **Shipped** |
-| [Post-session memory writer](architecture/session-logging.md) | **Shipped** |
-| Discord-side voice channel logging (threads + live embeds) | [Planned](roadmap/voice-logging.md) |
-| Web search as a provider tool | [Research](roadmap/web-search.md) |
+- **Understanding what remains:**
+  [Architecture overview](architecture/overview.md).

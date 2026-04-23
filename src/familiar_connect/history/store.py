@@ -21,12 +21,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from familiar_connect.identity import Author
-
-if TYPE_CHECKING:
-    from familiar_connect.config import ChannelMode
 
 PathLike = str | Path
 
@@ -251,11 +247,16 @@ class HistoryStore:
         content: str,
         author: Author | None = None,
         guild_id: int | None = None,
-        mode: ChannelMode | None = None,
+        mode: str | None = None,
     ) -> HistoryTurn:
-        """Append a single turn and return its persisted form."""
+        """Append a single turn and return its persisted form.
+
+        *mode* is a free-form string tag on the legacy ``turns.mode``
+        column — retained so pre-rearch rows still read back, but not
+        populated by the demolition-branch reply path (which is a stub).
+        """
         timestamp = datetime.now(tz=UTC)
-        mode_value = mode.value if mode is not None else None
+        mode_value = mode
         platform = author.platform if author is not None else None
         user_id = author.user_id if author is not None else None
         username = author.username if author is not None else None
@@ -299,13 +300,12 @@ class HistoryStore:
         familiar_id: str,
         channel_id: int,
         limit: int,
-        mode: ChannelMode | None = None,
+        mode: str | None = None,
     ) -> list[HistoryTurn]:
         """Return most recent turns in channel, oldest-first.
 
         Per-channel partitioning prevents bleed between conversations.
-        When *mode* is set, only matching turns returned (prevents
-        cross-mode style contamination).
+        When *mode* is set, only matching legacy-tag turns returned.
         """
         if limit <= 0:
             return []
@@ -318,7 +318,7 @@ class HistoryStore:
                  ORDER BY id DESC
                  LIMIT ?
                 """,  # noqa: S608
-                (familiar_id, channel_id, mode.value, limit),
+                (familiar_id, channel_id, mode, limit),
             ).fetchall()
         else:
             rows = self._conn.execute(

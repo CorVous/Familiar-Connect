@@ -72,9 +72,9 @@ uv run mkdocs build --strict
 ## Where things live
 
 - [Architecture overview](architecture/overview.md) — the big picture, the pipeline diagram, the component map.
-- [Context pipeline](architecture/context-pipeline.md) — how providers, processors, and the budgeter fit together.
-- [Memory](architecture/memory.md) — the per-familiar memory directory and `MemoryStore`.
+- Context pipeline — how providers, processors, and the budgeter fit together.
+- Memory — the per-familiar memory directory and `MemoryStore`.
 - [Configuration model](architecture/configuration-model.md) — the two-level config split, slash commands, on-disk layout.
 - [Security](architecture/security.md) — credential storage, path-traversal defences, logging rules.
 - [Design decisions](architecture/decisions.md) — ideas considered and rejected.
-- [Roadmap](roadmap/index.md) — planned work with per-item rationale.
+- Roadmap — planned work with per-item rationale.

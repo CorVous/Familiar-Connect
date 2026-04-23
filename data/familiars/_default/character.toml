@@ -1,8 +1,8 @@
 # Default familiar profile — checked into the repo.
 #
-# This file is the single source of truth for configuration defaults.
-# When another familiar's `character.toml` omits a field (or a whole
-# [llm.*] or [tts] section), the loader falls back to the value here.
+# Sole source of truth for configuration defaults. When another
+# familiar's `character.toml` omits a field, the loader falls back
+# to the value here.
 #
 # New familiars should copy this file as a starting template:
 #
@@ -13,134 +13,35 @@
 # the directory as a reference, not a runnable familiar. Do not set
 # FAMILIAR_ID=_default.
 
-# --- Persona and behaviour -------------------------------------------------
-
-default_mode  = "text_conversation_rp"
-display_tz    = "UTC"
-aliases       = []
-chattiness    = "Balanced — responds when the conversation is relevant"
-interjection  = "average"
-text_lull_timeout  = 10.0
-voice_lull_timeout = 5.0
-
-# --- Voice interruption handling (voice channels only) --------------------
-#
-# When the familiar is speaking or generating and a user starts talking,
-# the interruption detector classifies by duration and dispatches to the
-# appropriate handler. `interrupt_tolerance` controls the probability of
-# pushing through a short interruption mid-speech (higher = more
-# stubborn). See docs/roadmap/interruption-flow.md.
-
-[voice.interruption]
-interrupt_tolerance   = "average"   # very_meek | meek | average | stubborn | very_stubborn
-min_interruption_s    = 2.0         # back-channel filter threshold
-short_long_boundary_s = 30.0        # short (polite pause) vs. long (regen)
-
-# --- Typing simulation (text channels only) -------------------------------
-#
-# Chunks the LLM reply into paragraphs and sends each after a length-
-# proportional "typing..." delay. A new user message mid-delivery cancels
-# the remaining chunks; already-sent chunks become the assistant turn.
-#
-# Per-mode defaults live in channel_config_for_mode() — text_conversation_rp
-# enables; full_rp and imitate_voice disable. Uncomment below to override
-# familiar-wide (or per-channel via channels/<id>.toml).
-# See docs/architecture/typing-simulation.md.
-#
-# [typing_simulation]
-# enabled                  = true
-# chars_per_second         = 40.0    # ~240 wpm
-# min_delay_s              = 0.8
-# max_delay_s              = 6.0
-# inter_line_pause_s       = 0.7
-# sentence_split_threshold = 400     # chars — paragraphs above split by sentence
+display_tz = "UTC"
+aliases    = []
 
 [providers.history]
 window_size = 20
 
-# --- Memory writer (post-session summarisation into long-term memory) ---------
-
-[memory_writer]
-turn_threshold = 50     # run writer after this many new turns
-idle_timeout   = 1800.0 # run writer after 30 min of silence
-
-[layers.depth_inject]
-position = 0
-role     = "system"
-
 # --- Text-to-speech --------------------------------------------------------
 #
-# provider: "azure" (default) or "cartesia"
+# provider: "azure" (default), "cartesia", or "gemini"
 #
 # Azure:    set AZURE_SPEECH_KEY + AZURE_SPEECH_REGION env vars.
-#           azure_voice is any Azure Neural voice name.
-#
 # Cartesia: set CARTESIA_API_KEY env var.
-#           cartesia_voice_id is the Cartesia voice UUID.
-#           cartesia_model is the model name, e.g. "sonic-3".
-#
-# greetings: list of strings to randomly pick from when joining voice.
-#           Empty list falls back to "Hello!" (hardcoded default).
+# Gemini:   set GOOGLE_API_KEY env var.
 
 [tts]
-provider    = "azure"
-azure_voice = "en-US-AmberNeural"
+provider          = "azure"
+azure_voice       = "en-US-AmberNeural"
 cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"
 gemini_voice      = "Kore"
 gemini_model      = "gemini-3.1-flash-tts-preview"
-# Optional structured performance direction for Gemini. Any subset may be set;
-# unset fields are omitted from the composed prompt. All six are combined into
-# an Audio Profile / Scene / Director's Notes block prepended to each synthesis
-# request. Audio tags ([laughs], [whispers], [short pause], etc.) embedded in
-# LLM replies flow through automatically — no config needed.
-# gemini_audio_profile = "warm, curious 20-something"
-# gemini_scene         = "relaxed late-night voice chat"
-# gemini_context       = "casual banter with friends"
-# gemini_style         = "playful, conversational"
-# gemini_pace          = "natural, with thoughtful pauses"
-# gemini_accent        = "neutral American"
-greetings  = []
+greetings         = []
 
 # --- LLM slots -------------------------------------------------------------
 #
-# Every LLM call site in the codebase has its own slot here. Each slot
-# carries its own model and temperature so a familiar can trade off cost,
-# latency, and quality per call site independently.
-#
-# Unset slots in a familiar's own character.toml inherit from this file.
+# Main reply path. Reply orchestration is a stub during the re-arch
+# demolition; this slot exists so the next reply-path design can
+# plug in without churn.
 
-# Main reply path: the familiar's spoken reply to a Discord message.
 [llm.main_prose]
 model       = "z-ai/glm-5.1"
 temperature = 0.7
-
-# Recast post-processor: rewrite the reply for tone or spoken delivery.
-[llm.post_process_style]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.5
-
-# Stepped-thinking pre-processor: hidden chain-of-thought before replying.
-[llm.reasoning_context]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.3
-
-# History provider: summarise own-channel and cross-channel history.
-[llm.history_summary]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.4
-
-# Content-search provider: agentic memory / lore retrieval loop.
-[llm.memory_search]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.4
-
-# Memory writer: post-session summarisation into long-term memory files.
-[llm.memory_writer]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.3
-
-# Chattiness monitor: decide whether to proactively join a conversation.
-[llm.interjection_decision]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.5

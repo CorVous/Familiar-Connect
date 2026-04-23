@@ -13,7 +13,7 @@ These are ideas that were seriously considered during planning and deliberately 
 - **Running SillyTavern extensions outside SillyTavern requires a headless browser** driving a real ST tab (Playwright / CDP), intercepting `generate` calls, and marshaling chat state in and out. This is high-latency (the bot picked Cartesia for sub-100ms TTFB; a Chromium round-trip blows that budget), fragile across ST versions, and painful to test alongside the bot's `asyncio.TaskGroup`-scoped concurrency.
 - **SillyTavern's architecture assumes one user, one active chat.** Familiar-Connect is multi-guild and concurrent. Forcing every guild through a single ST session serialises the bot; spawning one ST instance per guild is a deployment nightmare.
 
-**What we take from it instead:** file formats only — Character Card V3, presets, World Info / lorebooks, and the macro vocabulary. These give SillyTavern users a painless on-ramp without making SillyTavern a runtime dependency. See [Context pipeline](context-pipeline.md) for the detailed split.
+**What we take from it instead:** file formats only — Character Card V3, presets, World Info / lorebooks, and the macro vocabulary. These give SillyTavern users a painless on-ramp without making SillyTavern a runtime dependency. See Context pipeline for the detailed split.
 
 ## Embedding a SillyTavern extension runtime via headless browser
 
@@ -43,7 +43,7 @@ These are ideas that were seriously considered during planning and deliberately 
 
 **The idea:** Outsource long-term memory and user-fact tracking to a managed or self-hosted memory service.
 
-**Why it's rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that principle, and the scale Familiar-Connect targets (one bot, N guilds, a single host, a learning project not headed for wide adoption) does not justify the operational or privacy cost. A plain-text memory directory plus a cheap search agent is strictly simpler and has the additional property that a human can `grep` and edit the familiar's memory directly. See [Memory](memory.md).
+**Why it's rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that principle, and the scale Familiar-Connect targets (one bot, N guilds, a single host, a learning project not headed for wide adoption) does not justify the operational or privacy cost. A plain-text memory directory plus a cheap search agent is strictly simpler and has the additional property that a human can `grep` and edit the familiar's memory directly. See Memory.
 
 This rejection also applies to **running a memory MCP server we own as a sidecar** for the bot's own internal use. MCP is useful when multiple separate agents need to share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle to manage). MCP stays on the table as a way to later *expose* Familiar-Connect's memory to external tools; it is not how Familiar-Connect consumes its own.
 

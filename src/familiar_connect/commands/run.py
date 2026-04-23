@@ -20,7 +20,6 @@ from familiar_connect.bot import create_bot
 from familiar_connect.config import ConfigError, load_character_config
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
-from familiar_connect.metrics import SQLiteCollector
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
 
@@ -92,7 +91,6 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     finally:
         for client in familiar.llm_clients.values():
             await client.close()
-        familiar.metrics_collector.close()
 
 
 _OPUS_FALLBACK_PATHS = [
@@ -170,12 +168,10 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("Failed to load familiar config: %s", exc)
         return 1
 
-    tol = character_config.interrupt_tolerance
     _logger.info(
         f"{ls.tag('Config', ls.W)} "
-        f"{ls.kv('tolerance', f'{tol.value}({tol.base_probability:.2f})')} "
-        f"{ls.kv('min', f'{character_config.min_interruption_s:.1f}s')} "
-        f"{ls.kv('boundary', f'{character_config.short_long_boundary_s:.1f}s')}"
+        f"{ls.kv('familiar', familiar_root.name)} "
+        f"{ls.kv('tts', character_config.tts.provider)}"
     )
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -216,13 +212,10 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("Failed to load familiar config: %s", exc)
         return 1
 
-    familiar.metrics_collector = SQLiteCollector(familiar_root / "metrics.db")
-
     _logger.info(
         f"{ls.tag('❇️ Loaded', ls.W)} "
         f"{ls.kv('familiar', familiar.id)} "
-        f"{ls.kv('from', str(familiar_root))} "
-        f"{ls.kv('default_mode', familiar.config.default_mode.value)}"
+        f"{ls.kv('from', str(familiar_root))}"
     )
 
     load_opus()
