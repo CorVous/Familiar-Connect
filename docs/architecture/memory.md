@@ -72,9 +72,8 @@ These are *conventions*, not requirements. A familiar that doesn't use them is f
 
 ### `self/` — the familiar's self-description
 
-- Written on familiar creation from a Character Card V3 (see [Bootstrapping](../guides/bootstrapping.md)).
-- The familiar does not normally edit these files. A human can edit them to tune the familiar's persona without re-importing a card.
-- `self/.original.png` preserves the original card bytes so a future unpacker revision can re-run against the source.
+- Populated by hand; one Markdown file per persona field (e.g. `description.md`, `personality.md`).
+- A human can edit them to tune the familiar's persona.
 
 ### `people/<platform>-<user_id>.md` — someone the familiar has interacted with
 

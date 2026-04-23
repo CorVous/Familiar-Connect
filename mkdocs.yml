@@ -58,7 +58,6 @@ nav:
       - getting-started/slash-commands.md
       - getting-started/troubleshooting.md
   - Guides:
-      - guides/bootstrapping.md
       - guides/twitch.md
       - guides/metrics.md
   - Architecture:

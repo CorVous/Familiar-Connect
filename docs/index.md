@@ -25,8 +25,6 @@ understands speech, and talks back using real AI voices.
 - **Running the bot:** [Installation](getting-started/installation.md)
   → [On-disk layout](getting-started/on-disk-layout.md)
   → [Slash commands](getting-started/slash-commands.md).
-- **Seeding a familiar from a character card or SillyTavern lorebook:**
-  [Bootstrapping guide](guides/bootstrapping.md).
 - **Understanding the architecture:**
   [Architecture overview](architecture/overview.md) is the entry point;
   [Context pipeline](architecture/context-pipeline.md) is the biggest
@@ -41,7 +39,6 @@ understands speech, and talks back using real AI voices.
 |---|---|
 | Context pipeline, providers, processors, budgeter | **Shipped** |
 | Memory directory + `MemoryStore` + `ContentSearchProvider` | **Shipped** |
-| Character card unpacker, SillyTavern lorebook importer | **Shipped** |
 | Per-channel subscriptions + channel modes + configuration model | **Shipped** |
 | Twitch EventSub integration | **Shipped** |
 | [Metrics and profiling](guides/metrics.md) (per-turn traces + CLI report) | **Shipped** |

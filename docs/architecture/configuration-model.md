@@ -32,7 +32,7 @@ Model choices, temperatures, and TTS voice are **not** here — those live on th
 
 Per-familiar configuration. The persona, behaviour knobs, pluggable component selection, and **every LLM model / temperature choice** for the single familiar this install runs.
 
-- **Persona** — character card fields, unpacked into `memory/self/*.md` by `familiar_connect.bootstrap.unpack_character` (see [Bootstrapping](../guides/bootstrapping.md)).
+- **Persona** — character card fields, unpacked into `memory/self/*.md`.
 - **Memory directory** — `memory/`, owned by `MemoryStore`. See [Memory](memory.md).
 - **Tuning parameters** — history window size, depth-inject position and role, default channel mode.
 - **Per-call-site LLM slots** — `[llm.<slot>]` sections, one per call site, each with its own `model` and `temperature`. See the [Per-call-site LLM slots](#per-call-site-llm-slots) section below.

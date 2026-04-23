@@ -110,16 +110,6 @@ summary because recent-history overflowed."
 
 Module: `familiar_connect.memory.store`. Covered in detail on the [Memory](memory.md) page — this is the single piece of new infrastructure the agentic-search design adds.
 
-## 4. Character-card unpacker
-
-Module: `familiar_connect.bootstrap.unpack_character`.
-
-On familiar creation, the unpacker reads a Character Card V3 and writes one Markdown file per field into `memory/self/` (`description.md`, `personality.md`, `scenario.md`, `first_mes.md`, `mes_example.md`, `system_prompt.md`, `post_history_instructions.md`). The original card bytes are preserved alongside as `self/.original.png` so a future unpacker revision can re-run against the source.
-
-Idempotent: re-unpacking the same card is a no-op; re-unpacking a *different* card errors unless `overwrite=True` is passed.
-
-See the [Bootstrapping guide](../guides/bootstrapping.md) for usage.
-
 ## 5. `CharacterProvider`
 
 Module: `familiar_connect.context.providers.character`.
@@ -192,12 +182,6 @@ One cheap-LLM call with the utterance, the top-K retrieved snippets (≤150 toke
 **Graceful failure** — if the filter or the retriever raises, the deterministic tier's contributions are still returned.
 
 **Deterministic mode for tests** — the cheap model client is injectable so tests can substitute a scripted responder.
-
-## 9. SillyTavern lorebook / world-info importer
-
-Module: `familiar_connect.bootstrap.import_silly_tavern`.
-
-Reads a SillyTavern lorebook or world-info JSON file and writes one Markdown file per entry into a subdirectory of the memory store. Each output file is plain Markdown: the entry title as the H1, the content as the body, and the trigger keywords as a short bulleted list at the top (kept for human reference; the runtime does not use them). See the [Bootstrapping guide](../guides/bootstrapping.md) for usage.
 
 ## 10. Processors
 

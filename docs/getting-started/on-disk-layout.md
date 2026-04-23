@@ -18,10 +18,7 @@ point `FAMILIAR_ID` at is loaded per process.
 
 Drop Markdown files into `data/familiars/<id>/memory/self/` (e.g.
 `description.md`, `personality.md`, `scenario.md`) — the
-`CharacterProvider` concatenates whatever is present. If you want to
-seed a familiar from a V3 character-card PNG or a SillyTavern lorebook
-export, see the [Bootstrapping guide](../guides/bootstrapping.md) for
-the operator recipes.
+`CharacterProvider` concatenates whatever is present.
 
 ## Per-mode instructions
 
