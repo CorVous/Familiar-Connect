@@ -27,13 +27,18 @@ from familiar_connect.config import ConfigError, load_character_config
 from familiar_connect.context import (
     Assembler,
     CharacterCardLayer,
+    ConversationSummaryLayer,
     CoreInstructionsLayer,
+    CrossChannelContextLayer,
     OperatingModeLayer,
+    RagContextLayer,
     RecentHistoryLayer,
 )
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
 from familiar_connect.processors import DebugLoggerProcessor, VoiceResponder
+from familiar_connect.processors.history_writer import HistoryWriter
+from familiar_connect.processors.summary_worker import SummaryWorker
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
 from familiar_connect.tts_player import LoggingTTSPlayer
@@ -114,14 +119,17 @@ async def _run_debug_processor(familiar: Familiar) -> None:
 
 
 def _default_assembler(familiar: Familiar) -> Assembler:
-    """Build the Phase-2 reduced layer stack.
+    """Build the Phase-3 full layer stack.
 
-    Cross-channel, summary, and rag layers come online in Phase 3 once
-    the side-indices are populated.
+    Order matches plan § Design.4: static role/character/operating-mode,
+    then cross-channel, rolling summary, RAG, and finally the recent
+    history message list (appended by the assembler as ``Message``
+    objects, not as system text).
     """
     root = familiar.root
     core_path = root.parent / "_default" / "core_instructions.md"
     card_path = root / "character.md"
+    store = familiar.history_store
     return Assembler(
         layers=[
             CoreInstructionsLayer(path=core_path),
@@ -138,8 +146,15 @@ def _default_assembler(familiar: Familiar) -> Assembler:
                     ),
                 }
             ),
+            CrossChannelContextLayer(
+                store=store,
+                viewer_map={},  # populated by per-channel config when present
+                ttl_seconds=600,
+            ),
+            ConversationSummaryLayer(store=store),
+            RagContextLayer(store=store, max_results=5),
             RecentHistoryLayer(
-                store=familiar.history_store,
+                store=store,
                 window_size=familiar.config.history_window_size,
             ),
         ]
@@ -150,6 +165,12 @@ async def _run_voice_responder(familiar: Familiar, responder: VoiceResponder) ->
     """Drain voice-topic events into the :class:`VoiceResponder`."""
     async for event in familiar.bus.subscribe(responder.topics):
         await responder.handle(event, familiar.bus)
+
+
+async def _run_history_writer(familiar: Familiar, writer: HistoryWriter) -> None:
+    """Persist turn-generating events into :class:`HistoryStore`."""
+    async for event in familiar.bus.subscribe(writer.topics):
+        await writer.handle(event, familiar.bus)
 
 
 async def _async_main(token: str, familiar: Familiar) -> None:
@@ -171,6 +192,15 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         router=familiar.router,
         familiar_id=familiar.id,
     )
+    history_writer = HistoryWriter(
+        store=familiar.history_store, familiar_id=familiar.id
+    )
+    summary_worker = SummaryWorker(
+        store=familiar.history_store,
+        llm_client=familiar.llm_clients["main_prose"],
+        familiar_id=familiar.id,
+        turns_threshold=10,
+    )
 
     try:
         async with asyncio.TaskGroup() as tg:
@@ -179,6 +209,11 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 _run_voice_responder(familiar, voice_responder),
                 name="voice-responder",
             )
+            tg.create_task(
+                _run_history_writer(familiar, history_writer),
+                name="history-writer",
+            )
+            tg.create_task(summary_worker.run(), name="summary-worker")
             tg.create_task(bot.start(token), name="discord-bot")
     finally:
         familiar.router.shutdown()

@@ -59,6 +59,7 @@ nav:
       - getting-started/troubleshooting.md
   - Architecture:
       - architecture/overview.md
+      - architecture/context-pipeline.md
       - architecture/configuration-model.md
       - architecture/security.md
       - architecture/decisions.md

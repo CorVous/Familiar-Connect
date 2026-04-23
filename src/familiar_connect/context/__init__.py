@@ -15,9 +15,12 @@ from familiar_connect.context.assembler import (
 )
 from familiar_connect.context.layers import (
     CharacterCardLayer,
+    ConversationSummaryLayer,
     CoreInstructionsLayer,
+    CrossChannelContextLayer,
     Layer,
     OperatingModeLayer,
+    RagContextLayer,
     RecentHistoryLayer,
 )
 
@@ -26,8 +29,11 @@ __all__ = [
     "Assembler",
     "AssemblyContext",
     "CharacterCardLayer",
+    "ConversationSummaryLayer",
     "CoreInstructionsLayer",
+    "CrossChannelContextLayer",
     "Layer",
     "OperatingModeLayer",
+    "RagContextLayer",
     "RecentHistoryLayer",
 ]

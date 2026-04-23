@@ -17,6 +17,7 @@ needed.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -124,12 +125,63 @@ CREATE TABLE IF NOT EXISTS memory_writer_watermark (
     last_written_id   INTEGER NOT NULL,
     created_at        TEXT    NOT NULL
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_turns USING fts5(
+    content,
+    content='turns',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Keep the FTS index in sync with ``turns``.
+CREATE TRIGGER IF NOT EXISTS turns_ai_fts
+AFTER INSERT ON turns BEGIN
+    INSERT INTO fts_turns (rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS turns_ad_fts
+AFTER DELETE ON turns BEGIN
+    INSERT INTO fts_turns (fts_turns, rowid, content)
+        VALUES ('delete', old.id, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS turns_au_fts
+AFTER UPDATE ON turns BEGIN
+    INSERT INTO fts_turns (fts_turns, rowid, content)
+        VALUES ('delete', old.id, old.content);
+    INSERT INTO fts_turns (rowid, content) VALUES (new.id, new.content);
+END;
 """
 
 _TURN_COLS = (
     "id, timestamp, role, author_platform, author_user_id, "
     "author_username, author_display_name, content, channel_id"
 )
+
+
+_FTS_TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
+
+
+def _tokenize_fts_query(query: str) -> list[str]:
+    """Sanitise an FTS5 MATCH expression.
+
+    FTS5 MATCH parses a small grammar — bare punctuation, unmatched
+    quotes, and leading booleans can all raise ``sqlite3.Operational``.
+    Extract bare word tokens and apply the FTS5 prefix operator so
+    a query ``fox`` also matches ``foxes`` (default tokenizer has no
+    stemmer). Tokens shorter than 3 chars drop the prefix to avoid
+    runaway matches on common stopword prefixes.
+    """
+    if not query or not query.strip():
+        return []
+    out: list[str] = []
+    for tok in _FTS_TOKEN_RE.findall(query):
+        low = tok.lower()
+        if len(low) >= 3:
+            out.append(f"{low}*")
+        else:
+            out.append(low)
+    return out
 
 
 class HistoryStore:
@@ -696,6 +748,90 @@ class HistoryStore:
             (familiar_id, min_id, limit),
         ).fetchall()
         return [_row_to_turn(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # FTS side-index over ``turns.content``
+    # ------------------------------------------------------------------
+
+    def search_turns(
+        self,
+        *,
+        familiar_id: str,
+        query: str,
+        limit: int,
+        channel_id: int | None = None,
+    ) -> list[HistoryTurn]:
+        """Return turns whose content matches the FTS *query*.
+
+        Empty/whitespace *query* returns ``[]``. Punctuation in the
+        query is tolerated — tokens are quoted before hand-off to
+        SQLite FTS5 so Unicode chars and special MATCH operators don't
+        raise.
+
+        Results are ordered by BM25 rank, tiebroken by turn id DESC
+        (newest first).
+        """
+        if limit <= 0:
+            return []
+        tokens = [t for t in _tokenize_fts_query(query) if t]
+        if not tokens:
+            return []
+        match_expr = " ".join(tokens)
+
+        params: list[object] = [match_expr, familiar_id]
+        where_channel = ""
+        if channel_id is not None:
+            where_channel = "AND t.channel_id = ?\n"
+            params.append(channel_id)
+        params.append(limit)
+
+        rows = self._conn.execute(
+            f"""
+            SELECT {", ".join("t." + c for c in _TURN_COLS.split(", "))}
+              FROM fts_turns AS fts
+              JOIN turns AS t ON t.id = fts.rowid
+             WHERE fts_turns MATCH ?
+               AND t.familiar_id = ?
+               {where_channel}
+             ORDER BY bm25(fts_turns) ASC, t.id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            params,
+        ).fetchall()
+        return [_row_to_turn(r) for r in rows]
+
+    def rebuild_fts(self) -> None:
+        """Drop and repopulate the ``fts_turns`` index from ``turns``.
+
+        Cheap relative to re-running every LLM call; cheap enough to
+        run at startup if triggers ever get out of sync.
+        """
+        self._conn.executescript(
+            """
+            DELETE FROM fts_turns;
+            INSERT INTO fts_turns (rowid, content)
+            SELECT id, content FROM turns;
+            """
+        )
+        self._conn.commit()
+
+    def latest_fts_id(self, *, familiar_id: str) -> int:
+        """Return the highest turn id currently indexed for ``familiar_id``.
+
+        The FTS index is updated by trigger in lockstep with ``turns``
+        writes, so this is an ``id``-lookup, not a separate watermark.
+        """
+        row = self._conn.execute(
+            """
+            SELECT MAX(t.id) AS max_id
+              FROM fts_turns AS fts
+              JOIN turns AS t ON t.id = fts.rowid
+             WHERE t.familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        max_id = row["max_id"] if row is not None else None
+        return int(max_id) if max_id is not None else 0
 
 
 def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:

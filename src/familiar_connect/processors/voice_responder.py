@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
@@ -21,6 +22,7 @@ from familiar_connect.bus.topics import (
     TOPIC_VOICE_TRANSCRIPT_FINAL,
 )
 from familiar_connect.context.assembler import AssemblyContext
+from familiar_connect.diagnostics.cold_cache import log_signals
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -108,6 +110,13 @@ class VoiceResponder:
         if not text:
             return
 
+        # Cold-cache signals — instrumentation only (no action yet).
+        # Runs before the user turn is appended so ``prev_turn_at``
+        # reflects the real gap.
+        self._emit_cold_cache_signals(
+            channel_id=channel_id, turn_id=scope.turn_id, text=text
+        )
+
         # Record the user turn so RecentHistoryLayer picks it up next time.
         self._history.append_turn(
             familiar_id=self._familiar_id,
@@ -116,6 +125,9 @@ class VoiceResponder:
             content=text,
             author=None,
         )
+
+        # Seed retrieval cue for RagContextLayer (if wired).
+        self._assembler.set_rag_cue(text)
 
         reply = await self._stream_reply(scope, channel_id)
         if reply is None or scope.is_cancelled():
@@ -161,6 +173,43 @@ class VoiceResponder:
             )
             return None
         return "".join(accumulated)
+
+    # ------------------------------------------------------------------
+    # Cold-cache signal emission (Phase-3 instrumentation)
+    # ------------------------------------------------------------------
+
+    def _emit_cold_cache_signals(
+        self, *, channel_id: int, turn_id: str, text: str
+    ) -> None:
+        """Emit cold-cache spans; swallow errors.
+
+        Best-effort — instrumentation must never block the reply path.
+        """
+        try:
+            summary = self._history.get_summary(
+                familiar_id=self._familiar_id, channel_id=channel_id
+            )
+            prior_context = summary.summary_text if summary is not None else ""
+            # Pull the most recent turn's timestamp for silence-gap.
+            recent = self._history.recent(
+                familiar_id=self._familiar_id,
+                channel_id=channel_id,
+                limit=1,
+            )
+            prev_at = recent[0].timestamp if recent else None
+            log_signals(
+                channel_id=channel_id,
+                turn_id=turn_id,
+                new_text=text,
+                prior_context=prior_context,
+                prev_turn_at=prev_at,
+                current_turn_at=datetime.now(tz=UTC),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug(
+                f"{ls.tag('ColdCache', ls.Y)} "
+                f"{ls.kv('signal_emit_error', repr(exc), vc=ls.Y)}"
+            )
 
 
 def _parse_voice_session(session_id: str) -> int | None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from familiar_connect.context.layers import RecentHistoryLayer
+from familiar_connect.context.layers import RagContextLayer, RecentHistoryLayer
 
 if TYPE_CHECKING:
     from familiar_connect.context.layers import Layer
@@ -51,6 +51,17 @@ class Assembler:
         self._layers: list[Layer] = list(layers)
         # key: (layer.name, invalidation_key) -> rendered text
         self._cache: dict[tuple[str, str], str] = {}
+
+    def set_rag_cue(self, cue: str) -> None:
+        """Forward *cue* to the first :class:`RagContextLayer`, if any.
+
+        Lets the responder set the retrieval query without taking a
+        direct handle on the layer object.
+        """
+        for layer in self._layers:
+            if isinstance(layer, RagContextLayer):
+                layer.set_current_cue(cue)
+                return
 
     async def assemble(self, ctx: AssemblyContext) -> AssembledPrompt:
         sections: list[str] = []
