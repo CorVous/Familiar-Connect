@@ -1348,7 +1348,9 @@ class TestOnSilenceCallback:
             interjection=Interjection.average,
         )
         monitor.on_silence = _capture
-        monitor._llm_client.chat = AsyncMock(side_effect=_no_with_straggler)  # ty: ignore[invalid-assignment]
+        monitor._llm_client.chat = AsyncMock(  # ty: ignore[invalid-assignment]
+            side_effect=_no_with_straggler,
+        )
 
         for i in range(9):
             asyncio.run(

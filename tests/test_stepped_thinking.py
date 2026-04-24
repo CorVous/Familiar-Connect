@@ -12,9 +12,12 @@ provider contributions. Inspired by SillyTavern's
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from familiar_connect.context.processors.stepped_thinking import (
     STEPPED_THINKING_PRIORITY,
@@ -26,11 +29,14 @@ from familiar_connect.context.types import (
     Contribution,
     Layer,
     Modality,
+    PendingTurn,
 )
+from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 
 _ALICE = Author(platform="discord", user_id="1", username="alice", display_name="Alice")
+_BOB = Author(platform="discord", user_id="2", username="bob", display_name="Bob")
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -221,3 +227,141 @@ class TestFailureIsolation:
         original = _request()
         result = await proc.process(original)
         assert result == original
+
+
+# ---------------------------------------------------------------------------
+# Context awareness: history + buffered pending turns
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryInPrompt:
+    """When a HistoryStore is wired in, prior turns appear in the prompt.
+
+    Without history the reasoning model only sees one isolated utterance
+    and cannot contextualise. See ``docs/architecture/context-pipeline.md``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_recent_history_turns_appear_in_prompt(self, tmp_path: Path) -> None:
+        store = HistoryStore(tmp_path / "history.db")
+        store.append_turn(
+            familiar_id="aria",
+            channel_id=100,
+            role="user",
+            content="I've been listening to 2-tone ska lately",
+            author=_ALICE,
+        )
+        store.append_turn(
+            familiar_id="aria",
+            channel_id=100,
+            role="assistant",
+            content="Madness or The Specials?",
+        )
+
+        side = _ScriptedLLMClient()
+        proc = SteppedThinkingPreProcessor(llm_client=side, history_store=store)
+        await proc.process(_request(utterance="what do you think about ska music?"))
+
+        prompt = side.calls[0][0].content
+        assert "2-tone ska" in prompt
+        assert "Madness or The Specials?" in prompt
+
+    @pytest.mark.asyncio
+    async def test_history_is_channel_scoped(self, tmp_path: Path) -> None:
+        store = HistoryStore(tmp_path / "history.db")
+        store.append_turn(
+            familiar_id="aria",
+            channel_id=999,
+            role="user",
+            content="unrelated other-channel chatter",
+            author=_BOB,
+        )
+
+        side = _ScriptedLLMClient()
+        proc = SteppedThinkingPreProcessor(llm_client=side, history_store=store)
+        await proc.process(_request(channel_id=100))
+
+        prompt = side.calls[0][0].content
+        assert "unrelated other-channel" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_history_store_optional_preserves_prior_behaviour(self) -> None:
+        """No history_store ⇒ no history section, processor still runs."""
+        side = _ScriptedLLMClient()
+        proc = SteppedThinkingPreProcessor(llm_client=side)
+        result = await proc.process(_request(utterance="hi"))
+        assert len(result.preprocessor_contributions) == 1
+        assert "hi" in side.calls[0][0].content
+
+    @pytest.mark.asyncio
+    async def test_history_respects_window_size(self, tmp_path: Path) -> None:
+        store = HistoryStore(tmp_path / "history.db")
+        for i in range(30):
+            store.append_turn(
+                familiar_id="aria",
+                channel_id=100,
+                role="user",
+                content=f"message number {i}",
+                author=_ALICE,
+            )
+
+        side = _ScriptedLLMClient()
+        proc = SteppedThinkingPreProcessor(
+            llm_client=side, history_store=store, history_window=5
+        )
+        await proc.process(_request())
+
+        prompt = side.calls[0][0].content
+        # last 5 should appear, earliest 20 should not
+        assert "message number 29" in prompt
+        assert "message number 25" in prompt
+        assert "message number 0" not in prompt
+        assert "message number 10" not in prompt
+
+
+class TestPendingTurnsInPrompt:
+    """All buffered pending turns flow into the prompt, not just trigger."""
+
+    @pytest.mark.asyncio
+    async def test_all_pending_turns_appear_in_prompt(self) -> None:
+        side = _ScriptedLLMClient()
+        proc = SteppedThinkingPreProcessor(llm_client=side)
+        pending = (
+            PendingTurn(author=_ALICE, text="hey so"),
+            PendingTurn(author=_ALICE, text="about the ska thing"),
+            PendingTurn(author=_ALICE, text="what do you think?"),
+        )
+        await proc.process(
+            _request(utterance="what do you think?", pending_turns=pending),
+        )
+
+        prompt = side.calls[0][0].content
+        assert "hey so" in prompt
+        assert "about the ska thing" in prompt
+        assert "what do you think?" in prompt
+
+    @pytest.mark.asyncio
+    async def test_pending_turns_override_single_utterance(self) -> None:
+        """When pending_turns is non-empty, only buffered content is used.
+
+        Last pending turn should match utterance per the contract, but
+        the prompt shouldn't duplicate it.
+        """
+        side = _ScriptedLLMClient()
+        proc = SteppedThinkingPreProcessor(llm_client=side)
+        pending = (
+            PendingTurn(author=_ALICE, text="first half"),
+            PendingTurn(author=_ALICE, text="final bit"),
+        )
+        await proc.process(_request(utterance="final bit", pending_turns=pending))
+
+        prompt = side.calls[0][0].content
+        assert prompt.count("final bit") == 1
+        assert "first half" in prompt
+
+    @pytest.mark.asyncio
+    async def test_empty_pending_turns_falls_back_to_utterance(self) -> None:
+        side = _ScriptedLLMClient()
+        proc = SteppedThinkingPreProcessor(llm_client=side)
+        await proc.process(_request(utterance="single trigger"))
+        assert "single trigger" in side.calls[0][0].content
