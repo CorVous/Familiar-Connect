@@ -46,6 +46,10 @@ docs = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+addopts = "-m 'not integration'"
+markers = [
+    "integration: live external-service tests; skipped by default, run with `-m integration`",
+]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

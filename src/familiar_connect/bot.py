@@ -1631,6 +1631,40 @@ def create_bot(familiar: Familiar) -> discord.Bot:
 
     familiar.monitor.on_respond = _on_respond
 
+    # on_silence callback: persist buffer to history when the familiar stays silent
+    async def _on_silence(  # noqa: RUF029
+        channel_id: int,
+        buffer: list[BufferedMessage],
+        trigger: ResponseTrigger,
+    ) -> None:
+        sub = familiar.subscriptions.get(
+            channel_id=channel_id,
+            kind=SubscriptionKind.text,
+        ) or familiar.subscriptions.get(
+            channel_id=channel_id,
+            kind=SubscriptionKind.voice,
+        )
+        guild_id = sub.guild_id if sub is not None else None
+        channel_config = familiar.channel_configs.get(channel_id=channel_id)
+        _logger.debug(
+            "silence trigger=%s channel=%s msgs=%d",
+            trigger.value,
+            familiar.monitor.format_channel_context(channel_id),
+            len(buffer),
+        )
+        for msg in buffer:
+            familiar.history_store.append_turn(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                role="user",
+                content=msg.text,
+                author=msg.author,
+                mode=channel_config.mode,
+            )
+
+    familiar.monitor.on_silence = _on_silence
+
     # --- /subscribe-* / /unsubscribe-* ---
     async def _subscribe_text_cmd(ctx: discord.ApplicationContext) -> None:
         await subscribe_text(ctx, familiar)
