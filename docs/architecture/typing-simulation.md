@@ -38,8 +38,7 @@ reply that sees both the partial previous reply and the new context.
    it into paragraph-sized pieces.
 3. For each chunk: enter `channel.typing()`, `asyncio.sleep(delay)`,
    `channel.send(chunk)`, `asyncio.sleep(inter_line_pause_s)`, loop.
-4. When the loop finishes, the assistant turn is written to history and
-   TTS fan-out runs (if subscribed in the same guild).
+4. When the loop finishes, the assistant turn is written to history.
 
 ### Cancellation
 
@@ -55,9 +54,8 @@ if tracker.is_active():
 
 The task raises `CancelledError`, which the response handler catches.
 Whatever chunks were already delivered to Discord are persisted as the
-assistant turn; unsent chunks are discarded. TTS fan-out is skipped for
-cancelled deliveries — the new user message will drive a fresh reply
-through the monitor, and that fresh reply is what gets spoken.
+assistant turn; unsent chunks are discarded. The new user message
+drives a fresh reply through the monitor.
 
 The history ordering for a cancel scenario is:
 
