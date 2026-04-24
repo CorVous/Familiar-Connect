@@ -3,14 +3,14 @@ revision = 3
 requires-python = "==3.13.*"
 
 [options]
-exclude-newer = "2026-04-10T17:20:42.616751795Z"
+exclude-newer = "2026-04-17T18:58:57.122499812Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-defusedxml = { timestamp = "2026-04-16T17:20:42.616775814Z", span = "P1D" }
-ty = { timestamp = "2026-04-16T17:20:42.616785343Z", span = "P1D" }
-ruff = { timestamp = "2026-04-15T17:20:42.616784225Z", span = "P2D" }
-davey = { timestamp = "2026-04-16T17:20:42.616786052Z", span = "P1D" }
+defusedxml = { timestamp = "2026-04-23T18:58:57.122521433Z", span = "P1D" }
+ty = { timestamp = "2026-04-23T18:58:57.122528725Z", span = "P1D" }
+ruff = { timestamp = "2026-04-22T18:58:57.122528284Z", span = "P2D" }
+davey = { timestamp = "2026-04-23T18:58:57.122529139Z", span = "P1D" }
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -423,8 +423,6 @@ dependencies = [
     { name = "py-cord" },
     { name = "pynacl" },
     { name = "python-dotenv" },
-    { name = "soxr" },
-    { name = "ten-vad" },
     { name = "tomli-w" },
     { name = "twitchapi" },
     { name = "tzdata" },
@@ -460,8 +458,6 @@ requires-dist = [
     { name = "py-cord", specifier = ">=2.7.0,<3" },
     { name = "pynacl", specifier = ">=1.5.0,<2" },
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
-    { name = "soxr", specifier = ">=0.5,<2" },
-    { name = "ten-vad", specifier = ">=1.0.6,<2" },
     { name = "tomli-w", specifier = ">=1.2,<2" },
     { name = "twitchapi", specifier = ">=4.2.0,<5" },
     { name = "tzdata", specifier = ">=2025.1" },
@@ -1681,22 +1677,6 @@ wheels = [
 ]
 
 [[package]]
-name = "soxr"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/42/7e/f4b461944662ad75036df65277d6130f9411002bfb79e9df7dff40a31db9/soxr-1.0.0.tar.gz", hash = "sha256:e07ee6c1d659bc6957034f4800c60cb8b98de798823e34d2a2bba1caa85a4509", size = 171415, upload-time = "2025-09-07T13:22:21.317Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/c7/f92b81f1a151c13afb114f57799b86da9330bec844ea5a0d3fe6a8732678/soxr-1.0.0-cp312-abi3-macosx_10_14_x86_64.whl", hash = "sha256:abecf4e39017f3fadb5e051637c272ae5778d838e5c3926a35db36a53e3a607f", size = 205508, upload-time = "2025-09-07T13:22:01.252Z" },
-    { url = "https://files.pythonhosted.org/packages/ff/1d/c945fea9d83ea1f2be9d116b3674dbaef26ed090374a77c394b31e3b083b/soxr-1.0.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:e973d487ee46aa8023ca00a139db6e09af053a37a032fe22f9ff0cc2e19c94b4", size = 163568, upload-time = "2025-09-07T13:22:03.558Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/80/10640970998a1d2199bef6c4d92205f36968cddaf3e4d0e9fe35ddd405bd/soxr-1.0.0-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e8ce273cca101aff3d8c387db5a5a41001ba76ef1837883438d3c652507a9ccc", size = 204707, upload-time = "2025-09-07T13:22:05.125Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/87/2726603c13c2126cb8ded9e57381b7377f4f0df6ba4408e1af5ddbfdc3dd/soxr-1.0.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e8f2a69686f2856d37823bbb7b78c3d44904f311fe70ba49b893af11d6b6047b", size = 238032, upload-time = "2025-09-07T13:22:06.428Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/04/530252227f4d0721a5524a936336485dfb429bb206a66baf8e470384f4a2/soxr-1.0.0-cp312-abi3-win_amd64.whl", hash = "sha256:2a3b77b115ae7c478eecdbd060ed4f61beda542dfb70639177ac263aceda42a2", size = 172070, upload-time = "2025-09-07T13:22:07.62Z" },
-]
-
-[[package]]
 name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1706,15 +1686,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
-]
-
-[[package]]
-name = "ten-vad"
-version = "1.0.6.8"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d5/c6/00ad5a4fbba29e9ff1b15b77f99f133d06180ef40f8548c520450fe4fa0a/ten_vad-1.0.6.8.tar.gz", hash = "sha256:af1fb4fcb81b2028a20b8a4dbc5662d9f103d0d75e1d62f36f131f58f148e4d5", size = 2554475, upload-time = "2025-11-14T15:13:00.285Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/31/2103a8c1de080b0b071ea1e7da73fbda1bccffa9e78642d1508a01864562/ten_vad-1.0.6.8-py3-none-any.whl", hash = "sha256:c881aecd774ee29f4fd4735c87265b888e5aed37f59bd3f87ea1fe26ab436eee", size = 1279204, upload-time = "2025-11-14T15:12:58.825Z" },
 ]
 
 [[package]]

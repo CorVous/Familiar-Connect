@@ -236,8 +236,6 @@ def _make_pipeline_stub(
     user_names: dict[int, str],
     resolve_name: Callable[[int], str | None] | None = None,
     response_handler: object = None,
-    on_speech_start: object = None,
-    on_speech_end: object = None,
 ) -> VoicePipeline:
     """Create a minimal VoicePipeline for transcript logger tests."""
     return VoicePipeline(
@@ -249,8 +247,6 @@ def _make_pipeline_stub(
         user_names=user_names,
         resolve_name=resolve_name,
         response_handler=response_handler,  # ty: ignore[invalid-argument-type]
-        on_speech_start=on_speech_start,  # ty: ignore[invalid-argument-type]
-        on_speech_end=on_speech_end,  # ty: ignore[invalid-argument-type]
     )
 
 
@@ -368,8 +364,8 @@ class TestTranscriptLogger:
         handler.assert_awaited_once_with(42, result)
 
     @pytest.mark.asyncio
-    async def test_response_handler_not_called_for_interim(self) -> None:
-        """response_handler is NOT called for interim results."""
+    async def test_response_handler_called_for_interim(self) -> None:
+        """response_handler IS called for interim results (needed for DGVAD edges)."""
         shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
         handler = AsyncMock()
         pipeline = _make_pipeline_stub({42: "Alice"}, response_handler=handler)
@@ -384,7 +380,7 @@ class TestTranscriptLogger:
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-        handler.assert_not_awaited()
+        handler.assert_awaited_once_with(42, result)
 
     @pytest.mark.asyncio
     async def test_response_handler_error_does_not_crash(self) -> None:
@@ -452,37 +448,6 @@ class TestTranscriptLogger:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-
-
-class TestRouterFeedsVAD:
-    @pytest.mark.asyncio
-    async def test_audio_router_calls_feed_vad(self) -> None:
-        """Router invokes `feed_vad` for every tagged chunk."""
-        tagged_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
-        shared_queue: asyncio.Queue[tuple[int, TranscriptionEvent]] = asyncio.Queue()
-        template = _make_template()
-        fed: list[tuple[int, bytes]] = []
-
-        pipeline = VoicePipeline(
-            template=template,
-            tagged_audio_queue=tagged_queue,
-            shared_transcript_queue=shared_queue,
-            router_task=MagicMock(),
-            logger_task=MagicMock(),
-            user_names={},
-            feed_vad=lambda uid, pcm: fed.append((uid, pcm)),
-        )
-
-        await tagged_queue.put((42, b"\x00\x01"))
-        await tagged_queue.put((42, b"\x02\x03"))
-
-        task = asyncio.create_task(_audio_router(tagged_queue, pipeline))
-        await asyncio.sleep(0.1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert fed == [(42, b"\x00\x01"), (42, b"\x02\x03")]
 
 
 # ---------------------------------------------------------------------------
