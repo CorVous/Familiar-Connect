@@ -137,14 +137,13 @@ class TestDeepgramTranscriber:
         assert params["vad_events"] == ["false"]
         assert "diarize" not in params
 
-    def test_builds_ws_url_omits_interim_results_by_default(self) -> None:
-        """Default config disables interim results and utterance_end_ms."""
+    def test_builds_ws_url_emits_interim_results_by_default(self) -> None:
+        """Default config enables interim results for DGVAD speech-edge detection."""
         client = DeepgramTranscriber(api_key="test-key")
         params = parse_qs(urlparse(client.build_ws_url()).query)
-        # interim_results default is False → omitted (server default is false)
-        assert "interim_results" not in params
-        # utterance_end_ms requires interim_results → must be omitted when off
-        assert "utterance_end_ms" not in params
+        assert params["interim_results"] == ["true"]
+        # utterance_end_ms is included alongside interim_results
+        assert "utterance_end_ms" in params
 
     def test_builds_ws_url_emits_endpointing(self) -> None:
         """Default endpointing_ms is serialized on the URL."""

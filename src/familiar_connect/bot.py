@@ -41,13 +41,13 @@ from familiar_connect.text.delivery import (
 from familiar_connect.tts import get_cached_greeting_audio
 from familiar_connect.voice import DaveVoiceClient, RecordingSink
 from familiar_connect.voice.audio import mono_to_stereo
+from familiar_connect.voice.deepgram_vad import DeepgramVoiceActivityDetector
 from familiar_connect.voice.interruption import (
     InterruptionClass,
     InterruptionDetector,
     ResponseState,
     split_at_elapsed,
 )
-from familiar_connect.voice.ten_vad import TenVadDetector
 from familiar_connect.voice_lull import VoiceLullMonitor
 from familiar_connect.voice_pipeline import get_pipeline, start_pipeline, stop_pipeline
 
@@ -1011,19 +1011,20 @@ async def subscribe_my_voice(
         # by text_lull_timeout inside ConversationMonitor
         familiar.extras["voice_lull_monitor"] = lull_monitor
 
-        # Local VAD: TEN VAD runs on the raw 48 kHz mono PCM from the
-        # sink, producing speech-start / speech-end edges that drive the
-        # lull monitor. Replaces Deepgram's hosted VAD events.
-        ten_vad = TenVadDetector(
+        # Deepgram-driven VAD: speech-start / speech-end edges derived from
+        # interim word arrivals on the Deepgram socket.
+        deepgram_vad = DeepgramVoiceActivityDetector(
             on_speech_start=lull_monitor.on_speech_start,
             on_speech_end=lull_monitor.on_speech_end,
         )
-        familiar.extras["ten_vad_detector"] = ten_vad
+        familiar.extras["deepgram_vad"] = deepgram_vad
 
         async def _route_transcript_to_monitor(  # noqa: RUF029
             user_id: int,
             result: TranscriptionResult,
         ) -> None:
+            # Feed DGVAD first so speech_start fires before transcript fan-out.
+            deepgram_vad.feed_transcript(user_id, result)
             lull_monitor.on_transcript(user_id, result)
             # Forward finals to the interruption detector so it can
             # accumulate the burst transcript for dispatch.
@@ -1036,9 +1037,6 @@ async def subscribe_my_voice(
             channel_name=channel.name,
             resolve_name=_resolve_from_channel,
             response_handler=_route_transcript_to_monitor,
-            on_speech_start=lull_monitor.on_speech_start,
-            on_speech_end=lull_monitor.on_speech_end,
-            feed_vad=ten_vad.feed,
         )
         sink = RecordingSink(
             loop=asyncio.get_running_loop(),
@@ -1081,6 +1079,9 @@ async def unsubscribe_voice(
         if isinstance(lull_monitor, VoiceLullMonitor):
             lull_monitor.clear()
         familiar.extras.pop("interruption_detector", None)
+        dgvad = familiar.extras.pop("deepgram_vad", None)
+        if isinstance(dgvad, DeepgramVoiceActivityDetector):
+            dgvad.reset()
         await vc.disconnect()
 
     if sub is not None:

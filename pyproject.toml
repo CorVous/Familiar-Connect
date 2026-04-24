@@ -17,8 +17,6 @@ dependencies = [
     "tzdata >= 2025.1",
     "azure-cognitiveservices-speech >= 1.42.0, < 2",
     "google-genai >= 1.51.0, < 2",
-    "ten-vad >= 1.0.6, < 2",
-    "soxr >= 0.5, < 2",
     "numpy >= 2, < 3",
     "colorama>=0.4.6",
     # local ONNX embeddings for ContentSearchProvider tier 2 — no third-party API
