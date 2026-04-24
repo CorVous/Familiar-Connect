@@ -177,6 +177,7 @@ class Familiar:
         pre_processors: dict[str, PreProcessor] = {
             "stepped_thinking": SteppedThinkingPreProcessor(
                 llm_client=llm_clients["reasoning_context"],
+                history_store=history_store,
             ),
         }
         post_processors: dict[str, PostProcessor] = {
