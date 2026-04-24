@@ -206,7 +206,7 @@ Modules:
 - `familiar_connect.context.processors.stepped_thinking`
 - `familiar_connect.context.processors.recast`
 
-**`SteppedThinkingPreProcessor`** runs a cheap model with a focused "think step by step about what the user is really asking" prompt, appends the result as a hidden assistant-visible note in the outgoing context, and marks it so it is never surfaced to the user. Inspired by SillyTavern's `st-stepped-thinking`.
+**`SteppedThinkingPreProcessor`** runs a cheap model with a focused "think step by step about what the user is really asking" prompt, appends the result as a hidden assistant-visible note in the outgoing context, and marks it so it is never surfaced to the user. When wired with a `HistoryStore`, the reasoning prompt includes a window of recent channel turns and all buffered pending turns — not just the single trigger utterance — so the reasoning model can contextualise the reply. Inspired by SillyTavern's `st-stepped-thinking`.
 
 **`RecastPostProcessor`** takes the main LLM reply and runs a focused cleanup pass with a cheap model: strip formatting artefacts, tighten tone, optionally rewrite for speech (since the reply is headed to TTS). Inspired by SillyTavern's `recast-post-processing`.
 
