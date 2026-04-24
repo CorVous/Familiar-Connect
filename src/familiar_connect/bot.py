@@ -1433,7 +1433,6 @@ async def _run_text_response(
                 if i < len(chunks) - 1:
                     await asyncio.sleep(ts_cfg.inter_line_pause_s)
 
-        was_cancelled = False
         async with builder.span("chunked_delivery") as cd_meta:
             cd_meta["chunk_count"] = len(chunks)
             task = asyncio.create_task(_deliver())
@@ -1441,7 +1440,6 @@ async def _run_text_response(
             try:
                 await task
             except asyncio.CancelledError:
-                was_cancelled = True
                 cd_meta["cancelled"] = True
             cd_meta["chunks_sent"] = len(tracker.sent_chunks)
 
@@ -1462,12 +1460,6 @@ async def _run_text_response(
             else:
                 hw_meta["turns_written"] = 0
         await familiar.memory_writer_scheduler.notify_turn()
-
-        if was_cancelled:
-            # cancelled delivery → skip TTS fan-out; caller's new
-            # user message will drive a fresh reply through the monitor
-            familiar.metrics_collector.record(builder.finalize())
-            return
     else:
         # legacy path: user turns + full assistant reply in one history
         # write, then single send — preserves pre-typing-sim behaviour
@@ -1498,25 +1490,6 @@ async def _run_text_response(
 
         async with builder.span("discord_send"):
             await channel.send(reply_text)
-
-    # TTS fan-out: speak reply in voice if a voice sub exists in guild
-    guild = getattr(channel, "guild", None)
-    if (
-        familiar.tts_client is not None
-        and guild is not None
-        and familiar.subscriptions.voice_in_guild(guild.id) is not None
-    ):
-        vc = guild.voice_client
-        if vc is not None and not vc.is_playing():
-            async with builder.span("tts") as tts_meta:
-                try:
-                    tts_result = await familiar.tts_client.synthesize(reply_text)
-                    stereo = mono_to_stereo(tts_result.audio)
-                    tts_meta["audio_bytes"] = len(stereo)
-                    vc.play(discord.PCMAudio(io.BytesIO(stereo)))
-                except Exception as exc:
-                    tts_meta["error"] = f"{type(exc).__name__}: {exc}"
-                    _logger.exception("TTS synthesis failed")
 
     familiar.metrics_collector.record(builder.finalize())
 
