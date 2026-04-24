@@ -215,7 +215,11 @@ If a lull evaluation and an interjection evaluation both trigger close together,
 
 ### Output
 
-The side model returns YES or NO. On YES, the `on_respond` callback fires with the buffer contents, triggering the full context pipeline → main LLM → reply → TTS flow. On NO, the monitor does nothing (except advance the step-down curve for interjection checks).
+The side model returns YES or NO.
+
+**On YES:** the `on_respond` callback fires with the buffer contents, triggering the full context pipeline → main LLM → reply → TTS flow. Buffer and counters reset.
+
+**On NO:** the `on_silence` callback fires with the messages that were evaluated (the buffer contents at the moment the LLM call began). Those messages are removed from the buffer and written to history as `role="user"` turns. This prevents the familiar from replying as though it had been silently watching old messages for multiple turns; when it eventually does speak, it responds only to new messages. Counters are not reset on interjection NO — the step-down curve keeps advancing, building pressure toward an eventual YES. On direct-address NO the counters are reset (same as a YES response). Any messages that arrived *during* the LLM call (stragglers) are not drained — they survive in the buffer for the next evaluation cycle.
 
 ### Prompt templates (draft — configurable later)
 
@@ -259,14 +263,20 @@ familiar.monitor.on_message(channel_id, author, text, is_mention)
     ├─ increment message counter
     │
     ├─ is direct address? (name/alias in text OR is_mention)
-    │   └─ YES → acquire lock → side model eval → respond or not → reset state
+    │   └─ YES → acquire lock → side model eval
+    │           → if YES: on_respond callback → reset state
+    │           → if NO:  on_silence callback (drain evaluated msgs to history) → reset state
     │
     ├─ counter hits interjection threshold?
-    │   └─ YES → acquire lock → side model eval → respond or not
-    │           └─ if NO: advance step-down curve (lower next threshold, floor at 3)
+    │   └─ YES → acquire lock → side model eval
+    │           → if YES: on_respond callback → reset state
+    │           → if NO:  on_silence callback (drain evaluated msgs to history)
+    │                     → advance step-down curve (lower next threshold, floor at 3)
     │
     └─ start new lull timer (text_lull_timeout seconds)
-            └─ on expiry → acquire lock → side model eval → respond or not
+            └─ on expiry → acquire lock → side model eval
+                        → if YES: on_respond callback → reset state
+                        → if NO:  on_silence callback (drain evaluated msgs to history)
 ```
 
 ## Non-goals
