@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import sqlite3
+from typing import TYPE_CHECKING
+
+import pytest
+
 from familiar_connect.history.store import Fact, HistoryStore
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _store_with_turns_and_facts() -> HistoryStore:
@@ -86,3 +94,145 @@ class TestFactStore:
         recents = store.recent_facts(familiar_id="fam", limit=10)
         assert recents[0].source_turn_ids == (3, 4)
         assert recents[1].source_turn_ids == (1, 2)
+
+
+class TestFactSupersession:
+    """Version chains: facts that go stale are superseded, not overwritten.
+
+    A new fact replaces the old; the old keeps its row with
+    ``superseded_at`` set and ``superseded_by`` pointing at the new
+    row. Reads default to current (non-superseded), but the history
+    is preserved for audit and contradiction inspection.
+    """
+
+    def test_new_facts_are_current_by_default(self) -> None:
+        store = _store_with_turns_and_facts()
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        for f in facts:
+            assert f.superseded_at is None
+            assert f.superseded_by is None
+
+    def test_supersede_marks_old_and_links_new(self) -> None:
+        store = _store_with_turns_and_facts()
+        # Replace the strawberry fact with an updated one.
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria is allergic to strawberries now.",
+            source_turn_ids=[5],
+        )
+        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        # Reload via recent (include superseded so we can inspect the old row)
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        old = next(f for f in all_facts if f.id == 1)
+        assert old.superseded_at is not None
+        assert old.superseded_by == new.id
+
+    def test_recent_facts_excludes_superseded_by_default(self) -> None:
+        store = _store_with_turns_and_facts()
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria is allergic to strawberries now.",
+            source_turn_ids=[5],
+        )
+        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        current = store.recent_facts(familiar_id="fam", limit=10)
+        texts = {f.text for f in current}
+        assert "Aria likes strawberries." not in texts
+        assert "Aria is allergic to strawberries now." in texts
+
+    def test_recent_facts_includes_superseded_when_asked(self) -> None:
+        store = _store_with_turns_and_facts()
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria is allergic to strawberries now.",
+            source_turn_ids=[5],
+        )
+        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        texts = {f.text for f in all_facts}
+        assert "Aria likes strawberries." in texts
+        assert "Aria is allergic to strawberries now." in texts
+
+    def test_search_facts_excludes_superseded(self) -> None:
+        store = _store_with_turns_and_facts()
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria is allergic to strawberries now.",
+            source_turn_ids=[5],
+        )
+        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        found = store.search_facts(familiar_id="fam", query="strawb", limit=10)
+        texts = {f.text for f in found}
+        assert "Aria likes strawberries." not in texts
+        assert "Aria is allergic to strawberries now." in texts
+
+    def test_supersede_idempotent_raises_on_already_superseded(self) -> None:
+        """Supersession is one-shot — re-superseding signals a bug upstream."""
+        store = _store_with_turns_and_facts()
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="updated.",
+            source_turn_ids=[5],
+        )
+        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        with pytest.raises(ValueError, match="already superseded"):
+            store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+
+    def test_supersede_unknown_id_raises(self) -> None:
+        store = _store_with_turns_and_facts()
+        with pytest.raises(ValueError, match="unknown fact"):
+            store.supersede_fact(familiar_id="fam", old_id=999, new_id=1)
+
+    def test_migration_adds_supersede_columns_to_pre_existing_table(
+        self, tmp_path: Path
+    ) -> None:
+        """Existing installs created ``facts`` without supersede columns.
+
+        Opening a HistoryStore against such a DB must add them
+        idempotently — no data loss, defaults to current.
+        """
+        db_path = tmp_path / "history.db"
+        # Hand-build the pre-supersession facts schema.
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE facts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id       TEXT    NOT NULL,
+                channel_id        INTEGER,
+                text              TEXT    NOT NULL,
+                source_turn_ids   TEXT    NOT NULL,
+                created_at        TEXT    NOT NULL
+            );
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            );
+            INSERT INTO facts (familiar_id, channel_id, text,
+                               source_turn_ids, created_at)
+            VALUES ('fam', 1, 'Old fact.', '[1]', '2026-04-26T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # Re-open via HistoryStore — migration should add the columns.
+        store = HistoryStore(db_path)
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].text == "Old fact."
+        assert facts[0].superseded_at is None
+        assert facts[0].superseded_by is None

@@ -33,6 +33,29 @@ _logger = logging.getLogger("familiar_connect.processors.fact_extractor")
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
+# Patterns that mark a "fact" as actually a self-capability statement
+# (e.g., "I cannot remember names"). These belong in the system prompt
+# or runtime config — not the facts store, where they'd silently expire
+# the moment the underlying capability changes. Belt-and-braces post-
+# filter; the extractor prompt also asks the model to skip them.
+_SELF_CAPABILITY_RE = re.compile(
+    r"""^\s*
+        (?:
+            i\s+(?:can(?:not|'t|\s+not)?|do(?:n't|\s+not)|am\s+(?:not|unable))
+          | i'm\s+(?:not|unable)
+          | i\s+have\s+no\b
+          | as\s+(?:an?\s+)?(?:ai|assistant|language\s+model|llm)\b
+          | the\s+(?:assistant|ai|familiar|model|bot)\b
+        )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_self_capability(text: str) -> bool:
+    """Heuristic prefix-match for self-capability "facts"."""
+    return bool(_SELF_CAPABILITY_RE.match(text))
+
 
 class FactExtractor:
     """Distils facts from new turns; forever loop with ``run()``."""
@@ -84,6 +107,7 @@ class FactExtractor:
         valid_ids = {t.id for t in new_turns}
         channel_ids: dict[int, int] = {t.id: t.channel_id for t in new_turns}
 
+        dropped_self_cap = 0
         for fact in facts:
             raw_sources = fact.get("source_turn_ids", [])
             source_ids: list[int] = []
@@ -98,6 +122,14 @@ class FactExtractor:
             channel_id = channel_ids.get(source_ids[0])
             text = str(fact.get("text", "")).strip()
             if not text:
+                continue
+            if _is_self_capability(text):
+                dropped_self_cap += 1
+                _logger.debug(
+                    f"{ls.tag('Facts', ls.Y)} "
+                    f"{ls.kv('drop', 'self_capability', vc=ls.LY)} "
+                    f"{ls.kv('text', ls.trunc(text, 120), vc=ls.LW)}"
+                )
                 continue
             self._store.append_fact(
                 familiar_id=self._familiar_id,
@@ -115,6 +147,7 @@ class FactExtractor:
             f"{ls.tag('Facts', ls.LC)} "
             f"{ls.kv('batch_size', str(len(new_turns)), vc=ls.LY)} "
             f"{ls.kv('extracted', str(len(facts)), vc=ls.LC)} "
+            f"{ls.kv('dropped_self_cap', str(dropped_self_cap), vc=ls.LY)} "
             f"{ls.kv('watermark', str(last_id), vc=ls.LW)}"
         )
 
@@ -126,11 +159,18 @@ class FactExtractor:
 
 def _build_extract_prompt(turns: Iterable[HistoryTurn]) -> list[Message]:
     header = (
-        "Extract a short list of atomic facts from the chat turns "
-        "below. Reply with a JSON array where each item has "
-        "``text`` (one sentence) and ``source_turn_ids`` (a list of "
-        "turn ids the fact was distilled from). Skip small talk and "
-        "transient feelings. If nothing useful, reply with []."
+        "Extract a short list of atomic facts about the people and "
+        "events in the chat turns below — observations about the "
+        "world, not about you.\n\n"
+        "Reply with a JSON array where each item has ``text`` (one "
+        "sentence) and ``source_turn_ids`` (a list of turn ids the "
+        "fact was distilled from). Skip small talk and transient "
+        "feelings. If nothing useful, reply with [].\n\n"
+        "Do NOT emit self-capability statements about yourself, the "
+        "assistant, or your own limitations (e.g., 'I cannot remember "
+        "names', 'the assistant has no internet access', 'as an AI, "
+        "I…'). Those belong in the system prompt, not the facts "
+        "store — they expire the moment a capability changes."
     )
     lines: list[str] = ["Turns (id prefixed):"]
     for t in turns:

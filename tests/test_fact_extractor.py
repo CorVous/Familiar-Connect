@@ -151,6 +151,69 @@ class TestFactExtractorTick:
         wm = store.get_writer_watermark(familiar_id="fam")
         assert wm is not None  # still advanced
 
+    @pytest.mark.asyncio
+    async def test_self_capability_facts_dropped(self) -> None:
+        """Self-capability statements aren't observations about the world.
+
+        The store holds facts about people and events, not about the
+        familiar's own abilities. Such "facts" expire the moment the
+        capability changes; they shouldn't be persisted at all.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": (
+                            "I cannot remember the names or faces of people "
+                            "from before the current conversation."
+                        ),
+                        "source_turn_ids": [1],
+                    },
+                    {
+                        "text": "The assistant does not have access to the internet.",
+                        "source_turn_ids": [2],
+                    },
+                    {
+                        "text": "As an AI, I have no personal preferences.",
+                        "source_turn_ids": [3],
+                    },
+                    {
+                        "text": "Aria likes strawberries.",
+                        "source_turn_ids": [5],
+                    },
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        texts = {f.text for f in facts}
+        assert texts == {"Aria likes strawberries."}, texts
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_warns_off_self_capability(self) -> None:
+        """Extractor's instruction must explicitly forbid self-capability.
+
+        Best-effort line of defence before the post-filter.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        assert "self-capability" in system_msg.content.lower() or (
+            "your own" in system_msg.content.lower()
+        ), system_msg.content
+
 
 def _turn_count_in_prompt(messages: list[Message]) -> int:
     """Count how many ``- [role] ...`` lines appear in the user message.

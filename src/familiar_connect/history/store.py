@@ -87,6 +87,11 @@ class Fact:
 
     :param source_turn_ids: ids in ``turns`` the fact was distilled
         from — forever provenance, per plan § Design.5.
+    :param superseded_at: when this fact was retired, or ``None`` if
+        still current. Supersession keeps the row (no delete) so the
+        prior state stays visible for audit.
+    :param superseded_by: id of the replacement fact, or ``None`` if
+        still current.
     """
 
     id: int
@@ -95,6 +100,8 @@ class Fact:
     text: str
     source_turn_ids: tuple[int, ...]
     created_at: datetime
+    superseded_at: datetime | None = None
+    superseded_by: int | None = None
 
 
 _SCHEMA = """
@@ -153,11 +160,16 @@ CREATE TABLE IF NOT EXISTS facts (
     channel_id        INTEGER,
     text              TEXT    NOT NULL,
     source_turn_ids   TEXT    NOT NULL,  -- JSON array of ids in ``turns``
-    created_at        TEXT    NOT NULL
+    created_at        TEXT    NOT NULL,
+    superseded_at     TEXT,               -- NULL = current
+    superseded_by     INTEGER             -- NULL = current; FK-by-convention
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_familiar
     ON facts (familiar_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_facts_familiar_current
+    ON facts (familiar_id, superseded_at, id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
     text,
@@ -328,6 +340,22 @@ class HistoryStore:
             if "channel_id" not in summary_cols:
                 self._conn.execute("DROP TABLE summaries")
                 self._conn.commit()
+
+        # facts: add supersession columns if missing. Existing facts
+        # default to current (NULL on both columns).
+        facts_row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='facts'"
+        ).fetchone()
+        if facts_row is not None:
+            facts_cols = {
+                col["name"]
+                for col in self._conn.execute("PRAGMA table_info(facts)").fetchall()
+            }
+            if "superseded_at" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_at TEXT")
+            if "superseded_by" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_by INTEGER")
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -917,27 +945,50 @@ class HistoryStore:
             created_at=ts,
         )
 
-    def recent_facts(self, *, familiar_id: str, limit: int) -> list[Fact]:
-        """Return the ``limit`` most recent facts, newest first."""
+    def recent_facts(
+        self,
+        *,
+        familiar_id: str,
+        limit: int,
+        include_superseded: bool = False,
+    ) -> list[Fact]:
+        """Return the ``limit`` most recent facts, newest first.
+
+        Excludes superseded facts unless ``include_superseded`` is set —
+        the default is "what's currently true". Audit / contradiction
+        inspection passes ``include_superseded=True``.
+        """
         if limit <= 0:
             return []
+        where_super = "" if include_superseded else "AND superseded_at IS NULL"
         rows = self._conn.execute(
-            """
+            f"""
             SELECT id, familiar_id, channel_id, text,
-                   source_turn_ids, created_at
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by
               FROM facts
              WHERE familiar_id = ?
+               {where_super}
              ORDER BY id DESC
              LIMIT ?
-            """,
+            """,  # noqa: S608
             (familiar_id, limit),
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
 
-    def search_facts(self, *, familiar_id: str, query: str, limit: int) -> list[Fact]:
+    def search_facts(
+        self,
+        *,
+        familiar_id: str,
+        query: str,
+        limit: int,
+        include_superseded: bool = False,
+    ) -> list[Fact]:
         """FTS search over ``facts.text``.
 
-        See :meth:`search_turns` for tokenisation notes.
+        See :meth:`search_turns` for tokenisation notes. Superseded
+        facts are excluded by default; the FTS index itself still
+        covers them (so unsupersede via re-supersede stays cheap).
         """
         if limit <= 0:
             return []
@@ -945,29 +996,74 @@ class HistoryStore:
         if not tokens:
             return []
         match_expr = " ".join(tokens)
+        where_super = "" if include_superseded else "AND f.superseded_at IS NULL"
         rows = self._conn.execute(
-            """
+            f"""
             SELECT f.id, f.familiar_id, f.channel_id, f.text,
-                   f.source_turn_ids, f.created_at
+                   f.source_turn_ids, f.created_at,
+                   f.superseded_at, f.superseded_by
               FROM fts_facts AS fts
               JOIN facts AS f ON f.id = fts.rowid
              WHERE fts_facts MATCH ?
                AND f.familiar_id = ?
+               {where_super}
              ORDER BY bm25(fts_facts) ASC, f.id DESC
              LIMIT ?
-            """,
+            """,  # noqa: S608
             (match_expr, familiar_id, limit),
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
 
     def latest_fact_id(self, *, familiar_id: str) -> int:
-        """Return highest ``facts.id`` for ``familiar_id``; 0 if none."""
+        """Return highest ``facts.id`` for ``familiar_id``; 0 if none.
+
+        Counts superseded rows too — the cache invalidation key only
+        needs to change on writes, and supersession-by-replacement
+        already adds a new row so the id ticks up naturally.
+        """
         row = self._conn.execute(
             "SELECT MAX(id) AS max_id FROM facts WHERE familiar_id = ?",
             (familiar_id,),
         ).fetchone()
         max_id = row["max_id"] if row is not None else None
         return int(max_id) if max_id is not None else 0
+
+    def supersede_fact(
+        self,
+        *,
+        familiar_id: str,
+        old_id: int,
+        new_id: int,
+    ) -> None:
+        """Mark ``old_id`` as superseded by ``new_id``.
+
+        Both ids must belong to ``familiar_id``. The old row keeps its
+        text and provenance; only ``superseded_at`` (now, UTC) and
+        ``superseded_by`` are written. Re-superseding a row that's
+        already superseded raises ``ValueError`` — that signals an
+        upstream bug (double-write) rather than something to silently
+        absorb.
+        """
+        row = self._conn.execute(
+            "SELECT superseded_at FROM facts WHERE id = ? AND familiar_id = ?",
+            (old_id, familiar_id),
+        ).fetchone()
+        if row is None:
+            msg = f"unknown fact id={old_id} for familiar={familiar_id}"
+            raise ValueError(msg)
+        if row["superseded_at"] is not None:
+            msg = f"fact id={old_id} already superseded"
+            raise ValueError(msg)
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            UPDATE facts
+               SET superseded_at = ?, superseded_by = ?
+             WHERE id = ? AND familiar_id = ?
+            """,
+            (ts, new_id, old_id, familiar_id),
+        )
+        self._conn.commit()
 
 
 def _row_to_fact(row: sqlite3.Row) -> Fact:
@@ -977,6 +1073,16 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
     except (ValueError, TypeError):
         ids = ()
     channel = row["channel_id"]
+    superseded_at_raw: str | None
+    superseded_by_raw: int | None
+    try:
+        superseded_at_raw = row["superseded_at"]
+    except (IndexError, KeyError):
+        superseded_at_raw = None
+    try:
+        superseded_by_raw = row["superseded_by"]
+    except (IndexError, KeyError):
+        superseded_by_raw = None
     return Fact(
         id=int(row["id"]),
         familiar_id=str(row["familiar_id"]),
@@ -984,6 +1090,12 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
         text=str(row["text"]),
         source_turn_ids=ids,
         created_at=datetime.fromisoformat(row["created_at"]),
+        superseded_at=(
+            datetime.fromisoformat(superseded_at_raw)
+            if superseded_at_raw is not None
+            else None
+        ),
+        superseded_by=int(superseded_by_raw) if superseded_by_raw is not None else None,
     )
 
 

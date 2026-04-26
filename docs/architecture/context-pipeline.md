@@ -126,7 +126,9 @@ No worker loop; writes are synchronous with `HistoryStore.append_turn`.
 
 `fts_facts` mirrors the pattern over `facts.text` with
 `facts_ai_fts` / `facts_ad_fts` triggers. Only insert + delete are
-needed; fact rows aren't updated in place.
+needed — fact `text` is never rewritten in place (supersession adds
+a new row and marks the old one stale; see [Fact discipline](#fact-discipline-supersession-and-self-capability)
+below).
 
 ### `FactExtractor`
 
@@ -140,6 +142,66 @@ pointing back to the originating turn ids. The watermark advances to
 the last processed turn id **whether or not** extraction produced
 any facts — otherwise a malformed response would stall the worker on
 the same batch forever.
+
+A post-extraction filter drops self-capability "facts" (e.g.,
+`I cannot remember names`, `the assistant has no internet access`)
+before they hit the store. See [Fact discipline](#fact-discipline-supersession-and-self-capability)
+for the rationale.
+
+## Fact discipline: supersession and self-capability
+
+The facts store holds **observations about the world**, with
+provenance back to the source turns. Two policies keep it from
+silently rotting:
+
+### No self-capability statements
+
+A "fact" like *the assistant cannot remember names or faces* is a
+self-description, not an observation — it expires the instant the
+underlying capability changes (e.g., once entity resolution lands).
+Such statements belong in the system prompt or in a runtime-computed
+self-description, not in a persistent facts table where they'd
+silently mislead the model long after they stopped being true.
+
+The `FactExtractor` handles this in two layers:
+
+1. **Prompt-side**: the extractor's system message explicitly
+   instructs the LLM not to emit facts about itself, the assistant,
+   or its own limitations.
+2. **Post-filter**: `_is_self_capability(text)` matches a small set
+   of first-person and "the assistant/AI/model" patterns at the
+   start of the fact. Matched facts are dropped (logged at DEBUG)
+   before `append_fact`. This is belt-and-braces — even if the
+   model ignores the prompt instruction, the row never lands.
+
+### Supersession instead of overwrite
+
+For facts that legitimately go stale (people change jobs,
+preferences shift, contradictions emerge): replace the old fact with
+a new one and mark the old row `superseded_at = now`,
+`superseded_by = <new_id>`. The old row stays in the table.
+
+- `recent_facts` and `search_facts` default to `WHERE superseded_at
+  IS NULL` — reads see "what's currently true".
+- Pass `include_superseded=True` for audit, contradiction
+  inspection, or future provenance UIs.
+- `supersede_fact(old_id, new_id)` is the only write API; it
+  refuses to re-supersede an already-superseded row (signals an
+  upstream bug rather than absorbing it silently).
+
+The `fts_facts` index covers all rows including superseded ones
+(the FTS triggers don't filter); read paths apply the
+`superseded_at IS NULL` filter via the JOIN to `facts`. Keeping
+superseded text indexed means re-superseding (e.g., reverting an
+incorrect supersession via a new fact) doesn't require an FTS
+rebuild.
+
+Cache invalidation: `latest_fact_id` counts all rows including
+superseded ones, so the `RagContextLayer` cache key flips whenever
+a new fact is appended — and supersession-by-replacement always
+appends, so the key naturally moves. (A future "manual supersede
+without replacement" path would need to track supersession state in
+the key directly; not built today.)
 
 ## Expiry semantics for cross-channel summaries
 
