@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.history.store import FactSubject, HistoryStore
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors.fact_extractor import FactExtractor
 
@@ -213,6 +214,158 @@ class TestFactExtractorTick:
         assert "self-capability" in system_msg.content.lower() or (
             "your own" in system_msg.content.lower()
         ), system_msg.content
+
+
+class TestFactExtractorSubjects:
+    """Participants manifest in prompt + ``subject_keys`` parsed back into facts.
+
+    The extractor is the *only* place that knows both the canonical
+    keys (from author rows) and the display names the LLM is using.
+    Soft-link those by giving the LLM a manifest and asking it to
+    optionally tag each fact with the canonical_keys it's about.
+
+    Identity hints from the LLM are advisory — mic-sharing, relays,
+    and ambiguity all break clean subject mapping. The extractor
+    stores whatever the LLM emits without claiming authority.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_participants_manifest(self) -> None:
+        """LLM must receive ``canonical_key → current display name`` pairs."""
+        store = HistoryStore(":memory:")
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat from cass {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        # The manifest must list canonical_key → display_name
+        assert "discord:111" in prompt_text
+        assert "Cass" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_extracts_subject_keys_into_fact_subjects(self) -> None:
+        store = HistoryStore(":memory:")
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Cass likes pho.",
+                        "source_turn_ids": [1],
+                        "subject_keys": ["discord:111"],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].subjects == (
+            FactSubject(canonical_key="discord:111", display_at_write="Cass"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_subject_keys_outside_manifest_are_dropped(self) -> None:
+        """Soft validation: the LLM may hallucinate keys; drop unknowns silently."""
+        store = HistoryStore(":memory:")
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Cass and a stranger ate pho.",
+                        "source_turn_ids": [1],
+                        "subject_keys": ["discord:111", "discord:does-not-exist"],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert facts[0].subjects == (
+            FactSubject(canonical_key="discord:111", display_at_write="Cass"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_facts_without_subject_keys_still_stored(self) -> None:
+        """Subject_keys is optional — facts without it default to empty subjects."""
+        store = HistoryStore(":memory:")
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    # No subject_keys field at all
+                    {"text": "It rained on Tuesday.", "source_turn_ids": [1]},
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].subjects == ()
 
 
 def _turn_count_in_prompt(messages: list[Message]) -> int:

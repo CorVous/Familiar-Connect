@@ -203,18 +203,55 @@ appends, so the key naturally moves. (A future "manual supersede
 without replacement" path would need to track supersession state in
 the key directly; not built today.)
 
-### Known limitation: nickname rot
+### Subject metadata: surviving nickname rot
 
-Display names get baked into fact text verbatim ("Selling Cass pics
-lives near Cass"). When the underlying user changes their Discord
-or Twitch nickname, every fact about them becomes referentially
-orphaned — FTS still matches the stale name, but the model can't
-tell the new nickname is the same person. `Author.canonical_key`
-(`platform:user_id`) is stable across renames and already attached
-to turns, but facts don't reference it. The eventual fix is to
-store canonical keys alongside fact text (parallel column or JSON
-metadata) and resolve them to current display names at read time.
-Flagged in `fact_extractor.py` as a `KNOWN ISSUE` comment.
+Display names appear verbatim in fact text ("Cass likes pho"), but
+Discord and Twitch users can rebrand freely. Without an out-of-band
+link to a stable identifier, every fact about a renamed user becomes
+referentially orphaned — FTS keeps matching the stale name, and the
+model has no way to know the new nickname is the same person.
+
+The fix is a soft annotation on each fact: an optional
+`subjects_json` column storing
+`[{canonical_key, display_at_write}]` for each person the
+extractor identified. `Author.canonical_key`
+(`platform:user_id`) is stable across renames; `display_at_write`
+is the name the LLM saw when the fact was authored.
+
+**Write path.** `FactExtractor` builds a participants manifest
+(`canonical_key → current display name`) from the batch's turns and
+injects it into the LLM prompt alongside the turns themselves. The
+LLM is asked to optionally tag each fact with `subject_keys` — a
+list of canonical keys from the manifest. The extractor validates
+those keys against the manifest (unknowns are dropped silently),
+pairs each with the current display name, and persists them via
+`HistoryStore.append_fact(subjects=...)`.
+
+**Read path.** `RagContextLayer` renders fact text verbatim and
+appends a soft annotation when any subject's current display name
+differs from `display_at_write`:
+
+> `- Cass likes pho. (Cass is now known as peeks)`
+
+Resolution uses `HistoryStore.latest_author_for(canonical_key)` to
+find the most recent turn carrying that canonical key — its
+display name is the freshest one we have. If the canonical key
+resolves to nothing (user hasn't spoken in this familiar) or the
+current name matches `display_at_write`, no annotation is added.
+
+**Why annotation, not substitution.** Identity consolidation is
+provisional. Mic-sharing on Discord, relayed quotes ("Bob says
+hi"), and plain ambiguity all break a clean 1:1 mapping from a
+mentioned name to a canonical key. Treating the extractor's hint
+as authoritative and rewriting fact text would launder a guess
+into source-of-truth. Appending `(was: …; now: …)` keeps the
+original observation intact and makes the link visible as a hint.
+
+**Forward-only.** Existing facts have `subjects_json = NULL` and
+render unchanged. The doc/code flow expects readers to live with
+the unannotated tail; backfilling is theoretically possible (walk
+each fact's `source_turn_ids`, pull the originating Author) but
+not worth the migration code for a bounded dev-test corpus.
 
 ## RAG retrieval quality
 

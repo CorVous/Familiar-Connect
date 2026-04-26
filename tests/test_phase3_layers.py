@@ -16,7 +16,8 @@ from familiar_connect.context.layers import (
     CrossChannelContextLayer,
     RagContextLayer,
 )
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.history.store import FactSubject, HistoryStore
+from familiar_connect.identity import Author
 
 
 def _ctx(*, channel_id: int = 1, viewer_mode: str = "voice") -> AssemblyContext:
@@ -237,6 +238,115 @@ class TestRagContextLayer:
             assert f"number {older_idx}" in out, (older_idx, out)
         for recent_idx in range(10, 30):
             assert f"number {recent_idx}" not in out, (recent_idx, out)
+
+    @pytest.mark.asyncio
+    async def test_fact_with_renamed_subject_gets_annotation(self) -> None:
+        """When a fact's subject has since renamed, annotate the rendered fact.
+
+        Render preserves the original fact text (what was actually
+        said) and appends a soft hint linking the stale display name
+        to the current one. The link is advisory — a real-world mic
+        share or relay can break the canonical-key correspondence —
+        but it's enough to keep the model from treating "Cass" and
+        "peeks" as different people.
+        """
+        store = HistoryStore(":memory:")
+        # User started as "Cass"; an earlier turn from before rename.
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hello from cass",
+            author=Author(
+                platform="discord",
+                user_id="111",
+                username="cass_login",
+                display_name="Cass",
+            ),
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cass likes pho.",
+            source_turn_ids=[1],
+            subjects=(
+                FactSubject(canonical_key="discord:111", display_at_write="Cass"),
+            ),
+        )
+        # The same user has since renamed to "peeks".
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="still here under a new name",
+            author=Author(
+                platform="discord",
+                user_id="111",
+                username="cass_login",
+                display_name="peeks",
+            ),
+        )
+        layer = RagContextLayer(store=store, max_facts=3)
+        layer.set_current_cue("pho")
+        out = await layer.build(_ctx(channel_id=1))
+
+        assert "Cass likes pho." in out  # original text preserved
+        assert "peeks" in out  # current display name surfaced
+        assert "Cass" in out  # old name still visible (it's in the text)
+
+    @pytest.mark.asyncio
+    async def test_fact_without_rename_renders_without_annotation(self) -> None:
+        """If display name hasn't changed, no annotation is added."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hello from cass",
+            author=Author(
+                platform="discord",
+                user_id="111",
+                username="cass_login",
+                display_name="Cass",
+            ),
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cass likes pho.",
+            source_turn_ids=[1],
+            subjects=(
+                FactSubject(canonical_key="discord:111", display_at_write="Cass"),
+            ),
+        )
+        layer = RagContextLayer(store=store, max_facts=3)
+        layer.set_current_cue("pho")
+        out = await layer.build(_ctx(channel_id=1))
+
+        assert "Cass likes pho." in out
+        # No "now known as" / "formerly" / "→" annotation when names match.
+        assert "now known as" not in out.lower()
+        assert "formerly" not in out.lower()
+
+    @pytest.mark.asyncio
+    async def test_legacy_fact_without_subjects_renders_unchanged(self) -> None:
+        """Facts written before the subjects feature have no metadata.
+
+        Forward-only fix — they render as plain text, no annotation.
+        """
+        store = HistoryStore(":memory:")
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="An old fact about pho.",
+            source_turn_ids=[],
+        )
+        layer = RagContextLayer(store=store, max_facts=3)
+        layer.set_current_cue("pho")
+        out = await layer.build(_ctx(channel_id=1))
+
+        assert "An old fact about pho." in out
+        assert "now known as" not in out.lower()
 
     @pytest.mark.asyncio
     async def test_zero_recent_window_keeps_old_behavior(self) -> None:

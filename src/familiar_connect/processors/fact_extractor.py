@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
+from familiar_connect.history.store import FactSubject
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -101,7 +102,8 @@ class FactExtractor:
         if len(new_turns) < self._batch_size:
             return
 
-        prompt = _build_extract_prompt(new_turns)
+        participants = _build_participants(new_turns)
+        prompt = _build_extract_prompt(new_turns, participants)
         reply = await self._llm.chat(prompt)
         facts = _parse_facts(reply.content)
         valid_ids = {t.id for t in new_turns}
@@ -131,11 +133,13 @@ class FactExtractor:
                     f"{ls.kv('text', ls.trunc(text, 120), vc=ls.LW)}"
                 )
                 continue
+            subjects = _resolve_subjects(fact.get("subject_keys", []), participants)
             self._store.append_fact(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
                 text=text,
                 source_turn_ids=source_ids,
+                subjects=subjects,
             )
 
         # Always advance watermark, even on empty/bad output, to prevent loops.
@@ -157,36 +161,79 @@ class FactExtractor:
 # ---------------------------------------------------------------------------
 
 
-def _build_extract_prompt(turns: Iterable[HistoryTurn]) -> list[Message]:
-    # KNOWN ISSUE — nickname rot. Display names are embedded directly
-    # into fact text ("Selling Cass pics lives near Cass"). When the
-    # underlying user changes nickname (Discord/Twitch let users
-    # rebrand freely), every fact about them becomes referentially
-    # orphaned: text-search still works on the stale name, but the
-    # model can't tell the new nickname is the same person.
-    # ``Author.canonical_key`` (``platform:user_id``) is stable and
-    # already attached to turns; facts don't reference it. Eventual
-    # fix: store canonical keys alongside fact text (parallel column
-    # or JSON metadata) and resolve to current display names at read
-    # time. Flagged here, not the issue tracker, because we don't
-    # have one yet.
+def _build_participants(turns: Iterable[HistoryTurn]) -> dict[str, str]:
+    """Map ``canonical_key`` → current display name across the batch.
+
+    Last-seen display name wins (later turns may carry a fresher one).
+    Skips turns without an author. The returned mapping is used both
+    to inject the LLM-facing manifest and to validate ``subject_keys``
+    coming back in the response — keys outside the manifest are
+    dropped (the LLM may hallucinate ids).
+    """
+    out: dict[str, str] = {}
+    for t in turns:
+        if t.author is None:
+            continue
+        out[t.author.canonical_key] = t.author.label
+    return out
+
+
+def _resolve_subjects(
+    raw: object,
+    participants: dict[str, str],
+) -> list[FactSubject]:
+    """Validate LLM-emitted ``subject_keys`` against the manifest.
+
+    Soft validation: unknown keys are dropped silently rather than
+    invalidating the fact. The display_at_write is taken from the
+    manifest (the LLM's view at extraction time), not from anything
+    the LLM might have echoed.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[FactSubject] = []
+    seen: set[str] = set()
+    for key in raw:
+        if not isinstance(key, str) or key not in participants or key in seen:
+            continue
+        seen.add(key)
+        out.append(FactSubject(canonical_key=key, display_at_write=participants[key]))
+    return out
+
+
+def _build_extract_prompt(
+    turns: Iterable[HistoryTurn],
+    participants: dict[str, str],
+) -> list[Message]:
     header = (
         "Extract a short list of atomic facts about the people and "
         "events in the chat turns below — observations about the "
         "world, not about you.\n\n"
-        "Reply with a JSON array where each item has ``text`` (one "
-        "sentence) and ``source_turn_ids`` (a list of turn ids the "
-        "fact was distilled from). Skip small talk and transient "
-        "feelings. If nothing useful, reply with [].\n\n"
-        "Do NOT emit self-capability statements about yourself, the "
-        "assistant, or your own limitations (e.g., 'I cannot remember "
-        "names', 'the assistant has no internet access', 'as an AI, "
-        "I…'). Those belong in the system prompt, not the facts "
-        "store — they expire the moment a capability changes."
+        "Reply with a JSON array. Each item has:\n"
+        "- ``text`` (one sentence)\n"
+        "- ``source_turn_ids`` (list of turn ids the fact was distilled from)\n"
+        "- ``subject_keys`` (optional list of canonical keys from the "
+        "Participants block, identifying which people the fact is "
+        "about). Use this whenever the fact mentions someone by name "
+        "and you can match that name to a participant. Leave it out "
+        "or empty if you can't tell.\n\n"
+        "Skip small talk and transient feelings. If nothing useful, "
+        "reply with []. Do NOT emit self-capability statements about "
+        "yourself, the assistant, or your own limitations (e.g., 'I "
+        "cannot remember names', 'the assistant has no internet "
+        "access', 'as an AI, I…'). Those belong in the system "
+        "prompt, not the facts store — they expire the moment a "
+        "capability changes."
     )
-    lines: list[str] = ["Turns (id prefixed):"]
+    lines: list[str] = []
+    if participants:
+        lines.append("Participants (canonical_key — current display name):")
+        for key, display in participants.items():
+            lines.append(f"- {key} — {display}")
+        lines.append("")
+    lines.append("Turns (id prefixed):")
     for t in turns:
-        who = t.author.display_name if t.author is not None else t.role
+        who = t.author.label if t.author is not None else t.role
         lines.append(f"- id={t.id} [{who}] {t.content}")
     return [
         Message(role="system", content=header),
@@ -226,5 +273,13 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
                 for x in raw_ids
                 if isinstance(x, (int, str)) and str(x).lstrip("-").isdigit()
             )
-        out.append({"text": item.get("text", ""), "source_turn_ids": ids})
+        subject_keys: list[str] = []
+        raw_subjects = item.get("subject_keys", [])
+        if isinstance(raw_subjects, list):
+            subject_keys = [s for s in raw_subjects if isinstance(s, str)]
+        out.append({
+            "text": item.get("text", ""),
+            "source_turn_ids": ids,
+            "subject_keys": subject_keys,
+        })
     return out

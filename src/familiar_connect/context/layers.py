@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from familiar_connect.context.assembler import AssemblyContext
-    from familiar_connect.history.store import HistoryStore
+    from familiar_connect.history.store import Fact, HistoryStore
     from familiar_connect.identity import Author
 
 
@@ -152,6 +152,42 @@ class RecentHistoryLayer:
             _turn_to_message(turn.role, turn.content, turn.author, turn.timestamp)
             for turn in turns
         ]
+
+
+def _render_fact_line(store: HistoryStore, familiar_id: str, fact: Fact) -> str:
+    """Render one fact's text with optional rename annotations.
+
+    Original text preserved verbatim — that's what was actually
+    observed. For each subject whose current display name differs
+    from the one baked into the text, a soft hint is appended:
+    ``(Cass is now known as peeks)``. Subjects with unchanged names
+    or unresolvable canonical keys add nothing.
+
+    The link from subject to canonical_key is the extractor's best
+    guess, not authoritative — mic-sharing and relays break clean
+    1:1 mapping. The render is intentionally additive (not a
+    substitution) to keep the original observation intact.
+    """
+    if not fact.subjects:
+        return fact.text
+    notes: list[str] = []
+    seen_keys: set[str] = set()
+    for subject in fact.subjects:
+        if subject.canonical_key in seen_keys:
+            continue
+        seen_keys.add(subject.canonical_key)
+        current = store.latest_author_for(
+            familiar_id=familiar_id, canonical_key=subject.canonical_key
+        )
+        if current is None:
+            continue
+        current_display = current.label
+        if current_display == subject.display_at_write:
+            continue
+        notes.append(f"{subject.display_at_write} is now known as {current_display}")
+    if not notes:
+        return fact.text
+    return f"{fact.text} ({'; '.join(notes)})"
 
 
 def _display_for(author: Author | None, role: str) -> str:
@@ -361,7 +397,10 @@ class RagContextLayer:
         sections: list[str] = []
         if fact_results:
             lines = ["## Possibly relevant facts\n"]
-            lines.extend(f"- {f.text}" for f in fact_results)
+            lines.extend(
+                f"- {_render_fact_line(self._store, ctx.familiar_id, f)}"
+                for f in fact_results
+            )
             sections.append("\n".join(lines))
         if turn_results:
             lines = ["## Possibly relevant earlier turns\n"]

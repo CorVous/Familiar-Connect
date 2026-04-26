@@ -82,6 +82,26 @@ class WatermarkEntry:
 
 
 @dataclass(frozen=True)
+class FactSubject:
+    """Soft link from a fact to one canonical identity.
+
+    The extractor's best guess at *who* a fact is about. Provisional —
+    mic-sharing, relayed quotes, ambiguous mentions all break a clean
+    1:1 mapping. Stored to enable display-name resolution at read time
+    without claiming authoritative subject identification.
+
+    :param canonical_key: stable ``platform:user_id`` from
+        :class:`~familiar_connect.identity.Author`.
+    :param display_at_write: display name as seen by the extractor
+        when the fact was authored. Used as a substring anchor at
+        read time when the current display name differs.
+    """
+
+    canonical_key: str
+    display_at_write: str
+
+
+@dataclass(frozen=True)
 class Fact:
     """Atomic fact extracted from one or more turns.
 
@@ -92,6 +112,9 @@ class Fact:
         prior state stays visible for audit.
     :param superseded_by: id of the replacement fact, or ``None`` if
         still current.
+    :param subjects: best-effort canonical-key annotations. Empty
+        tuple for legacy rows or when the extractor couldn't link a
+        name to any participant.
     """
 
     id: int
@@ -102,6 +125,7 @@ class Fact:
     created_at: datetime
     superseded_at: datetime | None = None
     superseded_by: int | None = None
+    subjects: tuple[FactSubject, ...] = ()
 
 
 _SCHEMA = """
@@ -162,7 +186,8 @@ CREATE TABLE IF NOT EXISTS facts (
     source_turn_ids   TEXT    NOT NULL,  -- JSON array of ids in ``turns``
     created_at        TEXT    NOT NULL,
     superseded_at     TEXT,               -- NULL = current
-    superseded_by     INTEGER             -- NULL = current; FK-by-convention
+    superseded_by     INTEGER,            -- NULL = current; FK-by-convention
+    subjects_json     TEXT                -- JSON list; NULL = legacy fact
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_familiar
@@ -466,6 +491,8 @@ class HistoryStore:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_at TEXT")
             if "superseded_by" not in facts_cols:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_by INTEGER")
+            if "subjects_json" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN subjects_json TEXT")
             self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -613,6 +640,48 @@ class HistoryStore:
             )
             for row in rows
         ]
+
+    def latest_author_for(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+    ) -> Author | None:
+        """Return the :class:`Author` from the most recent turn with this key.
+
+        Display names rotate (Discord/Twitch nicks); the latest turn
+        carries the freshest one. Returns ``None`` if no turn matches —
+        e.g. the user hasn't spoken in this familiar, or the
+        canonical_key isn't well-formed. Used by
+        :class:`RagContextLayer` to resolve stale fact-subject names
+        at read time.
+        """
+        if ":" not in canonical_key:
+            return None
+        platform, _, user_id = canonical_key.partition(":")
+        if not platform or not user_id:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT author_platform, author_user_id,
+                   author_username, author_display_name
+              FROM turns
+             WHERE familiar_id = ?
+               AND author_platform = ?
+               AND author_user_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (familiar_id, platform, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return Author(
+            platform=str(row["author_platform"]),
+            user_id=str(row["author_user_id"]),
+            username=row["author_username"],
+            display_name=row["author_display_name"],
+        )
 
     def older_than(
         self,
@@ -1038,17 +1107,41 @@ class HistoryStore:
         channel_id: int | None,
         text: str,
         source_turn_ids: Iterable[int],
+        subjects: Iterable[FactSubject] = (),
     ) -> Fact:
-        """Persist one fact. ``source_turn_ids`` is stored as JSON."""
+        """Persist one fact. ``source_turn_ids`` and ``subjects`` stored as JSON.
+
+        ``subjects`` is the extractor's best-effort link to canonical
+        identities — see :class:`FactSubject`.
+        """
         ids = [int(i) for i in source_turn_ids]
+        subjects_tuple = tuple(subjects)
+        subjects_blob: str | None = (
+            json.dumps([
+                {
+                    "canonical_key": s.canonical_key,
+                    "display_at_write": s.display_at_write,
+                }
+                for s in subjects_tuple
+            ])
+            if subjects_tuple
+            else None
+        )
         ts = datetime.now(tz=UTC)
         cur = self._conn.execute(
             """
             INSERT INTO facts (familiar_id, channel_id, text,
-                               source_turn_ids, created_at)
-            VALUES (?, ?, ?, ?, ?)
+                               source_turn_ids, created_at, subjects_json)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (familiar_id, channel_id, text, json.dumps(ids), ts.isoformat()),
+            (
+                familiar_id,
+                channel_id,
+                text,
+                json.dumps(ids),
+                ts.isoformat(),
+                subjects_blob,
+            ),
         )
         self._conn.commit()
         return Fact(
@@ -1058,6 +1151,7 @@ class HistoryStore:
             text=text,
             source_turn_ids=tuple(ids),
             created_at=ts,
+            subjects=subjects_tuple,
         )
 
     def recent_facts(
@@ -1080,7 +1174,7 @@ class HistoryStore:
             f"""
             SELECT id, familiar_id, channel_id, text,
                    source_turn_ids, created_at,
-                   superseded_at, superseded_by
+                   superseded_at, superseded_by, subjects_json
               FROM facts
              WHERE familiar_id = ?
                {where_super}
@@ -1115,7 +1209,7 @@ class HistoryStore:
             f"""
             SELECT f.id, f.familiar_id, f.channel_id, f.text,
                    f.source_turn_ids, f.created_at,
-                   f.superseded_at, f.superseded_by
+                   f.superseded_at, f.superseded_by, f.subjects_json
               FROM fts_facts AS fts
               JOIN facts AS f ON f.id = fts.rowid
              WHERE fts_facts MATCH ?
@@ -1197,6 +1291,27 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
         superseded_by_raw = row["superseded_by"]
     except (IndexError, KeyError):
         superseded_by_raw = None
+    try:
+        subjects_raw = row["subjects_json"]
+    except (IndexError, KeyError):
+        subjects_raw = None
+    subjects: tuple[FactSubject, ...] = ()
+    if subjects_raw:
+        try:
+            parsed = json.loads(subjects_raw)
+        except (ValueError, TypeError):
+            parsed = []
+        if isinstance(parsed, list):
+            subjects = tuple(
+                FactSubject(
+                    canonical_key=str(item["canonical_key"]),
+                    display_at_write=str(item["display_at_write"]),
+                )
+                for item in parsed
+                if isinstance(item, dict)
+                and "canonical_key" in item
+                and "display_at_write" in item
+            )
     return Fact(
         id=int(row["id"]),
         familiar_id=str(row["familiar_id"]),
@@ -1210,6 +1325,7 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
             else None
         ),
         superseded_by=int(superseded_by_raw) if superseded_by_raw is not None else None,
+        subjects=subjects,
     )
 
 

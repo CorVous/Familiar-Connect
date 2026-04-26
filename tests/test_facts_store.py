@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from familiar_connect.history.store import Fact, HistoryStore
+from familiar_connect.history.store import Fact, FactSubject, HistoryStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,6 +94,104 @@ class TestFactStore:
         recents = store.recent_facts(familiar_id="fam", limit=10)
         assert recents[0].source_turn_ids == (3, 4)
         assert recents[1].source_turn_ids == (1, 2)
+
+
+class TestFactSubjects:
+    """Subject-key metadata: best-effort link from fact text to canonical_keys.
+
+    The extractor's identification of *who* a fact is about is a soft
+    annotation, not authoritative — mic-sharing, relayed quotes, and
+    plain ambiguity all break a 1:1 mapping. Storage must preserve
+    whatever the extractor emits (zero, one, or many subjects per
+    fact) and surface it back unchanged.
+    """
+
+    def test_append_with_subjects_roundtrip(self) -> None:
+        store = HistoryStore(":memory:")
+        subjects = (
+            FactSubject(canonical_key="discord:123", display_at_write="Cass"),
+            FactSubject(canonical_key="discord:456", display_at_write="Aria"),
+        )
+        fact = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cass and Aria are roommates.",
+            source_turn_ids=[1],
+            subjects=subjects,
+        )
+        assert fact.subjects == subjects
+        # And again on re-read.
+        recents = store.recent_facts(familiar_id="fam", limit=10)
+        assert recents[0].subjects == subjects
+
+    def test_subjects_default_empty(self) -> None:
+        store = HistoryStore(":memory:")
+        fact = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="A fact with no identified subjects.",
+            source_turn_ids=[1],
+        )
+        assert fact.subjects == ()
+
+    def test_search_facts_returns_subjects(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cass likes pho.",
+            source_turn_ids=[1],
+            subjects=(
+                FactSubject(canonical_key="discord:123", display_at_write="Cass"),
+            ),
+        )
+        found = store.search_facts(familiar_id="fam", query="pho", limit=5)
+        assert len(found) == 1
+        assert found[0].subjects == (
+            FactSubject(canonical_key="discord:123", display_at_write="Cass"),
+        )
+
+    def test_migration_adds_subjects_column(self, tmp_path: Path) -> None:
+        """Existing installs without ``subjects_json`` get the column added.
+
+        Pre-existing rows return ``subjects=()`` — no backfill, the
+        feature is forward-only.
+        """
+        db_path = tmp_path / "history.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE facts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id       TEXT    NOT NULL,
+                channel_id        INTEGER,
+                text              TEXT    NOT NULL,
+                source_turn_ids   TEXT    NOT NULL,
+                created_at        TEXT    NOT NULL,
+                superseded_at     TEXT,
+                superseded_by     INTEGER
+            );
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            );
+            INSERT INTO facts (familiar_id, channel_id, text,
+                               source_turn_ids, created_at)
+            VALUES ('fam', 1, 'Legacy fact.', '[1]', '2026-04-26T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        store = HistoryStore(db_path)
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].text == "Legacy fact."
+        assert facts[0].subjects == ()
 
 
 class TestFactSupersession:
