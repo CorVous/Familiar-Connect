@@ -22,6 +22,7 @@ from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.identity import Author
 from familiar_connect.llm import Message
+from familiar_connect.silence import SilentDetector
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -152,11 +153,23 @@ class TextResponder:
         messages.extend(prompt.recent_history)
 
         accumulated: list[str] = []
+        silent = SilentDetector()
         try:
             async for delta in self._llm.chat_stream(messages):
                 if scope.is_cancelled():
                     return None
                 accumulated.append(delta)
+                if silent.feed(delta) is True:
+                    # Mirror cancellation: no send, no assistant turn.
+                    # The 'decision=silent' log replaces the would-be
+                    # empty-reply warning (which targets bad model /
+                    # content-filter cases, not deliberate silence).
+                    _logger.info(
+                        f"{ls.tag('💤 Text', ls.B)} "
+                        f"{ls.kv('decision', 'silent', vc=ls.LB)} "
+                        f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                    )
+                    return None
         except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
             _logger.warning(
                 f"{ls.tag('Text', ls.R)} "

@@ -193,6 +193,30 @@ prompts.
 codebase as a reference implementation of the single-writer + dedup
 pattern, but it is no longer wired into the run loop.
 
+## Multi-party addressivity
+
+Every channel the familiar joins is multi-party — humans talk to each
+other, not just to the bot. Two pieces collaborate to handle "is this
+turn for me?" without a separate gating LLM call:
+
+1. **Message format carries speaker + time.** `RecentHistoryLayer`
+   renders user turns as `[HH:MM Display Name] content` (UTC).
+   Different speakers get different prefixes; the rhythm of timestamps
+   tells the model whether a conversation is flowing between humans.
+2. **Silent sentinel in the reply.** The system prompt instructs the
+   model to emit the literal token `<silent>` as its *entire* reply
+   when the latest message is not for it. `SilentDetector`
+   (`familiar_connect.silence`) inspects the streaming reply
+   delta-by-delta; on a prefix match it short-circuits the stream,
+   the responder skips Discord posting / TTS, and no assistant turn
+   is appended. The user turn is still recorded — observation is not
+   gated by response.
+
+The sentinel is best-effort: it relies on the model following the
+system-prompt instruction. A stray `<silent>` mid-reply is treated as
+content (prefix-only match); the decision latches once made and
+subsequent deltas don't re-open it.
+
 ## Data flow per user turn
 
 ```
@@ -202,9 +226,9 @@ Discord text on channel C
       appends user turn to `turns` (fts_turns trigger fires; row indexed)
       seeds RagContextLayer cue = content
       Assembler.assemble(ctx, viewer_mode="text")
-      LLMClient.chat_stream (cancellable via scope)
-      BotHandle.send_text(channel_id, reply)
-      appends assistant turn
+      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
+      if `<silent>` detected: bail (no send, no assistant turn)
+      else: BotHandle.send_text(channel_id, reply); append assistant turn
       router.end_turn(scope)
 
 Voice transcript final on channel C (voice:C)
@@ -219,9 +243,9 @@ Voice transcript final on channel C (voice:C)
         → ConversationSummaryLayer: read from summaries
         → RagContextLayer: FTS search on cue
         → RecentHistoryLayer: last N turns for channel C
-      LLMClient.chat_stream (cancellable via scope)
-      TTSPlayer.speak
-      append assistant turn
+      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
+      if `<silent>` detected: bail (no TTS, no assistant turn)
+      else: TTSPlayer.speak; append assistant turn
 
 Background: SummaryWorker tick (every 5 s)
   → for each channel: maybe regenerate rolling summary
@@ -237,7 +261,7 @@ Per-channel overrides in `character.toml` (`[channels.<id>]`):
 - `prompt_layers` — explicit ordered list of layer names (parsed; the
   full wiring of per-channel reordering arrives alongside richer layer
   stacks).
-- `message_rendering` — `"prefixed"` (keep `[display_name]` in
+- `message_rendering` — `"prefixed"` (keep `[HH:MM display_name]` in
   content) or `"name_only"` (rely on OpenAI `name` field).
 
 `SummaryWorker` honours:

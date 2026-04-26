@@ -24,6 +24,7 @@ from familiar_connect.bus.topics import (
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.diagnostics.cold_cache import log_signals
 from familiar_connect.llm import Message
+from familiar_connect.silence import SilentDetector
 
 if TYPE_CHECKING:
     from familiar_connect.bus.envelope import Event, TurnScope
@@ -161,11 +162,20 @@ class VoiceResponder:
         messages.extend(prompt.recent_history)
 
         accumulated: list[str] = []
+        silent = SilentDetector()
         try:
             async for delta in self._llm.chat_stream(messages):
                 if scope.is_cancelled():
                     return None
                 accumulated.append(delta)
+                if silent.feed(delta) is True:
+                    # Mirror cancellation: no TTS, no assistant turn.
+                    _logger.info(
+                        f"{ls.tag('💤 Voice', ls.B)} "
+                        f"{ls.kv('decision', 'silent', vc=ls.LB)} "
+                        f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                    )
+                    return None
         except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
             _logger.warning(
                 f"{ls.tag('Voice', ls.R)} "

@@ -266,6 +266,55 @@ class TestReply:
         assert "hello" in observed_user_turns, observed_user_turns
 
     @pytest.mark.asyncio
+    async def test_silent_sentinel_skips_send_and_assistant_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """``<silent>`` reply gates the response.
+
+        No Discord post, no assistant turn appended. User turn is
+        still recorded.
+        """
+        llm = _ScriptedLLM(deltas=["<silent>"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi nobody"), bus)
+        await bus.shutdown()
+
+        assert send.calls == []
+        turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
+        assert all(t.role != "assistant" for t in turns)
+        # user turn is still persisted (we observed the message)
+        assert any(t.role == "user" and "hi nobody" in t.content for t in turns)
+
+    @pytest.mark.asyncio
+    async def test_silent_sentinel_with_leading_whitespace(
+        self, tmp_path: Path
+    ) -> None:
+        """Leading whitespace before the sentinel is tolerated."""
+        llm = _ScriptedLLM(deltas=["  ", "<silent>"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+        assert send.calls == []
+
+    @pytest.mark.asyncio
+    async def test_sentinel_mid_reply_is_not_a_gate(self, tmp_path: Path) -> None:
+        """A ``<silent>`` token after content is treated as content."""
+        llm = _ScriptedLLM(deltas=["Sure! ", "<silent>", " — kidding."])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+        assert send.calls == [(42, "Sure! <silent> — kidding.")]
+
+    @pytest.mark.asyncio
     async def test_user_turn_recorded_with_author_and_guild(
         self, tmp_path: Path
     ) -> None:

@@ -137,8 +137,11 @@ class RecentHistoryLayer:
         """Return the last ``window_size`` turns as LLM messages.
 
         User turns gain a ``name`` (platform:user_id) and a
-        ``[display_name]`` content prefix — critical for multi-user
-        channels where the model has to distinguish speakers.
+        ``[HH:MM display_name]`` content prefix — critical for
+        multi-user channels where the model has to distinguish
+        speakers and gauge message rhythm (rapid back-and-forth
+        between two humans reads differently from a question into
+        the void).
         """
         turns = self._store.recent(
             familiar_id=ctx.familiar_id,
@@ -146,7 +149,8 @@ class RecentHistoryLayer:
             limit=self._window_size,
         )
         return [
-            _turn_to_message(turn.role, turn.content, turn.author) for turn in turns
+            _turn_to_message(turn.role, turn.content, turn.author, turn.timestamp)
+            for turn in turns
         ]
 
 
@@ -156,14 +160,29 @@ def _display_for(author: Author | None, role: str) -> str:
     return role
 
 
-def _turn_to_message(role: str, content: str, author: Author | None) -> Message:
-    """Render a :class:`HistoryTurn`-like tuple into an LLM :class:`Message`."""
+def _turn_to_message(
+    role: str,
+    content: str,
+    author: Author | None,
+    timestamp: datetime | None = None,
+) -> Message:
+    """Render a :class:`HistoryTurn`-like tuple into an LLM :class:`Message`.
+
+    Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted —
+    the recent-history window is short and adding date noise per turn
+    hurts more than it helps. Older retrieved turns surface via
+    :class:`RagContextLayer`, where date context is handled separately.
+    """
     if role == "assistant" or author is None:
         return Message(role=role, content=content)
     name = sanitize_name(author.canonical_key)
     display = author.display_name or author.username or author.user_id
     # Belt-and-braces prefix so models that drop `name` still see attribution.
-    prefixed = f"[{display}] {content}"
+    if timestamp is not None:
+        ts = timestamp.astimezone(UTC).strftime("%H:%M")
+        prefixed = f"[{ts} {display}] {content}"
+    else:
+        prefixed = f"[{display}] {content}"
     return Message(role=role, content=prefixed, name=name)
 
 

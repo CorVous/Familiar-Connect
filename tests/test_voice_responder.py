@@ -188,6 +188,29 @@ class TestFinalReply:
         assert any("Hello, world." in c for c in contents)
 
     @pytest.mark.asyncio
+    async def test_silent_sentinel_skips_tts_and_assistant_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """``<silent>`` reply gates the response.
+
+        TTS not invoked, no assistant turn recorded. User turn still
+        recorded.
+        """
+        llm = _ScriptedLLM(deltas=["<silent>"])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, store = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+        await responder.handle(_mk_final("hi nobody", turn_id="t-1"), bus)
+        await bus.shutdown()
+
+        assert player.calls == []
+        turns = store.recent(familiar_id="fam", channel_id=1, limit=10)
+        assert all(t.role != "assistant" for t in turns)
+        assert any(t.role == "user" and "hi nobody" in t.content for t in turns)
+
+    @pytest.mark.asyncio
     async def test_stale_final_ignored(self, tmp_path: Path) -> None:
         """A FINAL whose turn_id mismatches the active scope is dropped."""
         llm = _ScriptedLLM(deltas=["ignored"])

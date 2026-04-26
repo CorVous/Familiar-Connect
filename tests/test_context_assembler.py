@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -147,9 +148,36 @@ class TestRecentHistoryLayer:
         user_msg = next(m for m in messages if m.role == "user")
         # name is derived from platform:user_id, sanitized
         assert user_msg.name is not None
-        # content is prefixed with display name so the model sees the attribution
-        # even if it drops `name`
-        assert "[Alice]" in user_msg.content
+        # content is prefixed with display name so the model sees the
+        # attribution even if it drops `name`
+        assert "Alice]" in user_msg.content
+        assert "hey" in user_msg.content
+
+    @pytest.mark.asyncio
+    async def test_user_messages_include_utc_timestamp_in_prefix(self) -> None:
+        """Format ``[HH:MM Display] content``.
+
+        Gives the model a sense of message rhythm so a rapid
+        back-and-forth between two humans doesn't read as a question
+        into the void.
+        """
+        store = HistoryStore(":memory:")
+        alice = Author(
+            platform="discord", user_id="42", username="alice", display_name="Alice"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=10,
+            role="user",
+            content="hey",
+            author=alice,
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=10))
+        user_msg = next(m for m in messages if m.role == "user")
+        assert re.match(r"^\[\d{2}:\d{2} Alice\] hey$", user_msg.content), (
+            user_msg.content
+        )
 
     @pytest.mark.asyncio
     async def test_respects_window_size(self) -> None:

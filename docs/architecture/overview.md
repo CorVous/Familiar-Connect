@@ -51,8 +51,8 @@ flowchart LR
 - **BotHandle** — adapter exposed to the lifecycle wiring so bus-only processors can post back to Discord without taking a direct `discord.Bot` reference. Carries `send_text(channel_id, content)` and a `voice_runtime: dict[int, VoiceRuntime]` map populated by `/subscribe-voice`.
 - **Processors** — subscribe to topics.
   - `DebugLoggerProcessor` — one log line per event on every subscribed topic.
-  - `TextResponder` — consumes `discord.text` (appends the user turn directly, seeds the RAG cue, assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Owning the user-turn write keeps read-after-write consistency for `RecentHistoryLayer` in the same task.
-  - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped.
+  - `TextResponder` — consumes `discord.text` (appends the user turn directly, seeds the RAG cue, assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Owning the user-turn write keeps read-after-write consistency for `RecentHistoryLayer` in the same task. A `SilentDetector` watches stream deltas; on a `<silent>` sentinel reply the post and assistant-turn append are skipped (the user turn is still recorded). See [Multi-party addressivity](context-pipeline.md#multi-party-addressivity).
+  - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped. Silent-sentinel handling mirrors `TextResponder`: on `<silent>`, TTS is not invoked.
 - **Diagnostics** — `@span(name)` decorator in `familiar_connect.diagnostics.spans` emits timing logs (`span=<name> ms=<n> status=<ok|error>`). Logs-first aggregation; a metrics collector + `/diagnostics` slash command come in Phase 5.
 - **Discord text** — `on_message` event handler + `subscribe-text` / `unsubscribe-text` slash commands. Built on py-cord.
 - **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption). On subscribe the bot attaches a `RecordingSink`, starts the Deepgram transcriber against a fresh result queue, and runs a `VoiceSource` task draining transcripts onto the bus. On unsubscribe the per-channel pump + source tasks are cancelled, recording is stopped, and the transcriber is closed.
@@ -110,5 +110,5 @@ playback halted. Verified by
   applied only via the default ordering; per-channel reordering lands
   with Phase 3's richer layer stack).
 - `message_rendering` — `"prefixed"` (always include
-  `[display_name]` content prefix) or `"name_only"` (rely on the
-  OpenAI `name` field alone — save tokens in DMs).
+  `[HH:MM display_name]` content prefix; UTC) or `"name_only"`
+  (rely on the OpenAI `name` field alone — save tokens in DMs).
