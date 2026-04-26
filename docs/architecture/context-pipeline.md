@@ -180,14 +180,16 @@ will be wired to force rebuilds of the stale layers. See plan
 ## Single-writer pattern
 
 `HistoryWriter` is the sole task that calls
-`HistoryStore.append_turn()` for events arriving on the bus. It
-subscribes to `discord.text`; dedups incoming events by `event_id` to
-tolerate future bus-level retries; ignores events for other
-familiars. The voice responder still writes its own user and
-assistant turns directly (it needs sequential consistency with
-`RecentHistoryLayer` reads in the same task); that write path can
-migrate to the writer via a publish-confirm topic in a later phase if
-SQLite contention becomes measurable.
+`HistoryStore.append_turn()` for `discord.text` user turns arriving
+on the bus. It dedups incoming events by `event_id` to tolerate
+future bus-level retries; ignores events for other familiars. Both
+`TextResponder` and `VoiceResponder` write their own assistant turns
+directly (they need sequential consistency with `RecentHistoryLayer`
+reads in the same task); the voice responder additionally writes its
+user turn directly because the upstream `VoiceSource` does not flow
+through `HistoryWriter`. Those write paths can migrate to the writer
+via a publish-confirm topic in a later phase if SQLite contention
+becomes measurable.
 
 ## Data flow per user turn
 
@@ -196,8 +198,8 @@ Discord text on channel C
   → DiscordTextSource publishes discord.text
   → HistoryWriter appends user turn to `turns`
   → fts_turns trigger fires; row indexed
-  → (text responder — later phase) assembles prompt, replies, appends
-    assistant turn
+  → TextResponder assembles prompt (viewer_mode="text"), streams LLM,
+    posts via BotHandle.send_text, appends assistant turn
 
 Voice transcript final on channel C (voice:C)
   → VoiceSource publishes voice.transcript.final

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 import discord
 
 from familiar_connect import log_style as ls
-from familiar_connect.bot import create_bot
+from familiar_connect.bot import BotHandle, create_bot
 from familiar_connect.bus.topics import (
     TOPIC_DISCORD_TEXT,
     TOPIC_TWITCH_EVENT,
@@ -36,13 +36,21 @@ from familiar_connect.context import (
 )
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
-from familiar_connect.processors import DebugLoggerProcessor, VoiceResponder
+from familiar_connect.processors import (
+    DebugLoggerProcessor,
+    TextResponder,
+    VoiceResponder,
+)
 from familiar_connect.processors.fact_extractor import FactExtractor
 from familiar_connect.processors.history_writer import HistoryWriter
 from familiar_connect.processors.summary_worker import SummaryWorker
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
-from familiar_connect.tts_player import LoggingTTSPlayer
+from familiar_connect.tts_player import (
+    DiscordVoicePlayer,
+    LoggingTTSPlayer,
+    TTSPlayer,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -168,6 +176,24 @@ async def _run_voice_responder(familiar: Familiar, responder: VoiceResponder) ->
         await responder.handle(event, familiar.bus)
 
 
+async def _run_text_responder(familiar: Familiar, responder: TextResponder) -> None:
+    """Drain ``discord.text`` events into the :class:`TextResponder`."""
+    async for event in familiar.bus.subscribe(responder.topics):
+        await responder.handle(event, familiar.bus)
+
+
+def _first_voice_client(handle: BotHandle) -> discord.VoiceClient | None:
+    """Pick any active voice client from the runtime map.
+
+    v1 supports one voice channel at a time, so the first runtime
+    entry is unambiguous. Returns ``None`` if no voice subscription
+    is active.
+    """
+    for rt in handle.voice_runtime.values():
+        return rt.voice_client
+    return None
+
+
 async def _run_history_writer(familiar: Familiar, writer: HistoryWriter) -> None:
     """Persist turn-generating events into :class:`HistoryStore`."""
     async for event in familiar.bus.subscribe(writer.topics):
@@ -180,15 +206,30 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     :param token: Discord bot token.
     :param familiar: The loaded :class:`Familiar` bundle.
     """
-    bot = create_bot(familiar)
+    handle = create_bot(familiar)
     await familiar.bus.start()
 
     assembler = _default_assembler(familiar)
-    tts_player = LoggingTTSPlayer()
+    tts_player: TTSPlayer
+    if familiar.tts_client is not None:
+        tts_player = DiscordVoicePlayer(
+            tts_client=familiar.tts_client,
+            get_voice_client=lambda: _first_voice_client(handle),
+        )
+    else:
+        tts_player = LoggingTTSPlayer()
     voice_responder = VoiceResponder(
         assembler=assembler,
         llm_client=familiar.llm_clients["main_prose"],
         tts_player=tts_player,
+        history_store=familiar.history_store,
+        router=familiar.router,
+        familiar_id=familiar.id,
+    )
+    text_responder = TextResponder(
+        assembler=assembler,
+        llm_client=familiar.llm_clients["main_prose"],
+        send_text=handle.send_text,
         history_store=familiar.history_store,
         router=familiar.router,
         familiar_id=familiar.id,
@@ -217,12 +258,16 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 name="voice-responder",
             )
             tg.create_task(
+                _run_text_responder(familiar, text_responder),
+                name="text-responder",
+            )
+            tg.create_task(
                 _run_history_writer(familiar, history_writer),
                 name="history-writer",
             )
             tg.create_task(summary_worker.run(), name="summary-worker")
             tg.create_task(fact_extractor.run(), name="fact-extractor")
-            tg.create_task(bot.start(token), name="discord-bot")
+            tg.create_task(handle.bot.start(token), name="discord-bot")
     finally:
         familiar.router.shutdown()
         await familiar.bus.shutdown()

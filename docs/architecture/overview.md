@@ -22,11 +22,17 @@ flowchart LR
 
     bus --> dbg[DebugLoggerProcessor]
     bus --> vr[VoiceResponder]
+    bus --> tr[TextResponder]
 
     vr --> asm[Assembler]
     vr --> llm[[LLMClient.chat_stream]]
     vr --> tts[[TTSPlayer]]
     vr -.cancel scope.-> rr[TurnRouter]
+
+    tr --> asm
+    tr --> llm
+    tr --> send[[BotHandle.send_text]]
+    tr -.cancel scope.-> rr
 ```
 
 ## Components
@@ -41,15 +47,18 @@ flowchart LR
   - `VoiceSource` — drains the Deepgram transcription queue; publishes `voice.activity.start`, `voice.transcript.partial`, `voice.transcript.final`, `voice.activity.end`. All events in one utterance share `turn_id`.
 - **Context assembly** — `Assembler` composes a layered system prompt. Phase-2 layers: `CoreInstructionsLayer` (file: `data/familiars/_default/core_instructions.md`), `CharacterCardLayer` (file: `data/familiars/<id>/character.md`), `OperatingModeLayer` (voice-terse vs text-verbose), `RecentHistoryLayer` (reads from `HistoryStore.recent`). Phase-3 adds rolling summary, cross-channel summary, and FTS-backed RAG.
 - **LLM** — `LLMClient` exposes `chat()` (blocking) and `chat_stream()` (async-iterator of content deltas). The streaming variant releases the process-wide rate-limit semaphore as soon as the request is accepted so barge-in cancellation isn't starved.
-- **TTSPlayer** — `speak(text, scope=...)` returns when playback finishes or the turn scope is cancelled. Production default is `LoggingTTSPlayer` (logs intended speech); `MockTTSPlayer` is used in tests. A Discord voice-channel playback impl is a later deliverable.
+- **TTSPlayer** — `speak(text, scope=...)` returns when playback finishes or the turn scope is cancelled. Production default is `DiscordVoicePlayer`, which synthesizes via the configured TTS client and pushes the resulting PCM through `voice_client.play(...)`. When no TTS client is configured the loop falls back to `LoggingTTSPlayer`, which only logs intended speech. `MockTTSPlayer` is used in tests.
+- **BotHandle** — adapter exposed to the lifecycle wiring so bus-only processors can post back to Discord without taking a direct `discord.Bot` reference. Carries `send_text(channel_id, content)` and a `voice_runtime: dict[int, VoiceRuntime]` map populated by `/subscribe-voice`.
 - **Processors** — subscribe to topics.
   - `DebugLoggerProcessor` — one log line per event on every subscribed topic.
+  - `HistoryWriter` — persists `discord.text` events as user turns.
+  - `TextResponder` — consumes `discord.text` (assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Cancellation flows through `TurnRouter` so a follow-up message in the same channel cancels in-flight LLM work.
   - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped.
 - **Diagnostics** — `@span(name)` decorator in `familiar_connect.diagnostics.spans` emits timing logs (`span=<name> ms=<n> status=<ok|error>`). Logs-first aggregation; a metrics collector + `/diagnostics` slash command come in Phase 5.
 - **Discord text** — `on_message` event handler + `subscribe-text` / `unsubscribe-text` slash commands. Built on py-cord.
-- **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption).
-- **Transcription** — Deepgram streaming client. Instantiated on startup; wired to the bus via `VoiceSource` once a voice channel is active.
-- **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. Phase 2's `LoggingTTSPlayer` does not call them; Discord voice playback arrives in a follow-up.
+- **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption). On subscribe the bot attaches a `RecordingSink`, starts the Deepgram transcriber against a fresh result queue, and runs a `VoiceSource` task draining transcripts onto the bus. On unsubscribe the per-channel pump + source tasks are cancelled, recording is stopped, and the transcriber is closed.
+- **Transcription** — Deepgram streaming client. Instantiated on startup; wired to the bus via `VoiceSource` once a voice channel is active. v1 supports one voice channel at a time (single transcriber per familiar).
+- **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through pycord's voice client. When no TTS client is configured `LoggingTTSPlayer` is used.
 - **OpenRouter LLM client** — one `LLMClient` per call-site slot.
 - **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries` and `cross_context_summaries` are watermarked side-indices.
 - **Subscription registry** — `data/familiars/<id>/subscriptions.toml`, written by the subscribe/unsubscribe slash commands.

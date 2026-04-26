@@ -7,12 +7,20 @@ Owns:
 - ``on_message`` and ``on_voice_state_update`` event handlers
 - :func:`ingest_event` — text and voice events publish to the event
   bus via :class:`DiscordTextSource`. Twitch has its own source.
+- :class:`BotHandle` — adapter exposed to the lifecycle wiring so
+  bus-only processors (e.g. :class:`TextResponder`) can post back
+  to Discord without taking a direct ``discord.Bot`` reference.
+- :func:`_start_voice_intake` / :func:`_stop_voice_intake` — bring
+  up / tear down the per-channel sink + transcriber + voice source
+  pipeline that ``/subscribe-voice`` triggers.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import discord
@@ -22,13 +30,142 @@ from familiar_connect.diagnostics.collector import get_span_collector
 from familiar_connect.diagnostics.report import render_summary_table
 from familiar_connect.identity import Author
 from familiar_connect.sources import DiscordTextSource
+from familiar_connect.sources.voice import VoiceSource
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.voice import DaveVoiceClient
+from familiar_connect.voice.recording_sink import RecordingSink
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from familiar_connect.familiar import Familiar
+    from familiar_connect.transcription import TranscriptionResult
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass
+class VoiceRuntime:
+    """Per-voice-channel pipeline state.
+
+    Holds the live voice client + the recording-sink / pump / source
+    tasks so ``/unsubscribe-voice`` can tear them down cleanly.
+    """
+
+    voice_client: discord.VoiceClient
+    sink: RecordingSink
+    audio_queue: asyncio.Queue[tuple[int, bytes]]
+    result_queue: asyncio.Queue[TranscriptionResult]
+    pump_task: asyncio.Task[None]
+    source_task: asyncio.Task[None]
+
+
+@dataclass
+class BotHandle:
+    """Bundle of bot + outbound seams used by bus processors.
+
+    ``send_text`` is the seam :class:`TextResponder` injects so it can
+    post replies without depending on pycord. ``voice_runtime`` is
+    keyed by voice-channel id; populated by ``/subscribe-voice`` and
+    consumed by the active TTS player to find the live voice client.
+    """
+
+    bot: discord.Bot
+    send_text: Callable[[int, str], Awaitable[None]]
+    voice_runtime: dict[int, VoiceRuntime] = field(default_factory=dict)
+
+
+def _on_recording_done(sink: RecordingSink, *args: object) -> None:
+    """py-cord ``start_recording`` callback. No-op — sink writes via queue."""
+    del sink, args
+
+
+async def _start_voice_intake(
+    *,
+    handle: BotHandle,
+    familiar: Familiar,
+    voice_client: discord.VoiceClient,
+    channel_id: int,
+) -> VoiceRuntime | None:
+    """Bring up sink + transcriber + voice source for *channel_id*.
+
+    Returns ``None`` when no transcriber is configured — the bot can
+    still join for TTS playback only. Idempotent: a second call for
+    the same channel returns the existing runtime.
+    """
+    if familiar.transcriber is None:
+        return None
+    existing = handle.voice_runtime.get(channel_id)
+    if existing is not None:
+        return existing
+
+    loop = asyncio.get_running_loop()
+    audio_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
+    result_queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+
+    sink = RecordingSink(loop=loop, audio_queue=audio_queue)
+    voice_client.start_recording(sink, _on_recording_done)
+    await familiar.transcriber.start(result_queue)
+
+    source = VoiceSource(
+        bus=familiar.bus,
+        familiar_id=familiar.id,
+        voice_channel_id=channel_id,
+        queue=result_queue,
+    )
+
+    transcriber = familiar.transcriber
+
+    async def _pump_audio() -> None:
+        while True:
+            _user, pcm = await audio_queue.get()
+            await transcriber.send_audio(pcm)
+
+    pump_task = asyncio.create_task(_pump_audio(), name=f"voice-pump-{channel_id}")
+    source_task = asyncio.create_task(source.run(), name=f"voice-source-{channel_id}")
+    rt = VoiceRuntime(
+        voice_client=voice_client,
+        sink=sink,
+        audio_queue=audio_queue,
+        result_queue=result_queue,
+        pump_task=pump_task,
+        source_task=source_task,
+    )
+    handle.voice_runtime[channel_id] = rt
+    _logger.info(
+        f"{ls.tag('🎙️  Voice', ls.G)} "
+        f"{ls.kv('intake', 'started', vc=ls.LG)} "
+        f"{ls.kv('channel', str(channel_id), vc=ls.LC)}"
+    )
+    return rt
+
+
+async def _stop_voice_intake(
+    *,
+    handle: BotHandle,
+    familiar: Familiar,
+    channel_id: int,
+) -> None:
+    """Cancel pump + source tasks, stop recording, stop transcriber."""
+    rt = handle.voice_runtime.pop(channel_id, None)
+    if rt is None:
+        return
+    with contextlib.suppress(Exception):
+        rt.voice_client.stop_recording()
+    rt.pump_task.cancel()
+    rt.source_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await rt.pump_task
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await rt.source_task
+    if familiar.transcriber is not None:
+        with contextlib.suppress(Exception):
+            await familiar.transcriber.stop()
+    _logger.info(
+        f"{ls.tag('🎙️  Voice', ls.Y)} "
+        f"{ls.kv('intake', 'stopped', vc=ls.LY)} "
+        f"{ls.kv('channel', str(channel_id), vc=ls.LC)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -65,20 +202,55 @@ async def ingest_event(
 # ---------------------------------------------------------------------------
 
 
-def create_bot(familiar: Familiar) -> discord.Bot:
-    """Construct the Discord client and register slash commands + events."""
+def create_bot(familiar: Familiar) -> BotHandle:
+    """Construct the Discord client and register slash commands + events.
+
+    Returns a :class:`BotHandle` carrying the bot plus the
+    ``send_text`` callback bus processors use for outbound posts and
+    the per-channel voice runtime map.
+    """
     intents = discord.Intents.default()
     intents.message_content = True
     intents.voice_states = True
 
     bot = discord.Bot(intents=intents)
 
-    text_source = DiscordTextSource(bus=familiar.bus, familiar_id=familiar.id)
+    async def send_text(channel_id: int, content: str) -> None:
+        """Resolve channel by id, post ``content`` via ``channel.send``.
 
-    _register_slash_commands(bot, familiar)
+        Resolves on each call — channel cache may miss right after
+        startup; ``fetch_channel`` is the fallback.
+        """
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except discord.DiscordException as exc:
+                _logger.warning(
+                    "send_text fetch_channel failed: channel=%d err=%s",
+                    channel_id,
+                    exc,
+                )
+                return
+        if not isinstance(channel, discord.abc.Messageable):
+            _logger.warning("send_text: channel %d not messageable", channel_id)
+            return
+        try:
+            await channel.send(content)
+        except discord.DiscordException as exc:
+            _logger.warning(
+                "send_text channel.send failed: channel=%d err=%s",
+                channel_id,
+                exc,
+            )
+
+    handle = BotHandle(bot=bot, send_text=send_text)
+
+    text_source = DiscordTextSource(bus=familiar.bus, familiar_id=familiar.id)
+    _register_slash_commands(handle, familiar)
     _register_events(bot, familiar, text_source)
 
-    return bot
+    return handle
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +258,9 @@ def create_bot(familiar: Familiar) -> discord.Bot:
 # ---------------------------------------------------------------------------
 
 
-def _register_slash_commands(bot: discord.Bot, familiar: Familiar) -> None:
+def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
+    bot = handle.bot
+
     @bot.slash_command(
         name="subscribe-text",
         description="Listen for text messages in this channel.",
@@ -129,18 +303,28 @@ def _register_slash_commands(bot: discord.Bot, familiar: Familiar) -> None:
 
         channel = voice_state.channel
         try:
-            await channel.connect(cls=DaveVoiceClient)
+            voice_client = await channel.connect(cls=DaveVoiceClient)
         except discord.DiscordException as exc:
             _logger.warning("voice connect failed: %s", exc)
             await ctx.respond("Could not join voice.", ephemeral=True)
             return
+
+        # Bring up sink + transcriber + voice source. Returns None if
+        # no transcriber configured — bot still joined for playback.
+        rt = await _start_voice_intake(
+            handle=handle,
+            familiar=familiar,
+            voice_client=voice_client,
+            channel_id=channel.id,
+        )
 
         familiar.subscriptions.add(
             channel_id=channel.id,
             kind=SubscriptionKind.voice,
             guild_id=ctx.guild_id,
         )
-        await ctx.respond(f"Joined {channel.name}.", ephemeral=True)
+        suffix = "" if rt is not None else " (playback only — no transcriber)"
+        await ctx.respond(f"Joined {channel.name}.{suffix}", ephemeral=True)
 
     @bot.slash_command(
         name="diagnostics",
@@ -165,6 +349,12 @@ def _register_slash_commands(bot: discord.Bot, familiar: Familiar) -> None:
         if sub is None:
             await ctx.respond("Not in a voice channel here.", ephemeral=True)
             return
+
+        await _stop_voice_intake(
+            handle=handle,
+            familiar=familiar,
+            channel_id=sub.channel_id,
+        )
 
         vc = guild.voice_client
         if vc is not None:
