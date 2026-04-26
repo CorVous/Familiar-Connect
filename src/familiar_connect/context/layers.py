@@ -303,6 +303,13 @@ class RagContextLayer:
     watermarks move when new turns or facts are written, so the
     cache flips automatically. Phase 4 adds facts alongside turns;
     Phase 3 only surfaced turns.
+
+    :param recent_window_size: when >0, exclude turns from the
+        current channel whose id falls within the last
+        ``recent_window_size`` rows — those are already shown by
+        :class:`RecentHistoryLayer` verbatim. Default 0 preserves
+        the unfiltered behaviour for tests / callers that don't opt
+        in.
     """
 
     name: str = "rag_context"
@@ -313,10 +320,12 @@ class RagContextLayer:
         store: HistoryStore,
         max_results: int = 5,
         max_facts: int = 3,
+        recent_window_size: int = 0,
     ) -> None:
         self._store = store
         self._max_results = max_results
         self._max_facts = max_facts
+        self._recent_window_size = recent_window_size
         self._current_cue: str = ""
 
     def set_current_cue(self, cue: str) -> None:
@@ -326,10 +335,20 @@ class RagContextLayer:
         cue = self._current_cue
         if not cue:
             return ""
+        # Window cutoff for the current channel: anything newer than
+        # this id is already in RecentHistoryLayer's output.
+        max_id: int | None = None
+        if self._recent_window_size > 0 and ctx.channel_id is not None:
+            latest = self._store.latest_id(
+                familiar_id=ctx.familiar_id, channel_id=ctx.channel_id
+            )
+            if latest is not None:
+                max_id = latest - self._recent_window_size
         turn_results = self._store.search_turns(
             familiar_id=ctx.familiar_id,
             query=cue,
             limit=self._max_results,
+            max_id=max_id,
         )
         fact_results = self._store.search_facts(
             familiar_id=ctx.familiar_id,

@@ -207,3 +207,53 @@ class TestRagContextLayer:
         layer.set_current_cue("otter")
         k3 = layer.invalidation_key(_ctx())
         assert k3 not in {k1, k2}
+
+    @pytest.mark.asyncio
+    async def test_excludes_turns_within_recent_window(self) -> None:
+        """RAG must not re-surface turns already in ``RecentHistoryLayer``.
+
+        Otherwise the user's own most-recent message (which is in
+        ``fts_turns`` and matches its own cue perfectly) shows up
+        twice in the prompt — once verbatim, once as "possibly
+        relevant earlier turns".
+        """
+        store = HistoryStore(":memory:")
+        # 30 turns total; the ones inside the recent-window (the
+        # last 20) must NOT appear in RAG output.
+        for i in range(30):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"strawberry observation number {i}",
+                author=None,
+            )
+        layer = RagContextLayer(store=store, max_results=10, recent_window_size=20)
+        layer.set_current_cue("strawberry")
+        out = await layer.build(_ctx(channel_id=1))
+        # Every numeric mention should be from id 1..10 (older than
+        # the 20-turn window's id 11..30).
+        for older_idx in range(10):
+            assert f"number {older_idx}" in out, (older_idx, out)
+        for recent_idx in range(10, 30):
+            assert f"number {recent_idx}" not in out, (recent_idx, out)
+
+    @pytest.mark.asyncio
+    async def test_zero_recent_window_keeps_old_behavior(self) -> None:
+        """Default ``recent_window_size=0`` disables exclusion.
+
+        Existing tests and any caller that doesn't opt into the
+        window-aware mode get the unfiltered RAG semantics.
+        """
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="strawberry observation",
+            author=None,
+        )
+        layer = RagContextLayer(store=store, max_results=5)  # default = 0
+        layer.set_current_cue("strawberry")
+        out = await layer.build(_ctx(channel_id=1))
+        assert "strawberry observation" in out

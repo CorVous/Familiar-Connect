@@ -224,27 +224,138 @@ _TURN_COLS = (
 
 _FTS_TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
 
+# Drop common English stopwords before FTS matching. Without this, casual
+# chat cues like "hey do you know about X" dilute BM25 scoring (every token
+# is OR'd) and produce noisy hits on conversational filler. Keep the list
+# small and high-confidence — over-filtering hurts recall.
+_FTS_STOPWORDS = frozenset({
+    "a",
+    "about",
+    "an",
+    "and",
+    "any",
+    "anything",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "but",
+    "by",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "done",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "hey",
+    "hi",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "its",
+    "just",
+    "know",
+    "lol",
+    "me",
+    "my",
+    "no",
+    "not",
+    "of",
+    "ok",
+    "on",
+    "or",
+    "our",
+    "out",
+    "she",
+    "so",
+    "some",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "to",
+    "too",
+    "up",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "would",
+    "yes",
+    "you",
+    "your",
+    "yours",
+})
+
 
 def _tokenize_fts_query(query: str) -> list[str]:
-    """Sanitise an FTS5 MATCH expression.
+    """Tokenize free-form text into FTS5 MATCH tokens.
 
-    FTS5 MATCH parses a small grammar — bare punctuation, unmatched
-    quotes, and leading booleans can all raise ``sqlite3.Operational``.
-    Extract bare word tokens and apply the FTS5 prefix operator so
-    a query ``fox`` also matches ``foxes`` (default tokenizer has no
-    stemmer). Tokens shorter than 3 chars drop the prefix to avoid
-    runaway matches on common stopword prefixes.
+    Strips punctuation, lowercases, drops English stopwords, and
+    appends the FTS5 prefix operator (``*``) to tokens of 3+ chars so
+    ``fox`` also matches ``foxes`` (default tokenizer has no stemmer).
+    Returns ``[]`` for empty / all-stopword input — caller short-
+    circuits when no useful tokens remain.
+
+    See :func:`_build_fts_match` for how callers compose the result
+    into an OR-joined MATCH expression.
     """
     if not query or not query.strip():
         return []
     out: list[str] = []
     for tok in _FTS_TOKEN_RE.findall(query):
         low = tok.lower()
+        if low in _FTS_STOPWORDS:
+            continue
         if len(low) >= 3:
             out.append(f"{low}*")
         else:
             out.append(low)
     return out
+
+
+def _build_fts_match(query: str) -> str:
+    """OR-joined MATCH expression for free-form text.
+
+    FTS5's default operator is implicit AND — every token must appear
+    in the indexed row. That destroys recall on multi-word chat cues
+    (a 16-token query that mixes filler with substantive nouns
+    almost never matches a 6-word fact). OR-joining lets BM25 rank
+    on whichever substantive tokens hit; common tokens contribute
+    little weight.
+    """
+    return " OR ".join(_tokenize_fts_query(query))
 
 
 class HistoryStore:
@@ -839,29 +950,33 @@ class HistoryStore:
         query: str,
         limit: int,
         channel_id: int | None = None,
+        max_id: int | None = None,
     ) -> list[HistoryTurn]:
         """Return turns whose content matches the FTS *query*.
 
-        Empty/whitespace *query* returns ``[]``. Punctuation in the
-        query is tolerated — tokens are quoted before hand-off to
-        SQLite FTS5 so Unicode chars and special MATCH operators don't
-        raise.
+        Empty/whitespace *query* and queries that reduce to only
+        stopwords return ``[]``. Tokens are OR-joined and BM25-ranked;
+        see :func:`_build_fts_match`.
 
-        Results are ordered by BM25 rank, tiebroken by turn id DESC
-        (newest first).
+        :param max_id: if set, only turns with ``id <= max_id`` are
+            considered. Used by :class:`RagContextLayer` to keep RAG
+            from re-surfacing turns already covered by
+            :class:`RecentHistoryLayer`.
         """
         if limit <= 0:
             return []
-        tokens = [t for t in _tokenize_fts_query(query) if t]
-        if not tokens:
+        match_expr = _build_fts_match(query)
+        if not match_expr:
             return []
-        match_expr = " ".join(tokens)
 
         params: list[object] = [match_expr, familiar_id]
-        where_channel = ""
+        where_extra = ""
         if channel_id is not None:
-            where_channel = "AND t.channel_id = ?\n"
+            where_extra += "AND t.channel_id = ?\n"
             params.append(channel_id)
+        if max_id is not None:
+            where_extra += "AND t.id <= ?\n"
+            params.append(max_id)
         params.append(limit)
 
         rows = self._conn.execute(
@@ -871,7 +986,7 @@ class HistoryStore:
               JOIN turns AS t ON t.id = fts.rowid
              WHERE fts_turns MATCH ?
                AND t.familiar_id = ?
-               {where_channel}
+               {where_extra}
              ORDER BY bm25(fts_turns) ASC, t.id DESC
              LIMIT ?
             """,  # noqa: S608
@@ -992,10 +1107,9 @@ class HistoryStore:
         """
         if limit <= 0:
             return []
-        tokens = [t for t in _tokenize_fts_query(query) if t]
-        if not tokens:
+        match_expr = _build_fts_match(query)
+        if not match_expr:
             return []
-        match_expr = " ".join(tokens)
         where_super = "" if include_superseded else "AND f.superseded_at IS NULL"
         rows = self._conn.execute(
             f"""

@@ -62,14 +62,14 @@ class TestFtsSearch:
             familiar_id="other",
             channel_id=100,
             role="user",
-            content="A fox on the other familiar.",
+            content="A unicorn appeared on the other familiar.",
             author=None,
         )
-        results = store.search_turns(
-            familiar_id="fam", query="fox on the other", limit=10
-        )
-        # "fox on the other" is very specific and should only match the
-        # other-familiar row, which we scope out
+        # ``unicorn`` is unique to the other-familiar row; matching
+        # tokens are OR'd so any non-stopword would do.
+        results = store.search_turns(familiar_id="fam", query="unicorn", limit=10)
+        # only the other-familiar row contains "unicorn", and that row
+        # is scoped out — so the result must be empty.
         assert results == []
 
     def test_respects_limit(self) -> None:
@@ -112,3 +112,42 @@ class TestFtsSearch:
         store = _store_with_turns()
         latest = store.latest_fts_id(familiar_id="fam")
         assert latest == store.latest_id(familiar_id="fam")
+
+    def test_chat_cue_with_stopwords_still_recalls_substantive_match(self) -> None:
+        """A casual chat cue with mostly stopwords still surfaces hits.
+
+        Tokens are OR'd, not AND'd, and English stopwords are dropped
+        before matching — otherwise multi-word chat cues return nothing
+        (FTS5's implicit-AND semantics destroys recall on free text).
+        """
+        store = _store_with_turns()
+        cue = "Hey, do you know anything about the fox?"
+        results = store.search_turns(familiar_id="fam", query=cue, limit=10)
+        assert results
+        # All "fox" turns should surface — `fox*` is the substantive token.
+        assert all("fox" in r.content.lower() for r in results)
+
+    def test_query_of_only_stopwords_returns_nothing(self) -> None:
+        """Empty token set after stopword filtering means no FTS query."""
+        store = _store_with_turns()
+        results = store.search_turns(
+            familiar_id="fam", query="hi the a do you", limit=10
+        )
+        assert results == []
+
+    def test_search_turns_respects_max_id(self) -> None:
+        """``max_id`` excludes turns with id > max_id (inclusive bound).
+
+        Used by ``RagContextLayer`` to keep RAG from re-surfacing turns
+        that ``RecentHistoryLayer`` already includes verbatim.
+        """
+        store = _store_with_turns()
+        full = store.search_turns(familiar_id="fam", query="fox", limit=10)
+        max_id = min(r.id for r in full)
+        bounded = store.search_turns(
+            familiar_id="fam", query="fox", limit=10, max_id=max_id
+        )
+        assert bounded
+        assert all(r.id <= max_id for r in bounded)
+        # bounded is a strict subset of full
+        assert len(bounded) < len(full)

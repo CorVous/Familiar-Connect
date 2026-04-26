@@ -160,7 +160,13 @@ def _default_assembler(familiar: Familiar) -> Assembler:
                 ttl_seconds=600,
             ),
             ConversationSummaryLayer(store=store),
-            RagContextLayer(store=store, max_results=5),
+            RagContextLayer(
+                store=store,
+                max_results=5,
+                # Match RecentHistoryLayer's window so RAG only surfaces
+                # turns *older* than what's already shown verbatim.
+                recent_window_size=familiar.config.history_window_size,
+            ),
             RecentHistoryLayer(
                 store=store,
                 window_size=familiar.config.history_window_size,

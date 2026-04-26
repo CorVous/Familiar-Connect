@@ -158,6 +158,18 @@ class FactExtractor:
 
 
 def _build_extract_prompt(turns: Iterable[HistoryTurn]) -> list[Message]:
+    # KNOWN ISSUE — nickname rot. Display names are embedded directly
+    # into fact text ("Selling Cass pics lives near Cass"). When the
+    # underlying user changes nickname (Discord/Twitch let users
+    # rebrand freely), every fact about them becomes referentially
+    # orphaned: text-search still works on the stale name, but the
+    # model can't tell the new nickname is the same person.
+    # ``Author.canonical_key`` (``platform:user_id``) is stable and
+    # already attached to turns; facts don't reference it. Eventual
+    # fix: store canonical keys alongside fact text (parallel column
+    # or JSON metadata) and resolve to current display names at read
+    # time. Flagged here, not the issue tracker, because we don't
+    # have one yet.
     header = (
         "Extract a short list of atomic facts about the people and "
         "events in the chat turns below — observations about the "

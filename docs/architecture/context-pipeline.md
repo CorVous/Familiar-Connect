@@ -203,6 +203,53 @@ appends, so the key naturally moves. (A future "manual supersede
 without replacement" path would need to track supersession state in
 the key directly; not built today.)
 
+### Known limitation: nickname rot
+
+Display names get baked into fact text verbatim ("Selling Cass pics
+lives near Cass"). When the underlying user changes their Discord
+or Twitch nickname, every fact about them becomes referentially
+orphaned — FTS still matches the stale name, but the model can't
+tell the new nickname is the same person. `Author.canonical_key`
+(`platform:user_id`) is stable across renames and already attached
+to turns, but facts don't reference it. The eventual fix is to
+store canonical keys alongside fact text (parallel column or JSON
+metadata) and resolve them to current display names at read time.
+Flagged in `fact_extractor.py` as a `KNOWN ISSUE` comment.
+
+## RAG retrieval quality
+
+`RagContextLayer` runs the inbound user turn through SQLite FTS5
+against `fts_turns` and `fts_facts`. Two policies keep recall
+acceptable on free-text chat cues:
+
+- **OR-joined tokens with stopword filtering.** FTS5's default
+  match operator is implicit-AND — every token in the cue must
+  appear in the indexed row, which destroys recall on multi-word
+  chat cues ("hey, do you know about cat toys?" almost never
+  matches a 6-word fact). `_tokenize_fts_query` drops common English
+  stopwords; `_build_fts_match` OR-joins the rest. BM25 ranks on
+  whichever substantive tokens hit. See `src/familiar_connect/history/store.py`.
+- **Recent-window exclusion.** The user turn that *seeded* the cue
+  is, by construction, the highest-BM25 match against itself — and
+  it's already shown verbatim by `RecentHistoryLayer`. RAG passes
+  `max_id = latest_in_channel - recent_window_size` to
+  `search_turns`, scoping retrieval to turns *older* than the
+  recent-history window. `recent_window_size` is wired in
+  `commands/run.py` to the same value as `RecentHistoryLayer`.
+
+Both policies surface in the `RagContextLayer`'s constructor
+parameters (`recent_window_size` defaulting to 0 for tests / callers
+that don't opt in; the production wiring sets it).
+
+Open work the current retrieval doesn't address:
+
+- **Embeddings** would beat keyword matching on semantic recall (e.g.,
+  cue "What did Aria order at lunch?" → fact "Aria likes pho"). Out
+  of scope for the present pipeline.
+- **Cue extraction** — using the raw user turn as the cue is noisy.
+  Pulling named entities or topic words out of the turn first would
+  improve precision without embeddings.
+
 ## Expiry semantics for cross-channel summaries
 
 Cross-channel summaries can go stale in two ways:
