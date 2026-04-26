@@ -156,3 +156,39 @@ class TestChatStreamNoHttp:
         with pytest.raises(httpx.HTTPStatusError):
             async for _ in client.chat_stream([Message(role="user", content="x")]):
                 pass
+
+
+class TestSSEErrorFrames:
+    """OpenRouter / OpenAI-compatible servers can send mid-stream errors.
+
+    Format observed in the wild::
+
+        data: {"error": {"message": "model not found", "code": 404}}
+
+    Our parser used to silently drop these; we now log a warning so
+    the operator sees *why* the reply came back empty.
+    """
+
+    @pytest.mark.asyncio
+    async def test_top_level_error_frame_logged(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client = LLMClient(api_key="k", model="m")
+        chunks = [
+            b'data: {"error": {"message": "model not found", "code": 404}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        fake_http = MagicMock()
+        fake_http.stream = MagicMock(return_value=_FakeStreamResponse(chunks))
+        client._http = fake_http  # type: ignore[assignment]
+
+        with caplog.at_level("WARNING", logger="familiar_connect.llm"):
+            got = [
+                d async for d in client.chat_stream([Message(role="user", content="x")])
+            ]
+
+        assert got == []
+        assert any("model not found" in r.getMessage() for r in caplog.records), [
+            r.getMessage() for r in caplog.records
+        ]

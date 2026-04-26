@@ -78,6 +78,17 @@ class TextResponder:
         reply = await self._stream_reply(scope, channel_id)
         if reply is None or scope.is_cancelled():
             return
+        # Discord rejects empty / whitespace-only messages (HTTP 400,
+        # error code 50006). An empty reply usually means the LLM
+        # stream emitted no deltas — bad model name, content filter,
+        # or upstream error frame the parser silently dropped.
+        if not reply.strip():
+            _logger.warning(
+                f"{ls.tag('Text', ls.Y)} "
+                f"{ls.kv('skip', 'empty_reply', vc=ls.LY)} "
+                f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+            )
+            return
 
         try:
             await self._send_text(channel_id, reply)
@@ -86,6 +97,12 @@ class TextResponder:
                 f"{ls.tag('Text', ls.R)} {ls.kv('send_error', repr(exc), vc=ls.R)}"
             )
             return
+        _logger.info(
+            f"{ls.tag('💬 Text', ls.G)} "
+            f"{ls.kv('turn', scope.turn_id, vc=ls.LC)} "
+            f"{ls.kv('chars', str(len(reply)), vc=ls.LW)} "
+            f"{ls.kv('text', ls.trunc(reply, 200), vc=ls.LW)}"
+        )
 
         if scope.is_cancelled():
             return

@@ -200,3 +200,30 @@ class TestReply:
         # turn ended cleanly — no active scope after completion
         assert router.active_scope("discord:42") is None
         assert send.calls
+
+    @pytest.mark.asyncio
+    async def test_skips_when_llm_returns_empty(self, tmp_path: Path) -> None:
+        """Discord rejects empty messages; bail before calling send_text."""
+        llm = _ScriptedLLM(deltas=[])  # zero deltas → empty reply
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+        assert send.calls == []
+        # no assistant turn either — nothing to record
+        turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
+        assert all(t.role != "assistant" for t in turns)
+
+    @pytest.mark.asyncio
+    async def test_skips_when_llm_returns_whitespace(self, tmp_path: Path) -> None:
+        """Whitespace-only replies also fail Discord; bail."""
+        llm = _ScriptedLLM(deltas=["   ", "\n"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+        assert send.calls == []

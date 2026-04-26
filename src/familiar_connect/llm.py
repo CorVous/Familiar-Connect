@@ -270,6 +270,9 @@ def _parse_sse_deltas(line: str) -> list[str]:
 
     Ignores comments, blank lines, and non-``data:`` prefixes.
     Returns ``[]`` on ``[DONE]`` or on events that carry no content.
+    Logs a warning when the frame carries an ``error`` object — the
+    server has signalled a mid-stream failure (bad model, content
+    filter, etc.) and the caller is about to see an empty reply.
     """
     line = line.strip()
     if not line or not line.startswith("data:"):
@@ -280,6 +283,16 @@ def _parse_sse_deltas(line: str) -> list[str]:
     try:
         obj = json.loads(payload)
     except ValueError:
+        return []
+    err = obj.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or "unknown"
+        code = err.get("code")
+        _logger.warning(
+            f"{ls.tag('LLM', ls.R)} "
+            f"{ls.kv('sse_error', str(msg), vc=ls.R)} "
+            f"{ls.kv('code', str(code), vc=ls.LW)}"
+        )
         return []
     choices = obj.get("choices") or []
     out: list[str] = []
