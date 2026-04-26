@@ -8,6 +8,7 @@ source running. Mocks the voice client and transcriber surfaces.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from familiar_connect.bot import (
     BotHandle,
     VoiceRuntime,
+    _on_recording_done,
     _start_voice_intake,
     _stop_voice_intake,
 )
@@ -130,6 +132,19 @@ class TestStopVoiceIntake:
         familiar = _make_familiar(transcriber=MagicMock())
         # Should not raise; nothing registered for channel 99.
         await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=99)
+
+
+class TestRecordingDoneCallback:
+    """pycord's ``start_recording`` callback contract.
+
+    Voice client calls ``asyncio.run_coroutine_threadsafe(callback(sink,
+    *args), self.loop)`` (``discord/voice_client.py:915``) when
+    recording ends. A plain ``def`` returns ``None`` and triggers
+    ``TypeError: A coroutine object is required``.
+    """
+
+    def test_on_recording_done_is_coroutine_function(self) -> None:
+        assert inspect.iscoroutinefunction(_on_recording_done)
 
 
 class TestPumpAudio:

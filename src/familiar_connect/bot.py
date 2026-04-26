@@ -75,8 +75,13 @@ class BotHandle:
     voice_runtime: dict[int, VoiceRuntime] = field(default_factory=dict)
 
 
-def _on_recording_done(sink: RecordingSink, *args: object) -> None:
-    """py-cord ``start_recording`` callback. No-op — sink writes via queue."""
+async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noqa: RUF029 — pycord requires coroutine fn even when there's nothing to await
+    """py-cord ``start_recording`` callback. No-op — sink writes via queue.
+
+    Must be ``async def`` — pycord schedules the return value with
+    ``asyncio.run_coroutine_threadsafe`` (voice_client.py:915), which
+    requires a coroutine.
+    """
     del sink, args
 
 
