@@ -4,8 +4,10 @@ Consumes ``discord.text`` events and produces an LLM reply, posted via
 the injected ``send_text`` callback. Mirrors :class:`VoiceResponder`
 but skips TTS — text channels render the assistant string directly.
 
-User-turn writes belong to :class:`HistoryWriter`; this processor only
-appends the assistant turn. Cancellation flows through
+Owns user-turn writes for ``discord.text`` (single-writer per channel
+keeps read-after-write consistency for ``RecentHistoryLayer`` in the
+same task — a separate :class:`HistoryWriter` task would race with
+the responder's ``assemble`` call). Cancellation flows through
 :class:`TurnRouter` so future barge-in (e.g. user sends a follow-up
 mid-stream) cancels in-flight LLM work.
 """
@@ -18,6 +20,7 @@ from typing import TYPE_CHECKING
 from familiar_connect import log_style as ls
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.context.assembler import AssemblyContext
+from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -55,9 +58,13 @@ class TextResponder:
         self._history = history_store
         self._router = router
         self._familiar_id = familiar_id
+        # in-process dedup; bus does not republish today, but cheap insurance
+        self._seen: set[str] = set()
 
     async def handle(self, event: Event, bus: EventBus) -> None:  # noqa: ARG002
         if event.topic != TOPIC_DISCORD_TEXT:
+            return
+        if event.event_id in self._seen:
             return
         payload = event.payload
         if not isinstance(payload, dict):
@@ -68,9 +75,25 @@ class TextResponder:
         content = payload.get("content") or ""
         if not isinstance(channel_id, int) or not content:
             return
+        raw_author = payload.get("author")
+        author = raw_author if isinstance(raw_author, Author) else None
+        raw_guild = payload.get("guild_id")
+        guild_id = raw_guild if isinstance(raw_guild, int) else None
 
+        self._seen.add(event.event_id)
         scope = self._router.begin_turn(
             session_id=event.session_id, turn_id=event.turn_id
+        )
+
+        # Persist user turn *before* streaming so RecentHistoryLayer
+        # in the same task sees it. Mirrors VoiceResponder.
+        self._history.append_turn(
+            familiar_id=self._familiar_id,
+            channel_id=channel_id,
+            role="user",
+            content=content,
+            author=author,
+            guild_id=guild_id,
         )
         # seed retrieval before assembly so RagContextLayer sees the cue
         self._assembler.set_rag_cue(content)

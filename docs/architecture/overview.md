@@ -51,8 +51,7 @@ flowchart LR
 - **BotHandle** — adapter exposed to the lifecycle wiring so bus-only processors can post back to Discord without taking a direct `discord.Bot` reference. Carries `send_text(channel_id, content)` and a `voice_runtime: dict[int, VoiceRuntime]` map populated by `/subscribe-voice`.
 - **Processors** — subscribe to topics.
   - `DebugLoggerProcessor` — one log line per event on every subscribed topic.
-  - `HistoryWriter` — persists `discord.text` events as user turns.
-  - `TextResponder` — consumes `discord.text` (assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Cancellation flows through `TurnRouter` so a follow-up message in the same channel cancels in-flight LLM work.
+  - `TextResponder` — consumes `discord.text` (appends the user turn directly, seeds the RAG cue, assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Owning the user-turn write keeps read-after-write consistency for `RecentHistoryLayer` in the same task.
   - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped.
 - **Diagnostics** — `@span(name)` decorator in `familiar_connect.diagnostics.spans` emits timing logs (`span=<name> ms=<n> status=<ok|error>`). Logs-first aggregation; a metrics collector + `/diagnostics` slash command come in Phase 5.
 - **Discord text** — `on_message` event handler + `subscribe-text` / `unsubscribe-text` slash commands. Built on py-cord.

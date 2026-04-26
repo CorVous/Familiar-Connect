@@ -42,7 +42,6 @@ from familiar_connect.processors import (
     VoiceResponder,
 )
 from familiar_connect.processors.fact_extractor import FactExtractor
-from familiar_connect.processors.history_writer import HistoryWriter
 from familiar_connect.processors.summary_worker import SummaryWorker
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
@@ -194,12 +193,6 @@ def _first_voice_client(handle: BotHandle) -> discord.VoiceClient | None:
     return None
 
 
-async def _run_history_writer(familiar: Familiar, writer: HistoryWriter) -> None:
-    """Persist turn-generating events into :class:`HistoryStore`."""
-    async for event in familiar.bus.subscribe(writer.topics):
-        await writer.handle(event, familiar.bus)
-
-
 async def _async_main(token: str, familiar: Familiar) -> None:
     """Asyncio entry point: bring up bus, responders, bot.
 
@@ -234,9 +227,6 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         router=familiar.router,
         familiar_id=familiar.id,
     )
-    history_writer = HistoryWriter(
-        store=familiar.history_store, familiar_id=familiar.id
-    )
     summary_worker = SummaryWorker(
         store=familiar.history_store,
         llm_client=familiar.llm_clients["main_prose"],
@@ -260,10 +250,6 @@ async def _async_main(token: str, familiar: Familiar) -> None:
             tg.create_task(
                 _run_text_responder(familiar, text_responder),
                 name="text-responder",
-            )
-            tg.create_task(
-                _run_history_writer(familiar, history_writer),
-                name="history-writer",
             )
             tg.create_task(summary_worker.run(), name="summary-worker")
             tg.create_task(fact_extractor.run(), name="fact-extractor")

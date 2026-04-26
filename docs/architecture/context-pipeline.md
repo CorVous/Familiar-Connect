@@ -179,27 +179,33 @@ will be wired to force rebuilds of the stale layers. See plan
 
 ## Single-writer pattern
 
-`HistoryWriter` is the sole task that calls
-`HistoryStore.append_turn()` for `discord.text` user turns arriving
-on the bus. It dedups incoming events by `event_id` to tolerate
-future bus-level retries; ignores events for other familiars. Both
-`TextResponder` and `VoiceResponder` write their own assistant turns
-directly (they need sequential consistency with `RecentHistoryLayer`
-reads in the same task); the voice responder additionally writes its
-user turn directly because the upstream `VoiceSource` does not flow
-through `HistoryWriter`. Those write paths can migrate to the writer
-via a publish-confirm topic in a later phase if SQLite contention
-becomes measurable.
+Each responder owns user-turn writes for its own topic. `TextResponder`
+appends the user turn (from a `discord.text` event) before calling
+`Assembler.assemble`, and `VoiceResponder` does the same for voice
+finals. Single-writer-in-the-same-task gives `RecentHistoryLayer`
+read-after-write consistency: the new turn is in SQLite *before* the
+LLM prompt is built, so the model always sees the message it's being
+asked to respond to. A separate writer task (e.g. an earlier
+`HistoryWriter` design) would race the responder and produce stale
+prompts.
+
+`HistoryWriter` (`processors/history_writer.py`) is kept in the
+codebase as a reference implementation of the single-writer + dedup
+pattern, but it is no longer wired into the run loop.
 
 ## Data flow per user turn
 
 ```
 Discord text on channel C
   → DiscordTextSource publishes discord.text
-  → HistoryWriter appends user turn to `turns`
-  → fts_turns trigger fires; row indexed
-  → TextResponder assembles prompt (viewer_mode="text"), streams LLM,
-    posts via BotHandle.send_text, appends assistant turn
+  → TextResponder:
+      appends user turn to `turns` (fts_turns trigger fires; row indexed)
+      seeds RagContextLayer cue = content
+      Assembler.assemble(ctx, viewer_mode="text")
+      LLMClient.chat_stream (cancellable via scope)
+      BotHandle.send_text(channel_id, reply)
+      appends assistant turn
+      router.end_turn(scope)
 
 Voice transcript final on channel C (voice:C)
   → VoiceSource publishes voice.transcript.final

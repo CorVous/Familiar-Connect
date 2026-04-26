@@ -227,3 +227,60 @@ class TestReply:
         await responder.handle(_discord_text_event(content="hi"), bus)
         await bus.shutdown()
         assert send.calls == []
+
+    @pytest.mark.asyncio
+    async def test_user_turn_persisted_before_llm_stream(self, tmp_path: Path) -> None:
+        """User turn must be in history *before* the LLM stream is read.
+
+        Otherwise ``RecentHistoryLayer`` would miss the just-arrived
+        message and the LLM would respond to a stale conversation.
+        """
+        store = HistoryStore(":memory:")
+        observed_user_turns: list[str] = []
+
+        class _ObservingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
+                return Message(role="assistant", content="ack")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],  # noqa: ARG002
+            ) -> AsyncIterator[str]:
+                # snapshot history at the moment streaming begins
+                turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
+                observed_user_turns.extend(t.content for t in turns if t.role == "user")
+                yield "ack"
+
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ObservingLLM(), send=send, tmp_path=tmp_path, store=store
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hello"), bus)
+        await bus.shutdown()
+
+        assert "hello" in observed_user_turns, observed_user_turns
+
+    @pytest.mark.asyncio
+    async def test_user_turn_recorded_with_author_and_guild(
+        self, tmp_path: Path
+    ) -> None:
+        """Author + guild_id from the event payload reach ``HistoryStore``."""
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
+        user_turns = [t for t in turns if t.role == "user"]
+        assert len(user_turns) == 1
+        assert user_turns[0].content == "hi"
+        assert user_turns[0].author is not None
+        assert user_turns[0].author.display_name == "Alice"
