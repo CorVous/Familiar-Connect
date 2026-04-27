@@ -143,6 +143,16 @@ class FactExtractor:
                 source_turn_ids=source_ids,
                 subjects=subjects,
             )
+            # Mirror resolved subjects into ``turn_mentions``. Bridges
+            # bare-text references like "what about Aria?" into the
+            # same mention index that Discord ``@`` pings populate, so
+            # ``PeopleDossierLayer`` can pick them up at the next
+            # assemble — no separate read path, no fact-table join in
+            # the hot path. Idempotent (PK-deduped on the store side).
+            if subjects:
+                keys = [s.canonical_key for s in subjects]
+                for tid in source_ids:
+                    self._store.record_mentions(turn_id=tid, canonical_keys=keys)
 
         # Always advance watermark, even on empty/bad output, to prevent loops.
         last_id = new_turns[-1].id

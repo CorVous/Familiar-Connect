@@ -423,11 +423,25 @@ O(1).
 ### Mentions (read + write)
 
 A `turn_mentions(turn_id, canonical_key)` junction table records
-who got pinged in each turn. On intake, `bot.on_message` reads
-`message.mentions`, the source publishes them as `Author` objects
-in the event payload, and `TextResponder` upserts each one into
-`accounts` (keeping the identity cache fresh) and inserts the
-`turn_mentions` rows.
+who is salient in each turn. Two writers populate it:
+
+- **Discord pings** — on intake, `bot.on_message` reads
+  `message.mentions`, the source publishes them as `Author` objects
+  in the event payload, and `TextResponder` upserts each one into
+  `accounts` (keeping the identity cache fresh) and inserts the
+  `turn_mentions` rows.
+- **Fact-extractor subjects** — when `FactExtractor` resolves a
+  fact's `subject_keys` against the participants manifest, it
+  mirrors the canonical keys into `turn_mentions` for each of the
+  fact's `source_turn_ids`. This bridges bare-text references
+  ("what about Aria?") that never raised a Discord ping but that
+  the LLM successfully linked to a known canonical key. Inserts
+  are PK-deduped, so a turn that was both pinged and fact-extracted
+  ends up with the union of keys.
+
+Downstream, `PeopleDossierLayer` reads `mentions_for_turn` and
+treats every recorded canonical key as a candidate for dossier
+inclusion — the layer doesn't care which writer added the row.
 
 In rendered prompts, Discord's raw `<@USER_ID>` markers in turn
 content are rewritten to `[@DisplayName]` via `resolve_label` —

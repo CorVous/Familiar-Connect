@@ -368,6 +368,129 @@ class TestFactExtractorSubjects:
         assert facts[0].subjects == ()
 
 
+class TestFactExtractorMirrorsMentions:
+    """Resolved subjects are mirrored into ``turn_mentions``.
+
+    A bare-text reference ("what about Aria?") never lands a Discord
+    ping — ``TextResponder`` only fills ``turn_mentions`` from
+    ``message.mentions``. The fact extractor's name-resolution
+    bridges that gap: when it identifies a subject, it records the
+    canonical key against every source turn so
+    :class:`PeopleDossierLayer` picks the person up at its next
+    assemble — same cadence as Discord pings.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mirrors_subjects_into_turn_mentions(self) -> None:
+        store = HistoryStore(":memory:")
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        # Cass speaks; the LLM extracts a fact about her (Aria-style
+        # cross-reference would land the same way once Aria is in
+        # the participants manifest).
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Cass likes pho.",
+                        "source_turn_ids": [3, 5],
+                        "subject_keys": ["discord:111"],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        # Every source turn now lists the resolved subject.
+        assert store.mentions_for_turn(turn_id=3) == ("discord:111",)
+        assert store.mentions_for_turn(turn_id=5) == ("discord:111",)
+        # Untouched turns get nothing.
+        assert store.mentions_for_turn(turn_id=4) == ()
+
+    @pytest.mark.asyncio
+    async def test_no_subjects_means_no_mention_writes(self) -> None:
+        store = HistoryStore(":memory:")
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    # No subject_keys ⇒ nothing to mirror.
+                    {"text": "It rained on Tuesday.", "source_turn_ids": [3]},
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        assert store.mentions_for_turn(turn_id=3) == ()
+
+    @pytest.mark.asyncio
+    async def test_mirror_does_not_clobber_prior_pings(self) -> None:
+        """Idempotent: an existing pinged-mention coexists with mirrored subjects."""
+        store = HistoryStore(":memory:")
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        # An earlier Discord @ ping already recorded Aria.
+        store.record_mentions(turn_id=3, canonical_keys=["discord:222"])
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Cass likes pho.",
+                        "source_turn_ids": [3],
+                        "subject_keys": ["discord:111"],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        # Both keys present, sorted by canonical_key as the read API guarantees.
+        assert store.mentions_for_turn(turn_id=3) == ("discord:111", "discord:222")
+
+
 def _turn_count_in_prompt(messages: list[Message]) -> int:
     """Count how many ``- [role] ...`` lines appear in the user message.
 
