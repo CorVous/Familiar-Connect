@@ -63,14 +63,29 @@ class VoiceResponder:
         self._history = history_store
         self._router = router
         self._familiar_id = familiar_id
+        # one in-flight final-handling task per voice session; replaced
+        # when a newer final arrives. soft-cancel via scope, plus pop
+        # from done-callback so finished tasks don't accumulate.
+        self._inflight: dict[str, asyncio.Task[None]] = {}
 
     async def handle(self, event: Event, bus: EventBus) -> None:  # noqa: ARG002
         if event.topic == TOPIC_VOICE_ACTIVITY_START:
             self._on_activity_start(event)
             return
         if event.topic == TOPIC_VOICE_TRANSCRIPT_FINAL:
-            await self._on_final(event)
+            self._spawn_final(event)
             return
+
+    async def wait_until_idle(self) -> None:
+        """Await every in-flight final-handling task.
+
+        Used by tests and graceful shutdown — a no-op when nothing is
+        in flight. Suppresses ``CancelledError`` from spawned tasks
+        whose scope was cancelled mid-flight.
+        """
+        tasks = [t for t in list(self._inflight.values()) if not t.done()]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # ------------------------------------------------------------------
     # Activity start — cancel prior, install new scope + stop TTS
@@ -89,6 +104,48 @@ class VoiceResponder:
                 self._tts.stop(),
                 name="voice-responder-tts-stop",
             )
+
+    # ------------------------------------------------------------------
+    # Final dispatch — spawn so the bus loop keeps pulling events
+    # ------------------------------------------------------------------
+
+    def _spawn_final(self, event: Event) -> None:
+        """Run ``_on_final`` as a per-session task.
+
+        Decouples ingestion from processing: the bus dispatcher returns
+        immediately after handing off, so a fresh ``activity.start``
+        can call ``prior.cancel()`` and ``tts.stop()`` while this task
+        is still parked at an LLM/TTS await point. Without this, the
+        soft scope-cancel never fires until the prior reply has fully
+        played, and the user hears it lag behind.
+        """
+        session_id = event.session_id
+        prior_task = self._inflight.get(session_id)
+        if prior_task is not None and not prior_task.done():
+            # A newer final without an intervening activity.start is
+            # unusual but defendable: cancel the prior so we don't
+            # double-speak. Soft cancel via the scope already happened
+            # if begin_turn ran; this is a hard fallback.
+            prior_task.cancel()
+        task = asyncio.create_task(
+            self._run_final(event),
+            name=f"voice-final-{event.turn_id}",
+        )
+        self._inflight[session_id] = task
+        task.add_done_callback(lambda t, sid=session_id: self._on_final_done(sid, t))
+
+    def _on_final_done(self, session_id: str, task: asyncio.Task[None]) -> None:
+        # Only clear the slot if we still own it — a newer turn may
+        # have already replaced our entry.
+        if self._inflight.get(session_id) is task:
+            self._inflight.pop(session_id, None)
+
+    async def _run_final(self, event: Event) -> None:
+        try:
+            await self._on_final(event)
+        except asyncio.CancelledError:
+            # Expected on barge-in: a newer final hard-cancelled us.
+            return
 
     # ------------------------------------------------------------------
     # Final transcript — run the reply pipeline

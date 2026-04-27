@@ -96,9 +96,17 @@ voice.transcript.final → if scope.turn_id == event.turn_id:
                            router.end_turn(scope)
 ```
 
+`voice.transcript.final` is spawned as a per-session `asyncio.Task`, so the
+bus dispatcher returns to the subscription loop immediately. A subsequent
+`voice.activity.start` runs `prior.cancel()` / `TTSPlayer.stop()` while the
+prior turn is still parked at an LLM or TTS await point — without the spawn,
+the dispatcher would sit inside the prior `handle()` and the cancel signal
+would arrive only after the old reply had played in full.
+
 Barge-in latency budget: 200 ms from a new `voice.activity.start` to TTS
-playback halted. Verified by
-`tests/test_voice_responder.py::TestBargeIn::test_barge_in_during_speech_cuts_playback_fast`.
+playback halted. Verified end-to-end (bus subscribe pattern) by
+`tests/test_voice_responder.py::TestDispatchLoop` and
+`::TestBargeIn::test_barge_in_during_speech_cuts_playback_fast`.
 
 ## Per-channel latency knobs
 

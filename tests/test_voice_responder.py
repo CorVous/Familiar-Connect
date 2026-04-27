@@ -7,6 +7,7 @@ assemble prompt → stream LLM → speak via TTS. Barge-in bites here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -175,6 +176,7 @@ class TestFinalReply:
         await bus.start()
         await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
         await responder.handle(_mk_final("hi there", turn_id="t-1"), bus)
+        await responder.wait_until_idle()
         await bus.shutdown()
 
         assert player.calls
@@ -203,6 +205,7 @@ class TestFinalReply:
         await bus.start()
         await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
         await responder.handle(_mk_final("hi nobody", turn_id="t-1"), bus)
+        await responder.wait_until_idle()
         await bus.shutdown()
 
         assert player.calls == []
@@ -221,6 +224,7 @@ class TestFinalReply:
         await responder.handle(_mk_activity_start(turn_id="t-new"), bus)
         # final from an older utterance
         await responder.handle(_mk_final("old", turn_id="t-OLD"), bus)
+        await responder.wait_until_idle()
         await bus.shutdown()
         assert player.calls == []
 
@@ -252,6 +256,7 @@ class TestBargeIn:
         )
         task_barge = asyncio.create_task(bargein())
         await asyncio.gather(task_reply, task_barge)
+        await responder.wait_until_idle()
 
         # Player should either have not been called, or been called with a
         # cancelled flag. The key assertion: we didn't speak the full text.
@@ -302,6 +307,9 @@ class TestBargeIn:
         task_barge = asyncio.create_task(bargein_mid_speech())
         cancel_time = await task_barge
         await task_reply
+        # handle() now spawns _on_final as a task — wait for the in-flight
+        # speak to actually finish (i.e. observe cancellation) before timing.
+        await responder.wait_until_idle()
         t_reply_done = loop.time()
 
         cut_latency_ms = int((t_reply_done - cancel_time) * 1000)
@@ -312,3 +320,81 @@ class TestBargeIn:
         assert player.calls
         assert player.calls[0][1] is True  # was cancelled
         await bus.shutdown()
+
+
+class TestDispatchLoop:
+    """Production dispatch pattern (`async for event in bus.subscribe(...)`).
+
+    Regression: previously the dispatcher awaited ``responder.handle()``
+    sequentially, so a slow ``_on_final`` blocked subsequent
+    ``voice.activity.start`` events from ever reaching ``prior.cancel()``
+    in time. The voice reply for an old utterance therefore played in
+    full even after the user spoke again.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_unblocked_during_in_flight_final(
+        self, tmp_path: Path
+    ) -> None:
+        """Barge-in must take effect while the prior LLM stream is parked."""
+
+        class _BlockingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+                self.started = asyncio.Event()
+                self.unblock = asyncio.Event()
+
+            async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
+                return Message(role="assistant", content="x")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],  # noqa: ARG002
+            ) -> AsyncIterator[str]:
+                self.started.set()
+                await self.unblock.wait()
+                yield "hello"
+
+        llm = _BlockingLLM()
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, router, _ = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+
+        async def dispatcher() -> None:
+            async for event in bus.subscribe(responder.topics):
+                await responder.handle(event, bus)
+
+        dispatch_task = asyncio.create_task(dispatcher(), name="dispatcher")
+        try:
+            # Let the dispatcher start its async-for loop and register
+            # the subscription before any publish.
+            await asyncio.sleep(0)
+            await bus.publish(_mk_activity_start(turn_id="t-1"))
+            await bus.publish(_mk_final("hi", turn_id="t-1"))
+            # Wait until the responder is genuinely parked inside the LLM
+            # stream — past this point any further events queue in the bus.
+            await asyncio.wait_for(llm.started.wait(), timeout=1.0)
+            # Barge-in: the dispatcher must keep pulling events. Under the
+            # bug, it's stuck inside handle() awaiting the blocked LLM.
+            await bus.publish(_mk_activity_start(turn_id="t-2"))
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                scope = router.active_scope("voice:1")
+                if scope is not None and scope.turn_id == "t-2":
+                    break
+            scope = router.active_scope("voice:1")
+            assert scope is not None
+            assert scope.turn_id == "t-2", (
+                f"dispatcher blocked on in-flight final; active turn is "
+                f"{scope.turn_id!r}, expected 't-2'"
+            )
+        finally:
+            llm.unblock.set()
+            await responder.wait_until_idle()
+            await bus.shutdown()
+            dispatch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await dispatch_task
