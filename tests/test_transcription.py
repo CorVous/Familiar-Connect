@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -714,6 +716,99 @@ class TestDeepgramReconnect:
 
         # Only the initial connect — auth failures aren't retried.
         assert connect_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_metadata_then_clean_close_resets_counter(
+        self, client: DeepgramTranscriber
+    ) -> None:
+        """Metadata arrival proves connection is healthy → reset counter.
+
+        Deepgram emits ``Metadata`` then closes with code 1000 on session
+        rotation/idle lifecycle. Without resetting on Metadata, the
+        counter ratchets to ``_MAX_RECONNECTS`` after a few cycles and
+        the receive loop gives up — even though every connect succeeded.
+        """
+
+        def _make_metadata_then_close() -> MagicMock:
+            ws = MagicMock()
+            ws.send_bytes = AsyncMock()
+            ws.send_json = AsyncMock()
+            ws.close = AsyncMock()
+            ws.closed = False
+            ws.close_code = 1000  # clean close after Metadata
+            m = MagicMock()
+            m.type = 1  # aiohttp.WSMsgType.TEXT
+            m.data = json.dumps({"type": "Metadata", "request_id": "x"})
+            ws.__aiter__ = MagicMock(return_value=_AsyncIter([m]))
+            return ws
+
+        # supply far more wses than MAX+1 so the test fails today
+        # (counter ratchets, loop exits) but passes after the fix
+        # (counter resets each Metadata arrival, loop runs until stop)
+        wses = [_make_metadata_then_close() for _ in range(50)]
+        connect_mock = AsyncMock(side_effect=wses)
+
+        with patch.object(client, "_ws_connect", new=connect_mock):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(1.0)
+            await client.stop()
+
+        # progress (Metadata) must reset the counter — so we keep
+        # reconnecting well past MAX rather than giving up. without
+        # the fix the loop bottoms out at 1 initial + MAX reconnects,
+        # which is at most 7 today (off-by-one). require at least 10
+        # to prove the reset is actually happening.
+        assert connect_mock.call_count >= 10, (
+            f"expected counter to reset on Metadata; got "
+            f"{connect_mock.call_count} connects (max would imply ratchet)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_attempt_log_never_exceeds_max(
+        self, client: DeepgramTranscriber, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``attempt=N/M`` must satisfy ``N <= M`` — no off-by-one.
+
+        With ``while consecutive_reconnects <= _MAX_RECONNECTS`` the
+        counter increments to ``_MAX_RECONNECTS + 1`` on the final
+        iteration, producing user-visible ``attempt=6/5``.
+        """
+
+        def _make_dying_ws() -> MagicMock:
+            ws = MagicMock()
+            ws.send_bytes = AsyncMock()
+            ws.send_json = AsyncMock()
+            ws.close = AsyncMock()
+            ws.closed = False
+            ws.close_code = 1006
+            ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+            return ws
+
+        connect_mock = AsyncMock(side_effect=[_make_dying_ws() for _ in range(20)])
+
+        with (
+            patch.object(client, "_ws_connect", new=connect_mock),
+            caplog.at_level(logging.WARNING, logger="familiar_connect.transcription"),
+        ):
+            queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
+            await client.start(queue)
+            await asyncio.sleep(2.0)  # exhaust retries
+            await client.stop()
+
+        max_n = client._MAX_RECONNECTS
+        # strip ANSI color escapes before extracting attempt counters
+        ansi_re = re.compile(r"\x1b\[[\d;]*m")
+        attempt_re = re.compile(r"attempt=(\d+)/(\d+)")
+        observed: list[int] = []
+        for record in caplog.records:
+            plain = ansi_re.sub("", record.getMessage())
+            for n, _m in attempt_re.findall(plain):
+                observed.append(int(n))
+        assert observed, "expected at least one reconnect attempt log"
+        assert max(observed) <= max_n, (
+            f"attempt counter exceeded max: saw {observed}, max={max_n}"
+        )
 
 
 class TestReplayBuffer:

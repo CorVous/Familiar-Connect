@@ -404,19 +404,22 @@ class DeepgramTranscriber:
         """Read messages from the WebSocket, reconnecting on drops."""
         consecutive_reconnects = 0
 
-        while consecutive_reconnects <= self._MAX_RECONNECTS:
+        while consecutive_reconnects < self._MAX_RECONNECTS:
             if self._ws is None:
                 return
             async for msg in self._ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
+                    # any server message proves the connection is healthy
+                    # — reset the consecutive-failure counter so a clean
+                    # close after Metadata (Deepgram session rotation)
+                    # doesn't ratchet to MAX
+                    consecutive_reconnects = 0
                     data = json.loads(msg.data)
                     msg_type = data.get("type", "")
                     if msg_type == "Results":
                         result = self._parse_response(data)
                         if result is not None:
                             await output.put(result)
-                            # got real data — reset reconnect counter
-                            consecutive_reconnects = 0
                     else:
                         _logger.info(
                             f"{ls.tag('Event', ls.C)} "
