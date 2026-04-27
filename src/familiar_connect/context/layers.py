@@ -7,6 +7,7 @@ invalidation signal. See plan § Design.4 *Prompt composition*.
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -16,8 +17,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from familiar_connect.context.assembler import AssemblyContext
-    from familiar_connect.history.store import Fact, HistoryStore
+    from familiar_connect.history.store import Fact, HistoryStore, HistoryTurn
     from familiar_connect.identity import Author
+
+
+# Discord mention syntax: <@USER_ID>, optionally with ! for nick form.
+_DISCORD_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+# Soft-cap on a parent reply's full content when inlined into a child's prefix.
+_REPLY_PARENT_FULL_CAP = 400
+# Snippet cap when the parent is already in the recent window.
+_REPLY_PARENT_SNIPPET_CAP = 80
 
 
 class Layer(Protocol):
@@ -139,22 +149,47 @@ class RecentHistoryLayer:
         User turns gain a ``name`` (platform:user_id) and a
         ``[HH:MM display_name]`` content prefix — critical for
         multi-user channels where the model has to distinguish
-        speakers and gauge message rhythm (rapid back-and-forth
-        between two humans reads differently from a question into
-        the void).
+        speakers and gauge message rhythm.
+
+        Reply marker. Turns whose ``reply_to_message_id`` resolves to
+        a known parent get a `↩` prefix carrying the parent's author
+        and content. Depth adapts: parents already inside the same
+        recent window contribute a short snippet (the full text is
+        about to render anyway); parents outside the window contribute
+        their full content (capped) so the reply stays intelligible.
+
+        Mention rewriting. Discord ``<@USER_ID>`` / ``<@!USER_ID>``
+        markers in turn content become ``[@DisplayName]`` using
+        :meth:`HistoryStore.resolve_label` — symmetric with the form
+        the LLM is asked to emit on output.
         """
         turns = self._store.recent(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id or 0,
             limit=self._window_size,
         )
+        in_window_msg_ids = {
+            t.platform_message_id for t in turns if t.platform_message_id
+        }
         return [
-            _turn_to_message(turn.role, turn.content, turn.author, turn.timestamp)
+            _turn_to_message_with_context(
+                turn=turn,
+                store=self._store,
+                familiar_id=ctx.familiar_id,
+                guild_id=ctx.guild_id,
+                in_window_msg_ids=in_window_msg_ids,
+            )
             for turn in turns
         ]
 
 
-def _render_fact_line(store: HistoryStore, familiar_id: str, fact: Fact) -> str:
+def _render_fact_line(
+    store: HistoryStore,
+    familiar_id: str,
+    fact: Fact,
+    *,
+    guild_id: int | None = None,
+) -> str:
     """Render one fact's text with optional rename annotations.
 
     Original text preserved verbatim — that's what was actually
@@ -167,6 +202,8 @@ def _render_fact_line(store: HistoryStore, familiar_id: str, fact: Fact) -> str:
     guess, not authoritative — mic-sharing and relays break clean
     1:1 mapping. The render is intentionally additive (not a
     substitution) to keep the original observation intact.
+    Resolution goes through :meth:`HistoryStore.resolve_label` so
+    per-guild nicknames in the active guild beat the snapshot name.
     """
     if not fact.subjects:
         return fact.text
@@ -176,12 +213,15 @@ def _render_fact_line(store: HistoryStore, familiar_id: str, fact: Fact) -> str:
         if subject.canonical_key in seen_keys:
             continue
         seen_keys.add(subject.canonical_key)
-        current = store.latest_author_for(
-            familiar_id=familiar_id, canonical_key=subject.canonical_key
+        current_display = store.resolve_label(
+            canonical_key=subject.canonical_key,
+            guild_id=guild_id,
+            familiar_id=familiar_id,
         )
-        if current is None:
+        # No row + snapshot ⇒ resolve_label returned the raw user_id;
+        # nothing meaningful to annotate against.
+        if current_display == subject.canonical_key.partition(":")[2]:
             continue
-        current_display = current.label
         if current_display == subject.display_at_write:
             continue
         notes.append(f"{subject.display_at_write} is now known as {current_display}")
@@ -196,24 +236,158 @@ def _display_for(author: Author | None, role: str) -> str:
     return role
 
 
+def _resolve_turn_label(
+    store: HistoryStore, ctx: AssemblyContext, turn: HistoryTurn
+) -> str:
+    """Resolve a turn's speaker label using the per-guild preference order."""
+    if turn.author is None:
+        return turn.role
+    return store.resolve_label(
+        canonical_key=turn.author.canonical_key,
+        guild_id=ctx.guild_id,
+        familiar_id=ctx.familiar_id,
+    )
+
+
+def _rewrite_mentions(
+    content: str,
+    *,
+    store: HistoryStore,
+    familiar_id: str,
+    guild_id: int | None,
+) -> str:
+    """Rewrite ``<@USER_ID>`` and ``<@!USER_ID>`` to ``[@DisplayName]``.
+
+    Resolution goes through :meth:`HistoryStore.resolve_label` so the
+    same per-guild preference order applies as for speaker names.
+    Unknown ids fall back to the bare ``user_id`` — never raises.
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        user_id = match.group(1)
+        display = store.resolve_label(
+            canonical_key=f"discord:{user_id}",
+            guild_id=guild_id,
+            familiar_id=familiar_id,
+        )
+        return f"[@{display}]"
+
+    return _DISCORD_MENTION_RE.sub(_sub, content)
+
+
+def _truncate(text: str, *, limit: int) -> str:
+    """Hard cap on a string with an ellipsis suffix when truncated."""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def _reply_prefix(
+    *,
+    parent: HistoryTurn,
+    parent_in_window: bool,
+    store: HistoryStore,
+    familiar_id: str,
+    guild_id: int | None,
+) -> str:
+    """Build the ``[↩ Bob (HH:MM): …]`` prefix for a child reply turn.
+
+    The parent's author label is resolved with the same
+    ``resolve_label`` callsite as the speaker name, so a per-guild
+    nick wins over the snapshot stored on the parent's ``Author``.
+    """
+    if parent.author is not None:
+        parent_label = store.resolve_label(
+            canonical_key=parent.author.canonical_key,
+            guild_id=guild_id,
+            familiar_id=familiar_id,
+        )
+    else:
+        parent_label = parent.role
+    parent_text = _rewrite_mentions(
+        parent.content, store=store, familiar_id=familiar_id, guild_id=guild_id
+    )
+    if parent_in_window:
+        snippet = _truncate(parent_text, limit=_REPLY_PARENT_SNIPPET_CAP)
+        return f"↩ {parent_label}: {snippet}"
+    parent_ts = parent.timestamp.astimezone(UTC).strftime("%H:%M")
+    full = _truncate(parent_text, limit=_REPLY_PARENT_FULL_CAP)
+    return f"↩ {parent_label} ({parent_ts}): {full}"
+
+
+def _turn_to_message_with_context(
+    *,
+    turn: HistoryTurn,
+    store: HistoryStore,
+    familiar_id: str,
+    guild_id: int | None,
+    in_window_msg_ids: set[str],
+) -> Message:
+    """Render a :class:`HistoryTurn` into an LLM :class:`Message`.
+
+    Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted —
+    the recent-history window is short. Reply markers and mention
+    rewriting are applied here so all enrichment lives in one place.
+    """
+    role = turn.role
+    author = turn.author
+    content = _rewrite_mentions(
+        turn.content, store=store, familiar_id=familiar_id, guild_id=guild_id
+    )
+    if role == "assistant" or author is None:
+        return Message(role=role, content=content)
+    label = store.resolve_label(
+        canonical_key=author.canonical_key,
+        guild_id=guild_id,
+        familiar_id=familiar_id,
+    )
+    name = sanitize_name(author.canonical_key)
+    ts = turn.timestamp.astimezone(UTC).strftime("%H:%M")
+
+    # Reply marker, depth-adaptive.
+    reply_prefix = ""
+    if turn.reply_to_message_id:
+        parent = store.lookup_turn_by_platform_message_id(
+            familiar_id=familiar_id,
+            platform_message_id=turn.reply_to_message_id,
+        )
+        if parent is not None:
+            parent_in_window = (
+                parent.platform_message_id in in_window_msg_ids
+                if parent.platform_message_id is not None
+                else False
+            )
+            reply_prefix = (
+                _reply_prefix(
+                    parent=parent,
+                    parent_in_window=parent_in_window,
+                    store=store,
+                    familiar_id=familiar_id,
+                    guild_id=guild_id,
+                )
+                + " "
+            )
+
+    prefixed = f"[{ts} {label}] {reply_prefix}{content}"
+    return Message(role=role, content=prefixed, name=name)
+
+
 def _turn_to_message(
     role: str,
     content: str,
     author: Author | None,
     timestamp: datetime | None = None,
 ) -> Message:
-    """Render a :class:`HistoryTurn`-like tuple into an LLM :class:`Message`.
+    """Legacy renderer kept for non-history-store callers (e.g. voice intake).
 
-    Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted —
-    the recent-history window is short and adding date noise per turn
-    hurts more than it helps. Older retrieved turns surface via
-    :class:`RagContextLayer`, where date context is handled separately.
+    Lacks reply-marker / mention-rewriting context — those need a
+    store handle and a window. New code should prefer
+    :func:`_turn_to_message_with_context`.
     """
     if role == "assistant" or author is None:
         return Message(role=role, content=content)
     name = sanitize_name(author.canonical_key)
     display = author.display_name or author.username or author.user_id
-    # Belt-and-braces prefix so models that drop `name` still see attribution.
     if timestamp is not None:
         ts = timestamp.astimezone(UTC).strftime("%H:%M")
         prefixed = f"[{ts} {display}] {content}"
@@ -398,16 +572,21 @@ class RagContextLayer:
         if fact_results:
             lines = ["## Possibly relevant facts\n"]
             lines.extend(
-                f"- {_render_fact_line(self._store, ctx.familiar_id, f)}"
+                f"- {_render_fact_line(self._store, ctx.familiar_id, f, guild_id=ctx.guild_id)}"  # noqa: E501
                 for f in fact_results
             )
             sections.append("\n".join(lines))
         if turn_results:
             lines = ["## Possibly relevant earlier turns\n"]
-            lines.extend(
-                f"- [{_display_for(t.author, t.role)}] {t.content}"
-                for t in turn_results
-            )
+            for t in turn_results:
+                label = _resolve_turn_label(self._store, ctx, t)
+                rewritten = _rewrite_mentions(
+                    t.content,
+                    store=self._store,
+                    familiar_id=ctx.familiar_id,
+                    guild_id=ctx.guild_id,
+                )
+                lines.append(f"- [{label}] {rewritten}")
             sections.append("\n".join(lines))
         return "\n\n".join(sections)
 

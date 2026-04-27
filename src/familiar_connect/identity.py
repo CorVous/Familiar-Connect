@@ -21,7 +21,16 @@ from familiar_connect.llm import sanitize_name
 
 
 class _DiscordMemberLike(Protocol):
-    """Minimal Discord Member/User surface for :meth:`Author.from_discord_member`."""
+    """Minimal Discord Member/User surface for :meth:`Author.from_discord_member`.
+
+    Real ``discord.Member`` carries four name fields: ``id`` (immutable
+    snowflake), ``name`` (global username), ``global_name`` (global
+    display name), and ``nick`` (per-guild override; ``None`` on
+    DMs / Users without a guild-scoped nick). ``display_name`` is
+    py-cord's resolved view: ``nick → global_name → name``. We read
+    all four; the optional pair via ``getattr`` to tolerate older
+    shapes and ``SimpleNamespace`` test doubles.
+    """
 
     id: int
     name: str
@@ -45,6 +54,8 @@ class Author:
     user_id: str
     username: str | None
     display_name: str | None
+    global_name: str | None = None
+    guild_nick: str | None = None
     aliases: frozenset[str] = field(default_factory=frozenset)
 
     # ------------------------------------------------------------------
@@ -102,14 +113,20 @@ class Author:
     def from_discord_member(cls, member: _DiscordMemberLike) -> Author:
         """Build from a Discord ``Member`` / ``User``.
 
-        Uses ``.id``, ``.name``, ``.display_name`` — the first is
-        immutable, the other two may change over time.
+        Reads four name fields. ``id`` is immutable; ``name``,
+        ``global_name``, ``nick`` may all change. ``display_name`` is
+        py-cord's resolved view (``nick → global_name → name``).
+        ``global_name`` and ``nick`` are read via ``getattr`` so
+        ``User`` (DM, no guild → no ``.nick``) and older py-cord
+        shapes still build cleanly.
         """
         return cls(
             platform="discord",
             user_id=str(member.id),
             username=member.name,
             display_name=member.display_name,
+            global_name=getattr(member, "global_name", None),
+            guild_nick=getattr(member, "nick", None),
         )
 
     @classmethod

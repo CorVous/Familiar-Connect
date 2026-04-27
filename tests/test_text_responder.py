@@ -54,13 +54,26 @@ class _ScriptedLLM(LLMClient):
 
 
 class _CapturingSend:
-    """Records ``send_text`` invocations for assertions."""
+    """Records ``send_text`` invocations for assertions.
 
-    def __init__(self) -> None:
-        self.calls: list[tuple[int, str]] = []
+    Matches the ``SendText`` callback signature: returns a fake
+    platform message id so the responder can persist it on the
+    assistant turn.
+    """
 
-    async def __call__(self, channel_id: int, content: str) -> None:
-        self.calls.append((channel_id, content))
+    def __init__(self, *, returned_id: str | None = "bot-msg-1") -> None:
+        self.calls: list[tuple[int, str, str | None, tuple[int, ...]]] = []
+        self._returned_id = returned_id
+
+    async def __call__(
+        self,
+        channel_id: int,
+        content: str,
+        reply_to_message_id: str | None = None,
+        mention_user_ids: tuple[int, ...] = (),
+    ) -> str | None:
+        self.calls.append((channel_id, content, reply_to_message_id, mention_user_ids))
+        return self._returned_id
 
 
 def _discord_text_event(
@@ -146,7 +159,7 @@ class TestReply:
         await responder.handle(_discord_text_event(content="hi there"), bus)
         await bus.shutdown()
 
-        assert send.calls == [(42, "Hello, world.")]
+        assert send.calls == [(42, "Hello, world.", None, ())]
         # assistant turn appended (user-turn write is HistoryWriter's job)
         turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
         roles_contents = [(t.role, t.content) for t in turns]
@@ -312,7 +325,7 @@ class TestReply:
         await bus.start()
         await responder.handle(_discord_text_event(content="hi"), bus)
         await bus.shutdown()
-        assert send.calls == [(42, "Sure! <silent> — kidding.")]
+        assert send.calls == [(42, "Sure! <silent> — kidding.", None, ())]
 
     @pytest.mark.asyncio
     async def test_user_turn_recorded_with_author_and_guild(
@@ -333,3 +346,274 @@ class TestReply:
         assert user_turns[0].content == "hi"
         assert user_turns[0].author is not None
         assert user_turns[0].author.display_name == "Alice"
+
+
+def _discord_text_event_full(
+    *,
+    event_id: str = "e-1",
+    channel_id: int = 42,
+    guild_id: int | None = 99,
+    content: str = "hi @bob",
+    message_id: str = "msg-001",
+    reply_to_message_id: str | None = None,
+    mentions: tuple[Author, ...] = (),
+    seq: int = 1,
+) -> Event:
+    """Like ``_discord_text_event`` but carries the new identity fields."""
+    return Event(
+        event_id=event_id,
+        turn_id=event_id,
+        session_id=f"discord:{channel_id}",
+        parent_event_ids=(),
+        topic=TOPIC_DISCORD_TEXT,
+        timestamp=datetime.now(tz=UTC),
+        sequence_number=seq,
+        payload={
+            "familiar_id": "fam",
+            "channel_id": channel_id,
+            "guild_id": guild_id,
+            "author": Author(
+                platform="discord",
+                user_id="1",
+                username="alice",
+                display_name="Alice",
+                global_name="Alice Liddell",
+                guild_nick="Aria",
+            ),
+            "content": content,
+            "message_id": message_id,
+            "reply_to_message_id": reply_to_message_id,
+            "mentions": mentions,
+        },
+    )
+
+
+class TestIdentityWritePath:
+    """User-turn ingestion upserts accounts/guild_nicks and records mentions."""
+
+    @pytest.mark.asyncio
+    async def test_persists_platform_message_id(self, tmp_path: Path) -> None:
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(message_id="msg-9999"), bus)
+        await bus.shutdown()
+
+        looked = store.lookup_turn_by_platform_message_id(
+            familiar_id="fam", platform_message_id="msg-9999"
+        )
+        assert looked is not None
+        assert looked.role == "user"
+
+    @pytest.mark.asyncio
+    async def test_persists_reply_to_message_id(self, tmp_path: Path) -> None:
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(
+                message_id="msg-2",
+                reply_to_message_id="msg-1",
+            ),
+            bus,
+        )
+        await bus.shutdown()
+
+        row = store._conn.execute(
+            "SELECT reply_to_message_id FROM turns WHERE platform_message_id = ?",
+            ("msg-2",),
+        ).fetchone()
+        assert row["reply_to_message_id"] == "msg-1"
+
+    @pytest.mark.asyncio
+    async def test_upserts_author_into_accounts(self, tmp_path: Path) -> None:
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(), bus)
+        await bus.shutdown()
+
+        row = store._conn.execute(
+            "SELECT canonical_key, global_name FROM accounts WHERE canonical_key = ?",
+            ("discord:1",),
+        ).fetchone()
+        assert row is not None
+        assert row["global_name"] == "Alice Liddell"
+
+    @pytest.mark.asyncio
+    async def test_upserts_author_guild_nick(self, tmp_path: Path) -> None:
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(guild_id=99), bus)
+        await bus.shutdown()
+
+        row = store._conn.execute(
+            "SELECT nick FROM account_guild_nicks "
+            "WHERE canonical_key = ? AND guild_id = ?",
+            ("discord:1", 99),
+        ).fetchone()
+        assert row is not None
+        assert row["nick"] == "Aria"
+
+    @pytest.mark.asyncio
+    async def test_upserts_each_mentioned_user(self, tmp_path: Path) -> None:
+        bob = Author(
+            platform="discord",
+            user_id="2",
+            username="bob",
+            display_name="Bob",
+            global_name="Robert",
+        )
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(mentions=(bob,)),
+            bus,
+        )
+        await bus.shutdown()
+
+        row = store._conn.execute(
+            "SELECT global_name FROM accounts WHERE canonical_key = ?",
+            ("discord:2",),
+        ).fetchone()
+        assert row is not None
+        assert row["global_name"] == "Robert"
+
+    @pytest.mark.asyncio
+    async def test_threads_reply_to_triggering_message(self, tmp_path: Path) -> None:
+        """Bot replies always thread to the inbound message id."""
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(message_id="incoming-msg-77"),
+            bus,
+        )
+        await bus.shutdown()
+
+        assert len(send.calls) == 1
+        _, _, reply_to, _ = send.calls[0]
+        assert reply_to == "incoming-msg-77"
+
+    @pytest.mark.asyncio
+    async def test_rewrites_llm_ping_marker_to_discord_mention(
+        self, tmp_path: Path
+    ) -> None:
+        """``[@DisplayName]`` from the LLM becomes ``<@user_id>`` on Discord."""
+        # Pre-seed the participant: bob exists in the channel.
+        store = HistoryStore(":memory:")
+        bob = Author(
+            platform="discord",
+            user_id="222",
+            username="bob",
+            display_name="Bob",
+            global_name="Bob",
+        )
+        store.upsert_account(bob)
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=42,
+            role="user",
+            content="hi",
+            author=bob,
+            guild_id=99,
+        )
+        llm = _ScriptedLLM(deltas=["sure thing, [@Bob]"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm, send=send, tmp_path=tmp_path, store=store
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(content="hi bob"), bus)
+        await bus.shutdown()
+
+        _, content, _, mention_user_ids = send.calls[0]
+        assert "<@222>" in content
+        assert "[@Bob]" not in content  # marker was consumed
+        assert 222 in mention_user_ids
+
+    @pytest.mark.asyncio
+    async def test_unknown_ping_marker_renders_as_plain_text(
+        self, tmp_path: Path
+    ) -> None:
+        """Unknown ``[@X]`` markers degrade to plain ``@X`` (no ping)."""
+        llm = _ScriptedLLM(deltas=["hi [@Nobody], welcome"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(), bus)
+        await bus.shutdown()
+
+        _, content, _, mention_user_ids = send.calls[0]
+        assert "<@" not in content
+        assert "@Nobody" in content  # rendered as plain @-prefix
+        assert mention_user_ids == ()
+
+    @pytest.mark.asyncio
+    async def test_assistant_turn_persists_platform_message_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Assistant turn carries the Discord message id returned by send."""
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend(returned_id="bot-msg-12345")
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(message_id="user-msg-1"), bus)
+        await bus.shutdown()
+
+        looked = store.lookup_turn_by_platform_message_id(
+            familiar_id="fam", platform_message_id="bot-msg-12345"
+        )
+        assert looked is not None
+        assert looked.role == "assistant"
+        assert looked.reply_to_message_id == "user-msg-1"
+
+    @pytest.mark.asyncio
+    async def test_records_turn_mentions_for_each_pinged_user(
+        self, tmp_path: Path
+    ) -> None:
+        bob = Author(
+            platform="discord",
+            user_id="2",
+            username="bob",
+            display_name="Bob",
+        )
+        carol = Author(
+            platform="discord",
+            user_id="3",
+            username="carol",
+            display_name="Carol",
+        )
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(mentions=(bob, carol)),
+            bus,
+        )
+        await bus.shutdown()
+
+        turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
+        user_turn = next(t for t in turns if t.role == "user")
+        keys = store.mentions_for_turn(turn_id=user_turn.id)
+        assert "discord:2" in keys
+        assert "discord:3" in keys

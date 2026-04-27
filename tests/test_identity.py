@@ -153,6 +153,33 @@ class TestFromDiscordMember:
         assert a.username == "ada_l"
         assert a.display_name == "Ada"
 
+    def test_extracts_global_name_and_guild_nick(self) -> None:
+        """Discord exposes 4 names: id, username (.name), global_name, nick.
+
+        ``global_name`` is the global "real name" (introduced 2023) —
+        distinct from username and from per-guild nick.
+        ``nick`` is the per-guild override; ``None`` for users without
+        a guild-scoped nickname or for DMs (where Member isn't bound).
+        """
+        member = SimpleNamespace(
+            id=987,
+            name="ada_l",
+            display_name="Aria",  # py-cord's resolved view (nick wins)
+            global_name="Ada Lovelace",
+            nick="Aria",
+        )
+        a = Author.from_discord_member(member)
+        assert a.global_name == "Ada Lovelace"
+        assert a.guild_nick == "Aria"
+        assert a.display_name == "Aria"
+
+    def test_handles_member_without_global_name_or_nick(self) -> None:
+        """Older py-cord shapes / DM Users may lack the new fields."""
+        member = SimpleNamespace(id=987, name="ada_l", display_name="ada_l")
+        a = Author.from_discord_member(member)
+        assert a.global_name is None
+        assert a.guild_nick is None
+
 
 class TestFromTwitch:
     def test_builds_from_api_fields(self) -> None:

@@ -41,6 +41,16 @@ if TYPE_CHECKING:
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import TranscriptionResult
 
+    # Outbound text callback. Returns the Discord message id of the
+    # posted message (str) for reply-chain tracking, or None if the
+    # send failed. ``reply_to_message_id`` threads via Discord's
+    # ``MessageReference``; ``mention_user_ids`` populates
+    # ``AllowedMentions(users=...)`` so only resolved targets get pings.
+    SendText = Callable[
+        [int, str, str | None, tuple[int, ...]],
+        Awaitable[str | None],
+    ]
+
 _logger = logging.getLogger(__name__)
 
 
@@ -65,13 +75,16 @@ class BotHandle:
     """Bundle of bot + outbound seams used by bus processors.
 
     ``send_text`` is the seam :class:`TextResponder` injects so it can
-    post replies without depending on pycord. ``voice_runtime`` is
-    keyed by voice-channel id; populated by ``/subscribe-voice`` and
-    consumed by the active TTS player to find the live voice client.
+    post replies without depending on pycord. The callback returns the
+    Discord message id of the posted message (as ``str``) so the
+    caller can record it for future reply lookups; returns ``None``
+    on send failure. ``voice_runtime`` is keyed by voice-channel id;
+    populated by ``/subscribe-voice`` and consumed by the active TTS
+    player to find the live voice client.
     """
 
     bot: discord.Bot
-    send_text: Callable[[int, str], Awaitable[None]]
+    send_text: SendText
     voice_runtime: dict[int, VoiceRuntime] = field(default_factory=dict)
 
 
@@ -186,6 +199,9 @@ async def ingest_event(
     guild_id: int | None,
     author: Author,
     text: str,
+    message_id: str | None = None,
+    reply_to_message_id: str | None = None,
+    mentions: tuple[Author, ...] = (),
 ) -> None:
     """Publish a text event onto the bus.
 
@@ -199,6 +215,9 @@ async def ingest_event(
         guild_id=guild_id,
         author=author,
         content=text,
+        message_id=message_id,
+        reply_to_message_id=reply_to_message_id,
+        mentions=mentions,
     )
 
 
@@ -220,11 +239,26 @@ def create_bot(familiar: Familiar) -> BotHandle:
 
     bot = discord.Bot(intents=intents)
 
-    async def send_text(channel_id: int, content: str) -> None:
+    async def send_text(
+        channel_id: int,
+        content: str,
+        reply_to_message_id: str | None = None,
+        mention_user_ids: tuple[int, ...] = (),
+    ) -> str | None:
         """Resolve channel by id, post ``content`` via ``channel.send``.
 
         Resolves on each call — channel cache may miss right after
         startup; ``fetch_channel`` is the fallback.
+
+        ``reply_to_message_id``: when set, threads the post to that
+        message via ``discord.MessageReference``.
+        ``mention_user_ids``: populates ``AllowedMentions(users=...)``
+        so only those user ids actually receive a notification, even
+        if the content contains other ``<@…>`` markers.
+
+        Returns the platform message id of the posted message (so
+        ``TextResponder`` can persist it for future reply lookups),
+        or ``None`` if the send failed.
         """
         channel = bot.get_channel(channel_id)
         if channel is None:
@@ -236,18 +270,46 @@ def create_bot(familiar: Familiar) -> BotHandle:
                     channel_id,
                     exc,
                 )
-                return
+                return None
         if not isinstance(channel, discord.abc.Messageable):
             _logger.warning("send_text: channel %d not messageable", channel_id)
-            return
+            return None
+
+        # Always restrict who can be pinged. Defers @everyone / role
+        # decisions to Discord's bot-and-role permissions.
+        allowed = discord.AllowedMentions(
+            everyone=False,
+            roles=False,
+            users=[discord.Object(id=int(u)) for u in mention_user_ids],
+        )
+        reference: discord.MessageReference | None = None
+        if reply_to_message_id:
+            try:
+                ref_id = int(reply_to_message_id)
+            except ValueError:
+                ref_id = None
+            if ref_id is not None:
+                reference = discord.MessageReference(
+                    message_id=ref_id,
+                    channel_id=channel_id,
+                    fail_if_not_exists=False,
+                )
+
         try:
-            await channel.send(content)
+            if reference is not None:
+                sent = await channel.send(
+                    content, allowed_mentions=allowed, reference=reference
+                )
+            else:
+                sent = await channel.send(content, allowed_mentions=allowed)
         except discord.DiscordException as exc:
             _logger.warning(
                 "send_text channel.send failed: channel=%d err=%s",
                 channel_id,
                 exc,
             )
+            return None
+        return str(sent.id) if sent is not None else None
 
     handle = BotHandle(bot=bot, send_text=send_text)
 
@@ -412,6 +474,14 @@ def _register_events(
         ):
             return
 
+        reply_to: str | None = None
+        if message.reference is not None and message.reference.message_id:
+            reply_to = str(message.reference.message_id)
+        mention_authors = tuple(
+            Author.from_discord_member(u)
+            for u in message.mentions
+            if not getattr(u, "bot", False)
+        )
         await ingest_event(
             source=text_source,
             familiar=familiar,
@@ -419,6 +489,9 @@ def _register_events(
             guild_id=message.guild.id if message.guild else None,
             author=Author.from_discord_member(message.author),
             text=message.content,
+            message_id=str(message.id),
+            reply_to_message_id=reply_to,
+            mentions=mention_authors,
         )
 
     @bot.event

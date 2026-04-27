@@ -23,12 +23,17 @@ if TYPE_CHECKING:
 
 
 def _ctx(
-    *, channel_id: int = 1, viewer_mode: str = "voice", familiar_id: str = "fam"
+    *,
+    channel_id: int = 1,
+    viewer_mode: str = "voice",
+    familiar_id: str = "fam",
+    guild_id: int | None = None,
 ) -> AssemblyContext:
     return AssemblyContext(
         familiar_id=familiar_id,
         channel_id=channel_id,
         viewer_mode=viewer_mode,
+        guild_id=guild_id,
     )
 
 
@@ -204,6 +209,226 @@ class TestRecentHistoryLayer:
         store = HistoryStore(":memory:")
         layer = RecentHistoryLayer(store=store, window_size=20)
         assert not await layer.build(_ctx(channel_id=1))
+
+
+class TestRecentHistoryGuildAwareNames:
+    """Speaker prefix uses ``resolve_label(canonical_key, guild_id)``.
+
+    Per-guild nicknames must beat the bare ``Author.display_name``
+    that's snapshotted on each turn — a user who changed their
+    guild-nick mid-conversation should appear under the new name in
+    the prompt.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uses_guild_nick_from_accounts_table(self) -> None:
+        store = HistoryStore(":memory:")
+        cass = Author(
+            platform="discord",
+            user_id="111",
+            username="cass_login",
+            display_name="Cass",  # snapshot at write time
+            global_name="Cassidy",
+        )
+        store.upsert_account(cass)
+        store.upsert_guild_nick(canonical_key="discord:111", guild_id=42, nick="Aria")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi",
+            author=cass,
+            guild_id=42,
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1, guild_id=42))
+        user_msg = next(m for m in messages if m.role == "user")
+        assert "Aria" in user_msg.content
+        # Snapshot 'Cass' is no longer the rendered label (modulo it
+        # might appear if it's part of the content, but here content="hi")
+        assert "Cass" not in user_msg.content
+
+
+class TestRecentHistoryReplyMarkers:
+    """Reply linkage: child turns surface marker + parent context.
+
+    Depth depends on whether the parent is in the same recent window:
+    in-window → marker + ≤80 char snippet; out-of-window → marker +
+    full parent content (soft-cap 400).
+    """
+
+    @pytest.mark.asyncio
+    async def test_marker_only_when_parent_in_window(self) -> None:
+        store = HistoryStore(":memory:")
+        bob = Author(
+            platform="discord",
+            user_id="2",
+            username="bob",
+            display_name="Bob",
+            global_name="Bob",
+        )
+        store.upsert_account(bob)
+        alice = Author(
+            platform="discord",
+            user_id="1",
+            username="alice",
+            display_name="Alice",
+            global_name="Alice",
+        )
+        store.upsert_account(alice)
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="parent message",
+            author=bob,
+            platform_message_id="msg-1",
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="child message",
+            author=alice,
+            platform_message_id="msg-2",
+            reply_to_message_id="msg-1",
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        child = next(m for m in messages if "child message" in m.content)
+        # Marker present, includes Bob.
+        assert "↩" in child.content
+        assert "Bob" in child.content
+        # Snippet kept short (parent content present in some form).
+        assert "parent message" in child.content
+
+    @pytest.mark.asyncio
+    async def test_inlines_full_parent_when_outside_window(self) -> None:
+        """Parent older than recent window: child carries full parent text."""
+        store = HistoryStore(":memory:")
+        bob = Author(
+            platform="discord",
+            user_id="2",
+            username="bob",
+            display_name="Bob",
+            global_name="Bob",
+        )
+        store.upsert_account(bob)
+        alice = Author(
+            platform="discord",
+            user_id="1",
+            username="alice",
+            display_name="Alice",
+            global_name="Alice",
+        )
+        store.upsert_account(alice)
+        # Parent at id 1.
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="parent text far away",
+            author=bob,
+            platform_message_id="msg-1",
+        )
+        # Filler so parent falls outside the window (window_size=2).
+        for i in range(5):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"filler {i}",
+                author=alice,
+            )
+        # Child reply (will be in the window).
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="child reply",
+            author=alice,
+            platform_message_id="msg-child",
+            reply_to_message_id="msg-1",
+        )
+        layer = RecentHistoryLayer(store=store, window_size=2)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        child = next(m for m in messages if "child reply" in m.content)
+        # Marker AND full parent text appears.
+        assert "↩" in child.content
+        assert "parent text far away" in child.content
+
+    @pytest.mark.asyncio
+    async def test_drops_marker_when_parent_unknown(self) -> None:
+        """Parent message_id we've never seen → no marker, render plain."""
+        store = HistoryStore(":memory:")
+        alice = Author(
+            platform="discord", user_id="1", username="alice", display_name="Alice"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="orphan reply",
+            author=alice,
+            platform_message_id="msg-x",
+            reply_to_message_id="msg-ghost",
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        m = next(msg for msg in messages if "orphan reply" in msg.content)
+        assert "↩" not in m.content
+
+
+class TestRecentHistoryMentionRewriting:
+    """Discord ``<@USER_ID>`` mention markers become ``[@DisplayName]``."""
+
+    @pytest.mark.asyncio
+    async def test_rewrites_user_mention_to_display_name(self) -> None:
+        store = HistoryStore(":memory:")
+        bob = Author(
+            platform="discord",
+            user_id="222",
+            username="bob",
+            display_name="Bob",
+            global_name="Bob",
+        )
+        store.upsert_account(bob)
+        alice = Author(
+            platform="discord", user_id="111", username="alice", display_name="Alice"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hey <@222>, look at this",
+            author=alice,
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        user_msg = next(m for m in messages if "look at this" in m.content)
+        assert "<@222>" not in user_msg.content
+        assert "[@Bob]" in user_msg.content
+
+    @pytest.mark.asyncio
+    async def test_unknown_mention_id_falls_back_to_id(self) -> None:
+        """If we don't have the account row, render bare id rather than fail."""
+        store = HistoryStore(":memory:")
+        alice = Author(
+            platform="discord", user_id="111", username="alice", display_name="Alice"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hey <@999>",
+            author=alice,
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        user_msg = next(m for m in messages if "hey" in m.content)
+        # `[@999]` is the resolved label for unknown account
+        # (resolve_label falls back to user_id).
+        assert "[@999]" in user_msg.content
 
 
 class TestAssembler:

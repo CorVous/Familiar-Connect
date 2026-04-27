@@ -36,8 +36,19 @@ class DiscordTextSource:
         guild_id: int | None,
         author: Author,
         content: str,
+        message_id: str | None = None,
+        reply_to_message_id: str | None = None,
+        mentions: tuple[Author, ...] = (),
     ) -> Event:
-        """Construct and publish a text event; return the envelope."""
+        """Construct and publish a text event; return the envelope.
+
+        ``message_id`` is the platform-native message id (Discord
+        snowflake as string). ``reply_to_message_id`` is set when
+        ``discord.Message.reference`` carried a parent message.
+        ``mentions`` is the tuple of users the message pinged
+        (already converted to :class:`Author`); empty when the
+        message contained no user mentions.
+        """
         self._seq += 1
         event_id = f"discord-text-{uuid4().hex[:12]}"
         ev = Event(
@@ -54,6 +65,9 @@ class DiscordTextSource:
                 "guild_id": guild_id,
                 "author": author,
                 "content": content,
+                "message_id": message_id,
+                "reply_to_message_id": reply_to_message_id,
+                "mentions": mentions,
             },
         )
         await self._bus.publish(ev)

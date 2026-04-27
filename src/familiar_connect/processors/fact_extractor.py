@@ -102,7 +102,9 @@ class FactExtractor:
         if len(new_turns) < self._batch_size:
             return
 
-        participants = _build_participants(new_turns)
+        participants = _build_participants(
+            new_turns, store=self._store, familiar_id=self._familiar_id
+        )
         prompt = _build_extract_prompt(new_turns, participants)
         reply = await self._llm.chat(prompt)
         facts = _parse_facts(reply.content)
@@ -161,20 +163,30 @@ class FactExtractor:
 # ---------------------------------------------------------------------------
 
 
-def _build_participants(turns: Iterable[HistoryTurn]) -> dict[str, str]:
+def _build_participants(
+    turns: Iterable[HistoryTurn],
+    *,
+    store: HistoryStore,
+    familiar_id: str,
+) -> dict[str, str]:
     """Map ``canonical_key`` → current display name across the batch.
 
-    Last-seen display name wins (later turns may carry a fresher one).
-    Skips turns without an author. The returned mapping is used both
-    to inject the LLM-facing manifest and to validate ``subject_keys``
-    coming back in the response — keys outside the manifest are
-    dropped (the LLM may hallucinate ids).
+    Resolution goes through :meth:`HistoryStore.resolve_label` so the
+    manifest matches what the read path renders (per-guild nick wins
+    over the snapshot label baked into each turn). Skips turns
+    without an author. Used both to inject the LLM-facing manifest
+    and to validate ``subject_keys`` coming back in the response —
+    keys outside the manifest are dropped (the LLM may hallucinate).
     """
     out: dict[str, str] = {}
     for t in turns:
         if t.author is None:
             continue
-        out[t.author.canonical_key] = t.author.label
+        out[t.author.canonical_key] = store.resolve_label(
+            canonical_key=t.author.canonical_key,
+            guild_id=t.guild_id,
+            familiar_id=familiar_id,
+        )
     return out
 
 

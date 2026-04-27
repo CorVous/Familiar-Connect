@@ -15,6 +15,7 @@ mid-stream) cancels in-flight LLM work.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
@@ -23,6 +24,45 @@ from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 from familiar_connect.silence import SilentDetector
+
+# LLM ping vocabulary: ``[@DisplayName]`` markers in the model's
+# output. Symmetric with the form ``RecentHistoryLayer`` rewrites
+# inbound ``<@USER_ID>`` mentions into.
+_PING_MARKER_RE = re.compile(r"\[@([^\]\n]+)\]")
+
+
+def _rewrite_pings(
+    content: str,
+    label_to_key: dict[str, str],
+) -> tuple[str, tuple[int, ...]]:
+    """Rewrite ``[@DisplayName]`` markers and collect resolved user ids.
+
+    Known labels become Discord-native ``<@user_id>`` mentions and
+    contribute to the returned tuple (passed to ``AllowedMentions``).
+    Unknown labels degrade to plain ``@DisplayName`` text — no ping,
+    no error. Non-Discord canonical keys also degrade (the bot only
+    sends to Discord today; future platform support would extend
+    this).
+    """
+    resolved: list[int] = []
+
+    def _sub(match: re.Match[str]) -> str:
+        label = match.group(1)
+        key = label_to_key.get(label)
+        if key is None:
+            return f"@{label}"
+        platform, _, user_id = key.partition(":")
+        if platform != "discord":
+            return f"@{label}"
+        try:
+            resolved.append(int(user_id))
+        except ValueError:
+            return f"@{label}"
+        return f"<@{user_id}>"
+
+    rewritten = _PING_MARKER_RE.sub(_sub, content)
+    return rewritten, tuple(resolved)
+
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -48,7 +88,10 @@ class TextResponder:
         *,
         assembler: Assembler,
         llm_client: LLMClient,
-        send_text: Callable[[int, str], Awaitable[None]],
+        send_text: Callable[
+            [int, str, str | None, tuple[int, ...]],
+            Awaitable[str | None],
+        ],
         history_store: HistoryStore,
         router: TurnRouter,
         familiar_id: str,
@@ -80,26 +123,76 @@ class TextResponder:
         author = raw_author if isinstance(raw_author, Author) else None
         raw_guild = payload.get("guild_id")
         guild_id = raw_guild if isinstance(raw_guild, int) else None
+        raw_msg_id = payload.get("message_id")
+        message_id = raw_msg_id if isinstance(raw_msg_id, str) else None
+        raw_reply_to = payload.get("reply_to_message_id")
+        reply_to_message_id = raw_reply_to if isinstance(raw_reply_to, str) else None
+        raw_mentions = payload.get("mentions") or ()
+        mentions: tuple[Author, ...] = (
+            tuple(m for m in raw_mentions if isinstance(m, Author))
+            if isinstance(raw_mentions, (tuple, list))
+            else ()
+        )
 
         self._seen.add(event.event_id)
         scope = self._router.begin_turn(
             session_id=event.session_id, turn_id=event.turn_id
         )
 
+        # Refresh canonical identity rows for everyone we know about in
+        # this turn. Soft annotation: the accounts table is a "what we
+        # most recently saw" cache, not source of truth.
+        if author is not None:
+            self._history.upsert_account(author)
+            if guild_id is not None and author.guild_nick is not None:
+                self._history.upsert_guild_nick(
+                    canonical_key=author.canonical_key,
+                    guild_id=guild_id,
+                    nick=author.guild_nick,
+                )
+        for m in mentions:
+            self._history.upsert_account(m)
+            if guild_id is not None and m.guild_nick is not None:
+                self._history.upsert_guild_nick(
+                    canonical_key=m.canonical_key,
+                    guild_id=guild_id,
+                    nick=m.guild_nick,
+                )
+
         # Persist user turn *before* streaming so RecentHistoryLayer
         # in the same task sees it. Mirrors VoiceResponder.
-        self._history.append_turn(
+        user_turn = self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             role="user",
             content=content,
             author=author,
             guild_id=guild_id,
+            platform_message_id=message_id,
+            reply_to_message_id=reply_to_message_id,
         )
+        if mentions:
+            self._history.record_mentions(
+                turn_id=user_turn.id,
+                canonical_keys=[m.canonical_key for m in mentions],
+            )
         # seed retrieval before assembly so RagContextLayer sees the cue
         self._assembler.set_rag_cue(content)
 
-        reply = await self._stream_reply(scope, channel_id)
+        # Build ping vocabulary for this channel/guild before assembly.
+        # ``label_to_key`` is consumed *after* the LLM responds to
+        # rewrite ``[@X]`` markers; the addendum string is appended to
+        # the system prompt so the LLM knows which names are routable.
+        ping_addendum, label_to_key = self._build_ping_vocabulary(
+            channel_id=channel_id, guild_id=guild_id
+        )
+
+        reply = await self._stream_reply(
+            scope,
+            channel_id=channel_id,
+            guild_id=guild_id,
+            ping_addendum=ping_addendum,
+        )
         if reply is None or scope.is_cancelled():
             return
         # Discord rejects empty / whitespace-only messages (HTTP 400,
@@ -114,8 +207,12 @@ class TextResponder:
             )
             return
 
+        rewritten, mention_user_ids = _rewrite_pings(reply, label_to_key)
+
         try:
-            await self._send_text(channel_id, reply)
+            sent_message_id = await self._send_text(
+                channel_id, rewritten, message_id, mention_user_ids
+            )
         except Exception as exc:  # noqa: BLE001 — surface but don't crash loop
             _logger.warning(
                 f"{ls.tag('Text', ls.R)} {ls.kv('send_error', repr(exc), vc=ls.R)}"
@@ -124,8 +221,8 @@ class TextResponder:
         _logger.info(
             f"{ls.tag('💬 Text', ls.G)} "
             f"{ls.kv('turn', scope.turn_id, vc=ls.LC)} "
-            f"{ls.kv('chars', str(len(reply)), vc=ls.LW)} "
-            f"{ls.kv('text', ls.trunc(reply, 200), vc=ls.LW)}"
+            f"{ls.kv('chars', str(len(rewritten)), vc=ls.LW)} "
+            f"{ls.kv('text', ls.trunc(rewritten, 200), vc=ls.LW)}"
         )
 
         if scope.is_cancelled():
@@ -135,21 +232,84 @@ class TextResponder:
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             role="assistant",
-            content=reply,
+            content=rewritten,
             author=None,
+            guild_id=guild_id,
+            platform_message_id=sent_message_id,
+            reply_to_message_id=message_id,
         )
         self._router.end_turn(scope)
 
-    async def _stream_reply(self, scope: TurnScope, channel_id: int) -> str | None:
+    def _build_ping_vocabulary(
+        self,
+        *,
+        channel_id: int,
+        guild_id: int | None,
+    ) -> tuple[str, dict[str, str]]:
+        """Return ``(system_prompt_addendum, label→canonical_key map)``.
+
+        Pulls recent distinct authors and resolves their labels via
+        :meth:`HistoryStore.resolve_label` so the names match what
+        ``RecentHistoryLayer`` puts in front of the model. Ambiguous
+        labels (two participants with the same nick) keep first-write;
+        a warning is logged so the operator can investigate.
+        """
+        authors = self._history.recent_distinct_authors(
+            familiar_id=self._familiar_id,
+            channel_id=channel_id,
+            limit=20,
+        )
+        label_to_key: dict[str, str] = {}
+        lines: list[str] = []
+        for a in authors:
+            label = self._history.resolve_label(
+                canonical_key=a.canonical_key,
+                guild_id=guild_id,
+                familiar_id=self._familiar_id,
+            )
+            if label in label_to_key:
+                if label_to_key[label] != a.canonical_key:
+                    keys_pair = f"{label_to_key[label]},{a.canonical_key}"
+                    _logger.warning(
+                        f"{ls.tag('Text', ls.Y)} "
+                        f"{ls.kv('ambiguous_label', label, vc=ls.LY)} "
+                        f"{ls.kv('keys', keys_pair, vc=ls.LW)}"
+                    )
+                continue
+            label_to_key[label] = a.canonical_key
+            lines.append(f"- [@{label}] = {a.canonical_key}")
+        if not lines:
+            return "", {}
+        addendum = (
+            "## Ping vocabulary\n\n"
+            "To deliberately ping someone, write `[@DisplayName]` "
+            "where DisplayName is one of the names below. The bot "
+            "rewrites it to a Discord mention. Names not on this "
+            "list render as plain text without pinging.\n\n" + "\n".join(lines)
+        )
+        return addendum, label_to_key
+
+    async def _stream_reply(
+        self,
+        scope: TurnScope,
+        *,
+        channel_id: int,
+        guild_id: int | None = None,
+        ping_addendum: str = "",
+    ) -> str | None:
         ctx = AssemblyContext(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             viewer_mode="text",
+            guild_id=guild_id,
         )
         prompt = await self._assembler.assemble(ctx)
+        system = prompt.system_prompt
+        if ping_addendum:
+            system = f"{system}\n\n{ping_addendum}" if system else ping_addendum
         messages: list[Message] = []
-        if prompt.system_prompt:
-            messages.append(Message(role="system", content=prompt.system_prompt))
+        if system:
+            messages.append(Message(role="system", content=system))
         messages.extend(prompt.recent_history)
 
         accumulated: list[str] = []

@@ -89,6 +89,68 @@ class TestPublishText:
         assert len(set(seqs)) == 3
 
     @pytest.mark.asyncio
+    async def test_carries_message_id_reply_and_mentions(self) -> None:
+        """Discord's message_id, reply target, and mentions must round-trip."""
+        bus = InProcessEventBus()
+        await bus.start()
+        source = DiscordTextSource(bus=bus, familiar_id="fam")
+        received: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((TOPIC_DISCORD_TEXT,)):
+                received.append(ev)
+                return
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0)
+        bob = _author(user_id="222", display_name="Bob")
+        await source.publish_text(
+            channel_id=111,
+            guild_id=222,
+            author=_author(),
+            content="hey @bob",
+            message_id="msg-9999",
+            reply_to_message_id="msg-prev",
+            mentions=(bob,),
+        )
+        await asyncio.wait_for(task, timeout=1.0)
+        await bus.shutdown()
+
+        ev = received[0]
+        assert ev.payload["message_id"] == "msg-9999"
+        assert ev.payload["reply_to_message_id"] == "msg-prev"
+        assert ev.payload["mentions"] == (bob,)
+
+    @pytest.mark.asyncio
+    async def test_message_id_reply_and_mentions_default(self) -> None:
+        """Backwards-compatible defaults: callers can omit the new fields."""
+        bus = InProcessEventBus()
+        await bus.start()
+        source = DiscordTextSource(bus=bus, familiar_id="fam")
+        received: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((TOPIC_DISCORD_TEXT,)):
+                received.append(ev)
+                return
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0)
+        await source.publish_text(
+            channel_id=111,
+            guild_id=222,
+            author=_author(),
+            content="hello",
+        )
+        await asyncio.wait_for(task, timeout=1.0)
+        await bus.shutdown()
+
+        ev = received[0]
+        assert ev.payload["message_id"] is None
+        assert ev.payload["reply_to_message_id"] is None
+        assert ev.payload["mentions"] == ()
+
+    @pytest.mark.asyncio
     async def test_turn_id_equals_event_id_for_source_events(self) -> None:
         bus = InProcessEventBus()
         await bus.start()

@@ -233,11 +233,11 @@ differs from `display_at_write`:
 
 > `- Cass likes pho. (Cass is now known as peeks)`
 
-Resolution uses `HistoryStore.latest_author_for(canonical_key)` to
-find the most recent turn carrying that canonical key — its
-display name is the freshest one we have. If the canonical key
-resolves to nothing (user hasn't spoken in this familiar) or the
-current name matches `display_at_write`, no annotation is added.
+Resolution goes through `HistoryStore.resolve_label(canonical_key,
+guild_id)`, which prefers per-guild nick → global_name → username →
+turn snapshot → user_id. If the canonical key resolves to the bare
+user_id (nothing else found) or matches `display_at_write`, no
+annotation is added.
 
 **Why annotation, not substitution.** Identity consolidation is
 provisional. Mic-sharing on Discord, relayed quotes ("Bob says
@@ -252,6 +252,122 @@ render unchanged. The doc/code flow expects readers to live with
 the unannotated tail; backfilling is theoretically possible (walk
 each fact's `source_turn_ids`, pull the originating Author) but
 not worth the migration code for a bounded dev-test corpus.
+
+## Discord identity, replies, and mentions
+
+A Discord account exposes four name fields — `id`, `username`,
+`global_name`, per-guild `nick` — plus message-level relations
+(`reference` for replies, `mentions` for pings). The pipeline
+navigates all of them so the bot can both *understand* who's
+speaking to whom and *act* by threading replies and pinging users
+deliberately.
+
+### Identity model
+
+Two new tables sit alongside the existing `turns` snapshot:
+
+- `accounts(canonical_key PK, platform, user_id, username,
+  global_name, last_seen_at)` — stable per-account row, last-write
+  wins. One row per `(platform, user_id)`.
+- `account_guild_nicks(canonical_key, guild_id, nick, last_seen_at)`
+  — per-guild override, primary-keyed by both columns. NULL `nick`
+  is meaningful: "we observed them with no override".
+
+`turns.author_*` columns stay as a self-contained snapshot — they
+are the historical receipt of what the bot saw at write time. The
+`accounts` tables are the live identity cache. `resolve_label`
+walks them in preference order:
+
+1. `account_guild_nicks.nick` for the active `(canonical_key,
+   guild_id)`
+2. `accounts.global_name`
+3. `accounts.username`
+4. The latest turn's `Author.label` (snapshot fallback for
+   pre-feature rows)
+5. The bare `user_id` portion of `canonical_key`
+
+This means the read path always shows the freshest per-guild
+display name even when the snapshot baked into older turns is
+stale.
+
+### Replies (read + write)
+
+Each turn carries two new `TEXT` columns: `platform_message_id`
+(the Discord snowflake) and `reply_to_message_id` (the parent
+snowflake when `discord.Message.reference` was set). A
+`(familiar_id, platform_message_id)` index makes parent lookup
+O(1).
+
+- **Read.** `RecentHistoryLayer` resolves each turn's
+  `reply_to_message_id` through
+  `HistoryStore.lookup_turn_by_platform_message_id`. Render depth is
+  adaptive: when the parent is already inside the same recent-
+  history window, the child gets a short marker plus a ≤80-char
+  snippet (`[14:32 Alice ↩ Bob: parent…] child`) — the full parent
+  is about to render anyway. When the parent is *outside* the
+  window, the child carries the full parent content (capped at
+  ~400 chars) so the reply stays intelligible without the reader
+  having to scroll. Unknown parent ids drop the marker silently.
+- **Write.** `bot.send_text` accepts an optional
+  `reply_to_message_id`; when set, the post threads via
+  `discord.MessageReference(message_id=…, fail_if_not_exists=False)`.
+  `TextResponder` always passes the inbound message id — bot
+  replies thread by default, which is what helps in chaotic
+  multi-speaker channels. The returned platform message id is then
+  stored on the assistant turn so future user replies *to* the bot
+  can be linked back.
+
+### Mentions (read + write)
+
+A `turn_mentions(turn_id, canonical_key)` junction table records
+who got pinged in each turn. On intake, `bot.on_message` reads
+`message.mentions`, the source publishes them as `Author` objects
+in the event payload, and `TextResponder` upserts each one into
+`accounts` (keeping the identity cache fresh) and inserts the
+`turn_mentions` rows.
+
+In rendered prompts, Discord's raw `<@USER_ID>` markers in turn
+content are rewritten to `[@DisplayName]` via `resolve_label` —
+symmetric with the form the LLM is asked to *emit* on output.
+
+### Bot-emitted pings
+
+The system prompt gains a "Ping vocabulary" block when the channel
+has known participants:
+
+```
+## Ping vocabulary
+
+To deliberately ping someone, write `[@DisplayName]` …
+
+- [@Aria] = discord:111
+- [@Bob] = discord:222
+```
+
+The LLM emits `[@DisplayName]` whenever it wants to draw someone's
+attention. `TextResponder._rewrite_pings` resolves each marker
+against the per-channel participant list and rewrites known names
+to Discord-native `<@user_id>`. Unknown markers degrade to plain
+`@DisplayName` (no ping). `send_text` always passes
+`discord.AllowedMentions(everyone=False, roles=False, users=[…])`
+restricted to the resolved ids — even if the LLM smuggles a raw
+`<@123>` for someone outside the participant list, Discord will
+not deliver the notification.
+
+Ambiguous labels (two participants sharing a display name in the
+same channel) keep first-write and log a warning. Guild nicknames
+usually keep this from happening; the AllowedMentions guard makes
+any misping recoverable.
+
+### What we deliberately don't do
+
+- No `@everyone` / role-mention support on the bot's output side.
+  Discord's bot/role permissions are the gate.
+- No mention-of-bot / addressivity heuristics. The decision of
+  *when* the bot speaks is unchanged by this work; only *how*.
+- No backfill of legacy turns or facts. Legacy rows just don't
+  participate in reply lookups (orphan markers drop silently) and
+  fall back to their `author_*` snapshot for label resolution.
 
 ## RAG retrieval quality
 

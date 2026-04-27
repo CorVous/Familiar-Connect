@@ -23,11 +23,14 @@ class AssemblyContext:
 
     :param viewer_mode: ``"voice"`` or ``"text"`` — selects
         :class:`OperatingModeLayer` output and may affect layer order.
+    :param guild_id: Discord guild scoping per-guild nicknames; pass
+        ``None`` for DMs or non-Discord platforms.
     """
 
     familiar_id: str
     channel_id: int | None
     viewer_mode: str = "text"
+    guild_id: int | None = None
 
 
 @dataclass

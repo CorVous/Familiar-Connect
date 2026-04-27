@@ -35,7 +35,17 @@ PathLike = str | Path
 
 @dataclass(frozen=True)
 class HistoryTurn:
-    """Single persisted conversational turn."""
+    """Single persisted conversational turn.
+
+    :param platform_message_id: native id from the platform of origin
+        (Discord snowflake, etc.). ``None`` for legacy rows or
+        platform-less inputs.
+    :param reply_to_message_id: parent ``platform_message_id`` when
+        this turn is a reply (e.g. ``message.reference`` on Discord).
+    :param guild_id: Discord guild scoping per-guild nicknames for
+        rendering. ``None`` for DMs / non-Discord platforms / legacy
+        rows where the column wasn't populated.
+    """
 
     id: int
     timestamp: datetime
@@ -43,6 +53,9 @@ class HistoryTurn:
     author: Author | None
     content: str
     channel_id: int = 0
+    platform_message_id: str | None = None
+    reply_to_message_id: str | None = None
+    guild_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -130,18 +143,20 @@ class Fact:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    familiar_id          TEXT    NOT NULL,
-    channel_id           INTEGER NOT NULL,
-    guild_id             INTEGER,
-    role                 TEXT    NOT NULL,
-    author_platform      TEXT,
-    author_user_id       TEXT,
-    author_username      TEXT,
-    author_display_name  TEXT,
-    content              TEXT    NOT NULL,
-    timestamp            TEXT    NOT NULL,
-    mode                 TEXT
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id            TEXT    NOT NULL,
+    channel_id             INTEGER NOT NULL,
+    guild_id               INTEGER,
+    role                   TEXT    NOT NULL,
+    author_platform        TEXT,
+    author_user_id         TEXT,
+    author_username        TEXT,
+    author_display_name    TEXT,
+    content                TEXT    NOT NULL,
+    timestamp              TEXT    NOT NULL,
+    mode                   TEXT,
+    platform_message_id    TEXT,
+    reply_to_message_id    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -152,6 +167,18 @@ CREATE INDEX IF NOT EXISTS idx_turns_global
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel_mode
     ON turns (familiar_id, channel_id, mode, id);
+
+CREATE INDEX IF NOT EXISTS idx_turns_platform_msg
+    ON turns (familiar_id, platform_message_id);
+
+CREATE TABLE IF NOT EXISTS turn_mentions (
+    turn_id        INTEGER NOT NULL,
+    canonical_key  TEXT    NOT NULL,
+    PRIMARY KEY (turn_id, canonical_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_turn_mentions_canonical
+    ON turn_mentions (canonical_key, turn_id);
 
 CREATE TABLE IF NOT EXISTS summaries (
     familiar_id         TEXT    NOT NULL,
@@ -176,6 +203,25 @@ CREATE TABLE IF NOT EXISTS memory_writer_watermark (
     familiar_id       TEXT    PRIMARY KEY,
     last_written_id   INTEGER NOT NULL,
     created_at        TEXT    NOT NULL
+);
+
+-- Identity. One row per (platform, user_id). Last-write wins.
+CREATE TABLE IF NOT EXISTS accounts (
+    canonical_key  TEXT PRIMARY KEY,           -- "discord:123" / "twitch:456"
+    platform       TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    username       TEXT,                        -- global handle
+    global_name    TEXT,                        -- global display name
+    last_seen_at   TEXT NOT NULL
+);
+
+-- Per-guild nickname cache. NULL nick = explicit "no override".
+CREATE TABLE IF NOT EXISTS account_guild_nicks (
+    canonical_key  TEXT NOT NULL,
+    guild_id       INTEGER NOT NULL,
+    nick           TEXT,
+    last_seen_at   TEXT NOT NULL,
+    PRIMARY KEY (canonical_key, guild_id)
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -243,7 +289,8 @@ END;
 
 _TURN_COLS = (
     "id, timestamp, role, author_platform, author_user_id, "
-    "author_username, author_display_name, content, channel_id"
+    "author_username, author_display_name, content, channel_id, "
+    "platform_message_id, reply_to_message_id, guild_id"
 )
 
 
@@ -458,9 +505,13 @@ class HistoryStore:
             "author_user_id",
             "author_username",
             "author_display_name",
+            "platform_message_id",
+            "reply_to_message_id",
         ):
             if col not in columns:
                 self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
+        if "guild_id" not in columns:
+            self._conn.execute("ALTER TABLE turns ADD COLUMN guild_id INTEGER")
         self._conn.commit()
 
         # summaries: old PK was (familiar_id) only; new adds channel_id.
@@ -517,13 +568,17 @@ class HistoryStore:
         author: Author | None = None,
         guild_id: int | None = None,
         mode: str | None = None,
+        platform_message_id: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> HistoryTurn:
         """Append a single turn and return its persisted form.
 
         *mode* is a free-form string tag on the ``turns.mode`` column.
+        *platform_message_id* / *reply_to_message_id* are platform-
+        native ids (Discord snowflakes, etc.) stored as TEXT so any
+        platform's id format fits.
         """
         timestamp = datetime.now(tz=UTC)
-        mode_value = mode
         platform = author.platform if author is not None else None
         user_id = author.user_id if author is not None else None
         username = author.username if author is not None else None
@@ -534,8 +589,9 @@ class HistoryStore:
                 (familiar_id, channel_id, guild_id,
                  role, author_platform, author_user_id,
                  author_username, author_display_name,
-                 content, timestamp, mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content, timestamp, mode,
+                 platform_message_id, reply_to_message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -548,7 +604,9 @@ class HistoryStore:
                 display_name,
                 content,
                 timestamp.isoformat(),
-                mode_value,
+                mode,
+                platform_message_id,
+                reply_to_message_id,
             ),
         )
         self._conn.commit()
@@ -560,6 +618,79 @@ class HistoryStore:
             content=content,
             channel_id=channel_id,
         )
+
+    def lookup_turn_by_platform_message_id(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+    ) -> HistoryTurn | None:
+        """Find the turn carrying ``platform_message_id`` for ``familiar_id``.
+
+        Returns ``None`` if no row matches — used by the read path to
+        resolve reply parents. The column index
+        ``idx_turns_platform_msg`` keeps this O(1) per familiar.
+        """
+        row = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ? AND platform_message_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,  # noqa: S608
+            (familiar_id, platform_message_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_turn(row)
+
+    # ------------------------------------------------------------------
+    # turn_mentions: many-to-many from a turn to mentioned canonical_keys
+    # ------------------------------------------------------------------
+
+    def record_mentions(
+        self,
+        *,
+        turn_id: int,
+        canonical_keys: Iterable[str],
+    ) -> None:
+        """Record the canonical keys mentioned in ``turn_id``.
+
+        Idempotent — re-recording the same keys is a no-op thanks to
+        the (turn_id, canonical_key) primary key. Empty input is a
+        no-op too. Order is not preserved; reads come back sorted by
+        canonical_key for determinism.
+        """
+        seen: set[str] = set()
+        rows: list[tuple[int, str]] = []
+        for key in canonical_keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((turn_id, key))
+        if not rows:
+            return
+        self._conn.executemany(
+            """
+            INSERT OR IGNORE INTO turn_mentions (turn_id, canonical_key)
+            VALUES (?, ?)
+            """,
+            rows,
+        )
+        self._conn.commit()
+
+    def mentions_for_turn(self, *, turn_id: int) -> tuple[str, ...]:
+        """Return the canonical keys mentioned in ``turn_id``, sorted."""
+        rows = self._conn.execute(
+            """
+            SELECT canonical_key FROM turn_mentions
+             WHERE turn_id = ?
+             ORDER BY canonical_key ASC
+            """,
+            (turn_id,),
+        ).fetchall()
+        return tuple(str(r["canonical_key"]) for r in rows)
 
     def recent(
         self,
@@ -640,6 +771,132 @@ class HistoryStore:
             )
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # accounts + per-guild nicknames
+    # ------------------------------------------------------------------
+
+    def upsert_account(self, author: Author) -> None:
+        """Insert or refresh the canonical identity row for an Author.
+
+        Last-write wins on ``username`` and ``global_name``;
+        ``last_seen_at`` always stamps now. ``canonical_key`` is the
+        primary key, so re-upserting an existing user is cheap. Does
+        not touch per-guild nicks — see :meth:`upsert_guild_nick`.
+        """
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO accounts
+                (canonical_key, platform, user_id, username, global_name, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (canonical_key) DO UPDATE SET
+                username     = excluded.username,
+                global_name  = excluded.global_name,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                author.canonical_key,
+                author.platform,
+                author.user_id,
+                author.username,
+                author.global_name,
+                ts,
+            ),
+        )
+        self._conn.commit()
+
+    def upsert_guild_nick(
+        self,
+        *,
+        canonical_key: str,
+        guild_id: int,
+        nick: str | None,
+    ) -> None:
+        """Cache a per-guild nickname. ``nick=None`` records "no override".
+
+        Per-guild row is keyed by ``(canonical_key, guild_id)``, so a
+        user with distinct nicks per guild gets distinct rows. NULL
+        ``nick`` is meaningful: it says "we observed this user in
+        this guild and they had no nickname override" — distinct from
+        "we've never seen them in this guild" (no row at all).
+        """
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO account_guild_nicks
+                (canonical_key, guild_id, nick, last_seen_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (canonical_key, guild_id) DO UPDATE SET
+                nick         = excluded.nick,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (canonical_key, guild_id, nick, ts),
+        )
+        self._conn.commit()
+
+    def resolve_label(
+        self,
+        *,
+        canonical_key: str,
+        guild_id: int | None,
+        familiar_id: str | None = None,
+    ) -> str:
+        """Return the best display name for ``canonical_key`` in *guild_id*.
+
+        Preference order:
+        1. ``account_guild_nicks.nick`` for ``(canonical_key, guild_id)``
+        2. ``accounts.global_name``
+        3. ``accounts.username``
+        4. ``latest_author_for(familiar_id, canonical_key).label`` —
+           snapshot from the most recent turn. Useful for legacy rows
+           where no ``accounts`` upsert has happened. Skipped when
+           *familiar_id* is omitted.
+        5. bare ``user_id`` parsed from canonical_key
+
+        Always returns a non-empty string — unknown keys still produce
+        ``"<user_id>"`` so callers don't have to handle ``None``.
+        """
+        if guild_id is not None:
+            row = self._conn.execute(
+                """
+                SELECT nick FROM account_guild_nicks
+                 WHERE canonical_key = ? AND guild_id = ?
+                """,
+                (canonical_key, guild_id),
+            ).fetchone()
+            if row is not None and row["nick"]:
+                return str(row["nick"])
+        row = self._conn.execute(
+            """
+            SELECT global_name, username FROM accounts
+             WHERE canonical_key = ?
+            """,
+            (canonical_key,),
+        ).fetchone()
+        if row is not None:
+            if row["global_name"]:
+                return str(row["global_name"])
+            if row["username"]:
+                return str(row["username"])
+        # Snapshot fallback: the latest turn carries an Author whose
+        # display_name was correct at the moment of writing. Cheaper
+        # than a join, and a sensible "last we saw them" answer for
+        # legacy rows that pre-date the accounts table.
+        if familiar_id is not None:
+            snapshot = self.latest_author_for(
+                familiar_id=familiar_id, canonical_key=canonical_key
+            )
+            if snapshot is not None:
+                return snapshot.label
+        # Fall back to the user_id portion of the canonical_key.
+        if ":" in canonical_key:
+            return canonical_key.partition(":")[2] or canonical_key
+        return canonical_key
+
+    # ------------------------------------------------------------------
+    # latest_author_for (legacy shim)
+    # ------------------------------------------------------------------
 
     def latest_author_for(
         self,
@@ -1353,6 +1610,18 @@ def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
     else:
         author = None
 
+    try:
+        platform_message_id = row["platform_message_id"]
+    except (IndexError, KeyError):
+        platform_message_id = None
+    try:
+        reply_to_message_id = row["reply_to_message_id"]
+    except (IndexError, KeyError):
+        reply_to_message_id = None
+    try:
+        guild_id_raw = row["guild_id"]
+    except (IndexError, KeyError):
+        guild_id_raw = None
     return HistoryTurn(
         id=int(row["id"]),
         timestamp=datetime.fromisoformat(row["timestamp"]),
@@ -1360,4 +1629,11 @@ def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
         author=author,
         content=str(row["content"]),
         channel_id=channel_id,
+        platform_message_id=(
+            str(platform_message_id) if platform_message_id is not None else None
+        ),
+        reply_to_message_id=(
+            str(reply_to_message_id) if reply_to_message_id is not None else None
+        ),
+        guild_id=int(guild_id_raw) if guild_id_raw is not None else None,
     )
