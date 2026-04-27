@@ -59,7 +59,7 @@ flowchart LR
 - **Transcription** — Deepgram streaming client. Instantiated on startup; wired to the bus via `VoiceSource` once a voice channel is active. v1 supports one voice channel at a time (single transcriber per familiar).
 - **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through pycord's voice client. When no TTS client is configured `LoggingTTSPlayer` is used.
 - **OpenRouter LLM client** — one `LLMClient` per call-site slot.
-- **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries` and `cross_context_summaries` are watermarked side-indices.
+- **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, and `people_dossiers` are watermarked side-indices.
 - **Subscription registry** — `data/familiars/<id>/subscriptions.toml`, written by the subscribe/unsubscribe slash commands.
 - **Twitch EventSub** — client code present; its queue is drained by `TwitchSource` onto the bus.
 

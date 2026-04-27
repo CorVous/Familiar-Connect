@@ -32,6 +32,7 @@ from familiar_connect.context import (
     CoreInstructionsLayer,
     CrossChannelContextLayer,
     OperatingModeLayer,
+    PeopleDossierLayer,
     RagContextLayer,
     RecentHistoryLayer,
 )
@@ -43,6 +44,7 @@ from familiar_connect.processors import (
     VoiceResponder,
 )
 from familiar_connect.processors.fact_extractor import FactExtractor
+from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
 from familiar_connect.processors.summary_worker import SummaryWorker
 from familiar_connect.transcription import create_transcriber_from_env
 from familiar_connect.tts import create_tts_client
@@ -161,6 +163,10 @@ def _default_assembler(familiar: Familiar) -> Assembler:
                 ttl_seconds=600,
             ),
             ConversationSummaryLayer(store=store),
+            PeopleDossierLayer(
+                store=store,
+                window_size=familiar.config.history_window_size,
+            ),
             RagContextLayer(
                 store=store,
                 max_results=5,
@@ -246,6 +252,11 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         familiar_id=familiar.id,
         batch_size=10,
     )
+    people_dossier_worker = PeopleDossierWorker(
+        store=familiar.history_store,
+        llm_client=familiar.llm_clients["main_prose"],
+        familiar_id=familiar.id,
+    )
 
     try:
         async with asyncio.TaskGroup() as tg:
@@ -260,6 +271,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
             )
             tg.create_task(summary_worker.run(), name="summary-worker")
             tg.create_task(fact_extractor.run(), name="fact-extractor")
+            tg.create_task(people_dossier_worker.run(), name="people-dossier-worker")
             tg.create_task(handle.bot.start(token), name="discord-bot")
     finally:
         # close py-cord first so its aiohttp ClientSession doesn't leak

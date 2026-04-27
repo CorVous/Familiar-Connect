@@ -20,6 +20,7 @@ from familiar_connect.context.layers import (
     CrossChannelContextLayer,
     Layer,
     OperatingModeLayer,
+    PeopleDossierLayer,
     RagContextLayer,
     RecentHistoryLayer,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "CrossChannelContextLayer",
     "Layer",
     "OperatingModeLayer",
+    "PeopleDossierLayer",
     "RagContextLayer",
     "RecentHistoryLayer",
 ]

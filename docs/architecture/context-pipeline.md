@@ -23,6 +23,7 @@ flowchart TB
         fts[(fts_turns FTS5)]
         facts[(facts)]
         fts_facts[(fts_facts FTS5)]
+        dossiers[(people_dossiers)]
     end
 
     turns -->|trigger| fts
@@ -30,6 +31,7 @@ flowchart TB
     turns -->|SummaryWorker| cross
     turns -->|FactExtractor| facts
     facts -->|trigger| fts_facts
+    facts -->|PeopleDossierWorker| dossiers
 
     subgraph Assembler[Prompt assembly]
         core[CoreInstructionsLayer]
@@ -37,15 +39,18 @@ flowchart TB
         mode[OperatingModeLayer]
         xc[CrossChannelContextLayer]
         sum[ConversationSummaryLayer]
+        ppl[PeopleDossierLayer]
         rag[RagContextLayer]
         hist[RecentHistoryLayer]
     end
 
     cross --> xc
     summaries --> sum
+    dossiers --> ppl
     fts --> rag
     fts_facts --> rag
     turns --> hist
+    turns --> ppl
 ```
 
 ## Layers
@@ -79,6 +84,7 @@ whose key has changed.
 |---|---|---|
 | `ConversationSummaryLayer` | `summaries` table | `ch<id>:wm<last_summarised_id>` |
 | `CrossChannelContextLayer` | `cross_context_summaries` table, per-viewer map | `<source>:wm<source_last_id>` concatenated |
+| `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions` | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `RagContextLayer` | `fts_turns` + `fts_facts` FTS5 search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent(channel_id, window_size)` | not cached — it *is* the query |
 
@@ -147,6 +153,31 @@ A post-extraction filter drops self-capability "facts" (e.g.,
 `I cannot remember names`, `the assistant has no internet access`)
 before they hit the store. See [Fact discipline](#fact-discipline-supersession-and-self-capability)
 for the rationale.
+
+### `PeopleDossierWorker`
+
+Compounds per-person summaries off the facts watermark. Same shape as
+`SummaryWorker` (compound prior + new evidence with one LLM call) but
+keyed by `canonical_key` instead of `channel_id`. Cadence is
+intentionally a quarter of `SummaryWorker`'s tick (`tick_interval_s = 20 s`):
+people-level evidence churns slower than turn-by-turn summaries, and
+the read path (`PeopleDossierLayer`) is a cheap SQLite lookup that
+doesn't wait on the worker.
+
+Per tick:
+
+1. `subjects_with_facts(familiar_id)` returns
+   `{canonical_key: max(facts.id)}` across non-superseded facts whose
+   `subjects_json` lists each key.
+2. For each subject, compare against its `people_dossiers.last_fact_id`
+   watermark. Skip when nothing is new.
+3. `facts_for_subject(canonical_key, min_id_exclusive=watermark)`
+   pulls the new evidence; the worker feeds prior dossier + new facts
+   to the LLM and writes the result back with the updated watermark.
+
+Empty LLM replies are dropped — a blank response must not blow away
+an existing dossier. Subjects whose only facts are superseded
+disappear from the candidate set; the dossier row stays put.
 
 ## Fact discipline: supersession and self-capability
 
@@ -252,6 +283,74 @@ render unchanged. The doc/code flow expects readers to live with
 the unannotated tail; backfilling is theoretically possible (walk
 each fact's `source_turn_ids`, pull the originating Author) but
 not worth the migration code for a bounded dev-test corpus.
+
+## People dossiers
+
+The dossier feature combines the prompt-layer pattern with the
+summary-caching pattern: per-person summaries are compounded off the
+facts watermark by `PeopleDossierWorker` and stitched into the
+system prompt by `PeopleDossierLayer`. The two halves are decoupled
+through the `people_dossiers` table, so the read path stays a
+cheap SQLite lookup and the LLM-driven refresh stays off the hot
+path.
+
+### Storage
+
+```
+people_dossiers (
+    familiar_id    TEXT NOT NULL,
+    canonical_key  TEXT NOT NULL,
+    last_fact_id   INTEGER NOT NULL,
+    dossier_text   TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (familiar_id, canonical_key)
+)
+```
+
+One row per person. `last_fact_id` is the watermark over `facts.id`
+that the worker has already folded into `dossier_text` —
+`PeopleDossierWorker` skips refresh when nothing in `facts` has
+moved past it. Same shape as `summaries`.
+
+### Layer (read path)
+
+`PeopleDossierLayer` walks the active channel's last `window_size`
+turns newest-first. For each turn it appends the author's
+`canonical_key` and any `turn_mentions` rows to an ordered candidate
+list, deduping on first sight (so most-recent occurrence wins).
+The list is truncated to `max_people` — same hard-count budgeting
+style as `RecentHistoryLayer.window_size`. Candidates without a
+stored dossier are skipped silently; the worker fills them in
+within one tick.
+
+The render is one Markdown block:
+
+```
+## People in this conversation
+
+### Cass
+Cass enjoys pho. Lives in Toronto.
+
+### Aria
+Aria runs a bakery on Queen St.
+```
+
+Display names come from `HistoryStore.resolve_label`, so per-guild
+nicknames win over snapshot labels — symmetric with the rest of
+the read path.
+
+Cache invalidation key: `t<latest_id>:cap<n>:<key>:f<wm>,…`. New
+turns flip `latest_id` (changing the candidate set); a worker
+refresh flips `f<wm>` for that key.
+
+### Why a separate worker
+
+Folding dossier refresh into `FactExtractor` would couple two
+unrelated cadences (extracting new facts vs compounding per-person
+summaries) and double the LLM cost on every batch. Splitting them
+keeps each worker's prompt narrowly scoped, lets the dossier worker
+tick on its own clock (4× slower), and preserves the existing
+single-responsibility shape of the worker family.
 
 ## Discord identity, replies, and mentions
 
@@ -515,6 +614,7 @@ Voice transcript final on channel C (voice:C)
         → cached CoreInstructions / CharacterCard / OperatingMode
         → CrossChannelContextLayer: TTL-checked read from cross_context_summaries
         → ConversationSummaryLayer: read from summaries
+        → PeopleDossierLayer: read from people_dossiers, capped at max_people
         → RagContextLayer: FTS search on cue
         → RecentHistoryLayer: last N turns for channel C
       LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
@@ -524,6 +624,10 @@ Voice transcript final on channel C (voice:C)
 Background: SummaryWorker tick (every 5 s)
   → for each channel: maybe regenerate rolling summary
   → for each viewer×source: maybe regenerate cross-channel summary
+
+Background: PeopleDossierWorker tick (every 20 s)
+  → subjects_with_facts(familiar_id) → {canonical_key: max_fact_id}
+  → for each subject whose watermark moved: compound prior dossier + new facts
 ```
 
 ## Configuration
@@ -551,3 +655,16 @@ Per-channel overrides in `character.toml` (`[channels.<id>]`):
 
 - `ttl_seconds` (default 600) — read-side staleness threshold.
 - `viewer_map` — mirrors `cross_channel_map` on the worker side.
+
+`PeopleDossierWorker` honours:
+
+- `tick_interval_s` (default 20) — seconds between ticks (¼ of
+  `SummaryWorker`'s default).
+
+`PeopleDossierLayer` honours:
+
+- `window_size` (default 20) — how far back into the channel to
+  look when collecting candidate canonical keys (authors + mentions).
+- `max_people` (default 8) — hard cap on dossiers rendered per
+  prompt; oldest mentions drop first when the candidate set exceeds
+  the cap.

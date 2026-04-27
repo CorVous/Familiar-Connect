@@ -502,6 +502,108 @@ class CrossChannelContextLayer:
         return "|".join(parts)
 
 
+class PeopleDossierLayer:
+    """Per-person dossier block for people active in this channel.
+
+    Reads ``people_dossiers`` (maintained by :class:`PeopleDossierWorker`)
+    for canonical keys that show up as authors *or* mentions in the
+    last ``window_size`` turns of the active channel. Candidates are
+    de-duped most-recent-first and capped at ``max_people`` — same
+    hard-count budgeting style as :class:`RecentHistoryLayer`'s
+    ``window_size``. Subjects without a stored dossier are skipped
+    silently; the worker fills them in within one tick.
+
+    Invalidation: ``(latest_turn_id, max_people, [key:f<wm>, …])`` —
+    any new channel turn flips ``latest_turn_id`` (changing the
+    candidate set), and each kept candidate's ``last_fact_id`` flips
+    when the worker refreshes its dossier.
+    """
+
+    name: str = "people_dossier"
+
+    def __init__(
+        self,
+        *,
+        store: HistoryStore,
+        window_size: int = 20,
+        max_people: int = 8,
+    ) -> None:
+        self._store = store
+        self._window_size = window_size
+        self._max_people = max_people
+
+    def _candidate_keys(self, ctx: AssemblyContext) -> list[str]:
+        """Ordered, deduped canonical keys for the active channel.
+
+        Newest turn first. Per turn, the author's key comes before
+        the turn's mentions — a person speaking *now* outranks a
+        person being talked about. Capped at ``max_people``.
+        """
+        if ctx.channel_id is None:
+            return []
+        turns = self._store.recent(
+            familiar_id=ctx.familiar_id,
+            channel_id=ctx.channel_id,
+            limit=self._window_size,
+        )
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def _add(key: str) -> None:
+            if key in seen:
+                return
+            seen.add(key)
+            ordered.append(key)
+
+        for turn in reversed(turns):  # newest first
+            if turn.author is not None:
+                _add(turn.author.canonical_key)
+            for key in self._store.mentions_for_turn(turn_id=turn.id):
+                _add(key)
+            if len(ordered) >= self._max_people:
+                break
+        return ordered[: self._max_people]
+
+    async def build(self, ctx: AssemblyContext) -> str:
+        candidates = self._candidate_keys(ctx)
+        if not candidates:
+            return ""
+        sections: list[str] = []
+        for key in candidates:
+            entry = self._store.get_people_dossier(
+                familiar_id=ctx.familiar_id, canonical_key=key
+            )
+            if entry is None or not entry.dossier_text.strip():
+                continue
+            display = self._store.resolve_label(
+                canonical_key=key,
+                guild_id=ctx.guild_id,
+                familiar_id=ctx.familiar_id,
+            )
+            sections.append(f"### {display}\n\n{entry.dossier_text.strip()}")
+        if not sections:
+            return ""
+        return "## People in this conversation\n\n" + "\n\n".join(sections)
+
+    def invalidation_key(self, ctx: AssemblyContext) -> str:
+        candidates = self._candidate_keys(ctx)
+        latest = (
+            self._store.latest_id(
+                familiar_id=ctx.familiar_id, channel_id=ctx.channel_id or 0
+            )
+            or 0
+        )
+        parts: list[str] = [f"t{latest}", f"cap{self._max_people}"]
+        for key in candidates:
+            entry = self._store.get_people_dossier(
+                familiar_id=ctx.familiar_id, canonical_key=key
+            )
+            parts.append(
+                f"{key}:none" if entry is None else f"{key}:f{entry.last_fact_id}"
+            )
+        return "|".join(parts)
+
+
 class RagContextLayer:
     """FTS-backed retrieval of relevant historical turns *and* facts.
 

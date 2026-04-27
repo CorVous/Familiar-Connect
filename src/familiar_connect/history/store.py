@@ -95,6 +95,21 @@ class WatermarkEntry:
 
 
 @dataclass(frozen=True)
+class PeopleDossierEntry:
+    """Cached per-person dossier compounded from facts mentioning ``canonical_key``.
+
+    ``last_fact_id`` is a watermark over ``facts.id`` — the worker
+    refreshes when ``subjects_with_facts`` reports a higher id for
+    this subject. Mirrors :class:`SummaryEntry`.
+    """
+
+    canonical_key: str
+    last_fact_id: int
+    dossier_text: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class FactSubject:
     """Soft link from a fact to one canonical identity.
 
@@ -203,6 +218,15 @@ CREATE TABLE IF NOT EXISTS memory_writer_watermark (
     familiar_id       TEXT    PRIMARY KEY,
     last_written_id   INTEGER NOT NULL,
     created_at        TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS people_dossiers (
+    familiar_id    TEXT    NOT NULL,
+    canonical_key  TEXT    NOT NULL,
+    last_fact_id   INTEGER NOT NULL,
+    dossier_text   TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL,
+    PRIMARY KEY (familiar_id, canonical_key)
 );
 
 -- Identity. One row per (platform, user_id). Last-write wins.
@@ -1264,6 +1288,138 @@ class HistoryStore:
             (familiar_id, min_id, limit),
         ).fetchall()
         return [_row_to_turn(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # people_dossiers — per-person summaries compounded from facts
+    # ------------------------------------------------------------------
+
+    def get_people_dossier(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+    ) -> PeopleDossierEntry | None:
+        """Return the cached dossier for ``canonical_key``, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT canonical_key, last_fact_id, dossier_text, created_at
+              FROM people_dossiers
+             WHERE familiar_id = ? AND canonical_key = ?
+            """,
+            (familiar_id, canonical_key),
+        ).fetchone()
+        if row is None:
+            return None
+        return PeopleDossierEntry(
+            canonical_key=str(row["canonical_key"]),
+            last_fact_id=int(row["last_fact_id"]),
+            dossier_text=str(row["dossier_text"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def put_people_dossier(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+        last_fact_id: int,
+        dossier_text: str,
+    ) -> None:
+        """Insert or replace the dossier for ``canonical_key``."""
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO people_dossiers
+                (familiar_id, canonical_key,
+                 last_fact_id, dossier_text, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (familiar_id, canonical_key)
+            DO UPDATE SET
+                last_fact_id = excluded.last_fact_id,
+                dossier_text = excluded.dossier_text,
+                created_at   = excluded.created_at
+            """,
+            (familiar_id, canonical_key, last_fact_id, dossier_text, ts),
+        )
+        self._conn.commit()
+
+    def subjects_with_facts(self, *, familiar_id: str) -> dict[str, int]:
+        """Map ``canonical_key`` → ``max(facts.id)`` across current facts.
+
+        Excludes superseded facts — the dossier should track current
+        truth, and a subject whose only facts are stale shouldn't keep
+        showing up as a refresh candidate. Scans ``subjects_json`` in
+        Python; fine at expected per-familiar volumes (a SQLite virtual
+        index would be a later optimisation if profiling demands it).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, subjects_json
+              FROM facts
+             WHERE familiar_id = ?
+               AND subjects_json IS NOT NULL
+               AND superseded_at IS NULL
+             ORDER BY id ASC
+            """,
+            (familiar_id,),
+        ).fetchall()
+        out: dict[str, int] = {}
+        for row in rows:
+            try:
+                parsed = json.loads(row["subjects_json"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(parsed, list):
+                continue
+            fact_id = int(row["id"])
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("canonical_key")
+                if not isinstance(key, str):
+                    continue
+                # ORDER BY id ASC ⇒ later assignment wins ⇒ max id.
+                out[key] = fact_id
+        return out
+
+    def facts_for_subject(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+        min_id_exclusive: int = 0,
+        include_superseded: bool = False,
+    ) -> list[Fact]:
+        """Return facts mentioning ``canonical_key``, ASC by id.
+
+        Pre-filters with ``subjects_json LIKE`` (cheap; the JSON form
+        wraps each key in quotes so substring collisions like
+        ``discord:1`` vs ``discord:11`` don't false-positive). Final
+        membership check parses the JSON in Python.
+        """
+        where_super = "" if include_superseded else "AND superseded_at IS NULL"
+        like_pattern = f'%"{canonical_key}"%'
+        rows = self._conn.execute(
+            f"""
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by, subjects_json
+              FROM facts
+             WHERE familiar_id = ?
+               AND id > ?
+               AND subjects_json IS NOT NULL
+               AND subjects_json LIKE ?
+               {where_super}
+             ORDER BY id ASC
+            """,  # noqa: S608
+            (familiar_id, min_id_exclusive, like_pattern),
+        ).fetchall()
+        out: list[Fact] = []
+        for row in rows:
+            fact = _row_to_fact(row)
+            if any(s.canonical_key == canonical_key for s in fact.subjects):
+                out.append(fact)
+        return out
 
     # ------------------------------------------------------------------
     # FTS side-index over ``turns.content``
