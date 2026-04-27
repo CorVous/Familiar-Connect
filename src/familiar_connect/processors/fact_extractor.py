@@ -71,12 +71,14 @@ class FactExtractor:
         familiar_id: str,
         batch_size: int = 10,
         tick_interval_s: float = 15.0,
+        participants_max: int = 30,
     ) -> None:
         self._store = store
         self._llm = llm_client
         self._familiar_id = familiar_id
         self._batch_size = max(1, batch_size)
         self._tick_interval_s = tick_interval_s
+        self._participants_max = max(1, participants_max)
 
     async def run(self) -> None:
         """Forever loop — tick on an interval. Cancel to stop."""
@@ -103,7 +105,10 @@ class FactExtractor:
             return
 
         participants = _build_participants(
-            new_turns, store=self._store, familiar_id=self._familiar_id
+            new_turns,
+            store=self._store,
+            familiar_id=self._familiar_id,
+            max_total=self._participants_max,
         )
         prompt = _build_extract_prompt(new_turns, participants)
         reply = await self._llm.chat(prompt)
@@ -178,18 +183,37 @@ def _build_participants(
     *,
     store: HistoryStore,
     familiar_id: str,
+    max_total: int = 30,
 ) -> dict[str, str]:
-    """Map ``canonical_key`` → current display name across the batch.
+    """Map ``canonical_key`` → current display name for fact resolution.
+
+    Two layers, batch-first:
+
+    1. **Batch authors** — every turn whose author is set, keyed by
+       canonical_key with per-turn ``guild_id`` for label resolution.
+       Guarantees the active speakers are always represented even if
+       the wider widen step would otherwise drop them.
+    2. **Recent channel participants** — for each channel touched by
+       the batch, ``recent_distinct_authors(limit=max_total)`` adds
+       speakers from the recent past, capped at ``max_total`` total.
+       Closes the bare-text reference gap: a batch where only Cass
+       speaks can still link "Aria" in turn content to her canonical
+       key when Aria spoke earlier in the channel.
 
     Resolution goes through :meth:`HistoryStore.resolve_label` so the
     manifest matches what the read path renders (per-guild nick wins
-    over the snapshot label baked into each turn). Skips turns
-    without an author. Used both to inject the LLM-facing manifest
-    and to validate ``subject_keys`` coming back in the response —
-    keys outside the manifest are dropped (the LLM may hallucinate).
+    over the snapshot label baked into each turn). Used both to
+    inject the LLM-facing manifest and to validate ``subject_keys``
+    coming back in the response — keys outside the manifest are
+    dropped silently (the LLM may hallucinate).
     """
     out: dict[str, str] = {}
+    # Batch authors first, with per-turn guild_id.
+    channel_guilds: dict[int, int | None] = {}
     for t in turns:
+        if t.channel_id is not None:
+            # Last guild_id wins per channel; usually consistent within a batch.
+            channel_guilds[t.channel_id] = t.guild_id
         if t.author is None:
             continue
         out[t.author.canonical_key] = store.resolve_label(
@@ -197,6 +221,24 @@ def _build_participants(
             guild_id=t.guild_id,
             familiar_id=familiar_id,
         )
+    # Widen with recent channel participants, capped at max_total.
+    for channel_id, guild_id in channel_guilds.items():
+        if len(out) >= max_total:
+            break
+        for author in store.recent_distinct_authors(
+            familiar_id=familiar_id,
+            channel_id=channel_id,
+            limit=max_total,
+        ):
+            if author.canonical_key in out:
+                continue
+            if len(out) >= max_total:
+                break
+            out[author.canonical_key] = store.resolve_label(
+                canonical_key=author.canonical_key,
+                guild_id=guild_id,
+                familiar_id=familiar_id,
+            )
     return out
 
 

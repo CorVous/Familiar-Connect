@@ -368,6 +368,210 @@ class TestFactExtractorSubjects:
         assert facts[0].subjects == ()
 
 
+class TestFactExtractorParticipantsWidening:
+    """Manifest extends past batch authors to recent channel participants.
+
+    Without widening, a batch of 10 turns where only Cass speaks
+    forecloses on linking any other name in the turn text to a
+    canonical key — the manifest would only carry Cass. ``recent_distinct_authors``
+    on the channel (capped at 30) widens the manifest to people who
+    spoke in the recent past, so the LLM can resolve "what about Aria?"
+    to ``discord:aria_id`` even when Aria didn't speak in this batch.
+    """
+
+    @pytest.mark.asyncio
+    async def test_manifest_includes_prior_channel_authors(self) -> None:
+        store = HistoryStore(":memory:")
+        # Aria spoke earlier (now outside the batch window).
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi from aria",
+            author=Author(
+                platform="discord",
+                user_id="222",
+                username="aria_login",
+                display_name="Aria",
+            ),
+        )
+        # 10 turns from Cass — fills the batch.
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        # Pre-advance the watermark past Aria's turn so she's outside the batch.
+        store.put_writer_watermark(familiar_id="fam", last_written_id=1)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        # Both speakers must be in the manifest, despite Aria being outside the batch.
+        assert "discord:111" in prompt_text  # Cass (batch author)
+        assert "discord:222" in prompt_text  # Aria (recent prior author)
+        assert "Aria" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_subject_keys_resolve_against_widened_manifest(self) -> None:
+        """An LLM-emitted subject_key for a non-batch author is now accepted."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi from aria",
+            author=Author(
+                platform="discord",
+                user_id="222",
+                username="aria_login",
+                display_name="Aria",
+            ),
+        )
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i} mentioning Aria",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        store.put_writer_watermark(familiar_id="fam", last_written_id=1)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Cass talked about Aria's bakery.",
+                        "source_turn_ids": [3],
+                        # Aria's key would have been dropped without widening.
+                        "subject_keys": ["discord:111", "discord:222"],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        keys = {s.canonical_key for s in facts[0].subjects}
+        assert keys == {"discord:111", "discord:222"}
+        # And turn_mentions picks up Aria too (no Discord ping needed).
+        assert "discord:222" in store.mentions_for_turn(turn_id=3)
+
+    @pytest.mark.asyncio
+    async def test_manifest_capped_at_total_limit(self) -> None:
+        """Bounded by ``participants_max`` so the prompt doesn't bloat unboundedly."""
+        store = HistoryStore(":memory:")
+        # Seed 50 distinct prior authors in channel 1.
+        for i in range(50):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content="x",
+                author=Author(
+                    platform="discord",
+                    user_id=f"prior-{i}",
+                    username=f"u{i}",
+                    display_name=f"U{i}",
+                ),
+            )
+        # Then a batch of 10 from Cass.
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"batch {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        store.put_writer_watermark(familiar_id="fam", last_written_id=50)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store,
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+            participants_max=30,
+        )
+        await extractor.tick()
+
+        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        # Manifest lines look like ``- canonical_key — display``; count them.
+        manifest_count = sum(
+            1
+            for line in prompt_text.splitlines()
+            if line.startswith("- discord:") and " — " in line
+        )
+        assert manifest_count == 30
+
+    @pytest.mark.asyncio
+    async def test_widening_scoped_per_channel(self) -> None:
+        """Authors from other channels don't leak into the manifest."""
+        store = HistoryStore(":memory:")
+        # Aria spoke in channel 99, never in channel 1.
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=99,
+            role="user",
+            content="other channel",
+            author=Author(
+                platform="discord",
+                user_id="222",
+                username="aria_login",
+                display_name="Aria",
+            ),
+        )
+        # Batch of 10 from Cass on channel 1.
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"chat {i}",
+                author=Author(
+                    platform="discord",
+                    user_id="111",
+                    username="cass_login",
+                    display_name="Cass",
+                ),
+            )
+        store.put_writer_watermark(familiar_id="fam", last_written_id=1)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        assert "discord:111" in prompt_text  # Cass present
+        assert "discord:222" not in prompt_text  # Aria isolated to her channel
+
+
 class TestFactExtractorMirrorsMentions:
     """Resolved subjects are mirrored into ``turn_mentions``.
 

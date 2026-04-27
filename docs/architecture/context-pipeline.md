@@ -250,10 +250,20 @@ extractor identified. `Author.canonical_key`
 is the name the LLM saw when the fact was authored.
 
 **Write path.** `FactExtractor` builds a participants manifest
-(`canonical_key → current display name`) from the batch's turns and
-injects it into the LLM prompt alongside the turns themselves. The
-LLM is asked to optionally tag each fact with `subject_keys` — a
-list of canonical keys from the manifest. The extractor validates
+(`canonical_key → current display name`) from two sources, batch-first:
+the authors of the current batch (with per-turn `guild_id` for
+label resolution), then `recent_distinct_authors` per channel
+touched by the batch — capped at `participants_max` (default 30).
+The widening matters because a batch where only one user speaks
+otherwise forecloses on linking other names in the turn text;
+including recent prior speakers lets the LLM resolve "what about
+Aria?" to her canonical key even when she didn't speak in this
+batch. Cap keeps prompt size bounded.
+
+The manifest is injected into the LLM prompt alongside the turns
+themselves. The LLM is asked to optionally tag each fact with
+`subject_keys` — a list of canonical keys from the manifest. The
+extractor validates
 those keys against the manifest (unknowns are dropped silently),
 pairs each with the current display name, and persists them via
 `HistoryStore.append_fact(subjects=...)`.
