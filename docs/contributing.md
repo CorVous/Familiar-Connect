@@ -42,6 +42,12 @@ uv run pytest                 # run the suite
 
 These are cheap and fast on a clean working tree. If any fail locally, CI will fail the same way — fix the root cause before pushing.
 
+Tests marked `@pytest.mark.integration` hit live external services (e.g. OpenRouter) and are skipped by default. Run them explicitly with:
+
+```bash
+uv run pytest -m integration  # requires OPENROUTER_API_KEY etc. in the env
+```
+
 ## Docs build & preview
 
 The docs site is built with [mkdocs-material](https://squidfunk.github.io/mkdocs-material/). Local preview:

@@ -653,6 +653,7 @@ def _live_client() -> LLMClient:
     return LLMClient(api_key=api_key, model=_LIVE_MODEL)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not _has_api_key, reason="OPENROUTER_API_KEY not set")
 class TestOpenRouterLive:
     @pytest.mark.asyncio

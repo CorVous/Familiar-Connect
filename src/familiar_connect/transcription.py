@@ -67,8 +67,9 @@ class TranscriptionResult:
         return Message(role="user", content=f"[Voice] {self.text}", name=name)
 
 
-# TEN VAD now drives voice-activity edges locally; Deepgram is used
-# for transcription text only (``Results`` messages).
+# Deepgram drives both transcription text and VAD edges. Interim Results
+# arrivals feed DeepgramVoiceActivityDetector for speech-start / speech-end
+# edges; finals feed VoiceLullMonitor for conversational-lull detection.
 TranscriptionEvent = TranscriptionResult
 
 
@@ -89,7 +90,7 @@ class DeepgramTranscriber:
         sample_rate: int = 48000,
         channels: int = 1,
         diarize: bool = False,
-        interim_results: bool = False,
+        interim_results: bool = True,
         utterance_end_ms: int = 1000,
         vad_events: bool = False,
         endpointing_ms: int = 300,
@@ -214,9 +215,8 @@ class DeepgramTranscriber:
     async def start(self: Self, output: asyncio.Queue[TranscriptionEvent]) -> None:
         """Connect to Deepgram and begin receiving transcription events.
 
-        Output queue carries :class:`TranscriptionResult`s in wire order.
-        VAD edges are produced elsewhere (TEN VAD) and do not flow
-        through this queue.
+        Output queue carries :class:`TranscriptionResult`s in wire order,
+        including interims (``is_final=False``) when ``interim_results=True``.
         """
         url = self.build_ws_url()
         _logger.info(
