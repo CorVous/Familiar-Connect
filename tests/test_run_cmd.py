@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
+    _async_main,
     _resolve_familiar_root,
     load_opus,
     run,
@@ -451,3 +455,123 @@ class TestRunTranscriberIntegration:
 
         assert result == 0
         assert mock_load.call_args.kwargs.get("transcriber") is None
+
+
+# ---------------------------------------------------------------------------
+# _async_main — shutdown cleanup
+# ---------------------------------------------------------------------------
+
+
+def _fake_familiar_for_async_main() -> MagicMock:
+    """Build a Familiar mock shaped just enough for ``_async_main`` plumbing."""
+    fam = MagicMock(name="familiar")
+    fam.id = "test"
+    fam.tts_client = None
+    fam.bus = MagicMock()
+    fam.bus.start = AsyncMock()
+    fam.bus.shutdown = AsyncMock()
+    fam.router = MagicMock()
+    fam.router.shutdown = MagicMock()
+    llm = MagicMock(name="llm")
+    llm.close = AsyncMock()
+    fam.llm_clients = {"main_prose": llm}
+    fam.history_store = MagicMock()
+    fam.config = MagicMock(history_window_size=10)
+    fam.root = MagicMock()
+    return fam
+
+
+async def _hang() -> None:
+    await asyncio.sleep(60)
+
+
+@pytest.mark.filterwarnings("ignore:coroutine '_hang' was never awaited:RuntimeWarning")
+class TestAsyncMainCleanup:
+    """Pin the ``finally``-block cleanup so leaked aiohttp sessions don't return."""
+
+    @pytest.mark.asyncio
+    async def test_closes_bot_and_transcriber_on_bot_start_failure(self) -> None:
+        """``bot.start`` failure must still trigger ``bot.close`` and ``transcriber.stop``."""  # noqa: E501
+        familiar = _fake_familiar_for_async_main()
+        familiar.transcriber = MagicMock(name="transcriber")
+        familiar.transcriber.stop = AsyncMock()
+
+        bot = MagicMock(name="bot")
+        bot.start = AsyncMock(side_effect=RuntimeError("login failed"))
+        bot.close = AsyncMock()
+        handle = MagicMock(bot=bot)
+
+        sw = MagicMock()
+        sw.run = AsyncMock(side_effect=_hang)
+        fe = MagicMock()
+        fe.run = AsyncMock(side_effect=_hang)
+
+        with (
+            patch("familiar_connect.commands.run.create_bot", return_value=handle),
+            patch("familiar_connect.commands.run._default_assembler"),
+            patch(
+                "familiar_connect.commands.run._run_debug_processor",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_voice_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_text_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch("familiar_connect.commands.run.VoiceResponder"),
+            patch("familiar_connect.commands.run.TextResponder"),
+            patch("familiar_connect.commands.run.SummaryWorker", return_value=sw),
+            patch("familiar_connect.commands.run.FactExtractor", return_value=fe),
+            pytest.raises(BaseExceptionGroup),  # TaskGroup wraps the inner raise
+        ):
+            await _async_main("fake-token", familiar)
+
+        bot.close.assert_awaited_once()
+        familiar.transcriber.stop.assert_awaited_once()
+        familiar.bus.shutdown.assert_awaited_once()
+        familiar.router.shutdown.assert_called_once()
+        familiar.llm_clients["main_prose"].close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_transcriber_when_none(self) -> None:
+        """No transcriber → cleanup must still close the bot, no AttributeError."""
+        familiar = _fake_familiar_for_async_main()
+        familiar.transcriber = None
+
+        bot = MagicMock(name="bot")
+        bot.start = AsyncMock(side_effect=RuntimeError("nope"))
+        bot.close = AsyncMock()
+        handle = MagicMock(bot=bot)
+
+        sw = MagicMock()
+        sw.run = AsyncMock(side_effect=_hang)
+        fe = MagicMock()
+        fe.run = AsyncMock(side_effect=_hang)
+
+        with (
+            patch("familiar_connect.commands.run.create_bot", return_value=handle),
+            patch("familiar_connect.commands.run._default_assembler"),
+            patch(
+                "familiar_connect.commands.run._run_debug_processor",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_voice_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_text_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch("familiar_connect.commands.run.VoiceResponder"),
+            patch("familiar_connect.commands.run.TextResponder"),
+            patch("familiar_connect.commands.run.SummaryWorker", return_value=sw),
+            patch("familiar_connect.commands.run.FactExtractor", return_value=fe),
+            pytest.raises(BaseExceptionGroup),
+        ):
+            await _async_main("fake-token", familiar)
+
+        bot.close.assert_awaited_once()

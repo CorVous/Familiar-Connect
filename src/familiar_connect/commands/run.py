@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes.util
 import logging
 import os
@@ -261,6 +262,14 @@ async def _async_main(token: str, familiar: Familiar) -> None:
             tg.create_task(fact_extractor.run(), name="fact-extractor")
             tg.create_task(handle.bot.start(token), name="discord-bot")
     finally:
+        # close py-cord first so its aiohttp ClientSession doesn't leak
+        # past loop shutdown; suppress so a close error can't mask the
+        # original exception that triggered the finally
+        with contextlib.suppress(Exception):
+            await handle.bot.close()
+        if familiar.transcriber is not None:
+            with contextlib.suppress(Exception):
+                await familiar.transcriber.stop()
         familiar.router.shutdown()
         await familiar.bus.shutdown()
         for client in familiar.llm_clients.values():
