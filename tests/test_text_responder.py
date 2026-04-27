@@ -492,8 +492,8 @@ class TestIdentityWritePath:
         assert row["global_name"] == "Robert"
 
     @pytest.mark.asyncio
-    async def test_threads_reply_to_triggering_message(self, tmp_path: Path) -> None:
-        """Bot replies always thread to the inbound message id."""
+    async def test_does_not_thread_by_default(self, tmp_path: Path) -> None:
+        """No marker → no threading. Default is a normal post."""
         llm = _ScriptedLLM(deltas=["ok"])
         send = _CapturingSend()
         responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
@@ -507,7 +507,45 @@ class TestIdentityWritePath:
 
         assert len(send.calls) == 1
         _, _, reply_to, _ = send.calls[0]
+        assert reply_to is None
+
+    @pytest.mark.asyncio
+    async def test_threads_when_llm_emits_thread_marker(self, tmp_path: Path) -> None:
+        """LLM emits ``[↩]`` → thread to the triggering message id."""
+        llm = _ScriptedLLM(deltas=["[↩] sure thing"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(message_id="incoming-msg-77"),
+            bus,
+        )
+        await bus.shutdown()
+
+        _, content, reply_to, _ = send.calls[0]
         assert reply_to == "incoming-msg-77"
+        # Marker stripped before posting.
+        assert "[↩]" not in content
+        assert content == "sure thing"
+
+    @pytest.mark.asyncio
+    async def test_thread_marker_reply_word_form_also_works(
+        self, tmp_path: Path
+    ) -> None:
+        """``[reply]`` is the tokenizer-safe alias for ``[↩]``."""
+        llm = _ScriptedLLM(deltas=["[reply] got it"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(message_id="msg-99"), bus)
+        await bus.shutdown()
+
+        _, content, reply_to, _ = send.calls[0]
+        assert reply_to == "msg-99"
+        assert "[reply]" not in content
+        assert content == "got it"
 
     @pytest.mark.asyncio
     async def test_rewrites_llm_ping_marker_to_discord_mention(
@@ -583,6 +621,27 @@ class TestIdentityWritePath:
         )
         assert looked is not None
         assert looked.role == "assistant"
+        # Default is non-threaded; reply_to_message_id only persists
+        # when the LLM opted into threading via ``[↩]``.
+        assert looked.reply_to_message_id is None
+
+    @pytest.mark.asyncio
+    async def test_assistant_turn_records_thread_target_when_threaded(
+        self, tmp_path: Path
+    ) -> None:
+        """When the LLM threads, the assistant turn records the target id."""
+        llm = _ScriptedLLM(deltas=["[↩] yep"])
+        send = _CapturingSend(returned_id="bot-msg-67890")
+        responder, _, store = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event_full(message_id="user-msg-1"), bus)
+        await bus.shutdown()
+
+        looked = store.lookup_turn_by_platform_message_id(
+            familiar_id="fam", platform_message_id="bot-msg-67890"
+        )
+        assert looked is not None
         assert looked.reply_to_message_id == "user-msg-1"
 
     @pytest.mark.asyncio

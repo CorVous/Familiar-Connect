@@ -30,6 +30,27 @@ from familiar_connect.silence import SilentDetector
 # inbound ``<@USER_ID>`` mentions into.
 _PING_MARKER_RE = re.compile(r"\[@([^\]\n]+)\]")
 
+# Thread-reply marker. Either ``[↩]`` (matches the inbound reply
+# glyph the read path uses) or ``[reply]`` for tokenizer safety.
+# Presence anywhere in the output → thread to the triggering
+# message; the marker is stripped before sending.
+_THREAD_MARKER_RE = re.compile(r"\[(?:↩|reply)\]")
+
+# Short addendum to the system prompt explaining the two output
+# controls. Costs ~4 lines; doesn't enumerate per-channel
+# participants — the LLM grounds names in recent history, the
+# resolver attempts a match against active speakers at send time.
+_BOT_OUTPUT_INSTRUCTIONS = (
+    "## Output controls\n\n"
+    "- Ping a user by writing `[@DisplayName]` using a name that "
+    "appears in recent messages. Unrecognised names render as "
+    "plain text without pinging.\n"
+    "- Optionally prefix your message with `[↩]` to thread it as "
+    "a reply to the message you're responding to. Useful when the "
+    "channel is busy and it isn't obvious who you're addressing. "
+    "Without `[↩]`, your message posts normally."
+)
+
 
 def _rewrite_pings(
     content: str,
@@ -62,6 +83,21 @@ def _rewrite_pings(
 
     rewritten = _PING_MARKER_RE.sub(_sub, content)
     return rewritten, tuple(resolved)
+
+
+def _consume_thread_marker(content: str) -> tuple[str, bool]:
+    """Strip ``[↩]`` / ``[reply]`` markers; return ``(stripped, wanted_thread)``.
+
+    Any occurrence anywhere in the output triggers threading — being
+    lenient about placement, since models are unreliable about exact
+    formatting. Multiple markers collapse to a single signal.
+    Surrounding whitespace from a leading marker is cleaned up so the
+    posted message doesn't start with a stray newline.
+    """
+    stripped, n = _THREAD_MARKER_RE.subn("", content)
+    if n == 0:
+        return content, False
+    return stripped.lstrip(), True
 
 
 if TYPE_CHECKING:
@@ -179,11 +215,11 @@ class TextResponder:
         # seed retrieval before assembly so RagContextLayer sees the cue
         self._assembler.set_rag_cue(content)
 
-        # Build ping vocabulary for this channel/guild before assembly.
-        # ``label_to_key`` is consumed *after* the LLM responds to
-        # rewrite ``[@X]`` markers; the addendum string is appended to
-        # the system prompt so the LLM knows which names are routable.
-        ping_addendum, label_to_key = self._build_ping_vocabulary(
+        # Build the label→canonical_key map for resolving any
+        # ``[@X]`` markers the LLM emits. Not surfaced in the prompt;
+        # the LLM grounds on names visible in recent history, the
+        # resolver tries to match against active speakers at send time.
+        label_to_key = self._build_ping_resolver(
             channel_id=channel_id, guild_id=guild_id
         )
 
@@ -191,7 +227,6 @@ class TextResponder:
             scope,
             channel_id=channel_id,
             guild_id=guild_id,
-            ping_addendum=ping_addendum,
         )
         if reply is None or scope.is_cancelled():
             return
@@ -207,11 +242,16 @@ class TextResponder:
             )
             return
 
-        rewritten, mention_user_ids = _rewrite_pings(reply, label_to_key)
+        # Threading is opt-in via an LLM-emitted marker. Strip the
+        # marker and only pass the inbound message_id to ``send_text``
+        # when the model deliberately asked to thread.
+        unthreaded, wants_thread = _consume_thread_marker(reply)
+        rewritten, mention_user_ids = _rewrite_pings(unthreaded, label_to_key)
+        thread_target = message_id if wants_thread else None
 
         try:
             sent_message_id = await self._send_text(
-                channel_id, rewritten, message_id, mention_user_ids
+                channel_id, rewritten, thread_target, mention_user_ids
             )
         except Exception as exc:  # noqa: BLE001 — surface but don't crash loop
             _logger.warning(
@@ -222,12 +262,17 @@ class TextResponder:
             f"{ls.tag('💬 Text', ls.G)} "
             f"{ls.kv('turn', scope.turn_id, vc=ls.LC)} "
             f"{ls.kv('chars', str(len(rewritten)), vc=ls.LW)} "
+            f"{ls.kv('thread', '1' if wants_thread else '0', vc=ls.LB)} "
             f"{ls.kv('text', ls.trunc(rewritten, 200), vc=ls.LW)}"
         )
 
         if scope.is_cancelled():
             return
 
+        # Persist what the bot actually sent, including whether we
+        # threaded. ``reply_to_message_id`` matches what we passed to
+        # ``send_text`` — that's the audit trail for "did the bot
+        # thread this reply?".
         self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
@@ -236,23 +281,25 @@ class TextResponder:
             author=None,
             guild_id=guild_id,
             platform_message_id=sent_message_id,
-            reply_to_message_id=message_id,
+            reply_to_message_id=thread_target,
         )
         self._router.end_turn(scope)
 
-    def _build_ping_vocabulary(
+    def _build_ping_resolver(
         self,
         *,
         channel_id: int,
         guild_id: int | None,
-    ) -> tuple[str, dict[str, str]]:
-        """Return ``(system_prompt_addendum, label→canonical_key map)``.
+    ) -> dict[str, str]:
+        """Return the ``label → canonical_key`` map used to resolve pings.
 
         Pulls recent distinct authors and resolves their labels via
-        :meth:`HistoryStore.resolve_label` so the names match what
-        ``RecentHistoryLayer`` puts in front of the model. Ambiguous
-        labels (two participants with the same nick) keep first-write;
-        a warning is logged so the operator can investigate.
+        :meth:`HistoryStore.resolve_label` so the keys match the names
+        ``RecentHistoryLayer`` puts in front of the model. The map
+        is *not* surfaced in the prompt — the LLM grounds on names in
+        recent history, the resolver tries to match what it emits at
+        send time. Ambiguous labels (two participants with the same
+        nick) keep first-write; a warning is logged.
         """
         authors = self._history.recent_distinct_authors(
             familiar_id=self._familiar_id,
@@ -260,7 +307,6 @@ class TextResponder:
             limit=20,
         )
         label_to_key: dict[str, str] = {}
-        lines: list[str] = []
         for a in authors:
             label = self._history.resolve_label(
                 canonical_key=a.canonical_key,
@@ -277,17 +323,7 @@ class TextResponder:
                     )
                 continue
             label_to_key[label] = a.canonical_key
-            lines.append(f"- [@{label}] = {a.canonical_key}")
-        if not lines:
-            return "", {}
-        addendum = (
-            "## Ping vocabulary\n\n"
-            "To deliberately ping someone, write `[@DisplayName]` "
-            "where DisplayName is one of the names below. The bot "
-            "rewrites it to a Discord mention. Names not on this "
-            "list render as plain text without pinging.\n\n" + "\n".join(lines)
-        )
-        return addendum, label_to_key
+        return label_to_key
 
     async def _stream_reply(
         self,
@@ -295,7 +331,6 @@ class TextResponder:
         *,
         channel_id: int,
         guild_id: int | None = None,
-        ping_addendum: str = "",
     ) -> str | None:
         ctx = AssemblyContext(
             familiar_id=self._familiar_id,
@@ -304,12 +339,15 @@ class TextResponder:
             guild_id=guild_id,
         )
         prompt = await self._assembler.assemble(ctx)
-        system = prompt.system_prompt
-        if ping_addendum:
-            system = f"{system}\n\n{ping_addendum}" if system else ping_addendum
-        messages: list[Message] = []
-        if system:
-            messages.append(Message(role="system", content=system))
+        # Always append the short output-controls instruction so the
+        # model knows ``[@X]`` and ``[↩]`` are routable. Costs ~4
+        # lines of context, no per-channel enumeration.
+        system = (
+            f"{prompt.system_prompt}\n\n{_BOT_OUTPUT_INSTRUCTIONS}"
+            if prompt.system_prompt
+            else _BOT_OUTPUT_INSTRUCTIONS
+        )
+        messages: list[Message] = [Message(role="system", content=system)]
         messages.extend(prompt.recent_history)
 
         accumulated: list[str] = []

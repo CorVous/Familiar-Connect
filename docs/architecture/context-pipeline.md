@@ -308,14 +308,18 @@ O(1).
   window, the child carries the full parent content (capped at
   ~400 chars) so the reply stays intelligible without the reader
   having to scroll. Unknown parent ids drop the marker silently.
-- **Write.** `bot.send_text` accepts an optional
+- **Write — opt-in.** `bot.send_text` accepts an optional
   `reply_to_message_id`; when set, the post threads via
   `discord.MessageReference(message_id=…, fail_if_not_exists=False)`.
-  `TextResponder` always passes the inbound message id — bot
-  replies thread by default, which is what helps in chaotic
-  multi-speaker channels. The returned platform message id is then
-  stored on the assistant turn so future user replies *to* the bot
-  can be linked back.
+  Threading is *not* the default: a normal reply just posts.
+  `TextResponder` only threads when the LLM deliberately asks for
+  it by emitting a `[↩]` (or `[reply]`) marker anywhere in its
+  output. The marker is stripped before sending; presence flips
+  the `reply_to_message_id` argument from `None` to the inbound
+  message id. This is the abilility the bot reaches for in busy
+  channels where it isn't obvious which message it's responding
+  to. The returned platform message id is stored on the assistant
+  turn so future user replies *to* the bot can be linked back.
 
 ### Mentions (read + write)
 
@@ -332,27 +336,35 @@ symmetric with the form the LLM is asked to *emit* on output.
 
 ### Bot-emitted pings
 
-The system prompt gains a "Ping vocabulary" block when the channel
-has known participants:
+A short, channel-agnostic addendum is appended to the system prompt
+on every text reply:
 
 ```
-## Ping vocabulary
+## Output controls
 
-To deliberately ping someone, write `[@DisplayName]` …
-
-- [@Aria] = discord:111
-- [@Bob] = discord:222
+- Ping a user by writing `[@DisplayName]` using a name that
+  appears in recent messages. Unrecognised names render as
+  plain text without pinging.
+- Optionally prefix your message with `[↩]` to thread it as a
+  reply to the message you're responding to. …
 ```
 
-The LLM emits `[@DisplayName]` whenever it wants to draw someone's
-attention. `TextResponder._rewrite_pings` resolves each marker
-against the per-channel participant list and rewrites known names
-to Discord-native `<@user_id>`. Unknown markers degrade to plain
+There is **no per-channel enumeration** of pingable users. The LLM
+grounds on the names already visible in recent history (where
+`<@USER_ID>` markers were rewritten to `[@DisplayName]` on intake);
+the responder then tries to resolve whatever the model emits.
+Resolution uses a `label → canonical_key` map built from
+`recent_distinct_authors` + `resolve_label` — enough to pin the
+right user when guild nicknames keep names unambiguous, and to
+silently drop anything else.
+
+Known markers become `<@user_id>` and contribute to
+`AllowedMentions(users=…)`. Unknown markers degrade to plain
 `@DisplayName` (no ping). `send_text` always passes
 `discord.AllowedMentions(everyone=False, roles=False, users=[…])`
 restricted to the resolved ids — even if the LLM smuggles a raw
-`<@123>` for someone outside the participant list, Discord will
-not deliver the notification.
+`<@123>` for someone outside the active set, Discord will not
+deliver the notification.
 
 Ambiguous labels (two participants sharing a display name in the
 same channel) keep first-write and log a warning. Guild nicknames
