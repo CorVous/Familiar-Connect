@@ -231,6 +231,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         history_store=familiar.history_store,
         router=familiar.router,
         familiar_id=familiar.id,
+        member_resolver=handle.resolve_member,
     )
     text_responder = TextResponder(
         assembler=assembler,

@@ -80,7 +80,9 @@ class VoiceSource:
             turn_id = f"voice-{uuid4().hex[:12]}"
             self._turn_ids[user_id] = turn_id
             await self._publish(
-                TOPIC_VOICE_ACTIVITY_START, turn_id=turn_id, payload=None
+                TOPIC_VOICE_ACTIVITY_START,
+                turn_id=turn_id,
+                payload={"user_id": user_id},
             )
 
         if result.is_final:
@@ -96,7 +98,11 @@ class VoiceSource:
                     "user_id": result.user_id,
                 },
             )
-            await self._publish(TOPIC_VOICE_ACTIVITY_END, turn_id=turn_id, payload=None)
+            await self._publish(
+                TOPIC_VOICE_ACTIVITY_END,
+                turn_id=turn_id,
+                payload={"user_id": user_id},
+            )
             self._turn_ids.pop(user_id, None)
         else:
             await self._publish(

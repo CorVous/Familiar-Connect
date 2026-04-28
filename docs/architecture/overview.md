@@ -96,12 +96,22 @@ voice.transcript.final → if scope.turn_id == event.turn_id:
                            router.end_turn(scope)
 ```
 
-`voice.transcript.final` is spawned as a per-session `asyncio.Task`, so the
+`voice.transcript.final` is spawned as a per-(session, user) `asyncio.Task`, so the
 bus dispatcher returns to the subscription loop immediately. A subsequent
 `voice.activity.start` runs `prior.cancel()` / `TTSPlayer.stop()` while the
 prior turn is still parked at an LLM or TTS await point — without the spawn,
 the dispatcher would sit inside the prior `handle()` and the cancel signal
 would arrive only after the old reply had played in full.
+
+Scope keys are per `(channel_id, user_id)`. Discord delivers per-SSRC audio
+so every speaker fires their own `activity.start`; channel-level scoping
+would let any speaker barge any other speaker's in-flight reply, which is
+not desired. Same-speaker self-barge still works as expected.
+
+Voice user turns are appended to history with the speaker's `Author`
+resolved through `BotHandle.resolve_member(channel_id, user_id)`. A cache
+miss (member left the guild, etc.) records the turn anonymously rather
+than blocking the audio path on a Discord fetch.
 
 Barge-in latency budget: 200 ms from a new `voice.activity.start` to TTS
 playback halted. Verified end-to-end (bus subscribe pattern) by

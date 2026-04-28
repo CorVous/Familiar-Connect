@@ -51,6 +51,11 @@ if TYPE_CHECKING:
         Awaitable[str | None],
     ]
 
+    # ``(channel_id, user_id) -> Author | None``. Resolves Discord
+    # member identity for voice turns so they carry the same author
+    # attribution as text turns.
+    ResolveMember = Callable[[int, int], "Author | None"]
+
 _logger = logging.getLogger(__name__)
 
 
@@ -88,12 +93,16 @@ class BotHandle:
     caller can record it for future reply lookups; returns ``None``
     on send failure. ``voice_runtime`` is keyed by voice-channel id;
     populated by ``/subscribe-voice`` and consumed by the active TTS
-    player to find the live voice client.
+    player to find the live voice client. ``resolve_member`` looks
+    up an ``Author`` for ``(channel_id, user_id)`` and is consumed by
+    :class:`VoiceResponder` so voice user turns get the same
+    speaker-attributed prefixes as text turns.
     """
 
     bot: discord.Bot
     send_text: SendText
     voice_runtime: dict[int, VoiceRuntime] = field(default_factory=dict)
+    resolve_member: ResolveMember | None = None
 
 
 async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noqa: RUF029 — pycord requires coroutine fn even when there's nothing to await
@@ -361,7 +370,24 @@ def create_bot(familiar: Familiar) -> BotHandle:
             return None
         return str(sent.id) if sent is not None else None
 
-    handle = BotHandle(bot=bot, send_text=send_text)
+    def resolve_member(channel_id: int, user_id: int) -> Author | None:
+        """Look up Discord member for a voice user_id; return Author.
+
+        Resolves via the cached channel → guild → member chain. Returns
+        ``None`` on cache miss; the caller treats that as an anonymous
+        voice turn rather than blocking on a Discord fetch (the audio
+        path can't tolerate a round-trip).
+        """
+        channel = bot.get_channel(channel_id)
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return None
+        member = guild.get_member(user_id)
+        if member is None:
+            return None
+        return Author.from_discord_member(member)
+
+    handle = BotHandle(bot=bot, send_text=send_text, resolve_member=resolve_member)
 
     text_source = DiscordTextSource(bus=familiar.bus, familiar_id=familiar.id)
     _register_slash_commands(handle, familiar)

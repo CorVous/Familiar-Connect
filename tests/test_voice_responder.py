@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
 from familiar_connect.bus import InProcessEventBus, TurnRouter
@@ -29,6 +29,7 @@ from familiar_connect.context import (
     RecentHistoryLayer,
 )
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors.voice_responder import VoiceResponder
 from familiar_connect.tts_player import MockTTSPlayer
@@ -60,7 +61,11 @@ class _ScriptedLLM(LLMClient):
             yield d
 
 
-def _mk_activity_start(session_id: str = "voice:1", turn_id: str = "t-1") -> Event:
+def _mk_activity_start(
+    session_id: str = "voice:1",
+    turn_id: str = "t-1",
+    user_id: int | None = None,
+) -> Event:
     return Event(
         event_id=f"act-{turn_id}",
         turn_id=turn_id,
@@ -69,7 +74,7 @@ def _mk_activity_start(session_id: str = "voice:1", turn_id: str = "t-1") -> Eve
         topic=TOPIC_VOICE_ACTIVITY_START,
         timestamp=datetime.now(tz=UTC),
         sequence_number=1,
-        payload=None,
+        payload={"user_id": user_id} if user_id is not None else None,
     )
 
 
@@ -78,6 +83,7 @@ def _mk_final(
     session_id: str = "voice:1",
     turn_id: str = "t-1",
     seq: int = 2,
+    user_id: int | None = None,
 ) -> Event:
     return Event(
         event_id=f"final-{turn_id}",
@@ -93,6 +99,7 @@ def _mk_final(
             "start": 0.0,
             "end": 1.0,
             "speaker": None,
+            "user_id": user_id,
         },
     )
 
@@ -104,6 +111,7 @@ def _make_responder(
     tmp_path: Path,
     router: TurnRouter | None = None,
     store: HistoryStore | None = None,
+    member_resolver: Callable[[int, int], Author | None] | None = None,
 ) -> tuple[VoiceResponder, TurnRouter, HistoryStore]:
     core = tmp_path / "core.md"
     core.write_text("You are a familiar.\n")
@@ -122,6 +130,7 @@ def _make_responder(
         history_store=store,
         router=router,
         familiar_id="fam",
+        member_resolver=member_resolver,
     )
     return responder, router, store
 
@@ -320,6 +329,169 @@ class TestBargeIn:
         assert player.calls
         assert player.calls[0][1] is True  # was cancelled
         await bus.shutdown()
+
+
+class TestPerUserBargeIn:
+    """Per-user scope: cross-user activity.start must NOT cancel a reply.
+
+    Discord delivers per-SSRC audio so every speaker fires their own
+    activity.start. Channel-level scope keys cause every user's start
+    to barge every other user's in-flight reply, so the bot rarely
+    gets to finish speaking. Scope must be (channel, user_id).
+    """
+
+    @pytest.mark.asyncio
+    async def test_cross_user_start_does_not_cancel(self, tmp_path: Path) -> None:
+        """Alice starts → Bob starts → Alice's scope still active."""
+        llm = _ScriptedLLM(deltas=["x"])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, router, _ = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+
+        await responder.handle(_mk_activity_start(turn_id="t-alice", user_id=101), bus)
+        await responder.handle(_mk_activity_start(turn_id="t-bob", user_id=202), bus)
+
+        alice = router.active_scope("voice:1:user:101")
+        bob = router.active_scope("voice:1:user:202")
+        assert alice is not None
+        assert bob is not None
+        assert alice.is_cancelled() is False
+        assert alice.turn_id == "t-alice"
+        assert bob.turn_id == "t-bob"
+        await bus.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_same_user_start_still_cancels(self, tmp_path: Path) -> None:
+        """Same speaker barging themselves still wins — preserves self-barge."""
+        llm = _ScriptedLLM(deltas=["x"])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, router, _ = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+
+        await responder.handle(_mk_activity_start(turn_id="t-1", user_id=101), bus)
+        first = router.active_scope("voice:1:user:101")
+        assert first is not None
+
+        await responder.handle(_mk_activity_start(turn_id="t-2", user_id=101), bus)
+        second = router.active_scope("voice:1:user:101")
+        assert second is not None
+        assert second.turn_id == "t-2"
+        assert first.is_cancelled() is True
+        await bus.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_cross_user_does_not_cancel_in_flight_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """Reply to Alice keeps streaming when Bob starts speaking."""
+        llm = _ScriptedLLM(deltas=[f"d{i} " for i in range(5)], delay_ms=30)
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _router, _ = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+
+        await responder.handle(_mk_activity_start(turn_id="t-alice", user_id=101), bus)
+
+        async def bob_speaks() -> None:
+            await asyncio.sleep(0.05)
+            await responder.handle(
+                _mk_activity_start(turn_id="t-bob", user_id=202), bus
+            )
+
+        task_reply = asyncio.create_task(
+            responder.handle(_mk_final("hi", turn_id="t-alice", user_id=101), bus)
+        )
+        task_bob = asyncio.create_task(bob_speaks())
+        await asyncio.gather(task_reply, task_bob)
+        await responder.wait_until_idle()
+
+        # Alice's reply should have been spoken in full despite Bob talking.
+        full = "".join(f"d{i} " for i in range(5))
+        assert player.calls
+        spoken, cancelled = player.calls[0]
+        assert cancelled is False
+        assert spoken == full
+        await bus.shutdown()
+
+
+class TestVoiceAuthorResolution:
+    """Voice user turns must resolve user_id → Author for prompt attribution.
+
+    Without this, voice turns store author=None and prompts show plain
+    ``[user]`` instead of ``[HH:MM Cor Vous]`` — the model can't tell
+    speakers apart.
+    """
+
+    @pytest.mark.asyncio
+    async def test_member_resolver_threads_author_into_history(
+        self, tmp_path: Path
+    ) -> None:
+        llm = _ScriptedLLM(deltas=["ack"])
+        player = MockTTSPlayer(ms_per_word=5)
+
+        def resolver(channel_id: int, user_id: int) -> Author | None:
+            assert channel_id == 1
+            assert user_id == 101
+            return Author(
+                platform="discord",
+                user_id="101",
+                username="cassidy",
+                display_name="Cor Vous",
+            )
+
+        responder, _router, store = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path, member_resolver=resolver
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1", user_id=101), bus)
+        await responder.handle(
+            _mk_final("hello there", turn_id="t-1", user_id=101), bus
+        )
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        turns = store.recent(familiar_id="fam", channel_id=1, limit=10)
+        user_turns = [t for t in turns if t.role == "user"]
+        assert user_turns, "user voice turn was not recorded"
+        author = user_turns[-1].author
+        assert author is not None
+        assert author.display_name == "Cor Vous"
+        assert author.user_id == "101"
+
+    @pytest.mark.asyncio
+    async def test_resolver_miss_falls_back_to_anon_user_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Resolver returning None must not crash; user turn still recorded."""
+        llm = _ScriptedLLM(deltas=["ack"])
+        player = MockTTSPlayer(ms_per_word=5)
+
+        def resolver(channel_id: int, user_id: int) -> Author | None:  # noqa: ARG001
+            return None
+
+        responder, _router, store = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path, member_resolver=resolver
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1", user_id=101), bus)
+        await responder.handle(
+            _mk_final("hello there", turn_id="t-1", user_id=101), bus
+        )
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        turns = store.recent(familiar_id="fam", channel_id=1, limit=10)
+        assert any("hello there" in t.content for t in turns)
 
 
 class TestDispatchLoop:

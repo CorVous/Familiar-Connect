@@ -27,13 +27,21 @@ from familiar_connect.llm import Message
 from familiar_connect.silence import SilentDetector
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from familiar_connect.bus.envelope import Event, TurnScope
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.bus.router import TurnRouter
     from familiar_connect.context.assembler import Assembler
     from familiar_connect.history.store import HistoryStore
+    from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
     from familiar_connect.tts_player.protocol import TTSPlayer
+
+    # ``(channel_id, user_id) -> Author | None``. Wired from the bot to
+    # resolve Discord members live; ``None`` when the member can't be
+    # resolved (left guild, cache miss, etc.).
+    MemberResolver = Callable[[int, int], "Author | None"]
 
 _logger = logging.getLogger("familiar_connect.processors.voice_responder")
 
@@ -56,6 +64,7 @@ class VoiceResponder:
         history_store: HistoryStore,
         router: TurnRouter,
         familiar_id: str,
+        member_resolver: MemberResolver | None = None,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -63,10 +72,28 @@ class VoiceResponder:
         self._history = history_store
         self._router = router
         self._familiar_id = familiar_id
-        # one in-flight final-handling task per voice session; replaced
-        # when a newer final arrives. soft-cancel via scope, plus pop
-        # from done-callback so finished tasks don't accumulate.
+        self._member_resolver = member_resolver
+        # one in-flight final-handling task per (session, user); replaced
+        # when a newer final from the same speaker arrives. cross-user
+        # finals coexist — only the TTS player serializes playback.
         self._inflight: dict[str, asyncio.Task[None]] = {}
+
+    @staticmethod
+    def _user_id_from_event(event: Event) -> int | None:
+        """Extract Discord user_id from an event payload, if present."""
+        if not isinstance(event.payload, dict):
+            return None
+        raw = event.payload.get("user_id")
+        if isinstance(raw, int):
+            return raw
+        return None
+
+    @staticmethod
+    def _scope_key(session_id: str, user_id: int | None) -> str:
+        """Per-(session, user) key. Falls back to channel-level for legacy events."""
+        if user_id is None:
+            return session_id
+        return f"{session_id}:user:{user_id}"
 
     async def handle(self, event: Event, bus: EventBus) -> None:  # noqa: ARG002
         if event.topic == TOPIC_VOICE_ACTIVITY_START:
@@ -92,12 +119,14 @@ class VoiceResponder:
     # ------------------------------------------------------------------
 
     def _on_activity_start(self, event: Event) -> None:
-        prior = self._router.active_scope(event.session_id)
-        self._router.begin_turn(session_id=event.session_id, turn_id=event.turn_id)
+        user_id = self._user_id_from_event(event)
+        scope_key = self._scope_key(event.session_id, user_id)
+        prior = self._router.active_scope(scope_key)
+        self._router.begin_turn(session_id=scope_key, turn_id=event.turn_id)
         # Tell the current player to flush whatever it's speaking so
-        # the cut-point is immediate. The player is stateless across
-        # turns, so calling stop() is safe even with no speech in
-        # flight.
+        # the cut-point is immediate, but only when the *same* speaker
+        # barges themselves. Cross-user activity must not interrupt the
+        # bot's reply to a different user.
         if prior is not None:
             # fire-and-forget: tts.stop is expected to be cheap
             asyncio.create_task(  # noqa: RUF006 — best-effort flush
@@ -110,7 +139,7 @@ class VoiceResponder:
     # ------------------------------------------------------------------
 
     def _spawn_final(self, event: Event) -> None:
-        """Run ``_on_final`` as a per-session task.
+        """Run ``_on_final`` as a per-(session, user) task.
 
         Decouples ingestion from processing: the bus dispatcher returns
         immediately after handing off, so a fresh ``activity.start``
@@ -119,26 +148,27 @@ class VoiceResponder:
         soft scope-cancel never fires until the prior reply has fully
         played, and the user hears it lag behind.
         """
-        session_id = event.session_id
-        prior_task = self._inflight.get(session_id)
+        user_id = self._user_id_from_event(event)
+        scope_key = self._scope_key(event.session_id, user_id)
+        prior_task = self._inflight.get(scope_key)
         if prior_task is not None and not prior_task.done():
-            # A newer final without an intervening activity.start is
-            # unusual but defendable: cancel the prior so we don't
-            # double-speak. Soft cancel via the scope already happened
-            # if begin_turn ran; this is a hard fallback.
+            # A newer final from the same speaker without an intervening
+            # activity.start is unusual but defendable: cancel the prior
+            # so we don't double-speak. Cross-user finals don't collide
+            # because they live under different scope keys.
             prior_task.cancel()
         task = asyncio.create_task(
             self._run_final(event),
             name=f"voice-final-{event.turn_id}",
         )
-        self._inflight[session_id] = task
-        task.add_done_callback(lambda t, sid=session_id: self._on_final_done(sid, t))
+        self._inflight[scope_key] = task
+        task.add_done_callback(lambda t, sid=scope_key: self._on_final_done(sid, t))
 
-    def _on_final_done(self, session_id: str, task: asyncio.Task[None]) -> None:
+    def _on_final_done(self, scope_key: str, task: asyncio.Task[None]) -> None:
         # Only clear the slot if we still own it — a newer turn may
         # have already replaced our entry.
-        if self._inflight.get(session_id) is task:
-            self._inflight.pop(session_id, None)
+        if self._inflight.get(scope_key) is task:
+            self._inflight.pop(scope_key, None)
 
     async def _run_final(self, event: Event) -> None:
         try:
@@ -152,7 +182,9 @@ class VoiceResponder:
     # ------------------------------------------------------------------
 
     async def _on_final(self, event: Event) -> None:
-        scope = self._router.active_scope(event.session_id)
+        user_id = self._user_id_from_event(event)
+        scope_key = self._scope_key(event.session_id, user_id)
+        scope = self._router.active_scope(scope_key)
         if scope is None or scope.turn_id != event.turn_id:
             # stale final — a newer utterance already started
             return
@@ -168,6 +200,8 @@ class VoiceResponder:
         if not text:
             return
 
+        author = self._resolve_author(channel_id=channel_id, user_id=user_id)
+
         # Cold-cache signals — instrumentation only (no action yet).
         # Runs before the user turn is appended so ``prev_turn_at``
         # reflects the real gap.
@@ -181,7 +215,7 @@ class VoiceResponder:
             channel_id=channel_id,
             role="user",
             content=text,
-            author=None,
+            author=author,
         )
 
         # Seed retrieval cue for RagContextLayer (if wired).
@@ -205,6 +239,19 @@ class VoiceResponder:
             author=None,
         )
         self._router.end_turn(scope)
+
+    def _resolve_author(self, *, channel_id: int, user_id: int | None) -> Author | None:
+        """Look up Discord member; swallow resolver errors as anon turn."""
+        if user_id is None or self._member_resolver is None:
+            return None
+        try:
+            return self._member_resolver(channel_id, user_id)
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug(
+                f"{ls.tag('Voice', ls.Y)} "
+                f"{ls.kv('member_resolve_error', repr(exc), vc=ls.Y)}"
+            )
+            return None
 
     async def _stream_reply(self, scope: TurnScope, channel_id: int) -> str | None:
         ctx = AssemblyContext(
