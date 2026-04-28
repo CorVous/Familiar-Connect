@@ -96,13 +96,20 @@ class BotHandle:
     player to find the live voice client. ``resolve_member`` looks
     up an ``Author`` for ``(channel_id, user_id)`` and is consumed by
     :class:`VoiceResponder` so voice user turns get the same
-    speaker-attributed prefixes as text turns.
+    speaker-attributed prefixes as text turns. ``voice_members``
+    is the side cache for voice-only members — without the privileged
+    ``members`` intent ``guild.get_member()`` only knows users it has
+    seen via other events (text messages, voice state changes), so
+    voice-only joiners stay invisible. Populated by voice-state
+    events and a background ``guild.fetch_member()`` triggered on
+    first audio per user_id.
     """
 
     bot: discord.Bot
     send_text: SendText
     voice_runtime: dict[int, VoiceRuntime] = field(default_factory=dict)
     resolve_member: ResolveMember | None = None
+    voice_members: dict[int, Author] = field(default_factory=dict)
 
 
 async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noqa: RUF029 — pycord requires coroutine fn even when there's nothing to await
@@ -113,6 +120,36 @@ async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noq
     requires a coroutine.
     """
     del sink, args
+
+
+async def _prefetch_voice_member(
+    *, handle: BotHandle, channel_id: int, user_id: int
+) -> None:
+    """Populate ``handle.voice_members[user_id]``; safe to fire repeatedly.
+
+    Order: cache → ``guild.get_member`` → ``guild.fetch_member`` (REST).
+    Each step bails on hit. Errors are swallowed — a missing voice
+    name is recoverable; a crashing prefetch task isn't.
+    """
+    if user_id in handle.voice_members:
+        return
+    channel = handle.bot.get_channel(channel_id)
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        return
+    try:
+        member = guild.get_member(user_id)
+        if member is None:
+            member = await guild.fetch_member(user_id)
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug(
+            f"{ls.tag('🎙️  Voice', ls.Y)} "
+            f"{ls.kv('member_prefetch_error', repr(exc), vc=ls.Y)}"
+        )
+        return
+    if member is None:
+        return
+    handle.voice_members[user_id] = Author.from_discord_member(member)
 
 
 async def _start_voice_intake(  # noqa: RUF029 — called from async slash-command handler
@@ -177,6 +214,17 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             _fanin(user_id, per_user_q),
             name=f"voice-fanin-{channel_id}-{user_id}",
         )
+        # Warm the voice-member cache. Voice-only users who haven't sent
+        # text aren't in ``guild._members`` (no privileged ``members``
+        # intent), so the resolver would miss them and the bot would
+        # log voice turns anonymously. Fire-and-forget — fetch races
+        # with the user's first utterance and almost always wins.
+        asyncio.create_task(  # noqa: RUF006 — best-effort cache warm
+            _prefetch_voice_member(
+                handle=handle, channel_id=channel_id, user_id=user_id
+            ),
+            name=f"voice-prefetch-{channel_id}-{user_id}",
+        )
         _logger.info(
             f"{ls.tag('🎙️  Voice', ls.G)} "
             f"{ls.kv('user', str(user_id), vc=ls.LC)} "
@@ -232,12 +280,17 @@ async def _stop_voice_intake(
         await rt.pump_task
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await rt.source_task
-    for t in rt.fanin_tasks.values():
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await t
-    for clone in rt.transcribers.values():
-        with contextlib.suppress(Exception):
-            await clone.stop()
+    if rt.fanin_tasks:
+        await asyncio.gather(*rt.fanin_tasks.values(), return_exceptions=True)
+    # Per-user transcriber teardown in parallel — each WS close is
+    # independent. Sequential awaits would N-times the unsubscribe
+    # latency and run the slash-command handler past Discord's 3 s
+    # interaction-token deadline.
+    if rt.transcribers:
+        await asyncio.gather(
+            *(clone.stop() for clone in rt.transcribers.values()),
+            return_exceptions=True,
+        )
     _logger.info(
         f"{ls.tag('🎙️  Voice', ls.Y)} "
         f"{ls.kv('intake', 'stopped', vc=ls.LY)} "
@@ -370,14 +423,20 @@ def create_bot(familiar: Familiar) -> BotHandle:
             return None
         return str(sent.id) if sent is not None else None
 
+    handle = BotHandle(bot=bot, send_text=send_text)
+
     def resolve_member(channel_id: int, user_id: int) -> Author | None:
         """Look up Discord member for a voice user_id; return Author.
 
-        Resolves via the cached channel → guild → member chain. Returns
-        ``None`` on cache miss; the caller treats that as an anonymous
-        voice turn rather than blocking on a Discord fetch (the audio
-        path can't tolerate a round-trip).
+        Order: voice-member side cache → ``guild.get_member`` (cache).
+        Returns ``None`` on miss; the caller treats that as an anonymous
+        voice turn rather than blocking on a Discord fetch — the audio
+        path can't tolerate REST round-trips. Prefetch warms the cache
+        in the background per ``_prefetch_voice_member``.
         """
+        cached = handle.voice_members.get(user_id)
+        if cached is not None:
+            return cached
         channel = bot.get_channel(channel_id)
         guild = getattr(channel, "guild", None)
         if guild is None:
@@ -385,13 +444,15 @@ def create_bot(familiar: Familiar) -> BotHandle:
         member = guild.get_member(user_id)
         if member is None:
             return None
-        return Author.from_discord_member(member)
+        author = Author.from_discord_member(member)
+        handle.voice_members[user_id] = author
+        return author
 
-    handle = BotHandle(bot=bot, send_text=send_text, resolve_member=resolve_member)
+    handle.resolve_member = resolve_member
 
     text_source = DiscordTextSource(bus=familiar.bus, familiar_id=familiar.id)
     _register_slash_commands(handle, familiar)
-    _register_events(bot, familiar, text_source)
+    _register_events(bot, familiar, text_source, handle)
 
     return handle
 
@@ -493,6 +554,13 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             await ctx.respond("Not in a voice channel here.", ephemeral=True)
             return
 
+        # Defer immediately — Discord's interaction token expires after
+        # 3 s. With per-user transcribers each having their own WS,
+        # teardown easily exceeds that. defer() converts the response
+        # to "thinking…"; the followup below replaces it.
+        with contextlib.suppress(discord.DiscordException):
+            await ctx.defer(ephemeral=True)
+
         await _stop_voice_intake(
             handle=handle,
             familiar=familiar,
@@ -508,7 +576,8 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             channel_id=sub.channel_id,
             kind=SubscriptionKind.voice,
         )
-        await ctx.respond("Left voice channel.", ephemeral=True)
+        with contextlib.suppress(discord.DiscordException):
+            await ctx.followup.send("Left voice channel.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +589,7 @@ def _register_events(
     bot: discord.Bot,
     familiar: Familiar,
     text_source: DiscordTextSource,
+    handle: BotHandle,
 ) -> None:
     @bot.event
     async def on_ready() -> None:  # noqa: RUF029 — Discord event handler contract
@@ -584,6 +654,10 @@ def _register_events(
         sub = familiar.subscriptions.voice_in_guild(member.guild.id)
         if sub is None or sub.channel_id != after.channel.id:
             return
+        # Warm the voice-member cache. This is the only reliable place
+        # to learn voice-only members without the privileged ``members``
+        # intent — message events miss anyone who never types.
+        handle.voice_members[member.id] = Author.from_discord_member(member)
         _logger.info(
             f"{ls.tag('🎙️  Voice', ls.G)} "
             f"{ls.kv('member', member.display_name, vc=ls.LC)} "

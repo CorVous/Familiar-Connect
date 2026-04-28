@@ -109,8 +109,15 @@ would let any speaker barge any other speaker's in-flight reply, which is
 not desired. Same-speaker self-barge still works as expected.
 
 Voice user turns are appended to history with the speaker's `Author`
-resolved through `BotHandle.resolve_member(channel_id, user_id)`. A cache
-miss (member left the guild, etc.) records the turn anonymously rather
+resolved through `BotHandle.resolve_member(channel_id, user_id)`. The
+resolver consults a voice-member side cache populated by two sources:
+`on_voice_state_update` events for state changes (join/mute/move) and
+a background `guild.fetch_member()` triggered when the audio pump sees
+a new user_id for the first time. The side cache works around the
+absence of the privileged `members` intent — without it
+`guild.get_member()` only knows users seen through other events
+(messages, voice state changes) and silently returns `None` for
+voice-only joiners. A cache miss records the turn anonymously rather
 than blocking the audio path on a Discord fetch.
 
 Barge-in latency budget: 200 ms from a new `voice.activity.start` to TTS

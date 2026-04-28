@@ -15,13 +15,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from familiar_connect import bot as bot_module
 from familiar_connect.bot import (
     BotHandle,
     VoiceRuntime,
     _on_recording_done,
+    _prefetch_voice_member,
     _start_voice_intake,
     _stop_voice_intake,
+    create_bot,
 )
+from familiar_connect.identity import Author
 from familiar_connect.transcription import TranscriptionResult
 
 
@@ -375,3 +379,132 @@ async def rt_audio_put(
     rt: Any = handle.voice_runtime[channel_id]
     for item in items:
         await rt.audio_queue.put(item)
+
+
+class TestVoiceMemberCache:
+    """Voice-only members aren't in the guild member cache.
+
+    Without the privileged ``members`` intent, ``guild.get_member()``
+    only knows users it has seen via other events (text messages,
+    voice state changes). A voice-only side cache populated from
+    voice state events plus a background ``guild.fetch_member()`` on
+    first audio from a new user_id keeps voice turn attribution
+    working without requiring privileged intents.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resolve_member_consults_voice_cache_first(self) -> None:
+        """Cache hit short-circuits ``guild.get_member`` lookup."""
+        familiar = MagicMock()
+        familiar.id = "fam"
+        familiar.bus = MagicMock()
+        familiar.subscriptions = MagicMock()
+        handle = create_bot(familiar)
+
+        cached = Author(
+            platform="discord",
+            user_id="42",
+            username="vox",
+            display_name="VoxOnly",
+        )
+        handle.voice_members[42] = cached
+
+        assert handle.resolve_member is not None
+        resolved = handle.resolve_member(10, 42)
+        assert resolved is cached
+
+    @pytest.mark.asyncio
+    async def test_pump_schedules_member_prefetch_on_new_user(self) -> None:
+        """First audio from a user_id should fire a background member fetch."""
+        handle = _make_handle()
+        member = MagicMock()
+        member.id = 999
+        member.name = "voxer"
+        member.display_name = "VoxOnly"
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=None)
+        guild.fetch_member = AsyncMock(return_value=member)
+
+        channel = MagicMock()
+        channel.guild = guild
+        handle.bot.get_channel = MagicMock(return_value=channel)  # ty: ignore[invalid-assignment]
+
+        await _prefetch_voice_member(handle=handle, channel_id=10, user_id=999)
+        assert 999 in handle.voice_members
+        assert handle.voice_members[999].display_name == "VoxOnly"
+        guild.fetch_member.assert_awaited_once_with(999)
+
+    @pytest.mark.asyncio
+    async def test_prefetch_skips_when_already_cached(self) -> None:
+        """Repeated prefetch for a known user_id must not re-hit Discord."""
+        handle = _make_handle()
+        handle.voice_members[7] = Author(
+            platform="discord",
+            user_id="7",
+            username="known",
+            display_name="Known",
+        )
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=None)
+        guild.fetch_member = AsyncMock()
+        channel = MagicMock()
+        channel.guild = guild
+        handle.bot.get_channel = MagicMock(return_value=channel)  # ty: ignore[invalid-assignment]
+
+        await _prefetch_voice_member(handle=handle, channel_id=10, user_id=7)
+        guild.fetch_member.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_prefetch_uses_get_member_when_cached_in_guild(self) -> None:
+        """If guild already has the member, no fetch is needed."""
+        handle = _make_handle()
+        member = MagicMock()
+        member.id = 13
+        member.name = "g"
+        member.display_name = "GuildKnown"
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=member)
+        guild.fetch_member = AsyncMock()
+        channel = MagicMock()
+        channel.guild = guild
+        handle.bot.get_channel = MagicMock(return_value=channel)  # ty: ignore[invalid-assignment]
+
+        await _prefetch_voice_member(handle=handle, channel_id=10, user_id=13)
+        assert handle.voice_members[13].display_name == "GuildKnown"
+        guild.fetch_member.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_intake_pump_triggers_prefetch_per_new_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the pump sees a new user_id, prefetch is scheduled."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+
+        prefetched: list[int] = []
+
+        async def fake_prefetch(  # noqa: RUF029 — matches real signature
+            *, handle: BotHandle, channel_id: int, user_id: int
+        ) -> None:
+            del handle, channel_id
+            prefetched.append(user_id)
+
+        monkeypatch.setattr(bot_module, "_prefetch_voice_member", fake_prefetch)
+
+        vc = MagicMock()
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        for _ in range(3):
+            await rt.audio_queue.put((101, b"x"))
+        await rt.audio_queue.put((202, b"y"))
+        await _drain_loop(20)
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        # exactly one prefetch per distinct user_id
+        assert sorted(prefetched) == [101, 202]
