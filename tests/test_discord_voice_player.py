@@ -117,6 +117,23 @@ class TestSpeakSkipPaths:
         vc.play.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_empty_text_skips_synthesize(self) -> None:
+        """Whitespace-only text never hits the TTS provider.
+
+        Cartesia returns HTTP 400 for empty ``transcript``; defend in
+        depth so any caller bug doesn't spam upstream.
+        """
+        tts = _StubTTS(audio=_mono_pcm())
+        vc = _voice_client()
+        player = DiscordVoicePlayer(tts_client=tts, get_voice_client=lambda: vc)
+        scope = TurnScope(turn_id="t", session_id="voice:1", started_at=0.0)
+
+        await player.speak("   \n\t", scope=scope)
+
+        assert tts.calls == []
+        vc.play.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_already_cancelled_scope_short_circuits(self) -> None:
         tts = _StubTTS(audio=_mono_pcm())
         vc = _voice_client()

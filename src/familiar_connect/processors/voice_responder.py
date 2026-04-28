@@ -224,6 +224,17 @@ class VoiceResponder:
         reply = await self._stream_reply(scope, channel_id)
         if reply is None or scope.is_cancelled():
             return
+        # Cartesia rejects empty/whitespace ``transcript`` with HTTP 400.
+        # An empty reply usually means the LLM stream emitted no deltas —
+        # bad model name, content filter, or upstream error frame the
+        # parser silently dropped. Mirrors ``TextResponder``'s guard.
+        if not reply.strip():
+            _logger.warning(
+                f"{ls.tag('Voice', ls.Y)} "
+                f"{ls.kv('skip', 'empty_reply', vc=ls.LY)} "
+                f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+            )
+            return
 
         # Speak — respects scope cancellation via the TTSPlayer contract.
         await self._tts.speak(reply, scope=scope)

@@ -65,6 +65,14 @@ class DiscordVoicePlayer:
     async def speak(self, text: str, *, scope: TurnScope) -> None:
         if scope.is_cancelled():
             return
+        # defense-in-depth: Cartesia 400s on empty/whitespace transcript.
+        if not text.strip():
+            _logger.warning(
+                f"{ls.tag('Player', ls.Y)} "
+                f"{ls.kv('skip', 'empty_text', vc=ls.LY)} "
+                f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+            )
+            return
         try:
             result = await self._tts.synthesize(text)
         except Exception as exc:  # noqa: BLE001 — TTS errors must not crash loop

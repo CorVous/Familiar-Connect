@@ -223,6 +223,31 @@ class TestFinalReply:
         assert any(t.role == "user" and "hi nobody" in t.content for t in turns)
 
     @pytest.mark.asyncio
+    async def test_empty_reply_skips_tts_and_assistant_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Whitespace-only LLM reply must not reach TTS.
+
+        Cartesia rejects empty ``transcript`` with HTTP 400. Mirrors the
+        ``TextResponder`` guard so voice and text behave consistently.
+        """
+        llm = _ScriptedLLM(deltas=["   ", "\n", "\t"])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, store = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+        await responder.handle(_mk_final("hi there", turn_id="t-1"), bus)
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        assert player.calls == []
+        # No assistant turn recorded; user turn still recorded.
+        turns = store.recent(familiar_id="fam", channel_id=1, limit=10)
+        assert all(t.role != "assistant" for t in turns)
+        assert any(t.role == "user" and "hi there" in t.content for t in turns)
+
+    @pytest.mark.asyncio
     async def test_stale_final_ignored(self, tmp_path: Path) -> None:
         """A FINAL whose turn_id mismatches the active scope is dropped."""
         llm = _ScriptedLLM(deltas=["ignored"])
