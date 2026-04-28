@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -81,6 +82,10 @@ class VoiceRuntime:
     source_task: asyncio.Task[None]
     transcribers: dict[int, DeepgramTranscriber] = field(default_factory=dict)
     fanin_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
+    # idle watchdog closes per-user streams after extended silence so
+    # Deepgram doesn't tear them down server-side mid-utterance. Reopened
+    # lazily on next audio chunk for that user.
+    idle_watchdog_task: asyncio.Task[None] | None = None
 
 
 @dataclass
@@ -194,6 +199,9 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     template = familiar.transcriber
     transcribers: dict[int, DeepgramTranscriber] = {}
     fanin_tasks: dict[int, asyncio.Task[None]] = {}
+    # last audio-chunk arrival per user (monotonic seconds). drives the
+    # idle watchdog below; entries removed when the stream is closed.
+    last_audio_time: dict[int, float] = {}
 
     async def _fanin(user_id: int, q: asyncio.Queue[TranscriptionResult]) -> None:
         """Tag each result with ``user_id`` and forward to shared queue."""
@@ -206,6 +214,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         existing = transcribers.get(user_id)
         if existing is not None:
             return existing
+        last_audio_time[user_id] = time.monotonic()
         clone = template.clone()
         per_user_q: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
         await clone.start(per_user_q)
@@ -232,14 +241,65 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         )
         return clone
 
+    async def _close_user_stream(user_id: int, *, reason: str) -> None:
+        """Tear down a per-user transcriber; reopened lazily on next audio."""
+        clone = transcribers.pop(user_id, None)
+        fanin = fanin_tasks.pop(user_id, None)
+        last_audio_time.pop(user_id, None)
+        if fanin is not None:
+            fanin.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await fanin
+        if clone is not None:
+            with contextlib.suppress(Exception):
+                await clone.stop()
+        _logger.info(
+            f"{ls.tag('🎙️  Voice', ls.Y)} "
+            f"{ls.kv('user', str(user_id), vc=ls.LC)} "
+            f"{ls.kv('transcriber', f'closed-{reason}', vc=ls.LY)}"
+        )
+
+    async def _idle_watchdog(idle_close_s: float) -> None:
+        """Pre-empt Deepgram's silence-based session close.
+
+        Per-user streams that go quiet still send KeepAlive every few
+        seconds, but Deepgram closes them anyway after extended silence
+        (observed: clean 1000 close after the user's last real audio,
+        regardless of KeepAlive flow). Closing proactively avoids the
+        reconnect + replay cycle and keeps logs quiet. Stream is
+        reopened on the user's next audio chunk via ``_ensure_transcriber``.
+        """
+        # quarter the idle window so a stale stream is closed within
+        # ~25 % of the threshold; floor keeps CPU negligible without
+        # forcing slow tests to wait a full second per scan.
+        interval = max(idle_close_s / 4.0, 0.01)
+        while True:
+            await asyncio.sleep(interval)
+            now = time.monotonic()
+            stale = [
+                uid
+                for uid, last in list(last_audio_time.items())
+                if now - last > idle_close_s
+            ]
+            for uid in stale:
+                await _close_user_stream(uid, reason="idle")
+
     async def _pump_audio() -> None:
         while True:
             user_id, pcm = await audio_queue.get()
+            last_audio_time[user_id] = time.monotonic()
             clone = await _ensure_transcriber(user_id)
             await clone.send_audio(pcm)
 
     pump_task = asyncio.create_task(_pump_audio(), name=f"voice-pump-{channel_id}")
     source_task = asyncio.create_task(source.run(), name=f"voice-source-{channel_id}")
+    idle_close_s = float(getattr(template, "_IDLE_CLOSE_S", 0.0))
+    watchdog_task: asyncio.Task[None] | None = None
+    if idle_close_s > 0:
+        watchdog_task = asyncio.create_task(
+            _idle_watchdog(idle_close_s),
+            name=f"voice-idle-watchdog-{channel_id}",
+        )
     rt = VoiceRuntime(
         voice_client=voice_client,
         sink=sink,
@@ -249,6 +309,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         source_task=source_task,
         transcribers=transcribers,
         fanin_tasks=fanin_tasks,
+        idle_watchdog_task=watchdog_task,
     )
     handle.voice_runtime[channel_id] = rt
     _logger.info(
@@ -274,12 +335,17 @@ async def _stop_voice_intake(
         rt.voice_client.stop_recording()
     rt.pump_task.cancel()
     rt.source_task.cancel()
+    if rt.idle_watchdog_task is not None:
+        rt.idle_watchdog_task.cancel()
     for t in rt.fanin_tasks.values():
         t.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await rt.pump_task
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await rt.source_task
+    if rt.idle_watchdog_task is not None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await rt.idle_watchdog_task
     if rt.fanin_tasks:
         await asyncio.gather(*rt.fanin_tasks.values(), return_exceptions=True)
     # Per-user transcriber teardown in parallel — each WS close is

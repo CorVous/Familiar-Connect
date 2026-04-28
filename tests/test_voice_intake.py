@@ -293,6 +293,57 @@ class TestPerUserDispatch:
             clone.stop.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_idle_watchdog_closes_silent_stream_and_reopens_on_next_audio(
+        self,
+    ) -> None:
+        """Stream silent past ``_IDLE_CLOSE_S`` is closed; next chunk reopens it."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        template._IDLE_CLOSE_S = 0.05
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        assert rt.idle_watchdog_task is not None
+
+        await rt.audio_queue.put((42, b"hi"))
+        await _drain_loop()
+        assert len(clones) == 1
+        first_clone = clones[0]
+
+        # wait past the idle window + a watchdog scan
+        await asyncio.sleep(0.15)
+        first_clone.stop.assert_awaited()
+
+        # next chunk for the same user_id should mint a fresh clone
+        await rt.audio_queue.put((42, b"back"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 2
+        assert clones[1] is not first_clone
+        assert clones[1].send_audio.await_args_list[0].args[0] == b"back"
+
+    @pytest.mark.asyncio
+    async def test_idle_watchdog_disabled_when_threshold_zero(self) -> None:
+        """``_IDLE_CLOSE_S=0`` skips watchdog entirely."""
+        handle = _make_handle()
+        template, _ = _make_template_transcriber()
+        template._IDLE_CLOSE_S = 0.0
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        assert rt.idle_watchdog_task is None
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
     async def test_results_carry_user_id_through_to_shared_queue(self) -> None:
         """Fan-in tags every result with the originating Discord user_id."""
         handle = _make_handle()

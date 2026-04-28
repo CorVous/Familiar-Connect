@@ -19,6 +19,7 @@ Set by the admin, never exposed through Discord.
 - `DEEPGRAM_SMART_FORMAT` / `DEEPGRAM_PUNCTUATE` — both default `true`. Set to `0` to disable.
 - `DEEPGRAM_KEYTERMS` — comma-separated jargon / proper nouns to bias nova-3 toward (e.g. `"rebasing, lifecycle mesh, Tam"`). Empty by default.
 - `DEEPGRAM_REPLAY_BUFFER_S` / `DEEPGRAM_KEEPALIVE_INTERVAL_S` / `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` / `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` — WebSocket resilience tuning.
+- `DEEPGRAM_IDLE_CLOSE_S` — per-user stream is closed after this many seconds without audio (default `30.0`); reopened lazily on the user's next chunk. Pre-empts Deepgram's silence-based session close so idle per-user streams stop looping through reconnect + replay. Set to `0` to disable.
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
 
 Where it lives: environment variables and/or a `.env` file. Never

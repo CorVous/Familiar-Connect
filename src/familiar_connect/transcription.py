@@ -137,6 +137,11 @@ class DeepgramTranscriber:
         # set by ``stop()`` so the receive loop can distinguish
         # self-initiated close from server/transport closes
         self._shutting_down: bool = False
+        # set when receive loop sees a server CLOSE frame; writers
+        # short-circuit so audio/KeepAlive don't race the closing
+        # transport (avoids `ClientConnectionResetError` and the resulting
+        # close_code=1006 misclassification of a clean 1000 close).
+        self._closing: bool = False
         # sliding window of recent PCM chunks; replayed to new WS on reconnect
         self._replay_buffer: collections.deque[bytes] = collections.deque()
         self._replay_buffer_bytes: int = 0
@@ -200,6 +205,7 @@ class DeepgramTranscriber:
         c._KEEPALIVE_INTERVAL = self._KEEPALIVE_INTERVAL
         c._MAX_RECONNECTS = self._MAX_RECONNECTS
         c._RECONNECT_BACKOFF_CAP = self._RECONNECT_BACKOFF_CAP
+        c._IDLE_CLOSE_S = self._IDLE_CLOSE_S
         return c
 
     def _parse_response(self: Self, data: dict[str, Any]) -> TranscriptionResult | None:
@@ -296,7 +302,10 @@ class DeepgramTranscriber:
             raise RuntimeError(msg)
         async with self._send_lock:
             self._buffer_chunk(data)
-            if self._ws.closed:
+            # `_closing` covers the window between server CLOSE frame and
+            # transport `closed=True`; writing in that window raises
+            # `ClientConnectionResetError` and corrupts the close handshake.
+            if self._ws.closed or self._closing:
                 return
             with contextlib.suppress(Exception):
                 await self._ws.send_bytes(data)
@@ -348,6 +357,11 @@ class DeepgramTranscriber:
     _RECONNECT_DELAY: float = 1.0  # base delay; first attempt is immediate
     _RECONNECT_BACKOFF_CAP: float = 16.0  # max backoff in seconds
     _KEEPALIVE_INTERVAL: float = 3.0
+    # bot-side per-user idle window. read by ``bot._start_voice_intake`` to
+    # spawn the idle watchdog. 0 disables. lives on the transcriber so the
+    # env-var factory and ``clone()`` carry it without bot.py importing
+    # config plumbing of its own.
+    _IDLE_CLOSE_S: float = 30.0
 
     # close codes that indicate a permanent, non-recoverable condition
     # (auth, billing, policy). reconnecting would just fail identically.
@@ -373,7 +387,7 @@ class DeepgramTranscriber:
         while True:
             await asyncio.sleep(self._KEEPALIVE_INTERVAL)
             ws = self._ws
-            if ws is None or ws.closed:
+            if ws is None or ws.closed or self._closing:
                 continue
             with contextlib.suppress(Exception):
                 await ws.send_json({"type": "KeepAlive"})
@@ -395,6 +409,8 @@ class DeepgramTranscriber:
             url,
             self.build_headers(),
         )
+        # fresh socket — clear the closing flag set by the prior CLOSE frame
+        self._closing = False
         _logger.info(
             f"{ls.tag('🔄 WebSocket', ls.Y)} "
             f"{ls.word('Deepgram', ls.C)} "
@@ -443,7 +459,16 @@ class DeepgramTranscriber:
         while consecutive_reconnects <= self._MAX_RECONNECTS:
             if self._ws is None:
                 return
-            async for msg in self._ws:
+            # explicit `receive()` instead of `async for` so we observe the
+            # CLOSE message itself — aiohttp's `__anext__` swallows CLOSE/
+            # CLOSING/CLOSED via `StopAsyncIteration` and only leaves
+            # `ws.close_code` behind. seeing CLOSE lets us flip `_closing`
+            # immediately so writers (audio pump, KeepAlive) stop racing
+            # the closing transport. it also exposes the close-frame reason
+            # string in `msg.extra`, which Deepgram occasionally populates.
+            close_reason: str | None = None
+            while True:
+                msg = await self._ws.receive()
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
                     msg_type = data.get("type", "")
@@ -455,47 +480,43 @@ class DeepgramTranscriber:
                             consecutive_reconnects = 0
                     else:
                         # full payload — `Metadata` carries session-end stats
-                        # (duration, models, model_info) we need for debugging
-                        # why Deepgram closes per-user sessions cleanly with
-                        # code 1000. truncating hides everything past
-                        # request_id.
+                        # (duration, models, model_info) needed to diagnose
+                        # per-user session closes; truncating hides
+                        # everything past request_id.
                         _logger.info(
                             f"{ls.tag('Event', ls.C)} "
                             f"{ls.word('Deepgram', ls.C)} "
                             f"{ls.kv('type', msg_type)} "
                             f"{ls.kv('data', msg.data, vc=ls.LW)}"
                         )
+                elif msg.type == aiohttp.WSMsgType.CLOSE:
+                    # server-initiated close frame; freeze writers so
+                    # they don't write to the closing transport while
+                    # aiohttp finishes the close handshake. CLOSED/ERROR
+                    # below are post-close states — `ws.closed` is already
+                    # True, so the existing send_audio check handles them.
+                    self._closing = True
+                    close_reason = msg.extra if isinstance(msg.extra, str) else None
+                    break
                 elif msg.type in {
+                    aiohttp.WSMsgType.CLOSING,
                     aiohttp.WSMsgType.CLOSED,
                     aiohttp.WSMsgType.ERROR,
                 }:
-                    _logger.warning(
-                        f"{ls.tag('🔌 WebSocket', ls.Y)} "
-                        f"{ls.word('Deepgram', ls.C)} "
-                        f"{ls.kv('type', str(msg.type), vc=ls.LW)} "
-                        f"{ls.kv('data', str(getattr(msg, 'data', None)), vc=ls.LW)}"
-                    )
                     break
 
             close_code = self._ws.close_code if self._ws else None
-            # diagnostic: aiohttp's `async for` swallows CLOSE messages and
-            # surfaces only `close_code`. when Deepgram tears the session
-            # down cleanly (1000 + final Metadata) we want every clue we
-            # can get — exception (transport-level) and any close-message
-            # data still hanging on the WS object.
             ws_exc: BaseException | None = None
-            close_msg_data: object | None = None
             if self._ws is not None:
                 with contextlib.suppress(Exception):
                     ws_exc = self._ws.exception()
-                close_msg_data = getattr(self._ws, "_close_msg", None)
             _logger.info(
                 f"{ls.tag('🔌 WebSocket', ls.Y)} "
                 f"{ls.word('Deepgram', ls.C)} "
                 f"{ls.word('loop-exit', ls.W)} "
                 f"{ls.kv('close_code', str(close_code), vc=ls.LW)} "
-                f"{ls.kv('exc', repr(ws_exc), vc=ls.LW)} "
-                f"{ls.kv('close_msg', repr(close_msg_data), vc=ls.LW)}"
+                f"{ls.kv('reason', repr(close_reason), vc=ls.LW)} "
+                f"{ls.kv('exc', repr(ws_exc), vc=ls.LW)}"
             )
 
             # self-initiated close → exit silently; ``stop()`` handles cleanup
@@ -626,6 +647,10 @@ def create_transcriber_from_env() -> DeepgramTranscriber:
     - ``DEEPGRAM_KEEPALIVE_INTERVAL_S`` (default ``3.0``)
     - ``DEEPGRAM_RECONNECT_MAX_ATTEMPTS`` (default ``5``)
     - ``DEEPGRAM_RECONNECT_BACKOFF_CAP_S`` (default ``16.0``)
+    - ``DEEPGRAM_IDLE_CLOSE_S`` (default ``30.0``) — per-user stream is
+      closed after this many seconds without audio; reopened lazily on
+      next chunk. Pre-empts Deepgram's silence-based close. ``0``
+      disables.
 
     :raises ValueError: If ``DEEPGRAM_API_KEY`` not set.
     """
@@ -647,6 +672,7 @@ def create_transcriber_from_env() -> DeepgramTranscriber:
     )
     max_attempts = _env_int(os.environ.get("DEEPGRAM_RECONNECT_MAX_ATTEMPTS"), 5)
     backoff_cap_s = _env_float(os.environ.get("DEEPGRAM_RECONNECT_BACKOFF_CAP_S"), 16.0)
+    idle_close_s = _env_float(os.environ.get("DEEPGRAM_IDLE_CLOSE_S"), 30.0)
 
     t = DeepgramTranscriber(
         api_key=api_key,
@@ -662,4 +688,5 @@ def create_transcriber_from_env() -> DeepgramTranscriber:
     t._KEEPALIVE_INTERVAL = keepalive_interval_s  # noqa: SLF001
     t._MAX_RECONNECTS = max_attempts  # noqa: SLF001
     t._RECONNECT_BACKOFF_CAP = backoff_cap_s  # noqa: SLF001
+    t._IDLE_CLOSE_S = idle_close_s  # noqa: SLF001
     return t

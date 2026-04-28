@@ -8,6 +8,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import aiohttp
 import pytest
 
 from familiar_connect.transcription import (
@@ -360,20 +361,31 @@ class TestDeepgramTranscriberParseResponse:
         assert result.speaker == 1
 
 
-class _AsyncIter:
-    """Wrap a list of items into an async iterator for mocking __aiter__."""
+def _closed_msg() -> MagicMock:
+    """WSMessage with type=CLOSED for the receive() drain after items run out."""
+    m = MagicMock()
+    m.type = aiohttp.WSMsgType.CLOSED
+    m.data = None
+    m.extra = None
+    return m
 
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
 
-    def __aiter__(self) -> _AsyncIter:
-        return self
+def _make_receive(items: list[object]) -> AsyncMock:
+    """Build an AsyncMock that returns ``items`` then CLOSED messages forever.
 
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration:
-            raise StopAsyncIteration from None
+    Mirrors aiohttp's ``ClientWebSocketResponse.receive()``: each call yields
+    the next message; once exhausted, repeated calls return the same CLOSED
+    sentinel so the receive loop can break cleanly.
+    """
+    queue = list(items)
+    closed = _closed_msg()
+
+    def _next(*_: object, **__: object) -> object:
+        if queue:
+            return queue.pop(0)
+        return closed
+
+    return AsyncMock(side_effect=_next)
 
 
 class TestDeepgramTranscriberLifecycle:
@@ -390,8 +402,9 @@ class TestDeepgramTranscriberLifecycle:
         ws.send_json = AsyncMock()
         ws.close = AsyncMock()
         ws.closed = False
+        ws.exception = MagicMock(return_value=None)
         items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        ws.receive = _make_receive(items)
         return ws
 
     @pytest.mark.asyncio
@@ -657,8 +670,9 @@ class TestDeepgramReconnect:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = 1006
+        ws.exception = MagicMock(return_value=None)
         items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        ws.receive = _make_receive(items)
         return ws
 
     @pytest.mark.asyncio
@@ -791,29 +805,26 @@ class TestReplayBuffer:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = close_code
+        ws.exception = MagicMock(return_value=None)
         items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        ws.receive = _make_receive(items)
         return ws
 
     def _make_open_ws_mock(self) -> MagicMock:
-        """WS that stays open forever (pending future aiter)."""
+        """WS that stays open forever (pending receive)."""
         ws = MagicMock()
         ws.send_bytes = AsyncMock()
         ws.send_json = AsyncMock()
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = None
+        ws.exception = MagicMock(return_value=None)
         pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
 
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
+        async def _wait(*_: object, **__: object) -> object:
+            return await pending
 
-            async def __anext__(self) -> object:
-                await pending
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
+        ws.receive = AsyncMock(side_effect=_wait)
         return ws
 
     @pytest.mark.asyncio
@@ -1022,7 +1033,8 @@ class TestExponentialBackoff:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = close_code
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+        ws.exception = MagicMock(return_value=None)
+        ws.receive = _make_receive([])
         return ws
 
     def _make_open_ws_mock(self) -> MagicMock:
@@ -1033,17 +1045,13 @@ class TestExponentialBackoff:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = None
+        ws.exception = MagicMock(return_value=None)
         pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
 
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
+        async def _wait(*_: object, **__: object) -> object:
+            return await pending
 
-            async def __anext__(self) -> object:
-                await pending
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
+        ws.receive = AsyncMock(side_effect=_wait)
         return ws
 
     @pytest.mark.asyncio
@@ -1106,22 +1114,18 @@ class TestDeepgramKeepAlive:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = None
-        items = messages if messages is not None else []
-        # Keep the aiter alive for the duration of the test so the receive
+        ws.exception = MagicMock(return_value=None)
+        items = list(messages) if messages is not None else []
+        # Keep receive() alive for the duration of the test so the receive
         # loop doesn't exit and trigger a reconnect during keepalive checks.
         pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
 
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
+        async def _receive(*_: object, **__: object) -> object:
+            if items:
+                return items.pop(0)
+            return await pending  # wait forever — test will cancel via stop()
 
-            async def __anext__(self) -> object:
-                if items:
-                    return items.pop(0)
-                await pending  # wait forever — test will cancel via stop()
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
+        ws.receive = AsyncMock(side_effect=_receive)
         return ws
 
     @staticmethod
@@ -1220,7 +1224,8 @@ class TestDeepgramKeepAlive:
         ws1.close = AsyncMock()
         ws1.closed = False
         ws1.close_code = 1006
-        ws1.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+        ws1.exception = MagicMock(return_value=None)
+        ws1.receive = _make_receive([])
 
         ws2 = self._make_ws_mock()
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
