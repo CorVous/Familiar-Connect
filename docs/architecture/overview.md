@@ -55,8 +55,8 @@ flowchart LR
   - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped. Silent-sentinel handling mirrors `TextResponder`: on `<silent>`, TTS is not invoked.
 - **Diagnostics** — `@span(name)` decorator in `familiar_connect.diagnostics.spans` emits timing logs (`span=<name> ms=<n> status=<ok|error>`). Logs-first aggregation; a metrics collector + `/diagnostics` slash command come in Phase 5.
 - **Discord text** — `on_message` event handler + `subscribe-text` / `unsubscribe-text` slash commands. Built on py-cord.
-- **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption). On subscribe the bot attaches a `RecordingSink`, starts the Deepgram transcriber against a fresh result queue, and runs a `VoiceSource` task draining transcripts onto the bus. On unsubscribe the per-channel pump + source tasks are cancelled, recording is stopped, and the transcriber is closed.
-- **Transcription** — Deepgram streaming client. Instantiated on startup; wired to the bus via `VoiceSource` once a voice channel is active. v1 supports one voice channel at a time (single transcriber per familiar).
+- **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption). On subscribe the bot attaches a `RecordingSink` and runs a `VoiceSource` task draining transcripts onto the bus. The audio pump dispatches per Discord user_id: the first audio chunk from a new SSRC lazily clones the configured Deepgram transcriber and opens a fresh WebSocket for that speaker, so two people talking concurrently get independent endpointing and don't slice each other's sentences. A per-user fan-in tags every result with the originating user_id before forwarding to the shared result queue. On unsubscribe the pump, source, and every per-user fan-in are cancelled, recording is stopped, and every per-user transcriber is closed.
+- **Transcription** — Deepgram streaming client. The instance loaded at startup acts as a *template*: `clone()` is called once per Discord user that speaks. Diarization stays off — Discord delivers per-SSRC audio, so attribution is exact and not AI-inferred. Defaults bias toward fewer mid-sentence cuts: `endpointing_ms=500`, `utterance_end_ms=1500`, `smart_format=true`, `punctuate=true`. Optional `DEEPGRAM_KEYTERMS` biases nova-3 toward project jargon and member display names.
 - **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through pycord's voice client. When no TTS client is configured `LoggingTTSPlayer` is used.
 - **OpenRouter LLM client** — one `LLMClient` per call-site slot.
 - **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, and `people_dossiers` are watermarked side-indices.
@@ -72,8 +72,8 @@ Topic strings live in `familiar_connect.bus.topics`:
 | `discord.text` | channel, guild, `Author`, content | unbounded |
 | `discord.voice.state` | member, channel | unbounded |
 | `voice.audio.raw` | PCM chunk + speaker | drop-oldest |
-| `voice.transcript.partial` | text + turn_id | block |
-| `voice.transcript.final` | text + turn_id + speaker | block |
+| `voice.transcript.partial` | text + turn_id + user_id | block |
+| `voice.transcript.final` | text + turn_id + user_id + speaker | block |
 | `voice.activity.start` / `.end` | turn_id | block |
 | `twitch.event` | `TwitchEvent` | unbounded |
 | `llm.response.chunk` / `.final` | text delta / message | block |

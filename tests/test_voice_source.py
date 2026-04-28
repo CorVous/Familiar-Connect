@@ -23,15 +23,27 @@ from familiar_connect.sources.voice import VoiceSource
 from familiar_connect.transcription import TranscriptionResult
 
 
-def _final(text: str = "hello world") -> TranscriptionResult:
+def _final(
+    text: str = "hello world", *, user_id: int | None = None
+) -> TranscriptionResult:
     return TranscriptionResult(
-        text=text, is_final=True, start=0.0, end=1.0, confidence=0.9
+        text=text,
+        is_final=True,
+        start=0.0,
+        end=1.0,
+        confidence=0.9,
+        user_id=user_id,
     )
 
 
-def _partial(text: str = "hel") -> TranscriptionResult:
+def _partial(text: str = "hel", *, user_id: int | None = None) -> TranscriptionResult:
     return TranscriptionResult(
-        text=text, is_final=False, start=0.0, end=0.3, confidence=0.5
+        text=text,
+        is_final=False,
+        start=0.0,
+        end=0.3,
+        confidence=0.5,
+        user_id=user_id,
     )
 
 
@@ -185,3 +197,81 @@ class TestVoiceSource:
         await bus.shutdown()
 
         assert finals[0].turn_id != finals[1].turn_id
+
+    @pytest.mark.asyncio
+    async def test_final_payload_carries_user_id(self) -> None:
+        """Discord user_id from per-user fan-in surfaces in the bus payload."""
+        bus = InProcessEventBus()
+        await bus.start()
+        queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+        source = VoiceSource(
+            bus=bus, familiar_id="fam", voice_channel_id=123, queue=queue
+        )
+        finals: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((TOPIC_VOICE_TRANSCRIPT_FINAL,)):
+                finals.append(ev)
+                return
+
+        c = asyncio.create_task(consume())
+        p = asyncio.create_task(source.run())
+        await asyncio.sleep(0)
+        await queue.put(_final("hello", user_id=42))
+        await asyncio.wait_for(c, timeout=1.0)
+        p.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await p
+        await bus.shutdown()
+
+        assert finals[0].payload["user_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_concurrent_speakers_get_independent_turn_ids(self) -> None:
+        """Two users speaking interleaved must each open their own turn.
+
+        Mixed-stream design (single turn_id state) drops the second
+        speaker's ``activity.start`` and orphans their final under the
+        first speaker's turn. With per-user state each user_id has its
+        own state machine.
+        """
+        bus = InProcessEventBus()
+        await bus.start()
+        queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+        source = VoiceSource(
+            bus=bus, familiar_id="fam", voice_channel_id=123, queue=queue
+        )
+        events: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((
+                TOPIC_VOICE_ACTIVITY_START,
+                TOPIC_VOICE_ACTIVITY_END,
+                TOPIC_VOICE_TRANSCRIPT_FINAL,
+            )):
+                events.append(ev)
+                if sum(1 for e in events if e.topic == TOPIC_VOICE_ACTIVITY_END) >= 2:
+                    return
+
+        c = asyncio.create_task(consume())
+        p = asyncio.create_task(source.run())
+        await asyncio.sleep(0)
+        # Alice starts; Bob starts before Alice finals; both final.
+        await queue.put(_partial("hel", user_id=101))
+        await queue.put(_partial("hi", user_id=202))
+        await queue.put(_final("hello", user_id=101))
+        await queue.put(_final("hi there", user_id=202))
+        await asyncio.wait_for(c, timeout=1.0)
+        p.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await p
+        await bus.shutdown()
+
+        starts = [e for e in events if e.topic == TOPIC_VOICE_ACTIVITY_START]
+        assert len(starts) == 2
+        # Each speaker gets a distinct turn_id
+        assert starts[0].turn_id != starts[1].turn_id
+        # Each final lands on its own speaker's turn_id
+        finals = [e for e in events if e.topic == TOPIC_VOICE_TRANSCRIPT_FINAL]
+        finals_by_user = {e.payload["user_id"]: e for e in finals}
+        assert finals_by_user[101].turn_id != finals_by_user[202].turn_id

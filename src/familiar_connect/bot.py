@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.familiar import Familiar
-    from familiar_connect.transcription import TranscriptionResult
+    from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
 
     # Outbound text callback. Returns the Discord message id of the
     # posted message (str) for reply-chain tracking, or None if the
@@ -60,6 +60,12 @@ class VoiceRuntime:
 
     Holds the live voice client + the recording-sink / pump / source
     tasks so ``/unsubscribe-voice`` can tear them down cleanly.
+
+    ``transcribers`` and ``fanin_tasks`` are keyed by Discord user_id
+    — the pump lazily clones a Deepgram stream per speaker (Discord
+    delivers per-SSRC audio so each user is naturally isolated). One
+    fan-in task per user forwards results onto the shared
+    ``result_queue`` after tagging with the originating user_id.
     """
 
     voice_client: discord.VoiceClient
@@ -68,6 +74,8 @@ class VoiceRuntime:
     result_queue: asyncio.Queue[TranscriptionResult]
     pump_task: asyncio.Task[None]
     source_task: asyncio.Task[None]
+    transcribers: dict[int, DeepgramTranscriber] = field(default_factory=dict)
+    fanin_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
 
 
 @dataclass
@@ -98,18 +106,24 @@ async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noq
     del sink, args
 
 
-async def _start_voice_intake(
+async def _start_voice_intake(  # noqa: RUF029 — called from async slash-command handler
     *,
     handle: BotHandle,
     familiar: Familiar,
     voice_client: discord.VoiceClient,
     channel_id: int,
 ) -> VoiceRuntime | None:
-    """Bring up sink + transcriber + voice source for *channel_id*.
+    """Bring up sink + per-user transcribers + voice source for *channel_id*.
 
     Returns ``None`` when no transcriber is configured — the bot can
     still join for TTS playback only. Idempotent: a second call for
     the same channel returns the existing runtime.
+
+    ``familiar.transcriber`` is treated as a *template*: a fresh
+    Deepgram WS is cloned for each Discord user_id the first time
+    audio arrives from that user. Per-user streams kill mixed-stream
+    endpointing (one speaker's pause finalizing another's mid-sentence)
+    and inherit attribution from Discord's per-SSRC delivery.
     """
     if familiar.transcriber is None:
         return None
@@ -123,7 +137,6 @@ async def _start_voice_intake(
 
     sink = RecordingSink(loop=loop, audio_queue=audio_queue)
     voice_client.start_recording(sink, _on_recording_done)
-    await familiar.transcriber.start(result_queue)
 
     source = VoiceSource(
         bus=familiar.bus,
@@ -132,12 +145,41 @@ async def _start_voice_intake(
         queue=result_queue,
     )
 
-    transcriber = familiar.transcriber
+    template = familiar.transcriber
+    transcribers: dict[int, DeepgramTranscriber] = {}
+    fanin_tasks: dict[int, asyncio.Task[None]] = {}
+
+    async def _fanin(user_id: int, q: asyncio.Queue[TranscriptionResult]) -> None:
+        """Tag each result with ``user_id`` and forward to shared queue."""
+        while True:
+            result = await q.get()
+            result.user_id = user_id
+            await result_queue.put(result)
+
+    async def _ensure_transcriber(user_id: int) -> DeepgramTranscriber:
+        existing = transcribers.get(user_id)
+        if existing is not None:
+            return existing
+        clone = template.clone()
+        per_user_q: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+        await clone.start(per_user_q)
+        transcribers[user_id] = clone
+        fanin_tasks[user_id] = asyncio.create_task(
+            _fanin(user_id, per_user_q),
+            name=f"voice-fanin-{channel_id}-{user_id}",
+        )
+        _logger.info(
+            f"{ls.tag('🎙️  Voice', ls.G)} "
+            f"{ls.kv('user', str(user_id), vc=ls.LC)} "
+            f"{ls.kv('transcriber', 'opened', vc=ls.LG)}"
+        )
+        return clone
 
     async def _pump_audio() -> None:
         while True:
-            _user, pcm = await audio_queue.get()
-            await transcriber.send_audio(pcm)
+            user_id, pcm = await audio_queue.get()
+            clone = await _ensure_transcriber(user_id)
+            await clone.send_audio(pcm)
 
     pump_task = asyncio.create_task(_pump_audio(), name=f"voice-pump-{channel_id}")
     source_task = asyncio.create_task(source.run(), name=f"voice-source-{channel_id}")
@@ -148,6 +190,8 @@ async def _start_voice_intake(
         result_queue=result_queue,
         pump_task=pump_task,
         source_task=source_task,
+        transcribers=transcribers,
+        fanin_tasks=fanin_tasks,
     )
     handle.voice_runtime[channel_id] = rt
     _logger.info(
@@ -164,7 +208,8 @@ async def _stop_voice_intake(
     familiar: Familiar,
     channel_id: int,
 ) -> None:
-    """Cancel pump + source tasks, stop recording, stop transcriber."""
+    """Cancel pump + source + fan-ins, stop recording, stop every clone."""
+    del familiar  # template not stopped — only clones own connections
     rt = handle.voice_runtime.pop(channel_id, None)
     if rt is None:
         return
@@ -172,13 +217,18 @@ async def _stop_voice_intake(
         rt.voice_client.stop_recording()
     rt.pump_task.cancel()
     rt.source_task.cancel()
+    for t in rt.fanin_tasks.values():
+        t.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await rt.pump_task
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await rt.source_task
-    if familiar.transcriber is not None:
+    for t in rt.fanin_tasks.values():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await t
+    for clone in rt.transcribers.values():
         with contextlib.suppress(Exception):
-            await familiar.transcriber.stop()
+            await clone.stop()
     _logger.info(
         f"{ls.tag('🎙️  Voice', ls.Y)} "
         f"{ls.kv('intake', 'stopped', vc=ls.LY)} "

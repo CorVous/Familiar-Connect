@@ -8,7 +8,9 @@ source running. Mocks the voice client and transcriber surfaces.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +22,7 @@ from familiar_connect.bot import (
     _start_voice_intake,
     _stop_voice_intake,
 )
+from familiar_connect.transcription import TranscriptionResult
 
 
 def _make_handle() -> BotHandle:
@@ -33,6 +36,38 @@ def _make_familiar(*, transcriber: object | None) -> MagicMock:
     fam.transcriber = transcriber
     fam.bus = MagicMock()
     return fam
+
+
+def _make_template_transcriber() -> tuple[MagicMock, list[MagicMock]]:
+    """Template transcriber whose ``clone()`` returns a fresh per-user mock.
+
+    Returned list captures every clone produced — tests inspect it to
+    verify per-user dispatch.
+    """
+    clones: list[MagicMock] = []
+
+    def _make_clone() -> MagicMock:
+        c = MagicMock()
+        c.start = AsyncMock()
+        c.send_audio = AsyncMock()
+        c.stop = AsyncMock()
+        clones.append(c)
+        return c
+
+    template = MagicMock()
+    template.clone = MagicMock(side_effect=_make_clone)
+    # template is never started directly — clones are. but keep these
+    # as AsyncMocks so accidental calls don't blow up the tests.
+    template.start = AsyncMock()
+    template.send_audio = AsyncMock()
+    template.stop = AsyncMock()
+    return template, clones
+
+
+async def _drain_loop(ticks: int = 10) -> None:
+    """Yield enough loop turns for the pump to consume queued chunks."""
+    for _ in range(ticks):
+        await asyncio.sleep(0)
 
 
 class TestStartVoiceIntake:
@@ -54,12 +89,11 @@ class TestStartVoiceIntake:
         vc.start_recording.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_attaches_sink_and_starts_transcriber(self) -> None:
+    async def test_attaches_sink_and_arms_pump(self) -> None:
+        """Sink attached, pump + source live; clones lazy until first audio."""
         handle = _make_handle()
-        transcriber = MagicMock()
-        transcriber.start = AsyncMock()
-        transcriber.send_audio = AsyncMock()
-        familiar = _make_familiar(transcriber=transcriber)
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
         vc = MagicMock()
 
         rt = await _start_voice_intake(
@@ -72,7 +106,9 @@ class TestStartVoiceIntake:
             assert isinstance(rt, VoiceRuntime)
             assert handle.voice_runtime[10] is rt
             vc.start_recording.assert_called_once()
-            transcriber.start.assert_awaited_once()
+            # template never started directly — clones own the WS
+            template.start.assert_not_awaited()
+            assert clones == []
             assert not rt.pump_task.done()
             assert not rt.source_task.done()
         finally:
@@ -81,10 +117,8 @@ class TestStartVoiceIntake:
     @pytest.mark.asyncio
     async def test_idempotent_for_same_channel(self) -> None:
         handle = _make_handle()
-        transcriber = MagicMock()
-        transcriber.start = AsyncMock()
-        transcriber.send_audio = AsyncMock()
-        familiar = _make_familiar(transcriber=transcriber)
+        template, _clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
         vc = MagicMock()
 
         rt1 = await _start_voice_intake(
@@ -96,20 +130,16 @@ class TestStartVoiceIntake:
         try:
             assert rt1 is rt2
             assert vc.start_recording.call_count == 1
-            transcriber.start.assert_awaited_once()
         finally:
             await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
 
 
 class TestStopVoiceIntake:
     @pytest.mark.asyncio
-    async def test_cancels_tasks_and_stops_transcriber(self) -> None:
+    async def test_cancels_tasks_and_stops_every_clone(self) -> None:
         handle = _make_handle()
-        transcriber = MagicMock()
-        transcriber.start = AsyncMock()
-        transcriber.send_audio = AsyncMock()
-        transcriber.stop = AsyncMock()
-        familiar = _make_familiar(transcriber=transcriber)
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
         vc = MagicMock()
 
         await _start_voice_intake(
@@ -117,12 +147,16 @@ class TestStopVoiceIntake:
         )
         rt = handle.voice_runtime[10]
         assert isinstance(rt, VoiceRuntime)
+        # spawn one clone via audio so stop has something to tear down
+        await rt.audio_queue.put((1, b"\x00"))
+        await _drain_loop()
 
         await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
 
         assert 10 not in handle.voice_runtime
         vc.stop_recording.assert_called_once()
-        transcriber.stop.assert_awaited_once()
+        assert len(clones) == 1
+        clones[0].stop.assert_awaited_once()
         assert rt.pump_task.cancelled() or rt.pump_task.done()
         assert rt.source_task.cancelled() or rt.source_task.done()
 
@@ -150,12 +184,10 @@ class TestRecordingDoneCallback:
 class TestPumpAudio:
     @pytest.mark.asyncio
     async def test_audio_queue_drains_into_transcriber(self) -> None:
-        """Bytes pushed into the sink's queue reach transcriber.send_audio."""
+        """Bytes pushed into the sink's queue reach a per-user transcriber clone."""
         handle = _make_handle()
-        transcriber = MagicMock()
-        transcriber.start = AsyncMock()
-        transcriber.send_audio = AsyncMock()
-        familiar = _make_familiar(transcriber=transcriber)
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
         vc = MagicMock()
 
         rt = await _start_voice_intake(
@@ -163,14 +195,183 @@ class TestPumpAudio:
         )
         assert isinstance(rt, VoiceRuntime)
 
-        # Push two chunks onto the audio queue the sink shares with the pump.
+        # Push two chunks for the same user onto the audio queue.
         await rt.audio_queue.put((1, b"\x00\x01\x02\x03"))
         await rt.audio_queue.put((1, b"\x04\x05"))
-        # Yield enough loop ticks for the pump to consume.
-        for _ in range(5):
-            await asyncio.sleep(0)
+        await _drain_loop()
         await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
 
-        sent = [c.args[0] for c in transcriber.send_audio.await_args_list]
+        # Exactly one clone should have been produced for user 1.
+        assert len(clones) == 1
+        sent = [c.args[0] for c in clones[0].send_audio.await_args_list]
         assert b"\x00\x01\x02\x03" in sent
         assert b"\x04\x05" in sent
+        # The template itself never accepts audio — only the clone does.
+        template.send_audio.assert_not_awaited()
+
+
+class TestPerUserDispatch:
+    """Discord delivers per-SSRC audio; each user gets their own Deepgram WS.
+
+    Avoids mixed-stream endpointing where one speaker's pause finalizes
+    another's mid-sentence, and gives each transcript inherent
+    attribution to the Discord user_id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_distinct_users_get_distinct_transcribers(self) -> None:
+        """Two user_ids → two clones; each receives only their own audio."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        await rt.audio_queue.put((101, b"alice-1"))
+        await rt.audio_queue.put((202, b"bob-1"))
+        await rt.audio_queue.put((101, b"alice-2"))
+        await rt.audio_queue.put((202, b"bob-2"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 2
+        all_sent = [
+            [c.args[0] for c in clone.send_audio.await_args_list] for clone in clones
+        ]
+        # find which clone got alice's audio vs bob's
+        alice_chunks = next(s for s in all_sent if b"alice-1" in s)
+        bob_chunks = next(s for s in all_sent if b"bob-1" in s)
+        assert alice_chunks == [b"alice-1", b"alice-2"]
+        assert bob_chunks == [b"bob-1", b"bob-2"]
+
+    @pytest.mark.asyncio
+    async def test_same_user_reuses_transcriber(self) -> None:
+        """Repeated chunks from one user_id stay on one clone."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        for i in range(5):
+            await rt.audio_queue.put((42, bytes([i])))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 1
+        assert clones[0].send_audio.await_count == 5
+
+    @pytest.mark.asyncio
+    async def test_stop_stops_every_clone(self) -> None:
+        """Tearing down the runtime stops every per-user transcriber."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        await rt_audio_put(handle, 10, [(1, b"a"), (2, b"b"), (3, b"c")])
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 3
+        for clone in clones:
+            clone.stop.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_results_carry_user_id_through_to_shared_queue(self) -> None:
+        """Fan-in tags every result with the originating Discord user_id."""
+        handle = _make_handle()
+
+        # Custom template whose clone captures the queue handed to start()
+        # so the test can push synthetic results into it.
+        per_clone_queues: list[asyncio.Queue[TranscriptionResult]] = []
+        clones: list[MagicMock] = []
+
+        def _make_clone() -> MagicMock:
+            c = MagicMock()
+
+            async def _start(q: asyncio.Queue[TranscriptionResult]) -> None:  # noqa: RUF029
+                per_clone_queues.append(q)
+
+            c.start = AsyncMock(side_effect=_start)
+            c.send_audio = AsyncMock()
+            c.stop = AsyncMock()
+            clones.append(c)
+            return c
+
+        template = MagicMock()
+        template.clone = MagicMock(side_effect=_make_clone)
+        template.start = AsyncMock()
+        template.stop = AsyncMock()
+
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        # Cancel the VoiceSource so it doesn't drain result_queue out
+        # from under the test — we're inspecting the fan-in's output
+        # directly here.
+        rt.source_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rt.source_task
+
+        # Trigger lazy clone creation for two users
+        await rt.audio_queue.put((101, b"a"))
+        await rt.audio_queue.put((202, b"b"))
+        await _drain_loop()
+        assert len(per_clone_queues) == 2
+
+        # Push a fake transcription result onto each per-user queue;
+        # the fan-in should tag with user_id and forward to result_queue.
+        await per_clone_queues[0].put(
+            TranscriptionResult(
+                text="alice talking",
+                is_final=True,
+                start=0.0,
+                end=1.0,
+                confidence=0.9,
+            )
+        )
+        await per_clone_queues[1].put(
+            TranscriptionResult(
+                text="bob talking",
+                is_final=True,
+                start=0.0,
+                end=1.0,
+                confidence=0.9,
+            )
+        )
+        await _drain_loop()
+
+        forwarded: list[TranscriptionResult] = []
+        while not rt.result_queue.empty():
+            forwarded.append(rt.result_queue.get_nowait())
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        by_text = {r.text: r for r in forwarded}
+        assert by_text["alice talking"].user_id == 101
+        assert by_text["bob talking"].user_id == 202
+
+
+async def rt_audio_put(
+    handle: BotHandle, channel_id: int, items: list[tuple[int, bytes]]
+) -> None:
+    rt: Any = handle.voice_runtime[channel_id]
+    for item in items:
+        await rt.audio_queue.put(item)

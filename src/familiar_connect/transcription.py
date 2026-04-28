@@ -50,7 +50,15 @@ window the endpointer expects in the normal flow.
 
 @dataclass
 class TranscriptionResult:
-    """Single Deepgram streaming transcription result."""
+    """Single Deepgram streaming transcription result.
+
+    ``user_id`` is the Discord user id when known — pumped into results
+    by the per-user fan-in in :func:`bot._start_voice_intake`. Discord
+    delivers per-SSRC audio so attribution comes for free without
+    Deepgram diarization. ``speaker`` is Deepgram's diarization label
+    (only set when ``diarize=True``); kept for completeness but not
+    used by the Discord pipeline.
+    """
 
     text: str
     is_final: bool
@@ -58,12 +66,20 @@ class TranscriptionResult:
     end: float
     confidence: float = 0.0
     speaker: int | None = None
+    user_id: int | None = None
 
     def to_message(self: Self, speaker_names: dict[int, str] | None = None) -> Message:
-        """Convert to LLM Message. Prefixes content with ``[Voice]``."""
+        """Convert to LLM Message. Prefixes content with ``[Voice]``.
+
+        ``speaker_names`` may be keyed by ``user_id`` (Discord) or by
+        Deepgram's ``speaker`` label — ``user_id`` takes precedence.
+        """
         name = "Voice"
-        if self.speaker is not None and speaker_names is not None:
-            name = speaker_names.get(self.speaker, "Voice")
+        if speaker_names is not None:
+            if self.user_id is not None and self.user_id in speaker_names:
+                name = speaker_names[self.user_id]
+            elif self.speaker is not None and self.speaker in speaker_names:
+                name = speaker_names[self.speaker]
         return Message(role="user", content=f"[Voice] {self.text}", name=name)
 
 
@@ -91,9 +107,12 @@ class DeepgramTranscriber:
         channels: int = 1,
         diarize: bool = False,
         interim_results: bool = True,
-        utterance_end_ms: int = 1000,
+        utterance_end_ms: int = 1500,
         vad_events: bool = False,
-        endpointing_ms: int = 300,
+        endpointing_ms: int = 500,
+        smart_format: bool = True,
+        punctuate: bool = True,
+        keyterms: tuple[str, ...] = (),
         replay_buffer_s: float = 5.0,
     ) -> None:
         self.api_key = api_key
@@ -106,6 +125,9 @@ class DeepgramTranscriber:
         self.utterance_end_ms = utterance_end_ms
         self.vad_events = vad_events
         self.endpointing_ms = endpointing_ms
+        self.smart_format = smart_format
+        self.punctuate = punctuate
+        self.keyterms = keyterms
         self.replay_buffer_s = replay_buffer_s
 
         self._session: aiohttp.ClientSession | None = None
@@ -128,22 +150,28 @@ class DeepgramTranscriber:
         interim results are enabled; Deepgram requires ``interim_results=true``
         for ``utterance_end_ms`` to take effect. ``endpointing`` is always
         emitted — it controls how long Deepgram waits in silence before
-        finalizing a segment.
+        finalizing a segment. ``keyterm`` is repeated once per term and
+        biases nova-3 toward the listed jargon / proper nouns.
         """
-        params: dict[str, str] = {
-            "model": self.model,
-            "language": self.language,
-            "sample_rate": str(self.sample_rate),
-            "channels": str(self.channels),
-            "encoding": "linear16",
-            "vad_events": str(self.vad_events).lower(),
-            "endpointing": str(self.endpointing_ms),
-        }
+        params: list[tuple[str, str]] = [
+            ("model", self.model),
+            ("language", self.language),
+            ("sample_rate", str(self.sample_rate)),
+            ("channels", str(self.channels)),
+            ("encoding", "linear16"),
+            ("vad_events", str(self.vad_events).lower()),
+            ("endpointing", str(self.endpointing_ms)),
+            ("smart_format", str(self.smart_format).lower()),
+            ("punctuate", str(self.punctuate).lower()),
+        ]
         if self.interim_results:
-            params["interim_results"] = "true"
-            params["utterance_end_ms"] = str(self.utterance_end_ms)
+            params.extend([
+                ("interim_results", "true"),
+                ("utterance_end_ms", str(self.utterance_end_ms)),
+            ])
         if self.diarize:
-            params["diarize"] = "true"
+            params.append(("diarize", "true"))
+        params.extend(("keyterm", term) for term in self.keyterms)
         return f"{DEEPGRAM_WS_URL}?{urlencode(params)}"
 
     def build_headers(self: Self) -> dict[str, str]:
@@ -152,7 +180,7 @@ class DeepgramTranscriber:
 
     def clone(self: Self) -> DeepgramTranscriber:
         """Create transcriber with same config, independent WS connection."""
-        return DeepgramTranscriber(
+        c = DeepgramTranscriber(
             api_key=self.api_key,
             model=self.model,
             language=self.language,
@@ -163,8 +191,16 @@ class DeepgramTranscriber:
             utterance_end_ms=self.utterance_end_ms,
             vad_events=self.vad_events,
             endpointing_ms=self.endpointing_ms,
+            smart_format=self.smart_format,
+            punctuate=self.punctuate,
+            keyterms=self.keyterms,
             replay_buffer_s=self.replay_buffer_s,
         )
+        # carry over any env-tuned class attrs the factory bumped
+        c._KEEPALIVE_INTERVAL = self._KEEPALIVE_INTERVAL
+        c._MAX_RECONNECTS = self._MAX_RECONNECTS
+        c._RECONNECT_BACKOFF_CAP = self._RECONNECT_BACKOFF_CAP
+        return c
 
     def _parse_response(self: Self, data: dict[str, Any]) -> TranscriptionResult | None:
         """Parse Deepgram response. Returns ``None`` for non-results or empty."""
@@ -529,6 +565,20 @@ def _env_int(raw: str | None, default: int) -> int:
         return default
 
 
+def _env_bool(raw: str | None, *, default: bool) -> bool:
+    """Parse *raw* as bool. ``1/true/yes/on`` → True, ``0/false/no/off`` → False."""
+    if not raw:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_csv(raw: str | None) -> tuple[str, ...]:
+    """Parse comma-separated env list, trimming whitespace and dropping empties."""
+    if not raw:
+        return ()
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 def create_transcriber_from_env() -> DeepgramTranscriber:
     """Create from env vars (``DEEPGRAM_API_KEY`` required).
 
@@ -536,6 +586,18 @@ def create_transcriber_from_env() -> DeepgramTranscriber:
 
     - ``DEEPGRAM_MODEL`` (default ``nova-3``)
     - ``DEEPGRAM_LANGUAGE`` (default ``en``)
+    - ``DEEPGRAM_ENDPOINTING_MS`` (default ``500``) — silence ms before
+      Deepgram finalizes; lower = quicker finals, higher = fewer
+      mid-sentence cuts during thinking pauses.
+    - ``DEEPGRAM_UTTERANCE_END_MS`` (default ``1500``) — speech-end
+      grace window; pairs with ``interim_results``.
+    - ``DEEPGRAM_SMART_FORMAT`` (default ``true``) — punctuation,
+      number/date/unit normalization.
+    - ``DEEPGRAM_PUNCTUATE`` (default ``true``) — explicit punctuation
+      pass; redundant with smart_format but cheap.
+    - ``DEEPGRAM_KEYTERMS`` — comma-separated jargon / proper nouns
+      to bias nova-3 toward (e.g. member display names, project
+      vocabulary).
     - ``DEEPGRAM_REPLAY_BUFFER_S`` (default ``5.0``)
     - ``DEEPGRAM_KEEPALIVE_INTERVAL_S`` (default ``3.0``)
     - ``DEEPGRAM_RECONNECT_MAX_ATTEMPTS`` (default ``5``)
@@ -550,6 +612,11 @@ def create_transcriber_from_env() -> DeepgramTranscriber:
 
     model = os.environ.get("DEEPGRAM_MODEL") or DEFAULT_MODEL
     language = os.environ.get("DEEPGRAM_LANGUAGE") or DEFAULT_LANGUAGE
+    endpointing_ms = _env_int(os.environ.get("DEEPGRAM_ENDPOINTING_MS"), 500)
+    utterance_end_ms = _env_int(os.environ.get("DEEPGRAM_UTTERANCE_END_MS"), 1500)
+    smart_format = _env_bool(os.environ.get("DEEPGRAM_SMART_FORMAT"), default=True)
+    punctuate = _env_bool(os.environ.get("DEEPGRAM_PUNCTUATE"), default=True)
+    keyterms = _env_csv(os.environ.get("DEEPGRAM_KEYTERMS"))
     replay_buffer_s = _env_float(os.environ.get("DEEPGRAM_REPLAY_BUFFER_S"), 5.0)
     keepalive_interval_s = _env_float(
         os.environ.get("DEEPGRAM_KEEPALIVE_INTERVAL_S"), 3.0
@@ -561,6 +628,11 @@ def create_transcriber_from_env() -> DeepgramTranscriber:
         api_key=api_key,
         model=model,
         language=language,
+        endpointing_ms=endpointing_ms,
+        utterance_end_ms=utterance_end_ms,
+        smart_format=smart_format,
+        punctuate=punctuate,
+        keyterms=keyterms,
         replay_buffer_s=replay_buffer_s,
     )
     t._KEEPALIVE_INTERVAL = keepalive_interval_s  # noqa: SLF001

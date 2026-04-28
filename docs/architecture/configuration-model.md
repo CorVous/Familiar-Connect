@@ -14,6 +14,11 @@ Set by the admin, never exposed through Discord.
 - `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS
 - `DEEPGRAM_API_KEY` — Deepgram STT
 - `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` — STT model + language (defaults: `nova-3` / `en`)
+- `DEEPGRAM_ENDPOINTING_MS` — silence ms before a segment finalizes (default `500`). Lower = quicker finals; higher = fewer mid-sentence cuts during thinking pauses.
+- `DEEPGRAM_UTTERANCE_END_MS` — speech-end grace window (default `1500`).
+- `DEEPGRAM_SMART_FORMAT` / `DEEPGRAM_PUNCTUATE` — both default `true`. Set to `0` to disable.
+- `DEEPGRAM_KEYTERMS` — comma-separated jargon / proper nouns to bias nova-3 toward (e.g. `"rebasing, lifecycle mesh, Tam"`). Empty by default.
+- `DEEPGRAM_REPLAY_BUFFER_S` / `DEEPGRAM_KEEPALIVE_INTERVAL_S` / `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` / `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` — WebSocket resilience tuning.
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
 
 Where it lives: environment variables and/or a `.env` file. Never

@@ -146,8 +146,8 @@ class TestDeepgramTranscriber:
         assert "utterance_end_ms" in params
 
     def test_builds_ws_url_emits_endpointing(self) -> None:
-        """Default endpointing_ms is serialized on the URL."""
-        client = DeepgramTranscriber(api_key="test-key")
+        """``endpointing_ms`` is serialized on the URL as ``endpointing``."""
+        client = DeepgramTranscriber(api_key="test-key", endpointing_ms=300)
         params = parse_qs(urlparse(client.build_ws_url()).query)
         assert params["endpointing"] == ["300"]
 
@@ -166,6 +166,62 @@ class TestDeepgramTranscriber:
         url = client.build_ws_url()
         params = parse_qs(urlparse(url).query)
         assert params["diarize"] == ["true"]
+
+    def test_default_endpointing_widened(self) -> None:
+        """Default endpointing must give speakers room to breathe mid-sentence.
+
+        Discord packets carry one user's voice, but a thinking pause
+        of 300 ms still slices a thought in half. 500 ms is the
+        baseline that survived field testing.
+        """
+        client = DeepgramTranscriber(api_key="test-key")
+        assert client.endpointing_ms >= 500
+
+    def test_default_utterance_end_ms_widened(self) -> None:
+        """Default ``utterance_end_ms`` should be at least 1500 ms."""
+        client = DeepgramTranscriber(api_key="test-key")
+        assert client.utterance_end_ms >= 1500
+
+    def test_smart_format_enabled_by_default(self) -> None:
+        """``smart_format`` is on by default — punctuation, numbers, units."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["smart_format"] == ["true"]
+
+    def test_punctuate_enabled_by_default(self) -> None:
+        """``punctuate`` is on by default; smart_format implies it but make explicit."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["punctuate"] == ["true"]
+
+    def test_keyterms_threaded_into_ws_url(self) -> None:
+        """Keyterm prompting biases nova-3 toward provided jargon/names."""
+        client = DeepgramTranscriber(
+            api_key="test-key",
+            keyterms=("rebasing", "lifecycle mesh", "Tam"),
+        )
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        # Deepgram accepts repeated ``keyterm=…`` query params.
+        assert params["keyterm"] == ["rebasing", "lifecycle mesh", "Tam"]
+
+    def test_no_keyterms_omits_param(self) -> None:
+        """Without keyterms the URL must not contain ``keyterm=``."""
+        client = DeepgramTranscriber(api_key="test-key")
+        url = client.build_ws_url()
+        assert "keyterm=" not in url
+
+    def test_clone_preserves_keyterms_and_format_flags(self) -> None:
+        """clone() carries every config knob across, including new ones."""
+        original = DeepgramTranscriber(
+            api_key="test-key",
+            smart_format=False,
+            punctuate=False,
+            keyterms=("alpha", "beta"),
+        )
+        cloned = original.clone()
+        assert cloned.smart_format is False
+        assert cloned.punctuate is False
+        assert cloned.keyterms == ("alpha", "beta")
 
     def test_builds_headers(self) -> None:
         """Headers include Authorization with Token prefix."""
@@ -1231,3 +1287,41 @@ class TestCreateTranscriberFromEnv:
         assert pytest.approx(5.0) == client._KEEPALIVE_INTERVAL
         assert client._MAX_RECONNECTS == 3
         assert pytest.approx(32.0) == client._RECONNECT_BACKOFF_CAP
+
+    def test_endpointing_knobs_from_env(self) -> None:
+        """Factory wires endpointing + utterance-end knobs from env vars."""
+        env = {
+            "DEEPGRAM_API_KEY": "sk-test",
+            "DEEPGRAM_ENDPOINTING_MS": "750",
+            "DEEPGRAM_UTTERANCE_END_MS": "2000",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            client = create_transcriber_from_env()
+
+        assert client.endpointing_ms == 750
+        assert client.utterance_end_ms == 2000
+
+    def test_keyterms_from_env(self) -> None:
+        """Factory parses ``DEEPGRAM_KEYTERMS`` as comma-separated list.
+
+        Trims whitespace; drops empty entries.
+        """
+        env = {
+            "DEEPGRAM_API_KEY": "sk-test",
+            "DEEPGRAM_KEYTERMS": "rebasing, lifecycle mesh ,, Tam ",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            client = create_transcriber_from_env()
+
+        assert client.keyterms == ("rebasing", "lifecycle mesh", "Tam")
+
+    def test_smart_format_disable_via_env(self) -> None:
+        """``DEEPGRAM_SMART_FORMAT=0`` disables the default-on smart formatter."""
+        env = {
+            "DEEPGRAM_API_KEY": "sk-test",
+            "DEEPGRAM_SMART_FORMAT": "0",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            client = create_transcriber_from_env()
+
+        assert client.smart_format is False

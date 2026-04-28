@@ -38,7 +38,14 @@ if TYPE_CHECKING:
 
 
 class VoiceSource:
-    """Drains a Deepgram transcription queue onto the bus."""
+    """Drains a Deepgram transcription queue onto the bus.
+
+    Discord delivers per-SSRC audio so each user_id has an independent
+    transcript stream. State machine is keyed by user_id (with ``None``
+    as the legacy single-stream key for unattributed results) so two
+    speakers talking concurrently get distinct turn_ids — a single
+    state slot would drop the second speaker's ``activity.start``.
+    """
 
     name: str = "voice"
 
@@ -55,8 +62,10 @@ class VoiceSource:
         self._channel_id = voice_channel_id
         self._queue = queue
         self._seq = 0
-        # state machine: None → "speaking" → None (after final)
-        self._current_turn_id: str | None = None
+        # per-user state machine: user_id → current_turn_id (None when idle).
+        # ``None`` user_id is the legacy unattributed slot — kept so older
+        # mixed-stream paths still work.
+        self._turn_ids: dict[int | None, str] = {}
 
     async def run(self) -> None:
         """Forever loop: drain queue, publish. Cancel to stop."""
@@ -65,37 +74,43 @@ class VoiceSource:
             await self._handle(result)
 
     async def _handle(self, result: TranscriptionResult) -> None:
-        if self._current_turn_id is None:
-            # fresh utterance
-            self._current_turn_id = f"voice-{uuid4().hex[:12]}"
-            await self._publish(TOPIC_VOICE_ACTIVITY_START, payload=None)
+        user_id = result.user_id
+        turn_id = self._turn_ids.get(user_id)
+        if turn_id is None:
+            turn_id = f"voice-{uuid4().hex[:12]}"
+            self._turn_ids[user_id] = turn_id
+            await self._publish(
+                TOPIC_VOICE_ACTIVITY_START, turn_id=turn_id, payload=None
+            )
 
         if result.is_final:
             await self._publish(
                 TOPIC_VOICE_TRANSCRIPT_FINAL,
+                turn_id=turn_id,
                 payload={
                     "text": result.text,
                     "confidence": result.confidence,
                     "start": result.start,
                     "end": result.end,
                     "speaker": result.speaker,
+                    "user_id": result.user_id,
                 },
             )
-            await self._publish(TOPIC_VOICE_ACTIVITY_END, payload=None)
-            self._current_turn_id = None
+            await self._publish(TOPIC_VOICE_ACTIVITY_END, turn_id=turn_id, payload=None)
+            self._turn_ids.pop(user_id, None)
         else:
             await self._publish(
                 TOPIC_VOICE_TRANSCRIPT_PARTIAL,
+                turn_id=turn_id,
                 payload={
                     "text": result.text,
                     "confidence": result.confidence,
+                    "user_id": result.user_id,
                 },
             )
 
-    async def _publish(self, topic: str, *, payload: object) -> Event:
+    async def _publish(self, topic: str, *, turn_id: str, payload: object) -> Event:
         self._seq += 1
-        turn_id = self._current_turn_id
-        assert turn_id is not None  # noqa: S101 — invariant: set before publish
         event_id = f"voice-{self._seq:08d}"
         ev = Event(
             event_id=event_id,
