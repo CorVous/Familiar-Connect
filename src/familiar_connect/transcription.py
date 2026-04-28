@@ -454,11 +454,16 @@ class DeepgramTranscriber:
                             # got real data — reset reconnect counter
                             consecutive_reconnects = 0
                     else:
+                        # full payload — `Metadata` carries session-end stats
+                        # (duration, models, model_info) we need for debugging
+                        # why Deepgram closes per-user sessions cleanly with
+                        # code 1000. truncating hides everything past
+                        # request_id.
                         _logger.info(
                             f"{ls.tag('Event', ls.C)} "
                             f"{ls.word('Deepgram', ls.C)} "
                             f"{ls.kv('type', msg_type)} "
-                            f"{ls.kv('data', ls.trunc(msg.data[:200], 100), vc=ls.LW)}"
+                            f"{ls.kv('data', msg.data, vc=ls.LW)}"
                         )
                 elif msg.type in {
                     aiohttp.WSMsgType.CLOSED,
@@ -473,6 +478,25 @@ class DeepgramTranscriber:
                     break
 
             close_code = self._ws.close_code if self._ws else None
+            # diagnostic: aiohttp's `async for` swallows CLOSE messages and
+            # surfaces only `close_code`. when Deepgram tears the session
+            # down cleanly (1000 + final Metadata) we want every clue we
+            # can get — exception (transport-level) and any close-message
+            # data still hanging on the WS object.
+            ws_exc: BaseException | None = None
+            close_msg_data: object | None = None
+            if self._ws is not None:
+                with contextlib.suppress(Exception):
+                    ws_exc = self._ws.exception()
+                close_msg_data = getattr(self._ws, "_close_msg", None)
+            _logger.info(
+                f"{ls.tag('🔌 WebSocket', ls.Y)} "
+                f"{ls.word('Deepgram', ls.C)} "
+                f"{ls.word('loop-exit', ls.W)} "
+                f"{ls.kv('close_code', str(close_code), vc=ls.LW)} "
+                f"{ls.kv('exc', repr(ws_exc), vc=ls.LW)} "
+                f"{ls.kv('close_msg', repr(close_msg_data), vc=ls.LW)}"
+            )
 
             # self-initiated close → exit silently; ``stop()`` handles cleanup
             if self._shutting_down:
