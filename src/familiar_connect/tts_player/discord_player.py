@@ -61,6 +61,12 @@ class DiscordVoicePlayer:
     ) -> None:
         self._tts = tts_client
         self._get_voice_client = get_voice_client
+        # serialize playback. per-user scopes (voice_responder) let two
+        # speakers' replies coexist, but the ``VoiceClient`` is single-
+        # track — concurrent ``vc.play`` raises ``ClientException(
+        # 'Already playing audio.')``. this lock makes the second
+        # ``speak`` await the first's playback completion.
+        self._play_lock = asyncio.Lock()
 
     async def speak(self, text: str, *, scope: TurnScope) -> None:
         if scope.is_cancelled():
@@ -93,23 +99,30 @@ class DiscordVoicePlayer:
 
         stereo = mono_to_stereo(result.audio)
         source = discord.PCMAudio(io.BytesIO(stereo))
-        _logger.info(
-            f"{ls.tag('🔊 Say', ls.G)} "
-            f"{ls.kv('turn', scope.turn_id, vc=ls.LC)} "
-            f"{ls.kv('bytes', str(len(stereo)), vc=ls.LW)}"
-        )
-        vc.play(source)
 
-        # Poll for completion or cancellation. ``vc.is_playing`` flips
-        # to False once py-cord has drained the source.
-        while vc.is_playing():
+        async with self._play_lock:
+            # scope may have been cancelled while we waited for the
+            # voice client to free up.
             if scope.is_cancelled():
-                _logger.info(
-                    f"{ls.tag('🔊 Cut', ls.Y)} {ls.kv('turn', scope.turn_id, vc=ls.LC)}"
-                )
-                vc.stop()
                 return
-            await asyncio.sleep(_POLL_S)
+            _logger.info(
+                f"{ls.tag('🔊 Say', ls.G)} "
+                f"{ls.kv('turn', scope.turn_id, vc=ls.LC)} "
+                f"{ls.kv('bytes', str(len(stereo)), vc=ls.LW)}"
+            )
+            vc.play(source)
+
+            # Poll for completion or cancellation. ``vc.is_playing`` flips
+            # to False once py-cord has drained the source.
+            while vc.is_playing():
+                if scope.is_cancelled():
+                    _logger.info(
+                        f"{ls.tag('🔊 Cut', ls.Y)} "
+                        f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                    )
+                    vc.stop()
+                    return
+                await asyncio.sleep(_POLL_S)
 
     async def stop(self) -> None:
         vc = self._get_voice_client()

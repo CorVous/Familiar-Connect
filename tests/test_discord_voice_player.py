@@ -15,6 +15,7 @@ import asyncio
 import struct
 from unittest.mock import MagicMock
 
+import discord
 import pytest
 
 from familiar_connect.bus.envelope import TurnScope
@@ -176,6 +177,60 @@ class TestBargeIn:
 
         vc.stop.assert_called()
         assert elapsed_ms < 200, f"barge-in took {elapsed_ms}ms"
+
+
+class TestConcurrentSpeak:
+    """Cross-user replies share one voice client.
+
+    Per-user scope (responder) lets two finals from different speakers
+    each spawn their own ``speak``. The Discord ``VoiceClient`` is
+    single-track; ``vc.play()`` while audio is already playing raises
+    ``ClientException('Already playing audio.')``. The player must
+    serialize.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_speaks_do_not_collide(self) -> None:
+        tts = _StubTTS(audio=_mono_pcm(8))
+
+        # mimic real pycord: play() raises while audio is already
+        # playing; is_playing returns True for several polls so each
+        # playback occupies the voice client across event-loop ticks
+        # — that's the race window where the second speak() arrives.
+        state = {"playing": False, "polls_remaining": 0}
+        plays: list[object] = []
+
+        def _play(source: object) -> None:
+            if state["playing"]:
+                msg = "Already playing audio."
+                raise discord.ClientException(msg)
+            state["playing"] = True
+            state["polls_remaining"] = 3
+            plays.append(source)
+
+        def _is_playing() -> bool:
+            if state["polls_remaining"] > 0:
+                state["polls_remaining"] -= 1
+                return True
+            state["playing"] = False
+            return False
+
+        vc = MagicMock(name="voice_client")
+        vc.is_connected.return_value = True
+        vc.play.side_effect = _play
+        vc.is_playing.side_effect = _is_playing
+
+        player = DiscordVoicePlayer(tts_client=tts, get_voice_client=lambda: vc)
+        s1 = TurnScope(turn_id="t1", session_id="voice:1:user:101", started_at=0.0)
+        s2 = TurnScope(turn_id="t2", session_id="voice:1:user:202", started_at=0.0)
+
+        await asyncio.gather(
+            player.speak("alice reply", scope=s1),
+            player.speak("bob reply", scope=s2),
+        )
+
+        assert len(plays) == 2
+        assert tts.calls == ["alice reply", "bob reply"]
 
 
 class TestStop:
