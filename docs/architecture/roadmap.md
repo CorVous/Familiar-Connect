@@ -93,15 +93,6 @@ audio; emit `voice.activity.end` on `complete`. Local VAD saves
 150–200 ms over remote. See
 [Voice pipeline — turn detection](voice-pipeline.md#turn-detection).
 
-### V2 — Sentence-level TTS streaming
-
-Today: `VoiceResponder` buffers the full LLM reply, then speaks.
-
-Change: `SentenceStreamer` between LLM and TTS. Flushes on sentence
-boundaries (abbreviation-aware). `<silent>` sentinel check moves to
-the first-sentence callback. Cancellation still scope-driven.
-1–3 s perceived-latency win.
-
 ### V3 — Pluggable transcriber backend
 
 Today: `DeepgramTranscriber` is concrete; the clone-template pattern
@@ -168,7 +159,8 @@ Today: `@span` emits timing logs. Phase-5 metrics collector +
 Change: ship the collector, surface a per-turn voice-budget
 breakdown (`vad_end → stt_final → llm_first_token →
 tts_first_audio → playback_start`). Most useful single signal once
-V1+V2 land.
+V1 lands — V2 (sentence streaming) shipped, so the budget already
+includes that win.
 
 ## Out of scope
 

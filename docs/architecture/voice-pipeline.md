@@ -42,7 +42,7 @@ Discord Opus  →  RecordingSink  →  per-user PCM
                           LLMClient.chat_stream   prompt
                                         │
                                         ▼
-                              [Sentence streamer]   ← roadmap V2
+                                [SentenceStreamer]
                                         │
                                         ▼
                                   [TTS client]
@@ -109,23 +109,30 @@ property — feed the next stage incrementally.
 
 ## Sentence streaming
 
-**Today:** `VoiceResponder` buffers the full LLM reply, then calls
-`TTSPlayer.speak`.
+`VoiceResponder` feeds each LLM delta through a `SentenceStreamer`
+(`familiar_connect.sentence_streamer`) and calls `TTSPlayer.speak`
+once per completed sentence. Time-to-first-audio drops from "after
+the LLM finishes" to "after the first sentence" — the same 1–3 s
+perceived-latency win Pipecat's `SentenceAggregator` ships.
 
-**Field consensus:** Pipecat's `SentenceAggregator` flushes to TTS
-on sentence boundaries. 1–3 s perceived-latency win; time-to-first-
-audio drops from "after the LLM finishes" to "after the first
-sentence".
+Splitter is abbreviation-aware: `Mr.` / `Dr.` / `etc.` /
+single-letter initials (`J. K. Rowling`) don't trip a boundary. A
+trailing partial that never reaches a terminator (model omits the
+final period) is drained on stream end via `flush()` and spoken as
+the last chunk.
 
-**Roadmap:** V2 introduces a `SentenceStreamer` between LLM and TTS.
-Abbreviation-aware splitting. `<silent>` sentinel detection moves
-to its first-sentence callback. Cancellation flushes in-flight
-sentences. Toggle via:
+**Silent sentinel.** `SilentDetector` runs ahead of the splitter
+on every delta. Sentences finalised before the gate decides are
+buffered; on `True` they're dropped and TTS is never invoked, on
+`False` they flush and the streamer takes over feeding TTS as new
+sentences arrive.
 
-```toml
-[providers.voice_pipeline]
-sentence_streaming = true
-```
+**Cancellation.** Each `await self._tts.speak(sentence, scope=...)`
+is awaited serially. A barge-in cancels the current `TurnScope`;
+`DiscordVoicePlayer`'s poll loop cuts the in-flight sentence within
+~20 ms and the responder bails before queueing the next sentence.
+The assistant turn is recorded only if the full reply played
+without cancellation.
 
 ## TTS
 
@@ -160,9 +167,9 @@ Cascaded with cloud STT/TTS, April 2026:
 | **Comfortable** | **1.0–1.2 s** |
 | **Feels broken above** | **2 s** |
 
-Biggest wins: local VAD (150–200 ms), semantic turn detection
-(skip the silence timeout), sentence-level TTS streaming. V1 + V2
-hit all three.
+Biggest remaining wins: local VAD (150–200 ms) and semantic turn
+detection (skip the silence timeout). Sentence-level TTS streaming
+already shipped — see [Sentence streaming](#sentence-streaming).
 
 ## Barge-in
 
@@ -186,5 +193,4 @@ Verified sub-200 ms by
 - `prompt_layers` — drop expensive layers on low-stakes channels.
 - `message_rendering` — `name_only` saves DM tokens.
 
-V1 and V2 will add strategy-level per-channel overrides once A1
-lands.
+V1 will add strategy-level per-channel overrides once A1 lands.

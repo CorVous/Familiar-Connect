@@ -24,6 +24,7 @@ from familiar_connect.bus.topics import (
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.diagnostics.cold_cache import log_signals
 from familiar_connect.llm import Message
+from familiar_connect.sentence_streamer import SentenceStreamer
 from familiar_connect.silence import SilentDetector
 
 if TYPE_CHECKING:
@@ -217,25 +218,21 @@ class VoiceResponder:
         # Seed retrieval cue for RagContextLayer (if wired).
         self._assembler.set_rag_cue(text)
 
-        reply = await self._stream_reply(scope, channel_id)
+        reply = await self._stream_and_speak(scope, channel_id)
         if reply is None or scope.is_cancelled():
             return
         # Cartesia rejects empty/whitespace ``transcript`` with HTTP 400.
         # An empty reply usually means the LLM stream emitted no deltas —
         # bad model name, content filter, or upstream error frame the
         # parser silently dropped. Mirrors ``TextResponder``'s guard.
+        # _stream_and_speak gates TTS on this too, so we just skip the
+        # assistant-turn write here.
         if not reply.strip():
             _logger.warning(
                 f"{ls.tag('Voice', ls.Y)} "
                 f"{ls.kv('skip', 'empty_reply', vc=ls.LY)} "
                 f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
             )
-            return
-
-        # Speak — respects scope cancellation via the TTSPlayer contract.
-        await self._tts.speak(reply, scope=scope)
-
-        if scope.is_cancelled():
             return
 
         self._history.append_turn(
@@ -260,7 +257,14 @@ class VoiceResponder:
             )
             return None
 
-    async def _stream_reply(self, scope: TurnScope, channel_id: int) -> str | None:
+    async def _stream_and_speak(self, scope: TurnScope, channel_id: int) -> str | None:
+        """Stream LLM output, speak sentence-by-sentence.
+
+        Returns concatenated reply on speech, ``None`` on silent /
+        empty / cancelled / stream error. ``<silent>`` sentinel is
+        decided before any sentence reaches TTS — buffered sentences
+        wait until :class:`SilentDetector` rules in/out.
+        """
         ctx = AssemblyContext(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
@@ -273,34 +277,80 @@ class VoiceResponder:
         messages.extend(prompt.recent_history)
 
         accumulated: list[str] = []
+        streamer = SentenceStreamer()
         silent = SilentDetector()
+        # sentences buffered while the silent gate is still pending.
+        # drained in arrival order once gate opens; dropped on ``True``.
+        pending: list[str] = []
+        gate_open = False  # SilentDetector returned False — speak path live
+
         try:
             async for delta in self._llm.chat_stream(messages):
                 if scope.is_cancelled():
                     return None
                 accumulated.append(delta)
-                if silent.feed(delta) is True:
-                    # Mirror cancellation: no TTS, no assistant turn.
-                    _logger.info(
-                        f"{ls.tag('💤 Voice', ls.B)} "
-                        f"{ls.kv('decision', 'silent', vc=ls.LB)} "
-                        f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
-                    )
-                    return None
+
+                if not gate_open:
+                    decision = silent.feed(delta)
+                    if decision is True:
+                        _logger.info(
+                            f"{ls.tag('💤 Voice', ls.B)} "
+                            f"{ls.kv('decision', 'silent', vc=ls.LB)} "
+                            f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                        )
+                        return None
+                    if decision is False:
+                        gate_open = True
+                        self._log_respond(scope.turn_id)
+
+                pending.extend(streamer.feed(delta))
+                if gate_open:
+                    while pending:
+                        if scope.is_cancelled():
+                            return None
+                        await self._speak(pending.pop(0), scope=scope)
+
+            # Stream ended undecided (very short / whitespace-only reply).
+            # Treat non-empty content as speak path so _on_final's
+            # empty-reply guard runs symmetrically with the streaming case.
+            if (
+                not gate_open
+                and silent.decided is None
+                and "".join(accumulated).strip()
+            ):
+                self._log_respond(scope.turn_id)
+                gate_open = True
+
+            if gate_open:
+                tail = streamer.flush()
+                if tail.strip():
+                    pending.append(tail)
+                while pending:
+                    if scope.is_cancelled():
+                        return None
+                    await self._speak(pending.pop(0), scope=scope)
         except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
             _logger.warning(
                 f"{ls.tag('Voice', ls.R)} "
                 f"{ls.kv('llm_stream_error', repr(exc), vc=ls.R)}"
             )
             return None
-        # Symmetric with the silent branch: one decision line per turn so
-        # ops can see every voice decision in logs, not just edge cases.
+
+        return "".join(accumulated)
+
+    def _log_respond(self, turn_id: str) -> None:
+        """One ``decision=respond`` line per turn, matching the silent log."""
         _logger.info(
             f"{ls.tag('Voice', ls.G)} "
             f"{ls.kv('decision', 'respond', vc=ls.LG)} "
-            f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+            f"{ls.kv('turn', turn_id, vc=ls.LC)}"
         )
-        return "".join(accumulated)
+
+    async def _speak(self, text: str, *, scope: TurnScope) -> None:
+        """Skip whitespace-only chunks; ``DiscordVoicePlayer`` would too."""
+        if not text.strip():
+            return
+        await self._tts.speak(text, scope=scope)
 
     # ------------------------------------------------------------------
     # Cold-cache signal emission (Phase-3 instrumentation)

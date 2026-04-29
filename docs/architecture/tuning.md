@@ -28,7 +28,7 @@ tracks the migration.
 | Deepgram STT thresholds & key-terms | env (`DEEPGRAM_*`) | `[providers.stt.deepgram]` (A2) |
 | Turn detection strategy | Deepgram-only | `[providers.turn_detection]` (V1) |
 | Memory projector selection | hard-wired | `[providers.memory]` (M5) |
-| Voice pipeline mode + sentence streaming | cascaded, full-buffer | `[providers.voice_pipeline]` (V2 / V5) |
+| Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
 | RAG / fact retrieval ranking | private constants | `[memory.retrieval]` (M2 / M6) |
 
 ## Environment variables
@@ -98,9 +98,10 @@ message_rendering   = "prefixed"  # "prefixed" | "name_only"
 4. **`[tts].provider = "cartesia"`**. Lowest hosted
    time-to-first-audio of the three.
 
-V1 (local VAD + Smart Turn) and V2 (sentence streaming) are where
-the big wins live. Today's knobs are within a few hundred
-milliseconds of each other.
+Sentence streaming (formerly V2) shipped — TTS first audio fires
+on the first sentence boundary, not after the LLM finishes.
+Remaining big win is V1 (local VAD + Smart Turn). Today's knobs
+above are within a few hundred milliseconds of each other.
 
 ### Better turn handling in busy channels
 
@@ -240,7 +241,7 @@ Documented now so the schema is settled before wiring lands. Not
 read by today's code.
 
 ```toml
-# planned (A1 / V1 / V2 / V5 / M5)
+# planned (A1 / V1 / V5 / M5)
 
 [providers.stt]
 backend = "deepgram"             # | "faster_whisper" | "parakeet"
@@ -252,8 +253,7 @@ strategy = "deepgram"            # | "silero+smart_turn" | "ten"
 projectors = ["rich_note", "people_dossier"]
 
 [providers.voice_pipeline]
-mode               = "cascaded"  # | "s2s"
-sentence_streaming = true
+mode = "cascaded"                # | "s2s" (V5)
 
 [memory.retrieval]
 bm25_weight       = 1.0
