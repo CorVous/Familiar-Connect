@@ -83,6 +83,49 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match="temperature must be in"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_provider_order_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``provider_order`` pins OpenRouter routing for cache stability.
+
+        Stopgap until OpenRouter routing improves or model swaps; the
+        config plumbing is decoupled so the pin can be dropped by
+        deleting the line.
+        """
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.main_prose]\nmodel = "z-ai/glm-5.1"\n'
+            'provider_order = ["z-ai", "deepinfra"]\n'
+            "provider_allow_fallbacks = false\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        slot = cfg.llm["main_prose"]
+        assert slot.provider_order == ("z-ai", "deepinfra")
+        assert slot.provider_allow_fallbacks is False
+
+    def test_provider_order_omitted_means_none(self, tmp_path: Path) -> None:
+        """Slot without ``provider_order`` parses to ``None`` (default routing).
+
+        Uses a custom default profile so the shipped default's pin
+        (currently ``["z-ai"]``) doesn't bleed in via TOML merge.
+        """
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text('[llm.main_prose]\nmodel = "x"\n')
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.main_prose]\nmodel = "m"\n')
+        cfg = load_character_config(path, defaults_path=defaults)
+        slot = cfg.llm["main_prose"]
+        assert slot.provider_order is None
+        assert slot.provider_allow_fallbacks is True
+
+    def test_provider_order_must_be_list_of_strings(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.main_prose]\nmodel = "m"\nprovider_order = [1, 2]\n')
+        with pytest.raises(ConfigError, match="provider_order"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_unknown_tts_provider_rejected(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:

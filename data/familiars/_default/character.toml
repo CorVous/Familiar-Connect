@@ -37,7 +37,13 @@ gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
 
 # --- LLM slots -------------------------------------------------------------
+#
+# provider_order pins OpenRouter routing for prompt-cache stability.
+# STOPGAP — drop this once OpenRouter's default routing reliably hits
+# a cache-supporting provider, or when you swap to a different model.
+# See docs/architecture/tuning.md § provider pinning.
 
 [llm.main_prose]
-model       = "z-ai/glm-5.1"
-temperature = 0.7
+model          = "z-ai/glm-5.1"
+temperature    = 0.7
+provider_order = ["z-ai"]            # first-party — best caching for GLM

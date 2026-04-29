@@ -28,6 +28,12 @@ class LLMSlotConfig:
 
     model: str
     temperature: float | None = None
+    # OpenRouter provider routing override. ``None`` keeps default
+    # routing (OpenRouter picks each call). A pinned order stabilises
+    # prompt caching across turns at the cost of some availability.
+    # Stopgap — see docs/architecture/tuning.md § provider pinning.
+    provider_order: tuple[str, ...] | None = None
+    provider_allow_fallbacks: bool = True
 
 
 _TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia", "gemini"})
@@ -310,8 +316,43 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
                 f"got {type(temperature_raw).__name__}"
             )
             raise ConfigError(msg)
-        slots[name] = LLMSlotConfig(model=model, temperature=temperature)
+        provider_order = _parse_provider_order(name, section.get("provider_order"))
+        allow_fallbacks_raw = section.get("provider_allow_fallbacks", True)
+        if not isinstance(allow_fallbacks_raw, bool):
+            msg = (
+                f"[llm.{name}].provider_allow_fallbacks must be a bool, "
+                f"got {type(allow_fallbacks_raw).__name__}"
+            )
+            raise ConfigError(msg)
+        slots[name] = LLMSlotConfig(
+            model=model,
+            temperature=temperature,
+            provider_order=provider_order,
+            provider_allow_fallbacks=allow_fallbacks_raw,
+        )
     return slots
+
+
+def _parse_provider_order(slot_name: str, raw: object) -> tuple[str, ...] | None:
+    """Validate ``[llm.<slot>].provider_order`` as a list of non-empty strings."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        msg = (
+            f"[llm.{slot_name}].provider_order must be a list of strings, "
+            f"got {type(raw).__name__}"
+        )
+        raise ConfigError(msg)
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item:
+            msg = (
+                f"[llm.{slot_name}].provider_order entries must be "
+                f"non-empty strings, got {item!r}"
+            )
+            raise ConfigError(msg)
+        out.append(item)
+    return tuple(out)
 
 
 def _parse_tts_config(raw: dict) -> TTSConfig:

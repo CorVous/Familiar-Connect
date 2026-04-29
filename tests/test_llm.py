@@ -201,6 +201,35 @@ class TestLLMClient:
         payload = client.build_payload(messages)
         assert payload["temperature"] == pytest.approx(0.7)
 
+    def test_payload_omits_provider_when_unset(self) -> None:
+        """Default routing — no ``provider`` field in the request."""
+        client = LLMClient(api_key="k", model="m")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert "provider" not in payload
+
+    def test_payload_pins_provider_order(self) -> None:
+        """``provider_order`` becomes ``provider.order`` for OpenRouter."""
+        client = LLMClient(
+            api_key="k",
+            model="m",
+            provider_order=("z-ai", "deepinfra"),
+        )
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["provider"] == {
+            "order": ["z-ai", "deepinfra"],
+            "allow_fallbacks": True,
+        }
+
+    def test_payload_disables_fallbacks_when_requested(self) -> None:
+        client = LLMClient(
+            api_key="k",
+            model="m",
+            provider_order=("z-ai",),
+            provider_allow_fallbacks=False,
+        )
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["provider"]["allow_fallbacks"] is False
+
 
 class TestLLMClientChat:
     @pytest.fixture

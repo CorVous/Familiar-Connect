@@ -120,6 +120,8 @@ class LLMClient:
         base_url: str = OPENROUTER_BASE_URL,
         temperature: float | None = None,
         slot: str | None = None,
+        provider_order: tuple[str, ...] | None = None,
+        provider_allow_fallbacks: bool = True,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -128,6 +130,10 @@ class LLMClient:
         # call-site label — appears in span names + the per-call log.
         # ``None`` keeps backward-compat for tests / one-off clients.
         self.slot = slot
+        # OpenRouter routing override. ``None`` keeps default routing.
+        # See LLMSlotConfig for the rationale + sunset note.
+        self.provider_order = provider_order
+        self.provider_allow_fallbacks = provider_allow_fallbacks
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
@@ -158,6 +164,11 @@ class LLMClient:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if self.provider_order is not None:
+            payload["provider"] = {
+                "order": list(self.provider_order),
+                "allow_fallbacks": self.provider_allow_fallbacks,
+            }
         return payload
 
     async def _post(
@@ -452,12 +463,19 @@ def create_llm_clients(
             model=slot.model,
             temperature=slot.temperature,
             slot=slot_name,
+            provider_order=slot.provider_order,
+            provider_allow_fallbacks=slot.provider_allow_fallbacks,
         )
         temp = slot.temperature if slot.temperature is not None else "default"
-        _logger.info(
-            f"{ls.tag('Config', ls.W)} "
-            f"{ls.kv('slot', slot_name)} "
-            f"{ls.kv('model', str(slot.model))} "
-            f"{ls.kv('temperature', str(temp))}"
-        )
+        log_parts = [
+            ls.tag("Config", ls.W),
+            ls.kv("slot", slot_name),
+            ls.kv("model", str(slot.model)),
+            ls.kv("temperature", str(temp)),
+        ]
+        if slot.provider_order is not None:
+            log_parts.append(ls.kv("provider_order", ",".join(slot.provider_order)))
+            if not slot.provider_allow_fallbacks:
+                log_parts.append(ls.kv("fallbacks", "off", vc=ls.LY))
+        _logger.info(" ".join(log_parts))
     return clients

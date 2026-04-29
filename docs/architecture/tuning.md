@@ -75,8 +75,10 @@ gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
 
 [llm.main_prose]
-model       = "z-ai/glm-5.1"
-temperature = 0.7
+model                    = "z-ai/glm-5.1"
+temperature              = 0.7
+provider_order           = ["z-ai"]   # optional — pin OpenRouter routing
+provider_allow_fallbacks = true       # optional — default true
 
 [channels.123456789012345678]
 history_window_size = 30
@@ -88,20 +90,56 @@ message_rendering   = "prefixed"  # "prefixed" | "name_only"
 
 ### Lower voice latency
 
-1. **`DEEPGRAM_ENDPOINTING_MS`** (default `500`). Drop to `300` for
+1. **`[llm.<slot>].provider_order`** — pin OpenRouter to a single
+   stable provider so prompt caching survives across turns (see
+   [provider pinning](#provider-pinning) below).
+2. **`DEEPGRAM_ENDPOINTING_MS`** (default `500`). Drop to `300` for
    snappier finals; raise to `700` if it cuts mid-sentence. Right
    long-term answer: a semantic turn classifier (V1).
-2. **`DEEPGRAM_UTTERANCE_END_MS`** (default `1500`). Speech-end
+3. **`DEEPGRAM_UTTERANCE_END_MS`** (default `1500`). Speech-end
    grace. Lower = faster handoff, more risk of mid-sentence cuts.
-3. **`[channels.<id>].history_window_size`**. Lower on busy
+4. **`[channels.<id>].history_window_size`**. Lower on busy
    channels — smaller prompt, lower LLM TTFT.
-4. **`[tts].provider = "cartesia"`**. Lowest hosted
+5. **`[tts].provider = "cartesia"`**. Lowest hosted
    time-to-first-audio of the three.
 
 Sentence streaming (formerly V2) shipped — TTS first audio fires
 on the first sentence boundary, not after the LLM finishes.
 Remaining big win is V1 (local VAD + Smart Turn). Today's knobs
 above are within a few hundred milliseconds of each other.
+
+#### Provider pinning
+
+OpenRouter load-balances each call across whichever providers are
+available. Diagnostics in production showed ten different providers
+across sixteen calls within a few minutes — each one a cold prompt
+cache, so input tokens stayed at `cached=0` even with identical
+system prompts turn-over-turn.
+
+Pin a provider in `[llm.<slot>]`:
+
+```toml
+[llm.main_prose]
+model                    = "z-ai/glm-5.1"
+provider_order           = ["z-ai"]      # first-party — best caching
+provider_allow_fallbacks = true          # default: fall back if pinned is down
+```
+
+For GLM family models, `z-ai` is the first-party provider and the
+most reliable caching path. For other model families, check the
+upstream's OpenRouter listing for the canonical provider; second
+choice is usually `deepinfra` or `together` (large stable infra).
+
+`provider_allow_fallbacks=true` (the default) lets OpenRouter route
+elsewhere when the pinned provider is unavailable — necessary so a
+flaky provider doesn't black out the bot. Set it to `false` only
+when you want hard failures rather than a cache-cold call.
+
+**This is a stopgap.** OpenRouter's default routing improves
+periodically and the `provider_order` line should be revisited
+whenever you change models. The `[LLM call]` log line shows
+`provider=...` and `cached=...` per call — use them to verify the
+pin is working and to decide when it's no longer needed.
 
 ### Better turn handling in busy channels
 
