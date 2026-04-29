@@ -29,6 +29,10 @@ from familiar_connect.bus.topics import (
     TOPIC_VOICE_TRANSCRIPT_FINAL,
     TOPIC_VOICE_TRANSCRIPT_PARTIAL,
 )
+from familiar_connect.diagnostics.voice_budget import (
+    PHASE_STT_FINAL,
+    get_voice_budget_recorder,
+)
 
 if TYPE_CHECKING:
     import asyncio
@@ -86,6 +90,9 @@ class VoiceSource:
             )
 
         if result.is_final:
+            # Stamp before publish so the recorder sees stt_final ahead of
+            # the responder's llm_first_token mark — preserves gap order.
+            get_voice_budget_recorder().record(turn_id=turn_id, phase=PHASE_STT_FINAL)
             await self._publish(
                 TOPIC_VOICE_TRANSCRIPT_FINAL,
                 turn_id=turn_id,

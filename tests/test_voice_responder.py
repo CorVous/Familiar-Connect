@@ -29,6 +29,11 @@ from familiar_connect.context import (
     CoreInstructionsLayer,
     RecentHistoryLayer,
 )
+from familiar_connect.diagnostics.collector import (
+    get_span_collector,
+    reset_span_collector,
+)
+from familiar_connect.diagnostics.voice_budget import reset_voice_budget_recorder
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
@@ -297,6 +302,55 @@ class TestFinalReply:
         await responder.wait_until_idle()
         await bus.shutdown()
         assert player.calls == []
+
+
+class TestVoiceBudgetSpans:
+    """Per-turn voice latency phase spans land in the SpanCollector.
+
+    See ``familiar_connect.diagnostics.voice_budget``. Mock TTS player
+    doesn't reach DiscordVoicePlayer so ``playback_start`` /
+    ``voice.total`` aren't asserted here — only the LLM/TTS handoff.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ttft_to_tts_gap_recorded(self, tmp_path: Path) -> None:
+        reset_span_collector()
+        reset_voice_budget_recorder()
+
+        llm = _ScriptedLLM(deltas=["Hello there. ", "How are you?"], delay_ms=20)
+        player = MockTTSPlayer(ms_per_word=1)
+        responder, _, _ = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+        await responder.handle(_mk_final("hi", turn_id="t-1"), bus)
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        names = [r.name for r in get_span_collector().all()]
+        # ttft_to_tts is the gap from first LLM delta to first TTS
+        # speak() call. A meaningful sentence-streaming win shows up
+        # here once it's compared against the LLM stream length.
+        assert "voice.ttft_to_tts" in names
+
+    @pytest.mark.asyncio
+    async def test_no_budget_spans_on_silent_reply(self, tmp_path: Path) -> None:
+        """Silent sentinel suppresses TTS — no ``tts_first_audio`` to record."""
+        reset_span_collector()
+        reset_voice_budget_recorder()
+
+        llm = _ScriptedLLM(deltas=["<silent>"])
+        player = MockTTSPlayer(ms_per_word=1)
+        responder, _, _ = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+        await responder.handle(_mk_final("hi", turn_id="t-1"), bus)
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        names = [r.name for r in get_span_collector().all()]
+        assert "voice.ttft_to_tts" not in names
 
 
 class TestSentenceStreaming:

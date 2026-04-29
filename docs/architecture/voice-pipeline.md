@@ -171,6 +171,37 @@ Biggest remaining wins: local VAD (150–200 ms) and semantic turn
 detection (skip the silence timeout). Sentence-level TTS streaming
 already shipped — see [Sentence streaming](#sentence-streaming).
 
+## Per-turn budget telemetry
+
+`familiar_connect.diagnostics.voice_budget.VoiceBudgetRecorder` (a
+process singleton like `SpanCollector`) stamps four phase markers
+keyed by `turn_id` and emits one span per adjacent gap into the
+shared collector — so `/diagnostics` shows the breakdown in its
+existing summary table.
+
+| Phase | Stamp site |
+|---|---|
+| `stt_final` | `VoiceSource._handle` (just before publishing `voice.transcript.final`) |
+| `llm_first_token` | `VoiceResponder._stream_and_speak` on first delta |
+| `tts_first_audio` | `VoiceResponder._speak` (deduped — first sentence wins) |
+| `playback_start` | `DiscordVoicePlayer.speak` after `vc.play(source)` |
+
+| Span | Gap |
+|---|---|
+| `voice.stt_to_ttft` | `stt_final` → `llm_first_token` (LLM TTFT, includes assembler) |
+| `voice.ttft_to_tts` | `llm_first_token` → `tts_first_audio` (first-sentence completion) |
+| `voice.tts_to_playback` | `tts_first_audio` → `playback_start` (TTS synthesis + voice-client lock) |
+| `voice.total` | `stt_final` → `playback_start` (user-perceived latency) |
+
+`vad_end` isn't stamped distinctly today: Deepgram's hosted
+endpointer fuses VAD-end and final into one `is_final` result.
+Roadmap V1 (local Silero VAD) introduces a separate signal; the
+recorder is structured to add it without churn.
+
+Recorder is best-effort: the voice path never blocks on it, and
+exceptions inside `record(...)` are swallowed so instrumentation
+can't take the bot down.
+
 ## Barge-in
 
 Already implemented. New `voice.activity.start` cancels prior

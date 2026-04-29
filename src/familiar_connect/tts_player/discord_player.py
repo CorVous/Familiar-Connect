@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING, Protocol
 import discord
 
 from familiar_connect import log_style as ls
+from familiar_connect.diagnostics.voice_budget import (
+    PHASE_PLAYBACK_START,
+    get_voice_budget_recorder,
+)
 from familiar_connect.voice.audio import mono_to_stereo
 
 if TYPE_CHECKING:
@@ -111,6 +115,12 @@ class DiscordVoicePlayer:
                 f"{ls.kv('bytes', str(len(stereo)), vc=ls.LW)}"
             )
             vc.play(source)
+            # First successful ``vc.play`` per turn closes the latency
+            # funnel; recorder dedupes so multi-sentence replies don't
+            # overwrite the first-audio timestamp.
+            get_voice_budget_recorder().record(
+                turn_id=scope.turn_id, phase=PHASE_PLAYBACK_START
+            )
 
             # Poll for completion or cancellation. ``vc.is_playing`` flips
             # to False once py-cord has drained the source.

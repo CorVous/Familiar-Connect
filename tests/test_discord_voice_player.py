@@ -19,6 +19,11 @@ import discord
 import pytest
 
 from familiar_connect.bus.envelope import TurnScope
+from familiar_connect.diagnostics.voice_budget import (
+    PHASE_PLAYBACK_START,
+    get_voice_budget_recorder,
+    reset_voice_budget_recorder,
+)
 from familiar_connect.tts import TTSResult
 from familiar_connect.tts_player.discord_player import DiscordVoicePlayer
 
@@ -231,6 +236,28 @@ class TestConcurrentSpeak:
 
         assert len(plays) == 2
         assert tts.calls == ["alice reply", "bob reply"]
+
+
+class TestVoiceBudget:
+    """``DiscordVoicePlayer`` stamps ``playback_start`` once per turn.
+
+    See :mod:`familiar_connect.diagnostics.voice_budget`. Closes the
+    funnel: enables ``voice.tts_to_playback`` + ``voice.total`` spans.
+    """
+
+    @pytest.mark.asyncio
+    async def test_play_records_playback_start(self) -> None:
+        reset_voice_budget_recorder()
+        tts = _StubTTS(audio=_mono_pcm(8))
+        vc = _voice_client(play_durations=2)
+        player = DiscordVoicePlayer(tts_client=tts, get_voice_client=lambda: vc)
+        scope = TurnScope(turn_id="t-budget", session_id="voice:1", started_at=0.0)
+
+        await player.speak("hello", scope=scope)
+
+        rec = get_voice_budget_recorder()
+        assert "t-budget" in rec._turns
+        assert PHASE_PLAYBACK_START in rec._turns["t-budget"]
 
 
 class TestStop:

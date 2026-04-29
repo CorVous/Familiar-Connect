@@ -151,17 +151,6 @@ Change: move non-secret Deepgram knobs to
 `[providers.stt.deepgram]`. Secrets stay in env. Env continues to
 override TOML for container deployments. Schema in [Tuning](tuning.md).
 
-### A3 — Diagnostics → metrics
-
-Today: `@span` emits timing logs. Phase-5 metrics collector +
-`/diagnostics` slash command already planned.
-
-Change: ship the collector, surface a per-turn voice-budget
-breakdown (`vad_end → stt_final → llm_first_token →
-tts_first_audio → playback_start`). Most useful single signal once
-V1 lands — V2 (sentence streaming) shipped, so the budget already
-includes that win.
-
 ## Out of scope
 
 - **Letta / MemGPT-style core-memory edit tools** — destructive,

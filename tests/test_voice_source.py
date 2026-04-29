@@ -19,6 +19,11 @@ from familiar_connect.bus.topics import (
     TOPIC_VOICE_TRANSCRIPT_FINAL,
     TOPIC_VOICE_TRANSCRIPT_PARTIAL,
 )
+from familiar_connect.diagnostics.voice_budget import (
+    PHASE_STT_FINAL,
+    get_voice_budget_recorder,
+    reset_voice_budget_recorder,
+)
 from familiar_connect.sources.voice import VoiceSource
 from familiar_connect.transcription import TranscriptionResult
 
@@ -275,3 +280,43 @@ class TestVoiceSource:
         finals = [e for e in events if e.topic == TOPIC_VOICE_TRANSCRIPT_FINAL]
         finals_by_user = {e.payload["user_id"]: e for e in finals}
         assert finals_by_user[101].turn_id != finals_by_user[202].turn_id
+
+
+class TestVoiceBudget:
+    """``VoiceSource`` stamps ``stt_final`` for the budget recorder.
+
+    See :mod:`familiar_connect.diagnostics.voice_budget`. The recorder
+    needs ``stt_final`` to anchor downstream gap spans.
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_records_stt_final_phase(self) -> None:
+        reset_voice_budget_recorder()
+        bus = InProcessEventBus()
+        await bus.start()
+        queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+        source = VoiceSource(
+            bus=bus, familiar_id="fam", voice_channel_id=123, queue=queue
+        )
+
+        events: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((TOPIC_VOICE_TRANSCRIPT_FINAL,)):
+                events.append(ev)
+                return
+
+        c = asyncio.create_task(consume())
+        p = asyncio.create_task(source.run())
+        await asyncio.sleep(0)
+        await queue.put(_final("hi"))
+        await asyncio.wait_for(c, timeout=1.0)
+        p.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await p
+        await bus.shutdown()
+
+        rec = get_voice_budget_recorder()
+        # internal access — reasonable for a unit test
+        assert events[0].turn_id in rec._turns
+        assert PHASE_STT_FINAL in rec._turns[events[0].turn_id]

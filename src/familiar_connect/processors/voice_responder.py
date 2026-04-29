@@ -23,6 +23,11 @@ from familiar_connect.bus.topics import (
 )
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.diagnostics.cold_cache import log_signals
+from familiar_connect.diagnostics.voice_budget import (
+    PHASE_LLM_FIRST_TOKEN,
+    PHASE_TTS_FIRST_AUDIO,
+    get_voice_budget_recorder,
+)
 from familiar_connect.llm import Message
 from familiar_connect.sentence_streamer import SentenceStreamer
 from familiar_connect.silence import SilentDetector
@@ -283,11 +288,16 @@ class VoiceResponder:
         # drained in arrival order once gate opens; dropped on ``True``.
         pending: list[str] = []
         gate_open = False  # SilentDetector returned False — speak path live
+        budget = get_voice_budget_recorder()
+        first_delta_seen = False
 
         try:
             async for delta in self._llm.chat_stream(messages):
                 if scope.is_cancelled():
                     return None
+                if not first_delta_seen:
+                    budget.record(turn_id=scope.turn_id, phase=PHASE_LLM_FIRST_TOKEN)
+                    first_delta_seen = True
                 accumulated.append(delta)
 
                 if not gate_open:
@@ -350,6 +360,11 @@ class VoiceResponder:
         """Skip whitespace-only chunks; ``DiscordVoicePlayer`` would too."""
         if not text.strip():
             return
+        # First call per turn marks tts_first_audio. Recorder dedupes,
+        # so subsequent sentences don't overwrite.
+        get_voice_budget_recorder().record(
+            turn_id=scope.turn_id, phase=PHASE_TTS_FIRST_AUDIO
+        )
         await self._tts.speak(text, scope=scope)
 
     # ------------------------------------------------------------------
