@@ -293,6 +293,13 @@ class VoiceResponder:
                 f"{ls.kv('llm_stream_error', repr(exc), vc=ls.R)}"
             )
             return None
+        # Symmetric with the silent branch: one decision line per turn so
+        # ops can see every voice decision in logs, not just edge cases.
+        _logger.info(
+            f"{ls.tag('Voice', ls.G)} "
+            f"{ls.kv('decision', 'respond', vc=ls.LG)} "
+            f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+        )
         return "".join(accumulated)
 
     # ------------------------------------------------------------------

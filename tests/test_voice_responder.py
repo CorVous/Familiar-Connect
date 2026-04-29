@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -197,6 +198,41 @@ class TestFinalReply:
         contents = [t.content for t in turns]
         assert any("hi there" in c for c in contents)
         assert any("Hello, world." in c for c in contents)
+
+    @pytest.mark.asyncio
+    async def test_respond_decision_logged_on_full_reply(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Affirmative branch logs ``decision=respond`` once per turn.
+
+        Mirrors the silent-branch log so every turn produces exactly
+        one decision line.
+        """
+        llm = _ScriptedLLM(deltas=["Hello", ", ", "world", "."])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, _ = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.voice_responder"
+        ):
+            await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+            await responder.handle(_mk_final("hi there", turn_id="t-1"), bus)
+            await responder.wait_until_idle()
+        await bus.shutdown()
+
+        # ``ls.kv`` interleaves ANSI codes between key and value, so match
+        # ``decision`` and ``respond`` independently rather than as one
+        # contiguous substring.
+        decisions = [
+            r
+            for r in caplog.records
+            if "decision" in r.getMessage() and "respond" in r.getMessage()
+        ]
+        assert len(decisions) == 1
+        assert "t-1" in decisions[0].getMessage()
 
     @pytest.mark.asyncio
     async def test_silent_sentinel_skips_tts_and_assistant_turn(
