@@ -42,3 +42,36 @@ Ideas seriously considered during planning and deliberately turned down. Recorde
 **Why it's rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that principle, and the scale Familiar-Connect targets (one bot, N guilds, a single host) does not justify the operational or privacy cost.
 
 This rejection also applies to **running a memory MCP server we own as a sidecar** for the bot's own internal use. MCP is useful when multiple separate agents need to share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle to manage).
+
+The *open-source library* underneath Zep — Graphiti — is a different proposition. Graphiti is a Python package with pluggable graph backends; embedding it (or porting its bi-temporal edge logic onto our existing SQLite store) keeps every byte of state local. That route is on the [roadmap](roadmap.md#m5-pluggable-memory-store-backend) as M5.
+
+## Letta / MemGPT as the memory runtime
+
+**The idea:** Adopt Letta (the maintained continuation of MemGPT) as the memory layer. Give the LLM tools like `core_memory_append`, `core_memory_replace`, `archival_memory_insert`, and let it manage its own context as if it were virtual memory.
+
+**Why it's rejected:**
+
+- **Letta's `core_memory_replace` is destructive by design.** The LLM is invited to mutate the source-of-truth in-place. Familiar-Connect commits to the opposite: every observation is appended; nothing is overwritten. New facts supersede old ones via an immutable bi-temporal record.
+- **Recursive summarization compounds the destruction.** Older context is replaced with a lossy sketch of itself, with no first-class concept of "this fact was true at t1, superseded at t2." That breaks any future audit or contradiction-inspection UI.
+- **Letta is an agent runtime, not a memory layer you bolt on.** It owns the loop, tool execution, and persistence. Adopting it would fork our architecture into theirs.
+
+**What we keep from the design.** The two-tier framing — a tiny always-in-context "core memory" block (character self-description, current-relationship facts) distinct from a large recall layer queried on demand — is sound. Familiar-Connect implements that split today via `core_instructions.md` + `character.md` + the assembler's recent-history layer, on top of an append-only event log we control.
+
+## Full-duplex speech-to-speech pipelines (Moshi, Sesame CSM)
+
+**The idea:** Replace the cascaded STT → LLM → TTS pipeline with a full-duplex speech-to-speech model (Moshi, Sesame CSM, Ultravox). Latency drops from ~700–1000 ms to ~200 ms; overlap-talk and barge-in become native rather than orchestrated.
+
+**Why it's rejected (today):**
+
+- **The LLM brain is bundled.** Moshi pins you to its 7B Helium model; Sesame CSM ships its own dual-LLaMA backbone. Familiar-Connect routes the persona through OpenRouter so any SOTA model is one config edit away. Giving that up forecloses on the most operator-impactful knob in the whole system.
+- **Tool-calling and prompt knobs degrade.** S2S models don't yet have the tool-use and prompt-engineering ergonomics of a frontier text LLM.
+- **Cascaded latency can mostly be closed.** Two-stage turn detection (Silero + Smart Turn) and sentence-level TTS streaming bring cascaded down to ~700–900 ms, which is well inside the "feels natural" band. The remaining gap doesn't justify the brain trade-off.
+- **Discord audio is constrained.** A 48 kHz Opus stream we don't fully control plays well with cascaded; full-duplex stacks expect they own the transport.
+
+**Revisit when:** a Mimi-codec-based S2S model supports an external LLM brain (or fine-tuning to a swappable one). Tracked in [roadmap V5](roadmap.md#v5-full-duplex-s2s-as-a-future-research-branch).
+
+## Heavy turn-detection LLM (TEN-style 7B classifier)
+
+**The idea:** Replace silence-based endpointing with a fine-tuned 7B LLM (TEN Turn Detection's Qwen 2.5-7B) that reads transcript chunks and classifies them `finished` / `unfinished` / `wait`.
+
+**Why it's rejected:** A 7B model deciding whether a Discord user has finished saying "uh, hold on" is wildly overkill. Pipecat's Smart Turn v3 (~360 MB ONNX, ~12 ms inference, BSD-2) does the same job on filler-word-aware audio for a fraction of the cost. The TEN-style approach is right for enterprise voice agents with strict SLAs and rare-language coverage; for a Discord familiar, the cheaper classifier is the correct pick. Tracked in [roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).

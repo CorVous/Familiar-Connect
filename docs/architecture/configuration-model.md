@@ -1,6 +1,9 @@
 # Configuration Model
 
-Two config levels.
+Two config levels. For a single-page reference of *every* operator-
+tunable knob (organised by goal), see [Tuning](tuning.md). For the
+forward-looking schema that consolidates today's env-var tunables into
+TOML, see [Roadmap A2](roadmap.md#a2-consolidate-stt-env-vars-into-toml).
 
 ## 1. Bot instance config
 

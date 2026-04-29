@@ -60,8 +60,12 @@ nav:
   - Architecture:
       - architecture/overview.md
       - architecture/context-pipeline.md
+      - architecture/memory-strategies.md
+      - architecture/voice-pipeline.md
       - architecture/streaming-bus.md
       - architecture/configuration-model.md
+      - architecture/tuning.md
       - architecture/security.md
       - architecture/decisions.md
+      - architecture/roadmap.md
   - Contributing: contributing.md

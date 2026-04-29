@@ -22,4 +22,9 @@ are logged and dropped — there is no reply path.
   → [On-disk layout](getting-started/on-disk-layout.md)
   → [Slash commands](getting-started/slash-commands.md).
 - **Architecture:**
-  [overview](architecture/overview.md).
+  [overview](architecture/overview.md)
+  → [memory strategies](architecture/memory-strategies.md)
+  → [voice pipeline](architecture/voice-pipeline.md).
+- **Tuning every knob from one page:**
+  [Tuning](architecture/tuning.md).
+- **What's coming next:** [Roadmap](architecture/roadmap.md).

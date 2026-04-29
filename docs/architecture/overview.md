@@ -8,6 +8,17 @@ Phase 2 adds the voice reply loop with sub-200 ms barge-in: a new
 utterance cancels the previous reply's `TurnScope`, stopping the
 LLM stream and flushing the TTS buffer.
 
+This page covers the *what's wired today* picture. For deeper dives:
+
+- [Memory strategies](memory-strategies.md) — the four families,
+  what's implemented, where alternative strategies plug in.
+- [Voice pipeline](voice-pipeline.md) — cascaded vs full-duplex,
+  two-stage turn detection, sentence-level streaming, swap points.
+- [Tuning](tuning.md) — single-point reference for every operator
+  knob.
+- [Roadmap](roadmap.md) — research-driven priorities for the
+  next iteration.
+
 ```mermaid
 flowchart LR
     dt([Discord text])     --> dts[DiscordTextSource]
