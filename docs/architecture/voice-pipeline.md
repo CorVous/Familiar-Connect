@@ -74,12 +74,45 @@ an anti-pattern.
   open option; trained on filler words STT drops, which is why it
   beats transcription-based endpointing.
 
-**Roadmap:** V1 wires Silero + Smart Turn v3 as default, Deepgram
-endpointer as fallback. TOML-driven:
+**Status:** V1 phase 1 — wrappers landed, not wired into the audio
+path yet. Two classes live under
+`familiar_connect.voice.turn_detection`:
+
+- `SileroVAD(model_path, sample_rate=16000, chunk_size=512)` — Silero
+  v5 ONNX. Stateful: feed 32 ms chunks, get speech probabilities;
+  call `reset()` between utterances. Returns `is_speech(chunk)` for
+  threshold use.
+- `SmartTurnDetector(model_path, max_duration_s=16.0)` — Pipecat's
+  Smart Turn v3. Stateless: feed the buffered utterance after VAD
+  silence. Handles both 2-class softmax and single sigmoid output
+  shapes (Pipecat's exports vary). Returns `is_complete(audio)`.
+
+Both lazy-import `onnxruntime`; install via the `local-turn` extra:
+
+```bash
+uv sync --extra local-turn
+```
+
+ONNX model files are not in the repo. Download separately:
+
+- Silero v5: <https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx>
+  (~2 MB)
+- Smart Turn v3: <https://huggingface.co/pipecat-ai/smart-turn-v3.0>
+  (~360 MB; pull the `.onnx` artifact)
+
+Place under `data/models/` (gitignored).
+
+**Phase 2 — wiring into the audio pipeline — is pending.** The
+recording sink today feeds Deepgram, which owns endpointing. Phase
+2 forks the per-user PCM stream into both the local detector chain
+*and* Deepgram (with `endpointing_ms` near zero so Deepgram becomes
+pure STT), and emits `voice.activity.end` from the local chain when
+Smart Turn classifies the buffer as `complete`. Selector lives in
+TOML:
 
 ```toml
 [providers.turn_detection]
-strategy = "silero+smart_turn"   # | "deepgram"
+strategy = "silero+smart_turn"   # | "deepgram" (default until phase 2)
 ```
 
 See [Roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).

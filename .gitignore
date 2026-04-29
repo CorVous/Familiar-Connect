@@ -28,5 +28,8 @@ site/
 data/familiars/*
 !data/familiars/_default/
 /data/cache/*
+# Local turn-detection ONNX models (Silero ~2 MB, Smart Turn v3 ~360 MB).
+# Downloaded out of band; see docs/architecture/voice-pipeline.md.
+/data/models/
 
 .aider*

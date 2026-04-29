@@ -24,6 +24,17 @@ dependencies = [
 [project.scripts]
 familiar-connect = "familiar_connect.cli:main"
 
+[project.optional-dependencies]
+# Local turn-detection: Silero VAD (~2 MB ONNX) + Smart Turn v3
+# (~360 MB ONNX). Installed via:
+#     uv sync --extra local-turn
+# numpy carries onnxruntime's tensor I/O. ONNX models live under
+# data/models/ — download separately, see docs/architecture/voice-pipeline.md.
+local-turn = [
+    "onnxruntime >= 1.18, < 2",
+    "numpy >= 1.26, < 3",
+]
+
 [dependency-groups]
 dev = [
     "ruff >= 0.14.3, < 1",
