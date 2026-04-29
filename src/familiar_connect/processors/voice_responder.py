@@ -121,18 +121,14 @@ class VoiceResponder:
     def _on_activity_start(self, event: Event) -> None:
         user_id = self._user_id_from_event(event)
         scope_key = self._scope_key(event.session_id, user_id)
-        prior = self._router.active_scope(scope_key)
+        # begin_turn cancels the prior scope for this (session, user).
+        # If the prior scope is the one currently being spoken, the
+        # player's poll loop catches ``scope.is_cancelled()`` and stops
+        # playback within one poll tick. A global ``tts.stop()`` here
+        # would also cut a *different* user's in-flight reply — Discord
+        # gives us one shared voice client, so any continuous speaker
+        # would barrage stop() against the bot's reply to someone else.
         self._router.begin_turn(session_id=scope_key, turn_id=event.turn_id)
-        # Tell the current player to flush whatever it's speaking so
-        # the cut-point is immediate, but only when the *same* speaker
-        # barges themselves. Cross-user activity must not interrupt the
-        # bot's reply to a different user.
-        if prior is not None:
-            # fire-and-forget: tts.stop is expected to be cheap
-            asyncio.create_task(  # noqa: RUF006 — best-effort flush
-                self._tts.stop(),
-                name="voice-responder-tts-stop",
-            )
 
     # ------------------------------------------------------------------
     # Final dispatch — spawn so the bus loop keeps pulling events

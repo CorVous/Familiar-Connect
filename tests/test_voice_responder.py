@@ -446,6 +446,58 @@ class TestPerUserBargeIn:
         assert spoken == full
         await bus.shutdown()
 
+    @pytest.mark.asyncio
+    async def test_other_users_continuous_starts_do_not_cut_playback(
+        self, tmp_path: Path
+    ) -> None:
+        """Bob's repeated activity.starts mid-playback must not cut Alice off.
+
+        Regression: production logs showed Cassidy's reply being cut by
+        Cor's continuous transcription. Cor's first activity.start
+        registered a scope; every subsequent one had ``prior is not None``
+        and triggered a global ``tts.stop()``, halting the discord voice
+        client mid-Cassidy-reply.
+        """
+        llm = _ScriptedLLM(deltas=["hello "], delay_ms=0)
+        # 200ms playback so Bob's barrage lands while speak() is in flight.
+        player = MockTTSPlayer(ms_per_word=200, poll_ms=5)
+        responder, _router, _ = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+
+        await responder.handle(_mk_activity_start(turn_id="t-alice", user_id=101), bus)
+
+        async def bob_keeps_starting() -> None:
+            # let Alice's speak() begin first
+            await asyncio.sleep(0.04)
+            # first start: no prior scope for Bob, no stop fired
+            await responder.handle(
+                _mk_activity_start(turn_id="t-bob-1", user_id=202), bus
+            )
+            # subsequent starts: each has a prior scope -> would fire tts.stop()
+            for i in range(2, 7):
+                await asyncio.sleep(0.02)
+                await responder.handle(
+                    _mk_activity_start(turn_id=f"t-bob-{i}", user_id=202), bus
+                )
+
+        task_reply = asyncio.create_task(
+            responder.handle(_mk_final("hi", turn_id="t-alice", user_id=101), bus)
+        )
+        task_bob = asyncio.create_task(bob_keeps_starting())
+        await asyncio.gather(task_reply, task_bob)
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        assert player.calls
+        spoken, cancelled = player.calls[0]
+        assert cancelled is False, (
+            "Bob's repeated activity.starts cut Alice's playback short"
+        )
+        assert spoken == "hello "
+
 
 class TestVoiceAuthorResolution:
     """Voice user turns must resolve user_id → Author for prompt attribution.
