@@ -202,6 +202,27 @@ Recorder is best-effort: the voice path never blocks on it, and
 exceptions inside `record(...)` are swallowed so instrumentation
 can't take the bot down.
 
+### LLM call signals
+
+Every `LLMClient.chat_stream` call adds three spans + one
+structured `[LLM call]` log line. The breakdown tells prompt-bloat
+apart from OpenRouter routing-tax at a glance.
+
+| Span | Phase |
+|---|---|
+| `llm.ttfb.<slot>` | request initiation → first response byte |
+| `llm.ttft.<slot>` | request initiation → first content delta |
+| `llm.total.<slot>` | request initiation → stream end |
+
+The log line carries `slot`, `model`, `chars` (input payload size),
+`ttfb_ms` / `ttft_ms` / `total_ms`, and — when the upstream returns
+them via OpenRouter's `usage: { include: true }` flag —
+`provider`, `in_tokens`, `out_tokens`, and `cached` (prompt-cache
+hit count, surfaced when the underlying provider supports it).
+`voice.stt_to_ttft` already covers the full STT-to-LLM-first-token
+gap; `llm.ttft.<slot>` is the LLM-only slice plus headers. Comparing
+the two isolates the assembler / network from raw model latency.
+
 ## Barge-in
 
 Already implemented. New `voice.activity.start` cancels prior
