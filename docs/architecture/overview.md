@@ -8,16 +8,14 @@ Phase 2 adds the voice reply loop with sub-200 ms barge-in: a new
 utterance cancels the previous reply's `TurnScope`, stopping the
 LLM stream and flushing the TTS buffer.
 
-This page covers the *what's wired today* picture. For deeper dives:
+What's wired today. Deeper dives:
 
-- [Memory strategies](memory-strategies.md) — the four families,
-  what's implemented, where alternative strategies plug in.
-- [Voice pipeline](voice-pipeline.md) — cascaded vs full-duplex,
-  two-stage turn detection, sentence-level streaming, swap points.
-- [Tuning](tuning.md) — single-point reference for every operator
-  knob.
-- [Roadmap](roadmap.md) — research-driven priorities for the
-  next iteration.
+- [Memory strategies](memory-strategies.md) — families, current
+  implementation, swap points.
+- [Voice pipeline](voice-pipeline.md) — cascaded vs S2S,
+  two-stage turn detection, sentence streaming, swap points.
+- [Tuning](tuning.md) — every operator knob, one page.
+- [Roadmap](roadmap.md) — research-driven priorities.
 
 ```mermaid
 flowchart LR

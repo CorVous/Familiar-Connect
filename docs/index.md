@@ -25,6 +25,5 @@ are logged and dropped — there is no reply path.
   [overview](architecture/overview.md)
   → [memory strategies](architecture/memory-strategies.md)
   → [voice pipeline](architecture/voice-pipeline.md).
-- **Tuning every knob from one page:**
-  [Tuning](architecture/tuning.md).
-- **What's coming next:** [Roadmap](architecture/roadmap.md).
+- **Every knob, one page:** [Tuning](architecture/tuning.md).
+- **What's next:** [Roadmap](architecture/roadmap.md).
