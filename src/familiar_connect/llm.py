@@ -262,7 +262,15 @@ class LLMClient:
         try:
             response = await stream_cm.__aenter__()  # noqa: PLC2801
             response.raise_for_status()
-        except BaseException:
+        except (GeneratorExit, asyncio.CancelledError):
+            if response is not None:
+                with contextlib.suppress(Exception):
+                    await stream_cm.__aexit__(None, None, None)
+            semaphore.release()
+            metrics.status = "cancelled"
+            metrics.emit()
+            raise
+        except Exception:
             if response is not None:
                 with contextlib.suppress(Exception):
                     await stream_cm.__aexit__(None, None, None)
@@ -282,7 +290,13 @@ class LLMClient:
                     if metrics.t_first_delta is None:
                         metrics.t_first_delta = time.perf_counter()
                     yield delta
-        except BaseException:
+        except (GeneratorExit, asyncio.CancelledError):
+            # Caller closed the generator (barge-in / silent gate /
+            # scope cancel). Not an upstream failure — distinct status
+            # so /diagnostics shows real provider errors clearly.
+            metrics.status = "cancelled"
+            raise
+        except Exception:
             metrics.status = "error"
             raise
         finally:

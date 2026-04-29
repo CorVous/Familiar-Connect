@@ -11,11 +11,14 @@ import asyncio
 import json
 import logging
 import re
-from typing import Self
+from typing import TYPE_CHECKING, Self, cast
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 from familiar_connect.diagnostics.collector import (
     get_span_collector,
@@ -184,6 +187,89 @@ class TestStructuredCallLog:
         assert "in_tokens=1234" in line
         assert "out_tokens=12" in line
         assert "provider=openai" in line
+
+
+class TestStatusClassification:
+    """``status`` distinguishes ok / cancelled / error.
+
+    Production logs were 100% ``status=error`` because GeneratorExit
+    (raised when the consumer breaks early — barge-in, silent gate,
+    early ``return``) was being caught alongside real upstream
+    failures. The three statuses make real provider errors visible.
+    """
+
+    @pytest.mark.asyncio
+    async def test_clean_completion_logs_ok(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        _wire(client, _sse_lines(["Hello"]))
+
+        with caplog.at_level(logging.INFO, logger="familiar_connect.llm"):
+            async for _ in client.chat_stream([Message(role="user", content="hi")]):
+                pass
+
+        line = next(
+            _strip_ansi(r.getMessage())
+            for r in caplog.records
+            if "LLM call" in r.getMessage()
+        )
+        assert "status=ok" in line
+
+    @pytest.mark.asyncio
+    async def test_consumer_break_logs_cancelled_not_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Caller stops iterating — generator closes via GeneratorExit.
+
+        VoiceResponder does this on barge-in, silent gate, and any
+        scope cancellation. Must not look like a provider error.
+        """
+        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        _wire(client, _sse_lines([f"d{i}" for i in range(50)]))
+
+        with caplog.at_level(logging.INFO, logger="familiar_connect.llm"):
+            # Explicit aclose so the finally-emit runs before assertions.
+            # Production's async-for + early return triggers the same path
+            # via GC eventually, but tests need it deterministic.
+            gen = cast(
+                "AsyncGenerator[str]",
+                client.chat_stream([Message(role="user", content="hi")]),
+            )
+            async for _ in gen:
+                break
+            await gen.aclose()
+
+        line = next(
+            _strip_ansi(r.getMessage())
+            for r in caplog.records
+            if "LLM call" in r.getMessage()
+        )
+        assert "status=cancelled" in line
+        assert "status=error" not in line
+
+    @pytest.mark.asyncio
+    async def test_http_4xx_logs_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        fake_http = MagicMock()
+        fake_http.stream = MagicMock(
+            return_value=_FakeStreamResponse([], status_code=429)
+        )
+        client._http = fake_http
+
+        with (
+            caplog.at_level(logging.INFO, logger="familiar_connect.llm"),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            async for _ in client.chat_stream([Message(role="user", content="hi")]):
+                pass
+
+        line = next(
+            _strip_ansi(r.getMessage())
+            for r in caplog.records
+            if "LLM call" in r.getMessage()
+        )
+        assert "status=error" in line
 
 
 class TestUsageChunkParsing:
