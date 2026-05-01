@@ -92,10 +92,13 @@ Today: Deepgram's hosted endpointer is the default. V1 phase 1
 endpointing.
 
 Remaining: TOML-driven selector via
-[A1](#a1-strategy-swap-configuration-spine), telemetry surface for
-`vad_end` in `voice_budget`, and audio-fixture integration tests
-covering complete-sentence / mid-thought / filler patterns. See
-[Voice pipeline — turn detection](voice-pipeline.md#turn-detection)
+[A1](#a1-strategy-swap-configuration-spine) and audio-fixture
+integration tests covering complete-sentence / mid-thought / filler
+patterns. `vad_end` telemetry is wired — `bot._on_complete` parks a
+perf-counter that `VoiceSource` drains on the next transcript per
+`user_id`, surfacing `voice.vad_to_stt` in the budget recorder. See
+[Voice pipeline — turn detection](voice-pipeline.md#turn-detection),
+[Per-turn budget telemetry](voice-pipeline.md#per-turn-budget-telemetry),
 and [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
 ### V3 — Pluggable transcriber backend

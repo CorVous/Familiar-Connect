@@ -19,8 +19,13 @@ from familiar_connect.bus.topics import (
     TOPIC_VOICE_TRANSCRIPT_FINAL,
     TOPIC_VOICE_TRANSCRIPT_PARTIAL,
 )
+from familiar_connect.diagnostics.collector import (
+    get_span_collector,
+    reset_span_collector,
+)
 from familiar_connect.diagnostics.voice_budget import (
     PHASE_STT_FINAL,
+    PHASE_VAD_END,
     get_voice_budget_recorder,
     reset_voice_budget_recorder,
 )
@@ -320,3 +325,87 @@ class TestVoiceBudget:
         # internal access — reasonable for a unit test
         assert events[0].turn_id in rec._turns
         assert PHASE_STT_FINAL in rec._turns[events[0].turn_id]
+
+    @pytest.mark.asyncio
+    async def test_pending_vad_end_stamped_on_next_result(self) -> None:
+        """Local endpointer fires before transcript final → vad_end buffered.
+
+        ``record_vad_end(user_id, t)`` parks a perf-counter timestamp;
+        the next transcription result for that user_id stamps it on
+        the freshly-minted (or current) turn so ``voice.vad_to_stt``
+        emits with the right delta.
+        """
+        reset_voice_budget_recorder()
+        reset_span_collector()
+        bus = InProcessEventBus()
+        await bus.start()
+        queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+        source = VoiceSource(
+            bus=bus, familiar_id="fam", voice_channel_id=123, queue=queue
+        )
+
+        events: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((TOPIC_VOICE_TRANSCRIPT_FINAL,)):
+                events.append(ev)
+                return
+
+        c = asyncio.create_task(consume())
+        p = asyncio.create_task(source.run())
+        await asyncio.sleep(0)
+        # Endpointer fires first; final arrives later.
+        source.record_vad_end(user_id=42, t=100.000)
+        await queue.put(_final("hi", user_id=42))
+        await asyncio.wait_for(c, timeout=1.0)
+        p.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await p
+        await bus.shutdown()
+
+        rec = get_voice_budget_recorder()
+        turn_id = events[0].turn_id
+        phases = rec._turns[turn_id]
+        assert PHASE_VAD_END in phases
+        assert PHASE_STT_FINAL in phases
+        # Buffered ``t=100.0`` must reach the recorder unchanged.
+        assert phases[PHASE_VAD_END] == pytest.approx(100.0)
+        # Adjacent gap span emits.
+        names = [r.name for r in get_span_collector().all()]
+        assert "voice.vad_to_stt" in names
+
+    @pytest.mark.asyncio
+    async def test_vad_end_only_applies_to_matching_user(self) -> None:
+        """Buffered timestamp keyed by user_id — wrong speaker ignores it."""
+        reset_voice_budget_recorder()
+        reset_span_collector()
+        bus = InProcessEventBus()
+        await bus.start()
+        queue: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
+        source = VoiceSource(
+            bus=bus, familiar_id="fam", voice_channel_id=123, queue=queue
+        )
+
+        events: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((TOPIC_VOICE_TRANSCRIPT_FINAL,)):
+                events.append(ev)
+                return
+
+        c = asyncio.create_task(consume())
+        p = asyncio.create_task(source.run())
+        await asyncio.sleep(0)
+        # Endpointer fired for user 101; user 202 happens to final first.
+        source.record_vad_end(user_id=101, t=99.0)
+        await queue.put(_final("other speaker", user_id=202))
+        await asyncio.wait_for(c, timeout=1.0)
+        p.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await p
+        await bus.shutdown()
+
+        rec = get_voice_budget_recorder()
+        turn_id = events[0].turn_id
+        # 202's turn must NOT carry 101's vad_end stamp.
+        assert PHASE_VAD_END not in rec._turns[turn_id]

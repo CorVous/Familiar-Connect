@@ -271,6 +271,7 @@ existing summary table.
 
 | Phase | Stamp site |
 |---|---|
+| `vad_end` | `bot._on_complete` parks a perf-counter; `VoiceSource._handle` drains on the next transcript event for the same `user_id` |
 | `stt_final` | `VoiceSource._handle` (just before publishing `voice.transcript.final`) |
 | `llm_first_token` | `VoiceResponder._stream_and_speak` on first delta |
 | `tts_first_audio` | `VoiceResponder._speak` (deduped — first sentence wins) |
@@ -278,15 +279,17 @@ existing summary table.
 
 | Span | Gap |
 |---|---|
+| `voice.vad_to_stt` | `vad_end` → `stt_final` (Deepgram finalize round-trip after local turn complete) |
 | `voice.stt_to_ttft` | `stt_final` → `llm_first_token` (LLM TTFT, includes assembler) |
 | `voice.ttft_to_tts` | `llm_first_token` → `tts_first_audio` (first-sentence completion) |
 | `voice.tts_to_playback` | `tts_first_audio` → `playback_start` (TTS synthesis + voice-client lock) |
 | `voice.total` | `stt_final` → `playback_start` (user-perceived latency) |
 
-`vad_end` isn't stamped distinctly today: Deepgram's hosted
-endpointer fuses VAD-end and final into one `is_final` result.
-Roadmap V1 (local TEN-VAD) introduces a separate signal; the
-recorder is structured to add it without churn.
+`vad_end` only stamps when local turn detection (TEN-VAD + Smart
+Turn) is wired in. With Deepgram-only endpointing, VAD-end and final
+fuse into one `is_final` result and the funnel starts at `stt_final`.
+`voice.total` keeps its `stt_final` start unchanged so historical
+numbers stay comparable.
 
 Recorder is best-effort: the voice path never blocks on it, and
 exceptions inside `record(...)` are swallowed so instrumentation

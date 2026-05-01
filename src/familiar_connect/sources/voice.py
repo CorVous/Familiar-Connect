@@ -18,6 +18,7 @@ via the bus default.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -31,6 +32,7 @@ from familiar_connect.bus.topics import (
 )
 from familiar_connect.diagnostics.voice_budget import (
     PHASE_STT_FINAL,
+    PHASE_VAD_END,
     get_voice_budget_recorder,
 )
 
@@ -70,6 +72,22 @@ class VoiceSource:
         # ``None`` user_id is the legacy unattributed slot — kept so older
         # mixed-stream paths still work.
         self._turn_ids: dict[int | None, str] = {}
+        # Local-endpointer ``on_turn_complete`` perf-counter timestamps
+        # awaiting a turn_id. Drained on the next transcript event for
+        # the same user_id; latest fire wins if multiple stack up.
+        self._pending_vad_end: dict[int, float] = {}
+
+    def record_vad_end(self, *, user_id: int, t: float | None = None) -> None:
+        """Park a local-endpointer ``on_turn_complete`` mark for ``user_id``.
+
+        The endpointer fires before Deepgram emits its final, so the
+        turn_id may not exist yet. Buffer the perf-counter; the next
+        transcription result for ``user_id`` stamps it on the recorder.
+        Latest fire wins if multiple arrive before a result.
+        """
+        if t is None:
+            t = time.perf_counter()
+        self._pending_vad_end[user_id] = t
 
     async def run(self) -> None:
         """Forever loop: drain queue, publish. Cancel to stop."""
@@ -88,6 +106,16 @@ class VoiceSource:
                 turn_id=turn_id,
                 payload={"user_id": user_id},
             )
+
+        # Drain pending vad_end ahead of any other phase so the gap to
+        # ``stt_final`` emits in order. ``user_id is None`` is the legacy
+        # unattributed slot — never carries a buffered mark.
+        if user_id is not None:
+            pending_t = self._pending_vad_end.pop(user_id, None)
+            if pending_t is not None:
+                get_voice_budget_recorder().record(
+                    turn_id=turn_id, phase=PHASE_VAD_END, t=pending_t
+                )
 
         if result.is_final:
             # Stamp before publish so the recorder sees stt_final ahead of

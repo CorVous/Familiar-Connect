@@ -19,6 +19,7 @@ from familiar_connect.diagnostics.voice_budget import (
     PHASE_PLAYBACK_START,
     PHASE_STT_FINAL,
     PHASE_TTS_FIRST_AUDIO,
+    PHASE_VAD_END,
     VoiceBudgetRecorder,
     get_voice_budget_recorder,
     reset_voice_budget_recorder,
@@ -141,6 +142,56 @@ class TestTotalSpan:
         rec.record(turn_id="t-1", phase=PHASE_PLAYBACK_START, t=10.2)
         names = _names(get_span_collector().all())
         assert "voice.total" not in names
+
+
+class TestVadEnd:
+    """Local-VAD turn boundary stamps ahead of ``stt_final``.
+
+    V1 phase 2 wires TEN-VAD + Smart Turn into the audio pump; the
+    moment Smart Turn classifies a turn complete is the new
+    ``vad_end`` mark. ``voice.vad_to_stt`` exposes the STT lag
+    between local endpointing and Deepgram's final.
+    """
+
+    def test_vad_to_stt_emits_on_stt_final(self) -> None:
+        rec = VoiceBudgetRecorder()
+        rec.record(turn_id="t-1", phase=PHASE_VAD_END, t=10.000)
+        assert _names(get_span_collector().all()) == []
+        rec.record(turn_id="t-1", phase=PHASE_STT_FINAL, t=10.180)
+        recorded = get_span_collector().all()
+        assert _names(recorded) == ["voice.vad_to_stt"]
+        assert recorded[0].ms == 180
+
+    def test_vad_end_optional_no_emit_without_it(self) -> None:
+        """``stt_final`` without ``vad_end`` doesn't emit ``voice.vad_to_stt``."""
+        rec = VoiceBudgetRecorder()
+        rec.record(turn_id="t-1", phase=PHASE_STT_FINAL, t=10.0)
+        rec.record(turn_id="t-1", phase=PHASE_LLM_FIRST_TOKEN, t=10.2)
+        names = _names(get_span_collector().all())
+        assert "voice.vad_to_stt" not in names
+        # Existing chain still works.
+        assert names == ["voice.stt_to_ttft"]
+
+    def test_full_funnel_with_vad_end(self) -> None:
+        rec = VoiceBudgetRecorder()
+        rec.record(turn_id="t-1", phase=PHASE_VAD_END, t=10.000)
+        rec.record(turn_id="t-1", phase=PHASE_STT_FINAL, t=10.150)
+        rec.record(turn_id="t-1", phase=PHASE_LLM_FIRST_TOKEN, t=10.450)
+        rec.record(turn_id="t-1", phase=PHASE_TTS_FIRST_AUDIO, t=10.600)
+        rec.record(turn_id="t-1", phase=PHASE_PLAYBACK_START, t=10.850)
+        names = _names(get_span_collector().all())
+        assert names == [
+            "voice.vad_to_stt",
+            "voice.stt_to_ttft",
+            "voice.ttft_to_tts",
+            "voice.tts_to_playback",
+            "voice.total",
+        ]
+        by_name = get_span_collector().by_name()
+        assert by_name["voice.vad_to_stt"][0].ms == 150
+        # ``voice.total`` keeps its existing ``stt_final`` start so old
+        # comparisons stay meaningful.
+        assert by_name["voice.total"][0].ms == 700
 
 
 class TestSingleton:

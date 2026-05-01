@@ -550,6 +550,50 @@ class TestLocalTurnDetection:
 
         await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
 
+    @pytest.mark.asyncio
+    async def test_endpointer_complete_buffers_vad_end_on_source(self) -> None:
+        """``on_turn_complete`` parks vad_end on the source for that user_id."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        captured_callbacks: list[_OnComplete] = []
+
+        def _make_endpointer(*, on_turn_complete: _OnComplete) -> MagicMock:
+            ep = MagicMock()
+            ep.feed_audio = AsyncMock()
+            ep.reset = MagicMock()
+            captured_callbacks.append(on_turn_complete)
+            return ep
+
+        detector = MagicMock()
+        detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
+        familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
+        vc = MagicMock()
+
+        # finalize is required by the on-complete callback; supply it.
+        original_clone_factory = template.clone.side_effect
+
+        def _make_clone_with_finalize() -> MagicMock:
+            c = original_clone_factory()
+            c.finalize = AsyncMock()
+            return c
+
+        template.clone = MagicMock(side_effect=_make_clone_with_finalize)
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((42, b"\x00"))
+        await _drain_loop()
+
+        assert len(captured_callbacks) == 1
+        await captured_callbacks[0](b"\x00\x00")
+
+        # Buffered timestamp visible on the source under the right user_id.
+        assert 42 in rt.source._pending_vad_end
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
 
 class TestVoiceMemberCache:
     """Voice-only members aren't in the guild member cache.

@@ -1,11 +1,16 @@
 """Per-turn voice latency budget recorder.
 
-Stamps phase markers across the voice path (``stt_final`` →
-``llm_first_token`` → ``tts_first_audio`` → ``playback_start``) keyed
-by ``turn_id``; emits one span per adjacent gap into the shared
+Stamps phase markers across the voice path (``vad_end`` → ``stt_final``
+→ ``llm_first_token`` → ``tts_first_audio`` → ``playback_start``)
+keyed by ``turn_id``; emits one span per adjacent gap into the shared
 :class:`SpanCollector`, plus a cumulative ``voice.total`` when the
 funnel completes. ``/diagnostics`` picks them up via the existing
 summary table — no new UI plumbing needed.
+
+``vad_end`` is optional: only stamped when local turn detection
+(TEN-VAD + Smart Turn) is wired in. Without it, the funnel starts at
+``stt_final`` like before — Deepgram's hosted endpointer fuses
+VAD-end and final into one signal.
 
 First record per (turn, phase) wins: sentence streaming records
 ``tts_first_audio`` ahead of every sentence flush, but only the first
@@ -29,6 +34,7 @@ from familiar_connect.diagnostics.collector import get_span_collector
 
 _logger = logging.getLogger("familiar_connect.diagnostics.voice_budget")
 
+PHASE_VAD_END: Final = "vad_end"
 PHASE_STT_FINAL: Final = "stt_final"
 PHASE_LLM_FIRST_TOKEN: Final = "llm_first_token"  # noqa: S105 — phase label, not a credential
 PHASE_TTS_FIRST_AUDIO: Final = "tts_first_audio"
@@ -37,6 +43,7 @@ PHASE_PLAYBACK_START: Final = "playback_start"
 # Adjacent-phase gaps. ``(prev, curr, span_name)``; emitted when
 # ``curr`` is recorded and ``prev`` was already present.
 _GAPS: Final[tuple[tuple[str, str, str], ...]] = (
+    (PHASE_VAD_END, PHASE_STT_FINAL, "voice.vad_to_stt"),
     (PHASE_STT_FINAL, PHASE_LLM_FIRST_TOKEN, "voice.stt_to_ttft"),
     (PHASE_LLM_FIRST_TOKEN, PHASE_TTS_FIRST_AUDIO, "voice.ttft_to_tts"),
     (PHASE_TTS_FIRST_AUDIO, PHASE_PLAYBACK_START, "voice.tts_to_playback"),

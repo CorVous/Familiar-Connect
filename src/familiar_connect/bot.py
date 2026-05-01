@@ -79,6 +79,7 @@ class VoiceRuntime:
     sink: RecordingSink
     audio_queue: asyncio.Queue[tuple[int, bytes]]
     result_queue: asyncio.Queue[TranscriptionResult]
+    source: VoiceSource
     pump_task: asyncio.Task[None]
     source_task: asyncio.Task[None]
     transcribers: dict[int, DeepgramTranscriber] = field(default_factory=dict)
@@ -234,6 +235,9 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         if detector is not None:
 
             async def _on_complete(_audio: bytes, uid: int = user_id) -> None:
+                # Park vad_end ahead of finalize so the buffered timestamp
+                # reaches VoiceSource before the resulting stt_final.
+                source.record_vad_end(user_id=uid)
                 target = transcribers.get(uid)
                 if target is None:
                     return
@@ -334,6 +338,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         sink=sink,
         audio_queue=audio_queue,
         result_queue=result_queue,
+        source=source,
         pump_task=pump_task,
         source_task=source_task,
         transcribers=transcribers,
