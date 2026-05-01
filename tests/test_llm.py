@@ -345,6 +345,42 @@ class TestLLMClientChat:
             await client.chat(sample_messages)
 
     @pytest.mark.asyncio
+    async def test_chat_logs_response_body_on_4xx(
+        self,
+        client: LLMClient,
+        sample_messages: list[Message],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A 400 leaves the upstream error body on a WARNING log."""
+        body = (
+            '{"error":{"message":"Unsupported value: '
+            "'temperature' does not support 0.7 with this model.\","
+            '"type":"invalid_request_error"}}'
+        )
+        error = httpx.HTTPStatusError(
+            "Bad Request",
+            request=httpx.Request(
+                "POST", "https://openrouter.ai/api/v1/chat/completions"
+            ),
+            response=httpx.Response(400, text=body),
+        )
+        mock_response = Mock(spec=httpx.Response)
+        mock_response.status_code = 400
+        mock_response.text = body
+        mock_response.raise_for_status.side_effect = error
+
+        caplog.set_level("WARNING", logger="familiar_connect.llm")
+        with (
+            patch.object(client, "_post", return_value=mock_response),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await client.chat(sample_messages)
+
+        joined = "\n".join(rec.message for rec in caplog.records)
+        assert "400" in joined
+        assert "temperature" in joined
+
+    @pytest.mark.asyncio
     async def test_chat_raises_on_empty_choices(
         self,
         client: LLMClient,

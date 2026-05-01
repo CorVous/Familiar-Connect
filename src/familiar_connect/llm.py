@@ -154,6 +154,26 @@ class LLMClient:
             "Content-Type": "application/json",
         }
 
+    def _log_http_error_body(self: Self, status_code: int, body: object) -> None:
+        """Surface the upstream error body on 4xx/5xx — not just the bare HTTP status.
+
+        Without this, ``raise_for_status`` only carries the status code
+        and reason phrase, so an OpenRouter response like
+        ``{"error": {"message": "Unsupported value: 'temperature' …"}}``
+        is invisible to operators tailing logs.
+        """
+        slot_suffix = f".{self.slot}" if self.slot else ""
+        # Mocked-out response objects in tests can hand back non-string
+        # ``.text`` (Mock); coerce defensively so logging never crashes
+        # the request path.
+        body_str = body if isinstance(body, str) else ""
+        _logger.warning(
+            f"{ls.tag('LLM', ls.R)} "
+            f"{ls.kv(f'http_error{slot_suffix}', str(status_code), vc=ls.R)} "
+            f"{ls.kv('model', self.model, vc=ls.LW)} "
+            f"{ls.kv('body', ls.trunc(body_str, limit=600), vc=ls.LW)}"
+        )
+
     def build_payload(
         self: Self,
         messages: list[Message],
@@ -220,6 +240,8 @@ class LLMClient:
         payload = self.build_payload(messages)
 
         response = await self._post(url, headers, payload)
+        if response.status_code >= 400:
+            self._log_http_error_body(response.status_code, response.text)
         response.raise_for_status()
 
         data = response.json()
@@ -272,6 +294,14 @@ class LLMClient:
         response = None
         try:
             response = await stream_cm.__aenter__()  # noqa: PLC2801
+            if response.status_code >= 400:
+                # streamed responses don't populate ``.text`` until the
+                # body is read — pull it explicitly so the upstream
+                # error message survives ``raise_for_status``.
+                with contextlib.suppress(Exception):
+                    await response.aread()
+                body = getattr(response, "text", "") or ""
+                self._log_http_error_body(response.status_code, body)
             response.raise_for_status()
         except (GeneratorExit, asyncio.CancelledError):
             if response is not None:

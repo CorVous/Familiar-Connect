@@ -34,15 +34,25 @@ def _sse_lines(deltas: list[str]) -> list[bytes]:
 class _FakeStreamResponse:
     """Async-context-manager stand-in for ``httpx.AsyncClient.stream``."""
 
-    def __init__(self, chunks: list[bytes], status_code: int = 200) -> None:
+    def __init__(
+        self, chunks: list[bytes], status_code: int = 200, body: str = ""
+    ) -> None:
         self._chunks = chunks
         self.status_code = status_code
+        self._body = body
+        self.text = body
 
     async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         return None
+
+    async def aread(self) -> bytes:
+        # httpx stream contract: aread() pulls the body so .text works
+        # before the stream context exits. Tests pre-set ``self.text``
+        # via the constructor, so this is a no-op.
+        return self._body.encode()
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -156,6 +166,32 @@ class TestChatStreamNoHttp:
         with pytest.raises(httpx.HTTPStatusError):
             async for _ in client.chat_stream([Message(role="user", content="x")]):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_stream_logs_response_body_on_4xx(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A streaming 400 leaves the upstream error body on a WARNING log."""
+        client = LLMClient(api_key="k", model="m")
+        body = (
+            '{"error":{"message":"Unsupported value: '
+            "'temperature' does not support 0.7 with this model.\","
+            '"type":"invalid_request_error"}}'
+        )
+        fake_http = MagicMock()
+        fake_http.stream = MagicMock(
+            return_value=_FakeStreamResponse([], status_code=400, body=body)
+        )
+        client._http = fake_http  # type: ignore[assignment]
+
+        caplog.set_level("WARNING", logger="familiar_connect.llm")
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in client.chat_stream([Message(role="user", content="x")]):
+                pass
+
+        joined = "\n".join(rec.message for rec in caplog.records)
+        assert "400" in joined
+        assert "temperature" in joined
 
 
 class TestSSEErrorFrames:
