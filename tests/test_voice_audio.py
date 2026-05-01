@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import struct
+import threading
+import time
 
 import pytest
 
 from familiar_connect.voice.audio import (
     DISCORD_FRAME_SIZE,
+    StreamingPCMSource,
     mono_to_stereo,
     stereo_to_mono,
 )
@@ -100,3 +103,81 @@ class TestDiscordFrameSize:
     def test_frame_size_is_3840(self) -> None:
         """Discord expects 3840-byte frames (48kHz, 16-bit, stereo, 20ms)."""
         assert DISCORD_FRAME_SIZE == 3840
+
+
+class TestStreamingPCMSource:
+    """Thread-safe buffer that feeds 20 ms PCM frames as they arrive."""
+
+    def test_read_returns_full_frame_when_buffered(self) -> None:
+        src = StreamingPCMSource()
+        src.feed(b"\xab" * (DISCORD_FRAME_SIZE * 2))
+        first = src.read()
+        second = src.read()
+        assert len(first) == DISCORD_FRAME_SIZE
+        assert len(second) == DISCORD_FRAME_SIZE
+        assert first == b"\xab" * DISCORD_FRAME_SIZE
+
+    def test_read_returns_empty_when_closed_and_drained(self) -> None:
+        src = StreamingPCMSource()
+        src.close_input()
+        assert src.read() == b""
+
+    def test_partial_frame_zero_padded_on_close(self) -> None:
+        src = StreamingPCMSource()
+        partial = b"\x01\x02\x03\x04"
+        src.feed(partial)
+        src.close_input()
+        out = src.read()
+        assert len(out) == DISCORD_FRAME_SIZE
+        assert out[: len(partial)] == partial
+        assert out[len(partial) :] == b"\x00" * (DISCORD_FRAME_SIZE - len(partial))
+        # next read drains
+        assert src.read() == b""
+
+    def test_read_blocks_until_data_arrives(self) -> None:
+        """Reader thread waits on the condition until the producer feeds."""
+        src = StreamingPCMSource()
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        # give the reader time to enter cond.wait
+        time.sleep(0.05)
+        assert t.is_alive(), "reader should be blocked"
+        src.feed(b"\x42" * DISCORD_FRAME_SIZE)
+        t.join(timeout=1.0)
+        assert results == [b"\x42" * DISCORD_FRAME_SIZE]
+
+    def test_close_unblocks_reader(self) -> None:
+        """Close while reader blocked → reader returns empty bytes."""
+        src = StreamingPCMSource()
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        time.sleep(0.05)
+        src.close_input()
+        t.join(timeout=1.0)
+        assert results == [b""]
+
+    def test_is_opus_false(self) -> None:
+        assert StreamingPCMSource().is_opus() is False
+
+    def test_cleanup_closes_input(self) -> None:
+        """Pycord calls cleanup on stop; should release any blocked reader."""
+        src = StreamingPCMSource()
+        src.cleanup()
+        assert src.read() == b""
+
+    def test_feed_empty_is_noop(self) -> None:
+        """Empty feed shouldn't notify or pollute the buffer."""
+        src = StreamingPCMSource()
+        src.feed(b"")
+        src.close_input()
+        assert src.read() == b""

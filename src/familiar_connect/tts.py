@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from datetime import timedelta
 
     from google.genai import Client as _GenaiClient
@@ -205,6 +206,74 @@ class CartesiaTTSClient:
             msg = f"Cartesia TTS error (status={status}): {err}"
             raise RuntimeError(msg)
         return False
+
+    async def synthesize_stream(self: Self, text: str) -> AsyncIterator[bytes]:
+        """Yield raw mono PCM chunks as Cartesia produces them.
+
+        Lower-latency variant of :meth:`synthesize`: callers can start
+        playback on the first chunk instead of waiting for the full
+        utterance. ``timestamps`` events are dropped — chunk consumers
+        get audio only. Errors and unexpected closes raise just like
+        :meth:`synthesize`.
+
+        Yields:
+            bytes: raw mono ``pcm_s16le`` chunks at the configured sample rate.
+
+        """
+        context_id = uuid.uuid4().hex
+        url = self.build_ws_url()
+        payload = self.build_payload(text, context_id=context_id)
+        first_at: float | None = None
+        last_at: float | None = None
+        total_bytes = 0
+
+        async with aiohttp.ClientSession() as session:
+            ws = await self._ws_connect(session, url)
+            try:
+                await ws.send_json(payload)
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        event = json.loads(msg.data)
+                        event_type = event.get("type")
+                        if event_type == "chunk":
+                            data = event.get("data")
+                            if isinstance(data, str):
+                                chunk = base64.b64decode(data)
+                                if not chunk:
+                                    continue
+                                now = asyncio.get_event_loop().time()
+                                if first_at is None:
+                                    first_at = now
+                                last_at = now
+                                total_bytes += len(chunk)
+                                yield chunk
+                        elif event_type == "done":
+                            break
+                        elif event_type == "error":
+                            err = event.get("error") or "unknown error"
+                            status = event.get("status_code")
+                            msg_txt = f"Cartesia TTS error (status={status}): {err}"
+                            raise RuntimeError(msg_txt)
+                        # timestamps event silently dropped
+                    elif msg.type in {
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    }:
+                        msg_txt = (
+                            f"Cartesia WebSocket closed unexpectedly (type={msg.type})"
+                        )
+                        raise RuntimeError(msg_txt)
+            finally:
+                if not ws.closed:
+                    await ws.close()
+
+        first_to_last_ms = (last_at - first_at) * 1000 if first_at and last_at else 0
+        _logger.info(
+            f"{ls.tag('🔉 TTS', ls.C)} "
+            f"{ls.word('Cartesia/stream', ls.C)} "
+            f"{ls.kv('audio', f'{total_bytes}b', vc=ls.LW)} "
+            f"{ls.kv('span_ms', f'{first_to_last_ms:.0f}', vc=ls.LW)}"
+        )
 
 
 def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:

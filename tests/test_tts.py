@@ -337,6 +337,121 @@ class TestCartesiaTTSClientSynthesize:
             await client.synthesize("Hello")
 
 
+class TestCartesiaTTSClientSynthesizeStream:
+    """``synthesize_stream`` yields chunks as they arrive (no buffering).
+
+    Lower-latency variant of ``synthesize``: enables byte-level playback
+    so ``DiscordVoicePlayer`` can start ``vc.play`` on the first chunk
+    instead of waiting for the full utterance.
+    """
+
+    @pytest.fixture
+    def client(self) -> CartesiaTTSClient:
+        return _client()
+
+    @pytest.mark.asyncio
+    async def test_yields_each_chunk_in_order(self, client: CartesiaTTSClient) -> None:
+        chunks = [b"\x10\x20", b"\x30\x40", b"\x50\x60"]
+        events = [
+            _text_msg({"type": "chunk", "data": base64.b64encode(c).decode()})
+            for c in chunks
+        ]
+        events.append(_text_msg({"type": "done"}))
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            collected = [chunk async for chunk in client.synthesize_stream("hello")]
+        assert collected == chunks
+
+    @pytest.mark.asyncio
+    async def test_empty_chunks_skipped(self, client: CartesiaTTSClient) -> None:
+        events = [
+            _text_msg({"type": "chunk", "data": ""}),
+            _text_msg({"type": "chunk", "data": base64.b64encode(b"\xab").decode()}),
+            _text_msg({"type": "done"}),
+        ]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [b"\xab"]
+
+    @pytest.mark.asyncio
+    async def test_timestamps_events_silently_dropped(
+        self, client: CartesiaTTSClient
+    ) -> None:
+        """Chunk consumers don't need timestamps; they should not break the iter."""
+        events = [
+            _text_msg({"type": "chunk", "data": base64.b64encode(b"\x01").decode()}),
+            _text_msg({
+                "type": "timestamps",
+                "word_timestamps": {
+                    "words": ["hi"],
+                    "start": [0.0],
+                    "end": [0.1],
+                },
+            }),
+            _text_msg({"type": "chunk", "data": base64.b64encode(b"\x02").decode()}),
+            _text_msg({"type": "done"}),
+        ]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [b"\x01", b"\x02"]
+
+    @pytest.mark.asyncio
+    async def test_error_event_raises(self, client: CartesiaTTSClient) -> None:
+        events = [
+            _text_msg({
+                "type": "error",
+                "error": "voice id unknown",
+                "status_code": 400,
+            }),
+        ]
+        fake_ws = _fake_ws(events)
+        with (
+            patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)),
+            pytest.raises(RuntimeError, match="voice id unknown"),
+        ):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_unexpected_close_raises(self, client: CartesiaTTSClient) -> None:
+        closed_msg = Mock(spec=aiohttp.WSMessage)
+        closed_msg.type = aiohttp.WSMsgType.CLOSED
+        fake_ws = _fake_ws([closed_msg])
+        with (
+            patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)),
+            pytest.raises(RuntimeError, match="closed unexpectedly"),
+        ):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_sends_request_payload(self, client: CartesiaTTSClient) -> None:
+        events = [_text_msg({"type": "done"})]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            async for _ in client.synthesize_stream("Hello"):
+                pass
+        assert len(fake_ws.sent) == 1
+        payload = fake_ws.sent[0]
+        assert payload["transcript"] == "Hello"
+        assert payload["add_timestamps"] is True
+
+    @pytest.mark.asyncio
+    async def test_done_terminates_iteration(self, client: CartesiaTTSClient) -> None:
+        """`done` ends the stream even if more events follow on the wire."""
+        events = [
+            _text_msg({"type": "chunk", "data": base64.b64encode(b"\xaa").decode()}),
+            _text_msg({"type": "done"}),
+            _text_msg({"type": "chunk", "data": base64.b64encode(b"\xbb").decode()}),
+        ]
+        fake_ws = _fake_ws(events)
+        with patch.object(client, "_ws_connect", new=AsyncMock(return_value=fake_ws)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [b"\xaa"]
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------

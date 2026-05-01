@@ -203,6 +203,32 @@ intended speech.
 
 Already a Protocol seam. Adding a backend is one new class.
 
+### Byte-level streaming (Cartesia)
+
+`CartesiaTTSClient` exposes a second method,
+`synthesize_stream(text) → AsyncIterator[bytes]`, that yields raw
+mono `pcm_s16le` chunks as the WebSocket delivers them. When the
+configured TTS client implements this method, `DiscordVoicePlayer`
+takes the streaming path:
+
+1. Open Cartesia stream (~140 ms TTFB).
+2. Pre-buffer the first chunk into a `StreamingPCMSource` (a
+   thread-safe `discord.AudioSource` with `feed` / `close_input`).
+3. `vc.play(source)` — pycord's audio thread drains 20 ms frames.
+4. A producer task feeds the rest of the stream into the source as
+   chunks arrive. `close_input()` on stream end lets the reader
+   return `b""` and pycord stop the player cleanly.
+
+That cuts `voice.tts_to_playback` from full-sentence synthesis time
+(1.5–3 s for a long sentence on `cartesia-sonic-3` at ~270 ms/word)
+down to ~one TTFB. Cancellation: `scope.is_cancelled()` flips
+`vc.stop()` within a poll tick; the producer drops out of its loop
+on the next `feed` and `close_input` releases any blocked reader.
+
+Azure and Gemini stay on the buffered `synthesize` path (their SDKs
+return one big result), so `DiscordVoicePlayer.speak` falls through
+to the prior synthesize-then-play behaviour for those clients.
+
 **Mimi-codec lineage.** Mimi (Kyutai, 12.5 Hz frames) is becoming
 the open audio-token standard — Sesame CSM, Hibiki, Moshi all use
 it. Sesame CSM-1B accepts conversational context for prosody
@@ -228,7 +254,9 @@ Cascaded with cloud STT/TTS, April 2026:
 
 Biggest remaining wins: local VAD (150–200 ms) and semantic turn
 detection (skip the silence timeout). Sentence-level TTS streaming
-already shipped — see [Sentence streaming](#sentence-streaming).
+and byte-level Cartesia streaming both shipped — see
+[Sentence streaming](#sentence-streaming) and
+[Byte-level streaming](#byte-level-streaming-cartesia).
 
 ## Per-turn budget telemetry
 
