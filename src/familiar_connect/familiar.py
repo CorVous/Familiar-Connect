@@ -51,7 +51,7 @@ class Familiar:
     bot_user_id: int | None = None
     """Discord snowflake for the logged-in bot user."""
     local_turn_detector: LocalTurnDetector | None = None
-    """V1 phase 2: Silero VAD + Smart Turn local endpointer factory.
+    """V1 phase 2: TEN-VAD + Smart Turn local endpointer factory.
 
     When set, the voice intake forks per-user PCM into both Deepgram
     and a local detector chain; turn-complete decisions trigger

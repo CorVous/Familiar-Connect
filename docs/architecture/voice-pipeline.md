@@ -67,8 +67,9 @@ biased by `endpointing_ms` and `utterance_end_ms`. See
 everywhere (Pipecat, LiveKit, TEN, Agora). Pure-VAD endpointing is
 an anti-pattern.
 
-- *Stage 1* — local VAD (Silero, ONNX, MIT). Fast, in-process.
-  Local VAD beats remote by 150–200 ms.
+- *Stage 1* — local VAD (TEN-VAD, native lib + bundled ONNX,
+  Apache 2.0). Fast, in-process. Local VAD beats remote by
+  150–200 ms.
 - *Stage 2* — semantic turn classifier over buffered audio.
   Pipecat's Smart Turn v3 (BSD-2, ~12 ms, 360 MB) is the leanest
   open option; trained on filler words STT drops, which is why it
@@ -78,36 +79,38 @@ an anti-pattern.
 flag. Three classes plus a factory live under
 `familiar_connect.voice.turn_detection`:
 
-- `SileroVAD(model_path, sample_rate=16000, chunk_size=512)` — Silero
-  v5 ONNX. Stateful: feed 32 ms chunks, get speech probabilities;
-  call `reset()` between utterances. Returns `is_speech(chunk)` for
-  threshold use.
+- `TenVAD(sample_rate=16000, hop_size=256)` — Agora's TEN-VAD via
+  the `ten_vad` Python package. Stateful native handle: feed 16 ms
+  (256-sample) or 10 ms (160-sample) chunks of 16 kHz mono int16
+  PCM, get back a probability + flag pair; call `reset()` between
+  utterances (rebuilds the C handle). Returns `is_speech(chunk)`
+  for threshold use.
 - `SmartTurnDetector(model_path, max_duration_s=16.0)` — Pipecat's
   Smart Turn v3. Stateless: feed the buffered utterance after VAD
   silence. Handles both 2-class softmax and single sigmoid output
   shapes (Pipecat's exports vary). Returns `is_complete(audio)`.
 - `UtteranceEndpointer(vad, smart_turn, on_turn_complete, …)` — per-user
   state machine driving the two above over a 48 kHz mono PCM stream.
-  Feeds 32 ms VAD windows after a 3:1 boxcar-decimation resample,
+  Feeds 16 ms VAD windows after a 3:1 boxcar-decimation resample,
   tracks `IDLE → SPEAKING → silence-after-speech → classify`, and
   awaits `on_turn_complete(audio)` on a `complete` Smart Turn verdict.
   An `incomplete` verdict holds the callback until a fresh speech
   burst followed by a fresh silence streak.
 - `LocalTurnDetector` (factory) + `create_local_turn_detector_from_env()`
   — bundle of model paths and thresholds. Builds a fresh
-  `UtteranceEndpointer` per Discord user (SileroVAD is stateful; Smart
-  Turn is shared).
+  `UtteranceEndpointer` per Discord user (TenVAD's native handle is
+  stateful; Smart Turn is shared).
 
-Both ONNX runtimes lazy-import; install via the `local-turn` extra:
+Both runtimes lazy-import; install via the `local-turn` extra:
 
 ```bash
 uv sync --extra local-turn
 ```
 
-ONNX model files are not in the repo. Download separately:
+TEN-VAD ships its model + native shared library inside the
+`ten-vad` wheel (sourced from upstream git via `[tool.uv.sources]`).
+Smart Turn's ONNX file is not in the repo — download separately:
 
-- Silero v5: <https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx>
-  (~2 MB)
 - Smart Turn v3: <https://huggingface.co/pipecat-ai/smart-turn-v3.0>
   (~360 MB; pull the `.onnx` artifact)
 
@@ -125,7 +128,7 @@ Discord Opus → RecordingSink → per-user PCM
                          ┌───────────┴───────────┐
                          ▼                       ▼
                    Deepgram clone       UtteranceEndpointer
-                   (endpointing_ms=10,    (Silero VAD + Smart Turn)
+                   (endpointing_ms=10,    (TEN-VAD + Smart Turn)
                     Finalize-driven)              │
                                                   │ on_turn_complete
                                                   ▼
@@ -282,7 +285,7 @@ existing summary table.
 
 `vad_end` isn't stamped distinctly today: Deepgram's hosted
 endpointer fuses VAD-end and final into one `is_final` result.
-Roadmap V1 (local Silero VAD) introduces a separate signal; the
+Roadmap V1 (local TEN-VAD) introduces a separate signal; the
 recorder is structured to add it without churn.
 
 Recorder is best-effort: the voice path never blocks on it, and

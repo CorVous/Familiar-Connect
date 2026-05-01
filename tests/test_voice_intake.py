@@ -441,7 +441,7 @@ async def rt_audio_put(
 
 
 class TestLocalTurnDetection:
-    """V1 phase 2 — local Silero+SmartTurn forks the audio path.
+    """V1 phase 2 — local TEN-VAD+SmartTurn forks the audio path.
 
     When ``familiar.local_turn_detector`` is set, the pump feeds each
     PCM chunk into both the Deepgram clone *and* a per-user

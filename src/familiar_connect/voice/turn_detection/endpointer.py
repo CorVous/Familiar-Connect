@@ -1,10 +1,10 @@
-"""Utterance endpointer — Silero VAD + Smart Turn over a 48 kHz PCM stream.
+"""Utterance endpointer — TEN-VAD + Smart Turn over a 48 kHz PCM stream.
 
 Drives V1 phase 2: per-user audio in, "turn complete" callback out.
 Owns three building blocks:
 
-- :class:`Resampler48to16` — 3:1 decimation to Silero's native rate.
-- :class:`SileroVAD` — per-32 ms is-speech probability.
+- :class:`Resampler48to16` — 3:1 decimation to TEN-VAD's native rate.
+- :class:`TenVAD` — per-16 ms is-speech probability.
 - :class:`SmartTurnDetector` — semantic completion classifier.
 
 State machine (per user):
@@ -30,12 +30,12 @@ from familiar_connect.voice.audio import Resampler48to16
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from familiar_connect.voice.turn_detection.silero_vad import SileroVAD
     from familiar_connect.voice.turn_detection.smart_turn import SmartTurnDetector
+    from familiar_connect.voice.turn_detection.ten_vad import TenVAD
 
 
-# Silero v5 native frame at 16 kHz: 512 int16 samples = 1024 bytes = 32 ms.
-_VAD_CHUNK_SAMPLES: int = 512
+# TEN-VAD native frame at 16 kHz: 256 int16 samples = 512 bytes = 16 ms.
+_VAD_CHUNK_SAMPLES: int = 256
 _VAD_CHUNK_BYTES: int = _VAD_CHUNK_SAMPLES * 2
 _VAD_CHUNK_MS: float = (_VAD_CHUNK_SAMPLES / 16000.0) * 1000.0
 
@@ -44,7 +44,7 @@ class UtteranceEndpointer:
     """Per-user local turn-detection state machine.
 
     Caller feeds 48 kHz mono int16 PCM via :meth:`feed_audio` (any
-    chunk length); endpointer resamples, frames into 32 ms VAD windows,
+    chunk length); endpointer resamples, frames into 16 ms VAD windows,
     and on a silence-after-speech edge runs Smart Turn over the buffered
     16 kHz utterance audio. ``on_turn_complete`` is awaited with the
     buffered audio whenever Smart Turn classifies ``complete``.
@@ -53,7 +53,7 @@ class UtteranceEndpointer:
     def __init__(
         self,
         *,
-        vad: SileroVAD,
+        vad: TenVAD,
         smart_turn: SmartTurnDetector,
         on_turn_complete: Callable[[bytes], Awaitable[None]],
         silence_ms: int = 200,
@@ -88,7 +88,7 @@ class UtteranceEndpointer:
         self._vad.reset()
 
     async def feed_audio(self, pcm_48k: bytes) -> None:
-        """Resample, frame into 32 ms VAD windows, advance the state machine."""
+        """Resample, frame into 16 ms VAD windows, advance the state machine."""
         if not pcm_48k:
             return
         resampled = self._resampler.feed(pcm_48k)
@@ -102,7 +102,7 @@ class UtteranceEndpointer:
             await self._on_vad_frame(frame)
 
     async def _on_vad_frame(self, frame: bytes) -> None:
-        """Single 32 ms decision step."""
+        """Single 16 ms decision step."""
         self._utterance.extend(frame)
         is_speech = self._vad.is_speech(frame)
 

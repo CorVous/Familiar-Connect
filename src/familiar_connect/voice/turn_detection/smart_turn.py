@@ -2,8 +2,8 @@
 
 Pipecat's `Smart Turn v3 <https://github.com/pipecat-ai/smart-turn>`_
 is a small wav2vec2-derived model that classifies whether the
-current audio buffer ends on a turn-complete boundary. Where Silero
-VAD answers "is anyone speaking right now?", Smart Turn answers
+current audio buffer ends on a turn-complete boundary. Where TEN-VAD
+answers "is anyone speaking right now?", Smart Turn answers
 "did the speaker actually finish?". Trained on filler-word audio
 that STT routinely drops, which is why it beats transcription-based
 endpointing.

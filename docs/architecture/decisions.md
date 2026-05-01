@@ -65,13 +65,16 @@ The *open-source library* underneath Zep — Graphiti — is a different proposi
 
 - **LLM brain is bundled.** Moshi pins you to Helium 7B; Sesame CSM ships its own LLaMA backbone. We route persona through OpenRouter — that's the most operator-impactful knob in the system.
 - **Tool-calling and prompt knobs degrade.** S2S models don't yet match frontier text LLMs on tool use or prompt engineering.
-- **Cascaded latency can mostly be closed.** Two-stage turn detection (Silero + Smart Turn) plus sentence-streaming TTS lands cascaded at ~700–900 ms — comfortably inside "feels natural".
+- **Cascaded latency can mostly be closed.** Two-stage turn detection (TEN-VAD + Smart Turn) plus sentence-streaming TTS lands cascaded at ~700–900 ms — comfortably inside "feels natural".
 - **Discord audio is constrained.** A 48 kHz Opus stream we don't fully control suits cascaded; S2S stacks expect to own the transport.
 
 **Revisit when** a Mimi-based S2S model gains an external-LLM-brain seam. Tracked in [roadmap V5](roadmap.md#v5-full-duplex-s2s-as-a-research-branch).
 
-## Heavy turn-detection LLM (TEN-style 7B classifier)
+## Heavy turn-detection LLM (TEN Turn Detection's 7B classifier)
 
 **The idea:** Replace silence-based endpointing with a fine-tuned 7B LLM (TEN Turn Detection's Qwen 2.5-7B) classifying transcript chunks `finished` / `unfinished` / `wait`.
 
 **Why it's rejected:** wildly overkill for "did the user finish saying 'uh, hold on'". Pipecat's Smart Turn v3 (~360 MB ONNX, ~12 ms, BSD-2) does the same job on filler-word-aware audio for a fraction of the cost. TEN's approach fits enterprise SLAs and rare-language coverage; for a Discord familiar the cheaper classifier wins. Tracked in [roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
+
+**Note:** this rejects the TEN *Turn Detection* 7B model only.
+Stage-1 VAD does use TEN-framework's separate **TEN-VAD** (small native lib + bundled ONNX, Apache 2.0) — see [Voice pipeline — turn detection](voice-pipeline.md#turn-detection).

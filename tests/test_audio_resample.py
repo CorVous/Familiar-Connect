@@ -1,9 +1,9 @@
 """Tests for 48 kHz → 16 kHz resampler used by the local turn-detection chain.
 
 Discord delivers 48 kHz mono int16 PCM after the recording sink's
-stereo→mono conversion. Silero VAD wants 16 kHz mono int16. 3:1
+stereo→mono conversion. TEN-VAD wants 16 kHz mono int16. 3:1
 decimation with a boxcar pre-filter (average each 3 samples) is
-cheap and good enough — Silero is forgiving of the residual aliasing
+cheap and good enough — TEN-VAD is forgiving of the residual aliasing
 above 8 kHz.
 
 The resampler is stream-stateful: callers feed arbitrary chunk

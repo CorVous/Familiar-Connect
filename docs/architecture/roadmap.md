@@ -85,10 +85,11 @@ FastEmbed/ONNX. Vectors in `sqlite-vec` alongside FTS.
 
 ### V1 — Local VAD + semantic turn detection
 
-Today: Deepgram's hosted endpointer is the default. V1 phase 1 (ONNX
-wrappers) and phase 2 (per-user `UtteranceEndpointer` wired into the
-audio pump) have shipped behind `LOCAL_TURN_DETECTION=1`. Local VAD
-saves 150–200 ms over remote endpointing.
+Today: Deepgram's hosted endpointer is the default. V1 phase 1
+(TEN-VAD + Smart Turn wrappers) and phase 2 (per-user
+`UtteranceEndpointer` wired into the audio pump) have shipped behind
+`LOCAL_TURN_DETECTION=1`. Local VAD saves 150–200 ms over remote
+endpointing.
 
 Remaining: TOML-driven selector via
 [A1](#a1-strategy-swap-configuration-spine), telemetry surface for
@@ -133,7 +134,7 @@ Change: TOML-driven selectors:
 backend = "deepgram"          # | "faster_whisper" | "parakeet"
 
 [providers.turn_detection]
-strategy = "deepgram"         # | "silero+smart_turn" | "ten"
+strategy = "deepgram"         # | "ten+smart_turn"
 
 [providers.memory]
 projectors = ["rich_note", "people_dossier"]

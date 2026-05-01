@@ -87,7 +87,7 @@ class VoiceRuntime:
     # Deepgram doesn't tear them down server-side mid-utterance. Reopened
     # lazily on next audio chunk for that user.
     idle_watchdog_task: asyncio.Task[None] | None = None
-    # V1 phase 2: per-user local turn-endpointer (Silero VAD + Smart
+    # V1 phase 2: per-user local turn-endpointer (TEN-VAD + Smart
     # Turn). Empty when ``familiar.local_turn_detector`` is unset.
     endpointers: dict[int, UtteranceEndpointer] = field(default_factory=dict)
 

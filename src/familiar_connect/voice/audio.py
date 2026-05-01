@@ -22,7 +22,7 @@ class Resampler48to16:
     Stateful: holds up to two int16 samples between calls so callers
     can feed arbitrary chunk lengths. Each output sample is the
     integer mean of three consecutive input samples (boxcar pre-filter
-    + 3:1 decimation). Silero VAD is forgiving of the residual high-
+    + 3:1 decimation). TEN-VAD is forgiving of the residual high-
     frequency aliasing above the 8 kHz Nyquist.
 
     Use :meth:`close` to flush a partial triplet (zero-padded) at

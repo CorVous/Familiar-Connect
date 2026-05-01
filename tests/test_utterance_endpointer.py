@@ -1,8 +1,8 @@
-"""Tests for the Silero+SmartTurn utterance endpointer state machine.
+"""Tests for the TEN-VAD+SmartTurn utterance endpointer state machine.
 
 The endpointer is the core of V1 phase 2: per-user 48 kHz PCM in,
-``is-this-turn-complete?`` decisions out. ONNX I/O is mocked so the
-suite stays fast and doesn't require model files.
+``is-this-turn-complete?`` decisions out. Native VAD + ONNX I/O are
+mocked so the suite stays fast and doesn't require model files.
 
 Trace shape:
 
@@ -27,23 +27,23 @@ from familiar_connect.voice.turn_detection import UtteranceEndpointer
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-# 32 ms at 16 kHz mono int16 — Silero v5 chunk size.
-VAD_CHUNK_SAMPLES = 512
+# 16 ms at 16 kHz mono int16 — TEN-VAD default hop.
+VAD_CHUNK_SAMPLES = 256
 VAD_CHUNK_BYTES = VAD_CHUNK_SAMPLES * 2
 
-# 48 kHz feed = 3x 16 kHz; one 32 ms VAD chunk corresponds to
+# 48 kHz feed = 3x 16 kHz; one 16 ms VAD chunk corresponds to
 # ``VAD_CHUNK_SAMPLES * 3`` input samples.
 INPUT_CHUNK_SAMPLES = VAD_CHUNK_SAMPLES * 3
 INPUT_CHUNK_BYTES = INPUT_CHUNK_SAMPLES * 2
 
 
 def _input_chunk(amplitude: int = 0) -> bytes:
-    """One 32-ms-equivalent block of 48 kHz mono int16 PCM."""
+    """One 16-ms-equivalent block of 48 kHz mono int16 PCM."""
     return struct.pack(f"<{INPUT_CHUNK_SAMPLES}h", *([amplitude] * INPUT_CHUNK_SAMPLES))
 
 
 def _make_vad(speech_pattern: list[bool]) -> MagicMock:
-    """Mock Silero VAD whose ``is_speech`` walks the pattern.
+    """Mock TEN-VAD whose ``is_speech`` walks the pattern.
 
     Once the pattern runs out, repeats the last value — useful for
     "tail off into silence" tests without listing every chunk.
@@ -117,8 +117,9 @@ class TestCompleteUtterance:
     async def test_speech_then_silence_classifies_and_fires_callback(self) -> None:
         """Speech burst followed by silence_ms silence → SmartTurn fires."""
         calls: list[bytes] = []
-        # 5 chunks speech, then 8 chunks silence (256 ms — past 200 ms cap)
-        pattern = [True] * 5 + [False] * 8
+        # 5 chunks speech, then 16 chunks silence (256 ms — past 200 ms cap
+        # at 16 ms per VAD frame).
+        pattern = [True] * 5 + [False] * 16
         vad = _make_vad(pattern)
         st = _make_smart_turn([True])
         ep = UtteranceEndpointer(
@@ -144,9 +145,10 @@ class TestIncompleteThenComplete:
     async def test_incomplete_holds_callback_until_next_pause(self) -> None:
         """``incomplete`` → no fire; resumed speech + new silence → reclassify."""
         calls: list[bytes] = []
-        # 3 speech, 8 silence (classify→incomplete),
-        # 3 speech (resume), 8 silence (classify again).
-        pattern = [True] * 3 + [False] * 8 + [True] * 3 + [False] * 8
+        # 3 speech, 16 silence (classify→incomplete),
+        # 3 speech (resume), 16 silence (classify again).
+        # 16 ms VAD frames → 16 silence chunks ≥ 200 ms threshold.
+        pattern = [True] * 3 + [False] * 16 + [True] * 3 + [False] * 16
         vad = _make_vad(pattern)
         st = _make_smart_turn([False, True])  # incomplete then complete
         ep = UtteranceEndpointer(
@@ -169,7 +171,9 @@ class TestExtendedSilenceAfterIncomplete:
     async def test_no_reclassification_during_continued_silence(self) -> None:
         """After incomplete, more silence alone shouldn't refire SmartTurn."""
         calls: list[bytes] = []
-        pattern = [True] * 3 + [False] * 16
+        # 24 silence frames so the streak runs ~8 frames past the 12-frame
+        # (200 ms) classify threshold without re-firing SmartTurn.
+        pattern = [True] * 3 + [False] * 24
         vad = _make_vad(pattern)
         st = _make_smart_turn([False])
         ep = UtteranceEndpointer(
@@ -190,7 +194,7 @@ class TestReset:
     @pytest.mark.asyncio
     async def test_reset_drops_buffer_and_state(self) -> None:
         calls: list[bytes] = []
-        vad = _make_vad([True] * 3 + [False] * 8)
+        vad = _make_vad([True] * 3 + [False] * 16)
         st = _make_smart_turn([True])
         ep = UtteranceEndpointer(
             vad=vad,

@@ -25,14 +25,17 @@ dependencies = [
 familiar-connect = "familiar_connect.cli:main"
 
 [project.optional-dependencies]
-# Local turn-detection: Silero VAD (~2 MB ONNX) + Smart Turn v3
-# (~360 MB ONNX). Installed via:
+# Local turn-detection: TEN-VAD (Apache 2.0, native lib + ONNX bundled
+# inside the wheel) + Pipecat Smart Turn v3 (~360 MB ONNX, lives under
+# data/models/ — download separately). Installed via:
 #     uv sync --extra local-turn
-# numpy carries onnxruntime's tensor I/O. ONNX models live under
-# data/models/ — download separately, see docs/architecture/voice-pipeline.md.
+# numpy carries both ten-vad's int16 I/O and onnxruntime's tensors.
+# ten-vad ships only via git; pin to a tag once upstream cuts releases.
+# See docs/architecture/voice-pipeline.md.
 local-turn = [
     "onnxruntime >= 1.18, < 2",
     "numpy >= 1.26, < 3",
+    "ten-vad",
 ]
 
 [dependency-groups]
@@ -73,6 +76,10 @@ version-file = "src/familiar_connect/_version.py"
 [tool.uv]
 default-groups = ["dev", "docs"]
 exclude-newer = "7d"
+
+[tool.uv.sources]
+# ten-vad isn't on PyPI; install from upstream git.
+ten-vad = { git = "https://github.com/TEN-framework/ten-vad.git" }
 
 [tool.uv.exclude-newer-package]
 defusedxml = "1d"

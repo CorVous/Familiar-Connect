@@ -193,26 +193,30 @@ thinking pauses; lower the silence thresholds for snappier finals.
 
 ## Local turn detection (V1)
 
-V1 phase 2 fork of the audio path: Silero VAD + Smart Turn v3 own
+V1 phase 2 fork of the audio path: TEN-VAD + Smart Turn v3 own
 endpointing locally, Deepgram becomes pure STT. Off by default;
 gated by `LOCAL_TURN_DETECTION` plus the `local-turn` extra
-(`uv sync --extra local-turn`) and ONNX model files under
-`data/models/`. When active, per-user Deepgram clones are spawned
-with `endpointing_ms=10` so they wait on `Finalize` from the local
-chain rather than firing on their own silence timer.
+(`uv sync --extra local-turn`). TEN-VAD's native lib + ONNX model
+ship inside the `ten-vad` wheel (sourced from upstream git, see
+`[tool.uv.sources]` in `pyproject.toml`); only Smart Turn needs an
+on-disk file under `data/models/`. When active, per-user Deepgram
+clones are spawned with `endpointing_ms=10` so they wait on
+`Finalize` from the local chain rather than firing on their own
+silence timer.
 
 | Var | Default | Purpose |
 |---|---|---|
 | `LOCAL_TURN_DETECTION` | _(unset)_ | `1/true/yes/on` enables the local detector chain. |
-| `SILERO_VAD_MODEL_PATH` | `data/models/silero_vad.onnx` | Silero v5 ONNX file. |
 | `SMART_TURN_MODEL_PATH` | `data/models/smart-turn-v3.onnx` | Pipecat Smart Turn v3 ONNX file. |
 | `LOCAL_TURN_SILENCE_MS` | `200` | Silence after speech before SmartTurn classifies. |
 | `LOCAL_TURN_SPEECH_START_MS` | `100` | Consecutive speech before "speaking" latches. |
-| `LOCAL_TURN_VAD_THRESHOLD` | `0.5` | Silero `is_speech` cutoff. |
+| `LOCAL_TURN_VAD_THRESHOLD` | `0.5` | TEN-VAD `is_speech` cutoff. |
 | `LOCAL_TURN_SMART_TURN_THRESHOLD` | `0.5` | SmartTurn `is_complete` cutoff. |
+| `TEN_VAD_HOP_SIZE` | `256` | TEN-VAD frame size in samples at 16 kHz; `256` (16 ms) or `160` (10 ms). |
 
-Missing model files turn the feature off with a warning — the bot
-falls back to Deepgram endpointing rather than failing to start.
+A missing Smart Turn ONNX file turns the feature off with a warning
+— the bot falls back to Deepgram endpointing rather than failing to
+start.
 
 ### Planned consolidation
 
@@ -308,7 +312,7 @@ read by today's code.
 backend = "deepgram"             # | "faster_whisper" | "parakeet"
 
 [providers.turn_detection]
-strategy = "deepgram"            # | "silero+smart_turn" | "ten"
+strategy = "deepgram"            # | "ten+smart_turn"
 
 [providers.memory]
 projectors = ["rich_note", "people_dossier"]
