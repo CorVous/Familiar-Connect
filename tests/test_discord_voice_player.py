@@ -245,6 +245,90 @@ class TestConcurrentSpeak:
         assert len(plays) == 2
         assert tts.calls == ["alice reply", "bob reply"]
 
+    @pytest.mark.asyncio
+    async def test_cancel_then_immediate_speak_does_not_collide(self) -> None:
+        """Barge-in should not race the next speaker's ``vc.play()``.
+
+        Reproduces the prod ``ClientException('Already playing audio.')``
+        from the trace: speaker A is mid-playback when scope_A is
+        cancelled; ``vc.stop()`` flips the stop flag but pycord's audio
+        thread takes a tick or two to actually release the player. If
+        ``speak()`` returns immediately on stop and B's ``speak()``
+        acquires the lock at that moment, B's ``vc.play()`` raises.
+        The fix drains ``is_playing()`` after ``vc.stop()`` before
+        releasing the lock.
+        """
+        tts = _StubTTS(audio=_mono_pcm(8))
+
+        # mimic real pycord: stop() flips a sticky flag, is_playing
+        # only returns False after several polls (audio-thread tick lag);
+        # play() raises if is_playing is still True; absent any stop,
+        # is_playing naturally drains after some polls so the test
+        # eventually terminates.
+        state = {
+            "playing": False,
+            "stop_lag_polls": 0,
+            "stopping": False,
+            "natural_polls": 0,
+        }
+        plays: list[object] = []
+
+        def _play(source: object) -> None:
+            if state["playing"]:
+                msg = "Already playing audio."
+                raise discord.ClientException(msg)
+            state["playing"] = True
+            state["stopping"] = False
+            state["stop_lag_polls"] = 0
+            state["natural_polls"] = 8
+            plays.append(source)
+
+        def _is_playing() -> bool:
+            if state["stopping"]:
+                state["stop_lag_polls"] -= 1
+                if state["stop_lag_polls"] <= 0:
+                    state["playing"] = False
+                    state["stopping"] = False
+            elif state["playing"]:
+                state["natural_polls"] -= 1
+                if state["natural_polls"] <= 0:
+                    state["playing"] = False
+            return bool(state["playing"])
+
+        def _stop() -> None:
+            if state["playing"] and not state["stopping"]:
+                # 4 polls of post-stop lag — within the bounded
+                # ``_await_stop_drain`` wait but enough that releasing
+                # the lock immediately would race B's ``vc.play``.
+                state["stopping"] = True
+                state["stop_lag_polls"] = 4
+
+        vc = MagicMock(name="voice_client")
+        vc.is_connected.return_value = True
+        vc.play.side_effect = _play
+        vc.is_playing.side_effect = _is_playing
+        vc.stop.side_effect = _stop
+
+        player = DiscordVoicePlayer(tts_client=tts, get_voice_client=lambda: vc)
+        scope_a = TurnScope(turn_id="ta", session_id="voice:1:user:101", started_at=0.0)
+        scope_b = TurnScope(turn_id="tb", session_id="voice:1:user:202", started_at=0.0)
+
+        async def cancel_a() -> None:
+            await asyncio.sleep(0.03)
+            scope_a.cancel()
+
+        cancel_task = asyncio.create_task(cancel_a())
+        # B's speak is launched concurrently; the lock serializes, but
+        # the post-stop drain is what prevents the race.
+        await asyncio.gather(
+            player.speak("alice", scope=scope_a),
+            player.speak("bob", scope=scope_b),
+        )
+        await cancel_task
+
+        # Both plays must succeed — no ClientException raised.
+        assert len(plays) == 2
+
 
 class TestVoiceBudget:
     """``DiscordVoicePlayer`` stamps ``playback_start`` once per turn.

@@ -43,6 +43,15 @@ if TYPE_CHECKING:
 _logger = logging.getLogger("familiar_connect.tts_player.discord")
 
 _POLL_S = 0.02
+# Max time we wait after ``vc.stop()`` for pycord's audio thread to
+# actually flip ``is_playing()`` to False before releasing the play
+# lock. Pycord's player thread checks the stop flag on each ~20 ms
+# tick so the real wait is one or two polls; the upper bound is just a
+# safety net for a wedged audio thread. Without this drain, a barge-in
+# can release the lock while the thread is mid-tick, the next speak()
+# acquires immediately, and ``vc.play()`` raises ``ClientException(
+# 'Already playing audio.')``.
+_STOP_DRAIN_S = 0.2
 
 
 class _TTSClient(Protocol):
@@ -177,6 +186,7 @@ class DiscordVoicePlayer:
                             f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
                         )
                         vc.stop()
+                        await self._await_stop_drain(vc)
                         return
                     await asyncio.sleep(_POLL_S)
             finally:
@@ -255,6 +265,7 @@ class DiscordVoicePlayer:
                         f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
                     )
                     vc.stop()
+                    await self._await_stop_drain(vc)
                     return
                 await asyncio.sleep(_POLL_S)
 
@@ -268,3 +279,20 @@ class DiscordVoicePlayer:
             return
         if playing:
             vc.stop()
+
+    @staticmethod
+    async def _await_stop_drain(vc: _VoiceClientLike) -> None:
+        """Poll ``is_playing()`` until pycord's audio thread is idle.
+
+        Bounded by :data:`_STOP_DRAIN_S` so a wedged player can't pin
+        the play lock forever. Caller must already have invoked
+        ``vc.stop()``.
+        """
+        deadline = asyncio.get_event_loop().time() + _STOP_DRAIN_S
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                if not vc.is_playing():
+                    return
+            except Exception:  # noqa: BLE001
+                return
+            await asyncio.sleep(_POLL_S)

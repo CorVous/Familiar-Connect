@@ -12,9 +12,17 @@ import pytest
 from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
     _async_main,
+    _default_assembler,
     _resolve_familiar_root,
     load_opus,
     run,
+)
+from familiar_connect.context.layers import (
+    ConversationSummaryLayer,
+    CrossChannelContextLayer,
+    PeopleDossierLayer,
+    RagContextLayer,
+    RecentHistoryLayer,
 )
 
 if TYPE_CHECKING:
@@ -575,3 +583,43 @@ class TestAsyncMainCleanup:
             await _async_main("fake-token", familiar)
 
         bot.close.assert_awaited_once()
+
+
+class TestDefaultAssemblerLayerOrder:
+    """Pin the system-prompt layer order for OpenAI prompt-cache friendliness.
+
+    OpenAI caches the longest matching prompt prefix; any layer that
+    changes between turns invalidates everything *after* it. The fix is
+    to place the slowest-refreshing dynamic layer first and the
+    per-turn-changing one last.
+    """
+
+    def _layer_order(self, tmp_path: Path) -> list[str]:
+        familiar = MagicMock(name="familiar")
+        familiar.root = tmp_path
+        familiar.config.history_window_size = 20
+        familiar.history_store = MagicMock(name="history_store")
+        asm = _default_assembler(familiar)
+        return [type(layer).__name__ for layer in asm._layers]
+
+    def test_conversation_summary_precedes_cross_channel(self, tmp_path: Path) -> None:
+        """ConvSummary refreshes every N turns; cross-channel fans across sources."""
+        order = self._layer_order(tmp_path)
+        assert order.index(ConversationSummaryLayer.__name__) < order.index(
+            CrossChannelContextLayer.__name__
+        )
+
+    def test_people_dossier_precedes_rag(self, tmp_path: Path) -> None:
+        """RAG flips every turn; dossier only on per-fact watermark advance."""
+        order = self._layer_order(tmp_path)
+        assert order.index(PeopleDossierLayer.__name__) < order.index(
+            RagContextLayer.__name__
+        )
+
+    def test_rag_is_last_system_prompt_layer(self, tmp_path: Path) -> None:
+        """RAG sits at system-prompt tail; only RecentHistory follows (in messages)."""
+        order = self._layer_order(tmp_path)
+        rag = order.index(RagContextLayer.__name__)
+        recent = order.index(RecentHistoryLayer.__name__)
+        assert rag == recent - 1
+        assert recent == len(order) - 1

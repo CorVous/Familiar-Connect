@@ -289,6 +289,35 @@ Recorder is best-effort: the voice path never blocks on it, and
 exceptions inside `record(...)` are swallowed so instrumentation
 can't take the bot down.
 
+### Prompt cache friendliness
+
+OpenAI's prompt caching matches the longest stable prefix of a
+request (1024-token minimum, 128-token granularity). Any change to a
+mid-prompt layer cache-invalidates everything after it, so the
+`_default_assembler` builds layers in **stability descending** order:
+
+| Position | Layer | Refresh trigger |
+|---|---|---|
+| 1 | `CoreInstructionsLayer` | file content change |
+| 2 | `CharacterCardLayer` | file content change |
+| 3 | `OperatingModeLayer` | `viewer_mode` flip (constant per mode) |
+| 4 | `ConversationSummaryLayer` | `SummaryWorker` writes (every N turns) |
+| 5 | `CrossChannelContextLayer` | any source channel's summary writes |
+| 6 | `PeopleDossierLayer` | `PeopleDossierWorker` watermark advances |
+| 7 | `RagContextLayer` | per-turn cue (always changes) |
+| — | `RecentHistoryLayer` | per-turn (contributes user/assistant messages, not system text) |
+
+`RagContextLayer` therefore sits at the tail of the system message,
+so its inevitable per-turn churn invalidates *only* itself — the
+prefix from `CoreInstructionsLayer` through `PeopleDossierLayer` can
+remain cached when its constituent layers haven't moved.
+
+`tests/test_run_cmd.py::TestDefaultAssemblerLayerOrder` pins this
+ordering so a refactor doesn't silently drop into "everything goes
+cold" mode. Prompt-cache hit count surfaces as `cached=N` on the
+`[LLM call]` log line below — if the count drops to 0, suspect a
+mid-prompt layer that just started churning between turns.
+
 ### LLM call signals
 
 Every `LLMClient.chat_stream` call adds three spans + one
@@ -322,6 +351,17 @@ Already implemented. New `voice.activity.start` cancels prior
 Verified sub-200 ms by
 `tests/test_voice_responder.py::TestBargeIn`. See
 [Voice reply loop](overview.md#voice-reply-loop).
+
+After `vc.stop()`, `DiscordVoicePlayer` polls `vc.is_playing()` for
+up to 200 ms before releasing the play lock. Pycord's audio thread
+checks the stop flag once per 20 ms tick so the actual wait is one
+or two polls; the upper bound is a safety net for a wedged thread.
+Without that drain, a barge-in followed by an immediate next-speaker
+turn would race: the next `speak()` acquires the lock the instant
+the prior call returns, but pycord still has `is_playing() == True`
+for one tick — and `vc.play()` raises `ClientException('Already
+playing audio.')`. Reproduced (and pinned) in
+`tests/test_discord_voice_player.py::TestConcurrentSpeak::test_cancel_then_immediate_speak_does_not_collide`.
 
 ## Per-channel tuning
 

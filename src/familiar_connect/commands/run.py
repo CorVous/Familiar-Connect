@@ -133,10 +133,25 @@ async def _run_debug_processor(familiar: Familiar) -> None:
 def _default_assembler(familiar: Familiar) -> Assembler:
     """Build the Phase-3 full layer stack.
 
-    Order matches plan § Design.4: static role/character/operating-mode,
-    then cross-channel, rolling summary, RAG, and finally the recent
-    history message list (appended by the assembler as ``Message``
-    objects, not as system text).
+    Order is **stability descending** so OpenAI's prompt cache keeps the
+    longest matching prefix across consecutive turns. Static layers
+    (file/mode-keyed) come first; dynamic layers come next, ordered by
+    refresh rate (slowest first):
+
+    * ``ConversationSummaryLayer`` — every ``turns_threshold`` turns
+      (default 10), the slowest of the dynamic block.
+    * ``CrossChannelContextLayer`` — when *any* other channel's summary
+      is rewritten; per-channel rate is bounded by the same threshold,
+      but multiple sources fan in.
+    * ``PeopleDossierLayer`` — when any active-channel subject's facts
+      tick the watermark; effectively per-fact write.
+    * ``RagContextLayer`` — every turn (cue is the inbound user text).
+
+    A change in any layer cache-invalidates everything *after* it in
+    the system message, so reordering gives the prefix the longest
+    stable run before the per-turn ``RagContextLayer`` flips. See
+    [Voice pipeline § Prompt cache friendliness](
+    ../../docs/architecture/voice-pipeline.md#prompt-cache-friendliness).
     """
     root = familiar.root
     core_path = root.parent / "_default" / "core_instructions.md"
@@ -158,16 +173,20 @@ def _default_assembler(familiar: Familiar) -> Assembler:
                     ),
                 }
             ),
+            # slowest dynamic layer — per-channel summary, every N turns
+            ConversationSummaryLayer(store=store),
+            # other-channel summaries — fans in but per-source rate matches above
             CrossChannelContextLayer(
                 store=store,
                 viewer_map={},  # populated by per-channel config when present
                 ttl_seconds=600,
             ),
-            ConversationSummaryLayer(store=store),
+            # per-fact watermark — refreshes ahead of every active-channel turn
             PeopleDossierLayer(
                 store=store,
                 window_size=familiar.config.history_window_size,
             ),
+            # per-turn cue — always changes, so it sits last in the system msg
             RagContextLayer(
                 store=store,
                 max_results=5,
