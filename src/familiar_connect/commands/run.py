@@ -53,6 +53,7 @@ from familiar_connect.tts_player import (
     LoggingTTSPlayer,
     TTSPlayer,
 )
+from familiar_connect.voice.turn_detection import create_local_turn_detector_from_env
 
 _logger = logging.getLogger(__name__)
 
@@ -397,12 +398,21 @@ def run(args: argparse.Namespace) -> int:
         _logger.warning("Transcriber unavailable: %s", exc)
         transcriber = None
 
+    # V1 phase 2: gated by ``LOCAL_TURN_DETECTION`` env var. Returns
+    # ``None`` if disabled or model files are missing.
+    try:
+        local_turn_detector = create_local_turn_detector_from_env()
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("Local turn detector unavailable: %s", exc)
+        local_turn_detector = None
+
     try:
         familiar = Familiar.load_from_disk(
             familiar_root,
             llm_clients=llm_clients,
             tts_client=tts_client,
             transcriber=transcriber,
+            local_turn_detector=local_turn_detector,
         )
     except ConfigError as exc:
         _logger.error("Failed to load familiar config: %s", exc)

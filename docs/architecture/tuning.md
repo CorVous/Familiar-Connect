@@ -191,6 +191,29 @@ thinking pauses; lower the silence thresholds for snappier finals.
 | `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` | `16.0` | Reconnect backoff cap. |
 | `DEEPGRAM_IDLE_CLOSE_S` | `30.0` | Per-user stream closed after this many silent seconds; reopened on next chunk. `0` disables. |
 
+## Local turn detection (V1)
+
+V1 phase 2 fork of the audio path: Silero VAD + Smart Turn v3 own
+endpointing locally, Deepgram becomes pure STT. Off by default;
+gated by `LOCAL_TURN_DETECTION` plus the `local-turn` extra
+(`uv sync --extra local-turn`) and ONNX model files under
+`data/models/`. When active, per-user Deepgram clones are spawned
+with `endpointing_ms=10` so they wait on `Finalize` from the local
+chain rather than firing on their own silence timer.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `LOCAL_TURN_DETECTION` | _(unset)_ | `1/true/yes/on` enables the local detector chain. |
+| `SILERO_VAD_MODEL_PATH` | `data/models/silero_vad.onnx` | Silero v5 ONNX file. |
+| `SMART_TURN_MODEL_PATH` | `data/models/smart-turn-v3.onnx` | Pipecat Smart Turn v3 ONNX file. |
+| `LOCAL_TURN_SILENCE_MS` | `200` | Silence after speech before SmartTurn classifies. |
+| `LOCAL_TURN_SPEECH_START_MS` | `100` | Consecutive speech before "speaking" latches. |
+| `LOCAL_TURN_VAD_THRESHOLD` | `0.5` | Silero `is_speech` cutoff. |
+| `LOCAL_TURN_SMART_TURN_THRESHOLD` | `0.5` | SmartTurn `is_complete` cutoff. |
+
+Missing model files turn the feature off with a warning — the bot
+falls back to Deepgram endpointing rather than failing to start.
+
 ### Planned consolidation
 
 [A2](roadmap.md#a2-consolidate-stt-env-vars-into-toml) moves

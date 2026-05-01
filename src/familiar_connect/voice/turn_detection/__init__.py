@@ -1,10 +1,25 @@
-"""Local turn detection — Silero VAD + Smart Turn v3.
+"""Local turn detection — Silero VAD + Smart Turn v3 + endpointer state machine.
 
-Phase 1 — wrappers only, not wired into the audio pipeline yet. See
-``docs/architecture/voice-pipeline.md`` for the integration plan.
+Phase 1 landed the wrappers; phase 2 adds :class:`UtteranceEndpointer`
+which composes them into a per-user state machine. The audio pump in
+``bot._start_voice_intake`` forks PCM into both Deepgram and the
+endpointer when ``LOCAL_TURN_DETECTION=1``; on a turn-complete verdict
+the endpointer calls ``transcriber.finalize()`` to flush Deepgram.
+See ``docs/architecture/voice-pipeline.md``.
 """
 
+from familiar_connect.voice.turn_detection.endpointer import UtteranceEndpointer
+from familiar_connect.voice.turn_detection.factory import (
+    LocalTurnDetector,
+    create_local_turn_detector_from_env,
+)
 from familiar_connect.voice.turn_detection.silero_vad import SileroVAD
 from familiar_connect.voice.turn_detection.smart_turn import SmartTurnDetector
 
-__all__ = ["SileroVAD", "SmartTurnDetector"]
+__all__ = [
+    "LocalTurnDetector",
+    "SileroVAD",
+    "SmartTurnDetector",
+    "UtteranceEndpointer",
+    "create_local_turn_detector_from_env",
+]

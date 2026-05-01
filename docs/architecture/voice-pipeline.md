@@ -74,8 +74,8 @@ an anti-pattern.
   open option; trained on filler words STT drops, which is why it
   beats transcription-based endpointing.
 
-**Status:** V1 phase 1 — wrappers landed, not wired into the audio
-path yet. Two classes live under
+**Status:** V1 phase 2 — local endpointer wired behind a feature
+flag. Three classes plus a factory live under
 `familiar_connect.voice.turn_detection`:
 
 - `SileroVAD(model_path, sample_rate=16000, chunk_size=512)` — Silero
@@ -86,8 +86,19 @@ path yet. Two classes live under
   Smart Turn v3. Stateless: feed the buffered utterance after VAD
   silence. Handles both 2-class softmax and single sigmoid output
   shapes (Pipecat's exports vary). Returns `is_complete(audio)`.
+- `UtteranceEndpointer(vad, smart_turn, on_turn_complete, …)` — per-user
+  state machine driving the two above over a 48 kHz mono PCM stream.
+  Feeds 32 ms VAD windows after a 3:1 boxcar-decimation resample,
+  tracks `IDLE → SPEAKING → silence-after-speech → classify`, and
+  awaits `on_turn_complete(audio)` on a `complete` Smart Turn verdict.
+  An `incomplete` verdict holds the callback until a fresh speech
+  burst followed by a fresh silence streak.
+- `LocalTurnDetector` (factory) + `create_local_turn_detector_from_env()`
+  — bundle of model paths and thresholds. Builds a fresh
+  `UtteranceEndpointer` per Discord user (SileroVAD is stateful; Smart
+  Turn is shared).
 
-Both lazy-import `onnxruntime`; install via the `local-turn` extra:
+Both ONNX runtimes lazy-import; install via the `local-turn` extra:
 
 ```bash
 uv sync --extra local-turn
@@ -100,20 +111,35 @@ ONNX model files are not in the repo. Download separately:
 - Smart Turn v3: <https://huggingface.co/pipecat-ai/smart-turn-v3.0>
   (~360 MB; pull the `.onnx` artifact)
 
-Place under `data/models/` (gitignored).
+Place under `data/models/` (gitignored) or override the path via env.
 
-**Phase 2 — wiring into the audio pipeline — is pending.** The
-recording sink today feeds Deepgram, which owns endpointing. Phase
-2 forks the per-user PCM stream into both the local detector chain
-*and* Deepgram (with `endpointing_ms` near zero so Deepgram becomes
-pure STT), and emits `voice.activity.end` from the local chain when
-Smart Turn classifies the buffer as `complete`. Selector lives in
-TOML:
+### How the audio path forks
 
-```toml
-[providers.turn_detection]
-strategy = "silero+smart_turn"   # | "deepgram" (default until phase 2)
+When `LOCAL_TURN_DETECTION=1` and the model files exist,
+`bot._start_voice_intake` builds a per-user endpointer alongside the
+per-user Deepgram clone. The pump feeds every PCM chunk into both:
+
 ```
+Discord Opus → RecordingSink → per-user PCM
+                                     │
+                         ┌───────────┴───────────┐
+                         ▼                       ▼
+                   Deepgram clone       UtteranceEndpointer
+                   (endpointing_ms=10,    (Silero VAD + Smart Turn)
+                    Finalize-driven)              │
+                                                  │ on_turn_complete
+                                                  ▼
+                                        clone.finalize() ──► Deepgram flush
+```
+
+`clone.endpointing_ms` is dropped to `10` for the Deepgram instance
+when local detection is active so Deepgram won't endpoint on its own —
+it relies on `Finalize` messages driven by the local chain. Selector
+TOML lands with [A1](roadmap.md#a1-strategy-swap-configuration-spine);
+today the toggle is the env knobs in [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
+
+The default is **off**: with no model files (or `LOCAL_TURN_DETECTION`
+unset), the bot keeps using Deepgram's hosted endpointer.
 
 See [Roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
 

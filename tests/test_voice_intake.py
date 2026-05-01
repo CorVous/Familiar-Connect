@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,16 +28,24 @@ from familiar_connect.bot import (
 from familiar_connect.identity import Author
 from familiar_connect.transcription import TranscriptionResult
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    _OnComplete = Callable[[bytes], Awaitable[None]]
+
 
 def _make_handle() -> BotHandle:
     bot = MagicMock()
     return BotHandle(bot=bot, send_text=AsyncMock())
 
 
-def _make_familiar(*, transcriber: object | None) -> MagicMock:
+def _make_familiar(
+    *, transcriber: object | None, local_turn_detector: object | None = None
+) -> MagicMock:
     fam = MagicMock()
     fam.id = "fam"
     fam.transcriber = transcriber
+    fam.local_turn_detector = local_turn_detector
     fam.bus = MagicMock()
     return fam
 
@@ -430,6 +438,117 @@ async def rt_audio_put(
     rt: Any = handle.voice_runtime[channel_id]
     for item in items:
         await rt.audio_queue.put(item)
+
+
+class TestLocalTurnDetection:
+    """V1 phase 2 — local Silero+SmartTurn forks the audio path.
+
+    When ``familiar.local_turn_detector`` is set, the pump feeds each
+    PCM chunk into both the Deepgram clone *and* a per-user
+    :class:`UtteranceEndpointer`. The endpointer's on-complete callback
+    calls ``clone.finalize()`` to force Deepgram to flush its buffered
+    transcript immediately rather than waiting on the hosted
+    silence-based endpointer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_endpointer_built_when_detector_unset(self) -> None:
+        """No detector configured → pump leaves the audio path unforked."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template, local_turn_detector=None)
+        vc = MagicMock()
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((1, b"\x00\x00"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+        # nothing under endpointers map (or attribute missing) — both fine.
+
+    @pytest.mark.asyncio
+    async def test_pump_forks_pcm_to_endpointer(self) -> None:
+        """When detector is set, every chunk reaches the per-user endpointer."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        endpointers: list[MagicMock] = []
+        finalize_callbacks: list[object] = []
+
+        def _make_endpointer(*, on_turn_complete: object) -> MagicMock:
+            ep = MagicMock()
+            ep.feed_audio = AsyncMock()
+            ep.reset = MagicMock()
+            endpointers.append(ep)
+            finalize_callbacks.append(on_turn_complete)
+            return ep
+
+        detector = MagicMock()
+        detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
+
+        familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((1, b"\x00\x01"))
+        await rt.audio_queue.put((1, b"\x02\x03"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(endpointers) == 1
+        ep = endpointers[0]
+        sent = [c.args[0] for c in ep.feed_audio.await_args_list]
+        assert b"\x00\x01" in sent
+        assert b"\x02\x03" in sent
+
+    @pytest.mark.asyncio
+    async def test_endpointer_complete_finalizes_deepgram(self) -> None:
+        """``on_turn_complete`` fires Deepgram's ``finalize`` for the right user."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        captured_callbacks: list[_OnComplete] = []
+
+        def _make_endpointer(*, on_turn_complete: _OnComplete) -> MagicMock:
+            ep = MagicMock()
+            ep.feed_audio = AsyncMock()
+            ep.reset = MagicMock()
+            captured_callbacks.append(on_turn_complete)
+            return ep
+
+        detector = MagicMock()
+        detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
+        familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
+        vc = MagicMock()
+
+        # add finalize to clone mock (default factory doesn't include it)
+        original_clone_factory = template.clone.side_effect
+
+        def _make_clone_with_finalize() -> MagicMock:
+            c = original_clone_factory()
+            c.finalize = AsyncMock()
+            return c
+
+        template.clone = MagicMock(side_effect=_make_clone_with_finalize)
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((42, b"\x00"))
+        await _drain_loop()
+
+        # Invoke the captured callback as the endpointer would on a complete turn.
+        assert len(captured_callbacks) == 1
+        cb = captured_callbacks[0]
+        await cb(b"\x00\x00")
+        # the only clone created is for user 42; its finalize should fire.
+        assert len(clones) == 1
+        clones[0].finalize.assert_awaited_once()
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
 
 
 class TestVoiceMemberCache:

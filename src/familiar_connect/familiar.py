@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
     from familiar_connect.transcription import DeepgramTranscriber
     from familiar_connect.tts import AzureTTSClient, CartesiaTTSClient, GeminiTTSClient
+    from familiar_connect.voice.turn_detection import LocalTurnDetector
 
 
 @dataclass
@@ -49,6 +50,15 @@ class Familiar:
     router: TurnRouter = field(default_factory=TurnRouter)
     bot_user_id: int | None = None
     """Discord snowflake for the logged-in bot user."""
+    local_turn_detector: LocalTurnDetector | None = None
+    """V1 phase 2: Silero VAD + Smart Turn local endpointer factory.
+
+    When set, the voice intake forks per-user PCM into both Deepgram
+    and a local detector chain; turn-complete decisions trigger
+    ``transcriber.finalize()`` so Deepgram emits its final ahead of
+    its own silence timer. ``None`` keeps Deepgram's hosted endpointer
+    in charge.
+    """
 
     @classmethod
     def load_from_disk(
@@ -58,6 +68,7 @@ class Familiar:
         llm_clients: dict[str, LLMClient],
         tts_client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | None = None,
         transcriber: DeepgramTranscriber | None = None,
+        local_turn_detector: LocalTurnDetector | None = None,
         defaults_path: Path | None = None,
     ) -> Familiar:
         """Build :class:`Familiar` from the on-disk ``data/familiars/<id>/`` layout.
@@ -85,4 +96,5 @@ class Familiar:
             tts_client=tts_client,
             transcriber=transcriber,
             subscriptions=subscriptions,
+            local_turn_detector=local_turn_detector,
         )

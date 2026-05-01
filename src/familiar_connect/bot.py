@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from familiar_connect.familiar import Familiar
     from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
+    from familiar_connect.voice.turn_detection import UtteranceEndpointer
 
     # Outbound text callback. Returns the Discord message id of the
     # posted message (str) for reply-chain tracking, or None if the
@@ -86,6 +87,9 @@ class VoiceRuntime:
     # Deepgram doesn't tear them down server-side mid-utterance. Reopened
     # lazily on next audio chunk for that user.
     idle_watchdog_task: asyncio.Task[None] | None = None
+    # V1 phase 2: per-user local turn-endpointer (Silero VAD + Smart
+    # Turn). Empty when ``familiar.local_turn_detector`` is unset.
+    endpointers: dict[int, UtteranceEndpointer] = field(default_factory=dict)
 
 
 @dataclass
@@ -197,8 +201,10 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     )
 
     template = familiar.transcriber
+    detector = getattr(familiar, "local_turn_detector", None)
     transcribers: dict[int, DeepgramTranscriber] = {}
     fanin_tasks: dict[int, asyncio.Task[None]] = {}
+    endpointers: dict[int, UtteranceEndpointer] = {}
     # last audio-chunk arrival per user (monotonic seconds). drives the
     # idle watchdog below; entries removed when the stream is closed.
     last_audio_time: dict[int, float] = {}
@@ -216,9 +222,27 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             return existing
         last_audio_time[user_id] = time.monotonic()
         clone = template.clone()
+        # V1 phase 2: when local turn detection owns endpointing, drive
+        # Deepgram with a near-zero hosted endpointer so it relies on
+        # ``Finalize`` from the local chain. Class-level fallback when
+        # the field doesn't exist (mocked clones in tests).
+        if detector is not None and hasattr(clone, "endpointing_ms"):
+            clone.endpointing_ms = 10
         per_user_q: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
         await clone.start(per_user_q)
         transcribers[user_id] = clone
+        if detector is not None:
+
+            async def _on_complete(_audio: bytes, uid: int = user_id) -> None:
+                target = transcribers.get(uid)
+                if target is None:
+                    return
+                with contextlib.suppress(Exception):
+                    await target.finalize()
+
+            endpointers[user_id] = detector.make_endpointer(
+                on_turn_complete=_on_complete,
+            )
         fanin_tasks[user_id] = asyncio.create_task(
             _fanin(user_id, per_user_q),
             name=f"voice-fanin-{channel_id}-{user_id}",
@@ -245,6 +269,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         """Tear down a per-user transcriber; reopened lazily on next audio."""
         clone = transcribers.pop(user_id, None)
         fanin = fanin_tasks.pop(user_id, None)
+        endpointers.pop(user_id, None)
         last_audio_time.pop(user_id, None)
         if fanin is not None:
             fanin.cancel()
@@ -290,6 +315,10 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             last_audio_time[user_id] = time.monotonic()
             clone = await _ensure_transcriber(user_id)
             await clone.send_audio(pcm)
+            ep = endpointers.get(user_id)
+            if ep is not None:
+                with contextlib.suppress(Exception):
+                    await ep.feed_audio(pcm)
 
     pump_task = asyncio.create_task(_pump_audio(), name=f"voice-pump-{channel_id}")
     source_task = asyncio.create_task(source.run(), name=f"voice-source-{channel_id}")
@@ -310,6 +339,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         transcribers=transcribers,
         fanin_tasks=fanin_tasks,
         idle_watchdog_task=watchdog_task,
+        endpointers=endpointers,
     )
     handle.voice_runtime[channel_id] = rt
     _logger.info(

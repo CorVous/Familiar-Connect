@@ -85,13 +85,17 @@ FastEmbed/ONNX. Vectors in `sqlite-vec` alongside FTS.
 
 ### V1 — Local VAD + semantic turn detection
 
-Today: Deepgram's hosted endpointer (silence-based).
+Today: Deepgram's hosted endpointer is the default. V1 phase 1 (ONNX
+wrappers) and phase 2 (per-user `UtteranceEndpointer` wired into the
+audio pump) have shipped behind `LOCAL_TURN_DETECTION=1`. Local VAD
+saves 150–200 ms over remote endpointing.
 
-Change: Silero VAD (ONNX, MIT) in-process. On VAD silence, run
-Pipecat's Smart Turn v3 (BSD-2, ~12 ms, 360 MB) over the buffered
-audio; emit `voice.activity.end` on `complete`. Local VAD saves
-150–200 ms over remote. See
-[Voice pipeline — turn detection](voice-pipeline.md#turn-detection).
+Remaining: TOML-driven selector via
+[A1](#a1-strategy-swap-configuration-spine), telemetry surface for
+`vad_end` in `voice_budget`, and audio-fixture integration tests
+covering complete-sentence / mid-thought / filler patterns. See
+[Voice pipeline — turn detection](voice-pipeline.md#turn-detection)
+and [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
 ### V3 — Pluggable transcriber backend
 
