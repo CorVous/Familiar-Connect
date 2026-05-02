@@ -38,6 +38,16 @@ class LLMSlotConfig:
 
 _TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia", "gemini"})
 
+_TURN_DETECTION_STRATEGIES: frozenset[str] = frozenset({"deepgram", "ten+smart_turn"})
+
+
+@dataclass(frozen=True)
+class TurnDetectionConfig:
+    """Turn-detection strategy from ``[providers.turn_detection]``."""
+
+    strategy: str = "deepgram"
+
+
 DEFAULT_AZURE_TTS_VOICE = "en-US-AmberNeural"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
@@ -94,6 +104,7 @@ class CharacterConfig:
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
     channels: dict[int, ChannelOverrides] = field(default_factory=dict)
+    turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty overrides if none."""
@@ -140,7 +151,8 @@ def load_character_config(
 
 
 def _parse_character_config(data: dict) -> CharacterConfig:
-    history_section = data.get("providers", {}).get("history", {})
+    providers_raw = data.get("providers", {})
+    history_section = providers_raw.get("history", {})
     history_window_size = int(history_section.get("window_size", 20))
 
     display_tz = str(data.get("display_tz", "UTC"))
@@ -169,6 +181,15 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     channels = _parse_channel_overrides(channels_raw)
 
+    turn_detection_raw = providers_raw.get("turn_detection", {})
+    if not isinstance(turn_detection_raw, dict):
+        msg = (
+            "[providers.turn_detection] must be a table, "
+            f"got {type(turn_detection_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    turn_detection = _parse_turn_detection_config(turn_detection_raw)
+
     return CharacterConfig(
         history_window_size=history_window_size,
         display_tz=display_tz,
@@ -176,6 +197,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         llm=llm,
         tts=tts,
         channels=channels,
+        turn_detection=turn_detection,
     )
 
 
@@ -353,6 +375,25 @@ def _parse_provider_order(slot_name: str, raw: object) -> tuple[str, ...] | None
             raise ConfigError(msg)
         out.append(item)
     return tuple(out)
+
+
+def _parse_turn_detection_config(raw: dict) -> TurnDetectionConfig:
+    """Parse and validate the ``[providers.turn_detection]`` section."""
+    strategy_raw = raw.get("strategy", "deepgram")
+    if not isinstance(strategy_raw, str):
+        msg = (
+            f"[providers.turn_detection].strategy must be a string, "
+            f"got {type(strategy_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    if strategy_raw not in _TURN_DETECTION_STRATEGIES:
+        valid = ", ".join(sorted(_TURN_DETECTION_STRATEGIES))
+        msg = (
+            f"[providers.turn_detection].strategy {strategy_raw!r} unknown; "
+            f"valid options: {valid}"
+        )
+        raise ConfigError(msg)
+    return TurnDetectionConfig(strategy=strategy_raw)
 
 
 def _parse_tts_config(raw: dict) -> TTSConfig:

@@ -85,21 +85,18 @@ FastEmbed/ONNX. Vectors in `sqlite-vec` alongside FTS.
 
 ### V1 — Local VAD + semantic turn detection
 
-Today: Deepgram's hosted endpointer is the default. V1 phase 1
-(TEN-VAD + Smart Turn wrappers) and phase 2 (per-user
-`UtteranceEndpointer` wired into the audio pump) have shipped behind
-`LOCAL_TURN_DETECTION=1`. Local VAD saves 150–200 ms over remote
-endpointing.
+Shipped. TEN-VAD + Smart Turn v3 wrappers (phase 1), per-user
+`UtteranceEndpointer` wired into the audio pump (phase 2), VAD-to-STT
+telemetry (`voice.vad_to_stt`), and TOML-driven strategy selector
+(`[providers.turn_detection] strategy = "ten+smart_turn"`) have all
+landed. Local VAD saves 150–200 ms over remote endpointing.
 
-Remaining: TOML-driven selector via
-[A1](#a1-strategy-swap-configuration-spine) and audio-fixture
-integration tests covering complete-sentence / mid-thought / filler
-patterns. `vad_end` telemetry is wired — `bot._on_complete` parks a
-perf-counter that `VoiceSource` drains on the next transcript per
-`user_id`, surfacing `voice.vad_to_stt` in the budget recorder. See
-[Voice pipeline — turn detection](voice-pipeline.md#turn-detection),
+See [Voice pipeline — turn detection](voice-pipeline.md#turn-detection),
 [Per-turn budget telemetry](voice-pipeline.md#per-turn-budget-telemetry),
 and [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
+
+Remaining: audio-fixture integration tests covering complete-sentence /
+mid-thought / filler endpointing patterns.
 
 ### V3 — Pluggable transcriber backend
 
@@ -128,27 +125,25 @@ Revisit if a Mimi-based S2S model gains an external-LLM-brain seam.
 
 ### A1 — Strategy-swap configuration spine
 
-Today: strategy selection lives in `commands/run.py` Python wiring.
+`[providers.turn_detection]` selector shipped: `strategy = "deepgram"
+| "ten+smart_turn"` in `character.toml` selects the endpointer chain;
+env var `LOCAL_TURN_DETECTION` continues to override TOML for container
+deployments. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
-Change: TOML-driven selectors:
+Remaining selectors (not yet wired — implementations don't exist):
 
 ```toml
 [providers.stt]
-backend = "deepgram"          # | "faster_whisper" | "parakeet"
-
-[providers.turn_detection]
-strategy = "deepgram"         # | "ten+smart_turn"
+backend = "deepgram"          # | "faster_whisper" | "parakeet"  (V3)
 
 [providers.memory]
-projectors = ["rich_note", "people_dossier"]
+projectors = ["rich_note", "people_dossier"]                      # (M5)
 
 [providers.voice_pipeline]
-mode               = "cascaded"  # | "s2s"
-sentence_streaming = true
+mode = "cascaded"             # | "s2s"                           # (V5)
 ```
 
-Defaults preserve today's behaviour. Consolidates with [Tuning](tuning.md)
-so a single TOML drives the whole bot.
+These will be wired when the corresponding backends land (V3, M5).
 
 ### A2 — Consolidate STT env vars into TOML
 

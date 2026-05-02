@@ -38,6 +38,8 @@ Surface today:
 - `display_tz` — IANA timezone (default `"UTC"`).
 - `aliases` — list of names the familiar answers to.
 - `[providers.history].window_size` — SQLite transcript window (default 20).
+- `[providers.turn_detection].strategy` — `"deepgram"` (default) or
+  `"ten+smart_turn"`. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 - `[llm.main_prose]` — model + optional temperature.
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
 

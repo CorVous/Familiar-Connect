@@ -19,6 +19,7 @@ from familiar_connect.config import (
     ConfigError,
     LLMSlotConfig,
     TTSConfig,
+    TurnDetectionConfig,
     load_character_config,
 )
 
@@ -202,3 +203,51 @@ class TestChannelOverrides:
         assert over.history_window_size is None
         assert over.prompt_layers is None
         assert over.message_rendering is None
+
+
+class TestTurnDetectionConfig:
+    def test_default_strategy_is_deepgram(self) -> None:
+        cfg = TurnDetectionConfig()
+        assert cfg.strategy == "deepgram"
+
+    def test_omitted_section_uses_default(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.strategy == "deepgram"
+
+    def test_ten_plus_smart_turn_strategy_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.turn_detection]\nstrategy = "ten+smart_turn"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.strategy == "ten+smart_turn"
+
+    def test_deepgram_strategy_explicit(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.turn_detection]\nstrategy = "deepgram"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.strategy == "deepgram"
+
+    def test_unknown_strategy_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.turn_detection]\nstrategy = "mystery"\n')
+        match = r"\[providers\.turn_detection\]\.strategy"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_strategy_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.turn_detection]\nstrategy = 42\n")
+        match = r"\[providers\.turn_detection\]\.strategy"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)

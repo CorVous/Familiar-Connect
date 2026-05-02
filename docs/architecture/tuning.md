@@ -26,7 +26,7 @@ tracks the migration.
 | TTS provider + voice | `[tts]` | unchanged |
 | History window + prompt layer order | `[providers.history]`, `[channels.<id>]` | unchanged |
 | Deepgram STT thresholds & key-terms | env (`DEEPGRAM_*`) | `[providers.stt.deepgram]` (A2) |
-| Turn detection strategy | Deepgram-only | `[providers.turn_detection]` (V1) |
+| Turn detection strategy | `[providers.turn_detection]` | unchanged |
 | Memory projector selection | hard-wired | `[providers.memory]` (M5) |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
 | RAG / fact retrieval ranking | private constants | `[memory.retrieval]` (M2 / M6) |
@@ -64,6 +64,9 @@ aliases    = []
 
 [providers.history]
 window_size = 20
+
+[providers.turn_detection]
+strategy = "deepgram"    # "deepgram" | "ten+smart_turn"
 
 [tts]
 provider          = "azure"      # "azure" | "cartesia" | "gemini"
@@ -193,20 +196,34 @@ thinking pauses; lower the silence thresholds for snappier finals.
 
 ## Local turn detection (V1)
 
-V1 phase 2 fork of the audio path: TEN-VAD + Smart Turn v3 own
-endpointing locally, Deepgram becomes pure STT. Off by default;
-gated by `LOCAL_TURN_DETECTION` plus the `local-turn` extra
-(`uv sync --extra local-turn`). TEN-VAD's native lib + ONNX model
-ship inside the `ten-vad` wheel (sourced from upstream git, see
-`[tool.uv.sources]` in `pyproject.toml`); only Smart Turn needs an
-on-disk file under `data/models/`. When active, per-user Deepgram
-clones are spawned with `endpointing_ms=10` so they wait on
-`Finalize` from the local chain rather than firing on their own
-silence timer.
+V1 fork of the audio path: TEN-VAD + Smart Turn v3 own endpointing
+locally, Deepgram becomes pure STT. Saves 150–200 ms vs. remote
+endpointing. Requires the `local-turn` extra (`uv sync --extra
+local-turn`) and a Smart Turn ONNX model file at
+`data/models/smart-turn-v3.onnx`.
+
+When active, per-user Deepgram clones are spawned with
+`endpointing_ms=10` so they wait on `Finalize` from the local chain
+rather than firing on their own silence timer.
+
+### Enabling via TOML (recommended)
+
+```toml
+[providers.turn_detection]
+strategy = "ten+smart_turn"   # "deepgram" (default) | "ten+smart_turn"
+```
+
+### Enabling via env var (legacy / container override)
+
+`LOCAL_TURN_DETECTION=1` overrides the TOML setting — useful in
+container deployments where `character.toml` is baked into the image
+but the feature flag lives in the environment.
+
+### Knobs (env)
 
 | Var | Default | Purpose |
 |---|---|---|
-| `LOCAL_TURN_DETECTION` | _(unset)_ | `1/true/yes/on` enables the local detector chain. |
+| `LOCAL_TURN_DETECTION` | _(unset)_ | Env override: `1/true/yes/on` enables the local chain. |
 | `SMART_TURN_MODEL_PATH` | `data/models/smart-turn-v3.onnx` | Pipecat Smart Turn v3 ONNX file. |
 | `LOCAL_TURN_SILENCE_MS` | `200` | Silence after speech before SmartTurn classifies. |
 | `LOCAL_TURN_SPEECH_START_MS` | `100` | Consecutive speech before "speaking" latches. |
@@ -306,16 +323,16 @@ Documented now so the schema is settled before wiring lands. Not
 read by today's code.
 
 ```toml
-# planned (A1 / V1 / V5 / M5)
-
-[providers.stt]
-backend = "deepgram"             # | "faster_whisper" | "parakeet"
-
+# shipped
 [providers.turn_detection]
 strategy = "deepgram"            # | "ten+smart_turn"
 
+# planned (A1-remaining / V3 / V5 / M5)
+[providers.stt]
+backend = "deepgram"             # | "faster_whisper" | "parakeet"  (V3)
+
 [providers.memory]
-projectors = ["rich_note", "people_dossier"]
+projectors = ["rich_note", "people_dossier"]                        # (M5)
 
 [providers.voice_pipeline]
 mode = "cascaded"                # | "s2s" (V5)

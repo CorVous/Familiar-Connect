@@ -53,7 +53,10 @@ from familiar_connect.tts_player import (
     LoggingTTSPlayer,
     TTSPlayer,
 )
-from familiar_connect.voice.turn_detection import create_local_turn_detector_from_env
+from familiar_connect.voice.turn_detection import (
+    create_local_turn_detector,
+    create_local_turn_detector_from_env,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -417,10 +420,15 @@ def run(args: argparse.Namespace) -> int:
         _logger.warning("Transcriber unavailable: %s", exc)
         transcriber = None
 
-    # V1 phase 2: gated by ``LOCAL_TURN_DETECTION`` env var. Returns
-    # ``None`` if disabled or model files are missing.
+    # V1 / A1: env var takes precedence (container-friendly override); otherwise
+    # the TOML ``[providers.turn_detection] strategy`` field drives the choice.
     try:
-        local_turn_detector = create_local_turn_detector_from_env()
+        if "LOCAL_TURN_DETECTION" in os.environ:
+            local_turn_detector = create_local_turn_detector_from_env()
+        elif character_config.turn_detection.strategy == "ten+smart_turn":
+            local_turn_detector = create_local_turn_detector()
+        else:
+            local_turn_detector = None
     except Exception as exc:  # noqa: BLE001
         _logger.warning("Local turn detector unavailable: %s", exc)
         local_turn_detector = None

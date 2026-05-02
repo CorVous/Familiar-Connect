@@ -11,6 +11,7 @@ See ``docs/architecture/voice-pipeline.md``.
 from familiar_connect.voice.turn_detection.endpointer import UtteranceEndpointer
 from familiar_connect.voice.turn_detection.factory import (
     LocalTurnDetector,
+    create_local_turn_detector,
     create_local_turn_detector_from_env,
 )
 from familiar_connect.voice.turn_detection.smart_turn import SmartTurnDetector
@@ -21,5 +22,6 @@ __all__ = [
     "SmartTurnDetector",
     "TenVAD",
     "UtteranceEndpointer",
+    "create_local_turn_detector",
     "create_local_turn_detector_from_env",
 ]

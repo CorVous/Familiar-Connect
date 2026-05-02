@@ -466,6 +466,139 @@ class TestRunTranscriberIntegration:
 
 
 # ---------------------------------------------------------------------------
+# run — turn detection TOML selector (A1)
+# ---------------------------------------------------------------------------
+
+
+def _fake_character_config_with_turn_strategy(strategy: str) -> MagicMock:
+    config = _fake_character_config()
+    config.turn_detection.strategy = strategy
+    return config
+
+
+def _run_with_strategy(tmp_path: Path, strategy: str, extra_env: dict | None = None):
+    """Run :func:`run` with all deps patched; return mocks for assertions."""
+    args = argparse.Namespace(familiar="aria")
+    env = {"DISCORD_BOT": "fake-token", "OPENROUTER_API_KEY": "sk-test"}
+    if extra_env:
+        env.update(extra_env)
+
+    mock_load = MagicMock(
+        return_value=MagicMock(id="aria", config=MagicMock()),
+    )
+    mock_create_local = MagicMock(return_value=None)
+    mock_create_local_env = MagicMock(return_value=None)
+
+    with (
+        patch.dict("os.environ", env, clear=True),
+        patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+        patch(
+            "familiar_connect.commands.run.load_character_config",
+            return_value=_fake_character_config_with_turn_strategy(strategy),
+        ),
+        patch(
+            "familiar_connect.commands.run.create_llm_clients",
+            return_value={"main_prose": MagicMock()},
+        ),
+        patch("familiar_connect.commands.run.create_tts_client", return_value=None),
+        patch(
+            "familiar_connect.commands.run.create_transcriber_from_env",
+            return_value=None,
+        ),
+        patch(
+            "familiar_connect.commands.run.create_local_turn_detector",
+            mock_create_local,
+        ),
+        patch(
+            "familiar_connect.commands.run.create_local_turn_detector_from_env",
+            mock_create_local_env,
+        ),
+        patch("familiar_connect.commands.run.Familiar.load_from_disk", mock_load),
+        patch("familiar_connect.commands.run.load_opus"),
+        patch(
+            "familiar_connect.commands.run._async_main",
+            new_callable=MagicMock,
+            return_value=MagicMock(name="coroutine"),
+        ),
+        patch("familiar_connect.commands.run.asyncio.run"),
+    ):
+        result = run(args)
+
+    return result, mock_load, mock_create_local, mock_create_local_env
+
+
+class TestRunTurnDetectionTomlSelector:
+    """TOML ``[providers.turn_detection] strategy`` drives detector creation (A1)."""
+
+    def test_deepgram_strategy_skips_local_detector(self, tmp_path: Path) -> None:
+        """strategy='deepgram' → create_local_turn_detector not called."""
+        (tmp_path / "aria").mkdir()
+        _result, mock_load, mock_create_local, _ = _run_with_strategy(
+            tmp_path, "deepgram"
+        )
+        mock_create_local.assert_not_called()
+        assert mock_load.call_args.kwargs.get("local_turn_detector") is None
+
+    def test_ten_smart_turn_strategy_creates_local_detector(
+        self, tmp_path: Path
+    ) -> None:
+        """strategy='ten+smart_turn' → create_local_turn_detector called."""
+        (tmp_path / "aria").mkdir()
+        mock_detector = MagicMock(name="detector")
+        args = argparse.Namespace(familiar="aria")
+        env = {"DISCORD_BOT": "fake-token", "OPENROUTER_API_KEY": "sk-test"}
+        mock_load = MagicMock(return_value=MagicMock(id="aria", config=MagicMock()))
+
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+            patch(
+                "familiar_connect.commands.run.load_character_config",
+                return_value=_fake_character_config_with_turn_strategy(
+                    "ten+smart_turn"
+                ),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_llm_clients",
+                return_value={"main_prose": MagicMock()},
+            ),
+            patch("familiar_connect.commands.run.create_tts_client", return_value=None),
+            patch(
+                "familiar_connect.commands.run.create_transcriber_from_env",
+                return_value=None,
+            ),
+            patch(
+                "familiar_connect.commands.run.create_local_turn_detector",
+                return_value=mock_detector,
+            ) as mock_create,
+            patch("familiar_connect.commands.run.Familiar.load_from_disk", mock_load),
+            patch("familiar_connect.commands.run.load_opus"),
+            patch(
+                "familiar_connect.commands.run._async_main",
+                new_callable=MagicMock,
+                return_value=MagicMock(name="coroutine"),
+            ),
+            patch("familiar_connect.commands.run.asyncio.run"),
+        ):
+            result = run(args)
+
+        assert result == 0
+        mock_create.assert_called_once()
+        assert mock_load.call_args.kwargs.get("local_turn_detector") is mock_detector
+
+    def test_env_var_overrides_deepgram_toml_strategy(self, tmp_path: Path) -> None:
+        """LOCAL_TURN_DETECTION=1 activates local detector even when TOML='deepgram'."""
+        (tmp_path / "aria").mkdir()
+        _result, _load, mock_create_local, mock_create_env = _run_with_strategy(
+            tmp_path,
+            "deepgram",
+            extra_env={"LOCAL_TURN_DETECTION": "1"},
+        )
+        mock_create_env.assert_called_once()
+        mock_create_local.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _async_main — shutdown cleanup
 # ---------------------------------------------------------------------------
 

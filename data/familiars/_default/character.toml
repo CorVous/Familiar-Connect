@@ -19,6 +19,18 @@ aliases    = []
 [providers.history]
 window_size = 20
 
+# --- Turn detection strategy -----------------------------------------------
+#
+# strategy: "deepgram" (default) uses Deepgram's hosted endpointer.
+#           "ten+smart_turn" activates the local TEN-VAD + Smart Turn v3
+#           chain — saves ~150-200 ms of endpointing latency.
+#           Requires the ``local-turn`` extra and a Smart Turn ONNX file
+#           under data/models/smart-turn-v3.onnx.
+#           See docs/architecture/tuning.md § local-turn-detection-v1.
+
+[providers.turn_detection]
+strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
+
 # --- Text-to-speech --------------------------------------------------------
 #
 # provider: "azure" (default), "cartesia", or "gemini"
