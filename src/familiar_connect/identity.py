@@ -1,14 +1,13 @@
 """Structured author identity for platform users.
 
-Replaces the bare ``speaker: str`` that used to thread through history,
-context, memory, and providers. An :class:`Author` carries both an
-immutable platform-level key (``platform`` + ``user_id``) and the
-human-readable variants (``username``, ``display_name``, ``aliases``)
-so recall can resolve by any known name while storage pins to a stable
-slug.
+Replaces bare ``speaker: str`` previously threading history, context,
+memory, providers. :class:`Author` carries immutable platform key
+(``platform`` + ``user_id``) plus human-readable variants
+(``username``, ``display_name``, ``aliases``) — recall resolves by any
+known name; storage pins to stable slug.
 
-See ``docs/architecture/memory.md`` for how files under
-``people/<slug>.md`` and the alias index use this.
+See ``docs/architecture/memory.md`` for ``people/<slug>.md`` + alias
+index usage.
 """
 
 from __future__ import annotations
@@ -23,13 +22,12 @@ from familiar_connect.llm import sanitize_name
 class _DiscordMemberLike(Protocol):
     """Minimal Discord Member/User surface for :meth:`Author.from_discord_member`.
 
-    Real ``discord.Member`` carries four name fields: ``id`` (immutable
+    ``discord.Member`` carries four name fields: ``id`` (immutable
     snowflake), ``name`` (global username), ``global_name`` (global
-    display name), and ``nick`` (per-guild override; ``None`` on
-    DMs / Users without a guild-scoped nick). ``display_name`` is
-    py-cord's resolved view: ``nick → global_name → name``. We read
-    all four; the optional pair via ``getattr`` to tolerate older
-    shapes and ``SimpleNamespace`` test doubles.
+    display name), ``nick`` (per-guild override; ``None`` on DMs).
+    ``display_name`` is py-cord's resolved view (``nick → global_name → name``).
+    Optional pair read via ``getattr`` for older shapes / ``SimpleNamespace``
+    test doubles.
     """
 
     id: int
@@ -44,10 +42,9 @@ _SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 class Author:
     """Platform-scoped identity for one speaker.
 
-    ``canonical_key`` is the storage-stable identifier; ``label`` is
-    the human-readable string rendered in prompts. Multiple display
-    names / nicknames map to one ``Author`` via ``aliases`` and the
-    on-disk alias index.
+    canonical_key: storage-stable id.
+    label: human-readable string for prompts.
+    aliases + on-disk index map many display names / nicknames → one Author.
     """
 
     platform: str
@@ -71,8 +68,8 @@ class Author:
     def slug(self) -> str:
         """Filesystem-safe form of :attr:`canonical_key`.
 
-        Lowercase, non-alphanumerics collapsed to single dashes,
-        trimmed. Used as the basename for ``people/<slug>.md``.
+        Lowercase; non-alphanumerics collapsed to single dashes; trimmed.
+        Basename for ``people/<slug>.md``.
         """
         return _SLUG_NON_ALNUM.sub("-", self.canonical_key.lower()).strip("-")
 
@@ -87,17 +84,17 @@ class Author:
 
     @property
     def openai_name(self) -> str | None:
-        """Value for OpenAI-style ``Message.name``. Scrubbed per API rules.
+        """OpenAI-style ``Message.name``; scrubbed per API rules.
 
-        Falls back to a sanitized ``user_id`` if the label sanitizes to
-        nothing (e.g. display name is all punctuation). ``None`` only
-        if even the id scrubs empty — not expected in practice.
+        Falls back to sanitized ``user_id`` if label scrubs empty (e.g.
+        display name all punctuation). ``None`` only if id also scrubs
+        empty — not expected.
         """
         return sanitize_name(self.label) or sanitize_name(self.user_id)
 
     @property
     def all_known_names(self) -> set[str]:
-        """Every name this author is known by. Used when rebuilding the alias index."""
+        """Every known name; used to rebuild alias index."""
         names: set[str] = set(self.aliases)
         if self.display_name:
             names.add(self.display_name)
@@ -111,14 +108,12 @@ class Author:
 
     @classmethod
     def from_discord_member(cls, member: _DiscordMemberLike) -> Author:
-        """Build from a Discord ``Member`` / ``User``.
+        """Build from Discord ``Member`` / ``User``.
 
-        Reads four name fields. ``id`` is immutable; ``name``,
-        ``global_name``, ``nick`` may all change. ``display_name`` is
-        py-cord's resolved view (``nick → global_name → name``).
-        ``global_name`` and ``nick`` are read via ``getattr`` so
-        ``User`` (DM, no guild → no ``.nick``) and older py-cord
-        shapes still build cleanly.
+        ``id`` immutable; ``name`` / ``global_name`` / ``nick`` mutable.
+        ``display_name`` is py-cord's resolved view (``nick → global_name
+        → name``). ``global_name`` / ``nick`` via ``getattr`` so DM
+        ``User`` (no guild → no ``.nick``) and older py-cord still build.
         """
         return cls(
             platform="discord",
@@ -139,8 +134,8 @@ class Author:
     ) -> Author:
         """Build from Twitch Helix fields.
 
-        ``user_login`` is the lowercase immutable login; ``user_name``
-        is the mutable display case (often just cased differently).
+        user_login: lowercase immutable login.
+        user_name: mutable display case (often just different casing).
         """
         return cls(
             platform="twitch",
@@ -153,9 +148,9 @@ class Author:
 def format_turn_for_transcript(role: str, author: Author | None, content: str) -> str:
     """Render one turn as ``role (label): content`` / ``role: content``.
 
-    Shared between the history-summary provider and memory writer so
-    their transcript format stays in sync. User turns include the
-    author label; assistant/system turns use role only.
+    Shared between history-summary provider and memory writer to keep
+    transcript format in sync. User turns include author label;
+    assistant/system turns use role only.
     """
     if role == "user" and author is not None:
         return f"{role} ({author.label}): {content}"

@@ -1,8 +1,8 @@
 """Runtime bundle for the single active character.
 
-One process runs one character (selected by ``FAMILIAR_ID``).
+One process per character (selected by ``FAMILIAR_ID``).
 :class:`Familiar` carries config, history store, LLM client, bus,
-router, and subscriptions.
+router, subscriptions.
 
 - :meth:`load_from_disk` — sole constructor; walks ``data/familiars/<id>/``
 """
@@ -32,10 +32,10 @@ if TYPE_CHECKING:
 class Familiar:
     """Runtime bundle for one character.
 
-    :param transcriber: when ``None``, voice subscription joins for TTS
-        playback only — no incoming audio is transcribed.
-    :param bus: event bus — sources publish, processors consume.
-    :param router: per-session turn routing + cancel-prior-scope.
+    transcriber: ``None`` = voice subscription joins for TTS playback
+    only; incoming audio not transcribed.
+    bus: sources publish, processors consume.
+    router: per-session turn routing + cancel-prior-scope.
     """
 
     id: str
@@ -53,11 +53,10 @@ class Familiar:
     local_turn_detector: LocalTurnDetector | None = None
     """V1 phase 2: TEN-VAD + Smart Turn local endpointer factory.
 
-    When set, the voice intake forks per-user PCM into both Deepgram
-    and a local detector chain; turn-complete decisions trigger
-    ``transcriber.finalize()`` so Deepgram emits its final ahead of
-    its own silence timer. ``None`` keeps Deepgram's hosted endpointer
-    in charge.
+    When set, voice intake forks per-user PCM to Deepgram + local chain;
+    turn-complete decisions fire ``transcriber.finalize()`` so Deepgram
+    emits final ahead of its silence timer. ``None`` leaves Deepgram's
+    hosted endpointer in charge.
     """
 
     @classmethod
@@ -71,10 +70,10 @@ class Familiar:
         local_turn_detector: LocalTurnDetector | None = None,
         defaults_path: Path | None = None,
     ) -> Familiar:
-        """Build :class:`Familiar` from the on-disk ``data/familiars/<id>/`` layout.
+        """Build from on-disk ``data/familiars/<id>/`` layout.
 
-        :param defaults_path: override for default profile path; tests
-            pass this to avoid staging a sibling ``_default/`` folder.
+        defaults_path: override default profile path; tests use this to
+        skip staging a sibling ``_default/`` folder.
         """
         familiar_id = root.name
         if defaults_path is None:

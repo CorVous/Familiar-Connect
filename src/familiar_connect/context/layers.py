@@ -138,30 +138,27 @@ class RecentHistoryLayer:
         return ""
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
-        # Dynamic — always rebuild. Real caching would key on
-        # ``(channel_id, latest_turn_id)`` but we'd still need the
-        # turns themselves, so there's nothing to reuse.
+        # dynamic — always rebuild. real caching would key on
+        # ``(channel_id, latest_turn_id)`` but turns are still needed,
+        # so nothing to reuse.
         return "always-rebuild"
 
     async def recent_messages(self, ctx: AssemblyContext) -> list[Message]:
-        """Return the last ``window_size`` turns as LLM messages.
+        """Last ``window_size`` turns as LLM messages.
 
-        User turns gain a ``name`` (platform:user_id) and a
-        ``[HH:MM display_name]`` content prefix — critical for
-        multi-user channels where the model has to distinguish
-        speakers and gauge message rhythm.
+        User turns get a ``name`` (platform:user_id) + ``[HH:MM
+        display_name]`` content prefix — needed for multi-user channels
+        to distinguish speakers and gauge rhythm.
 
-        Reply marker. Turns whose ``reply_to_message_id`` resolves to
-        a known parent get a `↩` prefix carrying the parent's author
-        and content. Depth adapts: parents already inside the same
-        recent window contribute a short snippet (the full text is
-        about to render anyway); parents outside the window contribute
-        their full content (capped) so the reply stays intelligible.
+        Reply marker. Turns whose ``reply_to_message_id`` resolves to a
+        known parent get a ``↩`` prefix carrying parent's author + text.
+        Depth adapts: in-window parents contribute a short snippet (full
+        text rendering imminent); out-of-window parents contribute full
+        content (capped) so the reply stays intelligible.
 
         Mention rewriting. Discord ``<@USER_ID>`` / ``<@!USER_ID>``
-        markers in turn content become ``[@DisplayName]`` using
-        :meth:`HistoryStore.resolve_label` — symmetric with the form
-        the LLM is asked to emit on output.
+        become ``[@DisplayName]`` via :meth:`HistoryStore.resolve_label`
+        — symmetric with the LLM's expected output form.
         """
         turns = self._store.recent(
             familiar_id=ctx.familiar_id,
@@ -190,20 +187,18 @@ def _render_fact_line(
     *,
     guild_id: int | None = None,
 ) -> str:
-    """Render one fact's text with optional rename annotations.
+    """Render fact text with optional rename annotations.
 
-    Original text preserved verbatim — that's what was actually
-    observed. For each subject whose current display name differs
-    from the one baked into the text, a soft hint is appended:
-    ``(Cass is now known as peeks)``. Subjects with unchanged names
-    or unresolvable canonical keys add nothing.
+    Original text preserved verbatim — that's what was observed. For
+    each subject whose current display name differs from the baked-in
+    one, append a soft hint: ``(Cass is now known as peeks)``.
+    Unchanged names / unresolvable canonical keys add nothing.
 
-    The link from subject to canonical_key is the extractor's best
-    guess, not authoritative — mic-sharing and relays break clean
-    1:1 mapping. The render is intentionally additive (not a
-    substitution) to keep the original observation intact.
-    Resolution goes through :meth:`HistoryStore.resolve_label` so
-    per-guild nicknames in the active guild beat the snapshot name.
+    Subject → canonical_key is the extractor's best guess, not
+    authoritative — mic-sharing and relays break 1:1 mapping. Render is
+    intentionally additive (not substituted) to preserve the original.
+    Resolution via :meth:`HistoryStore.resolve_label` so active-guild
+    nicknames beat the snapshot name.
     """
     if not fact.subjects:
         return fact.text

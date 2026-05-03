@@ -1,13 +1,12 @@
 """Silent-sentinel detection for LLM reply streams.
 
-The system prompt instructs the model to emit ``<silent>`` as its
-entire reply when it shouldn't speak. :class:`SilentDetector` watches
-a streamed reply delta-by-delta and decides as early as possible
-whether the model is staying silent — so the responder can abort
-before paying for downstream costs (Discord post, TTS synthesis).
+System prompt tells model to emit ``<silent>`` as its entire reply
+when it shouldn't speak. :class:`SilentDetector` watches deltas and
+decides ASAP whether model is staying silent — responder aborts
+before downstream cost (Discord post, TTS synthesis).
 
-Decision is *prefix-only*: a stray ``<silent>`` mid-reply is treated
-as content, not a gate.
+Decision is *prefix-only*: stray ``<silent>`` mid-reply is content,
+not a gate.
 """
 
 from __future__ import annotations
@@ -18,11 +17,10 @@ SILENT_TOKEN = "<silent>"  # noqa: S105 — model output sentinel, not a credent
 class SilentDetector:
     """Streaming inspector for the silent sentinel.
 
-    Feed deltas with :meth:`feed`; it returns ``True`` once the
-    leading non-whitespace content matches :data:`SILENT_TOKEN`,
-    ``False`` once a mismatch is certain, or ``None`` while still
-    undecided. Decision sticks — once final, further calls return
-    the same value without inspecting their argument.
+    :meth:`feed` returns ``True`` once leading non-whitespace matches
+    :data:`SILENT_TOKEN`, ``False`` on certain mismatch, ``None``
+    while undecided. Latches — further calls return the same value
+    without inspecting their argument.
     """
 
     __slots__ = ("_buf", "_decided")

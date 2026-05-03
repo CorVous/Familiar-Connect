@@ -29,18 +29,15 @@ DEFAULT_MODEL = "nova-3"
 DEFAULT_LANGUAGE = "en"
 
 DEFAULT_IDLE_FINALIZE_S: float = 0.5
-"""Silence gap before forcing a Deepgram ``Finalize``.
+"""Silence gap before forcing Deepgram ``Finalize``.
 
-Discord's client-side VAD stops RTP delivery during silence, so
-Deepgram's endpointer never sees the in-stream silence it needs and
-holds the buffered final until the next speech burst. After this many
-seconds of no chunks arriving, the pump sends ``{"type":"Finalize"}``
-to force Deepgram to emit immediately.
+Discord client-side VAD halts RTP during silence, so Deepgram's
+endpointer never sees in-stream silence and holds the final until
+next speech burst. After this many idle seconds, pump sends
+``{"type":"Finalize"}`` to flush.
 
-Also used as the post-replay cushion in ``_reconnect``: after draining
-the replay buffer and sleeping for the real-time replay duration, an
-additional ``DEFAULT_IDLE_FINALIZE_S`` wait ensures the same silence
-window the endpointer expects in the normal flow.
+Also reused as post-replay cushion in ``_reconnect`` — same silence
+window the endpointer expects in normal flow.
 """
 
 
@@ -53,12 +50,11 @@ window the endpointer expects in the normal flow.
 class TranscriptionResult:
     """Single Deepgram streaming transcription result.
 
-    ``user_id`` is the Discord user id when known — pumped into results
-    by the per-user fan-in in :func:`bot._start_voice_intake`. Discord
-    delivers per-SSRC audio so attribution comes for free without
-    Deepgram diarization. ``speaker`` is Deepgram's diarization label
-    (only set when ``diarize=True``); kept for completeness but not
-    used by the Discord pipeline.
+    user_id: Discord user id when known; stamped by per-user fan-in
+    in :func:`bot._start_voice_intake`. Per-SSRC audio gives attribution
+    for free, no Deepgram diarization needed.
+    speaker: Deepgram diarization label (set only when ``diarize=True``);
+    unused by Discord pipeline.
     """
 
     text: str
@@ -70,10 +66,10 @@ class TranscriptionResult:
     user_id: int | None = None
 
     def to_message(self: Self, speaker_names: dict[int, str] | None = None) -> Message:
-        """Convert to LLM Message. Prefixes content with ``[Voice]``.
+        """Convert to LLM Message; prefix content with ``[Voice]``.
 
-        ``speaker_names`` may be keyed by ``user_id`` (Discord) or by
-        Deepgram's ``speaker`` label — ``user_id`` takes precedence.
+        ``speaker_names`` may key by ``user_id`` (Discord) or by Deepgram
+        ``speaker`` label — ``user_id`` wins.
         """
         name = "Voice"
         if speaker_names is not None:
@@ -84,9 +80,9 @@ class TranscriptionResult:
         return Message(role="user", content=f"[Voice] {self.text}", name=name)
 
 
-# Deepgram drives both transcription text and VAD edges. Interim Results
-# arrivals feed DeepgramVoiceActivityDetector for speech-start / speech-end
-# edges; finals feed VoiceLullMonitor for conversational-lull detection.
+# Deepgram drives transcription text + VAD edges:
+# interims → DeepgramVoiceActivityDetector (speech-start / speech-end)
+# finals → VoiceLullMonitor (conversational-lull detection)
 TranscriptionEvent = TranscriptionResult
 
 
@@ -150,14 +146,13 @@ class DeepgramTranscriber:
         self._send_lock: asyncio.Lock = asyncio.Lock()
 
     def build_ws_url(self: Self) -> str:
-        """Deepgram WebSocket URL with query parameters.
+        """Deepgram WebSocket URL with query params.
 
-        ``interim_results`` / ``utterance_end_ms`` are emitted only when
-        interim results are enabled; Deepgram requires ``interim_results=true``
-        for ``utterance_end_ms`` to take effect. ``endpointing`` is always
-        emitted — it controls how long Deepgram waits in silence before
-        finalizing a segment. ``keyterm`` is repeated once per term and
-        biases nova-3 toward the listed jargon / proper nouns.
+        ``interim_results`` / ``utterance_end_ms`` only emitted when
+        interims enabled (Deepgram requires ``interim_results=true`` for
+        ``utterance_end_ms``). ``endpointing`` always emitted — silence
+        gap before finalizing a segment. ``keyterm`` repeated per term
+        to bias nova-3 toward jargon / proper nouns.
         """
         params: list[tuple[str, str]] = [
             ("model", self.model),
@@ -293,10 +288,8 @@ class DeepgramTranscriber:
     async def send_audio(self: Self, data: bytes) -> None:
         """Send PCM bytes; buffer for replay on reconnect.
 
-        Chunk is appended to the sliding replay window before attempting
-        the send, so a mid-send drop still lands in the buffer.
-
-        :raises RuntimeError: If called before :meth:`start`.
+        Chunk lands in replay window before send — mid-send drops still
+        get buffered. Raises ``RuntimeError`` if called before :meth:`start`.
         """
         if self._ws is None:
             msg = "Transcriber is not connected — call start() first"
@@ -312,13 +305,12 @@ class DeepgramTranscriber:
                 await self._ws.send_bytes(data)
 
     async def finalize(self: Self) -> None:
-        """Force Deepgram to flush the buffered segment as a final.
+        """Force Deepgram to flush buffered segment as a final.
 
-        Sends ``{"type":"Finalize"}``. Discord's client-side VAD drops
-        RTP during silence, so without an explicit flush Deepgram's
-        endpointer never sees the silence it needs and holds the final
-        until the next speech burst. Silent no-op if WS already closed
-        or never started — safe to call from idle-watchdog paths.
+        Sends ``{"type":"Finalize"}``. Discord client-side VAD drops RTP
+        during silence, so without explicit flush the endpointer holds
+        the final until next speech burst. No-op if WS closed or never
+        started — safe from idle-watchdog paths.
         """
         ws = self._ws
         if ws is None or ws.closed:

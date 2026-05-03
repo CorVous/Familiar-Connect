@@ -29,9 +29,9 @@ _NAME_ALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def sanitize_name(name: str) -> str | None:
-    """Sanitize *name* for OpenAI name field, or ``None`` if empty after cleanup.
+    """Sanitize for OpenAI ``name`` field; ``None`` if empty after cleanup.
 
-    Requires ``^[a-zA-Z0-9_-]{1,64}$``; unsupported chars replaced with underscores.
+    Pattern ``^[a-zA-Z0-9_-]{1,64}$``; unsupported chars → underscore.
     """
     sanitized = _NAME_ALLOWED.sub("_", name)[:64].strip("_")
     return sanitized or None
@@ -52,10 +52,10 @@ _request_semaphore: asyncio.Semaphore | None = None
 def get_request_semaphore(
     max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
 ) -> asyncio.Semaphore:
-    """Return module-level semaphore, creating on first call.
+    """Module-level semaphore, lazy-init.
 
-    Shared across all :class:`LLMClient` instances — bottleneck is
-    the OpenRouter API key's rate limit, not any single client.
+    Shared across all :class:`LLMClient` instances — bottleneck is the
+    OpenRouter API key's rate limit, not any single client.
     """
     global _request_semaphore  # noqa: PLW0603
     if _request_semaphore is None:
@@ -65,14 +65,14 @@ def get_request_semaphore(
 
 @dataclass
 class Message:
-    """A single chat message with an optional speaker name."""
+    """Chat message with optional speaker name."""
 
     role: str
     content: str
     name: str | None = None
 
     def to_dict(self: Self) -> dict[str, str]:
-        """Serialize to the OpenAI-compatible message dict format."""
+        """Serialize to OpenAI-compatible message dict."""
         d: dict[str, str] = {"role": self.role, "content": self.content}
         if self.name is not None:
             d["name"] = self.name
@@ -83,7 +83,7 @@ class Message:
 class SystemPromptLayers:
     """Layers composing the system prompt.
 
-    ``recent_history`` is kept as separate messages, not in system prompt.
+    ``recent_history`` stays as separate messages, not in system prompt.
     """
 
     core_instructions: str
@@ -94,7 +94,7 @@ class SystemPromptLayers:
 
 
 def build_system_prompt(layers: SystemPromptLayers) -> str:
-    """Assemble the system prompt from non-empty layers in priority order."""
+    """Assemble system prompt from non-empty layers in priority order."""
     sections: list[str] = []
 
     if layers.core_instructions:
@@ -110,7 +110,7 @@ def build_system_prompt(layers: SystemPromptLayers) -> str:
 
 
 class LLMClient:
-    """Client for sending chat completions to OpenRouter."""
+    """OpenRouter chat-completion client."""
 
     def __init__(
         self: Self,
@@ -127,23 +127,23 @@ class LLMClient:
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
-        # call-site label — appears in span names + the per-call log.
+        # call-site label — surfaces in span names + per-call log.
         # ``None`` keeps backward-compat for tests / one-off clients.
         self.slot = slot
-        # OpenRouter routing override. ``None`` keeps default routing.
-        # See LLMSlotConfig for the rationale + sunset note.
+        # OpenRouter routing override. ``None`` = default. See
+        # LLMSlotConfig for rationale + sunset note.
         self.provider_order = provider_order
         self.provider_allow_fallbacks = provider_allow_fallbacks
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
-        """Lazily create and return shared HTTP client."""
+        """Lazy-init shared HTTP client."""
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=120.0)
         return self._http
 
     async def close(self: Self) -> None:
-        """Shut down HTTP connection pool."""
+        """Shut down HTTP pool."""
         if self._http is not None:
             await self._http.aclose()
             self._http = None
@@ -155,17 +155,15 @@ class LLMClient:
         }
 
     def _log_http_error_body(self: Self, status_code: int, body: object) -> None:
-        """Surface the upstream error body on 4xx/5xx — not just the bare HTTP status.
+        """Surface upstream error body on 4xx/5xx — not just bare status.
 
-        Without this, ``raise_for_status`` only carries the status code
-        and reason phrase, so an OpenRouter response like
-        ``{"error": {"message": "Unsupported value: 'temperature' …"}}``
-        is invisible to operators tailing logs.
+        Without this, ``raise_for_status`` only carries status code +
+        reason phrase, hiding payloads like
+        ``{"error": {"message": "Unsupported value: 'temperature' …"}}``.
         """
         slot_suffix = f".{self.slot}" if self.slot else ""
-        # Mocked-out response objects in tests can hand back non-string
-        # ``.text`` (Mock); coerce defensively so logging never crashes
-        # the request path.
+        # mock response objects in tests may return non-string ``.text``;
+        # coerce so logging never crashes the request path.
         body_str = body if isinstance(body, str) else ""
         _logger.warning(
             f"{ls.tag('LLM', ls.R)} "
@@ -234,7 +232,7 @@ class LLMClient:
         return response
 
     async def chat(self: Self, messages: list[Message]) -> Message:
-        """Send messages to OpenRouter and return the assistant's reply."""
+        """Send messages to OpenRouter; return assistant reply."""
         url = f"{self.base_url}/chat/completions"
         headers = self.build_headers()
         payload = self.build_payload(messages)
@@ -259,32 +257,30 @@ class LLMClient:
     ) -> AsyncIterator[str]:
         """Stream assistant content deltas.
 
-        Required for barge-in: TTS can begin on the first delta and
-        cancellation mid-stream actually saves work.
+        Required for barge-in: TTS starts on first delta; mid-stream
+        cancellation actually saves work.
 
-        Unlike :meth:`chat`, no retry loop — retries on a streaming
-        call would hold the rate-limit slot during sleeps and starve
-        cancellation. On 429 the caller sees
-        :class:`httpx.HTTPStatusError`.
+        No retry loop (unlike :meth:`chat`) — retries on a streaming
+        call would hold the rate-limit slot through sleeps and starve
+        cancellation. On 429 caller sees :class:`httpx.HTTPStatusError`.
 
         Yields:
-            str: content delta as it arrives from the server.
+            content delta strings as they arrive.
 
         """
         url = f"{self.base_url}/chat/completions"
         headers = self.build_headers()
         payload = self.build_payload(messages)
         payload["stream"] = True
-        # Ask OpenRouter to send a final chunk with token usage + the
-        # provider that actually served the call. Cost is one extra
-        # SSE chunk, value is per-call cache/route visibility.
+        # ask OpenRouter for a trailing chunk carrying token usage +
+        # the provider that served the call. costs one extra SSE chunk
+        # for per-call cache/route visibility.
         payload["usage"] = {"include": True}
 
         http = self._get_http()
-        # Acquire the rate-limit slot only for the HTTP request *initiation*.
-        # Holding the semaphore across the entire stream would starve
-        # barge-in cancellation: a stalled reader would pin the slot.
-        # Release as soon as the server has accepted the request.
+        # acquire rate-limit slot only for request *initiation* —
+        # holding across the stream would starve barge-in cancellation
+        # (stalled reader pins slot). release once server accepts.
         metrics = _CallMetrics(slot=self.slot, model=self.model)
         metrics.input_chars = sum(len(m.content) for m in messages)
         metrics.t_start = time.perf_counter()
@@ -296,8 +292,8 @@ class LLMClient:
             response = await stream_cm.__aenter__()  # noqa: PLC2801
             if response.status_code >= 400:
                 # streamed responses don't populate ``.text`` until the
-                # body is read — pull it explicitly so the upstream
-                # error message survives ``raise_for_status``.
+                # body is read — pull it explicitly so upstream error
+                # message survives ``raise_for_status``.
                 with contextlib.suppress(Exception):
                     await response.aread()
                 body = getattr(response, "text", "") or ""

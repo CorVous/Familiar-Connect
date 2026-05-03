@@ -4,15 +4,15 @@ Owns:
 
 - Discord client construction (``py-cord`` + DAVE voice)
 - Subscribe / unsubscribe slash commands (text + voice)
-- ``on_message`` and ``on_voice_state_update`` event handlers
-- :func:`ingest_event` — text and voice events publish to the event
-  bus via :class:`DiscordTextSource`. Twitch has its own source.
-- :class:`BotHandle` — adapter exposed to the lifecycle wiring so
-  bus-only processors (e.g. :class:`TextResponder`) can post back
-  to Discord without taking a direct ``discord.Bot`` reference.
-- :func:`_start_voice_intake` / :func:`_stop_voice_intake` — bring
-  up / tear down the per-channel sink + transcriber + voice source
-  pipeline that ``/subscribe-voice`` triggers.
+- ``on_message`` / ``on_voice_state_update`` handlers
+- :func:`ingest_event` — text + voice events publish to bus via
+  :class:`DiscordTextSource`. Twitch has its own source.
+- :class:`BotHandle` — adapter for bus-only processors (e.g.
+  :class:`TextResponder`) to post back to Discord without holding
+  a direct ``discord.Bot`` reference.
+- :func:`_start_voice_intake` / :func:`_stop_voice_intake` —
+  bring up / tear down per-channel sink + transcriber + voice source
+  pipeline behind ``/subscribe-voice``.
 """
 
 from __future__ import annotations
@@ -43,19 +43,18 @@ if TYPE_CHECKING:
     from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
     from familiar_connect.voice.turn_detection import UtteranceEndpointer
 
-    # Outbound text callback. Returns the Discord message id of the
-    # posted message (str) for reply-chain tracking, or None if the
-    # send failed. ``reply_to_message_id`` threads via Discord's
-    # ``MessageReference``; ``mention_user_ids`` populates
-    # ``AllowedMentions(users=...)`` so only resolved targets get pings.
+    # outbound text callback. returns posted-message id (str) for
+    # reply-chain tracking, or None on send failure.
+    # ``reply_to_message_id`` threads via Discord ``MessageReference``;
+    # ``mention_user_ids`` → ``AllowedMentions(users=...)`` so only
+    # resolved targets ping.
     SendText = Callable[
         [int, str, str | None, tuple[int, ...]],
         Awaitable[str | None],
     ]
 
-    # ``(channel_id, user_id) -> Author | None``. Resolves Discord
-    # member identity for voice turns so they carry the same author
-    # attribution as text turns.
+    # resolves Discord member identity for voice turns so they carry
+    # the same author attribution as text turns.
     ResolveMember = Callable[[int, int], "Author | None"]
 
 _logger = logging.getLogger(__name__)
@@ -65,14 +64,13 @@ _logger = logging.getLogger(__name__)
 class VoiceRuntime:
     """Per-voice-channel pipeline state.
 
-    Holds the live voice client + the recording-sink / pump / source
-    tasks so ``/unsubscribe-voice`` can tear them down cleanly.
+    Holds live voice client + recording-sink / pump / source tasks for
+    clean ``/unsubscribe-voice`` teardown.
 
-    ``transcribers`` and ``fanin_tasks`` are keyed by Discord user_id
-    — the pump lazily clones a Deepgram stream per speaker (Discord
-    delivers per-SSRC audio so each user is naturally isolated). One
-    fan-in task per user forwards results onto the shared
-    ``result_queue`` after tagging with the originating user_id.
+    ``transcribers`` / ``fanin_tasks`` keyed by Discord user_id — pump
+    lazily clones a Deepgram stream per speaker (per-SSRC audio gives
+    natural isolation). One fan-in task per user forwards results onto
+    the shared ``result_queue`` tagged with originating user_id.
     """
 
     voice_client: discord.VoiceClient
@@ -85,34 +83,32 @@ class VoiceRuntime:
     transcribers: dict[int, DeepgramTranscriber] = field(default_factory=dict)
     fanin_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
     # idle watchdog closes per-user streams after extended silence so
-    # Deepgram doesn't tear them down server-side mid-utterance. Reopened
-    # lazily on next audio chunk for that user.
+    # Deepgram doesn't tear them down server-side mid-utterance.
+    # reopened lazily on next audio chunk for that user.
     idle_watchdog_task: asyncio.Task[None] | None = None
-    # V1 phase 2: per-user local turn-endpointer (TEN-VAD + Smart
-    # Turn). Empty when ``familiar.local_turn_detector`` is unset.
+    # V1 phase 2: per-user local turn-endpointer (TEN-VAD + Smart Turn).
+    # empty when ``familiar.local_turn_detector`` unset.
     endpointers: dict[int, UtteranceEndpointer] = field(default_factory=dict)
 
 
 @dataclass
 class BotHandle:
-    """Bundle of bot + outbound seams used by bus processors.
+    """Bot + outbound seams for bus processors.
 
-    ``send_text`` is the seam :class:`TextResponder` injects so it can
-    post replies without depending on pycord. The callback returns the
-    Discord message id of the posted message (as ``str``) so the
-    caller can record it for future reply lookups; returns ``None``
-    on send failure. ``voice_runtime`` is keyed by voice-channel id;
-    populated by ``/subscribe-voice`` and consumed by the active TTS
-    player to find the live voice client. ``resolve_member`` looks
-    up an ``Author`` for ``(channel_id, user_id)`` and is consumed by
+    send_text: seam :class:`TextResponder` injects to post replies
+    without depending on pycord. Returns posted-message id (``str``)
+    for future reply lookups; ``None`` on send failure.
+    voice_runtime: keyed by voice-channel id; populated by
+    ``/subscribe-voice``, read by active TTS player to find the live
+    voice client.
+    resolve_member: ``(channel_id, user_id) → Author``; consumed by
     :class:`VoiceResponder` so voice user turns get the same
-    speaker-attributed prefixes as text turns. ``voice_members``
-    is the side cache for voice-only members — without the privileged
-    ``members`` intent ``guild.get_member()`` only knows users it has
-    seen via other events (text messages, voice state changes), so
-    voice-only joiners stay invisible. Populated by voice-state
-    events and a background ``guild.fetch_member()`` triggered on
-    first audio per user_id.
+    speaker-attributed prefixes as text turns.
+    voice_members: side cache for voice-only members. Without the
+    privileged ``members`` intent, ``guild.get_member()`` only knows
+    users seen via other events (text, voice-state changes); voice-only
+    joiners stay invisible. Populated by voice-state events + background
+    ``guild.fetch_member()`` triggered on first audio per user_id.
     """
 
     bot: discord.Bot

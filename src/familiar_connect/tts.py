@@ -1,7 +1,7 @@
-"""TTS clients — Cartesia (WebSocket), Azure (Speech SDK), and Gemini.
+"""TTS clients — Cartesia (WebSocket), Azure (Speech SDK), Gemini.
 
-All three return :class:`TTSResult` with raw PCM audio + per-word timestamps.
-Timestamps drive mid-speech yield in the voice interruption flow.
+All return :class:`TTSResult` with raw PCM audio + per-word timestamps.
+Timestamps drive mid-speech yield in voice interruption flow.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ _AZURE_TICKS_PER_MS: float = 10_000.0
 """100-nanosecond ticks per millisecond — Azure SDK offset unit."""
 
 GEMINI_SAMPLE_RATE = 24000
-"""Native output rate for Gemini TTS (24 kHz). Upsampled to 48 kHz before use."""
+"""Gemini TTS native rate (24 kHz); upsampled to 48 kHz before use."""
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,7 @@ class CartesiaTTSClient:
         self.sample_rate = sample_rate
 
     def build_ws_url(self: Self) -> str:
-        """Return the Cartesia WebSocket URL with auth in the query string."""
+        """Cartesia WebSocket URL with auth in query string."""
         query = urlencode(
             {
                 "api_key": self.api_key,
@@ -103,7 +103,7 @@ class CartesiaTTSClient:
         return f"{self.ws_url}?{query}"
 
     def build_headers(self: Self) -> dict[str, str]:
-        """Return REST headers (kept for any non-WS call sites / tests)."""
+        """REST headers (for non-WS call sites / tests)."""
         return {
             "X-API-Key": self.api_key,
             "Cartesia-Version": CARTESIA_API_VERSION,
@@ -111,7 +111,7 @@ class CartesiaTTSClient:
         }
 
     def build_payload(self: Self, text: str, *, context_id: str) -> dict[str, Any]:
-        """Build JSON payload for one-shot TTS synthesis."""
+        """JSON payload for one-shot TTS synthesis."""
         return {
             "context_id": context_id,
             "model_id": self.model,
@@ -135,13 +135,13 @@ class CartesiaTTSClient:
         session: aiohttp.ClientSession,
         url: str,
     ) -> aiohttp.ClientWebSocketResponse:
-        """Open a WebSocket connection. Extracted for testability."""
+        """Open WebSocket. Extracted for testability."""
         return await session.ws_connect(url)
 
     async def synthesize(self: Self, text: str) -> TTSResult:
-        """Synthesize *text* via WebSocket; return audio + word timestamps.
+        """Synthesize via WebSocket; return audio + word timestamps.
 
-        :raises RuntimeError: on Cartesia ``error`` event or unexpected close.
+        Raises ``RuntimeError`` on Cartesia ``error`` event or unexpected close.
         """
         context_id = uuid.uuid4().hex
         url = self.build_ws_url()

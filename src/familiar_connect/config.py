@@ -28,10 +28,9 @@ class LLMSlotConfig:
 
     model: str
     temperature: float | None = None
-    # OpenRouter provider routing override. ``None`` keeps default
-    # routing (OpenRouter picks each call). A pinned order stabilises
-    # prompt caching across turns at the cost of some availability.
-    # Stopgap — see docs/architecture/tuning.md § provider pinning.
+    # OpenRouter provider routing override. ``None`` = default (per-call).
+    # Pinned order stabilises prompt caching, costs some availability.
+    # stopgap — see docs/architecture/tuning.md § provider pinning.
     provider_order: tuple[str, ...] | None = None
     provider_allow_fallbacks: bool = True
 
@@ -56,10 +55,10 @@ _STT_BACKENDS: frozenset[str] = frozenset({"deepgram"})
 class DeepgramSTTConfig:
     """Deepgram knobs from ``[providers.stt.deepgram]``.
 
-    Non-secret. ``DEEPGRAM_API_KEY`` stays in env. Matching ``DEEPGRAM_*``
-    env vars override per-knob (container-friendly — same precedence as
-    ``LOCAL_TURN_DETECTION``). Defaults match the previous env-only
-    defaults so unconfigured installs are unaffected.
+    Non-secret. ``DEEPGRAM_API_KEY`` stays in env. ``DEEPGRAM_*`` env
+    vars override per-knob (same precedence as ``LOCAL_TURN_DETECTION``).
+    Defaults match prior env-only defaults — unconfigured installs
+    unaffected.
     """
 
     model: str = "nova-3"
@@ -80,8 +79,8 @@ class DeepgramSTTConfig:
 class STTConfig:
     """STT backend selector + per-backend knobs from ``[providers.stt]``.
 
-    Only ``deepgram`` today. V3 widens *backend* to ``faster_whisper`` /
-    ``parakeet`` and adds parallel ``[providers.stt.<backend>]`` tables.
+    Only ``deepgram`` today. V3 widens *backend* → ``faster_whisper`` /
+    ``parakeet`` plus parallel ``[providers.stt.<backend>]`` tables.
     """
 
     backend: str = "deepgram"
@@ -116,17 +115,14 @@ class TTSConfig:
 class ChannelOverrides:
     """Per-channel overrides for latency-sensitive knobs.
 
-    Layered over the global defaults so test channels can be tuned
-    independently. See plan § Design.4 *Channel-aware composition
-    order*.
+    Layered over global defaults — test channels tunable independently.
+    See plan § Design.4 *Channel-aware composition order*.
 
-    :param history_window_size: override for
-        :attr:`CharacterConfig.history_window_size`.
-    :param prompt_layers: ordered list of layer names; ``None`` means
-        inherit the default order.
-    :param message_rendering: ``"prefixed"`` (always include
-        ``[display_name]`` prefix) or ``"name_only"`` (rely on the
-        OpenAI ``name`` field alone — save tokens in DMs).
+    history_window_size: overrides :attr:`CharacterConfig.history_window_size`.
+    prompt_layers: ordered layer names; ``None`` inherits default order.
+    message_rendering: ``"prefixed"`` (always include ``[display_name]``
+    prefix) or ``"name_only"`` (rely on OpenAI ``name`` field — saves
+    tokens in DMs).
     """
 
     history_window_size: int | None = None

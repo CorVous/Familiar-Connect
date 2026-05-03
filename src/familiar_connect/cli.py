@@ -1,8 +1,4 @@
-"""Command-line interface.
-
-This module provides the main CLI entry point and argument parsing.
-Subcommands are defined in separate files under the commands/ directory.
-"""
+"""CLI entry point and argument parsing. Subcommands live in ``commands/``."""
 
 import argparse
 import importlib.metadata
@@ -15,28 +11,24 @@ from familiar_connect import __version__, log_style
 from familiar_connect.commands import diagnose_cmd, run_cmd, version_cmd
 from familiar_connect.log_style import StyledFormatter
 
-# Get package name dynamically from installed metadata
+# dynamic package name from installed metadata
 try:
     _PACKAGE_METADATA = importlib.metadata.metadata(__package__ or "familiar_connect")
     _CLI_NAME = _PACKAGE_METADATA["Name"]
 except (importlib.metadata.PackageNotFoundError, KeyError):
-    # Fallback if metadata not available (e.g., editable install issues)
+    # fallback for editable-install issues
     _CLI_NAME = "familiar-connect"
 
 _logger = logging.getLogger(__name__)
 
 
 def setup_logging(verbose: int = 0, level: str | None = None) -> None:
-    """Configure logging based on verbosity level.
+    """Configure logging.
 
-    Supports both count-based verbosity (-v, -vv, -vvv) and explicit
-    log level specification (-v DEBUG).
-
-    :param verbose: Verbosity count (0=WARNING, 1=INFO, 2+=DEBUG)
-    :param level: Explicit log level string (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    :raises ValueError: If level is provided but invalid
+    verbose: count (0=WARNING, 1=INFO, 2+=DEBUG); ignored if ``level`` set.
+    level: explicit name (DEBUG/INFO/WARNING/ERROR/CRITICAL).
+    Raises ``ValueError`` if ``level`` unknown.
     """
-    # If explicit level provided, use it
     if level is not None:
         numeric_level = getattr(logging, level.upper(), None)
         if not isinstance(numeric_level, int):
@@ -44,7 +36,6 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
             raise ValueError(msg)
         log_level = numeric_level
     else:
-        # Count-based: 0=WARNING, 1=INFO, 2+=DEBUG
         levels = [logging.WARNING, logging.INFO, logging.DEBUG]
         log_level = levels[min(verbose, len(levels) - 1)]
 
@@ -54,11 +45,10 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
     logging.basicConfig(
         level=log_level,
         handlers=[handler],
-        force=True,  # Reconfigure if already configured
+        force=True,  # reconfigure if already configured
     )
 
-    # Always show our own INFO messages (connection status, transcriptions, etc.)
-    # even when the root logger is at WARNING. -vv still enables DEBUG for us.
+    # keep our INFO visible even if root is WARNING; -vv still flips DEBUG
     pkg_logger = logging.getLogger("familiar_connect")
     pkg_logger.setLevel(min(log_level, logging.INFO))
 
@@ -66,11 +56,7 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
 
 
 def create_parser() -> argparse.ArgumentParser:
-    """Create and configure the main argument parser.
-
-    :return: Configured ArgumentParser with subcommands
-    """
-    # Main parser with global arguments
+    """Build top-level parser with subcommands wired in."""
     parser = argparse.ArgumentParser(
         prog=_CLI_NAME,
         description=f"{_CLI_NAME} CLI tool",
@@ -88,17 +74,15 @@ def create_parser() -> argparse.ArgumentParser:
         help="Increase verbosity (can be repeated: -v, -vv, -vvv)",
     )
 
-    # Common arguments shared across all subcommands (empty for now, but available)
+    # shared subcommand args (empty placeholder)
     common_parser = argparse.ArgumentParser(add_help=False)
 
-    # Subcommands
     subparsers = parser.add_subparsers(
         dest="command",
         help="Available commands",
-        required=False,  # Allow running without subcommand to show help
+        required=False,  # allow bare invocation to print help
     )
 
-    # Register subcommands
     run_cmd.add_parser(subparsers, common_parser)
     diagnose_cmd.add_parser(subparsers, common_parser)
     version_cmd.add_parser(subparsers, common_parser)
@@ -107,23 +91,17 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """Execute the main CLI entry point.
-
-    :return: Exit code (0 for success, non-zero for error)
-    """
+    """CLI entry point. Returns exit code (0 ok, non-zero error)."""
     load_dotenv()
     parser = create_parser()
     args = parser.parse_args()
 
-    # If no command specified, show help
     if args.command is None:
         parser.print_help()
         return 0
 
-    # Setup logging
     setup_logging(verbose=args.verbose)
 
-    # Execute command
     try:
         return args.func(args)
     except Exception:
