@@ -18,8 +18,9 @@ details for what already ships live in
 
 2. **Bi-temporal append-only knowledge graphs** (Zep / Graphiti,
    Cognee). `t_valid` / `t_invalid` per edge; new facts mark old
-   ones invalid; nothing deleted. **Adopted incrementally** — M1
-   (bi-temporal facts), M5 (Graphiti as a swappable projector).
+   ones invalid; nothing deleted. **Adopted incrementally** —
+   bi-temporal facts shipped (M1; see [Bi-temporal facts](#bi-temporal-facts)),
+   M5 plans Graphiti as a swappable projector.
 
 3. **Self-evolving atomic notes with emergent linking** (A-MEM,
    generative-agents memory stream). One observation per row,
@@ -87,6 +88,30 @@ embedding_weight  = 0.0   # 0 disables until M6
 ```
 
 See [Tuning](tuning.md#forward-looking-schema).
+
+## Bi-temporal facts
+
+Each row in `facts` carries two independent time axes:
+
+- **System-time** (`created_at`, `superseded_at`, `superseded_by`) —
+  when *we* recorded it, and when we retired it. Supersession keeps
+  the old row; the new row points back via `superseded_by`.
+- **World-time** (`valid_from`, `valid_to`) — when the fact was
+  observed to *apply in the world*. `valid_from` defaults to the
+  source turn's timestamp; the LLM may override with an explicit
+  ISO-8601 string when it spots an "as of …" phrase ("Aria moved to
+  Berlin in early 2024"). `valid_to` is `NULL` while the fact still
+  applies.
+
+Default reads stay "current truth": `superseded_at IS NULL` and
+`valid_to IS NULL OR valid_to > now`. Audit queries pass
+`as_of=<datetime>` to `recent_facts` / `search_facts` /
+`facts_for_subject`; that switches to a bi-temporal slice
+(`valid_from <= as_of < valid_to`) and includes superseded rows so
+prior beliefs remain reconstructable.
+
+Legacy rows (pre-M1) carry `valid_from = valid_to = NULL` and read
+as "always valid"; no backfill — the feature is forward-only.
 
 ## Why rich-note + bi-temporal, not graph-only
 

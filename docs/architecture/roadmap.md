@@ -21,16 +21,6 @@ and closing the voice-latency gap to sub-1 s.
 
 ## Memory
 
-### M1 — Bi-temporal facts (`valid_from` / `valid_to`)
-
-Today: `facts` has `superseded_at` only. Captures *was-superseded*,
-not *when the fact applied in the world*.
-
-Change: add `valid_from` / `valid_to`, populated from the source
-turn's timestamp by default, overridable when the LLM extracts an
-explicit "as of" phrase. Default reads stay "current truth"; an
-`as_of` parameter unlocks audit queries.
-
 ### M2 — Importance-weighted retrieval
 
 Today: BM25 + recent-window exclusion.
