@@ -30,7 +30,7 @@ from familiar_connect.diagnostics.voice_budget import (
     reset_voice_budget_recorder,
 )
 from familiar_connect.sources.voice import VoiceSource
-from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.stt import TranscriptionResult
 
 
 def _final(

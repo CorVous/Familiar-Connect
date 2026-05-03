@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     import asyncio
 
     from familiar_connect.bus.protocols import EventBus
-    from familiar_connect.transcription import TranscriptionResult
+    from familiar_connect.stt import TranscriptionResult
 
 
 class VoiceSource:

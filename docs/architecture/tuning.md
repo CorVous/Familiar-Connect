@@ -187,10 +187,20 @@ turn detection, and voice pipeline mode.
 
 ## STT — Deepgram
 
-`backend = "deepgram"` is the only option today; V3 widens it. Knobs
-live in `[providers.stt.deepgram]`. Defaults bias toward fewer
-mid-sentence cuts during thinking pauses; lower the silence
-thresholds for snappier finals.
+`backend = "deepgram"` is the only implementation today; V3 phases
+2/3 add Parakeet and FasterWhisper. Selector + env override are
+already wired:
+
+- `[providers.stt].backend` in `character.toml` picks the backend.
+- `STT_BACKEND` env var overrides TOML at process start (mirrors
+  `LOCAL_TURN_DETECTION` — container-friendly).
+- Unknown backend → `ValueError`, caught in `commands/run.py` and
+  logged as "Transcriber unavailable"; bot still starts, voice path
+  degrades to no-op.
+
+Backend-specific knobs live in `[providers.stt.<backend>]`. For
+Deepgram, defaults bias toward fewer mid-sentence cuts during
+thinking pauses; lower the silence thresholds for snappier finals.
 
 ```toml
 [providers.stt]
@@ -356,14 +366,15 @@ read by today's code.
 strategy = "deepgram"            # | "ten+smart_turn"
 
 [providers.stt]
-backend = "deepgram"             # V3 widens: | "faster_whisper" | "parakeet"
+backend = "deepgram"             # phases 2/3 widen: | "parakeet" | "faster_whisper"
+# env: STT_BACKEND overrides this at startup (mirrors LOCAL_TURN_DETECTION)
 
-# planned (V3 / V5 / M5)
-[providers.stt.faster_whisper]   # (V3)
-model_size = "small"
-
-[providers.stt.parakeet]         # (V3)
+# planned (V3 phases 2/3, V5, M5)
+[providers.stt.parakeet]         # (V3 phase 2)
 model = "parakeet-tdt-0.6b-v3"
+
+[providers.stt.faster_whisper]   # (V3 phase 3)
+model_size = "small"
 
 [providers.memory]
 projectors = ["rich_note", "people_dossier"]                        # (M5)

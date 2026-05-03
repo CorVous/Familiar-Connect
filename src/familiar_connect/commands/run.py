@@ -46,7 +46,7 @@ from familiar_connect.processors import (
 from familiar_connect.processors.fact_extractor import FactExtractor
 from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
 from familiar_connect.processors.summary_worker import SummaryWorker
-from familiar_connect.transcription import create_transcriber_from_env
+from familiar_connect.stt import create_transcriber
 from familiar_connect.tts import create_tts_client
 from familiar_connect.tts_player import (
     DiscordVoicePlayer,
@@ -414,8 +414,11 @@ def run(args: argparse.Namespace) -> int:
         _logger.warning("TTS client unavailable: %s", exc)
         tts_client = None
 
+    # V3 / A1: ``STT_BACKEND`` env wins over TOML inside ``create_transcriber``
+    # (mirrors ``LOCAL_TURN_DETECTION``); ``ValueError`` on missing API key or
+    # unknown backend → degrade gracefully (text path still works).
     try:
-        transcriber = create_transcriber_from_env(character_config.stt.deepgram)
+        transcriber = create_transcriber(character_config.stt)
     except ValueError as exc:
         _logger.warning("Transcriber unavailable: %s", exc)
         transcriber = None

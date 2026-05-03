@@ -259,7 +259,7 @@ def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
             return_value=None,
         ),
         patch(
-            "familiar_connect.commands.run.create_transcriber_from_env",
+            "familiar_connect.commands.run.create_transcriber",
             return_value=None,
         ),
         patch(
@@ -318,7 +318,7 @@ def test_run_loads_config_before_building_clients(tmp_path: Path) -> None:
             return_value=None,
         ),
         patch(
-            "familiar_connect.commands.run.create_transcriber_from_env",
+            "familiar_connect.commands.run.create_transcriber",
             return_value=None,
         ),
         patch(
@@ -365,7 +365,7 @@ class TestRunTranscriberIntegration:
         self,
         tmp_path: Path,
     ) -> None:
-        """A successful create_transcriber_from_env reaches load_from_disk."""
+        """A successful create_transcriber reaches load_from_disk."""
         (tmp_path / "aria").mkdir()
         args = argparse.Namespace(familiar="aria")
         mock_transcriber = MagicMock(name="transcriber")
@@ -390,7 +390,7 @@ class TestRunTranscriberIntegration:
                 return_value=None,
             ),
             patch(
-                "familiar_connect.commands.run.create_transcriber_from_env",
+                "familiar_connect.commands.run.create_transcriber",
                 return_value=mock_transcriber,
             ) as mock_create,
             patch(
@@ -441,7 +441,7 @@ class TestRunTranscriberIntegration:
                 return_value=None,
             ),
             patch(
-                "familiar_connect.commands.run.create_transcriber_from_env",
+                "familiar_connect.commands.run.create_transcriber",
                 side_effect=ValueError("DEEPGRAM_API_KEY not set"),
             ),
             patch(
@@ -502,7 +502,7 @@ def _run_with_strategy(tmp_path: Path, strategy: str, extra_env: dict | None = N
         ),
         patch("familiar_connect.commands.run.create_tts_client", return_value=None),
         patch(
-            "familiar_connect.commands.run.create_transcriber_from_env",
+            "familiar_connect.commands.run.create_transcriber",
             return_value=None,
         ),
         patch(
@@ -564,7 +564,7 @@ class TestRunTurnDetectionTomlSelector:
             ),
             patch("familiar_connect.commands.run.create_tts_client", return_value=None),
             patch(
-                "familiar_connect.commands.run.create_transcriber_from_env",
+                "familiar_connect.commands.run.create_transcriber",
                 return_value=None,
             ),
             patch(

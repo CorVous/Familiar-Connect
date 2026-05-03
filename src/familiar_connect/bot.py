@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from familiar_connect.familiar import Familiar
-    from familiar_connect.transcription import DeepgramTranscriber, TranscriptionResult
+    from familiar_connect.stt import Transcriber, TranscriptionResult
     from familiar_connect.voice.turn_detection import UtteranceEndpointer
 
     # outbound text callback. returns posted-message id (str) for
@@ -80,7 +80,7 @@ class VoiceRuntime:
     source: VoiceSource
     pump_task: asyncio.Task[None]
     source_task: asyncio.Task[None]
-    transcribers: dict[int, DeepgramTranscriber] = field(default_factory=dict)
+    transcribers: dict[int, Transcriber] = field(default_factory=dict)
     fanin_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
     # idle watchdog closes per-user streams after extended silence so
     # Deepgram doesn't tear them down server-side mid-utterance.
@@ -199,7 +199,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
 
     template = familiar.transcriber
     detector = getattr(familiar, "local_turn_detector", None)
-    transcribers: dict[int, DeepgramTranscriber] = {}
+    transcribers: dict[int, Transcriber] = {}
     fanin_tasks: dict[int, asyncio.Task[None]] = {}
     endpointers: dict[int, UtteranceEndpointer] = {}
     # last audio-chunk arrival per user (monotonic seconds). drives the
@@ -213,7 +213,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             result.user_id = user_id
             await result_queue.put(result)
 
-    async def _ensure_transcriber(user_id: int) -> DeepgramTranscriber:
+    async def _ensure_transcriber(user_id: int) -> Transcriber:
         existing = transcribers.get(user_id)
         if existing is not None:
             return existing
@@ -221,10 +221,12 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         clone = template.clone()
         # V1 phase 2: when local turn detection owns endpointing, drive
         # Deepgram with a near-zero hosted endpointer so it relies on
-        # ``Finalize`` from the local chain. Class-level fallback when
-        # the field doesn't exist (mocked clones in tests).
+        # ``Finalize`` from the local chain. Backend-specific knob —
+        # not on the Transcriber Protocol; setattr keeps the typing
+        # honest while still no-oping for backends that lack the field
+        # (V3 phase 2/3, plus mocked clones in tests).
         if detector is not None and hasattr(clone, "endpointing_ms"):
-            clone.endpointing_ms = 10
+            setattr(clone, "endpointing_ms", 10)  # noqa: B010
         per_user_q: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
         await clone.start(per_user_q)
         transcribers[user_id] = clone

@@ -166,14 +166,19 @@ Two layers pin the state machine:
 
 ## STT (transcription)
 
-**Today:** `DeepgramTranscriber`. Per-speaker clone-from-template
+**Today:** `DeepgramTranscriber` in
+`familiar_connect.stt.deepgram`. Per-speaker clone-from-template
 pattern; one stream per Discord user, lazy-opened, closed after
 `idle_close_s`.
 
-**Pluggability:** the clone-template shape is a Protocol seam in
-spirit. V3 formalises it as `Transcriber` Protocol;
-`FasterWhisperTranscriber` (CTranslate2) and `ParakeetTranscriber`
-(Parakeet-TDT 0.6B v3) drop in behind it.
+**Pluggability:** V3 phase 1 lifted the clone-template shape into a
+`Transcriber` Protocol (`familiar_connect.stt.protocol`). The voice
+pipeline (`bot.py`, `sources/voice.py`, `familiar.py`) types against
+the Protocol; backend selection lives in `stt.factory`, dispatched
+on `[providers.stt].backend` (with `STT_BACKEND` env override —
+mirrors `LOCAL_TURN_DETECTION`). V3 phases 2 and 3 add
+`ParakeetTranscriber` (NeMo Parakeet-TDT 0.6B v3) and
+`FasterWhisperTranscriber` (CTranslate2) behind the same seam.
 
 **Partial vs final transcripts.** Modal's benchmark: partials are a
 UX feature, not a latency feature. The LLM can't start until the

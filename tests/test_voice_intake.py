@@ -26,7 +26,7 @@ from familiar_connect.bot import (
     create_bot,
 )
 from familiar_connect.identity import Author
-from familiar_connect.transcription import TranscriptionResult
+from familiar_connect.stt import TranscriptionResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

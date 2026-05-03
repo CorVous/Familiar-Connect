@@ -12,14 +12,16 @@ import aiohttp
 import pytest
 
 from familiar_connect.config import DeepgramSTTConfig
-from familiar_connect.transcription import (
+from familiar_connect.stt import (
+    TranscriptionEvent,
+    TranscriptionResult,
+)
+from familiar_connect.stt.deepgram import (
     DEEPGRAM_WS_URL,
     DEFAULT_IDLE_FINALIZE_S,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DeepgramTranscriber,
-    TranscriptionEvent,
-    TranscriptionResult,
     create_transcriber_from_env,
 )
 
@@ -909,7 +911,7 @@ class TestReplayBuffer:
 
         with (
             patch.object(client, "_ws_connect", new=connect_mock),
-            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
+            patch("familiar_connect.stt.deepgram.asyncio.sleep", new=_track_sleep),
         ):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
@@ -1073,7 +1075,7 @@ class TestExponentialBackoff:
 
         with (
             patch.object(client, "_ws_connect", new=connect_mock),
-            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
+            patch("familiar_connect.stt.deepgram.asyncio.sleep", new=_track_sleep),
         ):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)

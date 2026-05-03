@@ -1,4 +1,10 @@
-"""Deepgram streaming transcription client."""
+"""Deepgram streaming transcription backend.
+
+Concrete :class:`Transcriber` over Deepgram's `/v1/listen` WebSocket. See
+:mod:`familiar_connect.stt.protocol` for the surface contract; this module
+holds the WS lifecycle, replay-on-reconnect buffer, and env-override
+factory.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +15,6 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
@@ -17,7 +22,7 @@ import aiohttp
 
 from familiar_connect import log_style as ls
 from familiar_connect.config import DeepgramSTTConfig
-from familiar_connect.llm import Message
+from familiar_connect.stt.protocol import TranscriptionEvent, TranscriptionResult
 
 if TYPE_CHECKING:
     from typing import Self
@@ -39,51 +44,6 @@ next speech burst. After this many idle seconds, pump sends
 Also reused as post-replay cushion in ``_reconnect`` — same silence
 window the endpointer expects in normal flow.
 """
-
-
-# ---------------------------------------------------------------------------
-# Transcription result
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class TranscriptionResult:
-    """Single Deepgram streaming transcription result.
-
-    user_id: Discord user id when known; stamped by per-user fan-in
-    in :func:`bot._start_voice_intake`. Per-SSRC audio gives attribution
-    for free, no Deepgram diarization needed.
-    speaker: Deepgram diarization label (set only when ``diarize=True``);
-    unused by Discord pipeline.
-    """
-
-    text: str
-    is_final: bool
-    start: float
-    end: float
-    confidence: float = 0.0
-    speaker: int | None = None
-    user_id: int | None = None
-
-    def to_message(self: Self, speaker_names: dict[int, str] | None = None) -> Message:
-        """Convert to LLM Message; prefix content with ``[Voice]``.
-
-        ``speaker_names`` may key by ``user_id`` (Discord) or by Deepgram
-        ``speaker`` label — ``user_id`` wins.
-        """
-        name = "Voice"
-        if speaker_names is not None:
-            if self.user_id is not None and self.user_id in speaker_names:
-                name = speaker_names[self.user_id]
-            elif self.speaker is not None and self.speaker in speaker_names:
-                name = speaker_names[self.speaker]
-        return Message(role="user", content=f"[Voice] {self.text}", name=name)
-
-
-# Deepgram drives transcription text + VAD edges:
-# interims → DeepgramVoiceActivityDetector (speech-start / speech-end)
-# finals → VoiceLullMonitor (conversational-lull detection)
-TranscriptionEvent = TranscriptionResult
 
 
 # ---------------------------------------------------------------------------

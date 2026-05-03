@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.config import CharacterConfig
     from familiar_connect.llm import LLMClient
-    from familiar_connect.transcription import DeepgramTranscriber
+    from familiar_connect.stt import Transcriber
     from familiar_connect.tts import AzureTTSClient, CartesiaTTSClient, GeminiTTSClient
     from familiar_connect.voice.turn_detection import LocalTurnDetector
 
@@ -44,7 +44,7 @@ class Familiar:
     history_store: HistoryStore
     llm_clients: dict[str, LLMClient]
     tts_client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | None
-    transcriber: DeepgramTranscriber | None
+    transcriber: Transcriber | None
     subscriptions: SubscriptionRegistry
     bus: EventBus = field(default_factory=InProcessEventBus)
     router: TurnRouter = field(default_factory=TurnRouter)
@@ -66,7 +66,7 @@ class Familiar:
         *,
         llm_clients: dict[str, LLMClient],
         tts_client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | None = None,
-        transcriber: DeepgramTranscriber | None = None,
+        transcriber: Transcriber | None = None,
         local_turn_detector: LocalTurnDetector | None = None,
         defaults_path: Path | None = None,
     ) -> Familiar:

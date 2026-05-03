@@ -100,12 +100,19 @@ and [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
 ### V3 — Pluggable transcriber backend
 
-Today: `DeepgramTranscriber` is concrete; the clone-template pattern
-is a Protocol seam in spirit.
+Phase 1 shipped: `Transcriber` Protocol
+(`src/familiar_connect/stt/protocol.py`), backend dispatch in
+`stt/factory.create_transcriber`, and the `STT_BACKEND` env override
+on top of `[providers.stt].backend`. `DeepgramTranscriber` lives in
+`stt/deepgram.py`; the rest of the voice pipeline (`bot.py`,
+`sources/voice.py`, `familiar.py`) types against `Transcriber`. Wiring
+mirrors the V1 turn-detection pattern so a new backend is purely
+additive — drop a module, add an arm to `_KNOWN_BACKENDS`, register
+a parallel `[providers.stt.<name>]` config block.
 
-Change: formalize as `Transcriber` Protocol. `FasterWhisperTranscriber`
-(CTranslate2) and `ParakeetTranscriber` (Parakeet-TDT 0.6B v3) drop
-in behind it. Selected via `[providers.stt]`.
+Phase 2 (next): `ParakeetTranscriber` over NeMo Parakeet-TDT 0.6B v3.
+Phase 3: `FasterWhisperTranscriber` (CTranslate2). Both are local —
+streaming PCM intake, finalize-on-VAD-end semantics, no API key.
 
 ### V4 — Pluggable TTS backend & Mimi-codec readiness
 
@@ -130,12 +137,13 @@ Revisit if a Mimi-based S2S model gains an external-LLM-brain seam.
 env var `LOCAL_TURN_DETECTION` continues to override TOML for container
 deployments. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
+`[providers.stt].backend` selector wired in V3 phase 1 — same pattern
+(env override `STT_BACKEND` on top of TOML). Today only `deepgram`
+satisfies the dispatch; phases 2/3 widen the whitelist.
+
 Remaining selectors (not yet wired — implementations don't exist):
 
 ```toml
-[providers.stt]
-backend = "deepgram"          # | "faster_whisper" | "parakeet"  (V3)
-
 [providers.memory]
 projectors = ["rich_note", "people_dossier"]                      # (M5)
 
@@ -143,7 +151,7 @@ projectors = ["rich_note", "people_dossier"]                      # (M5)
 mode = "cascaded"             # | "s2s"                           # (V5)
 ```
 
-These will be wired when the corresponding backends land (V3, M5).
+These will be wired when the corresponding backends land (M5).
 
 ## Out of scope
 
