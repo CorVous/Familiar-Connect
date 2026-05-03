@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -179,29 +178,11 @@ class ParakeetTranscriber:
 # ---------------------------------------------------------------------------
 
 
-def _env_float(raw: str | None, default: float) -> float:
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def create_parakeet_from_env(
+def create_parakeet_transcriber(
     config: ParakeetSTTConfig | None = None,
 ) -> ParakeetTranscriber:
-    """Build :class:`ParakeetTranscriber` from *config* with env overrides.
-
-    Env knobs (each overrides the matching TOML field):
-    ``PARAKEET_MODEL_NAME``, ``PARAKEET_DEVICE``,
-    ``PARAKEET_IDLE_CLOSE_S``. Mirrors ``DEEPGRAM_*`` precedence so a
-    container can carry character.toml unchanged and tweak per-host.
-    """
+    """Build :class:`ParakeetTranscriber` from typed *config*."""
     cfg = config or ParakeetSTTConfig()
-    model_name = os.environ.get("PARAKEET_MODEL_NAME") or cfg.model_name
-    device = os.environ.get("PARAKEET_DEVICE") or cfg.device
-    idle_close_s = _env_float(os.environ.get("PARAKEET_IDLE_CLOSE_S"), cfg.idle_close_s)
-    t = ParakeetTranscriber(model_name=model_name, device=device)
-    t._IDLE_CLOSE_S = idle_close_s  # noqa: SLF001
+    t = ParakeetTranscriber(model_name=cfg.model_name, device=cfg.device)
+    t._IDLE_CLOSE_S = cfg.idle_close_s  # noqa: SLF001
     return t

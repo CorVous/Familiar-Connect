@@ -25,11 +25,11 @@ toml baked into the image and tune per host without a rebuild.
 | LLM model + temperature per slot | `[llm.<slot>]` | unchanged |
 | TTS provider + voice | `[tts]` | unchanged |
 | History window + prompt layer order | `[providers.history]`, `[channels.<id>]` | unchanged |
-| Deepgram STT thresholds & key-terms | `[providers.stt.deepgram]` (env override per knob) | unchanged |
-| Parakeet local STT (V3 phase 2) | `[providers.stt.parakeet]` (env override per knob) | unchanged |
-| FasterWhisper local STT (V3 phase 3) | `[providers.stt.faster_whisper]` (env override per knob) | unchanged |
-| STT backend selector | `[providers.stt].backend` (`STT_BACKEND` env override) | unchanged |
-| Turn detection strategy | `[providers.turn_detection]` | unchanged |
+| Deepgram STT thresholds & key-terms | `[providers.stt.deepgram]` | unchanged |
+| Parakeet local STT (V3 phase 2) | `[providers.stt.parakeet]` | unchanged |
+| FasterWhisper local STT (V3 phase 3) | `[providers.stt.faster_whisper]` | unchanged |
+| STT backend selector | `[providers.stt].backend` | unchanged |
+| Turn detection strategy + tuning | `[providers.turn_detection]` + `[providers.turn_detection.local]` | unchanged |
 | Memory projector selection | hard-wired | `[providers.memory]` (M5) |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
 | RAG / fact retrieval ranking | private constants | `[memory.retrieval]` (M2 / M6) |
@@ -190,24 +190,18 @@ turn detection, and voice pipeline mode.
 
 ## STT — Deepgram
 
-`backend = "deepgram"` is the only implementation today; V3 phases
-2/3 add Parakeet and FasterWhisper. Selector + env override are
-already wired:
+`backend = "deepgram"` is the default. The selector lives in
+`[providers.stt].backend`; an unknown value (or one whose extra isn't
+installed) → `ValueError`, caught in `commands/run.py` and logged as
+"Transcriber unavailable" — bot still starts, voice path degrades to
+no-op. `DEEPGRAM_API_KEY` is the only env input.
 
-- `[providers.stt].backend` in `character.toml` picks the backend.
-- `STT_BACKEND` env var overrides TOML at process start (mirrors
-  `LOCAL_TURN_DETECTION` — container-friendly).
-- Unknown backend → `ValueError`, caught in `commands/run.py` and
-  logged as "Transcriber unavailable"; bot still starts, voice path
-  degrades to no-op.
-
-Backend-specific knobs live in `[providers.stt.<backend>]`. For
-Deepgram, defaults bias toward fewer mid-sentence cuts during
-thinking pauses; lower the silence thresholds for snappier finals.
+Defaults bias toward fewer mid-sentence cuts during thinking pauses;
+lower the silence thresholds for snappier finals.
 
 ```toml
 [providers.stt]
-backend = "deepgram"            # V3: | "faster_whisper" | "parakeet"
+backend = "deepgram"            # | "parakeet" | "faster_whisper"
 
 [providers.stt.deepgram]
 model                   = "nova-3"
@@ -239,28 +233,6 @@ idle_close_s            = 30.0
 | `reconnect_backoff_cap_s` | `16.0` | Reconnect backoff cap. |
 | `idle_close_s` | `30.0` | Per-user stream closed after this many silent seconds; reopened on next chunk. `0` disables. |
 
-### Env overrides
-
-Each TOML field above has a matching `DEEPGRAM_*` env var that wins
-at startup — same precedence model as `LOCAL_TURN_DETECTION`. Useful
-when a baked-in container image needs per-host knobs without a
-rebuild. `DEEPGRAM_API_KEY` (the secret) only lives in env.
-
-| Env var | Overrides |
-|---|---|
-| `DEEPGRAM_MODEL` | `model` |
-| `DEEPGRAM_LANGUAGE` | `language` |
-| `DEEPGRAM_ENDPOINTING_MS` | `endpointing_ms` |
-| `DEEPGRAM_UTTERANCE_END_MS` | `utterance_end_ms` |
-| `DEEPGRAM_SMART_FORMAT` | `smart_format` (`0/1`) |
-| `DEEPGRAM_PUNCTUATE` | `punctuate` (`0/1`) |
-| `DEEPGRAM_KEYTERMS` | `keyterms` (comma-separated; empty string clears) |
-| `DEEPGRAM_REPLAY_BUFFER_S` | `replay_buffer_s` |
-| `DEEPGRAM_KEEPALIVE_INTERVAL_S` | `keepalive_interval_s` |
-| `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` | `reconnect_max_attempts` |
-| `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` | `reconnect_backoff_cap_s` |
-| `DEEPGRAM_IDLE_CLOSE_S` | `idle_close_s` |
-
 ## STT — Parakeet (V3 phase 2)
 
 Local NeMo Parakeet-TDT 0.6B v3 backend (Apache 2.0 toolkit, CC-BY-4.0
@@ -274,9 +246,9 @@ result.
 
 - `uv sync --extra local-turn --extra local-stt-parakeet` — pulls
   TEN-VAD, Smart Turn, NeMo, torch.
-- `[providers.turn_detection].strategy = "ten+smart_turn"` (or env
-  `LOCAL_TURN_DETECTION=1`). Without a local turn detector nothing
-  drives `finalize()`, so transcripts never surface.
+- `[providers.turn_detection].strategy = "ten+smart_turn"`. Without a
+  local turn detector nothing drives `finalize()`, so transcripts
+  never surface.
 
 ```toml
 [providers.stt]
@@ -294,12 +266,6 @@ idle_close_s = 30.0
 | `device` | `auto` | `auto` defers to NeMo (CUDA if available, else CPU); `cuda` / `cpu` force. |
 | `idle_close_s` | `30.0` | Per-user buffer reset after silence; matches Deepgram parity. |
 
-| Env var | Overrides |
-|---|---|
-| `PARAKEET_MODEL_NAME` | `model_name` |
-| `PARAKEET_DEVICE` | `device` |
-| `PARAKEET_IDLE_CLOSE_S` | `idle_close_s` |
-
 ## STT — FasterWhisper (V3 phase 3)
 
 Local CTranslate2-backed Whisper. Lighter than Parakeet — no torch,
@@ -312,9 +278,8 @@ final result.
 
 - `uv sync --extra local-turn --extra local-stt-whisper` — pulls
   TEN-VAD, Smart Turn, faster-whisper.
-- `[providers.turn_detection].strategy = "ten+smart_turn"` (or env
-  `LOCAL_TURN_DETECTION=1`). Without a local turn detector nothing
-  drives `finalize()`.
+- `[providers.turn_detection].strategy = "ten+smart_turn"`. Without a
+  local turn detector nothing drives `finalize()`.
 
 ```toml
 [providers.stt]
@@ -336,50 +301,42 @@ idle_close_s = 30.0
 | `language` | `en` | Pinned avoids per-turn language detection latency. |
 | `idle_close_s` | `30.0` | Per-user buffer reset after silence. |
 
-| Env var | Overrides |
-|---|---|
-| `FASTER_WHISPER_MODEL_SIZE` | `model_size` |
-| `FASTER_WHISPER_DEVICE` | `device` |
-| `FASTER_WHISPER_COMPUTE_TYPE` | `compute_type` |
-| `FASTER_WHISPER_LANGUAGE` | `language` |
-| `FASTER_WHISPER_IDLE_CLOSE_S` | `idle_close_s` |
-
 ## Local turn detection (V1)
 
 V1 fork of the audio path: TEN-VAD + Smart Turn v3 own endpointing
 locally, Deepgram becomes pure STT. Saves 150–200 ms vs. remote
-endpointing. Requires the `local-turn` extra (`uv sync --extra
-local-turn`) and a Smart Turn ONNX model file at
-`data/models/smart-turn-v3.onnx`.
+endpointing. Also required when the STT backend is local (Parakeet
+or FasterWhisper) since neither has an internal endpointer.
+
+Requires the `local-turn` extra (`uv sync --extra local-turn`) and a
+Smart Turn ONNX model file at `data/models/smart-turn-v3.onnx`
+(default; override the path in TOML below).
 
 When active, per-user Deepgram clones are spawned with
 `endpointing_ms=10` so they wait on `Finalize` from the local chain
 rather than firing on their own silence timer.
 
-### Enabling via TOML (recommended)
-
 ```toml
 [providers.turn_detection]
 strategy = "ten+smart_turn"   # "deepgram" (default) | "ten+smart_turn"
+
+[providers.turn_detection.local]
+smart_turn_model_path = "data/models/smart-turn-v3.onnx"
+silence_ms            = 200
+speech_start_ms       = 100
+vad_threshold         = 0.5
+smart_turn_threshold  = 0.5
+vad_hop_size          = 256
 ```
 
-### Enabling via env var (legacy / container override)
-
-`LOCAL_TURN_DETECTION=1` overrides the TOML setting — useful in
-container deployments where `character.toml` is baked into the image
-but the feature flag lives in the environment.
-
-### Knobs (env)
-
-| Var | Default | Purpose |
+| Field | Default | Purpose |
 |---|---|---|
-| `LOCAL_TURN_DETECTION` | _(unset)_ | Env override: `1/true/yes/on` enables the local chain. |
-| `SMART_TURN_MODEL_PATH` | `data/models/smart-turn-v3.onnx` | Pipecat Smart Turn v3 ONNX file. |
-| `LOCAL_TURN_SILENCE_MS` | `200` | Silence after speech before SmartTurn classifies. |
-| `LOCAL_TURN_SPEECH_START_MS` | `100` | Consecutive speech before "speaking" latches. |
-| `LOCAL_TURN_VAD_THRESHOLD` | `0.5` | TEN-VAD `is_speech` cutoff. |
-| `LOCAL_TURN_SMART_TURN_THRESHOLD` | `0.5` | SmartTurn `is_complete` cutoff. |
-| `TEN_VAD_HOP_SIZE` | `256` | TEN-VAD frame size in samples at 16 kHz; `256` (16 ms) or `160` (10 ms). |
+| `smart_turn_model_path` | `data/models/smart-turn-v3.onnx` | Pipecat Smart Turn v3 ONNX file on disk. |
+| `silence_ms` | `200` | Silence after speech before SmartTurn classifies. |
+| `speech_start_ms` | `100` | Consecutive speech before "speaking" latches. |
+| `vad_threshold` | `0.5` | TEN-VAD `is_speech` cutoff. |
+| `smart_turn_threshold` | `0.5` | SmartTurn `is_complete` cutoff. |
+| `vad_hop_size` | `256` | TEN-VAD frame size in samples at 16 kHz; `256` (16 ms) or `160` (10 ms). |
 
 A missing Smart Turn ONNX file turns the feature off with a warning
 — the bot falls back to Deepgram endpointing rather than failing to
@@ -453,7 +410,6 @@ strategy = "deepgram"            # | "ten+smart_turn"
 
 [providers.stt]
 backend = "deepgram"             # | "parakeet" | "faster_whisper" (V3 closed)
-# env: STT_BACKEND overrides this at startup (mirrors LOCAL_TURN_DETECTION)
 
 [providers.stt.parakeet]         # V3 phase 2 (shipped)
 model_name   = "nvidia/parakeet-tdt-0.6b-v3"

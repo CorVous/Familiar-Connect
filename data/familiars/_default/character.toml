@@ -19,39 +19,50 @@ aliases    = []
 [providers.history]
 window_size = 20
 
-# --- Turn detection strategy -----------------------------------------------
+# --- Turn detection --------------------------------------------------------
 #
-# strategy: "deepgram" (default) uses Deepgram's hosted endpointer.
-#           "ten+smart_turn" activates the local TEN-VAD + Smart Turn v3
-#           chain — saves ~150-200 ms of endpointing latency.
-#           Requires the ``local-turn`` extra and a Smart Turn ONNX file
-#           under data/models/smart-turn-v3.onnx.
-#           See docs/architecture/tuning.md § local-turn-detection-v1.
+# strategy = "deepgram"        Deepgram's hosted endpointer. Default.
+# strategy = "ten+smart_turn"  Local TEN-VAD + Smart Turn v3 chain. Saves
+#                              ~150-200 ms of endpointing latency, and is
+#                              required when [providers.stt].backend is a
+#                              local backend (parakeet, faster_whisper) —
+#                              those have no internal endpointer.
+#                              Needs the ``local-turn`` extra + the Smart
+#                              Turn ONNX (default path is below).
 
 [providers.turn_detection]
 strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
 
+[providers.turn_detection.local]
+# Knobs for the TEN-VAD + Smart Turn chain. Read only when strategy =
+# "ten+smart_turn". Defaults are field-tested; rarely need tweaking.
+smart_turn_model_path = "data/models/smart-turn-v3.onnx"
+silence_ms            = 200    # silence after speech before SmartTurn fires
+speech_start_ms       = 100    # consecutive speech before "speaking" latches
+vad_threshold         = 0.5    # TEN-VAD activation threshold
+smart_turn_threshold  = 0.5    # SmartTurn completion-probability cut
+vad_hop_size          = 256    # samples per VAD frame; 256 = 16 ms at 16 kHz
+
 # --- Speech-to-text --------------------------------------------------------
 #
-# backend selects the STT engine — three are wired:
-#   "deepgram"        cloud (Deepgram WS)               needs DEEPGRAM_API_KEY
-#   "parakeet"        local NeMo Parakeet-TDT 0.6B v3   needs local-stt-parakeet
-#   "faster_whisper"  local CTranslate2 Whisper         needs local-stt-whisper
-# Each backend reads its own ``[providers.stt.<backend>]`` table below.
-# The two local backends require the local turn detector (above) since
-# they have no internal endpointer.
+# Pick by what you care about:
+#                          Deepgram     Parakeet (NeMo)    FasterWhisper (CT2)
+# location                 cloud        local              local
+# cost                     paid         free               free
+# latency to final         lowest       moderate           moderate (CPU int8)
+# install size             tiny         heavy (torch+CUDA) light (no torch)
+# accuracy (English)       high         highest local      strong local
+# secret                   API key      —                  —
+# pairing requirement      —            ten+smart_turn     ten+smart_turn
 #
-# Per-knob env vars (``DEEPGRAM_MODEL``, ``PARAKEET_DEVICE``,
-# ``FASTER_WHISPER_LANGUAGE`` etc.) override TOML at startup, matching
-# the ``LOCAL_TURN_DETECTION`` precedent — useful when character.toml
-# is baked into a container but a few knobs need to differ per host.
-# Secrets (``DEEPGRAM_API_KEY``) stay in env.
+# Default: deepgram. Switch backend by changing the ``backend`` field
+# below; each backend reads its own ``[providers.stt.<backend>]`` table.
 
 [providers.stt]
 backend = "deepgram"            # "deepgram" | "parakeet" | "faster_whisper"
-# env STT_BACKEND overrides this at startup (mirrors LOCAL_TURN_DETECTION)
 
 [providers.stt.deepgram]
+# DEEPGRAM_API_KEY is the only env input; everything else lives here.
 model                   = "nova-3"
 language                = "en"
 endpointing_ms          = 500   # silence ms before a segment finalizes
@@ -66,24 +77,13 @@ reconnect_backoff_cap_s = 16.0
 idle_close_s            = 30.0  # close per-user stream after silence; 0 disables
 
 [providers.stt.parakeet]
-# Local NeMo backend. Requires the ``local-stt-parakeet`` extra
-# (`uv sync --extra local-stt-parakeet`) AND
-# ``[providers.turn_detection].strategy = "ten+smart_turn"`` — Parakeet
-# has no internal endpointer, so the local turn detector drives `finalize()`.
-# Per-knob env vars: PARAKEET_MODEL_NAME, PARAKEET_DEVICE, PARAKEET_IDLE_CLOSE_S.
+# Install: ``uv sync --extra local-turn --extra local-stt-parakeet``.
 model_name   = "nvidia/parakeet-tdt-0.6b-v3"
 device       = "auto"           # "auto" | "cuda" | "cpu"
 idle_close_s = 30.0
 
 [providers.stt.faster_whisper]
-# Local CTranslate2-backed Whisper. Lighter than Parakeet (~150 MB for
-# the small model) and pulls no torch. Requires the ``local-stt-whisper``
-# extra (`uv sync --extra local-stt-whisper`) AND
-# ``[providers.turn_detection].strategy = "ten+smart_turn"`` — same
-# reason as Parakeet.
-# Per-knob env vars: FASTER_WHISPER_MODEL_SIZE, FASTER_WHISPER_DEVICE,
-# FASTER_WHISPER_COMPUTE_TYPE, FASTER_WHISPER_LANGUAGE,
-# FASTER_WHISPER_IDLE_CLOSE_S.
+# Install: ``uv sync --extra local-turn --extra local-stt-whisper``.
 model_size   = "small"          # "tiny" | "base" | "small" | "medium" | "large-v3"
 device       = "auto"           # "auto" | "cuda" | "cpu"
 compute_type = "auto"           # "auto" | "int8" | "float16" | "float32"

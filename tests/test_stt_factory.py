@@ -1,4 +1,4 @@
-"""STT backend selector — `[providers.stt].backend` + ``STT_BACKEND``."""
+"""STT backend selector — `[providers.stt].backend` dispatch."""
 
 from __future__ import annotations
 
@@ -20,20 +20,8 @@ from familiar_connect.stt.parakeet import ParakeetTranscriber
 
 @pytest.fixture(autouse=True)
 def _scrub_env() -> None:
-    """Drop env that perturbs selector + per-backend factories between tests."""
-    for k in (
-        "STT_BACKEND",
-        "DEEPGRAM_API_KEY",
-        "PARAKEET_MODEL_NAME",
-        "PARAKEET_DEVICE",
-        "PARAKEET_IDLE_CLOSE_S",
-        "FASTER_WHISPER_MODEL_SIZE",
-        "FASTER_WHISPER_DEVICE",
-        "FASTER_WHISPER_COMPUTE_TYPE",
-        "FASTER_WHISPER_LANGUAGE",
-        "FASTER_WHISPER_IDLE_CLOSE_S",
-    ):
-        os.environ.pop(k, None)
+    """Drop the one secret the Deepgram factory still consumes from env."""
+    os.environ.pop("DEEPGRAM_API_KEY", None)
 
 
 class TestProtocolContract:
@@ -85,17 +73,7 @@ class TestDispatch:
             create_transcriber(cfg)
 
 
-class TestEnvOverride:
-    def test_stt_backend_env_overrides_toml(self) -> None:
-        # TOML says deepgram; env flips to faster_whisper — must skip the
-        # deepgram factory entirely (no API-key check) and return a
-        # FasterWhisperTranscriber.
-        os.environ["STT_BACKEND"] = "faster_whisper"
-        cfg = STTConfig(backend="deepgram")
-
-        t = create_transcriber(cfg)
-        assert isinstance(t, FasterWhisperTranscriber)
-
+class TestUnknownBackend:
     def test_unknown_backend_rejected(self) -> None:
         # ``_parse_stt_config`` whitelists at parse time, but the dataclass
         # itself doesn't — exercise the factory's own dispatch guard.

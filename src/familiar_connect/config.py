@@ -41,10 +41,27 @@ _TURN_DETECTION_STRATEGIES: frozenset[str] = frozenset({"deepgram", "ten+smart_t
 
 
 @dataclass(frozen=True)
+class LocalTurnConfig:
+    """V1 local-turn-detection knobs from ``[providers.turn_detection.local]``.
+
+    Read only when ``[providers.turn_detection].strategy = "ten+smart_turn"``.
+    Defaults match the V1 field-tested values; rarely need tweaking.
+    """
+
+    smart_turn_model_path: str = "data/models/smart-turn-v3.onnx"
+    silence_ms: int = 200
+    speech_start_ms: int = 100
+    vad_threshold: float = 0.5
+    smart_turn_threshold: float = 0.5
+    vad_hop_size: int = 256
+
+
+@dataclass(frozen=True)
 class TurnDetectionConfig:
     """Turn-detection strategy from ``[providers.turn_detection]``."""
 
     strategy: str = "deepgram"
+    local: LocalTurnConfig = field(default_factory=LocalTurnConfig)
 
 
 # V3 phase 2 added "parakeet"; phase 3 added "faster_whisper".
@@ -55,10 +72,7 @@ _STT_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet", "faster_whisp
 class DeepgramSTTConfig:
     """Deepgram knobs from ``[providers.stt.deepgram]``.
 
-    Non-secret. ``DEEPGRAM_API_KEY`` stays in env. ``DEEPGRAM_*`` env
-    vars override per-knob (same precedence as ``LOCAL_TURN_DETECTION``).
-    Defaults match prior env-only defaults — unconfigured installs
-    unaffected.
+    Non-secret. ``DEEPGRAM_API_KEY`` is the only env input.
     """
 
     model: str = "nova-3"
@@ -471,7 +485,61 @@ def _parse_turn_detection_config(raw: dict) -> TurnDetectionConfig:
             f"valid options: {valid}"
         )
         raise ConfigError(msg)
-    return TurnDetectionConfig(strategy=strategy_raw)
+
+    local_raw = raw.get("local", {})
+    if not isinstance(local_raw, dict):
+        msg = (
+            f"[providers.turn_detection.local] must be a table, "
+            f"got {type(local_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    local = _parse_local_turn_config(local_raw)
+    return TurnDetectionConfig(strategy=strategy_raw, local=local)
+
+
+def _parse_local_turn_config(raw: dict) -> LocalTurnConfig:
+    """Parse ``[providers.turn_detection.local]`` knobs; validate types."""
+    defaults = LocalTurnConfig()
+
+    def _str(key: str, default: str) -> str:
+        v = raw.get(key, default)
+        if not isinstance(v, str) or not v:
+            msg = f"[providers.turn_detection.local].{key} must be a non-empty string"
+            raise ConfigError(msg)
+        return v
+
+    def _int(key: str, default: int) -> int:
+        v = raw.get(key, default)
+        if not isinstance(v, int) or isinstance(v, bool):
+            msg = (
+                f"[providers.turn_detection.local].{key} must be an integer, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        return v
+
+    def _float(key: str, default: float) -> float:
+        v = raw.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = (
+                f"[providers.turn_detection.local].{key} must be a number, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        return float(v)
+
+    return LocalTurnConfig(
+        smart_turn_model_path=_str(
+            "smart_turn_model_path", defaults.smart_turn_model_path
+        ),
+        silence_ms=_int("silence_ms", defaults.silence_ms),
+        speech_start_ms=_int("speech_start_ms", defaults.speech_start_ms),
+        vad_threshold=_float("vad_threshold", defaults.vad_threshold),
+        smart_turn_threshold=_float(
+            "smart_turn_threshold", defaults.smart_turn_threshold
+        ),
+        vad_hop_size=_int("vad_hop_size", defaults.vad_hop_size),
+    )
 
 
 def _parse_stt_config(raw: dict) -> STTConfig:

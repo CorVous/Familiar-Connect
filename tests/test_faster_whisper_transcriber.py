@@ -22,7 +22,7 @@ from familiar_connect.stt.faster_whisper import (
     DEFAULT_COMPUTE_TYPE,
     DEFAULT_MODEL_SIZE,
     FasterWhisperTranscriber,
-    create_faster_whisper_from_env,
+    create_faster_whisper_transcriber,
 )
 
 if TYPE_CHECKING:
@@ -212,20 +212,21 @@ class TestStop:
         await harness.transcriber.stop()
 
 
-class TestEnvFactory:
+class TestFactory:
     def test_uses_config_defaults(self) -> None:
-        cfg = FasterWhisperSTTConfig()
-        t = create_faster_whisper_from_env(cfg)
+        t = create_faster_whisper_transcriber(FasterWhisperSTTConfig())
         assert t.model_size == DEFAULT_MODEL_SIZE
         assert t.language == "en"
 
-    def test_env_overrides_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("FASTER_WHISPER_MODEL_SIZE", "medium")
-        monkeypatch.setenv("FASTER_WHISPER_DEVICE", "cuda")
-        monkeypatch.setenv("FASTER_WHISPER_COMPUTE_TYPE", "float16")
-        monkeypatch.setenv("FASTER_WHISPER_LANGUAGE", "fr")
-        monkeypatch.setenv("FASTER_WHISPER_IDLE_CLOSE_S", "45.0")
-        t = create_faster_whisper_from_env()
+    def test_passes_config_through(self) -> None:
+        cfg = FasterWhisperSTTConfig(
+            model_size="medium",
+            device="cuda",
+            compute_type="float16",
+            language="fr",
+            idle_close_s=45.0,
+        )
+        t = create_faster_whisper_transcriber(cfg)
         assert t.model_size == "medium"
         assert t.device == "cuda"
         assert t.compute_type == "float16"

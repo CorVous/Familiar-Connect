@@ -55,7 +55,6 @@ from familiar_connect.tts_player import (
 )
 from familiar_connect.voice.turn_detection import (
     create_local_turn_detector,
-    create_local_turn_detector_from_env,
 )
 
 _logger = logging.getLogger(__name__)
@@ -414,22 +413,19 @@ def run(args: argparse.Namespace) -> int:
         _logger.warning("TTS client unavailable: %s", exc)
         tts_client = None
 
-    # V3 / A1: ``STT_BACKEND`` env wins over TOML inside ``create_transcriber``
-    # (mirrors ``LOCAL_TURN_DETECTION``); ``ValueError`` on missing API key or
-    # unknown backend → degrade gracefully (text path still works).
+    # ``ValueError`` on missing API key or unknown backend → degrade
+    # gracefully (text path still works).
     try:
         transcriber = create_transcriber(character_config.stt)
     except ValueError as exc:
         _logger.warning("Transcriber unavailable: %s", exc)
         transcriber = None
 
-    # V1 / A1: env var takes precedence (container-friendly override); otherwise
-    # the TOML ``[providers.turn_detection] strategy`` field drives the choice.
     try:
-        if "LOCAL_TURN_DETECTION" in os.environ:
-            local_turn_detector = create_local_turn_detector_from_env()
-        elif character_config.turn_detection.strategy == "ten+smart_turn":
-            local_turn_detector = create_local_turn_detector()
+        if character_config.turn_detection.strategy == "ten+smart_turn":
+            local_turn_detector = create_local_turn_detector(
+                character_config.turn_detection.local
+            )
         else:
             local_turn_detector = None
     except Exception as exc:  # noqa: BLE001

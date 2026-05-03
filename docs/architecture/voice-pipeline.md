@@ -114,13 +114,15 @@ Smart Turn's ONNX file is not in the repo — download separately:
 - Smart Turn v3: <https://huggingface.co/pipecat-ai/smart-turn-v3.0>
   (~360 MB; pull the `.onnx` artifact)
 
-Place under `data/models/` (gitignored) or override the path via env.
+Place under `data/models/` (gitignored) or override the path via
+`[providers.turn_detection.local].smart_turn_model_path`.
 
 ### How the audio path forks
 
-When `LOCAL_TURN_DETECTION=1` and the model files exist,
-`bot._start_voice_intake` builds a per-user endpointer alongside the
-per-user Deepgram clone. The pump feeds every PCM chunk into both:
+When `[providers.turn_detection].strategy = "ten+smart_turn"` and the
+model files exist, `bot._start_voice_intake` builds a per-user
+endpointer alongside the per-user Deepgram clone. The pump feeds every
+PCM chunk into both:
 
 ```
 Discord Opus → RecordingSink → per-user PCM
@@ -137,12 +139,12 @@ Discord Opus → RecordingSink → per-user PCM
 
 `clone.endpointing_ms` is dropped to `10` for the Deepgram instance
 when local detection is active so Deepgram won't endpoint on its own —
-it relies on `Finalize` messages driven by the local chain. Selector
-TOML lands with [A1](roadmap.md#a1-strategy-swap-configuration-spine);
-today the toggle is the env knobs in [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
+it relies on `Finalize` messages driven by the local chain. Strategy +
+tuning live in
+[`[providers.turn_detection]`](tuning.md#local-turn-detection-v1).
 
-The default is **off**: with no model files (or `LOCAL_TURN_DETECTION`
-unset), the bot keeps using Deepgram's hosted endpointer.
+The default is **off** (`strategy = "deepgram"`): the bot uses
+Deepgram's hosted endpointer.
 
 See [Roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
 
@@ -175,8 +177,7 @@ pattern; one stream per Discord user, lazy-opened, closed after
 `Transcriber` Protocol (`familiar_connect.stt.protocol`). The voice
 pipeline (`bot.py`, `sources/voice.py`, `familiar.py`) types against
 the Protocol; backend selection lives in `stt.factory`, dispatched
-on `[providers.stt].backend` (with `STT_BACKEND` env override —
-mirrors `LOCAL_TURN_DETECTION`).
+on `[providers.stt].backend`.
 
 V3 phase 2 added `ParakeetTranscriber` (NeMo Parakeet-TDT 0.6B v3,
 local, no API key) and phase 3 added `FasterWhisperTranscriber`

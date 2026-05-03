@@ -21,7 +21,7 @@ from familiar_connect.stt import Transcriber, TranscriptionResult
 from familiar_connect.stt.parakeet import (
     DEFAULT_MODEL_NAME,
     ParakeetTranscriber,
-    create_parakeet_from_env,
+    create_parakeet_transcriber,
 )
 
 if TYPE_CHECKING:
@@ -198,18 +198,19 @@ class TestStop:
         await harness.transcriber.stop()  # no exception
 
 
-class TestEnvFactory:
+class TestFactory:
     def test_uses_config_defaults(self) -> None:
-        cfg = ParakeetSTTConfig()
-        t = create_parakeet_from_env(cfg)
+        t = create_parakeet_transcriber(ParakeetSTTConfig())
         assert t.model_name == DEFAULT_MODEL_NAME
         assert t.device == "auto"
 
-    def test_env_overrides_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("PARAKEET_MODEL_NAME", "nvidia/parakeet-tdt-1.1b")
-        monkeypatch.setenv("PARAKEET_DEVICE", "cuda")
-        monkeypatch.setenv("PARAKEET_IDLE_CLOSE_S", "45.0")
-        t = create_parakeet_from_env()
+    def test_passes_config_through(self) -> None:
+        cfg = ParakeetSTTConfig(
+            model_name="nvidia/parakeet-tdt-1.1b",
+            device="cuda",
+            idle_close_s=45.0,
+        )
+        t = create_parakeet_transcriber(cfg)
         assert t.model_name == "nvidia/parakeet-tdt-1.1b"
         assert t.device == "cuda"
         assert pytest.approx(45.0) == t._IDLE_CLOSE_S

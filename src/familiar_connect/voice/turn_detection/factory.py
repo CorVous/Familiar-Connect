@@ -8,17 +8,15 @@ is stateless and can be shared).
 TEN-VAD ships its ONNX model inside the ``ten-vad`` Python package, so
 no VAD model path is required — only Smart Turn needs an on-disk file.
 
-Env-driven setup lives in :func:`create_local_turn_detector_from_env`
-so ``commands/run.py`` can mirror the existing ``create_transcriber_from_env``
-pattern. Returns ``None`` (rather than raising) when the feature flag
-is off or the SmartTurn model file is missing — the bot falls back to
-Deepgram-only endpointing.
+All knobs come from ``[providers.turn_detection.local]`` in
+``character.toml``. Returns ``None`` (rather than raising) when the
+SmartTurn model file is missing — the bot falls back to Deepgram-only
+endpointing.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,12 +29,9 @@ from familiar_connect.voice.turn_detection.ten_vad import TenVAD
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-_logger = logging.getLogger(__name__)
+    from familiar_connect.config import LocalTurnConfig
 
-# default SmartTurn path under the repo's gitignored ``data/models/`` tree
-DEFAULT_SMART_TURN_PATH: Path = Path("data/models/smart-turn-v3.onnx")
-# TEN-VAD's two supported hop sizes at 16 kHz; 256 = 16 ms is a good default
-DEFAULT_TEN_VAD_HOP_SIZE: int = 256
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,7 +49,7 @@ class LocalTurnDetector:
     speech_start_ms: int = 100
     smart_turn_threshold: float = 0.5
     vad_threshold: float = 0.5
-    vad_hop_size: int = DEFAULT_TEN_VAD_HOP_SIZE
+    vad_hop_size: int = 256
     _smart_turn: SmartTurnDetector | None = field(default=None, init=False, repr=False)
 
     def make_endpointer(
@@ -81,37 +76,14 @@ class LocalTurnDetector:
         )
 
 
-def _env_bool(raw: str | None, *, default: bool) -> bool:
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | None:
+    """Build :class:`LocalTurnDetector` from typed *config*.
 
-
-def _env_int(raw: str | None, default: int) -> int:
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _env_float(raw: str | None, default: float) -> float:
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def _build_detector_from_env_knobs(smart_turn: Path) -> LocalTurnDetector | None:
-    """Read turn-detector knobs from env and return a :class:`LocalTurnDetector`.
-
-    Returns ``None`` (with a warning) when *smart_turn* path is missing.
-    Does not check the ``LOCAL_TURN_DETECTION`` gate — callers decide
-    whether the feature is enabled.
+    Returns ``None`` (with a warning) when the SmartTurn ONNX file at
+    ``config.smart_turn_model_path`` is missing — the bot falls back
+    to Deepgram-only endpointing rather than crashing.
     """
+    smart_turn = Path(config.smart_turn_model_path)
     if not smart_turn.exists():
         _logger.warning(
             f"{ls.tag('🎙️  Voice', ls.Y)} "
@@ -122,15 +94,11 @@ def _build_detector_from_env_knobs(smart_turn: Path) -> LocalTurnDetector | None
         return None
     detector = LocalTurnDetector(
         smart_turn_path=smart_turn,
-        silence_ms=_env_int(os.environ.get("LOCAL_TURN_SILENCE_MS"), 200),
-        speech_start_ms=_env_int(os.environ.get("LOCAL_TURN_SPEECH_START_MS"), 100),
-        vad_threshold=_env_float(os.environ.get("LOCAL_TURN_VAD_THRESHOLD"), 0.5),
-        smart_turn_threshold=_env_float(
-            os.environ.get("LOCAL_TURN_SMART_TURN_THRESHOLD"), 0.5
-        ),
-        vad_hop_size=_env_int(
-            os.environ.get("TEN_VAD_HOP_SIZE"), DEFAULT_TEN_VAD_HOP_SIZE
-        ),
+        silence_ms=config.silence_ms,
+        speech_start_ms=config.speech_start_ms,
+        vad_threshold=config.vad_threshold,
+        smart_turn_threshold=config.smart_turn_threshold,
+        vad_hop_size=config.vad_hop_size,
     )
     _logger.info(
         f"{ls.tag('🎙️  Voice', ls.G)} "
@@ -141,53 +109,3 @@ def _build_detector_from_env_knobs(smart_turn: Path) -> LocalTurnDetector | None
         f"{ls.kv('speech_start_ms', str(detector.speech_start_ms), vc=ls.LW)}"
     )
     return detector
-
-
-def create_local_turn_detector(
-    *,
-    smart_turn_path: Path | None = None,
-) -> LocalTurnDetector | None:
-    """Build :class:`LocalTurnDetector` from env knobs; no feature-flag gate.
-
-    Called when ``[providers.turn_detection] strategy = "ten+smart_turn"``
-    in ``character.toml``. Knob values are still read from env;
-    a future TOML migration mirrors the STT consolidation.
-    Returns ``None`` (with a warning) when the SmartTurn model file
-    is missing.
-
-    :param smart_turn_path: override path to the SmartTurn ONNX model.
-        Defaults to ``SMART_TURN_MODEL_PATH`` env var or
-        ``data/models/smart-turn-v3.onnx``.
-    """
-    path = smart_turn_path or Path(
-        os.environ.get("SMART_TURN_MODEL_PATH") or str(DEFAULT_SMART_TURN_PATH)
-    )
-    return _build_detector_from_env_knobs(path)
-
-
-def create_local_turn_detector_from_env() -> LocalTurnDetector | None:
-    """Build :class:`LocalTurnDetector` from env, or ``None`` if disabled.
-
-    Knobs:
-
-    - ``LOCAL_TURN_DETECTION`` — ``1/true/yes/on`` to enable.
-    - ``SMART_TURN_MODEL_PATH`` — default ``data/models/smart-turn-v3.onnx``.
-    - ``LOCAL_TURN_SILENCE_MS`` — default ``200``. Silence after speech
-      before SmartTurn fires.
-    - ``LOCAL_TURN_SPEECH_START_MS`` — default ``100``. Consecutive
-      speech before "speaking" latches.
-    - ``LOCAL_TURN_VAD_THRESHOLD`` — default ``0.5``.
-    - ``LOCAL_TURN_SMART_TURN_THRESHOLD`` — default ``0.5``.
-    - ``TEN_VAD_HOP_SIZE`` — default ``256`` (16 ms). ``160`` (10 ms) also
-      supported.
-
-    Returns ``None`` (with a warning) if the feature is enabled but the
-    SmartTurn model file is missing — the bot keeps running on
-    Deepgram-only.
-    """
-    if not _env_bool(os.environ.get("LOCAL_TURN_DETECTION"), default=False):
-        return None
-    smart_turn = Path(
-        os.environ.get("SMART_TURN_MODEL_PATH") or str(DEFAULT_SMART_TURN_PATH)
-    )
-    return _build_detector_from_env_knobs(smart_turn)

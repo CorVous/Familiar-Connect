@@ -22,7 +22,7 @@ from familiar_connect.stt.deepgram import (
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DeepgramTranscriber,
-    create_transcriber_from_env,
+    create_deepgram_transcriber,
 )
 
 
@@ -1244,28 +1244,12 @@ class TestDeepgramKeepAlive:
                 await client.stop()
 
 
-class TestCreateTranscriberFromEnv:
-    def test_creates_from_env(self) -> None:
-        """Factory reads DEEPGRAM_API_KEY and optional overrides."""
-        env = {
-            "DEEPGRAM_API_KEY": "sk-deepgram-test-abc",
-            "DEEPGRAM_MODEL": "nova-2",
-            "DEEPGRAM_LANGUAGE": "es",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_transcriber_from_env()
-
-        assert client.api_key == "sk-deepgram-test-abc"
-        assert client.model == "nova-2"
-        assert client.language == "es"
-
-    def test_uses_defaults_when_optional_missing(self) -> None:
-        """Factory uses defaults for model and language when not in env."""
+class TestCreateDeepgramTranscriber:
+    def test_uses_default_config(self) -> None:
+        """Factory falls back to ``DeepgramSTTConfig()`` when no config passed."""
         env = {"DEEPGRAM_API_KEY": "sk-deepgram-test-abc"}
         with patch.dict(os.environ, env, clear=False):
-            os.environ.pop("DEEPGRAM_MODEL", None)
-            os.environ.pop("DEEPGRAM_LANGUAGE", None)
-            client = create_transcriber_from_env()
+            client = create_deepgram_transcriber()
 
         assert client.api_key == "sk-deepgram-test-abc"
         assert client.model == DEFAULT_MODEL
@@ -1277,66 +1261,10 @@ class TestCreateTranscriberFromEnv:
             patch.dict(os.environ, {}, clear=True),
             pytest.raises(ValueError, match=r"DEEPGRAM_API_KEY"),
         ):
-            create_transcriber_from_env()
+            create_deepgram_transcriber()
 
-    def test_reconnect_knobs_from_env(self) -> None:
-        """Factory wires reconnect/buffer/keepalive knobs from env vars."""
-        env = {
-            "DEEPGRAM_API_KEY": "sk-test",
-            "DEEPGRAM_REPLAY_BUFFER_S": "10.0",
-            "DEEPGRAM_KEEPALIVE_INTERVAL_S": "5.0",
-            "DEEPGRAM_RECONNECT_MAX_ATTEMPTS": "3",
-            "DEEPGRAM_RECONNECT_BACKOFF_CAP_S": "32.0",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_transcriber_from_env()
-
-        assert client.replay_buffer_s == pytest.approx(10.0)
-        assert pytest.approx(5.0) == client._KEEPALIVE_INTERVAL
-        assert client._MAX_RECONNECTS == 3
-        assert pytest.approx(32.0) == client._RECONNECT_BACKOFF_CAP
-
-    def test_endpointing_knobs_from_env(self) -> None:
-        """Factory wires endpointing + utterance-end knobs from env vars."""
-        env = {
-            "DEEPGRAM_API_KEY": "sk-test",
-            "DEEPGRAM_ENDPOINTING_MS": "750",
-            "DEEPGRAM_UTTERANCE_END_MS": "2000",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_transcriber_from_env()
-
-        assert client.endpointing_ms == 750
-        assert client.utterance_end_ms == 2000
-
-    def test_keyterms_from_env(self) -> None:
-        """Factory parses ``DEEPGRAM_KEYTERMS`` as comma-separated list.
-
-        Trims whitespace; drops empty entries.
-        """
-        env = {
-            "DEEPGRAM_API_KEY": "sk-test",
-            "DEEPGRAM_KEYTERMS": "rebasing, lifecycle mesh ,, Tam ",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_transcriber_from_env()
-
-        assert client.keyterms == ("rebasing", "lifecycle mesh", "Tam")
-
-    def test_smart_format_disable_via_env(self) -> None:
-        """``DEEPGRAM_SMART_FORMAT=0`` disables the default-on smart formatter."""
-        env = {
-            "DEEPGRAM_API_KEY": "sk-test",
-            "DEEPGRAM_SMART_FORMAT": "0",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_transcriber_from_env()
-
-        assert client.smart_format is False
-
-    def test_toml_config_flows_through_when_no_env(self) -> None:
-        """A2: ``DeepgramSTTConfig`` knobs reach the transcriber unchanged."""
-        env = {"DEEPGRAM_API_KEY": "sk-test"}
+    def test_toml_config_flows_through(self) -> None:
+        """``DeepgramSTTConfig`` knobs reach the transcriber unchanged."""
         cfg = DeepgramSTTConfig(
             model="nova-2",
             language="es",
@@ -1351,9 +1279,8 @@ class TestCreateTranscriberFromEnv:
             reconnect_backoff_cap_s=20.0,
             idle_close_s=45.0,
         )
-        with patch.dict(os.environ, env, clear=True):
-            os.environ["DEEPGRAM_API_KEY"] = "sk-test"
-            client = create_transcriber_from_env(cfg)
+        with patch.dict(os.environ, {"DEEPGRAM_API_KEY": "sk-test"}, clear=True):
+            client = create_deepgram_transcriber(cfg)
 
         assert client.model == "nova-2"
         assert client.language == "es"
@@ -1367,38 +1294,3 @@ class TestCreateTranscriberFromEnv:
         assert client._MAX_RECONNECTS == 7
         assert pytest.approx(20.0) == client._RECONNECT_BACKOFF_CAP
         assert pytest.approx(45.0) == client._IDLE_CLOSE_S
-
-    def test_env_overrides_toml_config(self) -> None:
-        """Env vars win over TOML — same precedence as ``LOCAL_TURN_DETECTION``."""
-        cfg = DeepgramSTTConfig(
-            model="nova-2",
-            endpointing_ms=275,
-            keyterms=("from-toml",),
-        )
-        env = {
-            "DEEPGRAM_API_KEY": "sk-test",
-            "DEEPGRAM_MODEL": "nova-3",
-            "DEEPGRAM_ENDPOINTING_MS": "600",
-            "DEEPGRAM_KEYTERMS": "env-1, env-2",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            client = create_transcriber_from_env(cfg)
-
-        assert client.model == "nova-3"
-        assert client.endpointing_ms == 600
-        assert client.keyterms == ("env-1", "env-2")
-
-    def test_empty_keyterms_env_overrides_toml(self) -> None:
-        """``DEEPGRAM_KEYTERMS=`` (set but empty) clears TOML keyterms.
-
-        Distinguishes "env unset → keep TOML" from "env empty → clear".
-        """
-        cfg = DeepgramSTTConfig(keyterms=("from-toml",))
-        env = {
-            "DEEPGRAM_API_KEY": "sk-test",
-            "DEEPGRAM_KEYTERMS": "",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            client = create_transcriber_from_env(cfg)
-
-        assert client.keyterms == ()

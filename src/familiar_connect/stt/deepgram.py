@@ -543,60 +543,13 @@ class DeepgramTranscriber:
 # ---------------------------------------------------------------------------
 
 
-def _env_float(raw: str | None, default: float) -> float:
-    """Parse *raw* as float, falling back to *default*."""
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def _env_int(raw: str | None, default: int) -> int:
-    """Parse *raw* as int, falling back to *default*."""
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _env_bool(raw: str | None, *, default: bool) -> bool:
-    """Parse *raw* as bool. ``1/true/yes/on`` → True, ``0/false/no/off`` → False."""
-    if not raw:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_csv(raw: str | None) -> tuple[str, ...]:
-    """Parse comma-separated env list, trimming whitespace and dropping empties."""
-    if not raw:
-        return ()
-    return tuple(item.strip() for item in raw.split(",") if item.strip())
-
-
-def create_transcriber_from_env(
+def create_deepgram_transcriber(
     config: DeepgramSTTConfig | None = None,
 ) -> DeepgramTranscriber:
-    """Build :class:`DeepgramTranscriber` from *config* with env overrides.
+    """Build :class:`DeepgramTranscriber` from *config*.
 
-    *config* supplies non-secret defaults from
-    ``[providers.stt.deepgram]``. Matching ``DEEPGRAM_*`` env vars
-    override per-knob — same precedence as ``LOCAL_TURN_DETECTION``,
-    so container deployments can keep the toml baked into the image
-    while per-host knobs live in env. ``DEEPGRAM_API_KEY`` is always
-    read from env.
-
-    Env knobs (each overrides the corresponding TOML field):
-    ``DEEPGRAM_MODEL``, ``DEEPGRAM_LANGUAGE``,
-    ``DEEPGRAM_ENDPOINTING_MS``, ``DEEPGRAM_UTTERANCE_END_MS``,
-    ``DEEPGRAM_SMART_FORMAT``, ``DEEPGRAM_PUNCTUATE``,
-    ``DEEPGRAM_KEYTERMS`` (comma-separated; empty string clears),
-    ``DEEPGRAM_REPLAY_BUFFER_S``, ``DEEPGRAM_KEEPALIVE_INTERVAL_S``,
-    ``DEEPGRAM_RECONNECT_MAX_ATTEMPTS``,
-    ``DEEPGRAM_RECONNECT_BACKOFF_CAP_S``, ``DEEPGRAM_IDLE_CLOSE_S``.
+    All non-secret knobs come from ``[providers.stt.deepgram]``;
+    ``DEEPGRAM_API_KEY`` is the only env input.
 
     :raises ValueError: If ``DEEPGRAM_API_KEY`` not set.
     """
@@ -606,49 +559,19 @@ def create_transcriber_from_env(
         msg = "DEEPGRAM_API_KEY environment variable is required"
         raise ValueError(msg)
 
-    model = os.environ.get("DEEPGRAM_MODEL") or cfg.model
-    language = os.environ.get("DEEPGRAM_LANGUAGE") or cfg.language
-    endpointing_ms = _env_int(
-        os.environ.get("DEEPGRAM_ENDPOINTING_MS"), cfg.endpointing_ms
-    )
-    utterance_end_ms = _env_int(
-        os.environ.get("DEEPGRAM_UTTERANCE_END_MS"), cfg.utterance_end_ms
-    )
-    smart_format = _env_bool(
-        os.environ.get("DEEPGRAM_SMART_FORMAT"), default=cfg.smart_format
-    )
-    punctuate = _env_bool(os.environ.get("DEEPGRAM_PUNCTUATE"), default=cfg.punctuate)
-    # keyterms: env "" clears (set-but-empty); env unset keeps TOML.
-    keyterms_env = os.environ.get("DEEPGRAM_KEYTERMS")
-    keyterms = _env_csv(keyterms_env) if keyterms_env is not None else cfg.keyterms
-    replay_buffer_s = _env_float(
-        os.environ.get("DEEPGRAM_REPLAY_BUFFER_S"), cfg.replay_buffer_s
-    )
-    keepalive_interval_s = _env_float(
-        os.environ.get("DEEPGRAM_KEEPALIVE_INTERVAL_S"), cfg.keepalive_interval_s
-    )
-    max_attempts = _env_int(
-        os.environ.get("DEEPGRAM_RECONNECT_MAX_ATTEMPTS"), cfg.reconnect_max_attempts
-    )
-    backoff_cap_s = _env_float(
-        os.environ.get("DEEPGRAM_RECONNECT_BACKOFF_CAP_S"),
-        cfg.reconnect_backoff_cap_s,
-    )
-    idle_close_s = _env_float(os.environ.get("DEEPGRAM_IDLE_CLOSE_S"), cfg.idle_close_s)
-
     t = DeepgramTranscriber(
         api_key=api_key,
-        model=model,
-        language=language,
-        endpointing_ms=endpointing_ms,
-        utterance_end_ms=utterance_end_ms,
-        smart_format=smart_format,
-        punctuate=punctuate,
-        keyterms=keyterms,
-        replay_buffer_s=replay_buffer_s,
+        model=cfg.model,
+        language=cfg.language,
+        endpointing_ms=cfg.endpointing_ms,
+        utterance_end_ms=cfg.utterance_end_ms,
+        smart_format=cfg.smart_format,
+        punctuate=cfg.punctuate,
+        keyterms=cfg.keyterms,
+        replay_buffer_s=cfg.replay_buffer_s,
     )
-    t._KEEPALIVE_INTERVAL = keepalive_interval_s  # noqa: SLF001
-    t._MAX_RECONNECTS = max_attempts  # noqa: SLF001
-    t._RECONNECT_BACKOFF_CAP = backoff_cap_s  # noqa: SLF001
-    t._IDLE_CLOSE_S = idle_close_s  # noqa: SLF001
+    t._KEEPALIVE_INTERVAL = cfg.keepalive_interval_s  # noqa: SLF001
+    t._MAX_RECONNECTS = cfg.reconnect_max_attempts  # noqa: SLF001
+    t._RECONNECT_BACKOFF_CAP = cfg.reconnect_backoff_cap_s  # noqa: SLF001
+    t._IDLE_CLOSE_S = cfg.idle_close_s  # noqa: SLF001
     return t

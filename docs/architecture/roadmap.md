@@ -101,11 +101,10 @@ and [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 ### V3 — Pluggable transcriber backend (shipped)
 
 Phase 1: `Transcriber` Protocol (`src/familiar_connect/stt/protocol.py`),
-backend dispatch in `stt/factory.create_transcriber`, and the
-`STT_BACKEND` env override on top of `[providers.stt].backend`.
-`DeepgramTranscriber` lives in `stt/deepgram.py`; the rest of the
-voice pipeline (`bot.py`, `sources/voice.py`, `familiar.py`) types
-against `Transcriber`.
+backend dispatch in `stt/factory.create_transcriber` keyed on
+`[providers.stt].backend`. `DeepgramTranscriber` lives in
+`stt/deepgram.py`; the rest of the voice pipeline (`bot.py`,
+`sources/voice.py`, `familiar.py`) types against `Transcriber`.
 
 Phase 2: `ParakeetTranscriber` (`stt/parakeet.py`) wraps NeMo
 Parakeet-TDT 0.6B v3. Selected via `backend = "parakeet"`; install
@@ -141,12 +140,14 @@ Revisit if a Mimi-based S2S model gains an external-LLM-brain seam.
 
 `[providers.turn_detection]` selector shipped: `strategy = "deepgram"
 | "ten+smart_turn"` in `character.toml` selects the endpointer chain;
-env var `LOCAL_TURN_DETECTION` continues to override TOML for container
-deployments. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
+its tuning lives in `[providers.turn_detection.local]`. See
+[Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
-`[providers.stt].backend` selector wired in V3 phase 1 — same pattern
-(env override `STT_BACKEND` on top of TOML). Phases 2 and 3 added
-`parakeet` and `faster_whisper`. V3 closed.
+`[providers.stt].backend` selector wired in V3 phase 1; phases 2 and 3
+added `parakeet` and `faster_whisper`. V3 closed.
+
+Env vars are restricted to secrets and deployment identity (API keys,
+Discord token, `FAMILIAR_ID`); all behavior knobs live in TOML.
 
 Remaining selectors (not yet wired — implementations don't exist):
 

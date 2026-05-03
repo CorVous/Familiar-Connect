@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -177,39 +176,16 @@ class FasterWhisperTranscriber:
 # ---------------------------------------------------------------------------
 
 
-def _env_float(raw: str | None, default: float) -> float:
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def create_faster_whisper_from_env(
+def create_faster_whisper_transcriber(
     config: FasterWhisperSTTConfig | None = None,
 ) -> FasterWhisperTranscriber:
-    """Build :class:`FasterWhisperTranscriber` from *config* with env overrides.
-
-    Env knobs (each overrides the matching TOML field):
-    ``FASTER_WHISPER_MODEL_SIZE``, ``FASTER_WHISPER_DEVICE``,
-    ``FASTER_WHISPER_COMPUTE_TYPE``, ``FASTER_WHISPER_LANGUAGE``,
-    ``FASTER_WHISPER_IDLE_CLOSE_S``. Mirrors the sibling backends'
-    precedence so a container can ship character.toml unchanged.
-    """
+    """Build :class:`FasterWhisperTranscriber` from typed *config*."""
     cfg = config or FasterWhisperSTTConfig()
-    model_size = os.environ.get("FASTER_WHISPER_MODEL_SIZE") or cfg.model_size
-    device = os.environ.get("FASTER_WHISPER_DEVICE") or cfg.device
-    compute_type = os.environ.get("FASTER_WHISPER_COMPUTE_TYPE") or cfg.compute_type
-    language = os.environ.get("FASTER_WHISPER_LANGUAGE") or cfg.language
-    idle_close_s = _env_float(
-        os.environ.get("FASTER_WHISPER_IDLE_CLOSE_S"), cfg.idle_close_s
-    )
     t = FasterWhisperTranscriber(
-        model_size=model_size,
-        device=device,
-        compute_type=compute_type,
-        language=language,
+        model_size=cfg.model_size,
+        device=cfg.device,
+        compute_type=cfg.compute_type,
+        language=cfg.language,
     )
-    t._IDLE_CLOSE_S = idle_close_s  # noqa: SLF001
+    t._IDLE_CLOSE_S = cfg.idle_close_s  # noqa: SLF001
     return t
