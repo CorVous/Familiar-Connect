@@ -31,6 +31,34 @@ window_size = 20
 [providers.turn_detection]
 strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
 
+# --- Speech-to-text --------------------------------------------------------
+#
+# backend selects the STT engine. Only "deepgram" today; V3 will widen
+# to "faster_whisper" / "parakeet". Each backend reads its own
+# ``[providers.stt.<backend>]`` table.
+#
+# Per-knob env vars (``DEEPGRAM_MODEL`` etc.) override TOML at startup,
+# matching the ``LOCAL_TURN_DETECTION`` precedent — useful when the
+# character.toml is baked into a container but a few knobs need to
+# differ per host. Secrets (``DEEPGRAM_API_KEY``) stay in env.
+
+[providers.stt]
+backend = "deepgram"            # "deepgram" (V3: | "faster_whisper" | "parakeet")
+
+[providers.stt.deepgram]
+model                   = "nova-3"
+language                = "en"
+endpointing_ms          = 500   # silence ms before a segment finalizes
+utterance_end_ms        = 1500  # speech-end grace window
+smart_format            = true
+punctuate               = true
+keyterms                = []    # bias nova-3 toward jargon / proper nouns
+replay_buffer_s         = 5.0
+keepalive_interval_s    = 3.0
+reconnect_max_attempts  = 5
+reconnect_backoff_cap_s = 16.0
+idle_close_s            = 30.0  # close per-user stream after silence; 0 disables
+
 # --- Text-to-speech --------------------------------------------------------
 #
 # provider: "azure" (default), "cartesia", or "gemini"

@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 from familiar_connect import log_style as ls
+from familiar_connect.config import DeepgramSTTConfig
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -624,55 +625,64 @@ def _env_csv(raw: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
-def create_transcriber_from_env() -> DeepgramTranscriber:
-    """Create from env vars (``DEEPGRAM_API_KEY`` required).
+def create_transcriber_from_env(
+    config: DeepgramSTTConfig | None = None,
+) -> DeepgramTranscriber:
+    """Build :class:`DeepgramTranscriber` from *config* with env overrides.
 
-    Optional overrides:
+    *config* supplies non-secret defaults from
+    ``[providers.stt.deepgram]``. Matching ``DEEPGRAM_*`` env vars
+    override per-knob — same precedence as ``LOCAL_TURN_DETECTION``,
+    so container deployments can keep the toml baked into the image
+    while per-host knobs live in env. ``DEEPGRAM_API_KEY`` is always
+    read from env.
 
-    - ``DEEPGRAM_MODEL`` (default ``nova-3``)
-    - ``DEEPGRAM_LANGUAGE`` (default ``en``)
-    - ``DEEPGRAM_ENDPOINTING_MS`` (default ``500``) — silence ms before
-      Deepgram finalizes; lower = quicker finals, higher = fewer
-      mid-sentence cuts during thinking pauses.
-    - ``DEEPGRAM_UTTERANCE_END_MS`` (default ``1500``) — speech-end
-      grace window; pairs with ``interim_results``.
-    - ``DEEPGRAM_SMART_FORMAT`` (default ``true``) — punctuation,
-      number/date/unit normalization.
-    - ``DEEPGRAM_PUNCTUATE`` (default ``true``) — explicit punctuation
-      pass; redundant with smart_format but cheap.
-    - ``DEEPGRAM_KEYTERMS`` — comma-separated jargon / proper nouns
-      to bias nova-3 toward (e.g. member display names, project
-      vocabulary).
-    - ``DEEPGRAM_REPLAY_BUFFER_S`` (default ``5.0``)
-    - ``DEEPGRAM_KEEPALIVE_INTERVAL_S`` (default ``3.0``)
-    - ``DEEPGRAM_RECONNECT_MAX_ATTEMPTS`` (default ``5``)
-    - ``DEEPGRAM_RECONNECT_BACKOFF_CAP_S`` (default ``16.0``)
-    - ``DEEPGRAM_IDLE_CLOSE_S`` (default ``30.0``) — per-user stream is
-      closed after this many seconds without audio; reopened lazily on
-      next chunk. Pre-empts Deepgram's silence-based close. ``0``
-      disables.
+    Env knobs (each overrides the corresponding TOML field):
+    ``DEEPGRAM_MODEL``, ``DEEPGRAM_LANGUAGE``,
+    ``DEEPGRAM_ENDPOINTING_MS``, ``DEEPGRAM_UTTERANCE_END_MS``,
+    ``DEEPGRAM_SMART_FORMAT``, ``DEEPGRAM_PUNCTUATE``,
+    ``DEEPGRAM_KEYTERMS`` (comma-separated; empty string clears),
+    ``DEEPGRAM_REPLAY_BUFFER_S``, ``DEEPGRAM_KEEPALIVE_INTERVAL_S``,
+    ``DEEPGRAM_RECONNECT_MAX_ATTEMPTS``,
+    ``DEEPGRAM_RECONNECT_BACKOFF_CAP_S``, ``DEEPGRAM_IDLE_CLOSE_S``.
 
     :raises ValueError: If ``DEEPGRAM_API_KEY`` not set.
     """
+    cfg = config or DeepgramSTTConfig()
     api_key = os.environ.get("DEEPGRAM_API_KEY")
     if not api_key:
         msg = "DEEPGRAM_API_KEY environment variable is required"
         raise ValueError(msg)
 
-    model = os.environ.get("DEEPGRAM_MODEL") or DEFAULT_MODEL
-    language = os.environ.get("DEEPGRAM_LANGUAGE") or DEFAULT_LANGUAGE
-    endpointing_ms = _env_int(os.environ.get("DEEPGRAM_ENDPOINTING_MS"), 500)
-    utterance_end_ms = _env_int(os.environ.get("DEEPGRAM_UTTERANCE_END_MS"), 1500)
-    smart_format = _env_bool(os.environ.get("DEEPGRAM_SMART_FORMAT"), default=True)
-    punctuate = _env_bool(os.environ.get("DEEPGRAM_PUNCTUATE"), default=True)
-    keyterms = _env_csv(os.environ.get("DEEPGRAM_KEYTERMS"))
-    replay_buffer_s = _env_float(os.environ.get("DEEPGRAM_REPLAY_BUFFER_S"), 5.0)
-    keepalive_interval_s = _env_float(
-        os.environ.get("DEEPGRAM_KEEPALIVE_INTERVAL_S"), 3.0
+    model = os.environ.get("DEEPGRAM_MODEL") or cfg.model
+    language = os.environ.get("DEEPGRAM_LANGUAGE") or cfg.language
+    endpointing_ms = _env_int(
+        os.environ.get("DEEPGRAM_ENDPOINTING_MS"), cfg.endpointing_ms
     )
-    max_attempts = _env_int(os.environ.get("DEEPGRAM_RECONNECT_MAX_ATTEMPTS"), 5)
-    backoff_cap_s = _env_float(os.environ.get("DEEPGRAM_RECONNECT_BACKOFF_CAP_S"), 16.0)
-    idle_close_s = _env_float(os.environ.get("DEEPGRAM_IDLE_CLOSE_S"), 30.0)
+    utterance_end_ms = _env_int(
+        os.environ.get("DEEPGRAM_UTTERANCE_END_MS"), cfg.utterance_end_ms
+    )
+    smart_format = _env_bool(
+        os.environ.get("DEEPGRAM_SMART_FORMAT"), default=cfg.smart_format
+    )
+    punctuate = _env_bool(os.environ.get("DEEPGRAM_PUNCTUATE"), default=cfg.punctuate)
+    # keyterms: env "" clears (set-but-empty); env unset keeps TOML.
+    keyterms_env = os.environ.get("DEEPGRAM_KEYTERMS")
+    keyterms = _env_csv(keyterms_env) if keyterms_env is not None else cfg.keyterms
+    replay_buffer_s = _env_float(
+        os.environ.get("DEEPGRAM_REPLAY_BUFFER_S"), cfg.replay_buffer_s
+    )
+    keepalive_interval_s = _env_float(
+        os.environ.get("DEEPGRAM_KEEPALIVE_INTERVAL_S"), cfg.keepalive_interval_s
+    )
+    max_attempts = _env_int(
+        os.environ.get("DEEPGRAM_RECONNECT_MAX_ATTEMPTS"), cfg.reconnect_max_attempts
+    )
+    backoff_cap_s = _env_float(
+        os.environ.get("DEEPGRAM_RECONNECT_BACKOFF_CAP_S"),
+        cfg.reconnect_backoff_cap_s,
+    )
+    idle_close_s = _env_float(os.environ.get("DEEPGRAM_IDLE_CLOSE_S"), cfg.idle_close_s)
 
     t = DeepgramTranscriber(
         api_key=api_key,

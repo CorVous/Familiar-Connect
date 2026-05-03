@@ -17,7 +17,9 @@ from familiar_connect.config import (
     ChannelOverrides,
     CharacterConfig,
     ConfigError,
+    DeepgramSTTConfig,
     LLMSlotConfig,
+    STTConfig,
     TTSConfig,
     TurnDetectionConfig,
     load_character_config,
@@ -249,5 +251,109 @@ class TestTurnDetectionConfig:
         path = tmp_path / "character.toml"
         path.write_text("[providers.turn_detection]\nstrategy = 42\n")
         match = r"\[providers\.turn_detection\]\.strategy"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestSTTConfig:
+    def test_default_backend_is_deepgram(self) -> None:
+        cfg = STTConfig()
+        assert cfg.backend == "deepgram"
+        assert isinstance(cfg.deepgram, DeepgramSTTConfig)
+
+    def test_deepgram_defaults_match_shipped_values(self) -> None:
+        """Defaults mirror the previous DEEPGRAM_* env var defaults."""
+        cfg = DeepgramSTTConfig()
+        assert cfg.model == "nova-3"
+        assert cfg.language == "en"
+        assert cfg.endpointing_ms == 500
+        assert cfg.utterance_end_ms == 1500
+        assert cfg.smart_format is True
+        assert cfg.punctuate is True
+        assert cfg.keyterms == ()
+        assert cfg.replay_buffer_s == pytest.approx(5.0)
+        assert cfg.keepalive_interval_s == pytest.approx(3.0)
+        assert cfg.reconnect_max_attempts == 5
+        assert cfg.reconnect_backoff_cap_s == pytest.approx(16.0)
+        assert cfg.idle_close_s == pytest.approx(30.0)
+
+    def test_omitted_section_uses_defaults(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.stt.backend == "deepgram"
+        assert cfg.stt.deepgram.endpointing_ms == 500
+        assert cfg.stt.deepgram.utterance_end_ms == 1500
+        assert cfg.stt.deepgram.keyterms == ()
+
+    def test_deepgram_knobs_overridden(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.stt.deepgram]\n"
+            'model = "nova-2"\n'
+            'language = "es"\n'
+            "endpointing_ms = 300\n"
+            "utterance_end_ms = 1200\n"
+            "smart_format = false\n"
+            "punctuate = false\n"
+            'keyterms = ["lifecycle mesh", "Tam"]\n'
+            "replay_buffer_s = 7.5\n"
+            "keepalive_interval_s = 2.0\n"
+            "reconnect_max_attempts = 8\n"
+            "reconnect_backoff_cap_s = 32.0\n"
+            "idle_close_s = 45.0\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        dg = cfg.stt.deepgram
+        assert dg.model == "nova-2"
+        assert dg.language == "es"
+        assert dg.endpointing_ms == 300
+        assert dg.utterance_end_ms == 1200
+        assert dg.smart_format is False
+        assert dg.punctuate is False
+        assert dg.keyterms == ("lifecycle mesh", "Tam")
+        assert dg.replay_buffer_s == pytest.approx(7.5)
+        assert dg.keepalive_interval_s == pytest.approx(2.0)
+        assert dg.reconnect_max_attempts == 8
+        assert dg.reconnect_backoff_cap_s == pytest.approx(32.0)
+        assert dg.idle_close_s == pytest.approx(45.0)
+
+    def test_unknown_backend_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.stt]\nbackend = "mystery"\n')
+        match = r"\[providers\.stt\]\.backend"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_backend_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.stt]\nbackend = 42\n")
+        match = r"\[providers\.stt\]\.backend"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_endpointing_ms_must_be_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.stt.deepgram]\nendpointing_ms = 1.5\n")
+        match = r"endpointing_ms"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_keyterms_must_be_list_of_strings(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.stt.deepgram]\nkeyterms = [1, 2]\n")
+        match = r"keyterms"
         with pytest.raises(ConfigError, match=match):
             load_character_config(path, defaults_path=default_profile_path)

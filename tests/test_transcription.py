@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 import aiohttp
 import pytest
 
+from familiar_connect.config import DeepgramSTTConfig
 from familiar_connect.transcription import (
     DEEPGRAM_WS_URL,
     DEFAULT_IDLE_FINALIZE_S,
@@ -1330,3 +1331,72 @@ class TestCreateTranscriberFromEnv:
             client = create_transcriber_from_env()
 
         assert client.smart_format is False
+
+    def test_toml_config_flows_through_when_no_env(self) -> None:
+        """A2: ``DeepgramSTTConfig`` knobs reach the transcriber unchanged."""
+        env = {"DEEPGRAM_API_KEY": "sk-test"}
+        cfg = DeepgramSTTConfig(
+            model="nova-2",
+            language="es",
+            endpointing_ms=275,
+            utterance_end_ms=1750,
+            smart_format=False,
+            punctuate=False,
+            keyterms=("lifecycle mesh", "Tam"),
+            replay_buffer_s=8.0,
+            keepalive_interval_s=2.5,
+            reconnect_max_attempts=7,
+            reconnect_backoff_cap_s=20.0,
+            idle_close_s=45.0,
+        )
+        with patch.dict(os.environ, env, clear=True):
+            os.environ["DEEPGRAM_API_KEY"] = "sk-test"
+            client = create_transcriber_from_env(cfg)
+
+        assert client.model == "nova-2"
+        assert client.language == "es"
+        assert client.endpointing_ms == 275
+        assert client.utterance_end_ms == 1750
+        assert client.smart_format is False
+        assert client.punctuate is False
+        assert client.keyterms == ("lifecycle mesh", "Tam")
+        assert client.replay_buffer_s == pytest.approx(8.0)
+        assert pytest.approx(2.5) == client._KEEPALIVE_INTERVAL
+        assert client._MAX_RECONNECTS == 7
+        assert pytest.approx(20.0) == client._RECONNECT_BACKOFF_CAP
+        assert pytest.approx(45.0) == client._IDLE_CLOSE_S
+
+    def test_env_overrides_toml_config(self) -> None:
+        """Env vars win over TOML — same precedence as ``LOCAL_TURN_DETECTION``."""
+        cfg = DeepgramSTTConfig(
+            model="nova-2",
+            endpointing_ms=275,
+            keyterms=("from-toml",),
+        )
+        env = {
+            "DEEPGRAM_API_KEY": "sk-test",
+            "DEEPGRAM_MODEL": "nova-3",
+            "DEEPGRAM_ENDPOINTING_MS": "600",
+            "DEEPGRAM_KEYTERMS": "env-1, env-2",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = create_transcriber_from_env(cfg)
+
+        assert client.model == "nova-3"
+        assert client.endpointing_ms == 600
+        assert client.keyterms == ("env-1", "env-2")
+
+    def test_empty_keyterms_env_overrides_toml(self) -> None:
+        """``DEEPGRAM_KEYTERMS=`` (set but empty) clears TOML keyterms.
+
+        Distinguishes "env unset → keep TOML" from "env empty → clear".
+        """
+        cfg = DeepgramSTTConfig(keyterms=("from-toml",))
+        env = {
+            "DEEPGRAM_API_KEY": "sk-test",
+            "DEEPGRAM_KEYTERMS": "",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = create_transcriber_from_env(cfg)
+
+        assert client.keyterms == ()

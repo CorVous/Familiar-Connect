@@ -11,10 +11,10 @@ The split:
   Per-familiar, deep-merged over `_default/character.toml`.
   `[channels.<id>]` overrides per Discord channel.
 
-Where a knob lives in env today but isn't a secret (STT thresholds),
-this page documents both the current location and the planned TOML
-home. [Roadmap A2](roadmap.md#a2-consolidate-stt-env-vars-into-toml)
-tracks the migration.
+Non-secret operator knobs live in TOML (`character.toml` fields and
+their `[channels.<id>]` overrides). The corresponding env var, where
+one exists, overrides TOML at startup so containers can keep the
+toml baked into the image and tune per host without a rebuild.
 
 ## Where each knob lives
 
@@ -25,7 +25,7 @@ tracks the migration.
 | LLM model + temperature per slot | `[llm.<slot>]` | unchanged |
 | TTS provider + voice | `[tts]` | unchanged |
 | History window + prompt layer order | `[providers.history]`, `[channels.<id>]` | unchanged |
-| Deepgram STT thresholds & key-terms | env (`DEEPGRAM_*`) | `[providers.stt.deepgram]` (A2) |
+| Deepgram STT thresholds & key-terms | `[providers.stt.deepgram]` (env override per knob) | unchanged |
 | Turn detection strategy | `[providers.turn_detection]` | unchanged |
 | Memory projector selection | hard-wired | `[providers.memory]` (M5) |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
@@ -68,6 +68,15 @@ window_size = 20
 [providers.turn_detection]
 strategy = "deepgram"    # "deepgram" | "ten+smart_turn"
 
+[providers.stt]
+backend = "deepgram"     # V3 widens to "faster_whisper" | "parakeet"
+
+[providers.stt.deepgram]
+model           = "nova-3"
+language        = "en"
+endpointing_ms  = 500
+keyterms        = []     # see § STT — Deepgram for the full set
+
 [tts]
 provider          = "azure"      # "azure" | "cartesia" | "gemini"
 azure_voice       = "en-US-AmberNeural"
@@ -96,11 +105,13 @@ message_rendering   = "prefixed"  # "prefixed" | "name_only"
 1. **`[llm.<slot>].provider_order`** — pin OpenRouter to a single
    stable provider so prompt caching survives across turns (see
    [provider pinning](#provider-pinning) below).
-2. **`DEEPGRAM_ENDPOINTING_MS`** (default `500`). Drop to `300` for
-   snappier finals; raise to `700` if it cuts mid-sentence. Right
-   long-term answer: a semantic turn classifier (V1).
-3. **`DEEPGRAM_UTTERANCE_END_MS`** (default `1500`). Speech-end
-   grace. Lower = faster handoff, more risk of mid-sentence cuts.
+2. **`[providers.stt.deepgram].endpointing_ms`** (default `500`).
+   Drop to `300` for snappier finals; raise to `700` if it cuts
+   mid-sentence. Right long-term answer: a semantic turn classifier
+   (V1).
+3. **`[providers.stt.deepgram].utterance_end_ms`** (default `1500`).
+   Speech-end grace. Lower = faster handoff, more risk of
+   mid-sentence cuts.
 4. **`[channels.<id>].history_window_size`**. Lower on busy
    channels — smaller prompt, lower LLM TTFT.
 5. **`[tts].provider = "cartesia"`**. Lowest hosted
@@ -176,23 +187,66 @@ turn detection, and voice pipeline mode.
 
 ## STT — Deepgram
 
-Today: env. Defaults bias toward fewer mid-sentence cuts during
-thinking pauses; lower the silence thresholds for snappier finals.
+`backend = "deepgram"` is the only option today; V3 widens it. Knobs
+live in `[providers.stt.deepgram]`. Defaults bias toward fewer
+mid-sentence cuts during thinking pauses; lower the silence
+thresholds for snappier finals.
 
-| Var | Default | Purpose |
+```toml
+[providers.stt]
+backend = "deepgram"            # V3: | "faster_whisper" | "parakeet"
+
+[providers.stt.deepgram]
+model                   = "nova-3"
+language                = "en"
+endpointing_ms          = 500
+utterance_end_ms        = 1500
+smart_format            = true
+punctuate               = true
+keyterms                = ["lifecycle mesh", "Tam"]
+replay_buffer_s         = 5.0
+keepalive_interval_s    = 3.0
+reconnect_max_attempts  = 5
+reconnect_backoff_cap_s = 16.0
+idle_close_s            = 30.0
+```
+
+| Field | Default | Purpose |
 |---|---|---|
-| `DEEPGRAM_MODEL` | `nova-3` | Model name. |
-| `DEEPGRAM_LANGUAGE` | `en` | Language code. |
-| `DEEPGRAM_ENDPOINTING_MS` | `500` | Silence ms before a segment finalizes. |
-| `DEEPGRAM_UTTERANCE_END_MS` | `1500` | Speech-end grace window. |
-| `DEEPGRAM_SMART_FORMAT` | `true` | Punctuation, number/date/unit normalization. |
-| `DEEPGRAM_PUNCTUATE` | `true` | Explicit punctuation pass. |
-| `DEEPGRAM_KEYTERMS` | _(empty)_ | Comma-separated jargon to bias nova-3 (e.g. `"lifecycle mesh, Tam"`). |
-| `DEEPGRAM_REPLAY_BUFFER_S` | `5.0` | Seconds replayed after WebSocket reconnect. |
-| `DEEPGRAM_KEEPALIVE_INTERVAL_S` | `3.0` | Keepalive ping cadence. |
-| `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` | `5` | Reconnect attempts before giving up. |
-| `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` | `16.0` | Reconnect backoff cap. |
-| `DEEPGRAM_IDLE_CLOSE_S` | `30.0` | Per-user stream closed after this many silent seconds; reopened on next chunk. `0` disables. |
+| `model` | `nova-3` | Model name. |
+| `language` | `en` | Language code. |
+| `endpointing_ms` | `500` | Silence ms before a segment finalizes. |
+| `utterance_end_ms` | `1500` | Speech-end grace window. |
+| `smart_format` | `true` | Punctuation, number/date/unit normalization. |
+| `punctuate` | `true` | Explicit punctuation pass. |
+| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. |
+| `replay_buffer_s` | `5.0` | Seconds replayed after WebSocket reconnect. |
+| `keepalive_interval_s` | `3.0` | Keepalive ping cadence. |
+| `reconnect_max_attempts` | `5` | Reconnect attempts before giving up. |
+| `reconnect_backoff_cap_s` | `16.0` | Reconnect backoff cap. |
+| `idle_close_s` | `30.0` | Per-user stream closed after this many silent seconds; reopened on next chunk. `0` disables. |
+
+### Env overrides
+
+Each TOML field above has a matching `DEEPGRAM_*` env var that wins
+at startup — same precedence model as `LOCAL_TURN_DETECTION`. Useful
+when a baked-in container image needs per-host knobs without a
+rebuild. `DEEPGRAM_API_KEY` (the secret) only lives in env.
+
+| Env var | Overrides |
+|---|---|
+| `DEEPGRAM_MODEL` | `model` |
+| `DEEPGRAM_LANGUAGE` | `language` |
+| `DEEPGRAM_ENDPOINTING_MS` | `endpointing_ms` |
+| `DEEPGRAM_UTTERANCE_END_MS` | `utterance_end_ms` |
+| `DEEPGRAM_SMART_FORMAT` | `smart_format` (`0/1`) |
+| `DEEPGRAM_PUNCTUATE` | `punctuate` (`0/1`) |
+| `DEEPGRAM_KEYTERMS` | `keyterms` (comma-separated; empty string clears) |
+| `DEEPGRAM_REPLAY_BUFFER_S` | `replay_buffer_s` |
+| `DEEPGRAM_KEEPALIVE_INTERVAL_S` | `keepalive_interval_s` |
+| `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` | `reconnect_max_attempts` |
+| `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` | `reconnect_backoff_cap_s` |
+| `DEEPGRAM_IDLE_CLOSE_S` | `idle_close_s` |
 
 ## Local turn detection (V1)
 
@@ -234,32 +288,6 @@ but the feature flag lives in the environment.
 A missing Smart Turn ONNX file turns the feature off with a warning
 — the bot falls back to Deepgram endpointing rather than failing to
 start.
-
-### Planned consolidation
-
-[A2](roadmap.md#a2-consolidate-stt-env-vars-into-toml) moves
-non-secret knobs to `[providers.stt.deepgram]`. Env continues to
-override TOML (container-friendly).
-
-```toml
-# planned, not yet wired
-[providers.stt]
-backend = "deepgram"
-
-[providers.stt.deepgram]
-model               = "nova-3"
-language            = "en"
-endpointing_ms      = 500
-utterance_end_ms    = 1500
-smart_format        = true
-punctuate           = true
-keyterms            = ["lifecycle mesh", "Tam"]
-replay_buffer_s     = 5.0
-keepalive_interval_s = 3.0
-reconnect_max_attempts = 5
-reconnect_backoff_cap_s = 16.0
-idle_close_s        = 30.0
-```
 
 ## TTS
 
@@ -327,9 +355,15 @@ read by today's code.
 [providers.turn_detection]
 strategy = "deepgram"            # | "ten+smart_turn"
 
-# planned (A1-remaining / V3 / V5 / M5)
 [providers.stt]
-backend = "deepgram"             # | "faster_whisper" | "parakeet"  (V3)
+backend = "deepgram"             # V3 widens: | "faster_whisper" | "parakeet"
+
+# planned (V3 / V5 / M5)
+[providers.stt.faster_whisper]   # (V3)
+model_size = "small"
+
+[providers.stt.parakeet]         # (V3)
+model = "parakeet-tdt-0.6b-v3"
 
 [providers.memory]
 projectors = ["rich_note", "people_dossier"]                        # (M5)

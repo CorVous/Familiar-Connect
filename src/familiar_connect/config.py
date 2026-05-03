@@ -48,6 +48,46 @@ class TurnDetectionConfig:
     strategy: str = "deepgram"
 
 
+# V3 will widen to {"deepgram", "faster_whisper", "parakeet"}.
+_STT_BACKENDS: frozenset[str] = frozenset({"deepgram"})
+
+
+@dataclass(frozen=True)
+class DeepgramSTTConfig:
+    """Deepgram knobs from ``[providers.stt.deepgram]``.
+
+    Non-secret. ``DEEPGRAM_API_KEY`` stays in env. Matching ``DEEPGRAM_*``
+    env vars override per-knob (container-friendly — same precedence as
+    ``LOCAL_TURN_DETECTION``). Defaults match the previous env-only
+    defaults so unconfigured installs are unaffected.
+    """
+
+    model: str = "nova-3"
+    language: str = "en"
+    endpointing_ms: int = 500
+    utterance_end_ms: int = 1500
+    smart_format: bool = True
+    punctuate: bool = True
+    keyterms: tuple[str, ...] = ()
+    replay_buffer_s: float = 5.0
+    keepalive_interval_s: float = 3.0
+    reconnect_max_attempts: int = 5
+    reconnect_backoff_cap_s: float = 16.0
+    idle_close_s: float = 30.0
+
+
+@dataclass(frozen=True)
+class STTConfig:
+    """STT backend selector + per-backend knobs from ``[providers.stt]``.
+
+    Only ``deepgram`` today. V3 widens *backend* to ``faster_whisper`` /
+    ``parakeet`` and adds parallel ``[providers.stt.<backend>]`` tables.
+    """
+
+    backend: str = "deepgram"
+    deepgram: DeepgramSTTConfig = field(default_factory=DeepgramSTTConfig)
+
+
 DEFAULT_AZURE_TTS_VOICE = "en-US-AmberNeural"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
@@ -105,6 +145,7 @@ class CharacterConfig:
     tts: TTSConfig = field(default_factory=TTSConfig)
     channels: dict[int, ChannelOverrides] = field(default_factory=dict)
     turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
+    stt: STTConfig = field(default_factory=STTConfig)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty overrides if none."""
@@ -190,6 +231,12 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     turn_detection = _parse_turn_detection_config(turn_detection_raw)
 
+    stt_raw = providers_raw.get("stt", {})
+    if not isinstance(stt_raw, dict):
+        msg = f"[providers.stt] must be a table, got {type(stt_raw).__name__}"
+        raise ConfigError(msg)
+    stt = _parse_stt_config(stt_raw)
+
     return CharacterConfig(
         history_window_size=history_window_size,
         display_tz=display_tz,
@@ -198,6 +245,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         tts=tts,
         channels=channels,
         turn_detection=turn_detection,
+        stt=stt,
     )
 
 
@@ -394,6 +442,100 @@ def _parse_turn_detection_config(raw: dict) -> TurnDetectionConfig:
         )
         raise ConfigError(msg)
     return TurnDetectionConfig(strategy=strategy_raw)
+
+
+def _parse_stt_config(raw: dict) -> STTConfig:
+    """Parse and validate the ``[providers.stt]`` section."""
+    backend_raw = raw.get("backend", "deepgram")
+    if not isinstance(backend_raw, str):
+        msg = (
+            f"[providers.stt].backend must be a string, "
+            f"got {type(backend_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    if backend_raw not in _STT_BACKENDS:
+        valid = ", ".join(sorted(_STT_BACKENDS))
+        msg = f"[providers.stt].backend {backend_raw!r} unknown; valid options: {valid}"
+        raise ConfigError(msg)
+
+    deepgram_raw = raw.get("deepgram", {})
+    if not isinstance(deepgram_raw, dict):
+        msg = (
+            f"[providers.stt.deepgram] must be a table, "
+            f"got {type(deepgram_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    deepgram = _parse_deepgram_stt_config(deepgram_raw)
+    return STTConfig(backend=backend_raw, deepgram=deepgram)
+
+
+def _parse_deepgram_stt_config(raw: dict) -> DeepgramSTTConfig:
+    """Parse ``[providers.stt.deepgram]`` knobs; validate types."""
+    defaults = DeepgramSTTConfig()
+
+    def _str(key: str, default: str) -> str:
+        v = raw.get(key, default)
+        if not isinstance(v, str) or not v:
+            msg = f"[providers.stt.deepgram].{key} must be a non-empty string"
+            raise ConfigError(msg)
+        return v
+
+    def _int(key: str, default: int) -> int:
+        v = raw.get(key, default)
+        if not isinstance(v, int) or isinstance(v, bool):
+            msg = (
+                f"[providers.stt.deepgram].{key} must be an integer, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        return v
+
+    def _float(key: str, default: float) -> float:
+        v = raw.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = (
+                f"[providers.stt.deepgram].{key} must be a number, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        return float(v)
+
+    def _bool(key: str, *, default: bool) -> bool:
+        v = raw.get(key, default)
+        if not isinstance(v, bool):
+            msg = (
+                f"[providers.stt.deepgram].{key} must be a bool, got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        return v
+
+    keyterms_raw = raw.get("keyterms", list(defaults.keyterms))
+    if not isinstance(keyterms_raw, list) or not all(
+        isinstance(x, str) for x in keyterms_raw
+    ):
+        msg = "[providers.stt.deepgram].keyterms must be a list of strings"
+        raise ConfigError(msg)
+
+    return DeepgramSTTConfig(
+        model=_str("model", defaults.model),
+        language=_str("language", defaults.language),
+        endpointing_ms=_int("endpointing_ms", defaults.endpointing_ms),
+        utterance_end_ms=_int("utterance_end_ms", defaults.utterance_end_ms),
+        smart_format=_bool("smart_format", default=defaults.smart_format),
+        punctuate=_bool("punctuate", default=defaults.punctuate),
+        keyterms=tuple(keyterms_raw),
+        replay_buffer_s=_float("replay_buffer_s", defaults.replay_buffer_s),
+        keepalive_interval_s=_float(
+            "keepalive_interval_s", defaults.keepalive_interval_s
+        ),
+        reconnect_max_attempts=_int(
+            "reconnect_max_attempts", defaults.reconnect_max_attempts
+        ),
+        reconnect_backoff_cap_s=_float(
+            "reconnect_backoff_cap_s", defaults.reconnect_backoff_cap_s
+        ),
+        idle_close_s=_float("idle_close_s", defaults.idle_close_s),
+    )
 
 
 def _parse_tts_config(raw: dict) -> TTSConfig:

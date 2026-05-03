@@ -415,7 +415,7 @@ def run(args: argparse.Namespace) -> int:
         tts_client = None
 
     try:
-        transcriber = create_transcriber_from_env()
+        transcriber = create_transcriber_from_env(character_config.stt.deepgram)
     except ValueError as exc:
         _logger.warning("Transcriber unavailable: %s", exc)
         transcriber = None

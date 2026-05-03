@@ -145,15 +145,6 @@ mode = "cascaded"             # | "s2s"                           # (V5)
 
 These will be wired when the corresponding backends land (V3, M5).
 
-### A2 — Consolidate STT env vars into TOML
-
-Today: `DEEPGRAM_*` knobs live in env. Awkward for per-character
-tuning; per-channel overrides impossible.
-
-Change: move non-secret Deepgram knobs to
-`[providers.stt.deepgram]`. Secrets stay in env. Env continues to
-override TOML for container deployments. Schema in [Tuning](tuning.md).
-
 ## Out of scope
 
 - **Letta / MemGPT-style core-memory edit tools** — destructive,

@@ -1,9 +1,7 @@
 # Configuration Model
 
 Two config levels. Every operator knob, organised by goal:
-[Tuning](tuning.md). Forward-looking schema consolidating env-var
-tunables into TOML:
-[Roadmap A2](roadmap.md#a2-consolidate-stt-env-vars-into-toml).
+[Tuning](tuning.md).
 
 ## 1. Bot instance config
 
@@ -15,14 +13,7 @@ Set by the admin, never exposed through Discord.
 - `CARTESIA_API_KEY` — Cartesia TTS (required when `[tts].provider="cartesia"`)
 - `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech
 - `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS
-- `DEEPGRAM_API_KEY` — Deepgram STT
-- `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` — STT model + language (defaults: `nova-3` / `en`)
-- `DEEPGRAM_ENDPOINTING_MS` — silence ms before a segment finalizes (default `500`). Lower = quicker finals; higher = fewer mid-sentence cuts during thinking pauses.
-- `DEEPGRAM_UTTERANCE_END_MS` — speech-end grace window (default `1500`).
-- `DEEPGRAM_SMART_FORMAT` / `DEEPGRAM_PUNCTUATE` — both default `true`. Set to `0` to disable.
-- `DEEPGRAM_KEYTERMS` — comma-separated jargon / proper nouns to bias nova-3 toward (e.g. `"rebasing, lifecycle mesh, Tam"`). Empty by default.
-- `DEEPGRAM_REPLAY_BUFFER_S` / `DEEPGRAM_KEEPALIVE_INTERVAL_S` / `DEEPGRAM_RECONNECT_MAX_ATTEMPTS` / `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` — WebSocket resilience tuning.
-- `DEEPGRAM_IDLE_CLOSE_S` — per-user stream is closed after this many seconds without audio (default `30.0`); reopened lazily on the user's next chunk. Pre-empts Deepgram's silence-based session close so idle per-user streams stop looping through reconnect + replay. Set to `0` to disable.
+- `DEEPGRAM_API_KEY` — Deepgram STT credential. Other Deepgram knobs live in `[providers.stt.deepgram]`; the matching `DEEPGRAM_*` env vars override TOML at startup. See [Tuning — STT — Deepgram](tuning.md#stt-deepgram) for the full list.
 - `FAMILIAR_ID` — selects which character folder under `data/familiars/` this process runs
 
 Where it lives: environment variables and/or a `.env` file. Never
@@ -40,6 +31,10 @@ Surface today:
 - `[providers.history].window_size` — SQLite transcript window (default 20).
 - `[providers.turn_detection].strategy` — `"deepgram"` (default) or
   `"ten+smart_turn"`. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
+- `[providers.stt]` + `[providers.stt.deepgram]` — STT backend
+  selector + per-backend knobs (`endpointing_ms`, `keyterms`, …).
+  Only `deepgram` today; V3 widens. Per-knob env override available.
+  See [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
 - `[llm.main_prose]` — model + optional temperature.
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
 

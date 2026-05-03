@@ -150,9 +150,10 @@ def create_local_turn_detector(
     """Build :class:`LocalTurnDetector` from env knobs; no feature-flag gate.
 
     Called when ``[providers.turn_detection] strategy = "ten+smart_turn"``
-    in ``character.toml``. Knob values are still read from env (A2 will
-    move them to TOML). Returns ``None`` (with a warning) when the
-    SmartTurn model file is missing.
+    in ``character.toml``. Knob values are still read from env;
+    a future TOML migration mirrors the STT consolidation.
+    Returns ``None`` (with a warning) when the SmartTurn model file
+    is missing.
 
     :param smart_turn_path: override path to the SmartTurn ONNX model.
         Defaults to ``SMART_TURN_MODEL_PATH`` env var or
