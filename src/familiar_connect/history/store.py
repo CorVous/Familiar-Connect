@@ -135,14 +135,20 @@ class Fact:
 
     :param source_turn_ids: ids in ``turns`` the fact was distilled
         from — forever provenance, per plan § Design.5.
-    :param superseded_at: when this fact was retired, or ``None`` if
-        still current. Supersession keeps the row (no delete) so the
-        prior state stays visible for audit.
+    :param superseded_at: system-time — when this fact was retired,
+        or ``None`` if still current. Supersession keeps the row (no
+        delete) so the prior state stays visible for audit.
     :param superseded_by: id of the replacement fact, or ``None`` if
         still current.
     :param subjects: best-effort canonical-key annotations. Empty
         tuple for legacy rows or when the extractor couldn't link a
         name to any participant.
+    :param valid_from: world-time — when the fact began applying.
+        Default is the source turn's timestamp; LLM may override when
+        an explicit "as of …" phrase is detected. ``None`` only on
+        legacy rows pre-M1.
+    :param valid_to: world-time — when the fact stopped applying;
+        ``None`` while still in effect.
     """
 
     id: int
@@ -154,6 +160,8 @@ class Fact:
     superseded_at: datetime | None = None
     superseded_by: int | None = None
     subjects: tuple[FactSubject, ...] = ()
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
 
 
 _SCHEMA = """
@@ -254,10 +262,12 @@ CREATE TABLE IF NOT EXISTS facts (
     channel_id        INTEGER,
     text              TEXT    NOT NULL,
     source_turn_ids   TEXT    NOT NULL,  -- JSON array of ids in ``turns``
-    created_at        TEXT    NOT NULL,
-    superseded_at     TEXT,               -- NULL = current
+    created_at        TEXT    NOT NULL,  -- system-time write
+    superseded_at     TEXT,               -- system-time retire; NULL = current
     superseded_by     INTEGER,            -- NULL = current; FK-by-convention
-    subjects_json     TEXT                -- JSON list; NULL = legacy fact
+    subjects_json     TEXT,               -- JSON list; NULL = legacy fact
+    valid_from        TEXT,               -- world-time start; NULL = legacy
+    valid_to          TEXT                -- world-time end; NULL = still applies
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_familiar
@@ -265,6 +275,9 @@ CREATE INDEX IF NOT EXISTS idx_facts_familiar
 
 CREATE INDEX IF NOT EXISTS idx_facts_familiar_current
     ON facts (familiar_id, superseded_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_facts_familiar_validity
+    ON facts (familiar_id, valid_from, valid_to);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
     text,
@@ -441,6 +454,41 @@ def _tokenize_fts_query(query: str) -> list[str]:
     return out
 
 
+def _facts_validity_where(
+    *,
+    include_superseded: bool,
+    as_of: datetime | None,
+    alias: str = "",
+) -> tuple[str, tuple[object, ...]]:
+    """Build SQL fragment + params for the ``facts`` validity filter.
+
+    Default ("current truth"):
+        ``superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now)``
+
+    With ``as_of``:
+        bi-temporal slice — ``valid_from`` IS NULL or <= as_of, and
+        ``valid_to`` IS NULL or > as_of. Includes superseded rows so
+        audit queries can recover prior beliefs (overrides
+        ``include_superseded``).
+    """
+    prefix = f"{alias}." if alias else ""
+    if as_of is not None:
+        ts = as_of.isoformat()
+        clause = (
+            f"AND ({prefix}valid_from IS NULL OR {prefix}valid_from <= ?) "
+            f"AND ({prefix}valid_to IS NULL OR {prefix}valid_to > ?)"
+        )
+        return clause, (ts, ts)
+    parts: list[str] = []
+    params: list[object] = []
+    if not include_superseded:
+        parts.append(f"AND {prefix}superseded_at IS NULL")
+    now_ts = datetime.now(tz=UTC).isoformat()
+    parts.append(f"AND ({prefix}valid_to IS NULL OR {prefix}valid_to > ?)")
+    params.append(now_ts)
+    return " ".join(parts), tuple(params)
+
+
 def _build_fts_match(query: str) -> str:
     """OR-joined MATCH expression for free-form text.
 
@@ -568,6 +616,10 @@ class HistoryStore:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_by INTEGER")
             if "subjects_json" not in facts_cols:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN subjects_json TEXT")
+            if "valid_from" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT")
+            if "valid_to" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_to TEXT")
             self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -1389,30 +1441,35 @@ class HistoryStore:
         canonical_key: str,
         min_id_exclusive: int = 0,
         include_superseded: bool = False,
+        as_of: datetime | None = None,
     ) -> list[Fact]:
         """Return facts mentioning ``canonical_key``, ASC by id.
 
         Pre-filters with ``subjects_json LIKE`` (cheap; the JSON form
         wraps each key in quotes so substring collisions like
         ``discord:1`` vs ``discord:11`` don't false-positive). Final
-        membership check parses the JSON in Python.
+        membership check parses the JSON in Python. ``as_of`` mirrors
+        :meth:`recent_facts` semantics.
         """
-        where_super = "" if include_superseded else "AND superseded_at IS NULL"
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of
+        )
         like_pattern = f'%"{canonical_key}"%'
         rows = self._conn.execute(
             f"""
             SELECT id, familiar_id, channel_id, text,
                    source_turn_ids, created_at,
-                   superseded_at, superseded_by, subjects_json
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to
               FROM facts
              WHERE familiar_id = ?
                AND id > ?
                AND subjects_json IS NOT NULL
                AND subjects_json LIKE ?
-               {where_super}
+               {where}
              ORDER BY id ASC
             """,  # noqa: S608
-            (familiar_id, min_id_exclusive, like_pattern),
+            (familiar_id, min_id_exclusive, like_pattern, *params),
         ).fetchall()
         out: list[Fact] = []
         for row in rows:
@@ -1521,11 +1578,19 @@ class HistoryStore:
         text: str,
         source_turn_ids: Iterable[int],
         subjects: Iterable[FactSubject] = (),
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
     ) -> Fact:
         """Persist one fact. ``source_turn_ids`` and ``subjects`` stored as JSON.
 
         ``subjects`` is the extractor's best-effort link to canonical
         identities — see :class:`FactSubject`.
+
+        ``valid_from`` / ``valid_to`` are world-time (when the fact
+        applied in the world). When ``valid_from`` is omitted it
+        defaults to ``created_at``; callers (e.g. ``FactExtractor``)
+        pass the source turn's timestamp explicitly. ``valid_to``
+        defaults to ``None`` — fact still applies.
         """
         ids = [int(i) for i in source_turn_ids]
         subjects_tuple = tuple(subjects)
@@ -1541,11 +1606,13 @@ class HistoryStore:
             else None
         )
         ts = datetime.now(tz=UTC)
+        valid_from_eff = valid_from if valid_from is not None else ts
         cur = self._conn.execute(
             """
             INSERT INTO facts (familiar_id, channel_id, text,
-                               source_turn_ids, created_at, subjects_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+                               source_turn_ids, created_at, subjects_json,
+                               valid_from, valid_to)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -1554,6 +1621,8 @@ class HistoryStore:
                 json.dumps(ids),
                 ts.isoformat(),
                 subjects_blob,
+                valid_from_eff.isoformat(),
+                valid_to.isoformat() if valid_to is not None else None,
             ),
         )
         self._conn.commit()
@@ -1565,6 +1634,8 @@ class HistoryStore:
             source_turn_ids=tuple(ids),
             created_at=ts,
             subjects=subjects_tuple,
+            valid_from=valid_from_eff,
+            valid_to=valid_to,
         )
 
     def recent_facts(
@@ -1573,28 +1644,36 @@ class HistoryStore:
         familiar_id: str,
         limit: int,
         include_superseded: bool = False,
+        as_of: datetime | None = None,
     ) -> list[Fact]:
         """Return the ``limit`` most recent facts, newest first.
 
-        Excludes superseded facts unless ``include_superseded`` is set —
-        the default is "what's currently true". Audit / contradiction
-        inspection passes ``include_superseded=True``.
+        Default ("current truth"): excludes superseded facts and any
+        whose world-time ``valid_to`` is in the past.
+
+        ``as_of`` switches to a bi-temporal world-time slice — returns
+        facts whose ``valid_from <= as_of`` and (``valid_to`` is NULL
+        or > ``as_of``). Includes superseded rows so audit queries can
+        recover prior beliefs (overrides ``include_superseded``).
         """
         if limit <= 0:
             return []
-        where_super = "" if include_superseded else "AND superseded_at IS NULL"
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of
+        )
         rows = self._conn.execute(
             f"""
             SELECT id, familiar_id, channel_id, text,
                    source_turn_ids, created_at,
-                   superseded_at, superseded_by, subjects_json
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to
               FROM facts
              WHERE familiar_id = ?
-               {where_super}
+               {where}
              ORDER BY id DESC
              LIMIT ?
             """,  # noqa: S608
-            (familiar_id, limit),
+            (familiar_id, *params, limit),
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
 
@@ -1605,33 +1684,38 @@ class HistoryStore:
         query: str,
         limit: int,
         include_superseded: bool = False,
+        as_of: datetime | None = None,
     ) -> list[Fact]:
         """FTS search over ``facts.text``.
 
-        See :meth:`search_turns` for tokenisation notes. Superseded
-        facts are excluded by default; the FTS index itself still
-        covers them (so unsupersede via re-supersede stays cheap).
+        See :meth:`search_turns` for tokenisation notes. Validity
+        filtering matches :meth:`recent_facts`: default = current
+        truth (not superseded, not expired); ``as_of`` switches to a
+        bi-temporal world-time slice including superseded rows.
         """
         if limit <= 0:
             return []
         match_expr = _build_fts_match(query)
         if not match_expr:
             return []
-        where_super = "" if include_superseded else "AND f.superseded_at IS NULL"
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of, alias="f"
+        )
         rows = self._conn.execute(
             f"""
             SELECT f.id, f.familiar_id, f.channel_id, f.text,
                    f.source_turn_ids, f.created_at,
-                   f.superseded_at, f.superseded_by, f.subjects_json
+                   f.superseded_at, f.superseded_by, f.subjects_json,
+                   f.valid_from, f.valid_to
               FROM fts_facts AS fts
               JOIN facts AS f ON f.id = fts.rowid
              WHERE fts_facts MATCH ?
                AND f.familiar_id = ?
-               {where_super}
+               {where}
              ORDER BY bm25(fts_facts) ASC, f.id DESC
              LIMIT ?
             """,  # noqa: S608
-            (match_expr, familiar_id, limit),
+            (match_expr, familiar_id, *params, limit),
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
 
@@ -1725,6 +1809,14 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
                 and "canonical_key" in item
                 and "display_at_write" in item
             )
+    try:
+        valid_from_raw = row["valid_from"]
+    except (IndexError, KeyError):
+        valid_from_raw = None
+    try:
+        valid_to_raw = row["valid_to"]
+    except (IndexError, KeyError):
+        valid_to_raw = None
     return Fact(
         id=int(row["id"]),
         familiar_id=str(row["familiar_id"]),
@@ -1739,6 +1831,14 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
         ),
         superseded_by=int(superseded_by_raw) if superseded_by_raw is not None else None,
         subjects=subjects,
+        valid_from=(
+            datetime.fromisoformat(valid_from_raw)
+            if valid_from_raw is not None
+            else None
+        ),
+        valid_to=(
+            datetime.fromisoformat(valid_to_raw) if valid_to_raw is not None else None
+        ),
     )
 
 

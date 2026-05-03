@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -334,3 +335,233 @@ class TestFactSupersession:
         assert facts[0].text == "Old fact."
         assert facts[0].superseded_at is None
         assert facts[0].superseded_by is None
+
+
+class TestFactBiTemporal:
+    """Bi-temporal validity: ``valid_from`` / ``valid_to`` (M1 — world-time).
+
+    ``superseded_at`` captures *when we recorded the change* (system-
+    time). ``valid_from`` / ``valid_to`` capture *when the fact applied
+    in the world* (world-time). Default reads stay "current truth";
+    ``as_of=...`` unlocks audit queries against world-time.
+    """
+
+    def test_append_defaults_valid_from_to_now_when_no_source_turns(self) -> None:
+        store = HistoryStore(":memory:")
+        before = datetime.now(tz=UTC)
+        fact = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="A fact.",
+            source_turn_ids=[],
+        )
+        after = datetime.now(tz=UTC)
+        assert fact.valid_from is not None
+        assert before <= fact.valid_from <= after
+        assert fact.valid_to is None
+
+    def test_append_with_explicit_valid_from(self) -> None:
+        store = HistoryStore(":memory:")
+        when = datetime(2025, 6, 1, tzinfo=UTC)
+        fact = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria moved to Berlin.",
+            source_turn_ids=[1],
+            valid_from=when,
+        )
+        assert fact.valid_from == when
+        assert fact.valid_to is None
+        # And on re-read.
+        recents = store.recent_facts(familiar_id="fam", limit=10)
+        assert recents[0].valid_from == when
+
+    def test_append_with_explicit_valid_to(self) -> None:
+        store = HistoryStore(":memory:")
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        end = datetime(2025, 12, 31, tzinfo=UTC)
+        fact = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria worked at Acme in 2025.",
+            source_turn_ids=[1],
+            valid_from=start,
+            valid_to=end,
+        )
+        assert fact.valid_from == start
+        assert fact.valid_to == end
+
+    def test_recent_facts_default_excludes_expired(self) -> None:
+        """A fact whose ``valid_to`` is in the past is not "current truth"."""
+        store = HistoryStore(":memory:")
+        past = datetime.now(tz=UTC) - timedelta(days=30)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria worked at Acme.",
+            source_turn_ids=[1],
+            valid_from=past - timedelta(days=365),
+            valid_to=past,
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria works at Globex.",
+            source_turn_ids=[2],
+            valid_from=past,
+        )
+        current = store.recent_facts(familiar_id="fam", limit=10)
+        texts = {f.text for f in current}
+        assert texts == {"Aria works at Globex."}
+
+    def test_as_of_returns_world_time_slice(self) -> None:
+        store = HistoryStore(":memory:")
+        t1 = datetime(2025, 1, 1, tzinfo=UTC)
+        t2 = datetime(2025, 6, 1, tzinfo=UTC)
+        t3 = datetime(2025, 9, 1, tzinfo=UTC)
+        # Fact applied Jan-Jun.
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria worked at Acme.",
+            source_turn_ids=[1],
+            valid_from=t1,
+            valid_to=t2,
+        )
+        # Fact applies from Jun onward.
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria works at Globex.",
+            source_turn_ids=[2],
+            valid_from=t2,
+        )
+        # As of March: only Acme.
+        march = datetime(2025, 3, 1, tzinfo=UTC)
+        slice_march = store.recent_facts(familiar_id="fam", limit=10, as_of=march)
+        assert {f.text for f in slice_march} == {"Aria worked at Acme."}
+        # As of September: only Globex.
+        slice_sept = store.recent_facts(familiar_id="fam", limit=10, as_of=t3)
+        assert {f.text for f in slice_sept} == {"Aria works at Globex."}
+
+    def test_as_of_includes_superseded_for_audit(self) -> None:
+        """``as_of`` is an audit query — superseded rows participate."""
+        store = HistoryStore(":memory:")
+        old_time = datetime(2025, 1, 1, tzinfo=UTC)
+        old = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria likes strawberries.",
+            source_turn_ids=[1],
+            valid_from=old_time,
+        )
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria is allergic to strawberries.",
+            source_turn_ids=[2],
+            valid_from=datetime(2025, 6, 1, tzinfo=UTC),
+        )
+        store.supersede_fact(familiar_id="fam", old_id=old.id, new_id=new.id)
+        # As of February the world believed Aria liked strawberries.
+        feb = datetime(2025, 2, 1, tzinfo=UTC)
+        slice_feb = store.recent_facts(familiar_id="fam", limit=10, as_of=feb)
+        texts = {f.text for f in slice_feb}
+        assert "Aria likes strawberries." in texts
+
+    def test_search_facts_supports_as_of(self) -> None:
+        store = HistoryStore(":memory:")
+        t1 = datetime(2025, 1, 1, tzinfo=UTC)
+        t2 = datetime(2025, 6, 1, tzinfo=UTC)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria worked at Acme.",
+            source_turn_ids=[1],
+            valid_from=t1,
+            valid_to=t2,
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria works at Globex.",
+            source_turn_ids=[2],
+            valid_from=t2,
+        )
+        march = datetime(2025, 3, 1, tzinfo=UTC)
+        found = store.search_facts(
+            familiar_id="fam", query="Aria", limit=10, as_of=march
+        )
+        assert {f.text for f in found} == {"Aria worked at Acme."}
+
+    def test_facts_for_subject_supports_as_of(self) -> None:
+        store = HistoryStore(":memory:")
+        t1 = datetime(2025, 1, 1, tzinfo=UTC)
+        t2 = datetime(2025, 6, 1, tzinfo=UTC)
+        subject = (FactSubject(canonical_key="discord:1", display_at_write="Aria"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria worked at Acme.",
+            source_turn_ids=[1],
+            subjects=subject,
+            valid_from=t1,
+            valid_to=t2,
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria works at Globex.",
+            source_turn_ids=[2],
+            subjects=subject,
+            valid_from=t2,
+        )
+        march = datetime(2025, 3, 1, tzinfo=UTC)
+        slice_march = store.facts_for_subject(
+            familiar_id="fam", canonical_key="discord:1", as_of=march
+        )
+        assert {f.text for f in slice_march} == {"Aria worked at Acme."}
+
+    def test_migration_adds_validity_columns(self, tmp_path: Path) -> None:
+        """Pre-existing ``facts`` tables get ``valid_from``/``valid_to`` added.
+
+        Pre-existing rows return ``valid_from = None`` and ``valid_to =
+        None`` — no backfill, the feature is forward-only. Default
+        reads still surface them (NULL ``valid_to`` ⇒ still applies).
+        """
+        db_path = tmp_path / "history.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE facts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id       TEXT    NOT NULL,
+                channel_id        INTEGER,
+                text              TEXT    NOT NULL,
+                source_turn_ids   TEXT    NOT NULL,
+                created_at        TEXT    NOT NULL,
+                superseded_at     TEXT,
+                superseded_by     INTEGER,
+                subjects_json     TEXT
+            );
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            );
+            INSERT INTO facts (familiar_id, channel_id, text,
+                               source_turn_ids, created_at)
+            VALUES ('fam', 1, 'Legacy fact.', '[1]', '2026-04-26T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        store = HistoryStore(db_path)
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].valid_from is None
+        assert facts[0].valid_to is None

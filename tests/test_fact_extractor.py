@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -693,6 +694,83 @@ class TestFactExtractorMirrorsMentions:
 
         # Both keys present, sorted by canonical_key as the read API guarantees.
         assert store.mentions_for_turn(turn_id=3) == ("discord:111", "discord:222")
+
+
+class TestFactExtractorBiTemporal:
+    """Bi-temporal seed values come from the source turn (M1).
+
+    The extractor's default ``valid_from`` is the timestamp of the
+    first source turn — the moment the world is observed to be in this
+    state. The LLM may override with an explicit ``valid_from`` ISO-
+    timestamp string when it spotted an "as of …" phrase.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_valid_from_matches_source_turn_timestamp(self) -> None:
+        store = HistoryStore(":memory:")
+        ids = _seed_turns(store, 10)
+        recents_turns = store.recent(familiar_id="fam", channel_id=1, limit=20)
+        ts_by_id = {t.id: t.timestamp for t in recents_turns}
+
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Aria likes strawberries.",
+                        "source_turn_ids": [ids[0], ids[2]],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].valid_from == ts_by_id[ids[0]]
+        assert facts[0].valid_to is None
+
+    @pytest.mark.asyncio
+    async def test_llm_valid_from_override_parsed(self) -> None:
+        """Explicit ``valid_from`` in the LLM reply overrides the turn timestamp."""
+        store = HistoryStore(":memory:")
+        ids = _seed_turns(store, 10)
+        override = datetime(2024, 1, 15, tzinfo=UTC)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Aria moved to Berlin in early 2024.",
+                        "source_turn_ids": [ids[0]],
+                        "valid_from": override.isoformat(),
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].valid_from == override
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_documents_valid_from_field(self) -> None:
+        """Prompt must teach the LLM about the optional ``valid_from`` field."""
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        assert "valid_from" in system_msg.content
 
 
 def _turn_count_in_prompt(messages: list[Message]) -> int:

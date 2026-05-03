@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
@@ -115,6 +116,7 @@ class FactExtractor:
         facts = _parse_facts(reply.content)
         valid_ids = {t.id for t in new_turns}
         channel_ids: dict[int, int] = {t.id: t.channel_id for t in new_turns}
+        ts_by_id: dict[int, datetime] = {t.id: t.timestamp for t in new_turns}
 
         dropped_self_cap = 0
         for fact in facts:
@@ -141,12 +143,18 @@ class FactExtractor:
                 )
                 continue
             subjects = _resolve_subjects(fact.get("subject_keys", []), participants)
+            valid_from = _parse_iso_dt(fact.get("valid_from")) or ts_by_id.get(
+                source_ids[0]
+            )
+            valid_to = _parse_iso_dt(fact.get("valid_to"))
             self._store.append_fact(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
                 text=text,
                 source_turn_ids=source_ids,
                 subjects=subjects,
+                valid_from=valid_from,
+                valid_to=valid_to,
             )
             # Mirror resolved subjects into ``turn_mentions``. Bridges
             # bare-text references like "what about Aria?" into the
@@ -280,7 +288,13 @@ def _build_extract_prompt(
         "Participants block, identifying which people the fact is "
         "about). Use this whenever the fact mentions someone by name "
         "and you can match that name to a participant. Leave it out "
-        "or empty if you can't tell.\n\n"
+        "or empty if you can't tell.\n"
+        "- ``valid_from`` (optional ISO-8601 timestamp) — only set "
+        "when the speaker explicitly anchors the fact to a different "
+        "moment than 'now' (e.g., 'as of last June', 'back in 2019'). "
+        "Otherwise omit; the source turn's timestamp is used.\n"
+        "- ``valid_to`` (optional ISO-8601 timestamp) — only set when "
+        "the fact is bounded to end at a known point.\n\n"
         "Skip small talk and transient feelings. If nothing useful, "
         "reply with []. Do NOT emit self-capability statements about "
         "yourself, the assistant, or your own limitations (e.g., 'I "
@@ -345,5 +359,27 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
             "text": item.get("text", ""),
             "source_turn_ids": ids,
             "subject_keys": subject_keys,
+            "valid_from": item.get("valid_from"),
+            "valid_to": item.get("valid_to"),
         })
     return out
+
+
+def _parse_iso_dt(raw: object) -> datetime | None:
+    """Permissive ISO-8601 → ``datetime`` parse; ``None`` for bad input.
+
+    The LLM may emit a date-only string (``2024-01-15``) or a full
+    timestamp; ``datetime.fromisoformat`` accepts both. Anything else
+    silently degrades to ``None`` so the caller falls back to the
+    source turn's timestamp.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    # date-only strings parse to naive datetimes; assume UTC for consistency.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
