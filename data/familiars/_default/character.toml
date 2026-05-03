@@ -43,7 +43,8 @@ strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
 # differ per host. Secrets (``DEEPGRAM_API_KEY``) stay in env.
 
 [providers.stt]
-backend = "deepgram"            # "deepgram" (V3: | "faster_whisper" | "parakeet")
+backend = "deepgram"            # "deepgram" | "parakeet" (V3 phase 3: | "faster_whisper")
+# env STT_BACKEND overrides this at startup (mirrors LOCAL_TURN_DETECTION)
 
 [providers.stt.deepgram]
 model                   = "nova-3"
@@ -58,6 +59,15 @@ keepalive_interval_s    = 3.0
 reconnect_max_attempts  = 5
 reconnect_backoff_cap_s = 16.0
 idle_close_s            = 30.0  # close per-user stream after silence; 0 disables
+
+[providers.stt.parakeet]
+# Local NeMo backend. Requires the ``local-stt`` extra (`uv sync --extra local-stt`)
+# AND ``[providers.turn_detection].strategy = "ten+smart_turn"`` — Parakeet
+# has no internal endpointer, so the local turn detector drives `finalize()`.
+# Per-knob env vars: PARAKEET_MODEL_NAME, PARAKEET_DEVICE, PARAKEET_IDLE_CLOSE_S.
+model_name   = "nvidia/parakeet-tdt-0.6b-v3"
+device       = "auto"           # "auto" | "cuda" | "cpu"
+idle_close_s = 30.0
 
 # --- Text-to-speech --------------------------------------------------------
 #

@@ -37,6 +37,16 @@ local-turn = [
     "numpy >= 1.26, < 3",
     "ten-vad",
 ]
+# Local STT — NeMo Parakeet-TDT 0.6B v3 (CC-BY-4.0 model, Apache 2.0
+# toolkit). Pulls torch + ~600 MB of weights on first load; opt-in by
+# design. Pair with ``local-turn`` so the endpointer drives
+# ``finalize()`` (Parakeet has no internal silence detector). Install via:
+#     uv sync --extra local-turn --extra local-stt
+# See docs/architecture/voice-pipeline.md.
+local-stt = [
+    "nemo-toolkit[asr] >= 2.0",
+    "numpy >= 1.26, < 3",
+]
 
 [dependency-groups]
 dev = [

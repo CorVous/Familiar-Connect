@@ -26,6 +26,8 @@ toml baked into the image and tune per host without a rebuild.
 | TTS provider + voice | `[tts]` | unchanged |
 | History window + prompt layer order | `[providers.history]`, `[channels.<id>]` | unchanged |
 | Deepgram STT thresholds & key-terms | `[providers.stt.deepgram]` (env override per knob) | unchanged |
+| Parakeet local STT (V3 phase 2) | `[providers.stt.parakeet]` (env override per knob) | unchanged |
+| STT backend selector | `[providers.stt].backend` (`STT_BACKEND` env override) | unchanged |
 | Turn detection strategy | `[providers.turn_detection]` | unchanged |
 | Memory projector selection | hard-wired | `[providers.memory]` (M5) |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
@@ -258,6 +260,45 @@ rebuild. `DEEPGRAM_API_KEY` (the secret) only lives in env.
 | `DEEPGRAM_RECONNECT_BACKOFF_CAP_S` | `reconnect_backoff_cap_s` |
 | `DEEPGRAM_IDLE_CLOSE_S` | `idle_close_s` |
 
+## STT — Parakeet (V3 phase 2)
+
+Local NeMo Parakeet-TDT 0.6B v3 backend (Apache 2.0 toolkit, CC-BY-4.0
+weights). No API key — model loads on first turn (~600 MB; cached in
+the HuggingFace cache thereafter). Buffer-and-finalize semantics:
+audio accumulates per user, the local turn detector fires
+`finalize()` on turn-complete, NeMo runs once and emits one final
+result.
+
+**Requirements:**
+
+- `uv sync --extra local-turn --extra local-stt` — pulls TEN-VAD,
+  Smart Turn, NeMo, torch.
+- `[providers.turn_detection].strategy = "ten+smart_turn"` (or env
+  `LOCAL_TURN_DETECTION=1`). Without a local turn detector nothing
+  drives `finalize()`, so transcripts never surface.
+
+```toml
+[providers.stt]
+backend = "parakeet"
+
+[providers.stt.parakeet]
+model_name   = "nvidia/parakeet-tdt-0.6b-v3"
+device       = "auto"     # "auto" | "cuda" | "cpu"
+idle_close_s = 30.0
+```
+
+| Field | Default | Purpose |
+|---|---|---|
+| `model_name` | `nvidia/parakeet-tdt-0.6b-v3` | HuggingFace ID passed to `nemo.collections.asr.models.ASRModel.from_pretrained`. |
+| `device` | `auto` | `auto` defers to NeMo (CUDA if available, else CPU); `cuda` / `cpu` force. |
+| `idle_close_s` | `30.0` | Per-user buffer reset after silence; matches Deepgram parity. |
+
+| Env var | Overrides |
+|---|---|
+| `PARAKEET_MODEL_NAME` | `model_name` |
+| `PARAKEET_DEVICE` | `device` |
+| `PARAKEET_IDLE_CLOSE_S` | `idle_close_s` |
+
 ## Local turn detection (V1)
 
 V1 fork of the audio path: TEN-VAD + Smart Turn v3 own endpointing
@@ -366,13 +407,15 @@ read by today's code.
 strategy = "deepgram"            # | "ten+smart_turn"
 
 [providers.stt]
-backend = "deepgram"             # phases 2/3 widen: | "parakeet" | "faster_whisper"
+backend = "deepgram"             # | "parakeet" (phase 2 shipped)
 # env: STT_BACKEND overrides this at startup (mirrors LOCAL_TURN_DETECTION)
 
-# planned (V3 phases 2/3, V5, M5)
-[providers.stt.parakeet]         # (V3 phase 2)
-model = "parakeet-tdt-0.6b-v3"
+[providers.stt.parakeet]         # V3 phase 2 (shipped)
+model_name   = "nvidia/parakeet-tdt-0.6b-v3"
+device       = "auto"
+idle_close_s = 30.0
 
+# planned (V3 phase 3, V5, M5)
 [providers.stt.faster_whisper]   # (V3 phase 3)
 model_size = "small"
 

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from familiar_connect.stt.protocol import Transcriber
 
 
-_KNOWN_BACKENDS: frozenset[str] = frozenset({"deepgram"})
+_KNOWN_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet"})
 
 
 def _resolve_backend(toml_backend: str) -> str:
@@ -35,8 +35,9 @@ def create_transcriber(config: STTConfig) -> Transcriber:
     """Build a :class:`Transcriber` from *config*.
 
     :raises ValueError: backend unknown, or selected backend's required
-        env (e.g. ``DEEPGRAM_API_KEY``) is missing. Caller is expected
-        to log + degrade — see ``commands/run.py``.
+        env (e.g. ``DEEPGRAM_API_KEY``) is missing, or the backend's
+        optional extra is not installed. Caller is expected to log +
+        degrade — see ``commands/run.py``.
     """
     backend = _resolve_backend(config.backend)
     if backend not in _KNOWN_BACKENDS:
@@ -49,11 +50,26 @@ def create_transcriber(config: STTConfig) -> Transcriber:
 
     if backend == "deepgram":
         return _create_deepgram(config)
+    if backend == "parakeet":
+        return _create_parakeet(config)
 
-    # unreachable while _KNOWN_BACKENDS == {"deepgram"}; phase 2/3 add arms
+    # unreachable while every _KNOWN_BACKENDS entry has a dispatch arm
     msg = f"backend {backend!r} accepted but not dispatched"  # pragma: no cover
     raise ValueError(msg)  # pragma: no cover
 
 
 def _create_deepgram(config: STTConfig) -> DeepgramTranscriber:
     return create_transcriber_from_env(config.deepgram)
+
+
+def _create_parakeet(config: STTConfig) -> Transcriber:
+    """Lazy-import Parakeet so the heavy numpy/NeMo deps stay optional."""
+    try:
+        from familiar_connect.stt.parakeet import (  # noqa: PLC0415
+            create_parakeet_from_env,
+        )
+    except RuntimeError as exc:
+        # numpy missing → ``ParakeetTranscriber`` module raises on import.
+        # Re-raise as ValueError so ``run.py`` catches + warns uniformly.
+        raise ValueError(str(exc)) from exc
+    return create_parakeet_from_env(config.parakeet)

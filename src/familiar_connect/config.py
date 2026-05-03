@@ -47,8 +47,8 @@ class TurnDetectionConfig:
     strategy: str = "deepgram"
 
 
-# V3 will widen to {"deepgram", "faster_whisper", "parakeet"}.
-_STT_BACKENDS: frozenset[str] = frozenset({"deepgram"})
+# V3 phase 2 added "parakeet"; phase 3 will add "faster_whisper".
+_STT_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet"})
 
 
 @dataclass(frozen=True)
@@ -76,15 +76,32 @@ class DeepgramSTTConfig:
 
 
 @dataclass(frozen=True)
+class ParakeetSTTConfig:
+    """Parakeet knobs from ``[providers.stt.parakeet]``.
+
+    Local NeMo model — no API key. Pair with
+    ``[providers.turn_detection].strategy = "ten+smart_turn"`` so
+    ``finalize()`` actually fires (no internal silence detector).
+    """
+
+    model_name: str = "nvidia/parakeet-tdt-0.6b-v3"
+    device: str = "auto"  # "auto" | "cuda" | "cpu"
+    idle_close_s: float = 30.0
+
+
+@dataclass(frozen=True)
 class STTConfig:
     """STT backend selector + per-backend knobs from ``[providers.stt]``.
 
-    Only ``deepgram`` today. V3 widens *backend* → ``faster_whisper`` /
-    ``parakeet`` plus parallel ``[providers.stt.<backend>]`` tables.
+    V3 phase 1 lifted the selector behind ``Transcriber`` Protocol;
+    phase 2 added the ``parakeet`` arm. Phase 3 will add
+    ``faster_whisper`` plus a parallel ``[providers.stt.faster_whisper]``
+    table.
     """
 
     backend: str = "deepgram"
     deepgram: DeepgramSTTConfig = field(default_factory=DeepgramSTTConfig)
+    parakeet: ParakeetSTTConfig = field(default_factory=ParakeetSTTConfig)
 
 
 DEFAULT_AZURE_TTS_VOICE = "en-US-AmberNeural"
@@ -462,7 +479,16 @@ def _parse_stt_config(raw: dict) -> STTConfig:
         )
         raise ConfigError(msg)
     deepgram = _parse_deepgram_stt_config(deepgram_raw)
-    return STTConfig(backend=backend_raw, deepgram=deepgram)
+
+    parakeet_raw = raw.get("parakeet", {})
+    if not isinstance(parakeet_raw, dict):
+        msg = (
+            f"[providers.stt.parakeet] must be a table, "
+            f"got {type(parakeet_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    parakeet = _parse_parakeet_stt_config(parakeet_raw)
+    return STTConfig(backend=backend_raw, deepgram=deepgram, parakeet=parakeet)
 
 
 def _parse_deepgram_stt_config(raw: dict) -> DeepgramSTTConfig:
@@ -530,6 +556,34 @@ def _parse_deepgram_stt_config(raw: dict) -> DeepgramSTTConfig:
         reconnect_backoff_cap_s=_float(
             "reconnect_backoff_cap_s", defaults.reconnect_backoff_cap_s
         ),
+        idle_close_s=_float("idle_close_s", defaults.idle_close_s),
+    )
+
+
+def _parse_parakeet_stt_config(raw: dict) -> ParakeetSTTConfig:
+    """Parse ``[providers.stt.parakeet]`` knobs; validate types."""
+    defaults = ParakeetSTTConfig()
+
+    def _str(key: str, default: str) -> str:
+        v = raw.get(key, default)
+        if not isinstance(v, str) or not v:
+            msg = f"[providers.stt.parakeet].{key} must be a non-empty string"
+            raise ConfigError(msg)
+        return v
+
+    def _float(key: str, default: float) -> float:
+        v = raw.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = (
+                f"[providers.stt.parakeet].{key} must be a number, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        return float(v)
+
+    return ParakeetSTTConfig(
+        model_name=_str("model_name", defaults.model_name),
+        device=_str("device", defaults.device),
         idle_close_s=_float("idle_close_s", defaults.idle_close_s),
     )
 

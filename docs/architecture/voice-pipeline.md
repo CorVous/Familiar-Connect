@@ -176,9 +176,19 @@ pattern; one stream per Discord user, lazy-opened, closed after
 pipeline (`bot.py`, `sources/voice.py`, `familiar.py`) types against
 the Protocol; backend selection lives in `stt.factory`, dispatched
 on `[providers.stt].backend` (with `STT_BACKEND` env override —
-mirrors `LOCAL_TURN_DETECTION`). V3 phases 2 and 3 add
-`ParakeetTranscriber` (NeMo Parakeet-TDT 0.6B v3) and
-`FasterWhisperTranscriber` (CTranslate2) behind the same seam.
+mirrors `LOCAL_TURN_DETECTION`).
+
+V3 phase 2 added `ParakeetTranscriber` (NeMo Parakeet-TDT 0.6B v3,
+local, no API key). It uses buffer-and-finalize semantics: incoming
+48 kHz Discord PCM is resampled to 16 kHz mono and accumulated;
+`finalize()` runs the model and emits one `is_final=True` result.
+There's no internal endpointer, so Parakeet must be paired with
+`[providers.turn_detection].strategy = "ten+smart_turn"` — the local
+endpointer drives `finalize()` on turn-complete. Install with
+`uv sync --extra local-turn --extra local-stt`.
+
+V3 phase 3 will add `FasterWhisperTranscriber` (CTranslate2) behind
+the same seam.
 
 **Partial vs final transcripts.** Modal's benchmark: partials are a
 UX feature, not a latency feature. The LLM can't start until the

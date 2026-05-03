@@ -105,14 +105,18 @@ Phase 1 shipped: `Transcriber` Protocol
 `stt/factory.create_transcriber`, and the `STT_BACKEND` env override
 on top of `[providers.stt].backend`. `DeepgramTranscriber` lives in
 `stt/deepgram.py`; the rest of the voice pipeline (`bot.py`,
-`sources/voice.py`, `familiar.py`) types against `Transcriber`. Wiring
-mirrors the V1 turn-detection pattern so a new backend is purely
-additive — drop a module, add an arm to `_KNOWN_BACKENDS`, register
-a parallel `[providers.stt.<name>]` config block.
+`sources/voice.py`, `familiar.py`) types against `Transcriber`.
 
-Phase 2 (next): `ParakeetTranscriber` over NeMo Parakeet-TDT 0.6B v3.
-Phase 3: `FasterWhisperTranscriber` (CTranslate2). Both are local —
-streaming PCM intake, finalize-on-VAD-end semantics, no API key.
+Phase 2 shipped: `ParakeetTranscriber` (`stt/parakeet.py`) wraps NeMo
+Parakeet-TDT 0.6B v3. Buffer-and-finalize semantics — the local
+endpointer (V1) drives `finalize()`, so this backend requires
+`[providers.turn_detection].strategy = "ten+smart_turn"`. Selected
+via `backend = "parakeet"` (or `STT_BACKEND=parakeet`); install the
+`local-stt` extra to pull NeMo and torch.
+
+Phase 3 (next): `FasterWhisperTranscriber` (CTranslate2). Same shape
+as Parakeet — local, finalize-driven; drops in behind the existing
+factory arm.
 
 ### V4 — Pluggable TTS backend & Mimi-codec readiness
 
@@ -138,8 +142,8 @@ env var `LOCAL_TURN_DETECTION` continues to override TOML for container
 deployments. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
 `[providers.stt].backend` selector wired in V3 phase 1 — same pattern
-(env override `STT_BACKEND` on top of TOML). Today only `deepgram`
-satisfies the dispatch; phases 2/3 widen the whitelist.
+(env override `STT_BACKEND` on top of TOML). Phase 2 added `parakeet`;
+phase 3 will add `faster_whisper`.
 
 Remaining selectors (not yet wired — implementations don't exist):
 
