@@ -33,14 +33,19 @@ strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
 
 # --- Speech-to-text --------------------------------------------------------
 #
-# backend selects the STT engine. Only "deepgram" today; V3 will widen
-# to "faster_whisper" / "parakeet". Each backend reads its own
-# ``[providers.stt.<backend>]`` table.
+# backend selects the STT engine — three are wired:
+#   "deepgram"        cloud (Deepgram WS)               needs DEEPGRAM_API_KEY
+#   "parakeet"        local NeMo Parakeet-TDT 0.6B v3   needs local-stt-parakeet
+#   "faster_whisper"  local CTranslate2 Whisper         needs local-stt-whisper
+# Each backend reads its own ``[providers.stt.<backend>]`` table below.
+# The two local backends require the local turn detector (above) since
+# they have no internal endpointer.
 #
-# Per-knob env vars (``DEEPGRAM_MODEL`` etc.) override TOML at startup,
-# matching the ``LOCAL_TURN_DETECTION`` precedent — useful when the
-# character.toml is baked into a container but a few knobs need to
-# differ per host. Secrets (``DEEPGRAM_API_KEY``) stay in env.
+# Per-knob env vars (``DEEPGRAM_MODEL``, ``PARAKEET_DEVICE``,
+# ``FASTER_WHISPER_LANGUAGE`` etc.) override TOML at startup, matching
+# the ``LOCAL_TURN_DETECTION`` precedent — useful when character.toml
+# is baked into a container but a few knobs need to differ per host.
+# Secrets (``DEEPGRAM_API_KEY``) stay in env.
 
 [providers.stt]
 backend = "deepgram"            # "deepgram" | "parakeet" | "faster_whisper"
