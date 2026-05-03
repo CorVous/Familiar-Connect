@@ -5,13 +5,16 @@ once per Discord user (the TenVAD instance is per-user because its
 native handle accumulates state across frames; the SmartTurn classifier
 is stateless and can be shared).
 
-TEN-VAD ships its ONNX model inside the ``ten-vad`` Python package, so
-no VAD model path is required — only Smart Turn needs an on-disk file.
+TEN-VAD ships its ONNX model inside the ``ten-vad`` Python package;
+SmartTurn weights are fetched from HuggingFace on first use via
+``hf_hub_download``. The Hub cache (``~/.cache/huggingface``) makes
+subsequent runs filesystem-only, and ``HF_HUB_OFFLINE=1`` forces
+cache-only mode for air-gapped deployments.
 
 All knobs come from ``[providers.turn_detection.local]`` in
 ``character.toml``. Returns ``None`` (rather than raising) when the
-SmartTurn model file is missing — the bot falls back to Deepgram-only
-endpointing.
+SmartTurn weights can't be resolved — the bot falls back to
+Deepgram-only endpointing.
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from huggingface_hub import hf_hub_download
 
 from familiar_connect import log_style as ls
 from familiar_connect.voice.turn_detection.endpointer import UtteranceEndpointer
@@ -79,21 +84,40 @@ class LocalTurnDetector:
 def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | None:
     """Build :class:`LocalTurnDetector` from typed *config*.
 
-    Returns ``None`` (with a warning) when the SmartTurn ONNX file at
-    ``config.smart_turn_model_path`` is missing — the bot falls back
+    Pulls the SmartTurn ONNX weights from HuggingFace
+    (``config.smart_turn_repo_id`` / ``config.smart_turn_filename``);
+    the Hub cache covers offline reruns. Returns ``None`` (with a
+    warning) on any download or filesystem error — the bot falls back
     to Deepgram-only endpointing rather than crashing.
     """
-    smart_turn = Path(config.smart_turn_model_path)
-    if not smart_turn.exists():
+    try:
+        resolved = Path(
+            hf_hub_download(
+                repo_id=config.smart_turn_repo_id,
+                filename=config.smart_turn_filename,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — broad: any HF/network/FS issue degrades
         _logger.warning(
             f"{ls.tag('🎙️  Voice', ls.Y)} "
             f"{ls.kv('local_turn_detection', 'disabled', vc=ls.LY)} "
-            f"{ls.kv('reason', 'smart_turn_model_missing', vc=ls.LW)} "
-            f"{ls.kv('smart_turn', str(smart_turn), vc=ls.LW)}"
+            f"{ls.kv('reason', 'smart_turn_download_failed', vc=ls.LW)} "
+            f"{ls.kv('repo', config.smart_turn_repo_id, vc=ls.LW)} "
+            f"{ls.kv('file', config.smart_turn_filename, vc=ls.LW)} "
+            f"{ls.kv('exc', repr(exc), vc=ls.LW)}"
+        )
+        return None
+    if not resolved.exists():
+        # cache rot — hf_hub_download returned a path that's gone
+        _logger.warning(
+            f"{ls.tag('🎙️  Voice', ls.Y)} "
+            f"{ls.kv('local_turn_detection', 'disabled', vc=ls.LY)} "
+            f"{ls.kv('reason', 'smart_turn_cache_missing', vc=ls.LW)} "
+            f"{ls.kv('path', str(resolved), vc=ls.LW)}"
         )
         return None
     detector = LocalTurnDetector(
-        smart_turn_path=smart_turn,
+        smart_turn_path=resolved,
         silence_ms=config.silence_ms,
         speech_start_ms=config.speech_start_ms,
         vad_threshold=config.vad_threshold,
@@ -104,6 +128,7 @@ def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | N
         f"{ls.tag('🎙️  Voice', ls.G)} "
         f"{ls.kv('local_turn_detection', 'enabled', vc=ls.LG)} "
         f"{ls.kv('vad', 'ten-vad', vc=ls.LG)} "
+        f"{ls.kv('smart_turn', config.smart_turn_filename, vc=ls.LW)} "
         f"{ls.kv('hop_size', str(detector.vad_hop_size), vc=ls.LW)} "
         f"{ls.kv('silence_ms', str(detector.silence_ms), vc=ls.LW)} "
         f"{ls.kv('speech_start_ms', str(detector.speech_start_ms), vc=ls.LW)}"

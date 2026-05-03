@@ -36,6 +36,7 @@ local-turn = [
     "onnxruntime >= 1.18, < 2",
     "numpy >= 1.26, < 3",
     "ten-vad",
+    "huggingface-hub >= 0.25, < 1",
 ]
 # Local STT — NeMo Parakeet-TDT 0.6B v3 (CC-BY-4.0 model, Apache 2.0
 # toolkit). Pulls torch + ~600 MB of weights on first load; opt-in by

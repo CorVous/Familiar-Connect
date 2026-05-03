@@ -46,9 +46,15 @@ class LocalTurnConfig:
 
     Read only when ``[providers.turn_detection].strategy = "ten+smart_turn"``.
     Defaults match the V1 field-tested values; rarely need tweaking.
+
+    Smart Turn weights are pulled from HuggingFace on first use (cached
+    under ``~/.cache/huggingface``). Default filename is the CPU ONNX
+    export — switch to ``smart-turn-v3.2-gpu.onnx`` if ``onnxruntime-gpu``
+    is installed.
     """
 
-    smart_turn_model_path: str = "data/models/smart-turn-v3.onnx"
+    smart_turn_repo_id: str = "pipecat-ai/smart-turn"
+    smart_turn_filename: str = "smart-turn-v3.2-cpu.onnx"
     silence_ms: int = 200
     speech_start_ms: int = 100
     vad_threshold: float = 0.5
@@ -529,9 +535,8 @@ def _parse_local_turn_config(raw: dict) -> LocalTurnConfig:
         return float(v)
 
     return LocalTurnConfig(
-        smart_turn_model_path=_str(
-            "smart_turn_model_path", defaults.smart_turn_model_path
-        ),
+        smart_turn_repo_id=_str("smart_turn_repo_id", defaults.smart_turn_repo_id),
+        smart_turn_filename=_str("smart_turn_filename", defaults.smart_turn_filename),
         silence_ms=_int("silence_ms", defaults.silence_ms),
         speech_start_ms=_int("speech_start_ms", defaults.speech_start_ms),
         vad_threshold=_float("vad_threshold", defaults.vad_threshold),

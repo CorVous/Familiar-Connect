@@ -308,9 +308,20 @@ locally, Deepgram becomes pure STT. Saves 150–200 ms vs. remote
 endpointing. Also required when the STT backend is local (Parakeet
 or FasterWhisper) since neither has an internal endpointer.
 
-Requires the `local-turn` extra (`uv sync --extra local-turn`) and a
-Smart Turn ONNX model file at `data/models/smart-turn-v3.onnx`
-(default; override the path in TOML below).
+Requires the `local-turn` extra (`uv sync --extra local-turn`).
+Smart Turn ONNX weights are pulled from HuggingFace on first use
+(cached under `~/.cache/huggingface`); subsequent runs are
+filesystem-only. `HF_HUB_OFFLINE=1` forces cache-only mode for
+air-gapped deployments.
+
+The default `smart_turn_filename` is the **CPU ONNX export**, which
+matches the `onnxruntime` shipped by the `local-turn` extra. If you
+install `onnxruntime-gpu` separately, switch to the GPU export:
+
+```toml
+[providers.turn_detection.local]
+smart_turn_filename = "smart-turn-v3.2-gpu.onnx"
+```
 
 When active, per-user Deepgram clones are spawned with
 `endpointing_ms=10` so they wait on `Finalize` from the local chain
@@ -321,7 +332,8 @@ rather than firing on their own silence timer.
 strategy = "ten+smart_turn"   # "deepgram" (default) | "ten+smart_turn"
 
 [providers.turn_detection.local]
-smart_turn_model_path = "data/models/smart-turn-v3.onnx"
+smart_turn_repo_id    = "pipecat-ai/smart-turn"
+smart_turn_filename   = "smart-turn-v3.2-cpu.onnx"
 silence_ms            = 200
 speech_start_ms       = 100
 vad_threshold         = 0.5
@@ -331,7 +343,8 @@ vad_hop_size          = 256
 
 | Field | Default | Purpose |
 |---|---|---|
-| `smart_turn_model_path` | `data/models/smart-turn-v3.onnx` | Pipecat Smart Turn v3 ONNX file on disk. |
+| `smart_turn_repo_id` | `pipecat-ai/smart-turn` | HuggingFace repo holding the ONNX exports. |
+| `smart_turn_filename` | `smart-turn-v3.2-cpu.onnx` | Specific export. Switch to `smart-turn-v3.2-gpu.onnx` if `onnxruntime-gpu` is installed. |
 | `silence_ms` | `200` | Silence after speech before SmartTurn classifies. |
 | `speech_start_ms` | `100` | Consecutive speech before "speaking" latches. |
 | `vad_threshold` | `0.5` | TEN-VAD `is_speech` cutoff. |

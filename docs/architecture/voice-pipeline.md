@@ -109,13 +109,13 @@ uv sync --extra local-turn
 
 TEN-VAD ships its model + native shared library inside the
 `ten-vad` wheel (sourced from upstream git via `[tool.uv.sources]`).
-Smart Turn's ONNX file is not in the repo — download separately:
-
-- Smart Turn v3: <https://huggingface.co/pipecat-ai/smart-turn-v3.0>
-  (~360 MB; pull the `.onnx` artifact)
-
-Place under `data/models/` (gitignored) or override the path via
-`[providers.turn_detection.local].smart_turn_model_path`.
+Smart Turn's ONNX weights are pulled from
+[`pipecat-ai/smart-turn`](https://huggingface.co/pipecat-ai/smart-turn)
+on first use via `huggingface_hub.hf_hub_download` — the Hub cache
+(`~/.cache/huggingface`) covers offline reruns. The default filename
+is the CPU export (`smart-turn-v3.2-cpu.onnx`); override via
+`[providers.turn_detection.local].smart_turn_filename` if you've
+installed `onnxruntime-gpu` separately.
 
 ### How the audio path forks
 

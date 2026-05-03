@@ -36,7 +36,14 @@ strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
 [providers.turn_detection.local]
 # Knobs for the TEN-VAD + Smart Turn chain. Read only when strategy =
 # "ten+smart_turn". Defaults are field-tested; rarely need tweaking.
-smart_turn_model_path = "data/models/smart-turn-v3.onnx"
+#
+# Smart Turn weights are pulled from HuggingFace on first use (cached
+# under ~/.cache/huggingface). The default is the CPU ONNX export,
+# which matches the ``onnxruntime`` shipped by the local-turn extra.
+# If you've installed ``onnxruntime-gpu`` separately, switch
+# smart_turn_filename to ``smart-turn-v3.2-gpu.onnx``.
+smart_turn_repo_id    = "pipecat-ai/smart-turn"
+smart_turn_filename   = "smart-turn-v3.2-cpu.onnx"
 silence_ms            = 200    # silence after speech before SmartTurn fires
 speech_start_ms       = 100    # consecutive speech before "speaking" latches
 vad_threshold         = 0.5    # TEN-VAD activation threshold

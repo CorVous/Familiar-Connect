@@ -779,6 +779,7 @@ local-stt-whisper = [
     { name = "numpy" },
 ]
 local-turn = [
+    { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "ten-vad" },
@@ -810,6 +811,7 @@ requires-dist = [
     { name = "faster-whisper", marker = "extra == 'local-stt-whisper'", specifier = ">=1.0" },
     { name = "google-genai", specifier = ">=1.51.0,<2" },
     { name = "httpx", specifier = ">=0.28.0,<1" },
+    { name = "huggingface-hub", marker = "extra == 'local-turn'", specifier = ">=0.25,<1" },
     { name = "nemo-toolkit", extras = ["asr"], marker = "extra == 'local-stt-parakeet'", specifier = ">=2.0" },
     { name = "numpy", marker = "extra == 'local-stt-parakeet'", specifier = ">=1.26,<3" },
     { name = "numpy", marker = "extra == 'local-stt-whisper'", specifier = ">=1.26,<3" },
