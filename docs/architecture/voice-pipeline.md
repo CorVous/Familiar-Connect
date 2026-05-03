@@ -179,16 +179,19 @@ on `[providers.stt].backend` (with `STT_BACKEND` env override —
 mirrors `LOCAL_TURN_DETECTION`).
 
 V3 phase 2 added `ParakeetTranscriber` (NeMo Parakeet-TDT 0.6B v3,
-local, no API key). It uses buffer-and-finalize semantics: incoming
-48 kHz Discord PCM is resampled to 16 kHz mono and accumulated;
-`finalize()` runs the model and emits one `is_final=True` result.
-There's no internal endpointer, so Parakeet must be paired with
+local, no API key) and phase 3 added `FasterWhisperTranscriber`
+(`faster-whisper` over CTranslate2). Both use the same
+buffer-and-finalize semantics: incoming 48 kHz Discord PCM is
+resampled to 16 kHz mono and accumulated; `finalize()` runs the
+model and emits one `is_final=True` result. Neither has an internal
+endpointer, so both must be paired with
 `[providers.turn_detection].strategy = "ten+smart_turn"` — the local
-endpointer drives `finalize()` on turn-complete. Install with
-`uv sync --extra local-turn --extra local-stt`.
+endpointer drives `finalize()` on turn-complete.
 
-V3 phase 3 will add `FasterWhisperTranscriber` (CTranslate2) behind
-the same seam.
+Install with `uv sync --extra local-turn --extra local-stt-parakeet`
+or `--extra local-stt-whisper` (or both). Parakeet pulls torch +
+~600 MB of weights; FasterWhisper is lighter (~150 MB for the
+`small` model, no torch).
 
 **Partial vs final transcripts.** Modal's benchmark: partials are a
 UX feature, not a latency feature. The LLM can't start until the

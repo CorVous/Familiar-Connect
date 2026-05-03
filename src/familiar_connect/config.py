@@ -47,8 +47,8 @@ class TurnDetectionConfig:
     strategy: str = "deepgram"
 
 
-# V3 phase 2 added "parakeet"; phase 3 will add "faster_whisper".
-_STT_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet"})
+# V3 phase 2 added "parakeet"; phase 3 added "faster_whisper".
+_STT_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet", "faster_whisper"})
 
 
 @dataclass(frozen=True)
@@ -90,18 +90,35 @@ class ParakeetSTTConfig:
 
 
 @dataclass(frozen=True)
+class FasterWhisperSTTConfig:
+    """FasterWhisper (CTranslate2) knobs from ``[providers.stt.faster_whisper]``.
+
+    Local CTranslate2-backed Whisper. Same pairing requirement as
+    Parakeet — no internal silence detector, so ``finalize()`` is
+    driven by the local turn detector.
+    """
+
+    model_size: str = "small"  # "tiny" | "base" | "small" | "medium" | "large-v3"
+    device: str = "auto"  # "auto" | "cuda" | "cpu"
+    compute_type: str = "auto"  # "auto" | "int8" | "float16" | "float32"
+    language: str = "en"
+    idle_close_s: float = 30.0
+
+
+@dataclass(frozen=True)
 class STTConfig:
     """STT backend selector + per-backend knobs from ``[providers.stt]``.
 
     V3 phase 1 lifted the selector behind ``Transcriber`` Protocol;
-    phase 2 added the ``parakeet`` arm. Phase 3 will add
-    ``faster_whisper`` plus a parallel ``[providers.stt.faster_whisper]``
-    table.
+    phase 2 added ``parakeet``; phase 3 added ``faster_whisper``.
     """
 
     backend: str = "deepgram"
     deepgram: DeepgramSTTConfig = field(default_factory=DeepgramSTTConfig)
     parakeet: ParakeetSTTConfig = field(default_factory=ParakeetSTTConfig)
+    faster_whisper: FasterWhisperSTTConfig = field(
+        default_factory=FasterWhisperSTTConfig
+    )
 
 
 DEFAULT_AZURE_TTS_VOICE = "en-US-AmberNeural"
@@ -488,7 +505,21 @@ def _parse_stt_config(raw: dict) -> STTConfig:
         )
         raise ConfigError(msg)
     parakeet = _parse_parakeet_stt_config(parakeet_raw)
-    return STTConfig(backend=backend_raw, deepgram=deepgram, parakeet=parakeet)
+
+    fw_raw = raw.get("faster_whisper", {})
+    if not isinstance(fw_raw, dict):
+        msg = (
+            f"[providers.stt.faster_whisper] must be a table, "
+            f"got {type(fw_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    faster_whisper = _parse_faster_whisper_stt_config(fw_raw)
+    return STTConfig(
+        backend=backend_raw,
+        deepgram=deepgram,
+        parakeet=parakeet,
+        faster_whisper=faster_whisper,
+    )
 
 
 def _parse_deepgram_stt_config(raw: dict) -> DeepgramSTTConfig:
@@ -584,6 +615,36 @@ def _parse_parakeet_stt_config(raw: dict) -> ParakeetSTTConfig:
     return ParakeetSTTConfig(
         model_name=_str("model_name", defaults.model_name),
         device=_str("device", defaults.device),
+        idle_close_s=_float("idle_close_s", defaults.idle_close_s),
+    )
+
+
+def _parse_faster_whisper_stt_config(raw: dict) -> FasterWhisperSTTConfig:
+    """Parse ``[providers.stt.faster_whisper]`` knobs; validate types."""
+    defaults = FasterWhisperSTTConfig()
+
+    def _str(key: str, default: str) -> str:
+        v = raw.get(key, default)
+        if not isinstance(v, str) or not v:
+            msg = f"[providers.stt.faster_whisper].{key} must be a non-empty string"
+            raise ConfigError(msg)
+        return v
+
+    def _float(key: str, default: float) -> float:
+        v = raw.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = (
+                f"[providers.stt.faster_whisper].{key} must be a number, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        return float(v)
+
+    return FasterWhisperSTTConfig(
+        model_size=_str("model_size", defaults.model_size),
+        device=_str("device", defaults.device),
+        compute_type=_str("compute_type", defaults.compute_type),
+        language=_str("language", defaults.language),
         idle_close_s=_float("idle_close_s", defaults.idle_close_s),
     )
 

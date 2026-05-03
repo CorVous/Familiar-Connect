@@ -27,6 +27,7 @@ toml baked into the image and tune per host without a rebuild.
 | History window + prompt layer order | `[providers.history]`, `[channels.<id>]` | unchanged |
 | Deepgram STT thresholds & key-terms | `[providers.stt.deepgram]` (env override per knob) | unchanged |
 | Parakeet local STT (V3 phase 2) | `[providers.stt.parakeet]` (env override per knob) | unchanged |
+| FasterWhisper local STT (V3 phase 3) | `[providers.stt.faster_whisper]` (env override per knob) | unchanged |
 | STT backend selector | `[providers.stt].backend` (`STT_BACKEND` env override) | unchanged |
 | Turn detection strategy | `[providers.turn_detection]` | unchanged |
 | Memory projector selection | hard-wired | `[providers.memory]` (M5) |
@@ -271,8 +272,8 @@ result.
 
 **Requirements:**
 
-- `uv sync --extra local-turn --extra local-stt` — pulls TEN-VAD,
-  Smart Turn, NeMo, torch.
+- `uv sync --extra local-turn --extra local-stt-parakeet` — pulls
+  TEN-VAD, Smart Turn, NeMo, torch.
 - `[providers.turn_detection].strategy = "ten+smart_turn"` (or env
   `LOCAL_TURN_DETECTION=1`). Without a local turn detector nothing
   drives `finalize()`, so transcripts never surface.
@@ -298,6 +299,50 @@ idle_close_s = 30.0
 | `PARAKEET_MODEL_NAME` | `model_name` |
 | `PARAKEET_DEVICE` | `device` |
 | `PARAKEET_IDLE_CLOSE_S` | `idle_close_s` |
+
+## STT — FasterWhisper (V3 phase 3)
+
+Local CTranslate2-backed Whisper. Lighter than Parakeet — no torch,
+~150 MB for the `small` model. Same buffer-and-finalize shape:
+audio accumulates per user, the local turn detector fires
+`finalize()` on turn-complete, Whisper runs once and emits one
+final result.
+
+**Requirements:**
+
+- `uv sync --extra local-turn --extra local-stt-whisper` — pulls
+  TEN-VAD, Smart Turn, faster-whisper.
+- `[providers.turn_detection].strategy = "ten+smart_turn"` (or env
+  `LOCAL_TURN_DETECTION=1`). Without a local turn detector nothing
+  drives `finalize()`.
+
+```toml
+[providers.stt]
+backend = "faster_whisper"
+
+[providers.stt.faster_whisper]
+model_size   = "small"          # "tiny" | "base" | "small" | "medium" | "large-v3"
+device       = "auto"           # "auto" | "cuda" | "cpu"
+compute_type = "auto"           # "auto" | "int8" | "float16" | "float32"
+language     = "en"
+idle_close_s = 30.0
+```
+
+| Field | Default | Purpose |
+|---|---|---|
+| `model_size` | `small` | CT2 model size; tradeoffs latency vs. accuracy. |
+| `device` | `auto` | `auto` defers to faster-whisper; `cuda` / `cpu` force. |
+| `compute_type` | `auto` | Quantisation; `int8` is the CPU sweet spot. |
+| `language` | `en` | Pinned avoids per-turn language detection latency. |
+| `idle_close_s` | `30.0` | Per-user buffer reset after silence. |
+
+| Env var | Overrides |
+|---|---|
+| `FASTER_WHISPER_MODEL_SIZE` | `model_size` |
+| `FASTER_WHISPER_DEVICE` | `device` |
+| `FASTER_WHISPER_COMPUTE_TYPE` | `compute_type` |
+| `FASTER_WHISPER_LANGUAGE` | `language` |
+| `FASTER_WHISPER_IDLE_CLOSE_S` | `idle_close_s` |
 
 ## Local turn detection (V1)
 
@@ -407,7 +452,7 @@ read by today's code.
 strategy = "deepgram"            # | "ten+smart_turn"
 
 [providers.stt]
-backend = "deepgram"             # | "parakeet" (phase 2 shipped)
+backend = "deepgram"             # | "parakeet" | "faster_whisper" (V3 closed)
 # env: STT_BACKEND overrides this at startup (mirrors LOCAL_TURN_DETECTION)
 
 [providers.stt.parakeet]         # V3 phase 2 (shipped)
@@ -415,9 +460,14 @@ model_name   = "nvidia/parakeet-tdt-0.6b-v3"
 device       = "auto"
 idle_close_s = 30.0
 
-# planned (V3 phase 3, V5, M5)
-[providers.stt.faster_whisper]   # (V3 phase 3)
-model_size = "small"
+[providers.stt.faster_whisper]   # V3 phase 3 (shipped)
+model_size   = "small"
+device       = "auto"
+compute_type = "auto"
+language     = "en"
+idle_close_s = 30.0
+
+# planned (V5, M5)
 
 [providers.memory]
 projectors = ["rich_note", "people_dossier"]                        # (M5)

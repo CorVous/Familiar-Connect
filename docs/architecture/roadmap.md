@@ -98,25 +98,28 @@ See [Voice pipeline — turn detection](voice-pipeline.md#turn-detection),
 [Per-turn budget telemetry](voice-pipeline.md#per-turn-budget-telemetry),
 and [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
-### V3 — Pluggable transcriber backend
+### V3 — Pluggable transcriber backend (shipped)
 
-Phase 1 shipped: `Transcriber` Protocol
-(`src/familiar_connect/stt/protocol.py`), backend dispatch in
-`stt/factory.create_transcriber`, and the `STT_BACKEND` env override
-on top of `[providers.stt].backend`. `DeepgramTranscriber` lives in
-`stt/deepgram.py`; the rest of the voice pipeline (`bot.py`,
-`sources/voice.py`, `familiar.py`) types against `Transcriber`.
+Phase 1: `Transcriber` Protocol (`src/familiar_connect/stt/protocol.py`),
+backend dispatch in `stt/factory.create_transcriber`, and the
+`STT_BACKEND` env override on top of `[providers.stt].backend`.
+`DeepgramTranscriber` lives in `stt/deepgram.py`; the rest of the
+voice pipeline (`bot.py`, `sources/voice.py`, `familiar.py`) types
+against `Transcriber`.
 
-Phase 2 shipped: `ParakeetTranscriber` (`stt/parakeet.py`) wraps NeMo
-Parakeet-TDT 0.6B v3. Buffer-and-finalize semantics — the local
-endpointer (V1) drives `finalize()`, so this backend requires
-`[providers.turn_detection].strategy = "ten+smart_turn"`. Selected
-via `backend = "parakeet"` (or `STT_BACKEND=parakeet`); install the
-`local-stt` extra to pull NeMo and torch.
+Phase 2: `ParakeetTranscriber` (`stt/parakeet.py`) wraps NeMo
+Parakeet-TDT 0.6B v3. Selected via `backend = "parakeet"`; install
+the `local-stt-parakeet` extra (NeMo + torch).
 
-Phase 3 (next): `FasterWhisperTranscriber` (CTranslate2). Same shape
-as Parakeet — local, finalize-driven; drops in behind the existing
-factory arm.
+Phase 3: `FasterWhisperTranscriber` (`stt/faster_whisper.py`) wraps
+`faster-whisper` (CTranslate2). Same buffer-and-finalize shape as
+Parakeet but lighter — no torch, ~150 MB for the `small` model.
+Selected via `backend = "faster_whisper"`; install the
+`local-stt-whisper` extra.
+
+Both local backends share the buffer-and-finalize seam: the local
+turn detector (V1) drives `finalize()`, so they require
+`[providers.turn_detection].strategy = "ten+smart_turn"`.
 
 ### V4 — Pluggable TTS backend & Mimi-codec readiness
 
@@ -142,8 +145,8 @@ env var `LOCAL_TURN_DETECTION` continues to override TOML for container
 deployments. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
 `[providers.stt].backend` selector wired in V3 phase 1 — same pattern
-(env override `STT_BACKEND` on top of TOML). Phase 2 added `parakeet`;
-phase 3 will add `faster_whisper`.
+(env override `STT_BACKEND` on top of TOML). Phases 2 and 3 added
+`parakeet` and `faster_whisper`. V3 closed.
 
 Remaining selectors (not yet wired — implementations don't exist):
 

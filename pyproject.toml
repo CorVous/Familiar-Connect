@@ -41,10 +41,18 @@ local-turn = [
 # toolkit). Pulls torch + ~600 MB of weights on first load; opt-in by
 # design. Pair with ``local-turn`` so the endpointer drives
 # ``finalize()`` (Parakeet has no internal silence detector). Install via:
-#     uv sync --extra local-turn --extra local-stt
+#     uv sync --extra local-turn --extra local-stt-parakeet
 # See docs/architecture/voice-pipeline.md.
-local-stt = [
+local-stt-parakeet = [
     "nemo-toolkit[asr] >= 2.0",
+    "numpy >= 1.26, < 3",
+]
+# Local STT — FasterWhisper (CTranslate2). Lighter than NeMo (no torch);
+# the ``small`` model is ~150 MB. Same finalize-driven shape as
+# Parakeet — pair with ``local-turn``. Install via:
+#     uv sync --extra local-turn --extra local-stt-whisper
+local-stt-whisper = [
+    "faster-whisper >= 1.0",
     "numpy >= 1.26, < 3",
 ]
 

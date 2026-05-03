@@ -43,7 +43,7 @@ strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
 # differ per host. Secrets (``DEEPGRAM_API_KEY``) stay in env.
 
 [providers.stt]
-backend = "deepgram"            # "deepgram" | "parakeet" (V3 phase 3: | "faster_whisper")
+backend = "deepgram"            # "deepgram" | "parakeet" | "faster_whisper"
 # env STT_BACKEND overrides this at startup (mirrors LOCAL_TURN_DETECTION)
 
 [providers.stt.deepgram]
@@ -61,12 +61,28 @@ reconnect_backoff_cap_s = 16.0
 idle_close_s            = 30.0  # close per-user stream after silence; 0 disables
 
 [providers.stt.parakeet]
-# Local NeMo backend. Requires the ``local-stt`` extra (`uv sync --extra local-stt`)
-# AND ``[providers.turn_detection].strategy = "ten+smart_turn"`` — Parakeet
+# Local NeMo backend. Requires the ``local-stt-parakeet`` extra
+# (`uv sync --extra local-stt-parakeet`) AND
+# ``[providers.turn_detection].strategy = "ten+smart_turn"`` — Parakeet
 # has no internal endpointer, so the local turn detector drives `finalize()`.
 # Per-knob env vars: PARAKEET_MODEL_NAME, PARAKEET_DEVICE, PARAKEET_IDLE_CLOSE_S.
 model_name   = "nvidia/parakeet-tdt-0.6b-v3"
 device       = "auto"           # "auto" | "cuda" | "cpu"
+idle_close_s = 30.0
+
+[providers.stt.faster_whisper]
+# Local CTranslate2-backed Whisper. Lighter than Parakeet (~150 MB for
+# the small model) and pulls no torch. Requires the ``local-stt-whisper``
+# extra (`uv sync --extra local-stt-whisper`) AND
+# ``[providers.turn_detection].strategy = "ten+smart_turn"`` — same
+# reason as Parakeet.
+# Per-knob env vars: FASTER_WHISPER_MODEL_SIZE, FASTER_WHISPER_DEVICE,
+# FASTER_WHISPER_COMPUTE_TYPE, FASTER_WHISPER_LANGUAGE,
+# FASTER_WHISPER_IDLE_CLOSE_S.
+model_size   = "small"          # "tiny" | "base" | "small" | "medium" | "large-v3"
+device       = "auto"           # "auto" | "cuda" | "cpu"
+compute_type = "auto"           # "auto" | "int8" | "float16" | "float32"
+language     = "en"
 idle_close_s = 30.0
 
 # --- Text-to-speech --------------------------------------------------------

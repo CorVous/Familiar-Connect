@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from familiar_connect.stt.protocol import Transcriber
 
 
-_KNOWN_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet"})
+_KNOWN_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet", "faster_whisper"})
 
 
 def _resolve_backend(toml_backend: str) -> str:
@@ -52,6 +52,8 @@ def create_transcriber(config: STTConfig) -> Transcriber:
         return _create_deepgram(config)
     if backend == "parakeet":
         return _create_parakeet(config)
+    if backend == "faster_whisper":
+        return _create_faster_whisper(config)
 
     # unreachable while every _KNOWN_BACKENDS entry has a dispatch arm
     msg = f"backend {backend!r} accepted but not dispatched"  # pragma: no cover
@@ -73,3 +75,15 @@ def _create_parakeet(config: STTConfig) -> Transcriber:
         # Re-raise as ValueError so ``run.py`` catches + warns uniformly.
         raise ValueError(str(exc)) from exc
     return create_parakeet_from_env(config.parakeet)
+
+
+def _create_faster_whisper(config: STTConfig) -> Transcriber:
+    """Lazy-import FasterWhisper so its CT2 deps stay optional."""
+    try:
+        from familiar_connect.stt.faster_whisper import (  # noqa: PLC0415
+            create_faster_whisper_from_env,
+        )
+    except RuntimeError as exc:
+        # numpy missing → module raises on import; surface as ValueError.
+        raise ValueError(str(exc)) from exc
+    return create_faster_whisper_from_env(config.faster_whisper)
