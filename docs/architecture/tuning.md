@@ -320,7 +320,7 @@ install `onnxruntime-gpu` separately, switch to the GPU export:
 
 ```toml
 [providers.turn_detection.local]
-smart_turn_filename = "smart-turn-v3.2-gpu.onnx"
+smart_turn_filename = "smart-turn-v3.1-gpu.onnx"
 ```
 
 When active, per-user Deepgram clones are spawned with
@@ -332,8 +332,8 @@ rather than firing on their own silence timer.
 strategy = "ten+smart_turn"   # "deepgram" (default) | "ten+smart_turn"
 
 [providers.turn_detection.local]
-smart_turn_repo_id    = "pipecat-ai/smart-turn"
-smart_turn_filename   = "smart-turn-v3.2-cpu.onnx"
+smart_turn_repo_id    = "pipecat-ai/smart-turn-v3"
+smart_turn_filename   = "smart-turn-v3.1-cpu.onnx"
 silence_ms            = 200
 speech_start_ms       = 100
 vad_threshold         = 0.5
@@ -343,8 +343,8 @@ vad_hop_size          = 256
 
 | Field | Default | Purpose |
 |---|---|---|
-| `smart_turn_repo_id` | `pipecat-ai/smart-turn` | HuggingFace repo holding the ONNX exports. |
-| `smart_turn_filename` | `smart-turn-v3.2-cpu.onnx` | Specific export. Switch to `smart-turn-v3.2-gpu.onnx` if `onnxruntime-gpu` is installed. |
+| `smart_turn_repo_id` | `pipecat-ai/smart-turn-v3` | HuggingFace repo holding the ONNX exports. |
+| `smart_turn_filename` | `smart-turn-v3.1-cpu.onnx` | Specific export. Switch to `smart-turn-v3.1-gpu.onnx` if `onnxruntime-gpu` is installed. |
 | `silence_ms` | `200` | Silence after speech before SmartTurn classifies. |
 | `speech_start_ms` | `100` | Consecutive speech before "speaking" latches. |
 | `vad_threshold` | `0.5` | TEN-VAD `is_speech` cutoff. |

@@ -49,12 +49,12 @@ class LocalTurnConfig:
 
     Smart Turn weights are pulled from HuggingFace on first use (cached
     under ``~/.cache/huggingface``). Default filename is the CPU ONNX
-    export — switch to ``smart-turn-v3.2-gpu.onnx`` if ``onnxruntime-gpu``
+    export — switch to ``smart-turn-v3.1-gpu.onnx`` if ``onnxruntime-gpu``
     is installed.
     """
 
-    smart_turn_repo_id: str = "pipecat-ai/smart-turn"
-    smart_turn_filename: str = "smart-turn-v3.2-cpu.onnx"
+    smart_turn_repo_id: str = "pipecat-ai/smart-turn-v3"
+    smart_turn_filename: str = "smart-turn-v3.1-cpu.onnx"
     silence_ms: int = 200
     speech_start_ms: int = 100
     vad_threshold: float = 0.5

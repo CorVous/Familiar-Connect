@@ -28,7 +28,7 @@ _HF_DOWNLOAD = "familiar_connect.voice.turn_detection.factory.hf_hub_download"
 
 class TestCreateLocalTurnDetector:
     def test_returns_detector_with_downloaded_path(self, tmp_path: Path) -> None:
-        model = tmp_path / "smart-turn-v3.2-cpu.onnx"
+        model = tmp_path / "smart-turn-v3.1-cpu.onnx"
         model.write_bytes(b"fake")
         with patch(_HF_DOWNLOAD, return_value=str(model)) as mock_dl:
             result = create_local_turn_detector(LocalTurnConfig())
@@ -36,8 +36,8 @@ class TestCreateLocalTurnDetector:
         assert result.smart_turn_path == model
         # default repo + filename flow through verbatim
         mock_dl.assert_called_once_with(
-            repo_id="pipecat-ai/smart-turn",
-            filename="smart-turn-v3.2-cpu.onnx",
+            repo_id="pipecat-ai/smart-turn-v3",
+            filename="smart-turn-v3.1-cpu.onnx",
         )
 
     def test_returns_none_when_download_fails(self) -> None:
@@ -52,7 +52,7 @@ class TestCreateLocalTurnDetector:
         assert result is None
 
     def test_default_knobs_applied(self, tmp_path: Path) -> None:
-        model = tmp_path / "smart-turn-v3.2-cpu.onnx"
+        model = tmp_path / "smart-turn-v3.1-cpu.onnx"
         model.write_bytes(b"fake")
         with patch(_HF_DOWNLOAD, return_value=str(model)):
             result = create_local_turn_detector(LocalTurnConfig())
@@ -64,11 +64,11 @@ class TestCreateLocalTurnDetector:
         assert result.vad_hop_size == 256
 
     def test_passes_config_through(self, tmp_path: Path) -> None:
-        model = tmp_path / "smart-turn-v3.2-gpu.onnx"
+        model = tmp_path / "smart-turn-v3.1-gpu.onnx"
         model.write_bytes(b"fake")
         cfg = LocalTurnConfig(
-            smart_turn_repo_id="pipecat-ai/smart-turn",
-            smart_turn_filename="smart-turn-v3.2-gpu.onnx",
+            smart_turn_repo_id="pipecat-ai/smart-turn-v3",
+            smart_turn_filename="smart-turn-v3.1-gpu.onnx",
             silence_ms=300,
             speech_start_ms=150,
             vad_threshold=0.7,
@@ -84,8 +84,8 @@ class TestCreateLocalTurnDetector:
         assert result.smart_turn_threshold == pytest.approx(0.6)
         assert result.vad_hop_size == 160
         mock_dl.assert_called_once_with(
-            repo_id="pipecat-ai/smart-turn",
-            filename="smart-turn-v3.2-gpu.onnx",
+            repo_id="pipecat-ai/smart-turn-v3",
+            filename="smart-turn-v3.1-gpu.onnx",
         )
 
     def test_custom_repo_id_flows_through(self, tmp_path: Path) -> None:
