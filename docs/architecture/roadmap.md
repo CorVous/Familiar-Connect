@@ -87,16 +87,16 @@ FastEmbed/ONNX. Vectors in `sqlite-vec` alongside FTS.
 
 Shipped. TEN-VAD + Smart Turn v3 wrappers (phase 1), per-user
 `UtteranceEndpointer` wired into the audio pump (phase 2), VAD-to-STT
-telemetry (`voice.vad_to_stt`), and TOML-driven strategy selector
-(`[providers.turn_detection] strategy = "ten+smart_turn"`) have all
-landed. Local VAD saves 150–200 ms over remote endpointing.
+telemetry (`voice.vad_to_stt`), TOML-driven strategy selector
+(`[providers.turn_detection] strategy = "ten+smart_turn"`), and
+audio-fixture integration coverage for complete-sentence / mid-thought /
+filler endpointing patterns
+(`tests/test_endpointer_audio_fixtures.py`) have all landed. Local VAD
+saves 150–200 ms over remote endpointing.
 
 See [Voice pipeline — turn detection](voice-pipeline.md#turn-detection),
 [Per-turn budget telemetry](voice-pipeline.md#per-turn-budget-telemetry),
 and [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
-
-Remaining: audio-fixture integration tests covering complete-sentence /
-mid-thought / filler endpointing patterns.
 
 ### V3 — Pluggable transcriber backend
 

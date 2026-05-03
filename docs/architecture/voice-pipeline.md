@@ -146,6 +146,24 @@ unset), the bot keeps using Deepgram's hosted endpointer.
 
 See [Roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
 
+#### Test coverage
+
+Two layers pin the state machine:
+
+- `tests/test_utterance_endpointer.py` — unit tests with canned
+  VAD/SmartTurn return values. Drives every state-machine edge.
+- `tests/test_endpointer_audio_fixtures.py` — audio-fixture
+  integration tests. Synthesises 48 kHz mono int16 PCM
+  (silence + 220 Hz sine bursts), feeds it through the real
+  resampler + framer, and validates the three patterns the field
+  consensus calls out: **complete-sentence** (one classify, one
+  callback), **mid-thought** (in-utterance pause below `silence_ms`
+  must not trip classification), and **filler** (incomplete verdict
+  holds the callback; resumed speech with a complete verdict fires
+  it). VAD is energy-thresholded over actual frame bytes so the
+  fixture genuinely drives the transitions; SmartTurn is a verdict
+  stub (no ONNX dependency in CI).
+
 ## STT (transcription)
 
 **Today:** `DeepgramTranscriber`. Per-speaker clone-from-template
