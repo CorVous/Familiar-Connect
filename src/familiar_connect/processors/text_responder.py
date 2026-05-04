@@ -146,7 +146,7 @@ def _consume_thread_marker(content: str) -> tuple[str, bool, str | None]:
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import Awaitable, Callable
     from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
     from familiar_connect.bus.envelope import Event, TurnScope
@@ -163,12 +163,6 @@ if TYPE_CHECKING:
     TriggerTyping = Callable[[int], AsyncContextManager[None]]
 
 _logger = logging.getLogger("familiar_connect.processors.text_responder")
-
-
-@contextlib.asynccontextmanager
-async def _null_typing_cm() -> AsyncIterator[None]:  # noqa: RUF029 — async-CM contract
-    """Fresh no-op CM when no typing-indicator hook is wired."""
-    yield
 
 
 class TextResponder:
@@ -294,18 +288,17 @@ class TextResponder:
             channel_id=channel_id, guild_id=guild_id
         )
 
-        # Wrap stream + send in the typing indicator so users see
-        # ``Bot is typing…`` for the duration. We can't tell silence in
-        # advance — entering the context briefly on a ``<silent>`` reply
-        # is acceptable; py-cord stops the indicator on context exit.
-        async with self._typing_context(channel_id):
-            reply = await self._stream_reply(
-                scope,
-                channel_id=channel_id,
-                guild_id=guild_id,
-            )
-            if reply is None or scope.is_cancelled():
-                return
+        # Typing indicator opens lazily inside ``_stream_reply`` once
+        # the silent-sentinel decision resolves to ``False`` — reasoning
+        # tokens routinely precede a ``<silent>`` verdict, and we don't
+        # want ``Bot is typing…`` to flicker on for those.
+        reply = await self._stream_reply(
+            scope,
+            channel_id=channel_id,
+            guild_id=guild_id,
+        )
+        if reply is None or scope.is_cancelled():
+            return
         # Discord rejects empty / whitespace-only messages (HTTP 400,
         # error code 50006). An empty reply usually means the LLM
         # stream emitted no deltas — bad model name, content filter,
@@ -376,12 +369,6 @@ class TextResponder:
         )
         self._router.end_turn(scope)
 
-    def _typing_context(self, channel_id: int) -> AsyncContextManager[None]:
-        """Return the active typing-indicator CM or a no-op fallback."""
-        if self._trigger_typing is not None:
-            return self._trigger_typing(channel_id)
-        return _null_typing_cm()
-
     def _build_ping_resolver(
         self,
         *,
@@ -450,26 +437,43 @@ class TextResponder:
 
         accumulated: list[str] = []
         silent = SilentDetector()
-        try:
-            async for delta in self._llm.chat_stream(messages):
-                if scope.is_cancelled():
-                    return None
-                accumulated.append(delta)
-                if silent.feed(delta) is True:
-                    # Mirror cancellation: no send, no assistant turn.
-                    # The 'decision=silent' log replaces the would-be
-                    # empty-reply warning (which targets bad model /
-                    # content-filter cases, not deliberate silence).
-                    _logger.info(
-                        f"{ls.tag('💤 Text', ls.B)} "
-                        f"{ls.kv('decision', 'silent', vc=ls.LB)} "
-                        f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
-                    )
-                    return None
-        except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
-            _logger.warning(
-                f"{ls.tag('Text', ls.R)} "
-                f"{ls.kv('llm_stream_error', repr(exc), vc=ls.R)}"
-            )
-            return None
-        return "".join(accumulated)
+        # Typing indicator stays closed until ``SilentDetector`` rules
+        # out the sentinel — keeps ``Bot is typing…`` from flickering
+        # during reasoning that resolves to ``<silent>``. ``AsyncExitStack``
+        # owns the eventual ``__aexit__`` whether the stream finishes,
+        # the scope is cancelled, or chat_stream raises.
+        typing_started = False
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                async for delta in self._llm.chat_stream(messages):
+                    if scope.is_cancelled():
+                        return None
+                    accumulated.append(delta)
+                    decision = silent.feed(delta)
+                    if decision is True:
+                        # Mirror cancellation: no send, no assistant turn.
+                        # The 'decision=silent' log replaces the would-be
+                        # empty-reply warning (which targets bad model /
+                        # content-filter cases, not deliberate silence).
+                        _logger.info(
+                            f"{ls.tag('💤 Text', ls.B)} "
+                            f"{ls.kv('decision', 'silent', vc=ls.LB)} "
+                            f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                        )
+                        return None
+                    if (
+                        decision is False
+                        and not typing_started
+                        and self._trigger_typing is not None
+                    ):
+                        await stack.enter_async_context(
+                            self._trigger_typing(channel_id)
+                        )
+                        typing_started = True
+            except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
+                _logger.warning(
+                    f"{ls.tag('Text', ls.R)} "
+                    f"{ls.kv('llm_stream_error', repr(exc), vc=ls.R)}"
+                )
+                return None
+            return "".join(accumulated)

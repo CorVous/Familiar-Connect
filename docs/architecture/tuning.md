@@ -228,9 +228,10 @@ typing_backoff_max_s     = 30.0
 While generating a reply the bot also surfaces Discord's "Bot is
 typing…" indicator (via `BotHandle.trigger_typing`) so users see the
 in-flight signal — including on regenerated replies after a barge-in
-cancellation. The indicator stops cleanly when the streaming context
-exits; on a `<silent>` reply it shows briefly then stops without a
-post.
+cancellation. The indicator opens lazily, only after `SilentDetector`
+rules out the `<silent>` sentinel, so reasoning that resolves to
+silence never flickers the indicator on. It stops cleanly when the
+streaming context exits.
 
 ### Better long-term memory
 

@@ -269,8 +269,14 @@ class TestTypingIndicator:
         assert typing.exited == 1
 
     @pytest.mark.asyncio
-    async def test_typing_context_exits_on_silent_reply(self, tmp_path: Path) -> None:
-        """``<silent>`` aborts mid-stream — context still exits cleanly."""
+    async def test_typing_context_skipped_on_silent_reply(self, tmp_path: Path) -> None:
+        """``<silent>`` (incl. after reasoning) must not surface the indicator.
+
+        Reasoning often resolves to ``<silent>`` — entering the typing
+        context up front would flicker ``Bot is typing…`` for nothing.
+        Deferred entry ensures the indicator only appears once we know
+        we're actually going to speak.
+        """
         typing = _RecordingTyping()
         llm = _ScriptedLLM(deltas=["<silent>"])
         send = _CapturingSend()
@@ -283,10 +289,23 @@ class TestTypingIndicator:
         await bus.shutdown()
 
         assert send.calls == []
-        # entered + exited even though we never sent — caller can't
-        # tell silence in advance, the brief flicker is acceptable
-        assert typing.entered == 1
-        assert typing.exited == 1
+        assert typing.entered == 0
+        assert typing.exited == 0
+
+    @pytest.mark.asyncio
+    async def test_typing_context_skipped_on_empty_stream(self, tmp_path: Path) -> None:
+        """No deltas at all → no typing indicator (mirrors ``<silent>``)."""
+        typing = _RecordingTyping()
+        llm = _ScriptedLLM(deltas=[])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm, send=send, tmp_path=tmp_path, trigger_typing=typing
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+        assert typing.entered == 0
 
     @pytest.mark.asyncio
     async def test_works_without_typing_hook(self, tmp_path: Path) -> None:
