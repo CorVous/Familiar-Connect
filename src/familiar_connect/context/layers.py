@@ -335,6 +335,16 @@ def _trim_rag_lines_to_tokens(
     return kept_facts, kept_turns
 
 
+def _format_clock_12h(ts: datetime) -> str:
+    """Render UTC time as ``2:29PM`` (no leading zero on hour)."""
+    return ts.astimezone(UTC).strftime("%I:%M%p").lstrip("0")
+
+
+def _format_date_iso(ts: datetime) -> str:
+    """Render UTC date as ``YYYY-MM-DD``."""
+    return ts.astimezone(UTC).strftime("%Y-%m-%d")
+
+
 def _trim_messages_to_token_cap(
     messages: list[Message], max_tokens: int
 ) -> list[Message]:
@@ -402,13 +412,19 @@ def _turn_to_message_with_context(
     Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted —
     the recent-history window is short. Reply markers and mention
     rewriting are applied here so all enrichment lives in one place.
+    The ``platform_message_id`` (when present) is surfaced as
+    ``#<id>`` next to the speaker so the model can target a specific
+    message via ``[↩ <id>]``.
     """
     role = turn.role
     author = turn.author
     content = _rewrite_mentions(
         turn.content, store=store, familiar_id=familiar_id, guild_id=guild_id
     )
+    msg_id_tag = f" #{turn.platform_message_id}" if turn.platform_message_id else ""
     if role == "assistant" or author is None:
+        if msg_id_tag:
+            return Message(role=role, content=f"[{msg_id_tag.lstrip()}] {content}")
         return Message(role=role, content=content)
     label = store.resolve_label(
         canonical_key=author.canonical_key,
@@ -442,7 +458,7 @@ def _turn_to_message_with_context(
                 + " "
             )
 
-    prefixed = f"[{ts} {label}] {reply_prefix}{content}"
+    prefixed = f"[{ts} {label}{msg_id_tag}] {reply_prefix}{content}"
     return Message(role=role, content=prefixed, name=name)
 
 
@@ -726,6 +742,10 @@ class RagContextLayer:
         :class:`RecentHistoryLayer` verbatim. Default 0 preserves
         the unfiltered behaviour for tests / callers that don't opt
         in.
+
+    :param context_window: per FTS hit, expand to ``hit.id ±
+        context_window`` so each retrieved turn keeps a small
+        surrounding context. ``0`` = hit alone (legacy behaviour).
     """
 
     name: str = "rag_context"
@@ -738,12 +758,14 @@ class RagContextLayer:
         max_facts: int = 3,
         recent_window_size: int = 0,
         max_tokens: int | None = None,
+        context_window: int = 1,
     ) -> None:
         self._store = store
         self._max_results = max_results
         self._max_facts = max_facts
         self._recent_window_size = recent_window_size
         self._max_tokens = max_tokens
+        self._context_window = max(0, context_window)
         self._current_cue: str = ""
 
     def set_current_cue(self, cue: str) -> None:
@@ -783,16 +805,7 @@ class RagContextLayer:
             f"- {_render_fact_line(self._store, ctx.familiar_id, f, guild_id=ctx.guild_id)}"  # noqa: E501
             for f in fact_results
         ]
-        turn_lines: list[str] = []
-        for t in turn_results:
-            label = _resolve_turn_label(self._store, ctx, t)
-            rewritten = _rewrite_mentions(
-                t.content,
-                store=self._store,
-                familiar_id=ctx.familiar_id,
-                guild_id=ctx.guild_id,
-            )
-            turn_lines.append(f"- [{label}] {rewritten}")
+        turn_lines = self._render_turn_lines(ctx, turn_results, max_id=max_id)
 
         if self._max_tokens is not None:
             fact_lines, turn_lines = _trim_rag_lines_to_tokens(
@@ -809,6 +822,68 @@ class RagContextLayer:
                 "\n".join(["## Possibly relevant earlier turns\n", *turn_lines])
             )
         return "\n\n".join(sections)
+
+    def _render_turn_lines(
+        self,
+        ctx: AssemblyContext,
+        hits: list[HistoryTurn],
+        *,
+        max_id: int | None,
+    ) -> list[str]:
+        """Group hits + neighbour context by date, render blockquote lines.
+
+        For each FTS hit, expand to ``id ± context_window`` and
+        de-duplicate, then bucket by UTC date. Each bucket emits a
+        ``YYYY-MM-DD:`` header followed by ``> [H:MMpm Author]: text``
+        lines so the model sees a hit with its surrounding chatter.
+
+        ``max_id`` mirrors the FTS exclusion: neighbour turns from the
+        active channel that fall inside the recent-history window are
+        dropped — :class:`RecentHistoryLayer` already shows them.
+        """
+        if not hits:
+            return []
+        wanted_ids: set[int] = set()
+        for h in hits:
+            wanted_ids.update(
+                h.id + d for d in range(-self._context_window, self._context_window + 1)
+            )
+        expanded = self._store.turns_by_ids(familiar_id=ctx.familiar_id, ids=wanted_ids)
+        hit_channels = {h.channel_id for h in hits}
+        kept: list[HistoryTurn] = []
+        for t in expanded:
+            if t.channel_id not in hit_channels:
+                continue
+            if (
+                max_id is not None
+                and ctx.channel_id is not None
+                and t.channel_id == ctx.channel_id
+                and t.id > max_id
+            ):
+                continue
+            kept.append(t)
+
+        by_date: dict[str, list[HistoryTurn]] = {}
+        for turn in kept:
+            by_date.setdefault(_format_date_iso(turn.timestamp), []).append(turn)
+
+        lines: list[str] = []
+        for date_label in sorted(by_date):
+            lines.append(f"{date_label}:")
+            for turn in by_date[date_label]:
+                label = _resolve_turn_label(self._store, ctx, turn)
+                rewritten = _rewrite_mentions(
+                    turn.content,
+                    store=self._store,
+                    familiar_id=ctx.familiar_id,
+                    guild_id=ctx.guild_id,
+                )
+                clock = _format_clock_12h(turn.timestamp)
+                lines.append(f"> [{clock} {label}]: {rewritten}")
+            lines.append("")  # blank line between date groups
+        if lines and not lines[-1]:
+            lines.pop()
+        return lines
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         cue = self._current_cue

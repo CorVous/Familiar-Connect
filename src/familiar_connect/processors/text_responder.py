@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from familiar_connect import log_style as ls
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.context.assembler import AssemblyContext
+from familiar_connect.context.final_reminder import build_final_reminder
 from familiar_connect.identity import Author
 from familiar_connect.llm import Message
 from familiar_connect.silence import SilentDetector
@@ -32,12 +33,14 @@ _PING_MARKER_RE = re.compile(r"\[@([^\]\n]+)\]")
 
 # Thread-reply marker. Either ``[↩]`` (matches the inbound reply
 # glyph the read path uses) or ``[reply]`` for tokenizer safety.
-# Presence anywhere in the output → thread to the triggering
-# message; the marker is stripped before sending.
-_THREAD_MARKER_RE = re.compile(r"\[(?:↩|reply)\]")
+# Optional whitespace + token after the glyph captures a target
+# ``platform_message_id`` — the LLM can point at a specific message
+# (visible as ``#<id>`` in recent history). Bare ``[↩]`` keeps the
+# legacy meaning: thread to the triggering message.
+_THREAD_MARKER_RE = re.compile(r"\[(?:↩|reply)(?:\s+([^\]\n]+))?\]")
 
 # Short addendum to the system prompt explaining the two output
-# controls. Costs ~4 lines; doesn't enumerate per-channel
+# controls. Costs ~5 lines; doesn't enumerate per-channel
 # participants — the LLM grounds names in recent history, the
 # resolver attempts a match against active speakers at send time.
 _BOT_OUTPUT_INSTRUCTIONS = (
@@ -48,7 +51,11 @@ _BOT_OUTPUT_INSTRUCTIONS = (
     "- Optionally prefix your message with `[↩]` to thread it as "
     "a reply to the message you're responding to. Useful when the "
     "channel is busy and it isn't obvious who you're addressing. "
-    "Without `[↩]`, your message posts normally."
+    "Without `[↩]`, your message posts normally.\n"
+    "- To reply to a *specific* earlier message, write "
+    "`[↩ <message_id>]` using the `#<id>` shown next to that "
+    "message in recent history. Unknown ids fall back to the "
+    "triggering message."
 )
 
 
@@ -85,19 +92,28 @@ def _rewrite_pings(
     return rewritten, tuple(resolved)
 
 
-def _consume_thread_marker(content: str) -> tuple[str, bool]:
-    """Strip ``[↩]`` / ``[reply]`` markers; return ``(stripped, wanted_thread)``.
+def _consume_thread_marker(content: str) -> tuple[str, bool, str | None]:
+    """Strip thread markers; return ``(stripped, wanted_thread, target_id)``.
 
     Any occurrence anywhere in the output triggers threading — being
     lenient about placement, since models are unreliable about exact
-    formatting. Multiple markers collapse to a single signal.
+    formatting. Multiple markers collapse to a single signal; the
+    *first* explicit id wins. ``target_id`` is ``None`` when the
+    marker is bare (legacy form: thread to the triggering message).
     Surrounding whitespace from a leading marker is cleaned up so the
     posted message doesn't start with a stray newline.
     """
-    stripped, n = _THREAD_MARKER_RE.subn("", content)
-    if n == 0:
-        return content, False
-    return stripped.lstrip(), True
+    target_id: str | None = None
+    matches = list(_THREAD_MARKER_RE.finditer(content))
+    if not matches:
+        return content, False, None
+    for m in matches:
+        captured = m.group(1)
+        if captured is not None and captured.strip():
+            target_id = captured.strip()
+            break
+    stripped = _THREAD_MARKER_RE.sub("", content).lstrip()
+    return stripped, True, target_id
 
 
 if TYPE_CHECKING:
@@ -243,11 +259,25 @@ class TextResponder:
             return
 
         # Threading is opt-in via an LLM-emitted marker. Strip the
-        # marker and only pass the inbound message_id to ``send_text``
-        # when the model deliberately asked to thread.
-        unthreaded, wants_thread = _consume_thread_marker(reply)
+        # marker and only pass a reply target to ``send_text`` when
+        # the model deliberately asked to thread. A captured id (e.g.
+        # ``[↩ msg-001]``) routes to that specific message when known;
+        # otherwise we fall back to the triggering message.
+        unthreaded, wants_thread, target_id = _consume_thread_marker(reply)
         rewritten, mention_user_ids = _rewrite_pings(unthreaded, label_to_key)
-        thread_target = message_id if wants_thread else None
+        thread_target: str | None = None
+        if wants_thread:
+            if (
+                target_id
+                and self._history.lookup_turn_by_platform_message_id(
+                    familiar_id=self._familiar_id,
+                    platform_message_id=target_id,
+                )
+                is not None
+            ):
+                thread_target = target_id
+            else:
+                thread_target = message_id
 
         try:
             sent_message_id = await self._send_text(
@@ -340,12 +370,13 @@ class TextResponder:
         )
         prompt = await self._assembler.assemble(ctx)
         # Always append the short output-controls instruction so the
-        # model knows ``[@X]`` and ``[↩]`` are routable. Costs ~4
-        # lines of context, no per-channel enumeration.
-        system = (
-            f"{prompt.system_prompt}\n\n{_BOT_OUTPUT_INSTRUCTIONS}"
-            if prompt.system_prompt
-            else _BOT_OUTPUT_INSTRUCTIONS
+        # model knows ``[@X]`` and ``[↩]`` are routable. Costs ~5
+        # lines of context, no per-channel enumeration. The final
+        # reminder restates current time + special inputs so the model
+        # doesn't drift on long-lived caches.
+        reminder = build_final_reminder(viewer_mode="text")
+        system = "\n\n".join(
+            s for s in (prompt.system_prompt, _BOT_OUTPUT_INSTRUCTIONS, reminder) if s
         )
         messages: list[Message] = [Message(role="system", content=system)]
         messages.extend(prompt.recent_history)

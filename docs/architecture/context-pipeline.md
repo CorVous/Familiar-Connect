@@ -470,7 +470,29 @@ on every text reply:
   plain text without pinging.
 - Optionally prefix your message with `[↩]` to thread it as a
   reply to the message you're responding to. …
+- To reply to a *specific* earlier message, write
+  `[↩ <message_id>]` using the `#<id>` shown next to that message
+  in recent history. Unknown ids fall back to the triggering
+  message id.
 ```
+
+`RecentHistoryLayer` surfaces `platform_message_id` next to each
+turn's speaker (`[14:32 Alice #1234567890] hi`) when present, so
+the model can target a specific earlier message via
+`[↩ 1234567890]`. The marker parser captures the optional id and
+`TextResponder` validates it against
+`HistoryStore.lookup_turn_by_platform_message_id`; unknown ids
+silently degrade to threading on the inbound message.
+
+### Final reminder
+
+Every system prompt closes with a small block restating *current
+time* (`YYYY-MM-DD H:MMpm UTC`) and the literal sentinels the
+responder honours. The block is rebuilt per-call (cheap), so the
+model never sees a stale clock — useful when the prompt cache lives
+across long-tailed turns. Voice channels see only `<silent>`; text
+channels also list `[@DisplayName]` and `[↩ <message_id>]`. Source:
+`src/familiar_connect/context/final_reminder.py`.
 
 There is **no per-channel enumeration** of pingable users. The LLM
 grounds on the names already visible in recent history (where
@@ -528,6 +550,24 @@ acceptable on free-text chat cues:
 Both policies surface in the `RagContextLayer`'s constructor
 parameters (`recent_window_size` defaulting to 0 for tests / callers
 that don't opt in; the production wiring sets it).
+
+**Rendering.** Retrieved hits are no longer flat ``- [Alice] text``
+lines — each hit pulls ``id ± context_window`` neighbours from the
+same channel (default 1, dropping any neighbour the recent-history
+window already shows) and the result is grouped by UTC date:
+
+```
+## Possibly relevant earlier turns
+
+2026-05-03:
+> [2:29PM Peebo]: i can't understand what you guys are saying
+> [2:30PM Peebo]: my brain's dying
+> [2:33PM Cassidy]: Dude maybe you should take a break
+```
+
+Date headers, 12-hour clock, and the surrounding turns make each
+hit interpretable on its own — the model doesn't have to guess at
+when or in what tone the line landed.
 
 Open work the current retrieval doesn't address:
 

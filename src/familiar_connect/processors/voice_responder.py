@@ -22,6 +22,7 @@ from familiar_connect.bus.topics import (
     TOPIC_VOICE_TRANSCRIPT_FINAL,
 )
 from familiar_connect.context.assembler import AssemblyContext
+from familiar_connect.context.final_reminder import build_final_reminder
 from familiar_connect.diagnostics.cold_cache import log_signals
 from familiar_connect.diagnostics.voice_budget import (
     PHASE_LLM_FIRST_TOKEN,
@@ -276,9 +277,11 @@ class VoiceResponder:
             viewer_mode="voice",
         )
         prompt = await self._assembler.assemble(ctx)
+        reminder = build_final_reminder(viewer_mode="voice")
+        system = "\n\n".join(s for s in (prompt.system_prompt, reminder) if s)
         messages: list[Message] = []
-        if prompt.system_prompt:
-            messages.append(Message(role="system", content=prompt.system_prompt))
+        if system:
+            messages.append(Message(role="system", content=system))
         messages.extend(prompt.recent_history)
 
         accumulated: list[str] = []

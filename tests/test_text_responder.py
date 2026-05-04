@@ -530,6 +530,58 @@ class TestIdentityWritePath:
         assert content == "sure thing"
 
     @pytest.mark.asyncio
+    async def test_thread_marker_with_explicit_id_targets_that_message(
+        self, tmp_path: Path
+    ) -> None:
+        """``[↩ <id>]`` threads to that specific message when known."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=42,
+            role="user",
+            content="earlier",
+            author=None,
+            platform_message_id="older-msg-7",
+        )
+        llm = _ScriptedLLM(deltas=["[↩ older-msg-7] sure"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm, send=send, tmp_path=tmp_path, store=store
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(message_id="incoming-msg-99"),
+            bus,
+        )
+        await bus.shutdown()
+
+        _, content, reply_to, _ = send.calls[0]
+        assert reply_to == "older-msg-7"
+        assert "[↩" not in content
+        assert content == "sure"
+
+    @pytest.mark.asyncio
+    async def test_thread_marker_with_unknown_id_falls_back_to_triggering(
+        self, tmp_path: Path
+    ) -> None:
+        """Unknown id → fall back to the triggering message id."""
+        llm = _ScriptedLLM(deltas=["[↩ no-such-msg] ok"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(message_id="incoming-msg-77"),
+            bus,
+        )
+        await bus.shutdown()
+
+        _, content, reply_to, _ = send.calls[0]
+        assert reply_to == "incoming-msg-77"
+        assert content == "ok"
+
+    @pytest.mark.asyncio
     async def test_thread_marker_reply_word_form_also_works(
         self, tmp_path: Path
     ) -> None:

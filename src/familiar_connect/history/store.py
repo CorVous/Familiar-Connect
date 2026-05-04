@@ -721,6 +721,33 @@ class HistoryStore:
             return None
         return _row_to_turn(row)
 
+    def turns_by_ids(
+        self,
+        *,
+        familiar_id: str,
+        ids: Iterable[int],
+    ) -> list[HistoryTurn]:
+        """Fetch turns by id, scoped to ``familiar_id``, oldest first.
+
+        Used by RAG to expand each FTS hit into a small surrounding
+        window (hit ± neighbours) without a per-id round trip.
+        """
+        unique_ids = sorted({int(i) for i in ids})
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ?
+               AND id IN ({placeholders})
+             ORDER BY id ASC
+            """,  # noqa: S608
+            (familiar_id, *unique_ids),
+        ).fetchall()
+        return [_row_to_turn(r) for r in rows]
+
     # ------------------------------------------------------------------
     # turn_mentions: many-to-many from a turn to mentioned canonical_keys
     # ------------------------------------------------------------------

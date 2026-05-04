@@ -349,6 +349,61 @@ class TestRagContextLayer:
         assert "now known as" not in out.lower()
 
     @pytest.mark.asyncio
+    async def test_renders_with_date_header_and_12h_clock(self) -> None:
+        """Earlier turns group under ``YYYY-MM-DD:`` with ``H:MMpm`` lines."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="my brain's dying",
+            author=Author(
+                platform="discord",
+                user_id="111",
+                username="peebo",
+                display_name="Peebo",
+            ),
+        )
+        # pin the timestamp so the assertion is stable
+        ts = datetime(2026, 5, 3, 14, 29, tzinfo=UTC).isoformat()
+        store._conn.execute("UPDATE turns SET timestamp = ? WHERE id = 1", (ts,))
+        store._conn.commit()
+        layer = RagContextLayer(store=store, max_results=5, context_window=0)
+        layer.set_current_cue("brain")
+        out = await layer.build(_ctx(channel_id=1))
+        assert "## Possibly relevant earlier turns" in out
+        assert "2026-05-03:" in out
+        assert "> [2:29PM Peebo]: my brain's dying" in out
+
+    @pytest.mark.asyncio
+    async def test_includes_neighbour_context_per_hit(self) -> None:
+        """Each hit pulls ±context_window neighbours, dedup'd, in order."""
+        store = HistoryStore(":memory:")
+        for content in [
+            "warmup chatter A",
+            "marker turn that mentions strawberry",
+            "follow up reply B",
+            "unrelated middle",
+            "later mention of strawberry too",
+        ]:
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=content,
+                author=None,
+            )
+        layer = RagContextLayer(store=store, max_results=5, context_window=1)
+        layer.set_current_cue("strawberry")
+        out = await layer.build(_ctx(channel_id=1))
+        # hit + immediate neighbours rendered; unrelated middle still
+        # appears because it's a neighbour of the second hit too.
+        assert "warmup chatter A" in out
+        assert "marker turn that mentions strawberry" in out
+        assert "follow up reply B" in out
+        assert "later mention of strawberry too" in out
+
+    @pytest.mark.asyncio
     async def test_zero_recent_window_keeps_old_behavior(self) -> None:
         """Default ``recent_window_size=0`` disables exclusion.
 
