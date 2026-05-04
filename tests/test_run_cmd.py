@@ -621,7 +621,7 @@ def _fake_familiar_for_async_main() -> MagicMock:
     llm.close = AsyncMock()
     fam.llm_clients = {"fast": llm, "prose": llm, "background": llm}
     fam.history_store = MagicMock()
-    fam.config = MagicMock(history_window_size=10)
+    fam.config = MagicMock(voice_window_size=10, text_window_size=10)
     fam.root = MagicMock()
     return fam
 
@@ -735,9 +735,8 @@ class TestDefaultAssemblerLayerOrder:
     def _layer_order(self, tmp_path: Path) -> list[str]:
         familiar = MagicMock(name="familiar")
         familiar.root = tmp_path
-        familiar.config.history_window_size = 20
         familiar.history_store = MagicMock(name="history_store")
-        asm = _default_assembler(familiar)
+        asm = _default_assembler(familiar, window_size=20)
         return [type(layer).__name__ for layer in asm._layers]
 
     def test_conversation_summary_precedes_cross_channel(self, tmp_path: Path) -> None:

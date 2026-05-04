@@ -17,7 +17,11 @@ display_tz = "UTC"
 aliases    = []
 
 [providers.history]
-window_size = 20
+# Tiered history windows. Voice trades context for latency;
+# text gets a wider window. Stopgap until a context budgeter
+# lands — see docs/architecture/roadmap.md § Dynamic context budgeter.
+voice_window_size = 20
+text_window_size  = 30
 
 # --- Turn detection --------------------------------------------------------
 #

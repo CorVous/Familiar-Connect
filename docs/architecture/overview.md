@@ -143,7 +143,9 @@ playback halted. Verified end-to-end (bus subscribe pattern) by
 `[channels.<id>]` in `character.toml` overrides three knobs:
 
 - `history_window_size` — how many recent turns the `RecentHistoryLayer`
-  pulls for this channel (default: `[providers.history].window_size`).
+  pulls for this channel. Overrides the tier default
+  (`[providers.history].voice_window_size` for voice channels,
+  `.text_window_size` for text channels).
 - `prompt_layers` — ordered list of layer names (currently parsed but
   applied only via the default ordering; per-channel reordering lands
   with Phase 3's richer layer stack).

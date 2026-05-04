@@ -193,7 +193,9 @@ class ChannelOverrides:
     Layered over global defaults — test channels tunable independently.
     See plan § Design.4 *Channel-aware composition order*.
 
-    history_window_size: overrides :attr:`CharacterConfig.history_window_size`.
+    history_window_size: overrides the tier default
+    (:attr:`CharacterConfig.voice_window_size` /
+    :attr:`CharacterConfig.text_window_size`).
     prompt_layers: ordered layer names; ``None`` inherits default order.
     message_rendering: ``"prefixed"`` (always include ``[display_name]``
     prefix) or ``"name_only"`` (rely on OpenAI ``name`` field — saves
@@ -209,7 +211,12 @@ class ChannelOverrides:
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``."""
 
-    history_window_size: int = 20
+    # Tiered history windows. Voice trades context for latency; text
+    # gets a wider window. Stopgap until a proper context budgeter
+    # lands — see docs/architecture/roadmap.md § Dynamic context
+    # budgeter.
+    voice_window_size: int = 20
+    text_window_size: int = 30
     display_tz: str = "UTC"
     aliases: list[str] = field(default_factory=list)
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
@@ -224,14 +231,15 @@ class CharacterConfig:
             return ChannelOverrides()
         return self.channels.get(channel_id, ChannelOverrides())
 
-    def window_size_for(self, channel_id: int | None) -> int:
-        """Resolve the history window size for ``channel_id``.
-
-        Returns the per-channel override if present; otherwise the
-        global default.
-        """
+    def voice_window_for(self, channel_id: int | None) -> int:
+        """Voice-tier window for ``channel_id``; channel override wins."""
         override = self.for_channel(channel_id).history_window_size
-        return override if override is not None else self.history_window_size
+        return override if override is not None else self.voice_window_size
+
+    def text_window_for(self, channel_id: int | None) -> int:
+        """Text-tier window for ``channel_id``; channel override wins."""
+        override = self.for_channel(channel_id).history_window_size
+        return override if override is not None else self.text_window_size
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +273,7 @@ def load_character_config(
 def _parse_character_config(data: dict) -> CharacterConfig:
     providers_raw = data.get("providers", {})
     history_section = providers_raw.get("history", {})
-    history_window_size = int(history_section.get("window_size", 20))
+    voice_window_size, text_window_size = _parse_history_windows(history_section)
 
     display_tz = str(data.get("display_tz", "UTC"))
 
@@ -309,7 +317,8 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     stt = _parse_stt_config(stt_raw)
 
     return CharacterConfig(
-        history_window_size=history_window_size,
+        voice_window_size=voice_window_size,
+        text_window_size=text_window_size,
         display_tz=display_tz,
         aliases=aliases,
         llm=llm,
@@ -522,6 +531,32 @@ def _parse_provider_order(slot_name: str, raw: object) -> tuple[str, ...] | None
             raise ConfigError(msg)
         out.append(item)
     return tuple(out)
+
+
+def _parse_history_windows(raw: dict) -> tuple[int, int]:
+    """Parse split history-window keys; reject the retired ``window_size``."""
+    if "window_size" in raw:
+        msg = (
+            "[providers.history].window_size has been split into "
+            "voice_window_size and text_window_size. Replace the legacy "
+            "key with both. See docs/architecture/tuning.md § History windows."
+        )
+        raise ConfigError(msg)
+
+    def _positive_int(key: str, default: int) -> int:
+        v = raw.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, int):
+            msg = (
+                f"[providers.history].{key} must be a positive integer, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        if v <= 0:
+            msg = f"[providers.history].{key} must be positive, got {v}"
+            raise ConfigError(msg)
+        return v
+
+    return _positive_int("voice_window_size", 20), _positive_int("text_window_size", 30)
 
 
 def _parse_turn_detection_config(raw: dict) -> TurnDetectionConfig:

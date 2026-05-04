@@ -38,7 +38,8 @@ class TestCharacterConfigDefaults:
         cfg = CharacterConfig()
         assert cfg.display_tz == "UTC"
         assert cfg.aliases == []
-        assert cfg.history_window_size == 20
+        assert cfg.voice_window_size == 20
+        assert cfg.text_window_size == 30
         assert cfg.llm == {}
         assert isinstance(cfg.tts, TTSConfig)
 
@@ -220,13 +221,41 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match=r"\[tts\]\.provider"):
             load_character_config(path, defaults_path=default_profile_path)
 
-    def test_history_window_override(
+    def test_history_window_split_parsed(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[providers.history]\nwindow_size = 50\n")
+        path.write_text(
+            "[providers.history]\nvoice_window_size = 25\ntext_window_size = 60\n"
+        )
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.history_window_size == 50
+        assert cfg.voice_window_size == 25
+        assert cfg.text_window_size == 60
+
+    def test_legacy_window_size_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """The retired ``[providers.history].window_size`` fails loudly."""
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\nwindow_size = 50\n")
+        with pytest.raises(ConfigError, match="window_size"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_voice_window_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\nvoice_window_size = 0\n")
+        with pytest.raises(ConfigError, match="voice_window_size"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_text_window_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\ntext_window_size = -1\n")
+        with pytest.raises(ConfigError, match="text_window_size"):
+            load_character_config(path, defaults_path=default_profile_path)
 
 
 class TestChannelOverrides:
@@ -254,18 +283,31 @@ class TestChannelOverrides:
         assert over.message_rendering == "name_only"
         assert over.prompt_layers == ("core_instructions", "character_card")
 
-    def test_window_size_for_falls_back_to_default(
+    def test_voice_window_for_falls_back_to_default(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            "[providers.history]\nwindow_size = 20\n\n"
+            "[providers.history]\nvoice_window_size = 20\n\n"
             "[channels.12345]\nhistory_window_size = 8\n"
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.window_size_for(12345) == 8  # override
-        assert cfg.window_size_for(99999) == 20  # default
-        assert cfg.window_size_for(None) == 20  # no channel → default
+        assert cfg.voice_window_for(12345) == 8  # override
+        assert cfg.voice_window_for(99999) == 20  # default
+        assert cfg.voice_window_for(None) == 20
+
+    def test_text_window_for_falls_back_to_default(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.history]\ntext_window_size = 50\n\n"
+            "[channels.12345]\nhistory_window_size = 8\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_window_for(12345) == 8  # override
+        assert cfg.text_window_for(99999) == 50  # default
+        assert cfg.text_window_for(None) == 50
 
     def test_invalid_window_rejected(
         self, tmp_path: Path, default_profile_path: Path

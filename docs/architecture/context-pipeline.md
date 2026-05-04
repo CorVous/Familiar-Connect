@@ -658,8 +658,9 @@ Background: PeopleDossierWorker tick (every 20 s)
 
 Per-channel overrides in `character.toml` (`[channels.<id>]`):
 
-- `history_window_size` — overrides the global default for this
-  channel's `RecentHistoryLayer`.
+- `history_window_size` — overrides the tier default
+  (`voice_window_size` / `text_window_size`) for this channel's
+  `RecentHistoryLayer`.
 - `prompt_layers` — explicit ordered list of layer names (parsed; the
   full wiring of per-channel reordering arrives alongside richer layer
   stacks).

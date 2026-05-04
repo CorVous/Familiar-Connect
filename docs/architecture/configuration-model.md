@@ -28,7 +28,9 @@ Surface today:
 
 - `display_tz` — IANA timezone (default `"UTC"`).
 - `aliases` — list of names the familiar answers to.
-- `[providers.history].window_size` — SQLite transcript window (default 20).
+- `[providers.history].voice_window_size` / `.text_window_size` —
+  recent-history layer windows, tiered by responder (defaults 20 / 30).
+  Stopgap until a dynamic budgeter ships.
 - `[providers.turn_detection].strategy` — `"deepgram"` (default) or
   `"ten+smart_turn"`. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 - `[providers.stt]` + `[providers.stt.deepgram]` — STT backend

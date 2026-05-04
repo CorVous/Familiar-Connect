@@ -132,7 +132,7 @@ async def _run_debug_processor(familiar: Familiar) -> None:
         await proc.handle(event, familiar.bus)
 
 
-def _default_assembler(familiar: Familiar) -> Assembler:
+def _default_assembler(familiar: Familiar, *, window_size: int) -> Assembler:
     """Build the Phase-3 full layer stack.
 
     Order is **stability descending** so OpenAI's prompt cache keeps the
@@ -186,7 +186,7 @@ def _default_assembler(familiar: Familiar) -> Assembler:
             # per-fact watermark — refreshes ahead of every active-channel turn
             PeopleDossierLayer(
                 store=store,
-                window_size=familiar.config.history_window_size,
+                window_size=window_size,
             ),
             # per-turn cue — always changes, so it sits last in the system msg
             RagContextLayer(
@@ -194,11 +194,11 @@ def _default_assembler(familiar: Familiar) -> Assembler:
                 max_results=5,
                 # Match RecentHistoryLayer's window so RAG only surfaces
                 # turns *older* than what's already shown verbatim.
-                recent_window_size=familiar.config.history_window_size,
+                recent_window_size=window_size,
             ),
             RecentHistoryLayer(
                 store=store,
-                window_size=familiar.config.history_window_size,
+                window_size=window_size,
             ),
         ]
     )
@@ -237,7 +237,14 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     handle = create_bot(familiar)
     await familiar.bus.start()
 
-    assembler = _default_assembler(familiar)
+    voice_assembler = _default_assembler(
+        familiar,
+        window_size=familiar.config.voice_window_size,
+    )
+    text_assembler = _default_assembler(
+        familiar,
+        window_size=familiar.config.text_window_size,
+    )
     tts_player: TTSPlayer
     if familiar.tts_client is not None:
         tts_player = DiscordVoicePlayer(
@@ -247,7 +254,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     else:
         tts_player = LoggingTTSPlayer()
     voice_responder = VoiceResponder(
-        assembler=assembler,
+        assembler=voice_assembler,
         llm_client=familiar.llm_clients["fast"],
         tts_player=tts_player,
         history_store=familiar.history_store,
@@ -256,7 +263,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         member_resolver=handle.resolve_member,
     )
     text_responder = TextResponder(
-        assembler=assembler,
+        assembler=text_assembler,
         llm_client=familiar.llm_clients["prose"],
         send_text=handle.send_text,
         history_store=familiar.history_store,

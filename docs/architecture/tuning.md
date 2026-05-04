@@ -66,7 +66,8 @@ display_tz = "UTC"
 aliases    = []
 
 [providers.history]
-window_size = 20
+voice_window_size = 20    # voice replies — small for latency
+text_window_size  = 30    # text replies — more context
 
 [providers.turn_detection]
 strategy = "deepgram"    # "deepgram" | "ten+smart_turn"
@@ -186,8 +187,11 @@ pin is working and to decide when it's no longer needed.
 
 ### Better long-term memory
 
-- **`[providers.history].window_size`** — recent-history layer
-  default. Larger = more raw context, bigger prompt.
+- **`[providers.history].voice_window_size` / `.text_window_size`** —
+  recent-history layer defaults, tiered by consumer. Voice trades
+  context for TTFT; text can afford a wider window. Stopgap until
+  the dynamic context budgeter ships
+  ([Roadmap A2](roadmap.md#a2-dynamic-context-budgeter)).
 - **`SummaryWorker.turns_threshold`** (default `10`). New turns
   before the rolling summary regenerates. Constructor arg in
   `commands/run.py`; planned move to TOML.
@@ -433,7 +437,8 @@ Constants live in `commands/run.py`. Roadmap A1 moves them to TOML.
 
 | Knob | Default | Source |
 |---|---|---|
-| `RecentHistoryLayer.window_size` | `20` | `[providers.history].window_size` |
+| `RecentHistoryLayer.window_size` (voice tier) | `20` | `[providers.history].voice_window_size` |
+| `RecentHistoryLayer.window_size` (text tier) | `30` | `[providers.history].text_window_size` |
 | `CrossChannelContextLayer.ttl_seconds` | `600` | constructor arg |
 | `SummaryWorker.turns_threshold` | `10` | constructor arg |
 | `SummaryWorker.cross_k` | `5` | constructor arg |

@@ -20,7 +20,8 @@ display_tz = "UTC"
 aliases    = []
 
 [providers.history]
-window_size = 20
+voice_window_size = 20
+text_window_size  = 30
 
 [llm.fast]
 model       = "anthropic/claude-haiku-4.5"

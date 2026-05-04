@@ -151,6 +151,35 @@ mode = "cascaded"             # | "s2s"                           # (V5)
 
 These will be wired when the corresponding backends land (M5).
 
+### A2 — Dynamic context budgeter
+
+Today: history windows are tiered statically per consumer
+(`[providers.history].voice_window_size`,
+`[providers.history].text_window_size`). Stopgap — fixed N-turn
+windows ignore the actual cost / quality / latency frontier.
+
+The window-size knob exists for three reasons: (1) some LLMs degrade
+on long context (less true on frontier models); (2) more tokens =
+more latency, which voice can't absorb; (3) cost. A static `N` only
+approximates these — the right answer varies per turn (token shape
+of recent turns, channel activity, model in use, current latency
+budget).
+
+Change: introduce a `Budgeter` that decides per call how much
+history to surface, given:
+
+- a per-tier latency / cost target (replaces the static `N`);
+- token-aware accounting of recent turns (not just a count);
+- "natural" boundaries, e.g. silence gaps in text channels — fold
+  in older turns up to a low-density boundary so prefixes stabilise
+  for prompt caching;
+- model-specific context-degradation curves where they matter.
+
+Once the budgeter lands, `voice_window_size` / `text_window_size`
+shrink to coarse upper bounds the budgeter is allowed to pick from,
+or disappear entirely. `[channels.<id>].history_window_size`
+remains as a per-channel cap.
+
 ## Out of scope
 
 - **Letta / MemGPT-style core-memory edit tools** — destructive,
