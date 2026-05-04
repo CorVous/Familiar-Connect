@@ -39,12 +39,25 @@ _PING_MARKER_RE = re.compile(r"\[@([^\]\n]+)\]")
 # legacy meaning: thread to the triggering message.
 _THREAD_MARKER_RE = re.compile(r"\[(?:↩|reply)(?:\s+([^\]\n]+))?\]")
 
+# Defense-in-depth: when the model leaks a metadata-shaped prefix
+# like ``[#1500709436557445449]`` or ``[4:03AM]`` at the very start
+# of the reply (mimicking the recent-history rendering format), drop
+# it. Conservative: only matches a bracketed clump containing ``#``,
+# digits + ``:``, or ``AM/PM``, optionally followed by another such
+# bracket, so we don't eat a legitimate ``[note]`` opener.
+_LEAKED_META_PREFIX_RE = re.compile(
+    r"^\s*(?:\[[^\]\n]*(?:#\d|\d:\d|[AP]M)[^\]\n]*\]\s*)+"
+)
+
 # Short addendum to the system prompt explaining the two output
 # controls. Costs ~5 lines; doesn't enumerate per-channel
 # participants — the LLM grounds names in recent history, the
 # resolver attempts a match against active speakers at send time.
 _BOT_OUTPUT_INSTRUCTIONS = (
     "## Output controls\n\n"
+    "- The `[H:MM Name #id]` prefix on each user message is read-only "
+    "metadata the system adds for you. **Do not** start your replies "
+    "with that shape — just write the message body.\n"
     "- Ping a user by writing `[@DisplayName]` using a name that "
     "appears in recent messages. Unrecognised names render as "
     "plain text without pinging.\n"
@@ -90,6 +103,17 @@ def _rewrite_pings(
 
     rewritten = _PING_MARKER_RE.sub(_sub, content)
     return rewritten, tuple(resolved)
+
+
+def _strip_leaked_metadata_prefix(content: str) -> str:
+    """Drop a leaked ``[#id]`` / ``[H:MMpm]`` style prefix from the head.
+
+    The recent-history layer prefixes every user turn with a
+    ``[H:MM Name #id]`` clump; some models echo that shape back. The
+    regex is conservative — it only matches bracket clumps that smell
+    like metadata, leaving legitimate ``[note]`` openings alone.
+    """
+    return _LEAKED_META_PREFIX_RE.sub("", content, count=1)
 
 
 def _consume_thread_marker(content: str) -> tuple[str, bool, str | None]:
@@ -264,6 +288,7 @@ class TextResponder:
         # ``[↩ msg-001]``) routes to that specific message when known;
         # otherwise we fall back to the triggering message.
         unthreaded, wants_thread, target_id = _consume_thread_marker(reply)
+        unthreaded = _strip_leaked_metadata_prefix(unthreaded)
         rewritten, mention_user_ids = _rewrite_pings(unthreaded, label_to_key)
         thread_target: str | None = None
         if wants_thread:

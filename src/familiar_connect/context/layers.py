@@ -412,20 +412,21 @@ def _turn_to_message_with_context(
     Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted —
     the recent-history window is short. Reply markers and mention
     rewriting are applied here so all enrichment lives in one place.
-    The ``platform_message_id`` (when present) is surfaced as
-    ``#<id>`` next to the speaker so the model can target a specific
-    message via ``[↩ <id>]``.
+    The ``platform_message_id`` for *user* turns (when present) is
+    surfaced as ``#<id>`` next to the speaker so the model can target
+    a specific message via ``[↩ <id>]``. Assistant turns deliberately
+    skip the id tag — otherwise the model sees its own past messages
+    prefixed with ``[#…]`` and starts emitting that prefix in fresh
+    replies (mimicry).
     """
     role = turn.role
     author = turn.author
     content = _rewrite_mentions(
         turn.content, store=store, familiar_id=familiar_id, guild_id=guild_id
     )
-    msg_id_tag = f" #{turn.platform_message_id}" if turn.platform_message_id else ""
     if role == "assistant" or author is None:
-        if msg_id_tag:
-            return Message(role=role, content=f"[{msg_id_tag.lstrip()}] {content}")
         return Message(role=role, content=content)
+    msg_id_tag = f" #{turn.platform_message_id}" if turn.platform_message_id else ""
     label = store.resolve_label(
         canonical_key=author.canonical_key,
         guild_id=guild_id,

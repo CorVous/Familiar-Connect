@@ -26,10 +26,14 @@ from familiar_connect.context import (
     CoreInstructionsLayer,
     RecentHistoryLayer,
 )
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.context.layers import _turn_to_message_with_context
+from familiar_connect.history.store import HistoryStore, HistoryTurn
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
-from familiar_connect.processors.text_responder import TextResponder
+from familiar_connect.processors.text_responder import (
+    TextResponder,
+    _strip_leaked_metadata_prefix,
+)
 
 
 class _ScriptedLLM(LLMClient):
@@ -728,3 +732,55 @@ class TestIdentityWritePath:
         keys = store.mentions_for_turn(turn_id=user_turn.id)
         assert "discord:2" in keys
         assert "discord:3" in keys
+
+
+class TestStripLeakedMetadataPrefix:
+    """Defensively drop ``[#id] / [H:MMpm]``-shaped prefixes the LLM may echo."""
+
+    def test_strips_leading_id_clump(self) -> None:
+        leaked = "[#1500709436557445449] 4:03AM UTC. I actually know that now!"
+        assert (
+            _strip_leaked_metadata_prefix(leaked)
+            == "4:03AM UTC. I actually know that now!"
+        )
+
+    def test_strips_leading_time_clump(self) -> None:
+        assert _strip_leaked_metadata_prefix("[4:03AM] hello") == "hello"
+
+    def test_strips_chained_metadata_clumps(self) -> None:
+        leaked = "[14:32 Alice #abc] [↩ msg-1] hi"
+        # only the metadata clump is dropped; the reply marker survives
+        # for ``_consume_thread_marker`` to handle separately.
+        assert _strip_leaked_metadata_prefix(leaked).startswith("[↩ msg-1] hi")
+
+    def test_leaves_legitimate_bracketed_text_alone(self) -> None:
+        assert _strip_leaked_metadata_prefix("[note] heads up") == "[note] heads up"
+
+    def test_passes_through_clean_text(self) -> None:
+        assert _strip_leaked_metadata_prefix("just a normal reply") == (
+            "just a normal reply"
+        )
+
+
+class TestAssistantTurnRendering:
+    """Assistant past turns must not surface ``[#id]`` (mimicry vector)."""
+
+    def test_assistant_message_has_no_id_prefix(self) -> None:
+        turn = HistoryTurn(
+            id=1,
+            timestamp=datetime(2026, 5, 4, 4, 3, tzinfo=UTC),
+            role="assistant",
+            author=None,
+            content="hello world",
+            channel_id=42,
+            platform_message_id="1500709436557445449",
+        )
+        store = HistoryStore(":memory:")
+        msg = _turn_to_message_with_context(
+            turn=turn,
+            store=store,
+            familiar_id="fam",
+            guild_id=None,
+            in_window_msg_ids=set(),
+        )
+        assert msg.content == "hello world"
