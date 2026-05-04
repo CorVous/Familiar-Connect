@@ -41,9 +41,9 @@ strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
 # under ~/.cache/huggingface). The default is the CPU ONNX export,
 # which matches the ``onnxruntime`` shipped by the local-turn extra.
 # If you've installed ``onnxruntime-gpu`` separately, switch
-# smart_turn_filename to ``smart-turn-v3.1-gpu.onnx``.
+# smart_turn_filename to ``smart-turn-v3.2-gpu.onnx``.
 smart_turn_repo_id    = "pipecat-ai/smart-turn-v3"
-smart_turn_filename   = "smart-turn-v3.1-cpu.onnx"
+smart_turn_filename   = "smart-turn-v3.2-cpu.onnx"
 silence_ms            = 200    # silence after speech before SmartTurn fires
 speech_start_ms       = 100    # consecutive speech before "speaking" latches
 vad_threshold         = 0.5    # TEN-VAD activation threshold

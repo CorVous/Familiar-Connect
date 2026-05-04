@@ -113,7 +113,7 @@ Smart Turn's ONNX weights are pulled from
 [`pipecat-ai/smart-turn-v3`](https://huggingface.co/pipecat-ai/smart-turn-v3)
 on first use via `huggingface_hub.hf_hub_download` — the Hub cache
 (`~/.cache/huggingface`) covers offline reruns. The default filename
-is the CPU export (`smart-turn-v3.1-cpu.onnx`); override via
+is the CPU export (`smart-turn-v3.2-cpu.onnx`); override via
 `[providers.turn_detection.local].smart_turn_filename` if you've
 installed `onnxruntime-gpu` separately.
 
