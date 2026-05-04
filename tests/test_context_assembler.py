@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.budget import Budgeter, TierBudget
 from familiar_connect.context import (
     Assembler,
     AssemblyContext,
@@ -501,6 +502,44 @@ class TestAssembler:
         await asm.assemble(_ctx())
         await asm.assemble(_ctx())
         assert calls == 1  # second call hit the cache
+
+    @pytest.mark.asyncio
+    async def test_budgeter_trims_history_to_total_cap(self) -> None:
+        """Total-cap enforcement drops oldest history turns."""
+        store = HistoryStore(":memory:")
+        for i in range(20):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"turn {i:02d} blah blah",
+                author=None,
+            )
+        asm = Assembler(
+            layers=[RecentHistoryLayer(store=store, window_size=20)],
+            budgeter=Budgeter(TierBudget(total_tokens=30)),
+        )
+        prompt = await asm.assemble(_ctx(channel_id=1))
+        # Newest survives.
+        assert prompt.recent_history[-1].content.endswith("19 blah blah")
+        # Aggressively trimmed.
+        assert len(prompt.recent_history) < 20
+
+    @pytest.mark.asyncio
+    async def test_no_budgeter_passthrough(self) -> None:
+        """Without a Budgeter, history is returned uncapped."""
+        store = HistoryStore(":memory:")
+        for i in range(5):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"m{i}",
+                author=None,
+            )
+        asm = Assembler(layers=[RecentHistoryLayer(store=store, window_size=20)])
+        prompt = await asm.assemble(_ctx(channel_id=1))
+        assert len(prompt.recent_history) == 5
 
     @pytest.mark.asyncio
     async def test_cache_invalidates_on_key_change(self) -> None:

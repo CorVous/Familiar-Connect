@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from familiar_connect.context.layers import RagContextLayer, RecentHistoryLayer
 
 if TYPE_CHECKING:
+    from familiar_connect.budget import Budgeter
     from familiar_connect.context.layers import Layer
     from familiar_connect.llm import Message
 
@@ -50,10 +51,16 @@ class Assembler:
     re-running :meth:`Layer.build`.
     """
 
-    def __init__(self, *, layers: list[Layer]) -> None:
+    def __init__(
+        self,
+        *,
+        layers: list[Layer],
+        budgeter: Budgeter | None = None,
+    ) -> None:
         self._layers: list[Layer] = list(layers)
         # key: (layer.name, invalidation_key) -> rendered text
         self._cache: dict[tuple[str, str], str] = {}
+        self._budgeter = budgeter
 
     def set_rag_cue(self, cue: str) -> None:
         """Forward *cue* to the first :class:`RagContextLayer`, if any.
@@ -85,6 +92,11 @@ class Assembler:
                 sections.append(text)
 
         system_prompt = "\n\n".join(sections)
+        if self._budgeter is not None:
+            system_prompt, recent = self._budgeter.trim(
+                system_prompt=system_prompt,
+                history=recent,
+            )
         return AssembledPrompt(
             system_prompt=system_prompt,
             recent_history=recent,

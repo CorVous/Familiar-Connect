@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.budget import TierBudget
 from familiar_connect.config import (
     LLM_SLOT_NAMES,
     ChannelOverrides,
@@ -38,8 +39,8 @@ class TestCharacterConfigDefaults:
         cfg = CharacterConfig()
         assert cfg.display_tz == "UTC"
         assert cfg.aliases == []
-        assert cfg.voice_window_size == 20
-        assert cfg.text_window_size == 30
+        assert cfg.voice_window_size == 100
+        assert cfg.text_window_size == 200
         assert cfg.llm == {}
         assert isinstance(cfg.tts, TTSConfig)
 
@@ -256,6 +257,67 @@ class TestLoadCharacterConfig:
         path.write_text("[providers.history]\ntext_window_size = -1\n")
         with pytest.raises(ConfigError, match="text_window_size"):
             load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestBudgets:
+    def test_default_budgets_match_documented_envelopes(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.budgets["voice"].total_tokens == 3000
+        assert cfg.budgets["text"].total_tokens == 8000
+        assert cfg.budgets["background"].total_tokens == 24000
+
+    def test_explicit_total_tokens_overrides_default(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.voice]\ntotal_tokens = 5000\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.budgets["voice"].total_tokens == 5000
+        # Other tiers untouched.
+        assert cfg.budgets["text"].total_tokens == 8000
+
+    def test_subcap_overrides_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[budget.text]\n"
+            "total_tokens = 10000\n"
+            "recent_history_tokens = 4000\n"
+            "rag_tokens = 1000\n"
+            "max_dossier_people = 12\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budgets["text"]
+        assert b.total_tokens == 10000
+        assert b.recent_history_tokens == 4000
+        assert b.rag_tokens == 1000
+        assert b.max_dossier_people == 12
+
+    def test_unknown_tier_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.mystery]\ntotal_tokens = 100\n")
+        with pytest.raises(ConfigError, match="unknown budget tier"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_negative_total_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.voice]\ntotal_tokens = -1\n")
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_default_tier_budget_dataclass(self) -> None:
+        # Sanity-check the dataclass standalone.
+        b = TierBudget(total_tokens=1000)
+        assert b.resolved().recent_history_tokens == 500
 
 
 class TestChannelOverrides:

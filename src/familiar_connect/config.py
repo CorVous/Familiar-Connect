@@ -10,8 +10,24 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from familiar_connect.budget import (
+    DEFAULT_BACKGROUND_BUDGET,
+    DEFAULT_TEXT_BUDGET,
+    DEFAULT_VOICE_BUDGET,
+    TierBudget,
+)
+
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+BUDGET_TIER_NAMES: frozenset[str] = frozenset({"voice", "text", "background"})
+"""Canonical assembly-tier names matching :class:`LLMSlotConfig` slots.
+
+Voice and text are reply tiers (consumed by responders); background
+is for offline workers (summary, fact extraction, dossier). Each
+tier has its own :class:`TierBudget` envelope.
+"""
 
 
 class ConfigError(Exception):
@@ -207,16 +223,23 @@ class ChannelOverrides:
     message_rendering: str | None = None
 
 
+def _default_budgets() -> dict[str, TierBudget]:
+    return {
+        "voice": DEFAULT_VOICE_BUDGET,
+        "text": DEFAULT_TEXT_BUDGET,
+        "background": DEFAULT_BACKGROUND_BUDGET,
+    }
+
+
 @dataclass(frozen=True)
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``."""
 
-    # Tiered history windows. Voice trades context for latency; text
-    # gets a wider window. Stopgap until a proper context budgeter
-    # lands — see docs/architecture/roadmap.md § Dynamic context
-    # budgeter.
-    voice_window_size: int = 20
-    text_window_size: int = 30
+    # Hard cap on history turns. The token-aware budget below usually
+    # bites first; keep this as a safety net (and a way to force the
+    # absolute upper bound on prompt size).
+    voice_window_size: int = 100
+    text_window_size: int = 200
     display_tz: str = "UTC"
     aliases: list[str] = field(default_factory=list)
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
@@ -224,6 +247,10 @@ class CharacterConfig:
     channels: dict[int, ChannelOverrides] = field(default_factory=dict)
     turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
     stt: STTConfig = field(default_factory=STTConfig)
+    # Per-tier token envelopes for the Budgeter. Operators tune
+    # ``total_tokens`` per tier; sub-caps derive from it unless
+    # explicitly overridden.
+    budgets: dict[str, TierBudget] = field(default_factory=_default_budgets)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty overrides if none."""
@@ -316,6 +343,12 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     stt = _parse_stt_config(stt_raw)
 
+    budget_raw = data.get("budget", {})
+    if not isinstance(budget_raw, dict):
+        msg = f"[budget] must be a table, got {type(budget_raw).__name__}"
+        raise ConfigError(msg)
+    budgets = _parse_budgets(budget_raw)
+
     return CharacterConfig(
         voice_window_size=voice_window_size,
         text_window_size=text_window_size,
@@ -326,6 +359,85 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         channels=channels,
         turn_detection=turn_detection,
         stt=stt,
+        budgets=budgets,
+    )
+
+
+def _parse_budgets(raw: dict) -> dict[str, TierBudget]:
+    """Parse ``[budget.<tier>]`` blocks; tiers must be canonical."""
+    out: dict[str, TierBudget] = dict(_default_budgets())
+    for tier, section in raw.items():
+        if tier not in BUDGET_TIER_NAMES:
+            valid = ", ".join(sorted(BUDGET_TIER_NAMES))
+            msg = f"unknown budget tier {tier!r}; valid tiers: {valid}"
+            raise ConfigError(msg)
+        if not isinstance(section, dict):
+            msg = f"[budget.{tier}] must be a table, got {type(section).__name__}"
+            raise ConfigError(msg)
+        out[tier] = _parse_tier_budget(tier, section, default=out[tier])
+    return out
+
+
+_BUDGET_INT_FIELDS_REQUIRED: tuple[str, ...] = ("total_tokens",)
+_BUDGET_INT_FIELDS_OPTIONAL: tuple[str, ...] = (
+    "recent_history_tokens",
+    "rag_tokens",
+    "dossier_tokens",
+    "summary_tokens",
+    "cross_channel_tokens",
+)
+_BUDGET_INT_FIELDS_HARDCAP: tuple[str, ...] = (
+    "max_history_turns",
+    "max_rag_turns",
+    "max_rag_facts",
+    "max_dossier_people",
+)
+
+
+def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudget:
+    """Validate and merge ``[budget.<tier>]`` over the default envelope."""
+
+    def _positive_int(key: str) -> int | None:
+        if key not in raw:
+            return None
+        v = raw[key]
+        if isinstance(v, bool) or not isinstance(v, int):
+            msg = (
+                f"[budget.{tier}].{key} must be a positive integer, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        if v <= 0:
+            msg = f"[budget.{tier}].{key} must be positive, got {v}"
+            raise ConfigError(msg)
+        return v
+
+    known = (
+        _BUDGET_INT_FIELDS_REQUIRED
+        + _BUDGET_INT_FIELDS_OPTIONAL
+        + _BUDGET_INT_FIELDS_HARDCAP
+    )
+    unknown = set(raw) - set(known)
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[budget.{tier}] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    o = {key: _positive_int(key) for key in known if key in raw}
+    return TierBudget(
+        total_tokens=o.get("total_tokens") or default.total_tokens,
+        recent_history_tokens=o.get(
+            "recent_history_tokens", default.recent_history_tokens
+        ),
+        rag_tokens=o.get("rag_tokens", default.rag_tokens),
+        dossier_tokens=o.get("dossier_tokens", default.dossier_tokens),
+        summary_tokens=o.get("summary_tokens", default.summary_tokens),
+        cross_channel_tokens=o.get(
+            "cross_channel_tokens", default.cross_channel_tokens
+        ),
+        max_history_turns=o.get("max_history_turns") or default.max_history_turns,
+        max_rag_turns=o.get("max_rag_turns") or default.max_rag_turns,
+        max_rag_facts=o.get("max_rag_facts") or default.max_rag_facts,
+        max_dossier_people=o.get("max_dossier_people") or default.max_dossier_people,
     )
 
 

@@ -17,11 +17,42 @@ display_tz = "UTC"
 aliases    = []
 
 [providers.history]
-# Tiered history windows. Voice trades context for latency;
-# text gets a wider window. Stopgap until a context budgeter
-# lands — see docs/architecture/roadmap.md § Dynamic context budgeter.
-voice_window_size = 20
-text_window_size  = 30
+# Hard upper bounds on history turns per tier — safety nets behind
+# the token-aware budget below. Lower these only to force a tighter
+# absolute cap on prompt size; the Budgeter's token cap usually
+# bites first.
+voice_window_size = 100
+text_window_size  = 200
+
+# --- Prompt assembly budget ------------------------------------------------
+#
+# Per-tier token envelope for the prompt assembler. ``total_tokens`` is
+# the primary knob; sub-caps (recent_history_tokens, rag_tokens, …) and
+# item caps (max_history_turns, max_dossier_people, …) all derive from
+# it unless explicitly overridden. Drop a sub-cap line if you want the
+# default split.
+#
+# Defaults are tuned to: voice models perform well up to ~3k tokens;
+# thoughtful (text) replies are fine up to ~8k; background workers
+# can absorb up to 24k.
+
+[budget.voice]
+total_tokens = 3000
+# recent_history_tokens = 1500   # default: total // 2
+# rag_tokens            = 450    # default: total * 15 / 100
+# dossier_tokens        = 450    # default: total * 15 / 100
+# summary_tokens        = 300    # default: total * 10 / 100
+# cross_channel_tokens  = 300    # default: total * 10 / 100
+# max_history_turns     = 100
+# max_dossier_people    = 8
+# max_rag_turns         = 5
+# max_rag_facts         = 3
+
+[budget.text]
+total_tokens = 8000
+
+[budget.background]
+total_tokens = 24000
 
 # --- Turn detection --------------------------------------------------------
 #

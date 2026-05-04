@@ -18,6 +18,7 @@ import discord
 
 from familiar_connect import log_style as ls
 from familiar_connect.bot import BotHandle, create_bot
+from familiar_connect.budget import Budgeter, TierBudget
 from familiar_connect.bus.topics import (
     TOPIC_DISCORD_TEXT,
     TOPIC_TWITCH_EVENT,
@@ -132,8 +133,13 @@ async def _run_debug_processor(familiar: Familiar) -> None:
         await proc.handle(event, familiar.bus)
 
 
-def _default_assembler(familiar: Familiar, *, window_size: int) -> Assembler:
-    """Build the Phase-3 full layer stack.
+def _default_assembler(
+    familiar: Familiar,
+    *,
+    window_size: int,
+    budget: TierBudget,
+) -> Assembler:
+    """Build the full layer stack with token-aware per-section caps.
 
     Order is **stability descending** so OpenAI's prompt cache keeps the
     longest matching prefix across consecutive turns. Static layers
@@ -154,11 +160,15 @@ def _default_assembler(familiar: Familiar, *, window_size: int) -> Assembler:
     stable run before the per-turn ``RagContextLayer`` flips. See
     [Voice pipeline § Prompt cache friendliness](
     ../../docs/architecture/voice-pipeline.md#prompt-cache-friendliness).
+
+    ``window_size`` is the hard upper bound on history turns; the
+    :class:`Budgeter`'s token caps usually bite first.
     """
     root = familiar.root
     core_path = root.parent / "_default" / "core_instructions.md"
     card_path = root / "character.md"
     store = familiar.history_store
+    resolved = budget.resolved()
     return Assembler(
         layers=[
             CoreInstructionsLayer(path=core_path),
@@ -175,32 +185,38 @@ def _default_assembler(familiar: Familiar, *, window_size: int) -> Assembler:
                     ),
                 }
             ),
-            # slowest dynamic layer — per-channel summary, every N turns
-            ConversationSummaryLayer(store=store),
-            # other-channel summaries — fans in but per-source rate matches above
+            ConversationSummaryLayer(
+                store=store,
+                max_tokens=resolved.summary_tokens,
+            ),
             CrossChannelContextLayer(
                 store=store,
                 viewer_map={},  # populated by per-channel config when present
                 ttl_seconds=600,
+                max_tokens=resolved.cross_channel_tokens,
             ),
-            # per-fact watermark — refreshes ahead of every active-channel turn
             PeopleDossierLayer(
                 store=store,
                 window_size=window_size,
+                max_people=resolved.max_dossier_people,
+                max_tokens=resolved.dossier_tokens,
             ),
-            # per-turn cue — always changes, so it sits last in the system msg
             RagContextLayer(
                 store=store,
-                max_results=5,
+                max_results=resolved.max_rag_turns,
+                max_facts=resolved.max_rag_facts,
                 # Match RecentHistoryLayer's window so RAG only surfaces
                 # turns *older* than what's already shown verbatim.
                 recent_window_size=window_size,
+                max_tokens=resolved.rag_tokens,
             ),
             RecentHistoryLayer(
                 store=store,
                 window_size=window_size,
+                max_tokens=resolved.recent_history_tokens,
             ),
-        ]
+        ],
+        budgeter=Budgeter(budget),
     )
 
 
@@ -240,10 +256,12 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     voice_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.voice_window_size,
+        budget=familiar.config.budgets["voice"],
     )
     text_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.text_window_size,
+        budget=familiar.config.budgets["text"],
     )
     tts_player: TTSPlayer
     if familiar.tts_client is not None:

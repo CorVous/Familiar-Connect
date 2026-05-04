@@ -24,7 +24,8 @@ toml baked into the image and tune per host without a rebuild.
 | Familiar id | env (`FAMILIAR_ID`) or `--familiar` | env (unchanged) |
 | LLM model + temperature per slot | `[llm.<slot>]` | unchanged |
 | TTS provider + voice | `[tts]` | unchanged |
-| History window + prompt layer order | `[providers.history]`, `[channels.<id>]` | unchanged |
+| Per-tier prompt token budget | `[budget.<tier>]` | unchanged |
+| History turn safety cap + prompt layer order | `[providers.history]`, `[channels.<id>]` | unchanged |
 | Deepgram STT thresholds & key-terms | `[providers.stt.deepgram]` | unchanged |
 | Parakeet local STT (V3 phase 2) | `[providers.stt.parakeet]` | unchanged |
 | FasterWhisper local STT (V3 phase 3) | `[providers.stt.faster_whisper]` | unchanged |
@@ -66,8 +67,15 @@ display_tz = "UTC"
 aliases    = []
 
 [providers.history]
-voice_window_size = 20    # voice replies — small for latency
-text_window_size  = 30    # text replies — more context
+voice_window_size = 100   # safety net — Budgeter usually trims first
+text_window_size  = 200
+
+[budget.voice]
+total_tokens = 3000       # voice models perform well up to ~3 k
+[budget.text]
+total_tokens = 8000       # thoughtful replies — room for context
+[budget.background]
+total_tokens = 24000      # offline workers — summary, dossier, facts
 
 [providers.turn_detection]
 strategy = "deepgram"    # "deepgram" | "ten+smart_turn"
@@ -187,16 +195,21 @@ pin is working and to decide when it's no longer needed.
 
 ### Better long-term memory
 
+- **`[budget.<tier>].total_tokens`** — primary knob. Lift to give
+  the model more room; sub-caps (recent history, RAG, dossiers,
+  summary, cross-channel) derive from the total unless explicitly
+  overridden. See [Prompt assembly budget](#prompt-assembly-budget).
 - **`[providers.history].voice_window_size` / `.text_window_size`** —
-  recent-history layer defaults, tiered by consumer. Voice trades
-  context for TTFT; text can afford a wider window. Stopgap until
-  the dynamic context budgeter ships
-  ([Roadmap A2](roadmap.md#a2-dynamic-context-budgeter)).
+  hard upper bound on history turns per tier. Safety net: the
+  Budgeter's token caps usually bite first. Lower these only to
+  force a tighter absolute cap on prompt size.
 - **`SummaryWorker.turns_threshold`** (default `10`). New turns
   before the rolling summary regenerates. Constructor arg in
   `commands/run.py`; planned move to TOML.
-- **`PeopleDossierLayer.max_people`** (default `8`). Hard cap on
-  dossier rows per prompt.
+- **`[budget.<tier>].max_dossier_people`** — was
+  `PeopleDossierLayer.max_people`. Hard cap on dossier rows per
+  prompt; combined with `dossier_tokens` so the count or the
+  byte size, whichever bites first, drops trailing rows.
 - **Roadmap M2 / M6** — importance-weighted retrieval and
   embeddings are the bigger wins.
 
@@ -431,14 +444,74 @@ Surface-only flag today — the call sites haven't been wired to
 register tools yet. Configuring it now means future tool wiring
 won't require a config schema change.
 
-## History / context layers
+## Prompt assembly budget
 
-Constants live in `commands/run.py`. Roadmap A1 moves them to TOML.
+The :class:`Budgeter` enforces a per-tier token envelope across the
+assembled prompt. Each dynamic layer self-truncates to its own
+`max_tokens` allocation; the Budgeter then drops oldest history
+turns until the combined `system_prompt + recent_history` fits the
+total. Token estimates use a fast `len(text) / 4` heuristic — no
+real tokenizer on the hot path; sub-microsecond per message.
+
+`total_tokens` is the only knob most operators need. Sub-caps
+default to a fixed split of the total:
+
+| Sub-cap | Default fraction of `total_tokens` |
+|---|---|
+| `recent_history_tokens` | 50 % |
+| `rag_tokens` | 15 % |
+| `dossier_tokens` | 15 % |
+| `summary_tokens` | 10 % |
+| `cross_channel_tokens` | 10 % |
+
+Item caps (`max_history_turns`, `max_dossier_people`, etc.) are
+hard safety nets — the token caps usually bite first.
+
+```toml
+[budget.voice]
+total_tokens = 3000
+
+[budget.text]
+total_tokens = 8000
+
+[budget.background]
+total_tokens = 24000
+
+# Overrides only when a section needs more or less than the default
+# fraction. Drop these lines to inherit the split above.
+[budget.text]
+total_tokens          = 12000
+recent_history_tokens = 6000
+rag_tokens            = 1200
+max_dossier_people    = 12
+```
+
+| Tier | Default `total_tokens` | Notes |
+|---|---|---|
+| `voice` | `3000` | Voice models perform well up to this range. |
+| `text` | `8000` | Thoughtful replies; raise toward 16–32 k for capable models. |
+| `background` | `24000` | Offline summary / fact / dossier work. |
+
+Sub-cap defaults sized for typical voice load (one-line turns); for
+text channels with long-form content the recent-history cap may
+trim before the cosmetic dossier/RAG caps. Bump
+`recent_history_tokens` first if that bites in the wrong direction.
+
+## History / context layers
 
 | Knob | Default | Source |
 |---|---|---|
-| `RecentHistoryLayer.window_size` (voice tier) | `20` | `[providers.history].voice_window_size` |
-| `RecentHistoryLayer.window_size` (text tier) | `30` | `[providers.history].text_window_size` |
+| `RecentHistoryLayer.window_size` (voice tier) | `100` | `[providers.history].voice_window_size` |
+| `RecentHistoryLayer.window_size` (text tier) | `200` | `[providers.history].text_window_size` |
+| `RecentHistoryLayer.max_tokens` | derived | `[budget.<tier>].recent_history_tokens` |
+| `RagContextLayer.max_results` | derived | `[budget.<tier>].max_rag_turns` |
+| `RagContextLayer.max_facts` | derived | `[budget.<tier>].max_rag_facts` |
+| `RagContextLayer.max_tokens` | derived | `[budget.<tier>].rag_tokens` |
+| `RagContextLayer.recent_window_size` | matches history window | constructor arg |
+| `PeopleDossierLayer.max_people` | derived | `[budget.<tier>].max_dossier_people` |
+| `PeopleDossierLayer.max_tokens` | derived | `[budget.<tier>].dossier_tokens` |
+| `ConversationSummaryLayer.max_tokens` | derived | `[budget.<tier>].summary_tokens` |
+| `CrossChannelContextLayer.max_tokens` | derived | `[budget.<tier>].cross_channel_tokens` |
 | `CrossChannelContextLayer.ttl_seconds` | `600` | constructor arg |
 | `SummaryWorker.turns_threshold` | `10` | constructor arg |
 | `SummaryWorker.cross_k` | `5` | constructor arg |
@@ -446,10 +519,6 @@ Constants live in `commands/run.py`. Roadmap A1 moves them to TOML.
 | `FactExtractor.batch_size` | `10` | constructor arg |
 | `FactExtractor.tick_interval_s` | `15.0` | class default |
 | `PeopleDossierWorker.tick_interval_s` | `20.0` | class default |
-| `PeopleDossierLayer.window_size` | matches history window | constructor arg |
-| `PeopleDossierLayer.max_people` | `8` | constructor arg |
-| `RagContextLayer.max_results` | `5` | constructor arg |
-| `RagContextLayer.recent_window_size` | matches history window | constructor arg |
 
 ### Per-channel overrides
 

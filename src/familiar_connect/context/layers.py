@@ -11,6 +11,10 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+from familiar_connect.budget import (
+    estimate_message_tokens,
+    estimate_tokens,
+)
 from familiar_connect.llm import Message, sanitize_name
 
 if TYPE_CHECKING:
@@ -130,9 +134,16 @@ class RecentHistoryLayer:
 
     name: str = "recent_history"
 
-    def __init__(self, *, store: HistoryStore, window_size: int = 20) -> None:
+    def __init__(
+        self,
+        *,
+        store: HistoryStore,
+        window_size: int = 20,
+        max_tokens: int | None = None,
+    ) -> None:
         self._store = store
         self._window_size = window_size
+        self._max_tokens = max_tokens
 
     async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
         return ""
@@ -168,7 +179,7 @@ class RecentHistoryLayer:
         in_window_msg_ids = {
             t.platform_message_id for t in turns if t.platform_message_id
         }
-        return [
+        rendered = [
             _turn_to_message_with_context(
                 turn=turn,
                 store=self._store,
@@ -178,6 +189,9 @@ class RecentHistoryLayer:
             )
             for turn in turns
         ]
+        if self._max_tokens is None:
+            return rendered
+        return _trim_messages_to_token_cap(rendered, self._max_tokens)
 
 
 def _render_fact_line(
@@ -275,6 +289,71 @@ def _truncate(text: str, *, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)] + "…"
+
+
+def _truncate_to_tokens(text: str, *, max_tokens: int) -> str:
+    """Truncate ``text`` so its estimated token count fits ``max_tokens``.
+
+    Uses the same char/4 heuristic as the budgeter — works on the
+    char length proxy so this stays cheap.
+    """
+    if max_tokens <= 0:
+        return ""
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    char_cap = max_tokens * 4
+    return _truncate(text, limit=char_cap)
+
+
+def _trim_rag_lines_to_tokens(
+    *,
+    fact_lines: list[str],
+    turn_lines: list[str],
+    max_tokens: int,
+) -> tuple[list[str], list[str]]:
+    """Cap RAG fact + turn lines together; facts win ties.
+
+    Adds lines in order (facts first, then turns) until the next would
+    cross the cap. Headers aren't counted — they're a flat ~10 tokens
+    of overhead the budgeter can absorb.
+    """
+    used = 0
+    kept_facts: list[str] = []
+    for line in fact_lines:
+        cost = estimate_tokens(line)
+        if used + cost > max_tokens and kept_facts:
+            break
+        kept_facts.append(line)
+        used += cost
+    kept_turns: list[str] = []
+    for line in turn_lines:
+        cost = estimate_tokens(line)
+        if used + cost > max_tokens and (kept_turns or kept_facts):
+            break
+        kept_turns.append(line)
+        used += cost
+    return kept_facts, kept_turns
+
+
+def _trim_messages_to_token_cap(
+    messages: list[Message], max_tokens: int
+) -> list[Message]:
+    """Drop oldest messages until total estimated tokens fit.
+
+    Always keeps the newest message even if it alone exceeds the cap —
+    the most recent turn is the model's primary cue.
+    """
+    if not messages:
+        return messages
+    kept_reversed: list[Message] = []
+    used = 0
+    for msg in reversed(messages):
+        cost = estimate_message_tokens(msg)
+        if used + cost > max_tokens and kept_reversed:
+            break
+        kept_reversed.append(msg)
+        used += cost
+    return list(reversed(kept_reversed))
 
 
 def _reply_prefix(
@@ -406,8 +485,14 @@ class ConversationSummaryLayer:
 
     name: str = "conversation_summary"
 
-    def __init__(self, *, store: HistoryStore) -> None:
+    def __init__(
+        self,
+        *,
+        store: HistoryStore,
+        max_tokens: int | None = None,
+    ) -> None:
         self._store = store
+        self._max_tokens = max_tokens
 
     async def build(self, ctx: AssemblyContext) -> str:
         entry = self._store.get_summary(
@@ -416,7 +501,10 @@ class ConversationSummaryLayer:
         )
         if entry is None or not entry.summary_text.strip():
             return ""
-        return "## Conversation so far\n\n" + entry.summary_text.strip()
+        body = entry.summary_text.strip()
+        if self._max_tokens is not None:
+            body = _truncate_to_tokens(body, max_tokens=self._max_tokens)
+        return "## Conversation so far\n\n" + body
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         entry = self._store.get_summary(
@@ -446,10 +534,12 @@ class CrossChannelContextLayer:
         store: HistoryStore,
         viewer_map: dict[int, list[int]],
         ttl_seconds: int = 600,
+        max_tokens: int | None = None,
     ) -> None:
         self._store = store
         self._viewer_map = {k: list(v) for k, v in viewer_map.items()}
         self._ttl_seconds = ttl_seconds
+        self._max_tokens = max_tokens
 
     def _viewer_key(self, ctx: AssemblyContext) -> str:
         return f"{ctx.viewer_mode}:{ctx.channel_id}"
@@ -461,6 +551,10 @@ class CrossChannelContextLayer:
 
         now = datetime.now(tz=UTC)
         sections: list[str] = []
+        # Token budget for the whole block; sections are added until
+        # the next would push us over. Newest source first so the most
+        # recently active channel always lands.
+        remaining = self._max_tokens
         for source_id in sources:
             entry = self._store.get_cross_context(
                 familiar_id=ctx.familiar_id,
@@ -472,9 +566,14 @@ class CrossChannelContextLayer:
             age = (now - entry.created_at).total_seconds()
             if age > self._ttl_seconds:
                 continue
-            sections.append(
-                f"### From channel #{source_id}\n\n" + entry.summary_text.strip()
-            )
+            section = f"### From channel #{source_id}\n\n" + entry.summary_text.strip()
+            if remaining is not None:
+                cost = estimate_tokens(section)
+                if cost > remaining and sections:
+                    break
+                section = _truncate_to_tokens(section, max_tokens=remaining)
+                remaining -= estimate_tokens(section)
+            sections.append(section)
         if not sections:
             return ""
         return "## Cross-channel context\n\n" + "\n\n".join(sections)
@@ -522,10 +621,12 @@ class PeopleDossierLayer:
         store: HistoryStore,
         window_size: int = 20,
         max_people: int = 8,
+        max_tokens: int | None = None,
     ) -> None:
         self._store = store
         self._window_size = window_size
         self._max_people = max_people
+        self._max_tokens = max_tokens
 
     def _candidate_keys(self, ctx: AssemblyContext) -> list[str]:
         """Ordered, deduped canonical keys for the active channel.
@@ -564,6 +665,7 @@ class PeopleDossierLayer:
         if not candidates:
             return ""
         sections: list[str] = []
+        remaining = self._max_tokens
         for key in candidates:
             entry = self._store.get_people_dossier(
                 familiar_id=ctx.familiar_id, canonical_key=key
@@ -575,7 +677,14 @@ class PeopleDossierLayer:
                 guild_id=ctx.guild_id,
                 familiar_id=ctx.familiar_id,
             )
-            sections.append(f"### {display}\n\n{entry.dossier_text.strip()}")
+            section = f"### {display}\n\n{entry.dossier_text.strip()}"
+            if remaining is not None:
+                cost = estimate_tokens(section)
+                if cost > remaining and sections:
+                    break
+                section = _truncate_to_tokens(section, max_tokens=remaining)
+                remaining -= estimate_tokens(section)
+            sections.append(section)
         if not sections:
             return ""
         return "## People in this conversation\n\n" + "\n\n".join(sections)
@@ -628,11 +737,13 @@ class RagContextLayer:
         max_results: int = 5,
         max_facts: int = 3,
         recent_window_size: int = 0,
+        max_tokens: int | None = None,
     ) -> None:
         self._store = store
         self._max_results = max_results
         self._max_facts = max_facts
         self._recent_window_size = recent_window_size
+        self._max_tokens = max_tokens
         self._current_cue: str = ""
 
     def set_current_cue(self, cue: str) -> None:
@@ -665,26 +776,38 @@ class RagContextLayer:
         if not turn_results and not fact_results:
             return ""
 
-        sections: list[str] = []
-        if fact_results:
-            lines = ["## Possibly relevant facts\n"]
-            lines.extend(
-                f"- {_render_fact_line(self._store, ctx.familiar_id, f, guild_id=ctx.guild_id)}"  # noqa: E501
-                for f in fact_results
+        # Build candidate item lines first so we can apply a token cap
+        # uniformly across facts + turns. Facts come first — usually
+        # higher signal per token than retrieved turns.
+        fact_lines = [
+            f"- {_render_fact_line(self._store, ctx.familiar_id, f, guild_id=ctx.guild_id)}"  # noqa: E501
+            for f in fact_results
+        ]
+        turn_lines: list[str] = []
+        for t in turn_results:
+            label = _resolve_turn_label(self._store, ctx, t)
+            rewritten = _rewrite_mentions(
+                t.content,
+                store=self._store,
+                familiar_id=ctx.familiar_id,
+                guild_id=ctx.guild_id,
             )
-            sections.append("\n".join(lines))
-        if turn_results:
-            lines = ["## Possibly relevant earlier turns\n"]
-            for t in turn_results:
-                label = _resolve_turn_label(self._store, ctx, t)
-                rewritten = _rewrite_mentions(
-                    t.content,
-                    store=self._store,
-                    familiar_id=ctx.familiar_id,
-                    guild_id=ctx.guild_id,
-                )
-                lines.append(f"- [{label}] {rewritten}")
-            sections.append("\n".join(lines))
+            turn_lines.append(f"- [{label}] {rewritten}")
+
+        if self._max_tokens is not None:
+            fact_lines, turn_lines = _trim_rag_lines_to_tokens(
+                fact_lines=fact_lines,
+                turn_lines=turn_lines,
+                max_tokens=self._max_tokens,
+            )
+
+        sections: list[str] = []
+        if fact_lines:
+            sections.append("\n".join(["## Possibly relevant facts\n", *fact_lines]))
+        if turn_lines:
+            sections.append(
+                "\n".join(["## Possibly relevant earlier turns\n", *turn_lines])
+            )
         return "\n\n".join(sections)
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:

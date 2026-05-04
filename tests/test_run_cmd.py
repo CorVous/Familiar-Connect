@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from familiar_connect.budget import TierBudget
 from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
     _async_main,
@@ -736,7 +737,9 @@ class TestDefaultAssemblerLayerOrder:
         familiar = MagicMock(name="familiar")
         familiar.root = tmp_path
         familiar.history_store = MagicMock(name="history_store")
-        asm = _default_assembler(familiar, window_size=20)
+        asm = _default_assembler(
+            familiar, window_size=20, budget=TierBudget(total_tokens=3000)
+        )
         return [type(layer).__name__ for layer in asm._layers]
 
     def test_conversation_summary_precedes_cross_channel(self, tmp_path: Path) -> None:
