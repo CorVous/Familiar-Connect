@@ -124,6 +124,9 @@ def _consume_thread_marker(content: str) -> tuple[str, bool, str | None]:
     formatting. Multiple markers collapse to a single signal; the
     *first* explicit id wins. ``target_id`` is ``None`` when the
     marker is bare (legacy form: thread to the triggering message).
+    A leading ``#`` sigil is stripped — recent-history surfaces ids as
+    ``#<id>`` and models routinely echo the sigil back inside the
+    marker.
     Surrounding whitespace from a leading marker is cleaned up so the
     posted message doesn't start with a stray newline.
     """
@@ -134,8 +137,9 @@ def _consume_thread_marker(content: str) -> tuple[str, bool, str | None]:
     for m in matches:
         captured = m.group(1)
         if captured is not None and captured.strip():
-            target_id = captured.strip()
-            break
+            target_id = captured.strip().lstrip("#").strip() or None
+            if target_id:
+                break
     stripped = _THREAD_MARKER_RE.sub("", content).lstrip()
     return stripped, True, target_id
 

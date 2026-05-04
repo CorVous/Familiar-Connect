@@ -566,6 +566,43 @@ class TestIdentityWritePath:
         assert content == "sure"
 
     @pytest.mark.asyncio
+    async def test_thread_marker_with_hash_sigil_is_resolved(
+        self, tmp_path: Path
+    ) -> None:
+        """``[↩ #<id>]`` strips the sigil before lookup.
+
+        Recent history surfaces ids as ``#<id>``; models echo the
+        sigil back inside the marker. Stripping it keeps the lookup
+        from missing and silently falling back to the triggering
+        message.
+        """
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=42,
+            role="user",
+            content="earlier",
+            author=None,
+            platform_message_id="1500691573262782604",
+        )
+        llm = _ScriptedLLM(deltas=["[↩ #1500691573262782604] still thinking"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm, send=send, tmp_path=tmp_path, store=store
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event_full(message_id="trigger-msg"),
+            bus,
+        )
+        await bus.shutdown()
+
+        _, content, reply_to, _ = send.calls[0]
+        assert reply_to == "1500691573262782604"
+        assert content == "still thinking"
+
+    @pytest.mark.asyncio
     async def test_thread_marker_with_unknown_id_falls_back_to_triggering(
         self, tmp_path: Path
     ) -> None:
