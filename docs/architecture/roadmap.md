@@ -70,25 +70,44 @@ deleted, per the supersession-over-overwrite rule.
 Token + count caps live in `[budget.<tier>]` as `reflection_tokens`
 and `max_reflections`. See [Memory strategies — reflections](memory-strategies.md#reflections-m3).
 
-### M4 — Lorebook layer
+### M4 — Lorebook layer (shipped)
 
-Today: `core_instructions.md` + `character.md` are always-on. No
-keyword-activated canon.
+`data/familiars/<id>/lorebook.toml` carries `[[entries]]` with
+`keys`, `content`, optional `priority` (default 0) and optional
+`selective` (default `false`). `LorebookLayer` scans the active
+channel's last `recent_window` turns case-insensitively against
+each entry's keys; hits render newest-priority-first under a
+`## Lorebook` block. `selective = true` flips the per-entry match
+from any-key (OR) to all-keys (AND).
 
-Change: `data/familiars/<id>/lorebook.toml` with entries carrying
-`keys`, `content`, `priority`, optional `selective`. `LorebookLayer`
-matches recent-history tokens against keys, inserts hits at the
-declared priority. No worker — file is source of truth.
+No worker — the file is the sole source of truth. Cache key
+combines a BLAKE2b hash of the file with the matched entry indices,
+so the layer only flips when the file or the activation set
+changes.
 
-### M5 — Pluggable memory-store backend
+Token + count caps live in `[budget.<tier>]` as `lorebook_tokens`
+and `max_lorebook_entries`. See
+[Memory strategies — lorebook](memory-strategies.md#lorebook-m4).
 
-Today: writers (`SummaryWorker`, `FactExtractor`,
-`PeopleDossierWorker`, FTS triggers) collectively implement one
-strategy.
+### M5 — Pluggable memory-store backend (shipped)
 
-Change: lift them behind a `MemoryProjector` Protocol. Defaults stay.
-A `GraphitiProjector` or `CogneeProjector` plugs alongside or
-replaces. Selected via `[providers.memory].projectors`. See
+Existing watermark-driven writers (`SummaryWorker`, `FactExtractor`,
+`PeopleDossierWorker`, `ReflectionWorker`) lifted behind a
+`MemoryProjector` Protocol (`src/familiar_connect/processors/projectors.py`).
+Operators select projectors via TOML:
+
+```toml
+[providers.memory]
+projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+```
+
+Names map to a registry (`register_projector`); third-party
+projectors (Graphiti, Cognee) call `register_projector` at import
+time and the same selector picks them up. Unknown names raise at
+config load — a typo never silently drops a writer.
+
+Default keeps every shipped projector. Empty list disables all
+memory projection. See
 [Memory strategies — swap points](memory-strategies.md#swap-points).
 
 ### M6 — Embeddings for semantic recall
@@ -167,17 +186,17 @@ added `parakeet` and `faster_whisper`. V3 closed.
 Env vars are restricted to secrets and deployment identity (API keys,
 Discord token, `FAMILIAR_ID`); all behavior knobs live in TOML.
 
-Remaining selectors (not yet wired — implementations don't exist):
+`[providers.memory]` selector wired in M5; built-in names today are
+`rolling_summary`, `rich_note`, `people_dossier`, `reflection`.
+Third-party projectors register at import time; the selector picks
+them up by name.
+
+Remaining selector (not yet wired — implementation doesn't exist):
 
 ```toml
-[providers.memory]
-projectors = ["rich_note", "people_dossier"]                      # (M5)
-
 [providers.voice_pipeline]
 mode = "cascaded"             # | "s2s"                           # (V5)
 ```
-
-These will be wired when the corresponding backends land (M5).
 
 ### A2 — Dynamic context budgeter
 

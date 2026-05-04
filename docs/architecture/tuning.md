@@ -31,7 +31,7 @@ toml baked into the image and tune per host without a rebuild.
 | FasterWhisper local STT (V3 phase 3) | `[providers.stt.faster_whisper]` | unchanged |
 | STT backend selector | `[providers.stt].backend` | unchanged |
 | Turn detection strategy + tuning | `[providers.turn_detection]` + `[providers.turn_detection.local]` | unchanged |
-| Memory projector selection | hard-wired | `[providers.memory]` (M5) |
+| Memory projector selection | `[providers.memory]` (M5) | unchanged |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
 | RAG / fact retrieval ranking | `[memory.retrieval]` (M2) | `embedding_weight` wires up at M6 |
 
@@ -258,6 +258,10 @@ streaming context exits.
 - **`[memory.retrieval].importance_weight`** — bias retrieval
   toward safety-critical facts (allergies, names, life events).
   See [Retrieval ranking](#retrieval-ranking-m2).
+- **`data/familiars/<id>/lorebook.toml`** — keyword-activated
+  authored canon (M4). Add hand-written world / setting / lore
+  entries that surface only when a key appears in recent turns.
+  See [Memory strategies — lorebook](memory-strategies.md#lorebook-m4).
 - **Roadmap M6** — embeddings for paraphrase recall is the next
   bigger win.
 
@@ -517,11 +521,13 @@ dossier_tokens        = 450
 summary_tokens        = 300
 cross_channel_tokens  = 300
 reflection_tokens     = 300
+lorebook_tokens       = 300
 max_history_turns     = 100    # safety net behind recent_history_tokens
 max_rag_turns         = 5
 max_rag_facts         = 3
 max_dossier_people    = 8
 max_reflections       = 3
+max_lorebook_entries  = 6
 
 [budget.text]      # same shape, larger envelope
 total_tokens       = 8000
@@ -564,6 +570,9 @@ total_tokens = 5000   # rest of the voice envelope inherits from _default
 | `CrossChannelContextLayer.ttl_seconds` | `600` | constructor arg |
 | `ReflectionLayer.max_reflections` | `3` (voice) | `[budget.<tier>].max_reflections` |
 | `ReflectionLayer.max_tokens` | `300` (voice) | `[budget.<tier>].reflection_tokens` |
+| `LorebookLayer.max_entries` | `6` (voice) | `[budget.<tier>].max_lorebook_entries` |
+| `LorebookLayer.max_tokens` | `300` (voice) | `[budget.<tier>].lorebook_tokens` |
+| `LorebookLayer.recent_window` | matches history window | constructor arg |
 | `SummaryWorker.turns_threshold` | `10` | constructor arg |
 | `SummaryWorker.cross_k` | `5` | constructor arg |
 | `SummaryWorker.tick_interval_s` | `5.0` | class default |
@@ -612,6 +621,36 @@ asks the LLM for a 1–10 integer (1 = throwaway, 5 = ordinary,
 10 = identity-defining / safety-critical). Out-of-range values are
 clamped on the store side; non-numeric input drops to NULL.
 
+## Memory projectors (M5)
+
+Each watermark-driven writer is a :class:`MemoryProjector` —
+``name: str`` plus ``async def run(self) -> None``. The TOML
+selector picks which run; unknown names raise at config load.
+
+```toml
+[providers.memory]
+projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+```
+
+| Name | Class | Side-index produced |
+|---|---|---|
+| `rolling_summary` | `SummaryWorker` | `summaries`, `cross_context_summaries` |
+| `rich_note` | `FactExtractor` | `facts` |
+| `people_dossier` | `PeopleDossierWorker` | `people_dossiers` |
+| `reflection` | `ReflectionWorker` | `reflections` |
+
+Default keeps all four. Drop a name to disable that writer. Empty
+list disables every memory projector (read paths still work — they
+just see stale side-indices).
+
+Third-party projectors (a Graphiti / Cognee / external memory
+service) plug in by calling
+``familiar_connect.processors.projectors.register_projector(name, factory)``
+at import time; once registered, the same selector picks them up.
+Each side-index remains regenerable from `turns`, so swapping
+projectors mid-deployment doesn't lose ground-truth — restart the
+new projector and let it backfill.
+
 ## Forward-looking schema
 
 Documented now so the schema is settled before wiring lands. Not
@@ -637,10 +676,12 @@ compute_type = "auto"
 language     = "en"
 idle_close_s = 30.0
 
-# planned (V5, M5)
+# shipped (M5) — see § Memory projectors
 
 [providers.memory]
-projectors = ["rich_note", "people_dossier"]                        # (M5)
+projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+
+# planned (V5)
 
 [providers.voice_pipeline]
 mode = "cascaded"                # | "s2s" (V5)

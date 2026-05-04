@@ -81,12 +81,14 @@ class TierBudget:
     :param summary_tokens: cap on the conversation-summary block.
     :param cross_channel_tokens: cap on cross-channel context.
     :param reflection_tokens: cap on the reflections block (M3).
+    :param lorebook_tokens: cap on the lorebook block (M4).
     :param max_history_turns: hard upper bound on recent-history turns
         (safety net before the token cap).
     :param max_rag_turns: hard cap on RAG turn results.
     :param max_rag_facts: hard cap on RAG fact results.
     :param max_dossier_people: hard cap on dossier rows.
     :param max_reflections: hard cap on rendered reflection rows (M3).
+    :param max_lorebook_entries: hard cap on rendered lorebook entries (M4).
     """
 
     total_tokens: int = 3000
@@ -96,11 +98,13 @@ class TierBudget:
     summary_tokens: int = 300
     cross_channel_tokens: int = 300
     reflection_tokens: int = 300
+    lorebook_tokens: int = 300
     max_history_turns: int = 100
     max_rag_turns: int = 5
     max_rag_facts: int = 3
     max_dossier_people: int = 8
     max_reflections: int = 3
+    max_lorebook_entries: int = 6
 
 
 class Budgeter:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import operator
 import re
+import tomllib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -1074,3 +1076,163 @@ class ReflectionLayer:
         )
         latest_id = rows[0].id if rows else 0
         return f"ch{ctx.channel_id}|r{latest_id}|cap{self._max_reflections}"
+
+
+# ---------------------------------------------------------------------------
+# Lorebook (M4) — hand-authored, keyword-activated canon
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LorebookEntry:
+    """One ``[[entries]]`` row from ``lorebook.toml``.
+
+    :param keys: substrings that activate this entry; matched
+        case-insensitively against the recent-history scan window.
+    :param content: text inserted into the system prompt on hit.
+    :param priority: higher renders first; ties keep file order.
+    :param selective: when ``True``, *all* keys must match (AND); the
+        default ``False`` matches if any key matches (OR).
+    """
+
+    keys: tuple[str, ...]
+    content: str
+    priority: int = 0
+    selective: bool = False
+
+
+class LorebookLayer:
+    """Keyword-activated authored canon (M4).
+
+    Source of truth: ``data/familiars/<id>/lorebook.toml``. Each
+    ``[[entries]]`` row carries ``keys`` / ``content`` / ``priority``
+    and an optional ``selective`` flag. ``build`` scans the active
+    channel's last ``recent_window`` turns, fires entries whose
+    keys hit, and renders the surviving content sorted by descending
+    priority — file order breaks ties. No worker; the file is the
+    sole source of truth.
+
+    Cache key combines the file's content hash with the matched
+    entry indices, so the layer flips when either changes.
+    """
+
+    name: str = "lorebook"
+
+    def __init__(
+        self,
+        *,
+        store: HistoryStore,
+        path: Path,
+        recent_window: int = 20,
+        max_entries: int = 10,
+        max_tokens: int | None = None,
+    ) -> None:
+        self._store = store
+        self._path = path
+        self._recent_window = max(1, recent_window)
+        self._max_entries = max(0, max_entries)
+        self._max_tokens = max_tokens
+
+    def _load_entries(self) -> list[LorebookEntry]:
+        if not self._path.exists():
+            return []
+        try:
+            with self._path.open("rb") as f:
+                data = tomllib.load(f)
+        except (tomllib.TOMLDecodeError, OSError):
+            return []
+        raw_entries = data.get("entries", [])
+        if not isinstance(raw_entries, list):
+            return []
+        out: list[LorebookEntry] = []
+        for raw in raw_entries:
+            if not isinstance(raw, dict):
+                continue
+            keys_raw = raw.get("keys", [])
+            if not isinstance(keys_raw, list):
+                continue
+            keys = tuple(str(k) for k in keys_raw if isinstance(k, str) and k)
+            if not keys:
+                continue
+            content = str(raw.get("content", "")).strip()
+            if not content:
+                continue
+            priority_raw = raw.get("priority", 0)
+            priority = (
+                int(priority_raw)
+                if isinstance(priority_raw, int) and not isinstance(priority_raw, bool)
+                else 0
+            )
+            selective = bool(raw.get("selective", False))
+            out.append(
+                LorebookEntry(
+                    keys=keys,
+                    content=content,
+                    priority=priority,
+                    selective=selective,
+                )
+            )
+        return out
+
+    def _scan_text(self, ctx: AssemblyContext) -> str:
+        if ctx.channel_id is None:
+            return ""
+        turns = self._store.recent(
+            familiar_id=ctx.familiar_id,
+            channel_id=ctx.channel_id,
+            limit=self._recent_window,
+        )
+        return "\n".join(t.content for t in turns).lower()
+
+    def _matched_indices(self, entries: list[LorebookEntry], scan: str) -> list[int]:
+        """File-order indices of entries whose keys hit *scan*."""
+        if not scan:
+            return []
+        out: list[int] = []
+        for idx, entry in enumerate(entries):
+            keys_lc = [k.lower() for k in entry.keys]
+            if entry.selective:
+                if all(k in scan for k in keys_lc):
+                    out.append(idx)
+            elif any(k in scan for k in keys_lc):
+                out.append(idx)
+        return out
+
+    async def build(self, ctx: AssemblyContext) -> str:
+        if self._max_entries <= 0:
+            return ""
+        entries = self._load_entries()
+        if not entries:
+            return ""
+        scan = self._scan_text(ctx)
+        idxs = self._matched_indices(entries, scan)
+        if not idxs:
+            return ""
+        # Sort by priority desc; ties keep file order via the index.
+        idxs.sort(key=lambda i: (-entries[i].priority, i))
+        idxs = idxs[: self._max_entries]
+
+        sections: list[str] = []
+        remaining = self._max_tokens
+        for i in idxs:
+            section = entries[i].content
+            if remaining is not None:
+                cost = estimate_tokens(section)
+                if cost > remaining and sections:
+                    break
+                section = _truncate_to_tokens(section, max_tokens=remaining)
+                remaining -= estimate_tokens(section)
+            sections.append(section)
+        if not sections:
+            return ""
+        return "## Lorebook\n\n" + "\n\n".join(sections)
+
+    def invalidation_key(self, ctx: AssemblyContext) -> str:
+        file_hash = _content_hash(self._path)
+        entries = self._load_entries()
+        scan = self._scan_text(ctx)
+        idxs = self._matched_indices(entries, scan)
+        return (
+            f"f{file_hash}|ch{ctx.channel_id}|"
+            f"m{','.join(str(i) for i in idxs)}|cap{self._max_entries}"
+        )

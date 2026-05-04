@@ -38,12 +38,14 @@ text_window_size  = 200
 # summary_tokens        cap on the conversation-summary block.
 # cross_channel_tokens  cap on cross-channel context.
 # reflection_tokens     cap on reflections block (M3).
+# lorebook_tokens       cap on lorebook block (M4).
 # max_history_turns     hard upper bound on history turn count
 #                       (safety net behind recent_history_tokens).
 # max_rag_turns         hard cap on RAG turn results.
 # max_rag_facts         hard cap on RAG fact results.
 # max_dossier_people    hard cap on dossier rows.
 # max_reflections       hard cap on rendered reflection rows (M3).
+# max_lorebook_entries  hard cap on rendered lorebook entries (M4).
 #
 # Defaults sized for: voice models hold up to ~3 k well; thoughtful
 # (text) replies fine up to ~8 k; offline workers absorb ~24 k.
@@ -56,11 +58,13 @@ dossier_tokens        = 450
 summary_tokens        = 300
 cross_channel_tokens  = 300
 reflection_tokens     = 300
+lorebook_tokens       = 300
 max_history_turns     = 100
 max_rag_turns         = 5
 max_rag_facts         = 3
 max_dossier_people    = 8
 max_reflections       = 3
+max_lorebook_entries  = 6
 
 [budget.text]
 total_tokens          = 8000
@@ -70,11 +74,13 @@ dossier_tokens        = 1200
 summary_tokens        = 800
 cross_channel_tokens  = 800
 reflection_tokens     = 800
+lorebook_tokens       = 800
 max_history_turns     = 200
 max_rag_turns         = 8
 max_rag_facts         = 5
 max_dossier_people    = 12
 max_reflections       = 5
+max_lorebook_entries  = 10
 
 [budget.background]
 total_tokens          = 24000
@@ -84,11 +90,13 @@ dossier_tokens        = 4000
 summary_tokens        = 2000
 cross_channel_tokens  = 2000
 reflection_tokens     = 2000
+lorebook_tokens       = 2000
 max_history_turns     = 500
 max_rag_turns         = 12
 max_rag_facts         = 8
 max_dossier_people    = 16
 max_reflections       = 8
+max_lorebook_entries  = 16
 
 # --- Retrieval ranking -----------------------------------------------------
 #
@@ -111,6 +119,22 @@ bm25_weight       = 1.0
 recency_weight    = 0.0
 importance_weight = 0.6
 embedding_weight  = 0.0
+
+# --- Memory projectors (M5) -----------------------------------------------
+#
+# Watermark-driven writers that project ``turns`` into side-indices.
+# Each name maps to a registered factory in
+# ``familiar_connect.processors.projectors``. Default keeps every
+# shipped projector — drop one to disable it, add a third-party
+# projector by registering it at import time and listing the name.
+#
+# rolling_summary  per-channel + cross-channel rolling summaries.
+# rich_note        fact extractor (the "rich-note" projector).
+# people_dossier   per-person summary off the facts watermark.
+# reflection       higher-order syntheses with citation provenance.
+
+[providers.memory]
+projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
 
 # --- Turn detection --------------------------------------------------------
 #

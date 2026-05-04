@@ -32,6 +32,7 @@ from familiar_connect.context import (
     ConversationSummaryLayer,
     CoreInstructionsLayer,
     CrossChannelContextLayer,
+    LorebookLayer,
     OperatingModeLayer,
     PeopleDossierLayer,
     RagContextLayer,
@@ -45,10 +46,10 @@ from familiar_connect.processors import (
     TextResponder,
     VoiceResponder,
 )
-from familiar_connect.processors.fact_extractor import FactExtractor
-from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
-from familiar_connect.processors.reflection_worker import ReflectionWorker
-from familiar_connect.processors.summary_worker import SummaryWorker
+from familiar_connect.processors.projectors import (
+    ProjectorContext,
+    create_projectors,
+)
 from familiar_connect.stt import create_transcriber
 from familiar_connect.tts import create_tts_client
 from familiar_connect.tts_player import (
@@ -148,6 +149,9 @@ def _default_assembler(
     (file/mode-keyed) come first; dynamic layers come next, ordered by
     refresh rate (slowest first):
 
+    * ``LorebookLayer`` — file-sourced authored canon, keyword-activated
+      against the recent window. Flips when topic shifts cross an
+      activation key; otherwise stable.
     * ``ConversationSummaryLayer`` — every ``turns_threshold`` turns
       (default 10), the slowest of the dynamic block.
     * ``CrossChannelContextLayer`` — when *any* other channel's summary
@@ -172,6 +176,7 @@ def _default_assembler(
     root = familiar.root
     core_path = root.parent / "_default" / "core_instructions.md"
     card_path = root / "character.md"
+    lorebook_path = root / "lorebook.toml"
     store = familiar.history_store
     retrieval = familiar.config.memory_retrieval
     return Assembler(
@@ -189,6 +194,13 @@ def _default_assembler(
                         "and multi-line replies are fine."
                     ),
                 }
+            ),
+            LorebookLayer(
+                store=store,
+                path=lorebook_path,
+                recent_window=window_size,
+                max_entries=budget.max_lorebook_entries,
+                max_tokens=budget.lorebook_tokens,
             ),
             ConversationSummaryLayer(
                 store=store,
@@ -304,27 +316,14 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         trigger_typing=handle.trigger_typing,
         typing_handler=handle.typing_interrupt,
     )
-    summary_worker = SummaryWorker(
+    projector_context = ProjectorContext(
         store=familiar.history_store,
-        llm_client=familiar.llm_clients["background"],
-        familiar_id=familiar.id,
-        turns_threshold=10,
-    )
-    fact_extractor = FactExtractor(
-        store=familiar.history_store,
-        llm_client=familiar.llm_clients["background"],
-        familiar_id=familiar.id,
-        batch_size=10,
-    )
-    people_dossier_worker = PeopleDossierWorker(
-        store=familiar.history_store,
-        llm_client=familiar.llm_clients["background"],
+        llm_clients=familiar.llm_clients,
         familiar_id=familiar.id,
     )
-    reflection_worker = ReflectionWorker(
-        store=familiar.history_store,
-        llm_client=familiar.llm_clients["background"],
-        familiar_id=familiar.id,
+    projectors = create_projectors(
+        names=list(familiar.config.memory_providers.projectors),
+        context=projector_context,
     )
 
     try:
@@ -338,10 +337,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 _run_text_responder(familiar, text_responder),
                 name="text-responder",
             )
-            tg.create_task(summary_worker.run(), name="summary-worker")
-            tg.create_task(fact_extractor.run(), name="fact-extractor")
-            tg.create_task(people_dossier_worker.run(), name="people-dossier-worker")
-            tg.create_task(reflection_worker.run(), name="reflection-worker")
+            for proj in projectors:
+                tg.create_task(proj.run(), name=proj.name)
             tg.create_task(handle.bot.start(token), name="discord-bot")
     finally:
         # close py-cord first so its aiohttp ClientSession doesn't leak

@@ -43,7 +43,7 @@ Ideas seriously considered during planning and deliberately turned down. Recorde
 
 This rejection also applies to **running a memory MCP server we own as a sidecar** for the bot's own internal use. MCP is useful when multiple separate agents need to share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle to manage).
 
-The *open-source library* underneath Zep — Graphiti — is a different proposition. Graphiti is a Python package with pluggable graph backends; embedding it (or porting its bi-temporal edge logic onto our SQLite store) keeps every byte of state local. On the [roadmap](roadmap.md#m5-pluggable-memory-store-backend) as M5.
+The *open-source library* underneath Zep — Graphiti — is a different proposition. Graphiti is a Python package with pluggable graph backends; embedding it (or porting its bi-temporal edge logic onto our SQLite store) keeps every byte of state local. M5 [shipped](roadmap.md#m5-pluggable-memory-store-backend-shipped) the projector swap point Graphiti would plug into.
 
 ## Letta / MemGPT as the memory runtime
 

@@ -241,6 +241,29 @@ class MemoryRetrievalConfig:
 
 
 @dataclass(frozen=True)
+class MemoryProvidersConfig:
+    """Memory-projector selector from ``[providers.memory]`` (M5).
+
+    Lifts the existing writers (`SummaryWorker`, `FactExtractor`,
+    `PeopleDossierWorker`, `ReflectionWorker`) behind a
+    :class:`MemoryProjector` Protocol so operators swap the strategy
+    via TOML. Default keeps every shipped projector.
+
+    :param projectors: ordered tuple of projector names. Each must be
+        registered in
+        :mod:`familiar_connect.processors.projectors`. Empty tuple
+        disables all memory projection.
+    """
+
+    projectors: tuple[str, ...] = (
+        "rolling_summary",
+        "rich_note",
+        "people_dossier",
+        "reflection",
+    )
+
+
+@dataclass(frozen=True)
 class ChannelOverrides:
     """Per-channel overrides for latency-sensitive knobs.
 
@@ -297,6 +320,10 @@ class CharacterConfig:
     # Retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
     memory_retrieval: MemoryRetrievalConfig = field(
         default_factory=MemoryRetrievalConfig
+    )
+    # M5 — memory-projector selection from [providers.memory].
+    memory_providers: MemoryProvidersConfig = field(
+        default_factory=MemoryProvidersConfig
     )
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
@@ -390,6 +417,15 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     stt = _parse_stt_config(stt_raw)
 
+    memory_providers_raw = providers_raw.get("memory", {})
+    if not isinstance(memory_providers_raw, dict):
+        msg = (
+            "[providers.memory] must be a table, "
+            f"got {type(memory_providers_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    memory_providers = _parse_memory_providers(memory_providers_raw)
+
     budget_raw = data.get("budget", {})
     if not isinstance(budget_raw, dict):
         msg = f"[budget] must be a table, got {type(budget_raw).__name__}"
@@ -429,6 +465,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         budgets=budgets,
         discord_text=discord_text,
         memory_retrieval=memory_retrieval,
+        memory_providers=memory_providers,
     )
 
 
@@ -506,11 +543,13 @@ _BUDGET_FIELDS: tuple[str, ...] = (
     "summary_tokens",
     "cross_channel_tokens",
     "reflection_tokens",
+    "lorebook_tokens",
     "max_history_turns",
     "max_rag_turns",
     "max_rag_facts",
     "max_dossier_people",
     "max_reflections",
+    "max_lorebook_entries",
 )
 
 
@@ -579,6 +618,46 @@ def _parse_memory_retrieval(raw: dict) -> MemoryRetrievalConfig:
             raise ConfigError(msg)
         out[key] = float(v)
     return MemoryRetrievalConfig(**out)
+
+
+_MEMORY_PROVIDERS_FIELDS: frozenset[str] = frozenset({"projectors"})
+
+
+def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
+    """Validate ``[providers.memory]``; reject unknown projector names.
+
+    Names are checked against
+    :func:`familiar_connect.processors.projectors.known_projectors` so
+    a typo fails loudly at config load rather than silently dropping a
+    writer.
+    """
+    unknown = set(raw) - _MEMORY_PROVIDERS_FIELDS
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[providers.memory] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    if "projectors" not in raw:
+        return MemoryProvidersConfig()
+    raw_projectors = raw["projectors"]
+    if not isinstance(raw_projectors, list) or not all(
+        isinstance(p, str) for p in raw_projectors
+    ):
+        msg = "[providers.memory].projectors must be a list of strings"
+        raise ConfigError(msg)
+    # Deferred to avoid pulling the registry into module import time —
+    # config.py is loaded by lots of test helpers.
+    from familiar_connect.processors.projectors import known_projectors  # noqa: PLC0415
+
+    valid_names = known_projectors()
+    for name in raw_projectors:
+        if name not in valid_names:
+            valid = ", ".join(sorted(valid_names)) or "(none)"
+            msg = (
+                f"[providers.memory].projectors lists unknown memory "
+                f"projector {name!r}; valid: {valid}"
+            )
+            raise ConfigError(msg)
+    return MemoryProvidersConfig(projectors=tuple(raw_projectors))
 
 
 _VALID_MESSAGE_RENDERING: frozenset[str] = frozenset({"prefixed", "name_only"})

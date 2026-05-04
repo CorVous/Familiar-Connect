@@ -647,10 +647,9 @@ class TestAsyncMainCleanup:
         bot.close = AsyncMock()
         handle = MagicMock(bot=bot)
 
-        sw = MagicMock()
-        sw.run = AsyncMock(side_effect=_hang)
-        fe = MagicMock()
-        fe.run = AsyncMock(side_effect=_hang)
+        proj = MagicMock(name="projector")
+        proj.run = AsyncMock(side_effect=_hang)
+        proj.name = "stub-projector"
 
         with (
             patch("familiar_connect.commands.run.create_bot", return_value=handle),
@@ -669,8 +668,10 @@ class TestAsyncMainCleanup:
             ),
             patch("familiar_connect.commands.run.VoiceResponder"),
             patch("familiar_connect.commands.run.TextResponder"),
-            patch("familiar_connect.commands.run.SummaryWorker", return_value=sw),
-            patch("familiar_connect.commands.run.FactExtractor", return_value=fe),
+            patch(
+                "familiar_connect.commands.run.create_projectors",
+                return_value=[proj],
+            ),
             pytest.raises(BaseExceptionGroup),  # TaskGroup wraps the inner raise
         ):
             await _async_main("fake-token", familiar)
@@ -693,10 +694,9 @@ class TestAsyncMainCleanup:
         bot.close = AsyncMock()
         handle = MagicMock(bot=bot)
 
-        sw = MagicMock()
-        sw.run = AsyncMock(side_effect=_hang)
-        fe = MagicMock()
-        fe.run = AsyncMock(side_effect=_hang)
+        proj = MagicMock(name="projector")
+        proj.run = AsyncMock(side_effect=_hang)
+        proj.name = "stub-projector"
 
         with (
             patch("familiar_connect.commands.run.create_bot", return_value=handle),
@@ -715,8 +715,10 @@ class TestAsyncMainCleanup:
             ),
             patch("familiar_connect.commands.run.VoiceResponder"),
             patch("familiar_connect.commands.run.TextResponder"),
-            patch("familiar_connect.commands.run.SummaryWorker", return_value=sw),
-            patch("familiar_connect.commands.run.FactExtractor", return_value=fe),
+            patch(
+                "familiar_connect.commands.run.create_projectors",
+                return_value=[proj],
+            ),
             pytest.raises(BaseExceptionGroup),
         ):
             await _async_main("fake-token", familiar)

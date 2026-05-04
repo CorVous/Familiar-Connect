@@ -31,8 +31,9 @@ details for what already ships live in
 
 4. **Hand-authored, rule-activated character context**
    (RisuAI / SillyTavern lorebooks). Keyword-activated entries.
-   `core_instructions.md` + `character.md` are a degenerate case
-   today (always-on, no keys); M4 adds a real lorebook layer.
+   `core_instructions.md` + `character.md` ship as the always-on
+   degenerate case; M4 added a real keyword-activated lorebook
+   alongside them — see [Lorebook](#lorebook-m4).
 
 ## What's wired today
 
@@ -66,13 +67,41 @@ This is how M3 (`ReflectionLayer`) and M4 (`LorebookLayer`) plug
 in. It's also how a candidate replacement layer can run
 side-by-side: register both, switch via TOML on a test channel.
 
-### 2. Projection writer (planned: `MemoryProjector` Protocol)
+### 2. Projection writer (`MemoryProjector` Protocol)
 
-Today's writers collectively implement one strategy: rich-note +
-per-channel summary + per-person dossier. M5 lifts them behind a
-`MemoryProjector` Protocol. Default stays. A `GraphitiProjector`
-or `CogneeProjector` runs alongside or replaces. Selected via
-`[providers.memory].projectors`.
+The watermark-driven writers — `SummaryWorker`, `FactExtractor`,
+`PeopleDossierWorker`, `ReflectionWorker` — implement a thin
+:class:`MemoryProjector` Protocol (M5):
+
+```python
+class MemoryProjector(Protocol):
+    name: str
+    async def run(self) -> None: ...
+```
+
+Names registered today (built-ins):
+
+| Name | Class | Side-index |
+|---|---|---|
+| `rolling_summary` | `SummaryWorker` | `summaries`, `cross_context_summaries` |
+| `rich_note` | `FactExtractor` | `facts` |
+| `people_dossier` | `PeopleDossierWorker` | `people_dossiers` |
+| `reflection` | `ReflectionWorker` | `reflections` |
+
+Operators pick the active set in `character.toml`:
+
+```toml
+[providers.memory]
+projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+```
+
+Default lists all four. Drop a name to disable that writer. Add a
+third-party projector (Graphiti, Cognee, …) by calling
+`register_projector("graphiti", factory)` at import time and listing
+it here. Unknown names fail loudly at config load — a typo never
+silently drops a writer. Empty list disables all projection (the
+side-indices stop refreshing; reads still work against whatever
+exists).
 
 ### 3. Retrieval ranking (`RagContextLayer`)
 
@@ -97,6 +126,50 @@ keeps the top N by weighted sum:
 
 `importance_weight = 0` reproduces pre-M2 ordering. See
 [Tuning — retrieval ranking](tuning.md#retrieval-ranking-m2).
+
+## Lorebook (M4)
+
+Hand-authored, keyword-activated canon. Lives at
+`data/familiars/<id>/lorebook.toml`:
+
+```toml
+[[entries]]
+keys      = ["paris", "france"]
+content   = "Paris is the capital of France. Founded ~250 BCE…"
+priority  = 100
+selective = false       # any key matches; default
+
+[[entries]]
+keys      = ["dragon", "wyvern"]
+content   = "Dragons in this world breathe radiant light, not fire."
+priority  = 50
+```
+
+`LorebookLayer` reads the file on every assemble (cheap; cached by
+the `Assembler`'s invalidation key), scans the active channel's
+last `recent_window` turns case-insensitively against each entry's
+keys, and renders the matching subset newest-priority-first under a
+`## Lorebook` block. `selective = true` flips the per-entry match
+from any-key (OR) to all-keys (AND) — useful when a generic key
+("dragon") shouldn't fire on its own without a disambiguator
+("dragon" + "Cassidy").
+
+No worker; the file is the sole source of truth. Operators edit it
+in place, no migration. The cache key combines a content hash of
+the file with the matched entry indices, so the layer only flips
+when the file or the activation set actually changes.
+
+The relevant knobs live in `[budget.<tier>]`:
+
+```toml
+[budget.text]
+lorebook_tokens      = 800   # cap on the rendered block
+max_lorebook_entries = 10    # hard cap on rendered entries
+```
+
+Authored canon stays separate from experiential memory (see
+[below](#why-authored-canon-stays-separate-from-experiential-memory))
+— the lorebook never mutates on its own.
 
 ## Reflections (M3)
 
@@ -174,7 +247,7 @@ projector, not a replacement.
 
 ## Why authored canon stays separate from experiential memory
 
-- **Authored canon** (`character.md`, future `lorebook.toml`) —
+- **Authored canon** (`character.md`, `lorebook.toml`) —
   human-edited, never evolves on its own.
 - **Experiential memory** (`turns` and projections) — bot-generated,
   evolves every interaction.

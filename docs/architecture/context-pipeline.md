@@ -40,6 +40,7 @@ flowchart TB
         core[CoreInstructionsLayer]
         card[CharacterCardLayer]
         mode[OperatingModeLayer]
+        lore[LorebookLayer]
         xc[CrossChannelContextLayer]
         sum[ConversationSummaryLayer]
         ref[ReflectionLayer]
@@ -82,6 +83,7 @@ whose key has changed.
 | `CoreInstructionsLayer` | `data/familiars/_default/core_instructions.md` | BLAKE2b content hash — catches sub-second edits |
 | `CharacterCardLayer` | `data/familiars/<id>/character.md` (optional sidecar) | BLAKE2b content hash |
 | `OperatingModeLayer` | in-memory `modes` dict, keyed on `viewer_mode` | `viewer_mode` |
+| `LorebookLayer` | `data/familiars/<id>/lorebook.toml` (optional) | file content hash + matched entry indices |
 
 ### Dynamic
 
