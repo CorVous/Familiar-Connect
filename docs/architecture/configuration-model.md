@@ -35,7 +35,10 @@ Surface today:
   selector + per-backend knobs (`endpointing_ms`, `keyterms`, …).
   Only `deepgram` today; V3 widens. Per-knob env override available.
   See [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
-- `[llm.main_prose]` — model + optional temperature.
+- `[llm.fast]` / `[llm.prose]` / `[llm.background]` — tiered LLM slots
+  (model, temperature, optional `provider_order`, `reasoning`,
+  `tool_calling`). See [Tuning — LLM slots](tuning.md#llm-slots) for
+  the schema and the call-site → slot mapping.
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
 
 ### Default profile

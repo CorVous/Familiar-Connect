@@ -18,8 +18,24 @@ class ConfigError(Exception):
     """Raised when a config file is malformed or references an unknown value."""
 
 
-LLM_SLOT_NAMES: frozenset[str] = frozenset({"main_prose"})
-"""Canonical LLM call-site slot names."""
+LLM_SLOT_NAMES: frozenset[str] = frozenset({"fast", "prose", "background"})
+"""Canonical LLM call-site slot names.
+
+Tiered by latency / quality:
+
+* ``fast`` — voice replies; reasoning off, tools off.
+* ``prose`` — text-channel replies; reasoning on, tools off.
+* ``background`` — summaries, fact extraction, dossier; reasoning
+  on, tools on (surface only — no tool wiring yet).
+"""
+
+REASONING_LEVELS: frozenset[str] = frozenset({"off", "low", "medium", "high"})
+"""Allowed values for ``[llm.<slot>].reasoning``.
+
+* ``"off"`` — explicitly suppress (OpenRouter ``reasoning.exclude``).
+* ``"low"`` / ``"medium"`` / ``"high"`` — effort levels.
+* omitted (``None``) — defer to the model's default.
+"""
 
 
 @dataclass(frozen=True)
@@ -33,6 +49,11 @@ class LLMSlotConfig:
     # stopgap — see docs/architecture/tuning.md § provider pinning.
     provider_order: tuple[str, ...] | None = None
     provider_allow_fallbacks: bool = True
+    # OpenRouter reasoning effort. ``None`` = model default.
+    # see ``REASONING_LEVELS`` for allowed strings.
+    reasoning: str | None = None
+    # surface-only flag for now — call sites haven't wired tools yet.
+    tool_calling: bool = False
 
 
 _TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia", "gemini"})
@@ -444,11 +465,39 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
                 f"got {type(allow_fallbacks_raw).__name__}"
             )
             raise ConfigError(msg)
+        reasoning_raw = section.get("reasoning")
+        reasoning: str | None
+        if reasoning_raw is None:
+            reasoning = None
+        elif isinstance(reasoning_raw, str):
+            if reasoning_raw not in REASONING_LEVELS:
+                valid = ", ".join(sorted(REASONING_LEVELS))
+                msg = (
+                    f"[llm.{name}].reasoning {reasoning_raw!r} unknown; "
+                    f"valid options: {valid}"
+                )
+                raise ConfigError(msg)
+            reasoning = reasoning_raw
+        else:
+            msg = (
+                f"[llm.{name}].reasoning must be a string, "
+                f"got {type(reasoning_raw).__name__}"
+            )
+            raise ConfigError(msg)
+        tool_calling_raw = section.get("tool_calling", False)
+        if not isinstance(tool_calling_raw, bool):
+            msg = (
+                f"[llm.{name}].tool_calling must be a bool, "
+                f"got {type(tool_calling_raw).__name__}"
+            )
+            raise ConfigError(msg)
         slots[name] = LLMSlotConfig(
             model=model,
             temperature=temperature,
             provider_order=provider_order,
             provider_allow_fallbacks=allow_fallbacks_raw,
+            reasoning=reasoning,
+            tool_calling=tool_calling_raw,
         )
     return slots
 

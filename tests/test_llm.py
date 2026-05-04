@@ -230,6 +230,25 @@ class TestLLMClient:
         payload = client.build_payload([Message(role="user", content="x")])
         assert payload["provider"]["allow_fallbacks"] is False
 
+    def test_payload_omits_reasoning_when_unset(self) -> None:
+        """Default — no ``reasoning`` field; defer to model default."""
+        client = LLMClient(api_key="k", model="m")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert "reasoning" not in payload
+
+    def test_payload_reasoning_off_excludes(self) -> None:
+        """``reasoning="off"`` maps to OpenRouter ``reasoning.exclude=True``."""
+        client = LLMClient(api_key="k", model="m", reasoning="off")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["reasoning"] == {"exclude": True}
+
+    @pytest.mark.parametrize("level", ["low", "medium", "high"])
+    def test_payload_reasoning_effort(self, level: str) -> None:
+        """Effort levels map to OpenRouter ``reasoning.effort``."""
+        client = LLMClient(api_key="k", model="m", reasoning=level)
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["reasoning"] == {"effort": level}
+
 
 class TestLLMClientChat:
     @pytest.fixture
@@ -462,15 +481,31 @@ class TestCreateLLMClients:
         tmp_path: Path,
         default_profile_path: Path,
     ) -> None:
-        """User config overrides the main_prose slot from the default profile."""
+        """User config overrides the prose slot from the default profile."""
         path = tmp_path / "character.toml"
         path.write_text(
-            '[llm.main_prose]\nmodel = "user/custom-prose"\ntemperature = 0.9\n',
+            '[llm.prose]\nmodel = "user/custom-prose"\ntemperature = 0.9\n',
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         clients = create_llm_clients("sk-or-test-abc", cfg)
-        assert clients["main_prose"].model == "user/custom-prose"
-        assert clients["main_prose"].temperature == pytest.approx(0.9)
+        assert clients["prose"].model == "user/custom-prose"
+        assert clients["prose"].temperature == pytest.approx(0.9)
+
+    def test_reasoning_threaded_through(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Slot reasoning lands on its :class:`LLMClient`."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        # default profile: fast="off", prose+background="medium"
+        assert clients["fast"].reasoning == "off"
+        assert clients["prose"].reasoning == "medium"
+        assert clients["background"].reasoning == "medium"
 
     def test_returns_distinct_client_instances(
         self,

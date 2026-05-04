@@ -1,9 +1,8 @@
 """Tests for the simplified CharacterConfig / TOML loader.
 
-The re-arch demolition pass cut most fields and all three enums
-(ChannelMode, Interjection, InterruptTolerance). What remains: TOML
-deep-merge over the default profile, a single LLM slot (main_prose),
-and the TTS config table.
+Covers TOML deep-merge over the default profile, the tiered LLM
+slots (``fast`` / ``prose`` / ``background``), and the TTS config
+table.
 """
 
 from __future__ import annotations
@@ -30,8 +29,8 @@ if TYPE_CHECKING:
 
 
 class TestLLMSlotNames:
-    def test_only_main_prose_slot(self) -> None:
-        assert frozenset({"main_prose"}) == LLM_SLOT_NAMES
+    def test_tiered_slots(self) -> None:
+        assert frozenset({"fast", "prose", "background"}) == LLM_SLOT_NAMES
 
 
 class TestCharacterConfigDefaults:
@@ -58,8 +57,9 @@ class TestLoadCharacterConfig:
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.display_tz == "UTC"
-        assert "main_prose" in cfg.llm
-        assert isinstance(cfg.llm["main_prose"], LLMSlotConfig)
+        for slot_name in ("fast", "prose", "background"):
+            assert slot_name in cfg.llm
+            assert isinstance(cfg.llm[slot_name], LLMSlotConfig)
 
     def test_user_overrides_default(
         self, tmp_path: Path, default_profile_path: Path
@@ -78,11 +78,20 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match="unknown LLM slot"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_legacy_main_prose_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """The retired ``main_prose`` slot fails loudly post-split."""
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.main_prose]\nmodel = "m"\n')
+        with pytest.raises(ConfigError, match="unknown LLM slot 'main_prose'"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_temperature_out_of_range(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text('[llm.main_prose]\nmodel = "m"\ntemperature = 3.0\n')
+        path.write_text('[llm.prose]\nmodel = "m"\ntemperature = 3.0\n')
         with pytest.raises(ConfigError, match="temperature must be in"):
             load_character_config(path, defaults_path=default_profile_path)
 
@@ -97,12 +106,12 @@ class TestLoadCharacterConfig:
         """
         path = tmp_path / "character.toml"
         path.write_text(
-            '[llm.main_prose]\nmodel = "z-ai/glm-5.1"\n'
+            '[llm.prose]\nmodel = "z-ai/glm-5.1"\n'
             'provider_order = ["z-ai", "deepinfra"]\n'
             "provider_allow_fallbacks = false\n"
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        slot = cfg.llm["main_prose"]
+        slot = cfg.llm["prose"]
         assert slot.provider_order == ("z-ai", "deepinfra")
         assert slot.provider_allow_fallbacks is False
 
@@ -110,14 +119,18 @@ class TestLoadCharacterConfig:
         """Slot without ``provider_order`` parses to ``None`` (default routing).
 
         Uses a custom default profile so the shipped default's pin
-        (currently ``["z-ai"]``) doesn't bleed in via TOML merge.
+        doesn't bleed in via TOML merge.
         """
         defaults = tmp_path / "defaults.toml"
-        defaults.write_text('[llm.main_prose]\nmodel = "x"\n')
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\n'
+            '[llm.prose]\nmodel = "x"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
         path = tmp_path / "character.toml"
-        path.write_text('[llm.main_prose]\nmodel = "m"\n')
+        path.write_text('[llm.prose]\nmodel = "m"\n')
         cfg = load_character_config(path, defaults_path=defaults)
-        slot = cfg.llm["main_prose"]
+        slot = cfg.llm["prose"]
         assert slot.provider_order is None
         assert slot.provider_allow_fallbacks is True
 
@@ -125,8 +138,78 @@ class TestLoadCharacterConfig:
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text('[llm.main_prose]\nmodel = "m"\nprovider_order = [1, 2]\n')
+        path.write_text('[llm.prose]\nmodel = "m"\nprovider_order = [1, 2]\n')
         with pytest.raises(ConfigError, match="provider_order"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_reasoning_levels_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "m"\nreasoning = "off"\n'
+            '[llm.prose]\nmodel = "m"\nreasoning = "medium"\n'
+            '[llm.background]\nmodel = "m"\nreasoning = "high"\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm["fast"].reasoning == "off"
+        assert cfg.llm["prose"].reasoning == "medium"
+        assert cfg.llm["background"].reasoning == "high"
+
+    def test_reasoning_omitted_means_none(self, tmp_path: Path) -> None:
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\n'
+            '[llm.prose]\nmodel = "x"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
+        cfg = load_character_config(tmp_path / "missing.toml", defaults_path=defaults)
+        assert cfg.llm["prose"].reasoning is None
+
+    def test_invalid_reasoning_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\nreasoning = "ultra"\n')
+        with pytest.raises(ConfigError, match="reasoning"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_reasoning_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\nreasoning = true\n')
+        with pytest.raises(ConfigError, match="reasoning"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tool_calling_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.background]\nmodel = "m"\ntool_calling = true\n'
+            '[llm.fast]\nmodel = "m"\ntool_calling = false\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm["background"].tool_calling is True
+        assert cfg.llm["fast"].tool_calling is False
+
+    def test_tool_calling_omitted_defaults_false(self, tmp_path: Path) -> None:
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\n'
+            '[llm.prose]\nmodel = "x"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
+        cfg = load_character_config(tmp_path / "missing.toml", defaults_path=defaults)
+        assert cfg.llm["prose"].tool_calling is False
+
+    def test_tool_calling_must_be_bool(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\ntool_calling = "yes"\n')
+        with pytest.raises(ConfigError, match="tool_calling"):
             load_character_config(path, defaults_path=default_profile_path)
 
     def test_unknown_tts_provider_rejected(

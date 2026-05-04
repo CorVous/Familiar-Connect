@@ -252,7 +252,11 @@ def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
         ),
         patch(
             "familiar_connect.commands.run.create_llm_clients",
-            return_value={"main_prose": MagicMock()},
+            return_value={
+                "fast": MagicMock(),
+                "prose": MagicMock(),
+                "background": MagicMock(),
+            },
         ),
         patch(
             "familiar_connect.commands.run.create_tts_client",
@@ -311,7 +315,11 @@ def test_run_loads_config_before_building_clients(tmp_path: Path) -> None:
         ) as mock_load_config,
         patch(
             "familiar_connect.commands.run.create_llm_clients",
-            return_value={"main_prose": MagicMock()},
+            return_value={
+                "fast": MagicMock(),
+                "prose": MagicMock(),
+                "background": MagicMock(),
+            },
         ) as mock_create_llm,
         patch(
             "familiar_connect.commands.run.create_tts_client",
@@ -383,7 +391,11 @@ class TestRunTranscriberIntegration:
             ),
             patch(
                 "familiar_connect.commands.run.create_llm_clients",
-                return_value={"main_prose": MagicMock()},
+                return_value={
+                    "fast": MagicMock(),
+                    "prose": MagicMock(),
+                    "background": MagicMock(),
+                },
             ),
             patch(
                 "familiar_connect.commands.run.create_tts_client",
@@ -434,7 +446,11 @@ class TestRunTranscriberIntegration:
             ),
             patch(
                 "familiar_connect.commands.run.create_llm_clients",
-                return_value={"main_prose": MagicMock()},
+                return_value={
+                    "fast": MagicMock(),
+                    "prose": MagicMock(),
+                    "background": MagicMock(),
+                },
             ),
             patch(
                 "familiar_connect.commands.run.create_tts_client",
@@ -495,7 +511,11 @@ def _run_with_strategy(tmp_path: Path, strategy: str):
         ),
         patch(
             "familiar_connect.commands.run.create_llm_clients",
-            return_value={"main_prose": MagicMock()},
+            return_value={
+                "fast": MagicMock(),
+                "prose": MagicMock(),
+                "background": MagicMock(),
+            },
         ),
         patch("familiar_connect.commands.run.create_tts_client", return_value=None),
         patch(
@@ -551,7 +571,11 @@ class TestRunTurnDetectionTomlSelector:
             ),
             patch(
                 "familiar_connect.commands.run.create_llm_clients",
-                return_value={"main_prose": MagicMock()},
+                return_value={
+                    "fast": MagicMock(),
+                    "prose": MagicMock(),
+                    "background": MagicMock(),
+                },
             ),
             patch("familiar_connect.commands.run.create_tts_client", return_value=None),
             patch(
@@ -595,7 +619,7 @@ def _fake_familiar_for_async_main() -> MagicMock:
     fam.router.shutdown = MagicMock()
     llm = MagicMock(name="llm")
     llm.close = AsyncMock()
-    fam.llm_clients = {"main_prose": llm}
+    fam.llm_clients = {"fast": llm, "prose": llm, "background": llm}
     fam.history_store = MagicMock()
     fam.config = MagicMock(history_window_size=10)
     fam.root = MagicMock()
@@ -654,7 +678,8 @@ class TestAsyncMainCleanup:
         familiar.transcriber.stop.assert_awaited_once()
         familiar.bus.shutdown.assert_awaited_once()
         familiar.router.shutdown.assert_called_once()
-        familiar.llm_clients["main_prose"].close.assert_awaited_once()
+        # one shared mock backs all three slots — close fires per slot
+        assert familiar.llm_clients["prose"].close.await_count == 3
 
     @pytest.mark.asyncio
     async def test_skips_transcriber_when_none(self) -> None:

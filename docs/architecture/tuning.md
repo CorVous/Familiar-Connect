@@ -89,11 +89,26 @@ gemini_voice      = "Kore"
 gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
 
-[llm.main_prose]
+[llm.fast]
+model        = "anthropic/claude-haiku-4.5"
+temperature  = 0.7
+reasoning    = "off"        # "off" | "low" | "medium" | "high" | omit
+tool_calling = false
+
+[llm.prose]
 model                    = "z-ai/glm-5.1"
 temperature              = 0.7
 provider_order           = ["z-ai"]   # optional — pin OpenRouter routing
 provider_allow_fallbacks = true       # optional — default true
+reasoning                = "medium"
+tool_calling             = false
+
+[llm.background]
+model          = "z-ai/glm-5.1"
+temperature    = 0.7
+provider_order = ["z-ai"]
+reasoning      = "medium"
+tool_calling   = true
 
 [channels.123456789012345678]
 history_window_size = 30
@@ -136,7 +151,7 @@ system prompts turn-over-turn.
 Pin a provider in `[llm.<slot>]`:
 
 ```toml
-[llm.main_prose]
+[llm.prose]
 model                    = "z-ai/glm-5.1"
 provider_order           = ["z-ai"]      # first-party — best caching
 provider_allow_fallbacks = true          # default: fall back if pinned is down
@@ -372,17 +387,45 @@ first speech doesn't pay TTS cold-start.
 
 ## LLM slots
 
-`[llm.main_prose]` is the only slot today. Schema is open; future
-slots (`summary`, `fact_extraction`, `turn_classifier`) plug in
-under `[llm.<slot>]`. Each picks its model independently — fast /
-cheap for background work, stronger for user-facing reply. See
+Three tiered slots, by latency / quality:
+
+| Slot | Call sites | Defaults |
+|---|---|---|
+| `fast` | voice replies (`VoiceResponder`) | low-latency model, reasoning off, tools off |
+| `prose` | text-channel replies (`TextResponder`) | quality model, reasoning on, tools off |
+| `background` | summaries, fact extraction, dossiers (`SummaryWorker`, `FactExtractor`, `PeopleDossierWorker`) | quality model, reasoning on, tools on |
+
+Each slot picks its model independently. Slot names are canonical —
+unknown slots fail loudly at config load. See
 `familiar_connect.config.LLM_SLOT_NAMES`.
 
+### Schema
+
 ```toml
-[llm.main_prose]
-model       = "z-ai/glm-5.1"
-temperature = 0.7
+[llm.<slot>]
+model                    = "z-ai/glm-5.1"   # required
+temperature              = 0.7              # optional, [0, 2]
+provider_order           = ["z-ai"]         # optional, OpenRouter pin
+provider_allow_fallbacks = true             # optional, default true
+reasoning                = "medium"         # "off"|"low"|"medium"|"high"|omit
+tool_calling             = false            # optional, default false
 ```
+
+### `reasoning`
+
+Maps to OpenRouter's `reasoning` parameter:
+
+- `"off"` → `reasoning.exclude = true` (suppress thinking even on
+  models that reason by default, like GLM 5.1).
+- `"low"` / `"medium"` / `"high"` → `reasoning.effort = <level>`.
+- omitted → no `reasoning` field; defer to model default. Haiku 4.5
+  never reasons regardless; GLM 5.1 reasons by default.
+
+### `tool_calling`
+
+Surface-only flag today — the call sites haven't been wired to
+register tools yet. Configuring it now means future tool wiring
+won't require a config schema change.
 
 ## History / context layers
 

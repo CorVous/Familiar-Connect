@@ -122,6 +122,7 @@ class LLMClient:
         slot: str | None = None,
         provider_order: tuple[str, ...] | None = None,
         provider_allow_fallbacks: bool = True,
+        reasoning: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -134,6 +135,9 @@ class LLMClient:
         # LLMSlotConfig for rationale + sunset note.
         self.provider_order = provider_order
         self.provider_allow_fallbacks = provider_allow_fallbacks
+        # OpenRouter reasoning effort. ``None`` = model default;
+        # ``"off"`` → ``exclude=True``; ``"low"|"medium"|"high"`` → ``effort=…``.
+        self.reasoning = reasoning
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
@@ -187,6 +191,10 @@ class LLMClient:
                 "order": list(self.provider_order),
                 "allow_fallbacks": self.provider_allow_fallbacks,
             }
+        if self.reasoning == "off":
+            payload["reasoning"] = {"exclude": True}
+        elif self.reasoning is not None:
+            payload["reasoning"] = {"effort": self.reasoning}
         return payload
 
     async def _post(
@@ -491,6 +499,7 @@ def create_llm_clients(
             slot=slot_name,
             provider_order=slot.provider_order,
             provider_allow_fallbacks=slot.provider_allow_fallbacks,
+            reasoning=slot.reasoning,
         )
         temp = slot.temperature if slot.temperature is not None else "default"
         log_parts = [
@@ -503,5 +512,9 @@ def create_llm_clients(
             log_parts.append(ls.kv("provider_order", ",".join(slot.provider_order)))
             if not slot.provider_allow_fallbacks:
                 log_parts.append(ls.kv("fallbacks", "off", vc=ls.LY))
+        if slot.reasoning is not None:
+            log_parts.append(ls.kv("reasoning", slot.reasoning, vc=ls.LM))
+        if slot.tool_calling:
+            log_parts.append(ls.kv("tools", "on", vc=ls.LM))
         _logger.info(" ".join(log_parts))
     return clients

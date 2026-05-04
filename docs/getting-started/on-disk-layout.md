@@ -22,9 +22,21 @@ aliases    = []
 [providers.history]
 window_size = 20
 
-[llm.main_prose]
+[llm.fast]
+model       = "anthropic/claude-haiku-4.5"
+temperature = 0.7
+reasoning   = "off"
+
+[llm.prose]
 model       = "z-ai/glm-5.1"
 temperature = 0.7
+reasoning   = "medium"
+
+[llm.background]
+model        = "z-ai/glm-5.1"
+temperature  = 0.7
+reasoning    = "medium"
+tool_calling = true
 
 [tts]
 provider    = "azure"

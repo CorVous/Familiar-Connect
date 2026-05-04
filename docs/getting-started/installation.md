@@ -46,8 +46,11 @@ DEEPGRAM_API_KEY=<deepgram key>
 ### Per-familiar model choice
 
 LLM model selection is per-call-site and lives in the familiar's
-`character.toml` under a `[llm.<slot>]` table. The only slot today is
-`main_prose`.
+`character.toml` under `[llm.<slot>]` tables. Three tiered slots
+ship today: `fast` (voice), `prose` (text replies), and `background`
+(summaries / fact extraction / dossiers). See
+[Tuning — LLM slots](../architecture/tuning.md#llm-slots) for the
+schema.
 
 The checked-in reference profile at
 `data/familiars/_default/character.toml` fills in the slot with a

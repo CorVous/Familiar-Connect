@@ -45,7 +45,8 @@ class TestLoadFromDisk:
         assert familiar.config.display_tz == "UTC"
         assert isinstance(familiar.history_store, HistoryStore)
         assert isinstance(familiar.subscriptions, SubscriptionRegistry)
-        assert "main_prose" in familiar.llm_clients
+        for slot_name in ("fast", "prose", "background"):
+            assert slot_name in familiar.llm_clients
 
     def test_tts_and_transcriber_default_to_none(
         self, tmp_path: Path, default_profile_path: Path

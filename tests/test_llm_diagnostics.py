@@ -120,16 +120,16 @@ class TestPayloadFlags:
 class TestSpansEmitted:
     @pytest.mark.asyncio
     async def test_chat_stream_emits_ttfb_ttft_total_spans(self) -> None:
-        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        client = LLMClient(api_key="k", model="m", slot="prose")
         _wire(client, _sse_lines(["Hel", "lo"]))
 
         async for _ in client.chat_stream([Message(role="user", content="hi")]):
             pass
 
         names = {r.name for r in get_span_collector().all()}
-        assert "llm.ttfb.main_prose" in names
-        assert "llm.ttft.main_prose" in names
-        assert "llm.total.main_prose" in names
+        assert "llm.ttfb.prose" in names
+        assert "llm.ttft.prose" in names
+        assert "llm.total.prose" in names
 
     @pytest.mark.asyncio
     async def test_no_slot_falls_back_to_unsuffixed_span_names(self) -> None:
@@ -146,16 +146,16 @@ class TestSpansEmitted:
     @pytest.mark.asyncio
     async def test_no_ttft_when_stream_yields_no_content(self) -> None:
         """Empty SSE stream → ttfb + total recorded; ttft skipped."""
-        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        client = LLMClient(api_key="k", model="m", slot="prose")
         _wire(client, _sse_lines([]))
 
         async for _ in client.chat_stream([Message(role="user", content="hi")]):
             pass
 
         names = {r.name for r in get_span_collector().all()}
-        assert "llm.ttfb.main_prose" in names
-        assert "llm.total.main_prose" in names
-        assert "llm.ttft.main_prose" not in names
+        assert "llm.ttfb.prose" in names
+        assert "llm.total.prose" in names
+        assert "llm.ttft.prose" not in names
 
 
 class TestStructuredCallLog:
@@ -164,7 +164,7 @@ class TestStructuredCallLog:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """One structured ``[LLM call]`` line per stream with the key signals."""
-        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        client = LLMClient(api_key="k", model="m", slot="prose")
         usage = {"prompt_tokens": 1234, "completion_tokens": 12, "total_tokens": 1246}
         _wire(client, _sse_lines(["Hi"], usage=usage, provider="openai"))
 
@@ -182,7 +182,7 @@ class TestStructuredCallLog:
         # Char count of input payload: 100 (system) + 5 (user) = 105.
         assert "chars=105" in line
         assert "model=m" in line
-        assert "slot=main_prose" in line
+        assert "slot=prose" in line
         # Final usage chunk surfaced.
         assert "in_tokens=1234" in line
         assert "out_tokens=12" in line
@@ -202,7 +202,7 @@ class TestStatusClassification:
     async def test_clean_completion_logs_ok(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        client = LLMClient(api_key="k", model="m", slot="prose")
         _wire(client, _sse_lines(["Hello"]))
 
         with caplog.at_level(logging.INFO, logger="familiar_connect.llm"):
@@ -225,7 +225,7 @@ class TestStatusClassification:
         VoiceResponder does this on barge-in, silent gate, and any
         scope cancellation. Must not look like a provider error.
         """
-        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        client = LLMClient(api_key="k", model="m", slot="prose")
         _wire(client, _sse_lines([f"d{i}" for i in range(50)]))
 
         with caplog.at_level(logging.INFO, logger="familiar_connect.llm"):
@@ -250,7 +250,7 @@ class TestStatusClassification:
 
     @pytest.mark.asyncio
     async def test_http_4xx_logs_error(self, caplog: pytest.LogCaptureFixture) -> None:
-        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        client = LLMClient(api_key="k", model="m", slot="prose")
         fake_http = MagicMock()
         fake_http.stream = MagicMock(
             return_value=_FakeStreamResponse([], status_code=429)
@@ -278,7 +278,7 @@ class TestUsageChunkParsing:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Anthropic/OpenAI return ``cached_tokens`` inside ``usage`` for cache hits."""
-        client = LLMClient(api_key="k", model="m", slot="main_prose")
+        client = LLMClient(api_key="k", model="m", slot="prose")
         usage = {
             "prompt_tokens": 1000,
             "completion_tokens": 50,

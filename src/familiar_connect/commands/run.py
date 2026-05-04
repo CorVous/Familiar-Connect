@@ -248,7 +248,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         tts_player = LoggingTTSPlayer()
     voice_responder = VoiceResponder(
         assembler=assembler,
-        llm_client=familiar.llm_clients["main_prose"],
+        llm_client=familiar.llm_clients["fast"],
         tts_player=tts_player,
         history_store=familiar.history_store,
         router=familiar.router,
@@ -257,7 +257,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     )
     text_responder = TextResponder(
         assembler=assembler,
-        llm_client=familiar.llm_clients["main_prose"],
+        llm_client=familiar.llm_clients["prose"],
         send_text=handle.send_text,
         history_store=familiar.history_store,
         router=familiar.router,
@@ -265,19 +265,19 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     )
     summary_worker = SummaryWorker(
         store=familiar.history_store,
-        llm_client=familiar.llm_clients["main_prose"],
+        llm_client=familiar.llm_clients["background"],
         familiar_id=familiar.id,
         turns_threshold=10,
     )
     fact_extractor = FactExtractor(
         store=familiar.history_store,
-        llm_client=familiar.llm_clients["main_prose"],
+        llm_client=familiar.llm_clients["background"],
         familiar_id=familiar.id,
         batch_size=10,
     )
     people_dossier_worker = PeopleDossierWorker(
         store=familiar.history_store,
-        llm_client=familiar.llm_clients["main_prose"],
+        llm_client=familiar.llm_clients["background"],
         familiar_id=familiar.id,
     )
 
