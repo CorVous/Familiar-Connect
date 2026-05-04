@@ -95,6 +95,22 @@ class WatermarkEntry:
 
 
 @dataclass(frozen=True)
+class AccountProfile:
+    """Read-side projection of ``accounts`` profile metadata.
+
+    Populated on Discord ingestion via :meth:`HistoryStore.upsert_account`;
+    consumed by :class:`PeopleDossierLayer` to surface basic identity
+    (username, pronouns, bio) on the prompt header.
+    """
+
+    canonical_key: str
+    username: str | None
+    global_name: str | None
+    pronouns: str | None
+    bio: str | None
+
+
+@dataclass(frozen=True)
 class PeopleDossierEntry:
     """Cached per-person dossier compounded from facts mentioning ``canonical_key``.
 
@@ -300,6 +316,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     user_id        TEXT NOT NULL,
     username       TEXT,                        -- global handle
     global_name    TEXT,                        -- global display name
+    pronouns       TEXT,                        -- profile pronouns; NULL when unknown
+    bio            TEXT,                        -- profile bio; NULL when unknown
     last_seen_at   TEXT NOT NULL
 );
 
@@ -657,6 +675,22 @@ class HistoryStore:
                 self._conn.execute("DROP TABLE summaries")
                 self._conn.commit()
 
+        # accounts: add profile columns if missing. Pre-existing rows
+        # default to NULL — populated next time the user is observed.
+        accounts_row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'"
+        ).fetchone()
+        if accounts_row is not None:
+            accounts_cols = {
+                col["name"]
+                for col in self._conn.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            if "pronouns" not in accounts_cols:
+                self._conn.execute("ALTER TABLE accounts ADD COLUMN pronouns TEXT")
+            if "bio" not in accounts_cols:
+                self._conn.execute("ALTER TABLE accounts ADD COLUMN bio TEXT")
+            self._conn.commit()
+
         # facts: add supersession columns if missing. Existing facts
         # default to current (NULL on both columns).
         facts_row = self._conn.execute(
@@ -941,20 +975,26 @@ class HistoryStore:
     def upsert_account(self, author: Author) -> None:
         """Insert or refresh the canonical identity row for an Author.
 
-        Last-write wins on ``username`` and ``global_name``;
-        ``last_seen_at`` always stamps now. ``canonical_key`` is the
-        primary key, so re-upserting an existing user is cheap. Does
-        not touch per-guild nicks — see :meth:`upsert_guild_nick`.
+        Last-write wins on ``username`` / ``global_name`` / ``pronouns``
+        / ``bio``; ``last_seen_at`` always stamps now. ``canonical_key``
+        is the primary key, so re-upserting an existing user is cheap.
+        Profile fields (pronouns, bio) only overwrite when the new
+        value is non-NULL — bot tokens often can't read them, so a
+        later read shouldn't clobber a richer earlier observation.
+        Does not touch per-guild nicks — see :meth:`upsert_guild_nick`.
         """
         ts = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
             """
             INSERT INTO accounts
-                (canonical_key, platform, user_id, username, global_name, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (canonical_key, platform, user_id, username, global_name,
+                 pronouns, bio, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (canonical_key) DO UPDATE SET
                 username     = excluded.username,
                 global_name  = excluded.global_name,
+                pronouns     = COALESCE(excluded.pronouns, accounts.pronouns),
+                bio          = COALESCE(excluded.bio, accounts.bio),
                 last_seen_at = excluded.last_seen_at
             """,
             (
@@ -963,10 +1003,37 @@ class HistoryStore:
                 author.user_id,
                 author.username,
                 author.global_name,
+                author.pronouns,
+                author.bio,
                 ts,
             ),
         )
         self._conn.commit()
+
+    def get_account_profile(self, *, canonical_key: str) -> AccountProfile | None:
+        """Return cached profile fields for ``canonical_key``.
+
+        Powers the per-person header in :class:`PeopleDossierLayer` —
+        cheap lookup against the ``accounts`` table. ``None`` when no
+        row exists; missing columns surface as ``None`` on the result.
+        """
+        row = self._conn.execute(
+            """
+            SELECT username, global_name, pronouns, bio
+              FROM accounts
+             WHERE canonical_key = ?
+            """,
+            (canonical_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AccountProfile(
+            canonical_key=canonical_key,
+            username=row["username"],
+            global_name=row["global_name"],
+            pronouns=row["pronouns"],
+            bio=row["bio"],
+        )
 
     def upsert_guild_nick(
         self,

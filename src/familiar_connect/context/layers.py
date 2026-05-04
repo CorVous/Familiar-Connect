@@ -22,7 +22,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from familiar_connect.context.assembler import AssemblyContext
-    from familiar_connect.history.store import Fact, HistoryStore, HistoryTurn
+    from familiar_connect.history.store import (
+        AccountProfile,
+        Fact,
+        HistoryStore,
+        HistoryTurn,
+    )
     from familiar_connect.identity import Author
 
 
@@ -290,6 +295,46 @@ def _truncate(text: str, *, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)] + "…"
+
+
+# Bio cap for the prompt header — long bios bloat the context budget;
+# the dossier carries the substance so 240 chars of free text is plenty.
+_BIO_CHAR_CAP = 240
+
+
+def _format_profile_header(display: str, profile: AccountProfile | None) -> str:
+    """Render the per-person header block.
+
+    Layout:
+
+    ```
+    ### <display>
+    @<username> · <pronouns>
+    Bio: <bio>
+    ```
+
+    Each metadata line is omitted when its source is missing or empty.
+    The username row collapses to ``@<username>`` alone, or
+    ``<pronouns>`` alone, when only one of the two is set. ``display``
+    is :meth:`HistoryStore.resolve_label`'s output — guild nick wins
+    over global name, so this stays consistent with the rest of the
+    read path.
+    """
+    lines: list[str] = [f"### {display}"]
+    if profile is not None:
+        username = (profile.username or "").strip()
+        pronouns = (profile.pronouns or "").strip()
+        meta_parts: list[str] = []
+        if username:
+            meta_parts.append(f"@{username}")
+        if pronouns:
+            meta_parts.append(pronouns)
+        if meta_parts:
+            lines.append(" · ".join(meta_parts))
+        bio = (profile.bio or "").strip()
+        if bio:
+            lines.append(f"Bio: {_truncate(bio, limit=_BIO_CHAR_CAP)}")
+    return "\n".join(lines)
 
 
 def _truncate_to_tokens(text: str, *, max_tokens: int) -> str:
@@ -752,7 +797,9 @@ class PeopleDossierLayer:
                 guild_id=ctx.guild_id,
                 familiar_id=ctx.familiar_id,
             )
-            section = f"### {display}\n\n{entry.dossier_text.strip()}"
+            profile = self._store.get_account_profile(canonical_key=key)
+            header = _format_profile_header(display, profile)
+            section = f"{header}\n\n{entry.dossier_text.strip()}"
             if remaining is not None:
                 cost = estimate_tokens(section)
                 if cost > remaining and sections:

@@ -373,15 +373,28 @@ The render is one Markdown block:
 ## People in this conversation
 
 ### Cass
+@cass_login · she/her
+Bio: Lover of pho.
+
 Cass enjoys pho. Lives in Toronto.
 
 ### Aria
+@aria_codes
+Bio: Runs a bakery on Queen St.
+
 Aria runs a bakery on Queen St.
 ```
 
 Display names come from `HistoryStore.resolve_label`, so per-guild
 nicknames win over snapshot labels — symmetric with the rest of
-the read path.
+the read path. The optional second line carries `@username` and
+profile pronouns (omitted when missing); the `Bio:` line is capped
+at 240 characters to keep the header lightweight. Profile fields
+flow in via `Author.from_discord_member` (read defensively via
+`getattr` — pronouns/bio aren't always populated on bot tokens) and
+are persisted by `HistoryStore.upsert_account`. `accounts.pronouns`
+and `accounts.bio` columns are added by an idempotent migration on
+existing DBs.
 
 Cache invalidation key: `t<latest_id>:cap<n>:<key>:f<wm>,…`. New
 turns flip `latest_id` (changing the candidate set); a worker
@@ -410,8 +423,11 @@ deliberately.
 Two new tables sit alongside the existing `turns` snapshot:
 
 - `accounts(canonical_key PK, platform, user_id, username,
-  global_name, last_seen_at)` — stable per-account row, last-write
-  wins. One row per `(platform, user_id)`.
+  global_name, pronouns, bio, last_seen_at)` — stable per-account
+  row, last-write wins on identity columns; profile columns
+  (`pronouns`, `bio`) preserve the prior non-NULL value via
+  `COALESCE` so a profile-less re-observation doesn't clobber an
+  earlier richer one. One row per `(platform, user_id)`.
 - `account_guild_nicks(canonical_key, guild_id, nick, last_seen_at)`
   — per-guild override, primary-keyed by both columns. NULL `nick`
   is meaningful: "we observed them with no override".
