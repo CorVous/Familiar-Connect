@@ -13,14 +13,17 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
 import asyncio
+import time
 
 from familiar_connect.bus import InProcessEventBus, TurnRouter
 from familiar_connect.bus.envelope import Event
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
+from familiar_connect.config import DiscordTextConfig
 from familiar_connect.context import (
     Assembler,
     CoreInstructionsLayer,
@@ -34,6 +37,7 @@ from familiar_connect.processors.text_responder import (
     TextResponder,
     _strip_leaked_metadata_prefix,
 )
+from familiar_connect.typing_interrupt import TypingInterruptHandler
 
 
 class _ScriptedLLM(LLMClient):
@@ -110,6 +114,34 @@ def _discord_text_event(
     )
 
 
+class _RecordingTyping:
+    """Async-context-manager factory that records ``(channel_id, entered, exited)``.
+
+    Stand-in for the real py-cord ``channel.typing()`` indicator
+    inside :class:`TextResponder` tests.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+        self.entered: int = 0
+        self.exited: int = 0
+
+    def __call__(self, channel_id: int) -> _RecordingTyping._CM:
+        self.calls.append(channel_id)
+        return _RecordingTyping._CM(self)
+
+    class _CM:
+        def __init__(self, parent: _RecordingTyping) -> None:
+            self._parent = parent
+
+        async def __aenter__(self) -> None:
+            self._parent.entered += 1
+
+        async def __aexit__(self, *exc: object) -> None:
+            del exc
+            self._parent.exited += 1
+
+
 def _make_responder(
     *,
     llm: LLMClient,
@@ -117,6 +149,7 @@ def _make_responder(
     tmp_path: Path,
     router: TurnRouter | None = None,
     store: HistoryStore | None = None,
+    trigger_typing: Callable[[int], AbstractAsyncContextManager[None]] | None = None,
 ) -> tuple[TextResponder, TurnRouter, HistoryStore]:
     core = tmp_path / "core.md"
     core.write_text("You are a familiar.\n")
@@ -135,8 +168,139 @@ def _make_responder(
         history_store=store,
         router=router,
         familiar_id="fam",
+        trigger_typing=trigger_typing,
     )
     return responder, router, store
+
+
+class TestTypingInterruptIntegration:
+    """``TextResponder`` consults the typing handler before / after streaming."""
+
+    @pytest.mark.asyncio
+    async def test_waits_for_bot_backoff_before_streaming(self, tmp_path: Path) -> None:
+        """A pending bot-typing backoff parks the responder before assembling."""
+        cfg = DiscordTextConfig(typing_backoff_initial_s=0.05, typing_backoff_max_s=0.1)
+        router = TurnRouter()
+        handler = TypingInterruptHandler(
+            config=cfg,
+            router=router,
+            is_subscribed=lambda _ch: True,
+            bot_user_id_provider=lambda: 999,
+        )
+        # Another bot is mid-typing — install backoff before the
+        # responder sees the user message.
+        handler.notify_typing(channel_id=42, user_id=123, is_bot=True)
+
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["ok"]),
+            send=send,
+            tmp_path=tmp_path,
+            router=router,
+        )
+        # inject handler post-construction so this test doesn't pin the
+        # constructor signature
+        responder._typing_handler = handler
+        bus = InProcessEventBus()
+        await bus.start()
+
+        start = time.monotonic()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        elapsed = time.monotonic() - start
+        await bus.shutdown()
+        # backoff is ~0.05s; allow generous floor / ceiling
+        assert elapsed >= 0.04
+        assert send.calls  # response still happened after backoff
+
+    @pytest.mark.asyncio
+    async def test_user_message_clears_backoff(self, tmp_path: Path) -> None:
+        """``notify_user_message`` fires for inbound user turns."""
+        cfg = DiscordTextConfig(typing_backoff_initial_s=1.0, typing_backoff_max_s=4.0)
+        router = TurnRouter()
+        handler = TypingInterruptHandler(
+            config=cfg,
+            router=router,
+            is_subscribed=lambda _ch: True,
+            bot_user_id_provider=lambda: 999,
+        )
+        handler.notify_typing(channel_id=42, user_id=123, is_bot=True)
+        handler.notify_typing(channel_id=42, user_id=123, is_bot=True)
+        # ladder advanced one rung
+        assert handler.current_backoff_s(42) == pytest.approx(2.0)
+
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["ok"]),
+            send=send,
+            tmp_path=tmp_path,
+            router=router,
+        )
+        responder._typing_handler = handler
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi again"), bus)
+        await bus.shutdown()
+
+        # next bot-typing event after the user message must restart at
+        # the initial step — the lane is alive, no pingpong protection
+        # needed yet.
+        handler.notify_typing(channel_id=42, user_id=123, is_bot=True)
+        assert handler.current_backoff_s(42) == pytest.approx(1.0)
+
+
+class TestTypingIndicator:
+    """``trigger_typing`` wraps the streaming + send path for non-silent replies."""
+
+    @pytest.mark.asyncio
+    async def test_enters_typing_context_during_stream(self, tmp_path: Path) -> None:
+        typing = _RecordingTyping()
+        llm = _ScriptedLLM(deltas=["Hello"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm, send=send, tmp_path=tmp_path, trigger_typing=typing
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert typing.calls == [42]
+        assert typing.entered == 1
+        assert typing.exited == 1
+
+    @pytest.mark.asyncio
+    async def test_typing_context_exits_on_silent_reply(self, tmp_path: Path) -> None:
+        """``<silent>`` aborts mid-stream — context still exits cleanly."""
+        typing = _RecordingTyping()
+        llm = _ScriptedLLM(deltas=["<silent>"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm, send=send, tmp_path=tmp_path, trigger_typing=typing
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert send.calls == []
+        # entered + exited even though we never sent — caller can't
+        # tell silence in advance, the brief flicker is acceptable
+        assert typing.entered == 1
+        assert typing.exited == 1
+
+    @pytest.mark.asyncio
+    async def test_works_without_typing_hook(self, tmp_path: Path) -> None:
+        """Optional hook — ``trigger_typing=None`` is valid."""
+        llm = _ScriptedLLM(deltas=["ok"])
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm, send=send, tmp_path=tmp_path, trigger_typing=None
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+        assert send.calls == [(42, "ok", None, ())]
 
 
 class TestProcessorSurface:

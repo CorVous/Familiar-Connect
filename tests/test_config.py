@@ -18,6 +18,7 @@ from familiar_connect.config import (
     CharacterConfig,
     ConfigError,
     DeepgramSTTConfig,
+    DiscordTextConfig,
     LLMSlotConfig,
     STTConfig,
     TTSConfig,
@@ -576,4 +577,62 @@ class TestSTTConfig:
         path.write_text("[providers.stt.deepgram]\nkeyterms = [1, 2]\n")
         match = r"keyterms"
         with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestDiscordTextConfig:
+    """``[discord.text]`` knobs for the typing-indicator + interruption path."""
+
+    def test_defaults(self) -> None:
+        cfg = DiscordTextConfig()
+        # Default: respect other users typing — treat as interruption.
+        assert cfg.respond_to_typing is True
+        # Backoff envelope for "another familiar-connect bot is typing"
+        # — initial pause doubles up to the cap to avoid pingpong.
+        assert cfg.typing_backoff_initial_s > 0
+        assert cfg.typing_backoff_max_s >= cfg.typing_backoff_initial_s
+
+    def test_present_on_character_config(self) -> None:
+        cfg = CharacterConfig()
+        assert isinstance(cfg.discord_text, DiscordTextConfig)
+
+    def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[discord.text]\n"
+            "respond_to_typing = false\n"
+            "typing_backoff_initial_s = 2.5\n"
+            "typing_backoff_max_s = 60.0\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.discord_text.respond_to_typing is False
+        assert cfg.discord_text.typing_backoff_initial_s == pytest.approx(2.5)
+        assert cfg.discord_text.typing_backoff_max_s == pytest.approx(60.0)
+
+    def test_respond_to_typing_must_be_bool(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[discord.text]\nrespond_to_typing = "yes"\n')
+        with pytest.raises(ConfigError, match="respond_to_typing"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[discord.text]\nunknown_knob = 1\n")
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_backoff_max_must_not_be_below_initial(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[discord.text]\n"
+            "typing_backoff_initial_s = 5.0\n"
+            "typing_backoff_max_s = 1.0\n"
+        )
+        with pytest.raises(ConfigError, match="typing_backoff_max_s"):
             load_character_config(path, defaults_path=default_profile_path)

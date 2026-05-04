@@ -123,6 +123,11 @@ tool_calling   = true
 history_window_size = 30
 prompt_layers       = ["core", "card", "operating_mode", "recent_history"]
 message_rendering   = "prefixed"  # "prefixed" | "name_only"
+
+[discord.text]
+respond_to_typing        = true   # cancel in-flight reply on user typing
+typing_backoff_initial_s = 1.0    # first pause when another bot is typing
+typing_backoff_max_s     = 30.0   # ceiling after exponential doubling
 ```
 
 ## Tuning by goal
@@ -192,6 +197,40 @@ pin is working and to decide when it's no longer needed.
 - **`<silent>` sentinel** — already wired (see
   [multi-party addressivity](context-pipeline.md#multi-party-addressivity)).
   Don't override the sentinel instruction in the character prompt.
+
+## Discord text channel knobs
+
+`[discord.text]` controls how the bot reacts to Discord's typing
+events while a reply is mid-flight.
+
+```toml
+[discord.text]
+respond_to_typing        = true
+typing_backoff_initial_s = 1.0
+typing_backoff_max_s     = 30.0
+```
+
+- **`respond_to_typing`** — when `true` (default), a typing-start
+  event from another user in a subscribed channel cancels the active
+  `TurnScope` so the bot stops streaming instead of talking over
+  someone. Same path as voice barge-in. Set `false` to ignore typing
+  events entirely; the bot will still finish replies even when a user
+  is mid-message.
+- **`typing_backoff_initial_s`** / **`typing_backoff_max_s`** —
+  exponential backoff envelope when *another bot* (e.g. another
+  familiar-connect instance) is typing in the same channel. Each bot
+  typing event installs a `now + window` deadline; the responder
+  waits past it before generating, then doubles the next window up to
+  the cap. A real user message resets the ladder. This protects
+  against pingpong: two bots that mirror each other's typing
+  indicators would otherwise generate replies in lockstep forever.
+
+While generating a reply the bot also surfaces Discord's "Bot is
+typing…" indicator (via `BotHandle.trigger_typing`) so users see the
+in-flight signal — including on regenerated replies after a barge-in
+cancellation. The indicator stops cleanly when the streaming context
+exits; on a `<silent>` reply it shows briefly then stops without a
+post.
 
 ### Better long-term memory
 

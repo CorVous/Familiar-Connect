@@ -198,6 +198,25 @@ class TTSConfig:
 
 
 @dataclass(frozen=True)
+class DiscordTextConfig:
+    """``[discord.text]`` knobs — typing-indicator + interruption behavior.
+
+    ``respond_to_typing``: treat other users' typing-start events as
+    interruptions of the bot's in-flight reply (cancels the active
+    :class:`TurnScope`). Default ``True`` — respect users typing.
+    ``typing_backoff_initial_s`` / ``typing_backoff_max_s``: when
+    another bot (e.g. another familiar-connect instance) is typing in
+    the same channel, hold off responding for an exponentially
+    increasing window — initial doubles toward max — to avoid two
+    bots pingponging on each other's typing events.
+    """
+
+    respond_to_typing: bool = True
+    typing_backoff_initial_s: float = 1.0
+    typing_backoff_max_s: float = 30.0
+
+
+@dataclass(frozen=True)
 class ChannelOverrides:
     """Per-channel overrides for latency-sensitive knobs.
 
@@ -250,6 +269,7 @@ class CharacterConfig:
     # ``total_tokens`` per tier; sub-caps derive from it unless
     # explicitly overridden.
     budgets: dict[str, TierBudget] = field(default_factory=_default_budgets)
+    discord_text: DiscordTextConfig = field(default_factory=DiscordTextConfig)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty overrides if none."""
@@ -348,6 +368,16 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     budgets = _parse_budgets(budget_raw)
 
+    discord_raw = data.get("discord", {})
+    if not isinstance(discord_raw, dict):
+        msg = f"[discord] must be a table, got {type(discord_raw).__name__}"
+        raise ConfigError(msg)
+    discord_text_raw = discord_raw.get("text", {})
+    if not isinstance(discord_text_raw, dict):
+        msg = f"[discord.text] must be a table, got {type(discord_text_raw).__name__}"
+        raise ConfigError(msg)
+    discord_text = _parse_discord_text_config(discord_text_raw)
+
     return CharacterConfig(
         voice_window_size=voice_window_size,
         text_window_size=text_window_size,
@@ -359,6 +389,58 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         turn_detection=turn_detection,
         stt=stt,
         budgets=budgets,
+        discord_text=discord_text,
+    )
+
+
+_DISCORD_TEXT_FIELDS: frozenset[str] = frozenset({
+    "respond_to_typing",
+    "typing_backoff_initial_s",
+    "typing_backoff_max_s",
+})
+
+
+def _parse_discord_text_config(raw: dict) -> DiscordTextConfig:
+    """Parse and validate ``[discord.text]``."""
+    unknown = set(raw) - _DISCORD_TEXT_FIELDS
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[discord.text] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    defaults = DiscordTextConfig()
+
+    rt_raw = raw.get("respond_to_typing", defaults.respond_to_typing)
+    if not isinstance(rt_raw, bool):
+        msg = (
+            "[discord.text].respond_to_typing must be a bool, "
+            f"got {type(rt_raw).__name__}"
+        )
+        raise ConfigError(msg)
+
+    def _positive_float(key: str, fallback: float) -> float:
+        v = raw.get(key, fallback)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = f"[discord.text].{key} must be a number, got {type(v).__name__}"
+            raise ConfigError(msg)
+        if v <= 0:
+            msg = f"[discord.text].{key} must be positive, got {v}"
+            raise ConfigError(msg)
+        return float(v)
+
+    initial_s = _positive_float(
+        "typing_backoff_initial_s", defaults.typing_backoff_initial_s
+    )
+    max_s = _positive_float("typing_backoff_max_s", defaults.typing_backoff_max_s)
+    if max_s < initial_s:
+        msg = (
+            "[discord.text].typing_backoff_max_s must be >= "
+            f"typing_backoff_initial_s, got {max_s} < {initial_s}"
+        )
+        raise ConfigError(msg)
+    return DiscordTextConfig(
+        respond_to_typing=rt_raw,
+        typing_backoff_initial_s=initial_s,
+        typing_backoff_max_s=max_s,
     )
 
 

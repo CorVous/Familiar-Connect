@@ -217,3 +217,19 @@ temperature    = 0.7
 provider_order = ["z-ai"]
 reasoning      = "medium"
 tool_calling   = true
+
+# --- Discord text-channel behavior ----------------------------------------
+#
+# respond_to_typing: when other users start typing in a subscribed
+# channel, treat that as an interruption — cancel any in-flight LLM
+# stream so the bot doesn't talk over them. Default true.
+# typing_backoff_initial_s / typing_backoff_max_s: when *another bot*
+# (e.g. another familiar-connect instance) is typing in the same
+# channel, hold off responding by an exponentially doubling window —
+# initial doubles up to max — so two bots don't pingpong on each
+# other's typing indicators.
+
+[discord.text]
+respond_to_typing        = true
+typing_backoff_initial_s = 1.0
+typing_backoff_max_s     = 30.0

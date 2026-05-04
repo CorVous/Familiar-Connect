@@ -33,11 +33,13 @@ from familiar_connect.identity import Author
 from familiar_connect.sources import DiscordTextSource
 from familiar_connect.sources.voice import VoiceSource
 from familiar_connect.subscriptions import SubscriptionKind
+from familiar_connect.typing_interrupt import TypingInterruptHandler
 from familiar_connect.voice import DaveVoiceClient
 from familiar_connect.voice.recording_sink import RecordingSink
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
     from familiar_connect.familiar import Familiar
     from familiar_connect.stt import Transcriber, TranscriptionResult
@@ -52,6 +54,12 @@ if TYPE_CHECKING:
         [int, str, str | None, tuple[int, ...]],
         Awaitable[str | None],
     ]
+
+    # py-cord ``Bot is typing…`` indicator hook. Returns a fresh async
+    # context manager that wraps the bot's response generation so the
+    # client shows the indicator for the duration. Implemented in
+    # ``create_bot`` via ``channel.typing()``.
+    TriggerTyping = Callable[[int], AsyncContextManager[None]]
 
     # resolves Discord member identity for voice turns so they carry
     # the same author attribution as text turns.
@@ -116,6 +124,9 @@ class BotHandle:
     voice_runtime: dict[int, VoiceRuntime] = field(default_factory=dict)
     resolve_member: ResolveMember | None = None
     voice_members: dict[int, Author] = field(default_factory=dict)
+    trigger_typing: TriggerTyping | None = None
+    typing_interrupt: TypingInterruptHandler | None = None
+    """Policy seam for ``on_typing`` events; consumed by ``TextResponder``."""
 
 
 async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noqa: RUF029 — pycord requires coroutine fn even when there's nothing to await
@@ -522,7 +533,45 @@ def create_bot(familiar: Familiar) -> BotHandle:
             return None
         return str(sent.id) if sent is not None else None
 
-    handle = BotHandle(bot=bot, send_text=send_text)
+    @contextlib.asynccontextmanager
+    async def trigger_typing(channel_id: int):  # noqa: ANN202 — py-cord typing CM
+        """Run ``async with channel.typing():`` for *channel_id*.
+
+        Falls through silently when the channel isn't messageable yet
+        (cache miss right after startup) or Discord rejects the
+        ``typing`` REST call; the bot still posts the reply.
+        """
+        channel = bot.get_channel(channel_id)
+        if channel is None or not isinstance(channel, discord.abc.Messageable):
+            yield
+            return
+        try:
+            cm = channel.typing()
+        except discord.DiscordException as exc:
+            _logger.debug(
+                f"{ls.tag('💬 Text', ls.Y)} "
+                f"{ls.kv('typing_init_error', repr(exc), vc=ls.Y)}"
+            )
+            yield
+            return
+        async with cm:
+            yield
+
+    typing_interrupt = TypingInterruptHandler(
+        config=familiar.config.discord_text,
+        router=familiar.router,
+        is_subscribed=lambda ch: (
+            familiar.subscriptions.get(channel_id=ch, kind=SubscriptionKind.text)
+            is not None
+        ),
+        bot_user_id_provider=lambda: familiar.bot_user_id,
+    )
+    handle = BotHandle(
+        bot=bot,
+        send_text=send_text,
+        trigger_typing=trigger_typing,
+        typing_interrupt=typing_interrupt,
+    )
 
     def resolve_member(channel_id: int, user_id: int) -> Author | None:
         """Look up Discord member for a voice user_id; return Author.
@@ -737,6 +786,24 @@ def _register_events(
             message_id=str(message.id),
             reply_to_message_id=reply_to,
             mentions=mention_authors,
+        )
+
+    @bot.event
+    async def on_typing(  # noqa: RUF029 — Discord event handler contract
+        channel: discord.abc.Messageable,
+        user: discord.User | discord.Member,
+        when: object,  # discord passes a datetime; unused here
+    ) -> None:
+        del when
+        if handle.typing_interrupt is None:
+            return
+        channel_id = getattr(channel, "id", None)
+        if not isinstance(channel_id, int):
+            return
+        handle.typing_interrupt.notify_typing(
+            channel_id=channel_id,
+            user_id=int(user.id),
+            is_bot=bool(getattr(user, "bot", False)),
         )
 
     @bot.event

@@ -14,6 +14,7 @@ mid-stream) cancels in-flight LLM work.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from typing import TYPE_CHECKING
@@ -145,7 +146,8 @@ def _consume_thread_marker(content: str) -> tuple[str, bool, str | None]:
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
     from familiar_connect.bus.envelope import Event, TurnScope
     from familiar_connect.bus.protocols import EventBus
@@ -153,8 +155,20 @@ if TYPE_CHECKING:
     from familiar_connect.context.assembler import Assembler
     from familiar_connect.history.store import HistoryStore
     from familiar_connect.llm import LLMClient
+    from familiar_connect.typing_interrupt import TypingInterruptHandler
+
+    # Optional Discord typing-indicator hook. Wrapped around the
+    # streaming + send path so the channel shows ``Bot is typing…``
+    # while the LLM is generating. ``None`` = indicator disabled.
+    TriggerTyping = Callable[[int], AsyncContextManager[None]]
 
 _logger = logging.getLogger("familiar_connect.processors.text_responder")
+
+
+@contextlib.asynccontextmanager
+async def _null_typing_cm() -> AsyncIterator[None]:  # noqa: RUF029 — async-CM contract
+    """Fresh no-op CM when no typing-indicator hook is wired."""
+    yield
 
 
 class TextResponder:
@@ -175,6 +189,8 @@ class TextResponder:
         history_store: HistoryStore,
         router: TurnRouter,
         familiar_id: str,
+        trigger_typing: TriggerTyping | None = None,
+        typing_handler: TypingInterruptHandler | None = None,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -182,6 +198,11 @@ class TextResponder:
         self._history = history_store
         self._router = router
         self._familiar_id = familiar_id
+        # discord ``Bot is typing…`` indicator factory; ``None`` opts out
+        self._trigger_typing = trigger_typing
+        # typing-event policy — bot pingpong backoff + user-typing cancel.
+        # ``None`` disables both behaviors (tests, future non-discord paths).
+        self._typing_handler = typing_handler
         # in-process dedup; bus does not republish today, but cheap insurance
         self._seen: set[str] = set()
 
@@ -215,6 +236,12 @@ class TextResponder:
         )
 
         self._seen.add(event.event_id)
+        # Honor any active pingpong-backoff (another bot has been typing
+        # in this channel) before claiming the lane. Then reset the
+        # ladder so future bot-typing events start at the initial step.
+        if self._typing_handler is not None:
+            await self._typing_handler.wait_for_backoff(channel_id)
+            self._typing_handler.notify_user_message(channel_id=channel_id)
         scope = self._router.begin_turn(
             session_id=event.session_id, turn_id=event.turn_id
         )
@@ -267,13 +294,18 @@ class TextResponder:
             channel_id=channel_id, guild_id=guild_id
         )
 
-        reply = await self._stream_reply(
-            scope,
-            channel_id=channel_id,
-            guild_id=guild_id,
-        )
-        if reply is None or scope.is_cancelled():
-            return
+        # Wrap stream + send in the typing indicator so users see
+        # ``Bot is typing…`` for the duration. We can't tell silence in
+        # advance — entering the context briefly on a ``<silent>`` reply
+        # is acceptable; py-cord stops the indicator on context exit.
+        async with self._typing_context(channel_id):
+            reply = await self._stream_reply(
+                scope,
+                channel_id=channel_id,
+                guild_id=guild_id,
+            )
+            if reply is None or scope.is_cancelled():
+                return
         # Discord rejects empty / whitespace-only messages (HTTP 400,
         # error code 50006). An empty reply usually means the LLM
         # stream emitted no deltas — bad model name, content filter,
@@ -343,6 +375,12 @@ class TextResponder:
             reply_to_message_id=thread_target,
         )
         self._router.end_turn(scope)
+
+    def _typing_context(self, channel_id: int) -> AsyncContextManager[None]:
+        """Return the active typing-indicator CM or a no-op fallback."""
+        if self._trigger_typing is not None:
+            return self._trigger_typing(channel_id)
+        return _null_typing_cm()
 
     def _build_ping_resolver(
         self,

@@ -286,6 +286,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         history_store=familiar.history_store,
         router=familiar.router,
         familiar_id=familiar.id,
+        trigger_typing=handle.trigger_typing,
+        typing_handler=handle.typing_interrupt,
     )
     summary_worker = SummaryWorker(
         store=familiar.history_store,
