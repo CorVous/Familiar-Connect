@@ -13,20 +13,29 @@ import json
 import logging
 import os
 import struct
+import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self, runtime_checkable
 from urllib.parse import urlencode
 
 import aiohttp
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import timedelta
 
     from google.genai import Client as _GenaiClient
 
     from familiar_connect.config import TTSConfig
+
+    LatencyRecorder = Callable[[str, float, str], None]
+    """Per-attempt callback: ``(provider, latency_s, outcome)``.
+
+    ``outcome`` is one of ``"ok"``, ``"error"``, ``"timeout"``.
+    """
 
 
 from familiar_connect import log_style as ls
@@ -64,6 +73,13 @@ class TTSResult:
 
     audio: bytes
     timestamps: list[WordTimestamp] = field(default_factory=list)
+
+
+@runtime_checkable
+class TTSClient(Protocol):
+    """Minimal async TTS surface: ``synthesize(text) -> TTSResult``."""
+
+    async def synthesize(self, text: str) -> TTSResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +266,7 @@ async def get_cached_greeting_audio(
     provider: str,
     voice_id: str,
     greeting: str,
-    client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient,
+    client: TTSClient,
 ) -> TTSResult:
     """Return TTS audio for *greeting*.
 
@@ -519,26 +535,184 @@ class GeminiTTSClient:
 
 
 # ---------------------------------------------------------------------------
+# Fallback chain + latency recorder
+# ---------------------------------------------------------------------------
+
+
+SingleTTSClient = CartesiaTTSClient | AzureTTSClient | GeminiTTSClient
+"""Concrete single-provider TTS client union; convenience alias."""
+
+
+class JSONLLatencyRecorder:
+    """Append per-attempt latency observations to a JSONL file.
+
+    One line per call; fields ``ts`` (UTC ISO-8601), ``provider``,
+    ``latency_s``, ``outcome``. File and parent dirs created on first
+    call. Synchronous I/O — recorder runs from inside the event loop
+    after a synthesis attempt completes; per-line writes are tiny.
+    """
+
+    def __init__(self: Self, path: Path) -> None:
+        self.path = path
+
+    def __call__(
+        self: Self,
+        provider: str,
+        latency_s: float,
+        outcome: str,
+    ) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(UTC).isoformat(),
+            "provider": provider,
+            "latency_s": round(latency_s, 4),
+            "outcome": outcome,
+        }
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+
+class FallbackTTSClient:
+    """Try a chain of TTS providers in order; record per-attempt latency.
+
+    Each attempt is bounded by ``timeout_s``. On exception or timeout,
+    log and try the next entry. Re-raises the last error if all attempts
+    fail. ``recorder`` (when set) observes ``(provider, latency_s,
+    outcome)`` after every attempt; recorder errors are swallowed so a
+    misbehaving sink can't drop the audio.
+    """
+
+    def __init__(
+        self: Self,
+        *,
+        attempts: list[tuple[str, TTSClient]],
+        timeout_s: float,
+        recorder: LatencyRecorder | None = None,
+    ) -> None:
+        if not attempts:
+            msg = "FallbackTTSClient requires at least one attempt"
+            raise ValueError(msg)
+        self.attempts = attempts
+        self.timeout_s = timeout_s
+        self.recorder = recorder
+
+    async def synthesize(self: Self, text: str) -> TTSResult:
+        last_exc: BaseException | None = None
+        for provider, client in self.attempts:
+            start = time.monotonic()
+            try:
+                result = await asyncio.wait_for(
+                    client.synthesize(text),
+                    timeout=self.timeout_s,
+                )
+            except TimeoutError as exc:
+                latency = time.monotonic() - start
+                _logger.warning(
+                    f"{ls.tag('🔉 TTS', ls.C)} "
+                    f"{ls.word('fallback', ls.LM)} "
+                    f"{ls.kv('provider', provider, vc=ls.LW)} "
+                    f"{ls.kv('outcome', 'timeout', vc=ls.LM)} "
+                    f"{ls.kv('latency', f'{latency:.2f}s', vc=ls.LW)}"
+                )
+                self._record(provider, latency, "timeout")
+                last_exc = exc
+                continue
+            except Exception as exc:  # noqa: BLE001
+                latency = time.monotonic() - start
+                _logger.warning(
+                    f"{ls.tag('🔉 TTS', ls.C)} "
+                    f"{ls.word('fallback', ls.LM)} "
+                    f"{ls.kv('provider', provider, vc=ls.LW)} "
+                    f"{ls.kv('outcome', 'error', vc=ls.LM)} "
+                    f"{ls.kv('latency', f'{latency:.2f}s', vc=ls.LW)} "
+                    f"{ls.kv('err', ls.trunc(str(exc), limit=120), vc=ls.LW)}"
+                )
+                self._record(provider, latency, "error")
+                last_exc = exc
+                continue
+            latency = time.monotonic() - start
+            self._record(provider, latency, "ok")
+            return result
+        # invariant: at least one attempt ran (guarded in __init__) and all
+        # paths above either return or assign last_exc
+        if last_exc is None:  # pragma: no cover - defensive
+            msg = "FallbackTTSClient: no attempt produced a result or error"
+            raise RuntimeError(msg)
+        raise last_exc
+
+    def _record(self: Self, provider: str, latency_s: float, outcome: str) -> None:
+        if self.recorder is None:
+            return
+        try:
+            self.recorder(provider, latency_s, outcome)
+        except Exception:
+            _logger.exception("TTS latency recorder raised; ignoring")
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 
 def create_tts_client(
     tts_config: TTSConfig,
-) -> CartesiaTTSClient | AzureTTSClient | GeminiTTSClient:
+    *,
+    metrics_path: Path | None = None,
+) -> SingleTTSClient | FallbackTTSClient:
     """Instantiate the TTS client for the active provider.
 
     Provider is taken from ``[tts].provider`` in ``character.toml``.
     Default provider is ``"azure"``.
 
+    When ``[tts].fallback_providers`` is non-empty the chain
+    ``[provider, *fallback_providers]`` is wrapped in
+    :class:`FallbackTTSClient`; entries whose env vars are missing are
+    skipped with a warning rather than failing the whole load. Per-attempt
+    latency is appended to ``metrics_path`` (when provided) via
+    :class:`JSONLLatencyRecorder`.
+
     Reads credentials from environment variables; raises :class:`ValueError`
-    if required variables are absent, config values are empty, or the
-    provider name is unrecognised.
+    if no provider in the chain can be built or the primary provider name
+    is unrecognised.
 
-    :raises ValueError: unknown provider, missing env var, or empty field.
+    :raises ValueError: unknown provider, or no provider buildable.
     """
-    provider = tts_config.provider
+    chain = [tts_config.provider, *tts_config.fallback_providers]
+    if len(chain) == 1:
+        return _build_single(tts_config, chain[0])
 
+    attempts: list[tuple[str, TTSClient]] = []
+    seen: set[str] = set()
+    for name in chain:
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            attempts.append((name, _build_single(tts_config, name)))
+        except ValueError as exc:
+            _logger.warning(
+                f"{ls.tag('🔉 TTS', ls.C)} "
+                f"{ls.word('fallback', ls.LM)} "
+                f"{ls.kv('skip', name, vc=ls.LW)} "
+                f"{ls.kv('reason', ls.trunc(str(exc), limit=120), vc=ls.LW)}"
+            )
+
+    if not attempts:
+        msg = (
+            f"No TTS provider in chain {chain!r} could be built; "
+            "check env vars and [tts] config"
+        )
+        raise ValueError(msg)
+
+    recorder = JSONLLatencyRecorder(metrics_path) if metrics_path is not None else None
+    return FallbackTTSClient(
+        attempts=attempts,
+        timeout_s=tts_config.provider_timeout_s,
+        recorder=recorder,
+    )
+
+
+def _build_single(tts_config: TTSConfig, provider: str) -> SingleTTSClient:
     if provider == "azure":
         return _create_azure_client(tts_config)
     if provider == "cartesia":

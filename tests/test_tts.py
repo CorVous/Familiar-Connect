@@ -1034,3 +1034,272 @@ class TestCreateTTSClientGemini:
             client = create_tts_client(cfg)
         assert isinstance(client, GeminiTTSClient)
         assert client.api_key == "primary"
+
+
+# ---------------------------------------------------------------------------
+# Fallback chain
+# ---------------------------------------------------------------------------
+
+
+from familiar_connect.tts import (  # noqa: E402
+    FallbackTTSClient,
+    JSONLLatencyRecorder,
+)
+
+
+class _FakeClient:
+    """Test double honoring the ``synthesize`` async interface."""
+
+    def __init__(
+        self: Self,
+        *,
+        result: TTSResult | None = None,
+        exc: BaseException | None = None,
+        delay_s: float = 0.0,
+    ) -> None:
+        self.result = result
+        self.exc = exc
+        self.delay_s = delay_s
+        self.calls = 0
+
+    async def synthesize(self: Self, text: str) -> TTSResult:  # noqa: ARG002
+        self.calls += 1
+        if self.delay_s:
+            import asyncio as _asyncio  # noqa: PLC0415
+
+            await _asyncio.sleep(self.delay_s)
+        if self.exc is not None:
+            raise self.exc
+        assert self.result is not None
+        return self.result
+
+
+if TYPE_CHECKING:
+    from typing import Self
+
+
+class TestFallbackTTSClient:
+    @pytest.mark.asyncio
+    async def test_returns_first_success(self) -> None:
+        first = _FakeClient(result=TTSResult(audio=b"first"))
+        second = _FakeClient(result=TTSResult(audio=b"second"))
+        client = FallbackTTSClient(
+            attempts=[("azure", first), ("cartesia", second)],
+            timeout_s=2.0,
+        )
+        result = await client.synthesize("hi")
+        assert result.audio == b"first"
+        assert first.calls == 1
+        assert second.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_exception(self) -> None:
+        first = _FakeClient(exc=RuntimeError("boom"))
+        second = _FakeClient(result=TTSResult(audio=b"second"))
+        client = FallbackTTSClient(
+            attempts=[("azure", first), ("cartesia", second)],
+            timeout_s=2.0,
+        )
+        result = await client.synthesize("hi")
+        assert result.audio == b"second"
+        assert first.calls == 1
+        assert second.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_timeout(self) -> None:
+        first = _FakeClient(result=TTSResult(audio=b"first"), delay_s=1.0)
+        second = _FakeClient(result=TTSResult(audio=b"second"))
+        client = FallbackTTSClient(
+            attempts=[("azure", first), ("cartesia", second)],
+            timeout_s=0.05,
+        )
+        result = await client.synthesize("hi")
+        assert result.audio == b"second"
+
+    @pytest.mark.asyncio
+    async def test_reraises_when_all_fail(self) -> None:
+        first = _FakeClient(exc=RuntimeError("first-fail"))
+        second = _FakeClient(exc=RuntimeError("second-fail"))
+        client = FallbackTTSClient(
+            attempts=[("azure", first), ("cartesia", second)],
+            timeout_s=2.0,
+        )
+        with pytest.raises(RuntimeError, match="second-fail"):
+            await client.synthesize("hi")
+
+    @pytest.mark.asyncio
+    async def test_recorder_observes_each_attempt(self) -> None:
+        first = _FakeClient(exc=RuntimeError("boom"))
+        second = _FakeClient(result=TTSResult(audio=b"ok"))
+        observed: list[tuple[str, float, str]] = []
+
+        def _recorder(provider: str, latency_s: float, outcome: str) -> None:
+            observed.append((provider, latency_s, outcome))
+
+        client = FallbackTTSClient(
+            attempts=[("azure", first), ("cartesia", second)],
+            timeout_s=2.0,
+            recorder=_recorder,
+        )
+        await client.synthesize("hi")
+        names = [o[0] for o in observed]
+        outcomes = [o[2] for o in observed]
+        assert names == ["azure", "cartesia"]
+        assert outcomes == ["error", "ok"]
+        assert all(latency >= 0.0 for _, latency, _ in observed)
+
+    @pytest.mark.asyncio
+    async def test_recorder_marks_timeout(self) -> None:
+        slow = _FakeClient(result=TTSResult(audio=b"x"), delay_s=1.0)
+        observed: list[tuple[str, float, str]] = []
+
+        def _recorder(provider: str, latency_s: float, outcome: str) -> None:
+            observed.append((provider, latency_s, outcome))
+
+        ok = _FakeClient(result=TTSResult(audio=b"ok"))
+        client = FallbackTTSClient(
+            attempts=[("azure", slow), ("cartesia", ok)],
+            timeout_s=0.05,
+            recorder=_recorder,
+        )
+        await client.synthesize("hi")
+        assert observed[0][2] == "timeout"
+        assert observed[1] == ("cartesia", observed[1][1], "ok")
+
+    @pytest.mark.asyncio
+    async def test_recorder_failure_does_not_break_synthesis(self) -> None:
+        ok = _FakeClient(result=TTSResult(audio=b"ok"))
+
+        def _bad_recorder(*_: object) -> None:
+            msg = "recorder broken"
+            raise RuntimeError(msg)
+
+        client = FallbackTTSClient(
+            attempts=[("azure", ok)],
+            timeout_s=2.0,
+            recorder=_bad_recorder,
+        )
+        result = await client.synthesize("hi")
+        assert result.audio == b"ok"
+
+    def test_requires_at_least_one_attempt(self) -> None:
+        with pytest.raises(ValueError, match="at least one"):
+            FallbackTTSClient(attempts=[], timeout_s=2.0)
+
+
+class TestJSONLLatencyRecorder:
+    def test_appends_one_json_line_per_call(self, tmp_path: Path) -> None:
+        path = tmp_path / "tts_metrics.jsonl"
+        recorder = JSONLLatencyRecorder(path)
+        recorder("azure", 0.42, "ok")
+        recorder("cartesia", 1.5, "timeout")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        first = json.loads(lines[0])
+        assert first["provider"] == "azure"
+        assert first["latency_s"] == pytest.approx(0.42)
+        assert first["outcome"] == "ok"
+        assert "ts" in first
+        second = json.loads(lines[1])
+        assert second["provider"] == "cartesia"
+        assert second["outcome"] == "timeout"
+
+    def test_creates_parent_directory(self, tmp_path: Path) -> None:
+        path = tmp_path / "deep" / "nested" / "tts_metrics.jsonl"
+        recorder = JSONLLatencyRecorder(path)
+        recorder("azure", 0.1, "ok")
+        assert path.is_file()
+
+
+class TestCreateTTSClientFallback:
+    def test_returns_fallback_when_chain_configured(self) -> None:
+        cfg = TTSConfig(
+            provider="azure",
+            fallback_providers=["cartesia"],
+            cartesia_voice_id="v",
+            cartesia_model="m",
+        )
+        env = {
+            "AZURE_SPEECH_KEY": "k",
+            "AZURE_SPEECH_REGION": "r",
+            "CARTESIA_API_KEY": "c",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = create_tts_client(cfg)
+        assert isinstance(client, FallbackTTSClient)
+        names = [name for name, _ in client.attempts]
+        assert names == ["azure", "cartesia"]
+
+    def test_fallback_skips_provider_with_missing_env(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cfg = TTSConfig(
+            provider="azure",
+            fallback_providers=["cartesia"],
+            cartesia_voice_id="v",
+            cartesia_model="m",
+        )
+        env = {"AZURE_SPEECH_KEY": "k", "AZURE_SPEECH_REGION": "r"}
+        with patch.dict(os.environ, env, clear=True), caplog.at_level("WARNING"):
+            client = create_tts_client(cfg)
+        assert isinstance(client, FallbackTTSClient)
+        names = [name for name, _ in client.attempts]
+        assert names == ["azure"]
+        assert "cartesia" in caplog.text.lower()
+
+    def test_returns_single_client_when_fallback_empty(self) -> None:
+        cfg = TTSConfig(provider="azure")
+        env = {"AZURE_SPEECH_KEY": "k", "AZURE_SPEECH_REGION": "r"}
+        with patch.dict(os.environ, env, clear=True):
+            client = create_tts_client(cfg)
+        assert isinstance(client, AzureTTSClient)
+
+    def test_fallback_passes_metrics_path_to_recorder(self, tmp_path: Path) -> None:
+        cfg = TTSConfig(
+            provider="azure",
+            fallback_providers=["cartesia"],
+            cartesia_voice_id="v",
+            cartesia_model="m",
+        )
+        env = {
+            "AZURE_SPEECH_KEY": "k",
+            "AZURE_SPEECH_REGION": "r",
+            "CARTESIA_API_KEY": "c",
+        }
+        metrics_path = tmp_path / "tts_metrics.jsonl"
+        with patch.dict(os.environ, env, clear=True):
+            client = create_tts_client(cfg, metrics_path=metrics_path)
+        assert isinstance(client, FallbackTTSClient)
+        assert client.recorder is not None
+
+    def test_fallback_uses_configured_timeout(self) -> None:
+        cfg = TTSConfig(
+            provider="azure",
+            fallback_providers=["cartesia"],
+            cartesia_voice_id="v",
+            cartesia_model="m",
+            provider_timeout_s=4.5,
+        )
+        env = {
+            "AZURE_SPEECH_KEY": "k",
+            "AZURE_SPEECH_REGION": "r",
+            "CARTESIA_API_KEY": "c",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = create_tts_client(cfg)
+        assert isinstance(client, FallbackTTSClient)
+        assert client.timeout_s == pytest.approx(4.5)
+
+    def test_raises_when_no_provider_can_be_built(self) -> None:
+        cfg = TTSConfig(
+            provider="azure",
+            fallback_providers=["cartesia"],
+            cartesia_voice_id="v",
+            cartesia_model="m",
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            pytest.raises(ValueError, match="No TTS provider"),
+        ):
+            create_tts_client(cfg)

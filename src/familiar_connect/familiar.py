@@ -57,7 +57,12 @@ if TYPE_CHECKING:
     )
     from familiar_connect.llm import LLMClient
     from familiar_connect.transcription import DeepgramTranscriber
-    from familiar_connect.tts import AzureTTSClient, CartesiaTTSClient, GeminiTTSClient
+    from familiar_connect.tts import (
+        AzureTTSClient,
+        CartesiaTTSClient,
+        FallbackTTSClient,
+        GeminiTTSClient,
+    )
 
 
 @dataclass
@@ -74,7 +79,9 @@ class Familiar:
     memory_store: MemoryStore
     history_store: HistoryStore
     llm_clients: dict[str, LLMClient]
-    tts_client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | None
+    tts_client: (
+        CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | FallbackTTSClient | None
+    )
     transcriber: DeepgramTranscriber | None
     providers: dict[str, ContextProvider]
     pre_processors: dict[str, PreProcessor]
@@ -118,7 +125,13 @@ class Familiar:
         root: Path,
         *,
         llm_clients: dict[str, LLMClient],
-        tts_client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | None = None,
+        tts_client: (
+            CartesiaTTSClient
+            | AzureTTSClient
+            | GeminiTTSClient
+            | FallbackTTSClient
+            | None
+        ) = None,
         transcriber: DeepgramTranscriber | None = None,
         defaults_path: Path | None = None,
     ) -> Familiar:

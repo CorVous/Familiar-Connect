@@ -89,6 +89,12 @@ cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"
 gemini_voice      = "Kore"
 gemini_model      = "gemini-3.1-flash-tts-preview"
+# Optional fallback chain. When non-empty, providers are tried in order
+# [provider, *fallback_providers]; an attempt that raises or exceeds
+# provider_timeout_s is logged and the next entry is tried. Per-attempt
+# (provider, latency_s, outcome) lands in data/familiars/<id>/tts_metrics.jsonl.
+# fallback_providers = ["cartesia", "gemini"]
+# provider_timeout_s = 15.0
 # Optional structured performance direction for Gemini. Any subset may be set;
 # unset fields are omitted from the composed prompt. All six are combined into
 # an Audio Profile / Scene / Director's Notes block prepended to each synthesis

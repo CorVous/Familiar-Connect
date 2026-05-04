@@ -171,6 +171,15 @@ class TTSConfig:
     """Accent direction; e.g. ``"soft Irish lilt"``."""
     greetings: list[str] = field(default_factory=list)
     """Random greeting audio played when the familiar joins a voice channel."""
+    fallback_providers: list[str] = field(default_factory=list)
+    """Secondary providers tried in order when the primary fails or times out.
+
+    Empty list (default) → single-provider behaviour. Otherwise the chain is
+    ``[provider, *fallback_providers]``; per-attempt latency is recorded
+    to ``<familiar_root>/tts_metrics.jsonl`` for later weighting.
+    """
+    provider_timeout_s: float = 15.0
+    """Per-provider deadline before falling back to the next entry."""
 
 
 @dataclass(frozen=True)
@@ -757,6 +766,36 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         raise ConfigError(msg)
     greetings = [str(g) for g in greetings_raw]
 
+    fallback_raw = raw.get("fallback_providers", [])
+    if not isinstance(fallback_raw, list):
+        msg = (
+            "[tts].fallback_providers must be a list of strings, "
+            f"got {type(fallback_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    fallback_providers: list[str] = []
+    for entry in fallback_raw:
+        if not isinstance(entry, str):
+            msg = "[tts].fallback_providers entries must be strings"
+            raise ConfigError(msg)
+        if entry not in _TTS_PROVIDERS:
+            valid = ", ".join(sorted(_TTS_PROVIDERS))
+            msg = (
+                f"[tts].fallback_providers entry {entry!r} unknown; "
+                f"valid options: {valid}"
+            )
+            raise ConfigError(msg)
+        fallback_providers.append(entry)
+
+    timeout_raw = raw.get("provider_timeout_s", 15.0)
+    if not isinstance(timeout_raw, (int, float)) or isinstance(timeout_raw, bool):
+        msg = "[tts].provider_timeout_s must be a number"
+        raise ConfigError(msg)
+    timeout_s = float(timeout_raw)
+    if timeout_s <= 0.0:
+        msg = "[tts].provider_timeout_s must be > 0"
+        raise ConfigError(msg)
+
     return TTSConfig(
         provider=provider_raw,
         cartesia_voice_id=cartesia_voice_id,
@@ -771,6 +810,8 @@ def _parse_tts_config(raw: dict) -> TTSConfig:
         gemini_pace=_opt_str("gemini_pace"),
         gemini_accent=_opt_str("gemini_accent"),
         greetings=greetings,
+        fallback_providers=fallback_providers,
+        provider_timeout_s=timeout_s,
     )
 
 

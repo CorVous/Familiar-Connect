@@ -110,6 +110,23 @@ Any subset may be set — unset fields are omitted from the composed prompt. All
 
 **Audio tags.** Gemini 3.1 Flash TTS supports 200+ inline audio tags (`[laughs]`, `[whispers]`, `[short pause]`, `[gasp]`, etc.). These flow through automatically if the LLM includes them in its reply — no config needed.
 
+#### Fallback chain
+
+When the primary provider errors or stalls, you can configure secondary providers to take over per request. Set `[tts].fallback_providers` to an ordered list and (optionally) `[tts].provider_timeout_s` to bound each attempt:
+
+```toml
+[tts]
+provider           = "azure"
+fallback_providers = ["cartesia", "gemini"]
+provider_timeout_s = 15.0  # default; per-attempt deadline before falling back
+```
+
+On each `synthesize()` call the wrapper tries `[provider, *fallback_providers]` in order; an attempt that raises or exceeds `provider_timeout_s` is logged and the next entry is tried. If all attempts fail the last error is re-raised.
+
+Entries whose env vars are missing at startup are skipped with a warning rather than failing the load — leave a provider out of `.env` and it is simply absent from the chain.
+
+Per-attempt observations land in `data/familiars/<id>/tts_metrics.jsonl` (one JSON line per attempt: `ts`, `provider`, `latency_s`, `outcome ∈ {ok, error, timeout}`). This file is the data source for any later weighting / penalty logic.
+
 **Available voices.** Prebuilt voice names (select with `gemini_voice`):
 Achernar, Achird, Algenib, Algieba, Alnilam, Aoede, Autonoe, Callirrhoe, Charon, Despina, Enceladus, Erinome, Fenrir (Excitable), Gacrux, Iapetus, Kore (Firm, default), Laomedeia, Leda, Orus, Puck (Upbeat), Pulcherrima, Rasalgethi, Sadachbia, Sadaltager, Schedar, Sulafat, Umbriel, Vindemiatrix, Zephyr (Bright), Zubenelgenubi.
 

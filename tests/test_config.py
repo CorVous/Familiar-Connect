@@ -296,6 +296,58 @@ class TestLoadCharacterConfig:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.tts.greetings == []
 
+    def test_tts_fallback_providers_parsed(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[tts]\nprovider = "azure"\nfallback_providers = ["cartesia", "gemini"]\n',
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.fallback_providers == ["cartesia", "gemini"]
+
+    def test_tts_fallback_providers_must_be_list(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\nfallback_providers = "cartesia"\n')
+        with pytest.raises(ConfigError, match="must be a list"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tts_fallback_providers_unknown_name_raises(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\nfallback_providers = ["bogus"]\n')
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tts_provider_timeout_parsed(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[tts]\nprovider_timeout_s = 7.5\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.provider_timeout_s == pytest.approx(7.5)
+
+    def test_tts_provider_timeout_default(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tts.provider_timeout_s > 0.0
+
     def test_defaults_populate_every_llm_slot(
         self,
         tmp_path: Path,

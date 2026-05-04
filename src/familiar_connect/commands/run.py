@@ -194,7 +194,10 @@ def run(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        tts_client = create_tts_client(character_config.tts)
+        tts_client = create_tts_client(
+            character_config.tts,
+            metrics_path=familiar_root / "tts_metrics.jsonl",
+        )
     except ValueError as exc:
         _logger.warning("TTS client unavailable: %s", exc)
         tts_client = None

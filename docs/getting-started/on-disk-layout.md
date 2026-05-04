@@ -10,7 +10,7 @@ data/familiars/aria/
 ```
 
 Everything else (`memory/`, `history.db`, `subscriptions.toml`,
-`channels/`, `modes/`) is created on first launch. Multiple character
+`channels/`, `modes/`, `tts_metrics.jsonl`) is created on first launch. Multiple character
 folders can sit side-by-side under `data/familiars/`; only the one you
 point `FAMILIAR_ID` at is loaded per process.
 
