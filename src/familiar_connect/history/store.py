@@ -130,6 +130,34 @@ class FactSubject:
 
 
 @dataclass(frozen=True)
+class Reflection:
+    """Higher-order synthesis over recent turns + facts (M3).
+
+    Written by :class:`ReflectionWorker`; read by
+    :class:`ReflectionLayer`. ``cited_turn_ids`` / ``cited_fact_ids``
+    are forever-provenance — never edited, never trimmed. A reflection
+    citing a superseded fact stays in the table; the read path flags
+    it stale rather than dropping it (audit trail beats silent loss).
+
+    :param last_turn_id: highest ``turns.id`` visible to the worker at
+        write time. Doubles as the next tick's watermark — one row per
+        write, not a separate table.
+    :param last_fact_id: highest ``facts.id`` visible to the worker at
+        write time. Same role as ``last_turn_id`` for the facts axis.
+    """
+
+    id: int
+    familiar_id: str
+    channel_id: int | None
+    text: str
+    cited_turn_ids: tuple[int, ...]
+    cited_fact_ids: tuple[int, ...]
+    created_at: datetime
+    last_turn_id: int
+    last_fact_id: int
+
+
+@dataclass(frozen=True)
 class Fact:
     """Atomic fact extracted from one or more turns.
 
@@ -240,6 +268,30 @@ CREATE TABLE IF NOT EXISTS people_dossiers (
     created_at     TEXT    NOT NULL,
     PRIMARY KEY (familiar_id, canonical_key)
 );
+
+-- Reflections (M3). Higher-order syntheses over recent turns + facts.
+-- Provenance forever via cited_turn_ids / cited_fact_ids (JSON arrays).
+-- ``last_turn_id`` / ``last_fact_id`` snapshot the worker's view at
+-- write time so the next tick can detect freshness without a separate
+-- watermark table. Citations to superseded facts surface as "stale" at
+-- read time; the row itself is never deleted.
+CREATE TABLE IF NOT EXISTS reflections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id     TEXT    NOT NULL,
+    channel_id      INTEGER,
+    text            TEXT    NOT NULL,
+    cited_turn_ids  TEXT    NOT NULL,  -- JSON array
+    cited_fact_ids  TEXT    NOT NULL,  -- JSON array
+    created_at      TEXT    NOT NULL,
+    last_turn_id    INTEGER NOT NULL,  -- watermark over turns at write
+    last_fact_id    INTEGER NOT NULL   -- watermark over facts at write
+);
+
+CREATE INDEX IF NOT EXISTS idx_reflections_familiar
+    ON reflections (familiar_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_reflections_familiar_channel
+    ON reflections (familiar_id, channel_id, id);
 
 -- Identity. One row per (platform, user_id). Last-write wins.
 CREATE TABLE IF NOT EXISTS accounts (
@@ -1858,6 +1910,181 @@ class HistoryStore:
             (ts, new_id, old_id, familiar_id),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # reflections (M3) — higher-order syntheses
+    # ------------------------------------------------------------------
+
+    def append_reflection(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int | None,
+        text: str,
+        cited_turn_ids: Iterable[int],
+        cited_fact_ids: Iterable[int],
+        last_turn_id: int,
+        last_fact_id: int,
+    ) -> Reflection:
+        """Insert a new reflection row.
+
+        ``last_turn_id`` / ``last_fact_id`` snapshot the worker's view
+        at write time — also serve as the next tick's watermark.
+        """
+        turn_ids = [int(i) for i in cited_turn_ids]
+        fact_ids = [int(i) for i in cited_fact_ids]
+        ts = datetime.now(tz=UTC)
+        cur = self._conn.execute(
+            """
+            INSERT INTO reflections
+                (familiar_id, channel_id, text,
+                 cited_turn_ids, cited_fact_ids, created_at,
+                 last_turn_id, last_fact_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                familiar_id,
+                channel_id,
+                text,
+                json.dumps(turn_ids),
+                json.dumps(fact_ids),
+                ts.isoformat(),
+                int(last_turn_id),
+                int(last_fact_id),
+            ),
+        )
+        self._conn.commit()
+        return Reflection(
+            id=int(cur.lastrowid or 0),
+            familiar_id=familiar_id,
+            channel_id=channel_id,
+            text=text,
+            cited_turn_ids=tuple(turn_ids),
+            cited_fact_ids=tuple(fact_ids),
+            created_at=ts,
+            last_turn_id=int(last_turn_id),
+            last_fact_id=int(last_fact_id),
+        )
+
+    def recent_reflections(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int | None = None,
+        limit: int,
+    ) -> list[Reflection]:
+        """Return ``limit`` most recent reflections, newest first.
+
+        ``channel_id`` scopes to one channel; ``None`` returns reflections
+        regardless of channel scope (including channel-agnostic rows).
+        """
+        if limit <= 0:
+            return []
+        if channel_id is None:
+            rows = self._conn.execute(
+                """
+                SELECT id, familiar_id, channel_id, text,
+                       cited_turn_ids, cited_fact_ids, created_at,
+                       last_turn_id, last_fact_id
+                  FROM reflections
+                 WHERE familiar_id = ?
+                 ORDER BY id DESC
+                 LIMIT ?
+                """,
+                (familiar_id, limit),
+            ).fetchall()
+        else:
+            # Include channel-agnostic rows (channel_id IS NULL) so a
+            # global reflection still surfaces in any channel.
+            rows = self._conn.execute(
+                """
+                SELECT id, familiar_id, channel_id, text,
+                       cited_turn_ids, cited_fact_ids, created_at,
+                       last_turn_id, last_fact_id
+                  FROM reflections
+                 WHERE familiar_id = ?
+                   AND (channel_id = ? OR channel_id IS NULL)
+                 ORDER BY id DESC
+                 LIMIT ?
+                """,
+                (familiar_id, channel_id, limit),
+            ).fetchall()
+        return [_row_to_reflection(r) for r in rows]
+
+    def latest_reflection_watermarks(
+        self,
+        *,
+        familiar_id: str,
+    ) -> tuple[int, int]:
+        """Return (last_turn_id, last_fact_id) of the newest reflection.
+
+        ``(0, 0)`` if no reflections exist for *familiar_id*. Used by
+        :class:`ReflectionWorker` to decide whether enough new turns
+        / facts have accumulated to write again.
+        """
+        row = self._conn.execute(
+            """
+            SELECT last_turn_id, last_fact_id
+              FROM reflections
+             WHERE familiar_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return (0, 0)
+        return (int(row["last_turn_id"]), int(row["last_fact_id"]))
+
+    def superseded_fact_ids(
+        self,
+        *,
+        familiar_id: str,
+        fact_ids: Iterable[int],
+    ) -> set[int]:
+        """Return the subset of ``fact_ids`` that are superseded.
+
+        Used by :class:`ReflectionLayer` to flag stale citations on
+        read. Empty input returns ``set()`` without a query.
+        """
+        ids = [int(i) for i in fact_ids]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT id
+              FROM facts
+             WHERE familiar_id = ?
+               AND id IN ({placeholders})
+               AND superseded_at IS NOT NULL
+            """,  # noqa: S608
+            (familiar_id, *ids),
+        ).fetchall()
+        return {int(r["id"]) for r in rows}
+
+
+def _row_to_reflection(row: sqlite3.Row) -> Reflection:
+    try:
+        turn_ids = tuple(int(x) for x in json.loads(row["cited_turn_ids"]))
+    except (ValueError, TypeError):
+        turn_ids = ()
+    try:
+        fact_ids = tuple(int(x) for x in json.loads(row["cited_fact_ids"]))
+    except (ValueError, TypeError):
+        fact_ids = ()
+    channel = row["channel_id"]
+    return Reflection(
+        id=int(row["id"]),
+        familiar_id=str(row["familiar_id"]),
+        channel_id=int(channel) if channel is not None else None,
+        text=str(row["text"]),
+        cited_turn_ids=turn_ids,
+        cited_fact_ids=fact_ids,
+        created_at=datetime.fromisoformat(row["created_at"]),
+        last_turn_id=int(row["last_turn_id"]),
+        last_fact_id=int(row["last_fact_id"]),
+    )
 
 
 def _row_to_fact(row: sqlite3.Row) -> Fact:

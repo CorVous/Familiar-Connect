@@ -37,11 +37,13 @@ text_window_size  = 200
 # dossier_tokens        cap on people-dossier block.
 # summary_tokens        cap on the conversation-summary block.
 # cross_channel_tokens  cap on cross-channel context.
+# reflection_tokens     cap on reflections block (M3).
 # max_history_turns     hard upper bound on history turn count
 #                       (safety net behind recent_history_tokens).
 # max_rag_turns         hard cap on RAG turn results.
 # max_rag_facts         hard cap on RAG fact results.
 # max_dossier_people    hard cap on dossier rows.
+# max_reflections       hard cap on rendered reflection rows (M3).
 #
 # Defaults sized for: voice models hold up to ~3 k well; thoughtful
 # (text) replies fine up to ~8 k; offline workers absorb ~24 k.
@@ -53,10 +55,12 @@ rag_tokens            = 450
 dossier_tokens        = 450
 summary_tokens        = 300
 cross_channel_tokens  = 300
+reflection_tokens     = 300
 max_history_turns     = 100
 max_rag_turns         = 5
 max_rag_facts         = 3
 max_dossier_people    = 8
+max_reflections       = 3
 
 [budget.text]
 total_tokens          = 8000
@@ -65,10 +69,12 @@ rag_tokens            = 1200
 dossier_tokens        = 1200
 summary_tokens        = 800
 cross_channel_tokens  = 800
+reflection_tokens     = 800
 max_history_turns     = 200
 max_rag_turns         = 8
 max_rag_facts         = 5
 max_dossier_people    = 12
+max_reflections       = 5
 
 [budget.background]
 total_tokens          = 24000
@@ -77,10 +83,12 @@ rag_tokens            = 4000
 dossier_tokens        = 4000
 summary_tokens        = 2000
 cross_channel_tokens  = 2000
+reflection_tokens     = 2000
 max_history_turns     = 500
 max_rag_turns         = 12
 max_rag_facts         = 8
 max_dossier_people    = 16
+max_reflections       = 8
 
 # --- Retrieval ranking -----------------------------------------------------
 #

@@ -24,6 +24,7 @@ flowchart TB
         facts[(facts)]
         fts_facts[(fts_facts FTS5)]
         dossiers[(people_dossiers)]
+        reflections[(reflections)]
     end
 
     turns -->|trigger| fts
@@ -32,6 +33,8 @@ flowchart TB
     turns -->|FactExtractor| facts
     facts -->|trigger| fts_facts
     facts -->|PeopleDossierWorker| dossiers
+    turns -->|ReflectionWorker| reflections
+    facts -->|ReflectionWorker| reflections
 
     subgraph Assembler[Prompt assembly]
         core[CoreInstructionsLayer]
@@ -39,6 +42,7 @@ flowchart TB
         mode[OperatingModeLayer]
         xc[CrossChannelContextLayer]
         sum[ConversationSummaryLayer]
+        ref[ReflectionLayer]
         ppl[PeopleDossierLayer]
         rag[RagContextLayer]
         hist[RecentHistoryLayer]
@@ -47,6 +51,7 @@ flowchart TB
     cross --> xc
     summaries --> sum
     dossiers --> ppl
+    reflections --> ref
     fts --> rag
     fts_facts --> rag
     turns --> hist
@@ -85,6 +90,7 @@ whose key has changed.
 | `ConversationSummaryLayer` | `summaries` table | `ch<id>:wm<last_summarised_id>` |
 | `CrossChannelContextLayer` | `cross_context_summaries` table, per-viewer map | `<source>:wm<source_last_id>` concatenated |
 | `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions` | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
+| `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
 | `RagContextLayer` | `fts_turns` + `fts_facts` FTS5 search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent(channel_id, window_size)` | not cached — it *is* the query |
 
@@ -178,6 +184,34 @@ Per tick:
 Empty LLM replies are dropped — a blank response must not blow away
 an existing dossier. Subjects whose only facts are superseded
 disappear from the candidate set; the dossier row stays put.
+
+### `ReflectionWorker`
+
+Writes higher-order syntheses over recent turns + facts (M3). Ticks
+every `tick_interval_s` (default 60 s) — slower than
+`PeopleDossierWorker` because reflections are themes and patterns,
+not turn-by-turn updates.
+
+Per tick:
+
+1. Read `latest_id(turns)` for the familiar; compare to the newest
+   reflection row's `last_turn_id` watermark. Skip if the gap is
+   `< turns_threshold` (default 20).
+2. Pull turns since the watermark plus the most recent N facts (for
+   evidence the reflection can cite even when the turns themselves
+   don't surface them).
+3. Ask the background-tier LLM for at most `max_reflections_per_tick`
+   (default 3) reflections, each with `cited_turn_ids` /
+   `cited_fact_ids`.
+4. Persist each row that cites at least one valid id; drop rows
+   that hallucinate everything. The row's `last_turn_id` /
+   `last_fact_id` columns snapshot the worker's view at write time
+   — also serve as the next tick's watermark, no separate watermark
+   table.
+
+`ReflectionLayer` reads recent rows on assemble and renders citation
+breadcrumbs `[T#42, F#7]`. Rows that cite at least one superseded
+fact are flagged `(stale)`; the row itself is never deleted.
 
 ## Fact discipline: supersession and self-capability
 

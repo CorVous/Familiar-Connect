@@ -44,6 +44,7 @@ details for what already ships live in
 | `cross_context_summaries` | `SummaryWorker` | `CrossChannelContextLayer` |
 | `facts` | `FactExtractor` | `RagContextLayer` (via FTS) |
 | `people_dossiers` | `PeopleDossierWorker` | `PeopleDossierLayer` |
+| `reflections` | `ReflectionWorker` | `ReflectionLayer` |
 
 Every writer is watermark-driven and idempotent; deleting a
 side-index table rebuilds it from `turns`. See
@@ -96,6 +97,42 @@ keeps the top N by weighted sum:
 
 `importance_weight = 0` reproduces pre-M2 ordering. See
 [Tuning — retrieval ranking](tuning.md#retrieval-ranking-m2).
+
+## Reflections (M3)
+
+Higher-order syntheses over recent turns + facts. Each reflection
+row carries:
+
+- `text` — one or two sentences naming a pattern, recurring tension,
+  open question, or theme.
+- `cited_turn_ids` / `cited_fact_ids` — forever-provenance JSON
+  arrays. Citations render as breadcrumbs `[T#42, F#7]` so the
+  reading model can map a synthesis back to its source.
+- `last_turn_id` / `last_fact_id` — watermark snapshotting the
+  worker's view at write time. The next tick uses the newest row's
+  watermark as its lower bound; no separate watermark table.
+
+`ReflectionWorker` ticks every 60 s; fires when at least
+`turns_threshold` (default 20) new turns have arrived since the
+newest reflection. It builds a prompt over the new turns plus the
+20 most recent facts, asks for at most 3 reflections per tick, and
+persists each answer that cites at least one valid turn or fact
+id. Uncited answers are dropped — a free-floating opinion isn't a
+synthesis.
+
+`ReflectionLayer` reads the most recent rows scoped to the active
+channel (channel-agnostic rows surface in every channel), renders
+citation breadcrumbs, and flags `(stale)` on rows that cite at
+least one superseded fact. Stale rows are never deleted; the audit
+trail is the point.
+
+The relevant knobs live in `[budget.<tier>]`:
+
+```toml
+[budget.text]
+reflection_tokens     = 800   # cap on the rendered block
+max_reflections       = 5     # hard cap on rendered rows
+```
 
 ## Bi-temporal facts
 

@@ -23,6 +23,7 @@ from familiar_connect.context.layers import (
     PeopleDossierLayer,
     RagContextLayer,
     RecentHistoryLayer,
+    ReflectionLayer,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "PeopleDossierLayer",
     "RagContextLayer",
     "RecentHistoryLayer",
+    "ReflectionLayer",
 ]

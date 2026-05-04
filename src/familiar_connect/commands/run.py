@@ -36,6 +36,7 @@ from familiar_connect.context import (
     PeopleDossierLayer,
     RagContextLayer,
     RecentHistoryLayer,
+    ReflectionLayer,
 )
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
@@ -46,6 +47,7 @@ from familiar_connect.processors import (
 )
 from familiar_connect.processors.fact_extractor import FactExtractor
 from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
+from familiar_connect.processors.reflection_worker import ReflectionWorker
 from familiar_connect.processors.summary_worker import SummaryWorker
 from familiar_connect.stt import create_transcriber
 from familiar_connect.tts import create_tts_client
@@ -151,6 +153,9 @@ def _default_assembler(
     * ``CrossChannelContextLayer`` — when *any* other channel's summary
       is rewritten; per-channel rate is bounded by the same threshold,
       but multiple sources fan in.
+    * ``ReflectionLayer`` — when :class:`ReflectionWorker` writes a
+      new reflection (default every ~20 turns); slower than dossiers,
+      faster than rolling summaries.
     * ``PeopleDossierLayer`` — when any active-channel subject's facts
       tick the watermark; effectively per-fact write.
     * ``RagContextLayer`` — every turn (cue is the inbound user text).
@@ -194,6 +199,11 @@ def _default_assembler(
                 viewer_map={},  # populated by per-channel config when present
                 ttl_seconds=600,
                 max_tokens=budget.cross_channel_tokens,
+            ),
+            ReflectionLayer(
+                store=store,
+                max_reflections=budget.max_reflections,
+                max_tokens=budget.reflection_tokens,
             ),
             PeopleDossierLayer(
                 store=store,
@@ -311,6 +321,11 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         llm_client=familiar.llm_clients["background"],
         familiar_id=familiar.id,
     )
+    reflection_worker = ReflectionWorker(
+        store=familiar.history_store,
+        llm_client=familiar.llm_clients["background"],
+        familiar_id=familiar.id,
+    )
 
     try:
         async with asyncio.TaskGroup() as tg:
@@ -326,6 +341,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
             tg.create_task(summary_worker.run(), name="summary-worker")
             tg.create_task(fact_extractor.run(), name="fact-extractor")
             tg.create_task(people_dossier_worker.run(), name="people-dossier-worker")
+            tg.create_task(reflection_worker.run(), name="reflection-worker")
             tg.create_task(handle.bot.start(token), name="discord-bot")
     finally:
         # close py-cord first so its aiohttp ClientSession doesn't leak

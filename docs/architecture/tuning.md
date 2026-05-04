@@ -516,10 +516,12 @@ rag_tokens            = 450
 dossier_tokens        = 450
 summary_tokens        = 300
 cross_channel_tokens  = 300
+reflection_tokens     = 300
 max_history_turns     = 100    # safety net behind recent_history_tokens
 max_rag_turns         = 5
 max_rag_facts         = 3
 max_dossier_people    = 8
+max_reflections       = 3
 
 [budget.text]      # same shape, larger envelope
 total_tokens       = 8000
@@ -560,12 +562,16 @@ total_tokens = 5000   # rest of the voice envelope inherits from _default
 | `ConversationSummaryLayer.max_tokens` | `300` (voice) | `[budget.<tier>].summary_tokens` |
 | `CrossChannelContextLayer.max_tokens` | `300` (voice) | `[budget.<tier>].cross_channel_tokens` |
 | `CrossChannelContextLayer.ttl_seconds` | `600` | constructor arg |
+| `ReflectionLayer.max_reflections` | `3` (voice) | `[budget.<tier>].max_reflections` |
+| `ReflectionLayer.max_tokens` | `300` (voice) | `[budget.<tier>].reflection_tokens` |
 | `SummaryWorker.turns_threshold` | `10` | constructor arg |
 | `SummaryWorker.cross_k` | `5` | constructor arg |
 | `SummaryWorker.tick_interval_s` | `5.0` | class default |
 | `FactExtractor.batch_size` | `10` | constructor arg |
 | `FactExtractor.tick_interval_s` | `15.0` | class default |
 | `PeopleDossierWorker.tick_interval_s` | `20.0` | class default |
+| `ReflectionWorker.turns_threshold` | `20` | constructor arg |
+| `ReflectionWorker.tick_interval_s` | `60.0` | class default |
 
 ### Per-channel overrides
 

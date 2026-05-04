@@ -994,3 +994,83 @@ class RagContextLayer:
         latest_turn = self._store.latest_fts_id(familiar_id=ctx.familiar_id)
         latest_fact = self._store.latest_fact_id(familiar_id=ctx.familiar_id)
         return f"{cue}|t{latest_turn}|f{latest_fact}"
+
+
+class ReflectionLayer:
+    """Recent reflections block — higher-order syntheses with citations (M3).
+
+    Reads ``reflections`` (maintained by :class:`ReflectionWorker`) and
+    renders the most recent ``max_reflections`` rows scoped to the
+    active channel (channel-agnostic rows always surface). Citations
+    render as breadcrumbs ``[T#42, F#7]`` so the reader (the LLM) can
+    map a synthesis back to its provenance. Reflections that cite at
+    least one superseded fact are flagged ``(stale)`` — never deleted,
+    per the supersession-over-overwrite rule.
+
+    Invalidation: ``(latest_reflection_id, channel_id, max_reflections)``.
+    A new reflection write or a fact supersession is detected by
+    :class:`Assembler` cache walks already keyed on ``latest_*_id``;
+    here we just key on the newest reflection's id.
+    """
+
+    name: str = "reflection"
+
+    def __init__(
+        self,
+        *,
+        store: HistoryStore,
+        max_reflections: int = 3,
+        max_tokens: int | None = None,
+    ) -> None:
+        self._store = store
+        self._max_reflections = max(0, max_reflections)
+        self._max_tokens = max_tokens
+
+    async def build(self, ctx: AssemblyContext) -> str:
+        if self._max_reflections <= 0:
+            return ""
+        rows = self._store.recent_reflections(
+            familiar_id=ctx.familiar_id,
+            channel_id=ctx.channel_id,
+            limit=self._max_reflections,
+        )
+        if not rows:
+            return ""
+        # Single batched query for stale citations across every row.
+        all_cited_facts: list[int] = []
+        for r in rows:
+            all_cited_facts.extend(r.cited_fact_ids)
+        stale = self._store.superseded_fact_ids(
+            familiar_id=ctx.familiar_id, fact_ids=all_cited_facts
+        )
+
+        sections: list[str] = []
+        remaining = self._max_tokens
+        for r in rows:
+            citations: list[str] = []
+            citations.extend(f"T#{tid}" for tid in r.cited_turn_ids)
+            citations.extend(f"F#{fid}" for fid in r.cited_fact_ids)
+            cite_block = f" [{', '.join(citations)}]" if citations else ""
+            stale_block = (
+                " (stale)" if any(fid in stale for fid in r.cited_fact_ids) else ""
+            )
+            line = f"- {r.text.strip()}{cite_block}{stale_block}"
+            if remaining is not None:
+                cost = estimate_tokens(line)
+                if cost > remaining and sections:
+                    break
+                line = _truncate_to_tokens(line, max_tokens=remaining)
+                remaining -= estimate_tokens(line)
+            sections.append(line)
+        if not sections:
+            return ""
+        return "## Recent reflections\n\n" + "\n".join(sections)
+
+    def invalidation_key(self, ctx: AssemblyContext) -> str:
+        rows = self._store.recent_reflections(
+            familiar_id=ctx.familiar_id,
+            channel_id=ctx.channel_id,
+            limit=1,
+        )
+        latest_id = rows[0].id if rows else 0
+        return f"ch{ctx.channel_id}|r{latest_id}|cap{self._max_reflections}"

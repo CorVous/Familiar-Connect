@@ -505,10 +505,12 @@ _BUDGET_FIELDS: tuple[str, ...] = (
     "dossier_tokens",
     "summary_tokens",
     "cross_channel_tokens",
+    "reflection_tokens",
     "max_history_turns",
     "max_rag_turns",
     "max_rag_facts",
     "max_dossier_people",
+    "max_reflections",
 )
 
 

@@ -45,17 +45,30 @@ beat equally-matched casual ones. See
 [Memory strategies — retrieval ranking](memory-strategies.md#3-retrieval-ranking-ragcontextlayer)
 and [Tuning — retrieval ranking](tuning.md#retrieval-ranking-m2).
 
-### M3 — Reflection layer
+### M3 — Reflection layer (shipped)
 
-Today: summaries (per-channel) and facts (atomic). No higher-order
-syntheses.
+`reflections` table with `cited_turn_ids` / `cited_fact_ids` (JSON
+arrays) plus `last_turn_id` / `last_fact_id` watermarks snapshotting
+the worker's view at write time. Each row is forever-provenance —
+never edited, never trimmed.
 
-Change: `reflections` table with `cited_turn_ids` /
-`cited_fact_ids`. `ReflectionWorker` ticks slower than the dossier
-worker, asks "what high-level questions do recent events raise?",
-writes one row per answer. `ReflectionLayer` renders citations as
-breadcrumbs. Reflections citing superseded facts are flagged stale
-on read, never deleted.
+`ReflectionWorker` (`src/familiar_connect/processors/reflection_worker.py`)
+ticks every 60 s (slower than `PeopleDossierWorker`'s 20 s); fires
+when at least `turns_threshold` (default 20) new turns have arrived
+since the newest reflection. Asks the background-tier LLM "what
+high-level questions do recent events raise?" and persists each
+answer with at least one cited turn or fact id. Rows whose only
+citations the LLM hallucinates are dropped silently; rows where
+some ids are valid keep the valid subset.
+
+`ReflectionLayer` renders the most recent rows scoped to the active
+channel (channel-agnostic rows always surface) with citation
+breadcrumbs `[T#42, F#7]`. Reflections that cite at least one
+superseded fact are flagged `(stale)` on read — the row is never
+deleted, per the supersession-over-overwrite rule.
+
+Token + count caps live in `[budget.<tier>]` as `reflection_tokens`
+and `max_reflections`. See [Memory strategies — reflections](memory-strategies.md#reflections-m3).
 
 ### M4 — Lorebook layer
 
