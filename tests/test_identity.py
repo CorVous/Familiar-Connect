@@ -180,6 +180,29 @@ class TestFromDiscordMember:
         assert a.global_name is None
         assert a.guild_nick is None
 
+    def test_extracts_pronouns_and_bio_when_present(self) -> None:
+        """Discord profile pronouns + bio surface on Author when exposed.
+
+        Bot tokens don't always populate these — read defensively via
+        ``getattr`` so absent fields stay ``None`` without crashing.
+        """
+        member = SimpleNamespace(
+            id=987,
+            name="ada_l",
+            display_name="Ada",
+            pronouns="she/her",
+            bio="Designs analytical engines.",
+        )
+        a = Author.from_discord_member(member)
+        assert a.pronouns == "she/her"
+        assert a.bio == "Designs analytical engines."
+
+    def test_pronouns_and_bio_default_none(self) -> None:
+        member = SimpleNamespace(id=987, name="ada_l", display_name="Ada")
+        a = Author.from_discord_member(member)
+        assert a.pronouns is None
+        assert a.bio is None
+
 
 class TestFromTwitch:
     def test_builds_from_api_fields(self) -> None:

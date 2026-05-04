@@ -53,6 +53,8 @@ class Author:
     display_name: str | None
     global_name: str | None = None
     guild_nick: str | None = None
+    pronouns: str | None = None
+    bio: str | None = None
     aliases: frozenset[str] = field(default_factory=frozenset)
 
     # ------------------------------------------------------------------
@@ -114,6 +116,8 @@ class Author:
         ``display_name`` is py-cord's resolved view (``nick → global_name
         → name``). ``global_name`` / ``nick`` via ``getattr`` so DM
         ``User`` (no guild → no ``.nick``) and older py-cord still build.
+        ``pronouns`` / ``bio`` are profile-only fields; bot tokens
+        rarely populate them, so getattr defaults to ``None``.
         """
         return cls(
             platform="discord",
@@ -122,6 +126,8 @@ class Author:
             display_name=member.display_name,
             global_name=getattr(member, "global_name", None),
             guild_nick=getattr(member, "nick", None),
+            pronouns=getattr(member, "pronouns", None),
+            bio=getattr(member, "bio", None),
         )
 
     @classmethod

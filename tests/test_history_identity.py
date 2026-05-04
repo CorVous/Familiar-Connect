@@ -42,6 +42,28 @@ class TestAccountsUpsert:
         assert row["username"] == "cass_login"
         assert row["global_name"] == "Cassidy"
 
+    def test_upsert_persists_pronouns_and_bio(self) -> None:
+        """Profile metadata round-trips through the accounts table."""
+        store = HistoryStore(":memory:")
+        author = Author(
+            platform="discord",
+            user_id="222",
+            username="ada_l",
+            display_name="Ada",
+            pronouns="she/her",
+            bio="Designs analytical engines.",
+        )
+        store.upsert_account(author)
+        profile = store.get_account_profile(canonical_key="discord:222")
+        assert profile is not None
+        assert profile.pronouns == "she/her"
+        assert profile.bio == "Designs analytical engines."
+        assert profile.username == "ada_l"
+
+    def test_get_account_profile_missing_returns_none(self) -> None:
+        store = HistoryStore(":memory:")
+        assert store.get_account_profile(canonical_key="discord:999") is None
+
     def test_upsert_updates_existing_row(self) -> None:
         store = HistoryStore(":memory:")
         store.upsert_account(

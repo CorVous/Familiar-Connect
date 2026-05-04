@@ -74,6 +74,71 @@ class TestPeopleDossierLayer:
         assert "pho" in out
 
     @pytest.mark.asyncio
+    async def test_renders_profile_metadata_when_available(self) -> None:
+        """Discord profile fields surface above the dossier body.
+
+        Username, pronouns, and bio belong on the prompt header so the
+        model can address subjects naturally without re-deriving from
+        the dossier text. Each field is optional; render only what's
+        stored.
+        """
+        store = HistoryStore(":memory:")
+        author = Author(
+            platform="discord",
+            user_id="1",
+            username="cass_login",
+            display_name="Cass",
+            global_name="Cass",
+            pronouns="she/her",
+            bio="Lover of pho.",
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi",
+            author=author,
+        )
+        store.upsert_account(author)
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:1",
+            last_fact_id=5,
+            dossier_text="Cass enjoys pho.",
+        )
+        layer = PeopleDossierLayer(store=store)
+        out = await layer.build(_ctx())
+        assert "### Cass" in out
+        assert "@cass_login" in out
+        assert "she/her" in out
+        assert "Lover of pho." in out
+        assert "Cass enjoys pho." in out
+
+    @pytest.mark.asyncio
+    async def test_renders_without_optional_profile_fields(self) -> None:
+        """Missing pronouns/bio degrade gracefully — no empty rows."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi",
+            author=_author("1", display="Cass"),
+        )
+        store.upsert_account(_author("1", display="Cass"))
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:1",
+            last_fact_id=5,
+            dossier_text="Cass enjoys pho.",
+        )
+        layer = PeopleDossierLayer(store=store)
+        out = await layer.build(_ctx())
+        assert "Cass enjoys pho." in out
+        assert "Pronouns:" not in out
+        assert "Bio:" not in out
+
+    @pytest.mark.asyncio
     async def test_renders_dossier_for_mentioned_user(self) -> None:
         """Mentions matter even when the mentioned user hasn't spoken."""
         store = HistoryStore(":memory:")
