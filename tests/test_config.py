@@ -260,23 +260,47 @@ class TestLoadCharacterConfig:
 
 
 class TestBudgets:
-    def test_default_budgets_match_documented_envelopes(
+    def test_shipped_default_voice_budget(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``_default/character.toml`` is the source of truth for voice."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        v = cfg.budgets["voice"]
+        assert v.total_tokens == 3000
+        assert v.recent_history_tokens == 1500
+        assert v.rag_tokens == 450
+        assert v.dossier_tokens == 450
+        assert v.summary_tokens == 300
+        assert v.cross_channel_tokens == 300
+        assert v.max_history_turns == 100
+        assert v.max_rag_turns == 5
+        assert v.max_rag_facts == 3
+        assert v.max_dossier_people == 8
+
+    def test_shipped_default_text_and_background(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.budgets["voice"].total_tokens == 3000
         assert cfg.budgets["text"].total_tokens == 8000
         assert cfg.budgets["background"].total_tokens == 24000
 
-    def test_explicit_total_tokens_overrides_default(
+    def test_partial_override_keeps_other_subcaps(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
+        """Override one knob; the rest inherit from ``_default``."""
         path = tmp_path / "character.toml"
         path.write_text("[budget.voice]\ntotal_tokens = 5000\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.budgets["voice"].total_tokens == 5000
+        v = cfg.budgets["voice"]
+        assert v.total_tokens == 5000
+        # Untouched — TOML deep-merge over the default.
+        assert v.recent_history_tokens == 1500
+        assert v.rag_tokens == 450
+        assert v.max_dossier_people == 8
         # Other tiers untouched.
         assert cfg.budgets["text"].total_tokens == 8000
 
@@ -306,6 +330,14 @@ class TestBudgets:
         with pytest.raises(ConfigError, match="unknown budget tier"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.voice]\nwobble = 5\n")
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_negative_total_rejected(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
@@ -314,10 +346,11 @@ class TestBudgets:
         with pytest.raises(ConfigError, match="total_tokens"):
             load_character_config(path, defaults_path=default_profile_path)
 
-    def test_default_tier_budget_dataclass(self) -> None:
-        # Sanity-check the dataclass standalone.
-        b = TierBudget(total_tokens=1000)
-        assert b.resolved().recent_history_tokens == 500
+    def test_dataclass_default_is_voice_tier(self) -> None:
+        """Programmatic ``TierBudget()`` matches the voice envelope."""
+        b = TierBudget()
+        assert b.total_tokens == 3000
+        assert b.recent_history_tokens == 1500
 
 
 class TestChannelOverrides:

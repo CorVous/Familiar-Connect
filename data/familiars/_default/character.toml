@@ -26,33 +26,61 @@ text_window_size  = 200
 
 # --- Prompt assembly budget ------------------------------------------------
 #
-# Per-tier token envelope for the prompt assembler. ``total_tokens`` is
-# the primary knob; sub-caps (recent_history_tokens, rag_tokens, …) and
-# item caps (max_history_turns, max_dossier_people, …) all derive from
-# it unless explicitly overridden. Drop a sub-cap line if you want the
-# default split.
+# Per-tier token caps for the prompt assembler. Each cap is a hard
+# number — no proportional / "auto" derivation. Override one knob in
+# a per-familiar character.toml and the rest stay put (TOML deep-merge).
 #
-# Defaults are tuned to: voice models perform well up to ~3k tokens;
-# thoughtful (text) replies are fine up to ~8k; background workers
-# can absorb up to 24k.
+# total_tokens          post-assembly trim cap; Budgeter drops oldest
+#                       history turns to fit.
+# recent_history_tokens cap on the recent-history block while building.
+# rag_tokens            cap on the RAG-context block.
+# dossier_tokens        cap on people-dossier block.
+# summary_tokens        cap on the conversation-summary block.
+# cross_channel_tokens  cap on cross-channel context.
+# max_history_turns     hard upper bound on history turn count
+#                       (safety net behind recent_history_tokens).
+# max_rag_turns         hard cap on RAG turn results.
+# max_rag_facts         hard cap on RAG fact results.
+# max_dossier_people    hard cap on dossier rows.
+#
+# Defaults sized for: voice models hold up to ~3 k well; thoughtful
+# (text) replies fine up to ~8 k; offline workers absorb ~24 k.
 
 [budget.voice]
-total_tokens = 3000
-# recent_history_tokens = 1500   # default: total // 2
-# rag_tokens            = 450    # default: total * 15 / 100
-# dossier_tokens        = 450    # default: total * 15 / 100
-# summary_tokens        = 300    # default: total * 10 / 100
-# cross_channel_tokens  = 300    # default: total * 10 / 100
-# max_history_turns     = 100
-# max_dossier_people    = 8
-# max_rag_turns         = 5
-# max_rag_facts         = 3
+total_tokens          = 3000
+recent_history_tokens = 1500
+rag_tokens            = 450
+dossier_tokens        = 450
+summary_tokens        = 300
+cross_channel_tokens  = 300
+max_history_turns     = 100
+max_rag_turns         = 5
+max_rag_facts         = 3
+max_dossier_people    = 8
 
 [budget.text]
-total_tokens = 8000
+total_tokens          = 8000
+recent_history_tokens = 4000
+rag_tokens            = 1200
+dossier_tokens        = 1200
+summary_tokens        = 800
+cross_channel_tokens  = 800
+max_history_turns     = 200
+max_rag_turns         = 8
+max_rag_facts         = 5
+max_dossier_people    = 12
 
 [budget.background]
-total_tokens = 24000
+total_tokens          = 24000
+recent_history_tokens = 12000
+rag_tokens            = 4000
+dossier_tokens        = 4000
+summary_tokens        = 2000
+cross_channel_tokens  = 2000
+max_history_turns     = 500
+max_rag_turns         = 12
+max_rag_facts         = 8
+max_dossier_people    = 16
 
 # --- Turn detection --------------------------------------------------------
 #

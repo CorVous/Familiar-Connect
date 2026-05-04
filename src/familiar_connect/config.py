@@ -10,12 +10,7 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from familiar_connect.budget import (
-    DEFAULT_BACKGROUND_BUDGET,
-    DEFAULT_TEXT_BUDGET,
-    DEFAULT_VOICE_BUDGET,
-    TierBudget,
-)
+from familiar_connect.budget import TierBudget
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -224,11 +219,15 @@ class ChannelOverrides:
 
 
 def _default_budgets() -> dict[str, TierBudget]:
-    return {
-        "voice": DEFAULT_VOICE_BUDGET,
-        "text": DEFAULT_TEXT_BUDGET,
-        "background": DEFAULT_BACKGROUND_BUDGET,
-    }
+    """Programmatic fallback for ``CharacterConfig()`` without TOML.
+
+    The shipped per-tier values live in
+    ``data/familiars/_default/character.toml`` and overlay these at
+    load time. Tests that bypass TOML loading get the dataclass
+    defaults — voice-tier sized; pass an explicit ``TierBudget`` if
+    you need other shapes.
+    """
+    return {tier: TierBudget() for tier in BUDGET_TIER_NAMES}
 
 
 @dataclass(frozen=True)
@@ -378,15 +377,13 @@ def _parse_budgets(raw: dict) -> dict[str, TierBudget]:
     return out
 
 
-_BUDGET_INT_FIELDS_REQUIRED: tuple[str, ...] = ("total_tokens",)
-_BUDGET_INT_FIELDS_OPTIONAL: tuple[str, ...] = (
+_BUDGET_FIELDS: tuple[str, ...] = (
+    "total_tokens",
     "recent_history_tokens",
     "rag_tokens",
     "dossier_tokens",
     "summary_tokens",
     "cross_channel_tokens",
-)
-_BUDGET_INT_FIELDS_HARDCAP: tuple[str, ...] = (
     "max_history_turns",
     "max_rag_turns",
     "max_rag_facts",
@@ -395,11 +392,21 @@ _BUDGET_INT_FIELDS_HARDCAP: tuple[str, ...] = (
 
 
 def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudget:
-    """Validate and merge ``[budget.<tier>]`` over the default envelope."""
+    """Validate and merge ``[budget.<tier>]`` over the default envelope.
 
-    def _positive_int(key: str) -> int | None:
+    Each field is a hard positive int. Keys present in ``raw`` win;
+    keys absent inherit ``default`` (which itself comes from the
+    deep-merged ``_default/character.toml``).
+    """
+    unknown = set(raw) - set(_BUDGET_FIELDS)
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[budget.{tier}] has unknown keys: {bad}"
+        raise ConfigError(msg)
+
+    def _positive_int(key: str, fallback: int) -> int:
         if key not in raw:
-            return None
+            return fallback
         v = raw[key]
         if isinstance(v, bool) or not isinstance(v, int):
             msg = (
@@ -412,33 +419,9 @@ def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudg
             raise ConfigError(msg)
         return v
 
-    known = (
-        _BUDGET_INT_FIELDS_REQUIRED
-        + _BUDGET_INT_FIELDS_OPTIONAL
-        + _BUDGET_INT_FIELDS_HARDCAP
-    )
-    unknown = set(raw) - set(known)
-    if unknown:
-        bad = ", ".join(sorted(unknown))
-        msg = f"[budget.{tier}] has unknown keys: {bad}"
-        raise ConfigError(msg)
-    o = {key: _positive_int(key) for key in known if key in raw}
-    return TierBudget(
-        total_tokens=o.get("total_tokens") or default.total_tokens,
-        recent_history_tokens=o.get(
-            "recent_history_tokens", default.recent_history_tokens
-        ),
-        rag_tokens=o.get("rag_tokens", default.rag_tokens),
-        dossier_tokens=o.get("dossier_tokens", default.dossier_tokens),
-        summary_tokens=o.get("summary_tokens", default.summary_tokens),
-        cross_channel_tokens=o.get(
-            "cross_channel_tokens", default.cross_channel_tokens
-        ),
-        max_history_turns=o.get("max_history_turns") or default.max_history_turns,
-        max_rag_turns=o.get("max_rag_turns") or default.max_rag_turns,
-        max_rag_facts=o.get("max_rag_facts") or default.max_rag_facts,
-        max_dossier_people=o.get("max_dossier_people") or default.max_dossier_people,
-    )
+    return TierBudget(**{
+        key: _positive_int(key, getattr(default, key)) for key in _BUDGET_FIELDS
+    })
 
 
 _VALID_MESSAGE_RENDERING: frozenset[str] = frozenset({"prefixed", "name_only"})

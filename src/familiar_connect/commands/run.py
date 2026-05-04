@@ -168,7 +168,6 @@ def _default_assembler(
     core_path = root.parent / "_default" / "core_instructions.md"
     card_path = root / "character.md"
     store = familiar.history_store
-    resolved = budget.resolved()
     return Assembler(
         layers=[
             CoreInstructionsLayer(path=core_path),
@@ -187,33 +186,33 @@ def _default_assembler(
             ),
             ConversationSummaryLayer(
                 store=store,
-                max_tokens=resolved.summary_tokens,
+                max_tokens=budget.summary_tokens,
             ),
             CrossChannelContextLayer(
                 store=store,
                 viewer_map={},  # populated by per-channel config when present
                 ttl_seconds=600,
-                max_tokens=resolved.cross_channel_tokens,
+                max_tokens=budget.cross_channel_tokens,
             ),
             PeopleDossierLayer(
                 store=store,
                 window_size=window_size,
-                max_people=resolved.max_dossier_people,
-                max_tokens=resolved.dossier_tokens,
+                max_people=budget.max_dossier_people,
+                max_tokens=budget.dossier_tokens,
             ),
             RagContextLayer(
                 store=store,
-                max_results=resolved.max_rag_turns,
-                max_facts=resolved.max_rag_facts,
+                max_results=budget.max_rag_turns,
+                max_facts=budget.max_rag_facts,
                 # Match RecentHistoryLayer's window so RAG only surfaces
                 # turns *older* than what's already shown verbatim.
                 recent_window_size=window_size,
-                max_tokens=resolved.rag_tokens,
+                max_tokens=budget.rag_tokens,
             ),
             RecentHistoryLayer(
                 store=store,
                 window_size=window_size,
-                max_tokens=resolved.recent_history_tokens,
+                max_tokens=budget.recent_history_tokens,
             ),
         ],
         budgeter=Budgeter(budget),

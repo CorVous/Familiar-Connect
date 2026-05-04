@@ -449,53 +449,52 @@ won't require a config schema change.
 The :class:`Budgeter` enforces a per-tier token envelope across the
 assembled prompt. Each dynamic layer self-truncates to its own
 `max_tokens` allocation; the Budgeter then drops oldest history
-turns until the combined `system_prompt + recent_history` fits the
-total. Token estimates use a fast `len(text) / 4` heuristic — no
-real tokenizer on the hot path; sub-microsecond per message.
+turns until the combined `system_prompt + recent_history` fits
+`total_tokens`. Token estimates use a fast `len(text) / 4`
+heuristic — no real tokenizer on the hot path; sub-microsecond per
+message.
 
-`total_tokens` is the only knob most operators need. Sub-caps
-default to a fixed split of the total:
-
-| Sub-cap | Default fraction of `total_tokens` |
-|---|---|
-| `recent_history_tokens` | 50 % |
-| `rag_tokens` | 15 % |
-| `dossier_tokens` | 15 % |
-| `summary_tokens` | 10 % |
-| `cross_channel_tokens` | 10 % |
-
-Item caps (`max_history_turns`, `max_dossier_people`, etc.) are
-hard safety nets — the token caps usually bite first.
+Every cap is a hard number. There is no "auto-fill from total" —
+the source of truth is `data/familiars/_default/character.toml`,
+which spells out each value per tier. Per-familiar overrides
+deep-merge over those defaults, so changing one knob leaves the
+rest in place.
 
 ```toml
 [budget.voice]
-total_tokens = 3000
+total_tokens          = 3000   # post-assembly trim cap
+recent_history_tokens = 1500   # cap on recent-history layer
+rag_tokens            = 450
+dossier_tokens        = 450
+summary_tokens        = 300
+cross_channel_tokens  = 300
+max_history_turns     = 100    # safety net behind recent_history_tokens
+max_rag_turns         = 5
+max_rag_facts         = 3
+max_dossier_people    = 8
 
-[budget.text]
-total_tokens = 8000
+[budget.text]      # same shape, larger envelope
+total_tokens       = 8000
+# …
 
 [budget.background]
-total_tokens = 24000
-
-# Overrides only when a section needs more or less than the default
-# fraction. Drop these lines to inherit the split above.
-[budget.text]
-total_tokens          = 12000
-recent_history_tokens = 6000
-rag_tokens            = 1200
-max_dossier_people    = 12
+total_tokens       = 24000
+# …
 ```
 
-| Tier | Default `total_tokens` | Notes |
+| Tier | Shipped `total_tokens` | Sized for |
 |---|---|---|
-| `voice` | `3000` | Voice models perform well up to this range. |
+| `voice` | `3000` | Voice models hold up to this well; latency budget. |
 | `text` | `8000` | Thoughtful replies; raise toward 16–32 k for capable models. |
-| `background` | `24000` | Offline summary / fact / dossier work. |
+| `background` | `24000` | Offline summary / fact / dossier workers. |
 
-Sub-cap defaults sized for typical voice load (one-line turns); for
-text channels with long-form content the recent-history cap may
-trim before the cosmetic dossier/RAG caps. Bump
-`recent_history_tokens` first if that bites in the wrong direction.
+Override one knob in your familiar's `character.toml`:
+
+```toml
+# data/familiars/aria/character.toml
+[budget.voice]
+total_tokens = 5000   # rest of the voice envelope inherits from _default
+```
 
 ## History / context layers
 
@@ -503,15 +502,15 @@ trim before the cosmetic dossier/RAG caps. Bump
 |---|---|---|
 | `RecentHistoryLayer.window_size` (voice tier) | `100` | `[providers.history].voice_window_size` |
 | `RecentHistoryLayer.window_size` (text tier) | `200` | `[providers.history].text_window_size` |
-| `RecentHistoryLayer.max_tokens` | derived | `[budget.<tier>].recent_history_tokens` |
-| `RagContextLayer.max_results` | derived | `[budget.<tier>].max_rag_turns` |
-| `RagContextLayer.max_facts` | derived | `[budget.<tier>].max_rag_facts` |
-| `RagContextLayer.max_tokens` | derived | `[budget.<tier>].rag_tokens` |
+| `RecentHistoryLayer.max_tokens` | `1500` (voice) | `[budget.<tier>].recent_history_tokens` |
+| `RagContextLayer.max_results` | `5` (voice) | `[budget.<tier>].max_rag_turns` |
+| `RagContextLayer.max_facts` | `3` (voice) | `[budget.<tier>].max_rag_facts` |
+| `RagContextLayer.max_tokens` | `450` (voice) | `[budget.<tier>].rag_tokens` |
 | `RagContextLayer.recent_window_size` | matches history window | constructor arg |
-| `PeopleDossierLayer.max_people` | derived | `[budget.<tier>].max_dossier_people` |
-| `PeopleDossierLayer.max_tokens` | derived | `[budget.<tier>].dossier_tokens` |
-| `ConversationSummaryLayer.max_tokens` | derived | `[budget.<tier>].summary_tokens` |
-| `CrossChannelContextLayer.max_tokens` | derived | `[budget.<tier>].cross_channel_tokens` |
+| `PeopleDossierLayer.max_people` | `8` (voice) | `[budget.<tier>].max_dossier_people` |
+| `PeopleDossierLayer.max_tokens` | `450` (voice) | `[budget.<tier>].dossier_tokens` |
+| `ConversationSummaryLayer.max_tokens` | `300` (voice) | `[budget.<tier>].summary_tokens` |
+| `CrossChannelContextLayer.max_tokens` | `300` (voice) | `[budget.<tier>].cross_channel_tokens` |
 | `CrossChannelContextLayer.ttl_seconds` | `600` | constructor arg |
 | `SummaryWorker.turns_threshold` | `10` | constructor arg |
 | `SummaryWorker.cross_k` | `5` | constructor arg |

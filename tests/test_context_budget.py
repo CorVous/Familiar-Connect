@@ -1,7 +1,8 @@
 """Tests for the prompt-assembly budgeter.
 
-Covers token estimation, per-tier sub-cap derivation, and the
-post-assembly history trimmer that enforces the soft total cap.
+Covers token estimation and the post-assembly history trimmer.
+Per-tier defaults live in ``data/familiars/_default/character.toml``;
+:mod:`tests.test_config` exercises that path.
 """
 
 from __future__ import annotations
@@ -9,9 +10,6 @@ from __future__ import annotations
 import time
 
 from familiar_connect.budget import (
-    DEFAULT_BACKGROUND_BUDGET,
-    DEFAULT_TEXT_BUDGET,
-    DEFAULT_VOICE_BUDGET,
     Budgeter,
     TierBudget,
     estimate_message_tokens,
@@ -56,30 +54,20 @@ class TestEstimateTokens:
         )
 
 
-class TestTierBudgetDefaults:
-    def test_voice_default_is_3000(self) -> None:
-        assert DEFAULT_VOICE_BUDGET.total_tokens == 3000
+class TestTierBudgetFields:
+    def test_overriding_one_field_leaves_others_at_default(self) -> None:
+        """Each cap is independent — no proportional auto-derivation."""
+        a = TierBudget()
+        b = TierBudget(total_tokens=9999)
+        assert b.total_tokens == 9999
+        # Other fields untouched.
+        assert b.recent_history_tokens == a.recent_history_tokens
+        assert b.rag_tokens == a.rag_tokens
+        assert b.max_dossier_people == a.max_dossier_people
 
-    def test_text_default_is_8000(self) -> None:
-        assert DEFAULT_TEXT_BUDGET.total_tokens == 8000
-
-    def test_background_default_is_24000(self) -> None:
-        assert DEFAULT_BACKGROUND_BUDGET.total_tokens == 24000
-
-    def test_resolved_history_is_half_total(self) -> None:
-        b = TierBudget(total_tokens=3000)
-        r = b.resolved()
-        assert r.recent_history_tokens == 1500
-
-    def test_explicit_subcap_overrides_default(self) -> None:
-        b = TierBudget(total_tokens=3000, recent_history_tokens=500)
-        assert b.resolved().recent_history_tokens == 500
-
-    def test_resolved_passes_item_caps_through(self) -> None:
-        b = TierBudget(total_tokens=4000, max_history_turns=42, max_dossier_people=3)
-        r = b.resolved()
-        assert r.max_history_turns == 42
-        assert r.max_dossier_people == 3
+    def test_explicit_subcap_used_directly(self) -> None:
+        b = TierBudget(recent_history_tokens=500)
+        assert b.recent_history_tokens == 500
 
 
 class TestBudgeterTrim:
