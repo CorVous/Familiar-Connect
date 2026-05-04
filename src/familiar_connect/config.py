@@ -217,6 +217,30 @@ class DiscordTextConfig:
 
 
 @dataclass(frozen=True)
+class MemoryRetrievalConfig:
+    """Ranking weights for :class:`RagContextLayer` (M2).
+
+    Default keeps pre-M2 ordering (BM25-only). Operators opt into
+    importance / recency by raising the matching weight in
+    ``[memory.retrieval]``.
+
+    :param bm25_weight: ranking weight on BM25 quality (best=1.0,
+        worst=0.0 within the candidate batch).
+    :param recency_weight: ranking weight on fact-id rank within
+        the candidate batch (newest=1.0).
+    :param importance_weight: ranking weight on the extractor's 1-10
+        importance hint (``importance/10``). Legacy / unscored facts
+        get the neutral midpoint.
+    :param embedding_weight: M6 placeholder; ignored today.
+    """
+
+    bm25_weight: float = 1.0
+    recency_weight: float = 0.0
+    importance_weight: float = 0.0
+    embedding_weight: float = 0.0
+
+
+@dataclass(frozen=True)
 class ChannelOverrides:
     """Per-channel overrides for latency-sensitive knobs.
 
@@ -270,6 +294,10 @@ class CharacterConfig:
     # explicitly overridden.
     budgets: dict[str, TierBudget] = field(default_factory=_default_budgets)
     discord_text: DiscordTextConfig = field(default_factory=DiscordTextConfig)
+    # Retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
+    memory_retrieval: MemoryRetrievalConfig = field(
+        default_factory=MemoryRetrievalConfig
+    )
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty overrides if none."""
@@ -378,6 +406,16 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     discord_text = _parse_discord_text_config(discord_text_raw)
 
+    memory_raw = data.get("memory", {})
+    if not isinstance(memory_raw, dict):
+        msg = f"[memory] must be a table, got {type(memory_raw).__name__}"
+        raise ConfigError(msg)
+    retrieval_raw = memory_raw.get("retrieval", {})
+    if not isinstance(retrieval_raw, dict):
+        msg = f"[memory.retrieval] must be a table, got {type(retrieval_raw).__name__}"
+        raise ConfigError(msg)
+    memory_retrieval = _parse_memory_retrieval(retrieval_raw)
+
     return CharacterConfig(
         voice_window_size=voice_window_size,
         text_window_size=text_window_size,
@@ -390,6 +428,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         stt=stt,
         budgets=budgets,
         discord_text=discord_text,
+        memory_retrieval=memory_retrieval,
     )
 
 
@@ -504,6 +543,40 @@ def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudg
     return TierBudget(**{
         key: _positive_int(key, getattr(default, key)) for key in _BUDGET_FIELDS
     })
+
+
+_RETRIEVAL_FIELDS: tuple[str, ...] = (
+    "bm25_weight",
+    "recency_weight",
+    "importance_weight",
+    "embedding_weight",
+)
+
+
+def _parse_memory_retrieval(raw: dict) -> MemoryRetrievalConfig:
+    """Validate ``[memory.retrieval]``; non-negative floats only."""
+    unknown = set(raw) - set(_RETRIEVAL_FIELDS)
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[memory.retrieval] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    defaults = MemoryRetrievalConfig()
+    out: dict[str, float] = {f: float(getattr(defaults, f)) for f in _RETRIEVAL_FIELDS}
+    for key in _RETRIEVAL_FIELDS:
+        if key not in raw:
+            continue
+        v = raw[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = (
+                f"[memory.retrieval].{key} must be a non-negative number, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        if v < 0:
+            msg = f"[memory.retrieval].{key} must be non-negative, got {v}"
+            raise ConfigError(msg)
+        out[key] = float(v)
+    return MemoryRetrievalConfig(**out)
 
 
 _VALID_MESSAGE_RENDERING: frozenset[str] = frozenset({"prefixed", "name_only"})

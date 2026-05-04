@@ -168,6 +168,7 @@ def _default_assembler(
     core_path = root.parent / "_default" / "core_instructions.md"
     card_path = root / "character.md"
     store = familiar.history_store
+    retrieval = familiar.config.memory_retrieval
     return Assembler(
         layers=[
             CoreInstructionsLayer(path=core_path),
@@ -208,6 +209,10 @@ def _default_assembler(
                 # turns *older* than what's already shown verbatim.
                 recent_window_size=window_size,
                 max_tokens=budget.rag_tokens,
+                bm25_weight=retrieval.bm25_weight,
+                recency_weight=retrieval.recency_weight,
+                importance_weight=retrieval.importance_weight,
+                embedding_weight=retrieval.embedding_weight,
             ),
             RecentHistoryLayer(
                 store=store,

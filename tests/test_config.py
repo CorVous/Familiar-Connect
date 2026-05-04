@@ -20,6 +20,7 @@ from familiar_connect.config import (
     DeepgramSTTConfig,
     DiscordTextConfig,
     LLMSlotConfig,
+    MemoryRetrievalConfig,
     STTConfig,
     TTSConfig,
     TurnDetectionConfig,
@@ -352,6 +353,64 @@ class TestBudgets:
         b = TierBudget()
         assert b.total_tokens == 3000
         assert b.recent_history_tokens == 1500
+
+
+class TestMemoryRetrieval:
+    """[memory.retrieval] — M2 importance-weighted retrieval weights."""
+
+    def test_shipped_default_weights(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        r = cfg.memory_retrieval
+        assert r.bm25_weight == pytest.approx(1.0)
+        assert r.recency_weight == pytest.approx(0.0)
+        assert r.importance_weight == pytest.approx(0.6)
+        assert r.embedding_weight == pytest.approx(0.0)
+
+    def test_partial_override(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[memory.retrieval]\nimportance_weight = 1.5\nrecency_weight = 0.4\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        r = cfg.memory_retrieval
+        assert r.importance_weight == pytest.approx(1.5)
+        assert r.recency_weight == pytest.approx(0.4)
+        assert r.bm25_weight == pytest.approx(1.0)  # untouched
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[memory.retrieval]\nmagic_weight = 1\n")
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_negative_weight_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[memory.retrieval]\nimportance_weight = -1\n")
+        with pytest.raises(ConfigError, match="non-negative"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_numeric_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[memory.retrieval]\nimportance_weight = "high"\n')
+        with pytest.raises(ConfigError, match="non-negative number"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_dataclass_default_is_pre_m2_bm25_only(self) -> None:
+        r = MemoryRetrievalConfig()
+        assert r.bm25_weight == pytest.approx(1.0)
+        assert r.recency_weight == pytest.approx(0.0)
+        assert r.importance_weight == pytest.approx(0.0)
+        assert r.embedding_weight == pytest.approx(0.0)
 
 
 class TestChannelOverrides:

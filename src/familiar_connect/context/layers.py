@@ -7,6 +7,7 @@ invalidation signal. See plan § Design.4 *Prompt composition*.
 from __future__ import annotations
 
 import hashlib
+import operator
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
@@ -333,6 +334,63 @@ def _trim_rag_lines_to_tokens(
         kept_turns.append(line)
         used += cost
     return kept_facts, kept_turns
+
+
+def _rerank_fact_candidates(
+    scored: list[tuple[Fact, float]],
+    *,
+    limit: int,
+    bm25_weight: float,
+    recency_weight: float,
+    importance_weight: float,
+) -> list[Fact]:
+    """Fuse BM25 / recency / importance into a single rank, keep top N.
+
+    All three signals are mapped to ``[0, 1]`` quality (higher = better)
+    before weighting:
+
+    * **BM25** — FTS5 returns negative numbers (lower = better). The
+      best score in the batch maps to 1.0, the worst to 0.0; ties map
+      to 0.5. Single-result batches always get 1.0.
+    * **Recency** — fact id rank within the batch. Newest = 1.0.
+    * **Importance** — ``importance / 10``. ``None`` → neutral 0.5 so
+      legacy / unscored rows aren't penalised relative to a 5/10.
+
+    Sort is stable on equal scores; ties fall back to BM25 order
+    (the candidate list itself is BM25-ordered when handed in).
+    """
+    if not scored:
+        return []
+    bm25_scores = [s for _, s in scored]
+    bm25_min = min(bm25_scores)
+    bm25_max = max(bm25_scores)
+    bm25_span = bm25_max - bm25_min
+
+    fact_ids_sorted = sorted({f.id for f, _ in scored})
+    recency_rank: dict[int, float] = {}
+    if len(fact_ids_sorted) == 1:
+        recency_rank[fact_ids_sorted[0]] = 1.0
+    else:
+        last = len(fact_ids_sorted) - 1
+        for i, fid in enumerate(fact_ids_sorted):
+            recency_rank[fid] = i / last
+
+    ranked: list[tuple[float, int, Fact]] = []
+    for idx, (fact, bm25) in enumerate(scored):
+        # bm25 is negative; min = best. Normalise so best = 1, worst = 0.
+        bm25_q = (bm25_max - bm25) / bm25_span if bm25_span > 0 else 1.0
+        recency_q = recency_rank[fact.id]
+        importance_q = (fact.importance / 10.0) if fact.importance is not None else 0.5
+        score = (
+            bm25_weight * bm25_q
+            + recency_weight * recency_q
+            + importance_weight * importance_q
+        )
+        # idx is the candidate position from the SQL BM25 sort; used as
+        # a stable tiebreak so equal-scored facts keep deterministic order.
+        ranked.append((score, -idx, fact))
+    ranked.sort(key=operator.itemgetter(0, 1), reverse=True)
+    return [f for _, _, f in ranked[:limit]]
 
 
 def _format_clock_12h(ts: datetime) -> str:
@@ -747,6 +805,20 @@ class RagContextLayer:
     :param context_window: per FTS hit, expand to ``hit.id ±
         context_window`` so each retrieved turn keeps a small
         surrounding context. ``0`` = hit alone (legacy behaviour).
+
+    :param bm25_weight: ranking weight on the BM25 quality of a fact
+        match. Default 1.0 reproduces pre-M2 ordering.
+    :param recency_weight: ranking weight on fact id rank (newer =
+        higher score). 0 disables.
+    :param importance_weight: ranking weight on the extractor's 1-10
+        importance hint. 0 disables (default — opt in via TOML).
+        ``None`` importance is treated as the neutral midpoint (5/10).
+    :param embedding_weight: M6 placeholder; ignored today, accepted
+        so the constructor's surface stabilises ahead of the
+        embedding projector landing.
+    :param fact_overfetch: when any non-default rank weight is set,
+        over-fetch this many BM25 candidates before reranking. Hard
+        cap on extra DB work — never exceeds 4x ``max_facts``.
     """
 
     name: str = "rag_context"
@@ -760,6 +832,11 @@ class RagContextLayer:
         recent_window_size: int = 0,
         max_tokens: int | None = None,
         context_window: int = 1,
+        bm25_weight: float = 1.0,
+        recency_weight: float = 0.0,
+        importance_weight: float = 0.0,
+        embedding_weight: float = 0.0,
+        fact_overfetch: int = 12,
     ) -> None:
         self._store = store
         self._max_results = max_results
@@ -767,7 +844,17 @@ class RagContextLayer:
         self._recent_window_size = recent_window_size
         self._max_tokens = max_tokens
         self._context_window = max(0, context_window)
+        self._bm25_weight = float(bm25_weight)
+        self._recency_weight = float(recency_weight)
+        self._importance_weight = float(importance_weight)
+        self._embedding_weight = float(embedding_weight)
+        self._fact_overfetch = max(int(fact_overfetch), 1)
         self._current_cue: str = ""
+
+    @property
+    def _rerank_facts(self) -> bool:
+        """True when any non-BM25 weight is set; opts the rerank path on."""
+        return self._recency_weight > 0.0 or self._importance_weight > 0.0
 
     def set_current_cue(self, cue: str) -> None:
         self._current_cue = (cue or "").strip()
@@ -791,11 +878,27 @@ class RagContextLayer:
             limit=self._max_results,
             max_id=max_id,
         )
-        fact_results = self._store.search_facts(
-            familiar_id=ctx.familiar_id,
-            query=cue,
-            limit=self._max_facts,
-        )
+        if self._rerank_facts:
+            fetch = min(self._fact_overfetch, self._max_facts * 4)
+            fetch = max(fetch, self._max_facts)
+            scored = self._store.search_facts_scored(
+                familiar_id=ctx.familiar_id,
+                query=cue,
+                limit=fetch,
+            )
+            fact_results = _rerank_fact_candidates(
+                scored,
+                limit=self._max_facts,
+                bm25_weight=self._bm25_weight,
+                recency_weight=self._recency_weight,
+                importance_weight=self._importance_weight,
+            )
+        else:
+            fact_results = self._store.search_facts(
+                familiar_id=ctx.familiar_id,
+                query=cue,
+                limit=self._max_facts,
+            )
         if not turn_results and not fact_results:
             return ""
 

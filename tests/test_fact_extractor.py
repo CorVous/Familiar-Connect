@@ -773,6 +773,110 @@ class TestFactExtractorBiTemporal:
         assert "valid_from" in system_msg.content
 
 
+class TestFactExtractorImportance:
+    """M2 — extractor emits a 1-10 importance hint per fact."""
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_documents_importance_field(self) -> None:
+        """Prompt must teach the LLM the 1-10 importance scale."""
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        assert "importance" in system_msg.content
+        # 1-10 scale referenced explicitly so the model doesn't invent
+        # a 0-1 or 0-100 scale.
+        assert "1" in system_msg.content
+        assert "10" in system_msg.content
+
+    @pytest.mark.asyncio
+    async def test_persists_importance_when_emitted(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Aria is allergic to peanuts.",
+                        "source_turn_ids": [1],
+                        "importance": 9,
+                    },
+                    {
+                        "text": "Boris had cereal for breakfast.",
+                        "source_turn_ids": [3],
+                        "importance": 2,
+                    },
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+        facts = {f.text: f for f in store.recent_facts(familiar_id="fam", limit=10)}
+        assert facts["Aria is allergic to peanuts."].importance == 9
+        assert facts["Boris had cereal for breakfast."].importance == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_importance_persists_as_none(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {"text": "A fact.", "source_turn_ids": [1]},
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert facts[0].importance is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_importance_clamps_or_drops(self) -> None:
+        """Out-of-range / non-integer values reach the store, which clamps."""
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Too high.",
+                        "source_turn_ids": [1],
+                        "importance": 99,
+                    },
+                    {
+                        "text": "Negative.",
+                        "source_turn_ids": [3],
+                        "importance": -3,
+                    },
+                    {
+                        "text": "Garbage.",
+                        "source_turn_ids": [5],
+                        "importance": "very important",
+                    },
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+        facts = {f.text: f for f in store.recent_facts(familiar_id="fam", limit=10)}
+        assert facts["Too high."].importance == 10
+        assert facts["Negative."].importance == 1
+        # Non-numeric input drops silently to None — no poison ranking.
+        assert facts["Garbage."].importance is None
+
+
 def _turn_count_in_prompt(messages: list[Message]) -> int:
     """Count how many ``- [role] ...`` lines appear in the user message.
 

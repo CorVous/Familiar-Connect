@@ -33,7 +33,7 @@ toml baked into the image and tune per host without a rebuild.
 | Turn detection strategy + tuning | `[providers.turn_detection]` + `[providers.turn_detection.local]` | unchanged |
 | Memory projector selection | hard-wired | `[providers.memory]` (M5) |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
-| RAG / fact retrieval ranking | private constants | `[memory.retrieval]` (M2 / M6) |
+| RAG / fact retrieval ranking | `[memory.retrieval]` (M2) | `embedding_weight` wires up at M6 |
 
 ## Environment variables
 
@@ -76,6 +76,11 @@ total_tokens = 3000       # voice models perform well up to ~3 k
 total_tokens = 8000       # thoughtful replies — room for context
 [budget.background]
 total_tokens = 24000      # offline workers — summary, dossier, facts
+
+[memory.retrieval]
+bm25_weight       = 1.0
+recency_weight    = 0.0
+importance_weight = 0.6   # M2 — see § Retrieval ranking
 
 [providers.turn_detection]
 strategy = "deepgram"    # "deepgram" | "ten+smart_turn"
@@ -249,8 +254,11 @@ post.
   `PeopleDossierLayer.max_people`. Hard cap on dossier rows per
   prompt; combined with `dossier_tokens` so the count or the
   byte size, whichever bites first, drops trailing rows.
-- **Roadmap M2 / M6** — importance-weighted retrieval and
-  embeddings are the bigger wins.
+- **`[memory.retrieval].importance_weight`** — bias retrieval
+  toward safety-critical facts (allergies, names, life events).
+  See [Retrieval ranking](#retrieval-ranking-m2).
+- **Roadmap M6** — embeddings for paraphrase recall is the next
+  bigger win.
 
 ### A/B a strategy on one channel
 
@@ -566,6 +574,37 @@ Today's `[channels.<id>]` knobs:
 - `prompt_layers` — explicit ordered list of layer names.
 - `message_rendering` — `"prefixed"` or `"name_only"`.
 
+## Retrieval ranking (M2)
+
+```toml
+[memory.retrieval]
+bm25_weight       = 1.0
+recency_weight    = 0.0
+importance_weight = 0.6   # M2 — fact's 1-10 importance hint
+embedding_weight  = 0.0   # M6 placeholder
+```
+
+`RagContextLayer` over-fetches BM25 candidates (up to 4×
+`max_rag_facts`), normalises each signal to `[0, 1]` within the
+candidate batch, and keeps the top N by weighted sum.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `bm25_weight` | `1.0` | FTS5 BM25 quality. Best in batch = 1.0. |
+| `recency_weight` | `0.0` | Newer fact id in batch = 1.0. |
+| `importance_weight` | `0.6` | `importance/10`. NULL = neutral 0.5. |
+| `embedding_weight` | `0.0` | M6 placeholder; ignored today. |
+
+`importance_weight = 0` reproduces pre-M2 BM25-only ordering. Raise
+it to bias toward safety-critical facts (allergies, names, life
+events); raise `recency_weight` to anchor retrieval to recent
+conversation. Negative weights are rejected at load time.
+
+Importance itself is set per-fact by `FactExtractor`: the prompt
+asks the LLM for a 1–10 integer (1 = throwaway, 5 = ordinary,
+10 = identity-defining / safety-critical). Out-of-range values are
+clamped on the store side; non-numeric input drops to NULL.
+
 ## Forward-looking schema
 
 Documented now so the schema is settled before wiring lands. Not
@@ -598,10 +637,4 @@ projectors = ["rich_note", "people_dossier"]                        # (M5)
 
 [providers.voice_pipeline]
 mode = "cascaded"                # | "s2s" (V5)
-
-[memory.retrieval]
-bm25_weight       = 1.0
-recency_weight    = 0.4
-importance_weight = 0.6          # M2
-embedding_weight  = 0.0          # M6
 ```

@@ -147,6 +147,7 @@ class FactExtractor:
                 source_ids[0]
             )
             valid_to = _parse_iso_dt(fact.get("valid_to"))
+            importance = _parse_importance(fact.get("importance"))
             self._store.append_fact(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
@@ -155,6 +156,7 @@ class FactExtractor:
                 subjects=subjects,
                 valid_from=valid_from,
                 valid_to=valid_to,
+                importance=importance,
             )
             # Mirror resolved subjects into ``turn_mentions``. Bridges
             # bare-text references like "what about Aria?" into the
@@ -294,7 +296,12 @@ def _build_extract_prompt(
         "moment than 'now' (e.g., 'as of last June', 'back in 2019'). "
         "Otherwise omit; the source turn's timestamp is used.\n"
         "- ``valid_to`` (optional ISO-8601 timestamp) — only set when "
-        "the fact is bounded to end at a known point.\n\n"
+        "the fact is bounded to end at a known point.\n"
+        "- ``importance`` (optional integer 1-10) - how much this "
+        "fact should influence future replies. 1 = throwaway aside, "
+        "5 = ordinary detail, 10 = safety-critical / identity-defining "
+        "(allergies, names, long-standing preferences, life events). "
+        "Omit when unsure.\n\n"
         "Skip small talk and transient feelings. If nothing useful, "
         "reply with []. Do NOT emit self-capability statements about "
         "yourself, the assistant, or your own limitations (e.g., 'I "
@@ -361,8 +368,39 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
             "subject_keys": subject_keys,
             "valid_from": item.get("valid_from"),
             "valid_to": item.get("valid_to"),
+            "importance": item.get("importance"),
         })
     return out
+
+
+def _parse_importance(raw: object) -> int | None:
+    """Coerce LLM-emitted importance to an int; ``None`` for missing / non-numeric.
+
+    Out-of-range values are passed through verbatim — :meth:`HistoryStore.append_fact`
+    clamps to ``[1, 10]``. Non-integer / non-numeric input degrades to
+    ``None`` rather than 0; the store treats ``None`` as the neutral
+    midpoint at rank time.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            try:
+                return int(float(s))
+            except ValueError:
+                return None
+    return None
 
 
 def _parse_iso_dt(raw: object) -> datetime | None:

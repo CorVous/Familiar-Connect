@@ -149,6 +149,9 @@ class Fact:
         legacy rows pre-M1.
     :param valid_to: world-time — when the fact stopped applying;
         ``None`` while still in effect.
+    :param importance: 1-10 hint for retrieval ranking (M2). ``None``
+        on legacy rows or when the extractor declined to score.
+        Treated as the neutral midpoint by rank-time consumers.
     """
 
     id: int
@@ -162,6 +165,7 @@ class Fact:
     subjects: tuple[FactSubject, ...] = ()
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    importance: int | None = None
 
 
 _SCHEMA = """
@@ -267,7 +271,8 @@ CREATE TABLE IF NOT EXISTS facts (
     superseded_by     INTEGER,            -- NULL = current; FK-by-convention
     subjects_json     TEXT,               -- JSON list; NULL = legacy fact
     valid_from        TEXT,               -- world-time start; NULL = legacy
-    valid_to          TEXT                -- world-time end; NULL = still applies
+    valid_to          TEXT,               -- world-time end; NULL = still applies
+    importance        INTEGER             -- 1-10; NULL = unknown / legacy
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_familiar
@@ -620,6 +625,8 @@ class HistoryStore:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT")
             if "valid_to" not in facts_cols:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN valid_to TEXT")
+            if "importance" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN importance INTEGER")
             self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -1487,7 +1494,7 @@ class HistoryStore:
             SELECT id, familiar_id, channel_id, text,
                    source_turn_ids, created_at,
                    superseded_at, superseded_by, subjects_json,
-                   valid_from, valid_to
+                   valid_from, valid_to, importance
               FROM facts
              WHERE familiar_id = ?
                AND id > ?
@@ -1607,6 +1614,7 @@ class HistoryStore:
         subjects: Iterable[FactSubject] = (),
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
+        importance: int | None = None,
     ) -> Fact:
         """Persist one fact. ``source_turn_ids`` and ``subjects`` stored as JSON.
 
@@ -1618,6 +1626,11 @@ class HistoryStore:
         defaults to ``created_at``; callers (e.g. ``FactExtractor``)
         pass the source turn's timestamp explicitly. ``valid_to``
         defaults to ``None`` — fact still applies.
+
+        ``importance`` is the extractor's 1-10 ranking hint (M2).
+        Out-of-range values clamp to ``[1, 10]`` so a stray LLM number
+        can't poison rank-time math. ``None`` is preserved verbatim —
+        downstream consumers treat it as a neutral midpoint.
         """
         ids = [int(i) for i in source_turn_ids]
         subjects_tuple = tuple(subjects)
@@ -1634,12 +1647,17 @@ class HistoryStore:
         )
         ts = datetime.now(tz=UTC)
         valid_from_eff = valid_from if valid_from is not None else ts
+        importance_eff: int | None
+        if importance is None:
+            importance_eff = None
+        else:
+            importance_eff = max(1, min(10, int(importance)))
         cur = self._conn.execute(
             """
             INSERT INTO facts (familiar_id, channel_id, text,
                                source_turn_ids, created_at, subjects_json,
-                               valid_from, valid_to)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               valid_from, valid_to, importance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -1650,6 +1668,7 @@ class HistoryStore:
                 subjects_blob,
                 valid_from_eff.isoformat(),
                 valid_to.isoformat() if valid_to is not None else None,
+                importance_eff,
             ),
         )
         self._conn.commit()
@@ -1663,6 +1682,7 @@ class HistoryStore:
             subjects=subjects_tuple,
             valid_from=valid_from_eff,
             valid_to=valid_to,
+            importance=importance_eff,
         )
 
     def recent_facts(
@@ -1693,7 +1713,7 @@ class HistoryStore:
             SELECT id, familiar_id, channel_id, text,
                    source_turn_ids, created_at,
                    superseded_at, superseded_by, subjects_json,
-                   valid_from, valid_to
+                   valid_from, valid_to, importance
               FROM facts
              WHERE familiar_id = ?
                {where}
@@ -1733,7 +1753,7 @@ class HistoryStore:
             SELECT f.id, f.familiar_id, f.channel_id, f.text,
                    f.source_turn_ids, f.created_at,
                    f.superseded_at, f.superseded_by, f.subjects_json,
-                   f.valid_from, f.valid_to
+                   f.valid_from, f.valid_to, f.importance
               FROM fts_facts AS fts
               JOIN facts AS f ON f.id = fts.rowid
              WHERE fts_facts MATCH ?
@@ -1745,6 +1765,48 @@ class HistoryStore:
             (match_expr, familiar_id, *params, limit),
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
+
+    def search_facts_scored(
+        self,
+        *,
+        familiar_id: str,
+        query: str,
+        limit: int,
+        include_superseded: bool = False,
+        as_of: datetime | None = None,
+    ) -> list[tuple[Fact, float]]:
+        """Like :meth:`search_facts`, but pairs each row with its BM25 score.
+
+        FTS5's ``bm25()`` returns negative numbers — lower = better
+        match. Exposed verbatim so :class:`RagContextLayer` can fuse it
+        with importance and recency at rank time (M2).
+        """
+        if limit <= 0:
+            return []
+        match_expr = _build_fts_match(query)
+        if not match_expr:
+            return []
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of, alias="f"
+        )
+        rows = self._conn.execute(
+            f"""
+            SELECT f.id, f.familiar_id, f.channel_id, f.text,
+                   f.source_turn_ids, f.created_at,
+                   f.superseded_at, f.superseded_by, f.subjects_json,
+                   f.valid_from, f.valid_to, f.importance,
+                   bm25(fts_facts) AS bm25_score
+              FROM fts_facts AS fts
+              JOIN facts AS f ON f.id = fts.rowid
+             WHERE fts_facts MATCH ?
+               AND f.familiar_id = ?
+               {where}
+             ORDER BY bm25(fts_facts) ASC, f.id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            (match_expr, familiar_id, *params, limit),
+        ).fetchall()
+        return [(_row_to_fact(r), float(r["bm25_score"])) for r in rows]
 
     def latest_fact_id(self, *, familiar_id: str) -> int:
         """Return highest ``facts.id`` for ``familiar_id``; 0 if none.
@@ -1844,6 +1906,10 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
         valid_to_raw = row["valid_to"]
     except (IndexError, KeyError):
         valid_to_raw = None
+    try:
+        importance_raw = row["importance"]
+    except (IndexError, KeyError):
+        importance_raw = None
     return Fact(
         id=int(row["id"]),
         familiar_id=str(row["familiar_id"]),
@@ -1866,6 +1932,7 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
         valid_to=(
             datetime.fromisoformat(valid_to_raw) if valid_to_raw is not None else None
         ),
+        importance=int(importance_raw) if importance_raw is not None else None,
     )
 
 

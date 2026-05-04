@@ -21,14 +21,29 @@ and closing the voice-latency gap to sub-1 s.
 
 ## Memory
 
-### M2 — Importance-weighted retrieval
+### M2 — Importance-weighted retrieval (shipped)
 
-Today: BM25 + recent-window exclusion.
+`FactExtractor` emits a 1–10 importance hint per fact (prompt teaches
+the scale: 1 = throwaway, 5 = ordinary, 10 = identity-defining /
+safety-critical). Persisted on the `facts` table as a nullable
+`importance INTEGER`; legacy rows read back as `None` and rank as
+the neutral midpoint. `HistoryStore.search_facts_scored` exposes
+BM25 verbatim so `RagContextLayer` can fuse three signals at rank
+time:
 
-Change: extend `FactExtractor` to emit a 1–10 importance score,
-persist alongside the fact, fold into `RagContextLayer` ranking.
-Weights configurable in TOML (see [Tuning](tuning.md)). One extra
-field per extraction, large UX win.
+```toml
+[memory.retrieval]
+bm25_weight       = 1.0
+recency_weight    = 0.0
+importance_weight = 0.6
+embedding_weight  = 0.0   # M6 placeholder
+```
+
+Defaults reproduce pre-M2 ordering when `importance_weight = 0`;
+the shipped default raises it to `0.6` so safety-critical facts
+beat equally-matched casual ones. See
+[Memory strategies — retrieval ranking](memory-strategies.md#3-retrieval-ranking-ragcontextlayer)
+and [Tuning — retrieval ranking](tuning.md#retrieval-ranking-m2).
 
 ### M3 — Reflection layer
 

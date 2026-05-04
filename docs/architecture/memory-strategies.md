@@ -49,8 +49,8 @@ Every writer is watermark-driven and idempotent; deleting a
 side-index table rebuilds it from `turns`. See
 [Context pipeline](context-pipeline.md) for watermark semantics.
 
-Reads are multi-signal: BM25 + recent-window exclusion today; M2
-adds importance, M6 adds embeddings.
+Reads are multi-signal: BM25 + recent-window exclusion + a 1-10
+importance hint per fact (M2). M6 adds embeddings.
 
 ## Swap points
 
@@ -75,19 +75,27 @@ or `CogneeProjector` runs alongside or replaces. Selected via
 
 ### 3. Retrieval ranking (`RagContextLayer`)
 
-Today's ranking combines BM25 score and recency. M2 widens to
-four signals (BM25 × recency × importance × embedding once M6
-ships), TOML-driven:
+Three signals fuse at rank time, TOML-driven:
 
 ```toml
 [memory.retrieval]
 bm25_weight       = 1.0
-recency_weight    = 0.4
-importance_weight = 0.6
-embedding_weight  = 0.0   # 0 disables until M6
+recency_weight    = 0.0
+importance_weight = 0.6   # M2 — fact's 1-10 hint
+embedding_weight  = 0.0   # M6 — disabled until embeddings ship
 ```
 
-See [Tuning](tuning.md#forward-looking-schema).
+The layer over-fetches BM25 candidates (up to 4× `max_rag_facts`),
+normalises each signal to `[0, 1]` within the candidate batch, and
+keeps the top N by weighted sum:
+
+- **BM25 quality** — best score in the batch maps to 1.0.
+- **Recency** — newest fact id in the batch = 1.0.
+- **Importance** — `importance/10`. Legacy / unscored rows
+  (`importance IS NULL`) get the neutral midpoint, never zero.
+
+`importance_weight = 0` reproduces pre-M2 ordering. See
+[Tuning — retrieval ranking](tuning.md#retrieval-ranking-m2).
 
 ## Bi-temporal facts
 

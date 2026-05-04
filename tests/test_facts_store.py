@@ -565,3 +565,124 @@ class TestFactBiTemporal:
         assert len(facts) == 1
         assert facts[0].valid_from is None
         assert facts[0].valid_to is None
+
+
+class TestFactImportance:
+    """Importance score (M2): 1-10 hint for retrieval ranking.
+
+    Persisted alongside each fact; consumed by ``RagContextLayer``.
+    Optional — legacy rows and extractions that omit it read back as
+    ``None`` and are treated as the neutral midpoint at rank time.
+    """
+
+    def test_append_with_importance_roundtrip(self) -> None:
+        store = HistoryStore(":memory:")
+        fact = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria is allergic to peanuts.",
+            source_turn_ids=[1],
+            importance=9,
+        )
+        assert fact.importance == 9
+        recents = store.recent_facts(familiar_id="fam", limit=10)
+        assert recents[0].importance == 9
+
+    def test_importance_defaults_none(self) -> None:
+        store = HistoryStore(":memory:")
+        fact = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Casual aside.",
+            source_turn_ids=[1],
+        )
+        assert fact.importance is None
+
+    def test_importance_clamped_to_range(self) -> None:
+        """Out-of-range values clamp to [1, 10] so the LLM can't poison ranks."""
+        store = HistoryStore(":memory:")
+        low = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="too low.",
+            source_turn_ids=[1],
+            importance=0,
+        )
+        high = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="too high.",
+            source_turn_ids=[2],
+            importance=42,
+        )
+        assert low.importance == 1
+        assert high.importance == 10
+
+    def test_search_facts_scored_returns_bm25(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria likes strawberries.",
+            source_turn_ids=[1],
+            importance=8,
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Boris likes strawberries too.",
+            source_turn_ids=[2],
+            importance=2,
+        )
+        scored = store.search_facts_scored(familiar_id="fam", query="strawb", limit=5)
+        assert len(scored) == 2
+        # bm25 is a real number; both rows should score (FTS5 returns negative
+        # numbers, lower = better — exposed verbatim so callers can rerank).
+        for fact, score in scored:
+            assert isinstance(fact, Fact)
+            assert isinstance(score, float)
+        # Order matches default search_facts (BM25 ascending = best first).
+        assert scored[0][1] <= scored[1][1]
+
+    def test_migration_adds_importance_column(self, tmp_path: Path) -> None:
+        """Pre-existing ``facts`` tables get ``importance`` added.
+
+        Legacy rows return ``importance=None``; no backfill — forward-only.
+        """
+        db_path = tmp_path / "history.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE facts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id       TEXT    NOT NULL,
+                channel_id        INTEGER,
+                text              TEXT    NOT NULL,
+                source_turn_ids   TEXT    NOT NULL,
+                created_at        TEXT    NOT NULL,
+                superseded_at     TEXT,
+                superseded_by     INTEGER,
+                subjects_json     TEXT,
+                valid_from        TEXT,
+                valid_to          TEXT
+            );
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            );
+            INSERT INTO facts (familiar_id, channel_id, text,
+                               source_turn_ids, created_at)
+            VALUES ('fam', 1, 'Legacy fact.', '[1]', '2026-04-26T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        store = HistoryStore(db_path)
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].importance is None
