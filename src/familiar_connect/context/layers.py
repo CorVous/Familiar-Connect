@@ -18,6 +18,7 @@ from familiar_connect.budget import (
     estimate_message_tokens,
     estimate_tokens,
 )
+from familiar_connect.history.store import HistoryTurn
 from familiar_connect.llm import Message, sanitize_name
 
 if TYPE_CHECKING:
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
         AccountProfile,
         Fact,
         HistoryStore,
-        HistoryTurn,
     )
     from familiar_connect.identity import Author
 
@@ -148,10 +148,14 @@ class RecentHistoryLayer:
         store: HistoryStore,
         window_size: int = 20,
         max_tokens: int | None = None,
+        coalesce_max_gap_seconds: float = 45.0,
     ) -> None:
         self._store = store
         self._window_size = window_size
         self._max_tokens = max_tokens
+        # 0 disables; otherwise consecutive same-speaker turns within
+        # this gap collapse into one rendered message.
+        self._coalesce_max_gap_seconds = coalesce_max_gap_seconds
 
     async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
         return ""
@@ -178,11 +182,22 @@ class RecentHistoryLayer:
         Mention rewriting. Discord ``<@USER_ID>`` / ``<@!USER_ID>``
         become ``[@DisplayName]`` via :meth:`HistoryStore.resolve_label`
         — symmetric with the LLM's expected output form.
+
+        Voice-fragment coalescing. Deepgram emits one ``user`` turn per
+        segment-final, so a long monologue arrives as several
+        consecutive same-speaker rows. Merge them into one rendered
+        message — earliest timestamp, content joined by single space —
+        when neither side carries a platform message id or reply
+        marker, and the gap between them is within
+        ``coalesce_max_gap_seconds``.
         """
         turns = self._store.recent(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id or 0,
             limit=self._window_size,
+        )
+        turns = _coalesce_voice_fragments(
+            turns, max_gap_seconds=self._coalesce_max_gap_seconds
         )
         in_window_msg_ids = {
             t.platform_message_id for t in turns if t.platform_message_id
@@ -200,6 +215,62 @@ class RecentHistoryLayer:
         if self._max_tokens is None:
             return rendered
         return _trim_messages_to_token_cap(rendered, self._max_tokens)
+
+
+def _coalesce_voice_fragments(
+    turns: list[HistoryTurn], *, max_gap_seconds: float
+) -> list[HistoryTurn]:
+    """Collapse consecutive same-speaker voice fragments.
+
+    Merges turns where:
+    - same ``role`` and same ``author.canonical_key``
+    - both sides lack ``platform_message_id`` and ``reply_to_message_id``
+      (Discord text turns and explicit replies are out of scope)
+    - timestamp gap ≤ ``max_gap_seconds``
+
+    Merged turn keeps the earliest timestamp and joins content with a
+    single space. ``max_gap_seconds <= 0`` disables coalescing.
+    """
+    if max_gap_seconds <= 0 or not turns:
+        return turns
+    merged: list[HistoryTurn] = []
+    for turn in turns:
+        if not merged:
+            merged.append(turn)
+            continue
+        prev = merged[-1]
+        if _can_coalesce(prev, turn, max_gap_seconds=max_gap_seconds):
+            merged[-1] = HistoryTurn(
+                id=prev.id,
+                timestamp=prev.timestamp,
+                role=prev.role,
+                author=prev.author,
+                content=f"{prev.content} {turn.content}",
+                channel_id=prev.channel_id,
+                platform_message_id=None,
+                reply_to_message_id=None,
+                guild_id=prev.guild_id,
+            )
+        else:
+            merged.append(turn)
+    return merged
+
+
+def _can_coalesce(
+    prev: HistoryTurn, curr: HistoryTurn, *, max_gap_seconds: float
+) -> bool:
+    if prev.role != curr.role:
+        return False
+    if prev.author is None or curr.author is None:
+        return False
+    if prev.author.canonical_key != curr.author.canonical_key:
+        return False
+    if prev.platform_message_id or curr.platform_message_id:
+        return False
+    if prev.reply_to_message_id or curr.reply_to_message_id:
+        return False
+    gap = (curr.timestamp - prev.timestamp).total_seconds()
+    return 0 <= gap <= max_gap_seconds
 
 
 def _render_fact_line(

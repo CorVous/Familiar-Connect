@@ -31,6 +31,11 @@ Surface today:
 - `[providers.history].voice_window_size` / `.text_window_size` —
   recent-history layer windows, tiered by responder (defaults 20 / 30).
   Stopgap until a dynamic budgeter ships.
+- `[providers.history].coalesce_max_gap_seconds` — collapse
+  consecutive same-speaker voice fragments at prompt-render time when
+  the gap between them is within this many seconds. Default `45.0`;
+  `0` disables. Discord text turns are unaffected (they carry
+  `platform_message_id`, which suppresses coalescing).
 - `[providers.turn_detection].strategy` — `"deepgram"` (default) or
   `"ten+smart_turn"`. See [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 - `[providers.stt]` + `[providers.stt.deepgram]` — STT backend

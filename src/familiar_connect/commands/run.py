@@ -240,6 +240,9 @@ def _default_assembler(
                 store=store,
                 window_size=window_size,
                 max_tokens=budget.recent_history_tokens,
+                coalesce_max_gap_seconds=(
+                    familiar.config.recent_history_coalesce_max_gap_seconds
+                ),
             ),
         ],
         budgeter=Budgeter(budget),

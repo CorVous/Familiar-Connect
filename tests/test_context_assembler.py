@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -210,6 +211,222 @@ class TestRecentHistoryLayer:
         store = HistoryStore(":memory:")
         layer = RecentHistoryLayer(store=store, window_size=20)
         assert not await layer.build(_ctx(channel_id=1))
+
+
+class TestRecentHistoryCoalesceFragments:
+    """Consecutive same-speaker fragments collapse into one message.
+
+    Voice transcription emits one ``user`` turn per Deepgram
+    segment-final, so a long monologue arrives as 4-6 rows in a row
+    from the same speaker (no ``platform_message_id`` / no
+    ``reply_to_message_id``). Render them as one message with the
+    earliest timestamp and content joined by a single space.
+    """
+
+    @staticmethod
+    def _set_turn_timestamp(store: HistoryStore, turn_id: int, ts: datetime) -> None:
+        store._conn.execute(
+            "UPDATE turns SET timestamp = ? WHERE id = ?",
+            (ts.isoformat(), turn_id),
+        )
+        store._conn.commit()
+
+    @pytest.mark.asyncio
+    async def test_consecutive_same_speaker_voice_fragments_merge(self) -> None:
+        store = HistoryStore(":memory:")
+        cass = Author(
+            platform="discord", user_id="111", username="cass", display_name="Cassidy"
+        )
+        base = datetime(2026, 5, 5, 1, 35, tzinfo=UTC)
+        fragments = [
+            "I okay.",
+            "So, Tam, here's the etiquette.",
+            "Big Discord calls like this. Right?",
+            "You can jump in",
+        ]
+        for i, text in enumerate(fragments):
+            row = store.append_turn(
+                familiar_id="fam",
+                channel_id=10,
+                role="user",
+                content=text,
+                author=cass,
+            )
+            self._set_turn_timestamp(store, row.id, base + timedelta(seconds=2 * i))
+
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=10))
+
+        user_msgs = [m for m in messages if m.role == "user"]
+        assert len(user_msgs) == 1
+        # earliest timestamp wins; fragments joined with a single space
+        assert re.match(
+            r"^\[01:35 Cassidy\] I okay\. So, Tam, here's the etiquette\."
+            r" Big Discord calls like this\. Right\? You can jump in$",
+            user_msgs[0].content,
+        ), user_msgs[0].content
+
+    @pytest.mark.asyncio
+    async def test_different_speakers_do_not_merge(self) -> None:
+        store = HistoryStore(":memory:")
+        cass = Author(
+            platform="discord", user_id="1", username="cass", display_name="Cass"
+        )
+        tam = Author(
+            platform="discord", user_id="2", username="tam", display_name="Tam"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hey",
+            author=cass,
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="yo",
+            author=tam,
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        assert len([m for m in messages if m.role == "user"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_assistant_turn_between_breaks_run(self) -> None:
+        store = HistoryStore(":memory:")
+        cass = Author(
+            platform="discord", user_id="1", username="cass", display_name="Cass"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="part one",
+            author=cass,
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content="ack",
+            author=None,
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="part two",
+            author=cass,
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        assert [m.role for m in messages] == ["user", "assistant", "user"]
+
+    @pytest.mark.asyncio
+    async def test_text_turns_with_message_id_do_not_merge(self) -> None:
+        """Discord text turns carry ``platform_message_id``.
+
+        Coalescing them would erase per-message id tags that the model
+        relies on to target replies via ``[↩ #id]``.
+        """
+        store = HistoryStore(":memory:")
+        cass = Author(
+            platform="discord", user_id="1", username="cass", display_name="Cass"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="first text msg",
+            author=cass,
+            platform_message_id="100",
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="second text msg",
+            author=cass,
+            platform_message_id="101",
+        )
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        assert len([m for m in messages if m.role == "user"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_gap_exceeding_max_seconds_breaks_run(self) -> None:
+        """Long pause forces a break even with same speaker.
+
+        Defaults to 45s — long enough that a continuous monologue
+        doesn't get split, short enough that "she said something an
+        hour ago, then said something else" stays as two turns.
+        """
+        store = HistoryStore(":memory:")
+        cass = Author(
+            platform="discord", user_id="1", username="cass", display_name="Cass"
+        )
+        base = datetime(2026, 5, 5, 1, 0, tzinfo=UTC)
+        row1 = store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="long ago",
+            author=cass,
+        )
+        self._set_turn_timestamp(store, row1.id, base)
+        row2 = store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="much later",
+            author=cass,
+        )
+        # 60s gap — exceeds 45s default
+        self._set_turn_timestamp(store, row2.id, base + timedelta(seconds=60))
+
+        layer = RecentHistoryLayer(store=store, window_size=20)
+        messages = await layer.recent_messages(_ctx(channel_id=1))
+        assert len([m for m in messages if m.role == "user"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_max_gap_seconds_knob_overrides_default(self) -> None:
+        store = HistoryStore(":memory:")
+        cass = Author(
+            platform="discord", user_id="1", username="cass", display_name="Cass"
+        )
+        base = datetime(2026, 5, 5, 1, 0, tzinfo=UTC)
+        row1 = store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="a",
+            author=cass,
+        )
+        self._set_turn_timestamp(store, row1.id, base)
+        row2 = store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="b",
+            author=cass,
+        )
+        self._set_turn_timestamp(store, row2.id, base + timedelta(seconds=10))
+
+        # 5s ceiling — 10s gap forces split
+        strict = RecentHistoryLayer(
+            store=store, window_size=20, coalesce_max_gap_seconds=5
+        )
+        messages = await strict.recent_messages(_ctx(channel_id=1))
+        assert len([m for m in messages if m.role == "user"]) == 2
+
+        # 0 disables coalescing entirely — back-to-back turns stay split
+        disabled = RecentHistoryLayer(
+            store=store, window_size=20, coalesce_max_gap_seconds=0
+        )
+        messages = await disabled.recent_messages(_ctx(channel_id=1))
+        assert len([m for m in messages if m.role == "user"]) == 2
 
 
 class TestRecentHistoryGuildAwareNames:

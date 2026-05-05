@@ -305,6 +305,9 @@ class CharacterConfig:
     # absolute upper bound on prompt size).
     voice_window_size: int = 100
     text_window_size: int = 200
+    # Consecutive same-speaker voice fragments within this gap (seconds)
+    # collapse into one rendered history message. 0 disables.
+    recent_history_coalesce_max_gap_seconds: float = 45.0
     display_tz: str = "UTC"
     aliases: list[str] = field(default_factory=list)
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
@@ -375,6 +378,9 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     providers_raw = data.get("providers", {})
     history_section = providers_raw.get("history", {})
     voice_window_size, text_window_size = _parse_history_windows(history_section)
+    recent_history_coalesce_max_gap_seconds = _parse_recent_history_coalesce_gap(
+        history_section
+    )
 
     display_tz = str(data.get("display_tz", "UTC"))
 
@@ -455,6 +461,9 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     return CharacterConfig(
         voice_window_size=voice_window_size,
         text_window_size=text_window_size,
+        recent_history_coalesce_max_gap_seconds=(
+            recent_history_coalesce_max_gap_seconds
+        ),
         display_tz=display_tz,
         aliases=aliases,
         llm=llm,
@@ -888,6 +897,24 @@ def _parse_history_windows(raw: dict) -> tuple[int, int]:
         return v
 
     return _positive_int("voice_window_size", 20), _positive_int("text_window_size", 30)
+
+
+def _parse_recent_history_coalesce_gap(raw: dict) -> float:
+    """Parse ``[providers.history].coalesce_max_gap_seconds`` (≥ 0)."""
+    default = 45.0
+    if "coalesce_max_gap_seconds" not in raw:
+        return default
+    v = raw["coalesce_max_gap_seconds"]
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        msg = (
+            "[providers.history].coalesce_max_gap_seconds must be a number, "
+            f"got {type(v).__name__}"
+        )
+        raise ConfigError(msg)
+    if v < 0:
+        msg = f"[providers.history].coalesce_max_gap_seconds must be >= 0, got {v}"
+        raise ConfigError(msg)
+    return float(v)
 
 
 def _parse_turn_detection_config(raw: dict) -> TurnDetectionConfig:
