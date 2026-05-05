@@ -293,10 +293,15 @@ class VoiceResponder:
         gate_open = False  # SilentDetector returned False — speak path live
         budget = get_voice_budget_recorder()
         first_delta_seen = False
+        # exactly one decision line per turn — silent | respond | preempted.
+        # tracked so a cancel-mid-speak after gate_open doesn't double-log.
+        decision_logged = False
 
         try:
             async for delta in self._llm.chat_stream(messages):
                 if scope.is_cancelled():
+                    if not decision_logged:
+                        self._log_preempted(scope.turn_id)
                     return None
                 if not first_delta_seen:
                     budget.record(turn_id=scope.turn_id, phase=PHASE_LLM_FIRST_TOKEN)
@@ -315,11 +320,14 @@ class VoiceResponder:
                     if decision is False:
                         gate_open = True
                         self._log_respond(scope.turn_id)
+                        decision_logged = True
 
                 pending.extend(streamer.feed(delta))
                 if gate_open:
                     while pending:
                         if scope.is_cancelled():
+                            if not decision_logged:
+                                self._log_preempted(scope.turn_id)
                             return None
                         await self._speak(pending.pop(0), scope=scope)
 
@@ -332,6 +340,7 @@ class VoiceResponder:
                 and "".join(accumulated).strip()
             ):
                 self._log_respond(scope.turn_id)
+                decision_logged = True
                 gate_open = True
 
             if gate_open:
@@ -340,6 +349,8 @@ class VoiceResponder:
                     pending.append(tail)
                 while pending:
                     if scope.is_cancelled():
+                        if not decision_logged:
+                            self._log_preempted(scope.turn_id)
                         return None
                     await self._speak(pending.pop(0), scope=scope)
         except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
@@ -356,6 +367,21 @@ class VoiceResponder:
         _logger.info(
             f"{ls.tag('Voice', ls.G)} "
             f"{ls.kv('decision', 'respond', vc=ls.LG)} "
+            f"{ls.kv('turn', turn_id, vc=ls.LC)}"
+        )
+
+    def _log_preempted(self, turn_id: str) -> None:
+        """Cancel-before-decision marker.
+
+        Emitted when ``scope.is_cancelled()`` short-circuits the stream
+        loop before silent/respond latched. Without this line a
+        barge-in chain (continuous speaker) leaves a trail of
+        ``[LLM call] status=cancelled`` with no way to tell which
+        transcript was preempted.
+        """
+        _logger.info(
+            f"{ls.tag('Voice', ls.Y)} "
+            f"{ls.kv('decision', 'preempted', vc=ls.LY)} "
             f"{ls.kv('turn', turn_id, vc=ls.LC)}"
         )
 
