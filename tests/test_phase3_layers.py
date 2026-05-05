@@ -376,6 +376,37 @@ class TestRagContextLayer:
         assert "> [2:29PM Peebo]: my brain's dying" in out
 
     @pytest.mark.asyncio
+    async def test_multiline_message_prefixes_every_line(self) -> None:
+        """Multi-line content keeps the blockquote intact on every line."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content=("*small surprised blink*\n\nzero?\n\n*looks at cassidy*"),
+            author=Author(
+                platform="discord",
+                user_id="222",
+                username="assistant",
+                display_name="assistant",
+            ),
+        )
+        ts = datetime(2026, 5, 2, 3, 2, tzinfo=UTC).isoformat()
+        store._conn.execute("UPDATE turns SET timestamp = ? WHERE id = 1", (ts,))
+        store._conn.commit()
+        layer = RagContextLayer(store=store, max_results=5, context_window=0)
+        layer.set_current_cue("blink")
+        out = await layer.build(_ctx(channel_id=1))
+        assert "> [3:02AM assistant]: *small surprised blink*" in out
+        # every continuation line must keep the `>` prefix; blank lines
+        # render as bare `>` so the blockquote isn't broken.
+        assert "> zero?" in out
+        assert "> *looks at cassidy*" in out
+        # no continuation line should appear without the `>` marker
+        assert "\nzero?" not in out
+        assert "\n*looks at cassidy*" not in out
+
+    @pytest.mark.asyncio
     async def test_includes_neighbour_context_per_hit(self) -> None:
         """Each hit pulls ±context_window neighbours, dedup'd, in order."""
         store = HistoryStore(":memory:")

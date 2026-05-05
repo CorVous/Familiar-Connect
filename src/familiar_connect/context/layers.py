@@ -1032,7 +1032,11 @@ class RagContextLayer:
                     guild_id=ctx.guild_id,
                 )
                 clock = _format_clock_12h(turn.timestamp)
-                lines.append(f"> [{clock} {label}]: {rewritten}")
+                content_lines = rewritten.split("\n")
+                lines.append(f"> [{clock} {label}]: {content_lines[0]}")
+                # keep blockquote intact across newlines; bare `>` for
+                # blank lines so spacing inside the quote is preserved.
+                lines.extend(f"> {cont}" if cont else ">" for cont in content_lines[1:])
             lines.append("")  # blank line between date groups
         if lines and not lines[-1]:
             lines.pop()
