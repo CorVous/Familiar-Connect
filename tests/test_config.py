@@ -261,6 +261,50 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match="text_window_size"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_text_silence_gap_fold_defaults_to_zero(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_silence_gap_fold_seconds == 0.0
+
+    def test_text_silence_gap_fold_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = 1800\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_silence_gap_fold_seconds == 1800.0
+
+    def test_text_silence_gap_fold_rejects_negative(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.history]\ntext_silence_gap_fold_seconds = -1\n"
+        )
+        with pytest.raises(ConfigError, match="text_silence_gap_fold_seconds"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_text_silence_gap_fold_rejects_non_numeric(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[providers.history]\ntext_silence_gap_fold_seconds = "big"\n'
+        )
+        with pytest.raises(ConfigError, match="text_silence_gap_fold_seconds"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_text_silence_gap_fold_accepts_zero(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = 0\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_silence_gap_fold_seconds == 0.0
+
 
 class TestBudgets:
     def test_shipped_default_voice_budget(

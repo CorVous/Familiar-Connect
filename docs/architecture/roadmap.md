@@ -279,14 +279,16 @@ What landed:
 - `[channels.<id>].history_window_size` continues to override the
   per-channel turn cap.
 
-What's still open (worth doing, but not blocking voice quality):
-
-- "Natural" silence-gap boundaries in text channels — fold older
-  turns up to a low-density boundary so prefixes stabilise for
-  prompt caching.
+A2 is now fully closed.
 
 Shipped since initial A2:
 
+- Silence-gap fold for text channels — `[providers.history].text_silence_gap_fold_seconds`
+  (0 = disabled, default). When set, `RecentHistoryLayer` drops turns older than
+  the last qualifying gap before rendering, so the verbatim history block starts
+  at a stable fold point and the system prompt prefix survives across turns for
+  OpenAI/Anthropic prompt caching. The fold index advances only when a newer
+  qualifying gap appears inside the window.
 - Per-channel `total_tokens` overrides — `[channels.<id>].total_tokens`
   in `character.toml` overrides the tier's post-assembly trim cap for
   that channel. `Budgeter.trim()` selects the channel cap when the

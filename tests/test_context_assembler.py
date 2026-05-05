@@ -429,6 +429,115 @@ class TestRecentHistoryCoalesceFragments:
         assert len([m for m in messages if m.role == "user"]) == 2
 
 
+class TestSilenceGapFold:
+    """Turns before the last qualifying silence gap are folded out."""
+
+    @staticmethod
+    def _set_ts(store: HistoryStore, turn_id: int, ts: datetime) -> None:
+        store._conn.execute(
+            "UPDATE turns SET timestamp = ? WHERE id = ?",
+            (ts.isoformat(), turn_id),
+        )
+        store._conn.commit()
+
+    def _store_with_turns(
+        self,
+        *,
+        gaps_seconds: list[float],
+        channel_id: int = 1,
+    ) -> HistoryStore:
+        """Build a store with len(gaps)+1 turns.
+
+        First turn is at t=0; each subsequent turn is offset by the
+        corresponding gap. Roles alternate user/assistant.
+        """
+        store = HistoryStore(":memory:")
+        t = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        roles = ["user", "assistant"]
+        row = store.append_turn(
+            familiar_id="fam",
+            channel_id=channel_id,
+            role=roles[0],
+            content="turn 0",
+            author=None,
+        )
+        self._set_ts(store, row.id, t)
+        for i, gap in enumerate(gaps_seconds):
+            t = t + timedelta(seconds=gap)
+            row = store.append_turn(
+                familiar_id="fam",
+                channel_id=channel_id,
+                role=roles[(i + 1) % 2],
+                content=f"turn {i + 1}",
+                author=None,
+            )
+            self._set_ts(store, row.id, t)
+        return store
+
+    @pytest.mark.asyncio
+    async def test_no_gap_keeps_all_turns(self) -> None:
+        store = self._store_with_turns(gaps_seconds=[60, 60, 60])
+        layer = RecentHistoryLayer(
+            store=store, window_size=20, silence_gap_fold_seconds=300
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert len(msgs) == 4  # all four turns kept
+
+    @pytest.mark.asyncio
+    async def test_gap_folds_turns_before_it(self) -> None:
+        # Turns: 0 --(60s)-- 1 --(600s)-- 2 --(60s)-- 3
+        # Gap at position 2 qualifies (600 >= 300); fold → keep turns 2,3
+        store = self._store_with_turns(gaps_seconds=[60, 600, 60])
+        layer = RecentHistoryLayer(
+            store=store, window_size=20, silence_gap_fold_seconds=300
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        contents = [m.content for m in msgs]
+        assert any("turn 2" in c for c in contents)
+        assert any("turn 3" in c for c in contents)
+        assert not any("turn 0" in c for c in contents)
+        assert not any("turn 1" in c for c in contents)
+
+    @pytest.mark.asyncio
+    async def test_uses_last_qualifying_gap(self) -> None:
+        # Gaps: 600s, 600s, 60s → two qualifying gaps; last at position 2
+        # → keep turns 2,3
+        store = self._store_with_turns(gaps_seconds=[600, 600, 60])
+        layer = RecentHistoryLayer(
+            store=store, window_size=20, silence_gap_fold_seconds=300
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        contents = [m.content for m in msgs]
+        assert any("turn 2" in c for c in contents)
+        assert any("turn 3" in c for c in contents)
+        assert not any("turn 0" in c for c in contents)
+        assert not any("turn 1" in c for c in contents)
+
+    @pytest.mark.asyncio
+    async def test_zero_threshold_keeps_all(self) -> None:
+        # 0 disables the fold entirely.
+        store = self._store_with_turns(gaps_seconds=[3600, 3600])
+        layer = RecentHistoryLayer(
+            store=store, window_size=20, silence_gap_fold_seconds=0
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert len(msgs) == 3
+
+    @pytest.mark.asyncio
+    async def test_gap_at_last_position_keeps_only_newest(self) -> None:
+        # Gap right before the last turn → only the last turn survives.
+        store = self._store_with_turns(gaps_seconds=[60, 60, 3600])
+        layer = RecentHistoryLayer(
+            store=store, window_size=20, silence_gap_fold_seconds=300
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        contents = [m.content for m in msgs]
+        assert any("turn 3" in c for c in contents)
+        assert not any("turn 0" in c for c in contents)
+        assert not any("turn 1" in c for c in contents)
+        assert not any("turn 2" in c for c in contents)
+
+
 class TestRecentHistoryGuildAwareNames:
     """Speaker prefix uses ``resolve_label(canonical_key, guild_id)``.
 

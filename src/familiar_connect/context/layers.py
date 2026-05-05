@@ -155,6 +155,7 @@ class RecentHistoryLayer:
         window_size: int = 20,
         max_tokens: int | None = None,
         coalesce_max_gap_seconds: float = 45.0,
+        silence_gap_fold_seconds: float = 0.0,
     ) -> None:
         self._store = store
         self._window_size = window_size
@@ -162,6 +163,9 @@ class RecentHistoryLayer:
         # 0 disables; otherwise consecutive same-speaker turns within
         # this gap collapse into one rendered message.
         self._coalesce_max_gap_seconds = coalesce_max_gap_seconds
+        # 0 disables; otherwise turns before the last gap >= this
+        # threshold are folded out to stabilise the cache prefix.
+        self._silence_gap_fold_seconds = silence_gap_fold_seconds
 
     async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
         return ""
@@ -209,6 +213,11 @@ class RecentHistoryLayer:
         turns = _coalesce_voice_fragments(
             turns, max_gap_seconds=self._coalesce_max_gap_seconds
         )
+        fold_idx = _silence_fold_index(
+            turns, min_gap_seconds=self._silence_gap_fold_seconds
+        )
+        if fold_idx:
+            turns = turns[fold_idx:]
         in_window_msg_ids = {
             t.platform_message_id for t in turns if t.platform_message_id
         }
@@ -232,6 +241,28 @@ class RecentHistoryLayer:
         if self._max_tokens is None:
             return rendered
         return _trim_messages_to_token_cap(rendered, self._max_tokens)
+
+
+def _silence_fold_index(turns: list[HistoryTurn], *, min_gap_seconds: float) -> int:
+    """Return index of first turn to keep after the last qualifying gap.
+
+    Scans *turns* (oldest-first) and returns the index of the turn
+    immediately following the last gap >= *min_gap_seconds*. Returns 0
+    when no qualifying gap exists (keep all) or when disabled (≤ 0).
+
+    Using the *last* qualifying gap means the fold point advances as
+    the channel fills with new bursts, which keeps the retained window
+    stable: once a gap is no longer the last one, earlier turns were
+    already summarised by the rolling summary worker.
+    """
+    if min_gap_seconds <= 0 or len(turns) < 2:
+        return 0
+    fold_idx = 0
+    for i in range(1, len(turns)):
+        gap = (turns[i].timestamp - turns[i - 1].timestamp).total_seconds()
+        if gap >= min_gap_seconds:
+            fold_idx = i
+    return fold_idx
 
 
 def _coalesce_voice_fragments(

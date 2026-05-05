@@ -340,6 +340,9 @@ class CharacterConfig:
     # Consecutive same-speaker voice fragments within this gap (seconds)
     # collapse into one rendered history message. 0 disables.
     recent_history_coalesce_max_gap_seconds: float = 45.0
+    # Fold text-channel turns before the last silence gap >= this value
+    # into the rolling summary (0 = disabled).
+    text_silence_gap_fold_seconds: float = 0.0
     display_tz: str = "UTC"
     aliases: list[str] = field(default_factory=list)
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
@@ -448,6 +451,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     recent_history_coalesce_max_gap_seconds = _parse_recent_history_coalesce_gap(
         history_section
     )
+    text_silence_gap_fold_seconds = _parse_text_silence_gap_fold(history_section)
 
     display_tz = str(data.get("display_tz", "UTC"))
 
@@ -546,6 +550,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         recent_history_coalesce_max_gap_seconds=(
             recent_history_coalesce_max_gap_seconds
         ),
+        text_silence_gap_fold_seconds=text_silence_gap_fold_seconds,
         display_tz=display_tz,
         aliases=aliases,
         llm=llm,
@@ -1144,6 +1149,23 @@ def _parse_recent_history_coalesce_gap(raw: dict) -> float:
         raise ConfigError(msg)
     if v < 0:
         msg = f"[providers.history].coalesce_max_gap_seconds must be >= 0, got {v}"
+        raise ConfigError(msg)
+    return float(v)
+
+
+def _parse_text_silence_gap_fold(raw: dict) -> float:
+    """Parse ``[providers.history].text_silence_gap_fold_seconds`` (>= 0)."""
+    if "text_silence_gap_fold_seconds" not in raw:
+        return 0.0
+    v = raw["text_silence_gap_fold_seconds"]
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        msg = (
+            "[providers.history].text_silence_gap_fold_seconds must be a "
+            f"number, got {type(v).__name__}"
+        )
+        raise ConfigError(msg)
+    if v < 0:
+        msg = f"[providers.history].text_silence_gap_fold_seconds must be >= 0, got {v}"
         raise ConfigError(msg)
     return float(v)
 

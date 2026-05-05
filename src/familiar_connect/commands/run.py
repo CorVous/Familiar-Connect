@@ -145,6 +145,7 @@ def _default_assembler(
     window_size: int,
     budget: TierBudget,
     channel_total_tokens: dict[int, int] | None = None,
+    silence_gap_fold_seconds: float = 0.0,
     embedder: Embedder | None = None,
 ) -> Assembler:
     """Build the full layer stack with token-aware per-section caps.
@@ -249,6 +250,7 @@ def _default_assembler(
                 coalesce_max_gap_seconds=(
                     familiar.config.recent_history_coalesce_max_gap_seconds
                 ),
+                silence_gap_fold_seconds=silence_gap_fold_seconds,
             ),
         ],
         budgeter=Budgeter(budget, channel_total_tokens=channel_total_tokens),
@@ -306,6 +308,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         window_size=familiar.config.text_window_size,
         budget=familiar.config.budget_for("text", None),
         channel_total_tokens=channel_total_tokens or None,
+        silence_gap_fold_seconds=familiar.config.text_silence_gap_fold_seconds,
         embedder=embedder,
     )
     tts_player: TTSPlayer
