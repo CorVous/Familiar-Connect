@@ -11,6 +11,7 @@ import time
 
 from familiar_connect.budget import (
     Budgeter,
+    ModelBudgetCurve,
     TierBudget,
     estimate_message_tokens,
     estimate_messages_tokens,
@@ -121,6 +122,77 @@ class TestBudgeterTrim:
         bud = Budgeter(TierBudget(total_tokens=10))
         sys_out, _ = bud.trim(system_prompt="LONG " * 1000, history=[])
         assert sys_out == "LONG " * 1000
+
+
+class TestModelBudgetCurve:
+    def test_defaults_are_all_one(self) -> None:
+        c = ModelBudgetCurve()
+        for field_val in vars(c).values():
+            assert field_val == 1.0
+
+    def test_partial_override_leaves_others_at_one(self) -> None:
+        c = ModelBudgetCurve(total_tokens=2.0, rag_tokens=1.5)
+        assert c.total_tokens == 2.0
+        assert c.rag_tokens == 1.5
+        assert c.recent_history_tokens == 1.0
+        assert c.dossier_tokens == 1.0
+
+
+class TestTierBudgetApplyCurve:
+    def test_identity_curve_returns_equivalent_budget(self) -> None:
+        b = TierBudget(total_tokens=4000, rag_tokens=500)
+        assert b.apply_curve(ModelBudgetCurve()) == b
+
+    def test_scale_total_tokens(self) -> None:
+        b = TierBudget(total_tokens=1000)
+        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=2.0))
+        assert scaled.total_tokens == 2000
+        assert scaled.rag_tokens == b.rag_tokens  # unchanged
+
+    def test_scale_rounds_to_nearest_int(self) -> None:
+        b = TierBudget(total_tokens=1000)
+        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=1.5))
+        assert scaled.total_tokens == 1500
+
+    def test_scale_minimum_is_one(self) -> None:
+        # Near-zero multiplier must not produce 0 or negative tokens.
+        b = TierBudget(total_tokens=1)
+        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=0.001))
+        assert scaled.total_tokens >= 1
+
+    def test_scale_all_token_fields(self) -> None:
+        b = TierBudget(
+            total_tokens=8000,
+            recent_history_tokens=2000,
+            rag_tokens=400,
+            dossier_tokens=400,
+            summary_tokens=200,
+            cross_channel_tokens=200,
+            reflection_tokens=200,
+            lorebook_tokens=200,
+        )
+        c = ModelBudgetCurve(
+            total_tokens=2.0,
+            recent_history_tokens=2.0,
+            rag_tokens=1.5,
+            dossier_tokens=1.5,
+            summary_tokens=1.5,
+            cross_channel_tokens=1.5,
+            reflection_tokens=1.5,
+            lorebook_tokens=1.5,
+        )
+        scaled = b.apply_curve(c)
+        assert scaled.total_tokens == 16000
+        assert scaled.recent_history_tokens == 4000
+        assert scaled.rag_tokens == 600
+        assert scaled.dossier_tokens == 600
+
+    def test_scale_count_fields(self) -> None:
+        b = TierBudget(max_rag_turns=5, max_rag_facts=3, max_reflections=3)
+        scaled = b.apply_curve(ModelBudgetCurve(max_rag_turns=2.0, max_rag_facts=2.0))
+        assert scaled.max_rag_turns == 10
+        assert scaled.max_rag_facts == 6
+        assert scaled.max_reflections == b.max_reflections  # unchanged
 
 
 class TestBudgeterChannelOverride:

@@ -284,8 +284,6 @@ What's still open (worth doing, but not blocking voice quality):
 - "Natural" silence-gap boundaries in text channels — fold older
   turns up to a low-density boundary so prefixes stabilise for
   prompt caching.
-- Model-specific context-degradation curves (today the same envelope
-  applies regardless of model; frontier models could absorb more).
 
 Shipped since initial A2:
 
@@ -293,6 +291,11 @@ Shipped since initial A2:
   in `character.toml` overrides the tier's post-assembly trim cap for
   that channel. `Budgeter.trim()` selects the channel cap when the
   `channel_id` matches; other channels use the tier default.
+- Model-specific per-section curves — `[budget.model_curves."<model-name>"]`
+  blocks with float multipliers for every `TierBudget` field. Applied in
+  `CharacterConfig.budget_for()` when the tier's active LLM slot uses
+  that model; all 14 sections are independently tunable. Channel
+  `total_tokens` overrides take precedence over the curve-scaled value.
 
 ## Out of scope
 

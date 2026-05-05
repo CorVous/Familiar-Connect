@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from familiar_connect.budget import TierBudget
+from familiar_connect.budget import ModelBudgetCurve, TierBudget
 from familiar_connect.config import (
     LLM_SLOT_NAMES,
     ChannelOverrides,
@@ -645,6 +645,118 @@ class TestChannelOverrides:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         b = cfg.budget_for("text", None)
         assert b.total_tokens == cfg.budgets["text"].total_tokens
+
+
+class TestBudgetCurves:
+    def test_no_curves_section_empty_dict(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.budget_curves == {}
+
+    def test_curve_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[budget.model_curves."claude-opus-4-7"]\n'
+            "total_tokens = 2.0\n"
+            "rag_tokens = 1.5\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        curve = cfg.budget_curves["claude-opus-4-7"]
+        assert curve.total_tokens == 2.0
+        assert curve.rag_tokens == 1.5
+        assert curve.recent_history_tokens == 1.0  # default
+
+    def test_unknown_curve_field_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[budget.model_curves."claude-opus-4-7"]\n'
+            "no_such_field = 1.5\n"
+        )
+        with pytest.raises(ConfigError, match="no_such_field"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_positive_multiplier_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[budget.model_curves."claude-opus-4-7"]\n'
+            "total_tokens = 0.0\n"
+        )
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_numeric_multiplier_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[budget.model_curves."claude-opus-4-7"]\n'
+            'total_tokens = "big"\n'
+        )
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_budget_for_applies_curve_when_model_matches(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        # Wire fast slot to a model that has a curve.
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "claude-opus-4-7"\napi_key_env = "X"\n\n'
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["voice"]
+        b = cfg.budget_for("voice", None)
+        assert b.total_tokens == round(base.total_tokens * 2.0)
+        # Sub-caps unaffected by a curve that only sets total_tokens.
+        assert b.rag_tokens == base.rag_tokens
+
+    def test_budget_for_no_curve_returns_base(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["voice"]
+        b = cfg.budget_for("voice", None)
+        assert b.total_tokens == base.total_tokens
+
+    def test_budget_for_channel_override_wins_over_curve(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "claude-opus-4-7"\napi_key_env = "X"\n\n'
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n\n'
+            "[channels.99]\ntotal_tokens = 1234\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("voice", 99)
+        # Explicit channel value wins over the scaled value.
+        assert b.total_tokens == 1234
+
+    def test_budget_for_curve_not_applied_for_different_model(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "claude-sonnet-4-6"\napi_key_env = "X"\n\n'
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["voice"]
+        b = cfg.budget_for("voice", None)
+        # Sonnet is active; opus curve should not be applied.
+        assert b.total_tokens == base.total_tokens
 
 
 class TestTurnDetectionConfig:

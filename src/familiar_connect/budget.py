@@ -57,6 +57,42 @@ def estimate_messages_tokens(messages: list[Message]) -> int:
 
 
 @dataclass(frozen=True)
+class ModelBudgetCurve:
+    """Per-section multipliers for a specific model.
+
+    All fields default to 1.0 (identity — no change). Operators set
+    only the sections that differ from the tier default; unset fields
+    stay at the base value.
+
+    Field names mirror :class:`TierBudget` exactly so config parsing
+    can validate keys against this class with a simple set comparison.
+
+    Multipliers must be positive (> 0). Values are applied via
+    :meth:`TierBudget.apply_curve`; each int field is scaled and
+    rounded, with a floor of 1.
+    """
+
+    total_tokens: float = 1.0
+    recent_history_tokens: float = 1.0
+    rag_tokens: float = 1.0
+    dossier_tokens: float = 1.0
+    summary_tokens: float = 1.0
+    cross_channel_tokens: float = 1.0
+    reflection_tokens: float = 1.0
+    lorebook_tokens: float = 1.0
+    max_history_turns: float = 1.0
+    max_rag_turns: float = 1.0
+    max_rag_facts: float = 1.0
+    max_dossier_people: float = 1.0
+    max_reflections: float = 1.0
+    max_lorebook_entries: float = 1.0
+
+
+def _scale(base: int, multiplier: float) -> int:
+    return max(1, round(base * multiplier))
+
+
+@dataclass(frozen=True)
 class TierBudget:
     """Token budget for one assembly tier (voice / text / background).
 
@@ -105,6 +141,33 @@ class TierBudget:
     max_dossier_people: int = 8
     max_reflections: int = 3
     max_lorebook_entries: int = 6
+
+    def apply_curve(self, curve: ModelBudgetCurve) -> TierBudget:
+        """Return a new budget with each field scaled by the curve multiplier."""
+        return TierBudget(
+            total_tokens=_scale(self.total_tokens, curve.total_tokens),
+            recent_history_tokens=_scale(
+                self.recent_history_tokens, curve.recent_history_tokens
+            ),
+            rag_tokens=_scale(self.rag_tokens, curve.rag_tokens),
+            dossier_tokens=_scale(self.dossier_tokens, curve.dossier_tokens),
+            summary_tokens=_scale(self.summary_tokens, curve.summary_tokens),
+            cross_channel_tokens=_scale(
+                self.cross_channel_tokens, curve.cross_channel_tokens
+            ),
+            reflection_tokens=_scale(self.reflection_tokens, curve.reflection_tokens),
+            lorebook_tokens=_scale(self.lorebook_tokens, curve.lorebook_tokens),
+            max_history_turns=_scale(self.max_history_turns, curve.max_history_turns),
+            max_rag_turns=_scale(self.max_rag_turns, curve.max_rag_turns),
+            max_rag_facts=_scale(self.max_rag_facts, curve.max_rag_facts),
+            max_dossier_people=_scale(
+                self.max_dossier_people, curve.max_dossier_people
+            ),
+            max_reflections=_scale(self.max_reflections, curve.max_reflections),
+            max_lorebook_entries=_scale(
+                self.max_lorebook_entries, curve.max_lorebook_entries
+            ),
+        )
 
 
 class Budgeter:

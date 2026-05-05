@@ -10,7 +10,7 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from familiar_connect.budget import TierBudget
+from familiar_connect.budget import ModelBudgetCurve, TierBudget
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -351,6 +351,9 @@ class CharacterConfig:
     # ``total_tokens`` per tier; sub-caps derive from it unless
     # explicitly overridden.
     budgets: dict[str, TierBudget] = field(default_factory=_default_budgets)
+    # Per-model multipliers keyed by model name (e.g. "claude-opus-4-7").
+    # Applied in :meth:`budget_for` when the tier's LLM slot uses that model.
+    budget_curves: dict[str, ModelBudgetCurve] = field(default_factory=dict)
     discord_text: DiscordTextConfig = field(default_factory=DiscordTextConfig)
     # Retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
     memory_retrieval: MemoryRetrievalConfig = field(
@@ -380,12 +383,34 @@ class CharacterConfig:
         return override if override is not None else self.text_window_size
 
     def budget_for(self, tier: str, channel_id: int | None) -> TierBudget:
-        """Tier budget with per-channel ``total_tokens`` applied if set."""
+        """Effective budget: model curve scaled, then channel total_tokens applied.
+
+        Resolution order:
+        1. Start from the tier's base :class:`TierBudget`.
+        2. Apply :class:`ModelBudgetCurve` for the tier's active model if one
+           is registered under ``budget_curves``.
+        3. Override ``total_tokens`` with the per-channel value if set.
+        """
         base = self.budgets[tier]
-        override = self.for_channel(channel_id).total_tokens
-        if override is None:
-            return base
-        return replace(base, total_tokens=override)
+        slot = _TIER_TO_SLOT.get(tier)
+        if slot is not None:
+            slot_cfg = self.llm.get(slot)
+            if slot_cfg is not None:
+                curve = self.budget_curves.get(slot_cfg.model)
+                if curve is not None:
+                    base = base.apply_curve(curve)
+        channel_total = self.for_channel(channel_id).total_tokens
+        if channel_total is not None:
+            base = replace(base, total_tokens=channel_total)
+        return base
+
+
+# Tier → LLM slot mapping (mirrors run.py responder wiring).
+_TIER_TO_SLOT: dict[str, str] = {
+    "voice": "fast",
+    "text": "prose",
+    "background": "background",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +511,14 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(budget_raw, dict):
         msg = f"[budget] must be a table, got {type(budget_raw).__name__}"
         raise ConfigError(msg)
-    budgets = _parse_budgets(budget_raw)
+    # Strip model_curves before tier parsing — _parse_budgets rejects unknown keys.
+    budget_curves_raw = budget_raw.get("model_curves", {})
+    if not isinstance(budget_curves_raw, dict):
+        msg = "[budget.model_curves] must be a table"
+        raise ConfigError(msg)
+    budget_tiers_raw = {k: v for k, v in budget_raw.items() if k != "model_curves"}
+    budgets = _parse_budgets(budget_tiers_raw)
+    budget_curves = _parse_budget_curves(budget_curves_raw)
 
     discord_raw = data.get("discord", {})
     if not isinstance(discord_raw, dict):
@@ -522,6 +554,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         turn_detection=turn_detection,
         stt=stt,
         budgets=budgets,
+        budget_curves=budget_curves,
         discord_text=discord_text,
         memory_retrieval=memory_retrieval,
         memory_providers=memory_providers,
@@ -644,6 +677,49 @@ def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudg
     return TierBudget(**{
         key: _positive_int(key, getattr(default, key)) for key in _BUDGET_FIELDS
     })
+
+
+# Same names as _BUDGET_FIELDS; used to validate [budget.model_curves] sections.
+_CURVE_FIELDS: frozenset[str] = frozenset(_BUDGET_FIELDS)
+
+
+def _parse_budget_curves(raw: dict) -> dict[str, ModelBudgetCurve]:
+    """Parse ``[budget.model_curves.<model>]`` blocks into typed curves."""
+    out: dict[str, ModelBudgetCurve] = {}
+    for model_name, section in raw.items():
+        if not isinstance(section, dict):
+            msg = (
+                f"[budget.model_curves.{model_name!r}] must be a table, "
+                f"got {type(section).__name__}"
+            )
+            raise ConfigError(msg)
+        unknown = set(section) - _CURVE_FIELDS
+        if unknown:
+            bad = ", ".join(sorted(unknown))
+            msg = f"[budget.model_curves.{model_name!r}] has unknown keys: {bad}"
+            raise ConfigError(msg)
+
+        kwargs: dict[str, float] = {}
+        for key in _CURVE_FIELDS:
+            if key not in section:
+                continue
+            v = section[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                msg = (
+                    f"[budget.model_curves.{model_name!r}].{key} must be a "
+                    f"positive number, got {type(v).__name__}"
+                )
+                raise ConfigError(msg)
+            fv = float(v)
+            if fv <= 0:
+                msg = (
+                    f"[budget.model_curves.{model_name!r}].{key} must be "
+                    f"positive, got {v}"
+                )
+                raise ConfigError(msg)
+            kwargs[key] = fv
+        out[model_name] = ModelBudgetCurve(**kwargs)
+    return out
 
 
 _RETRIEVAL_FIELDS: tuple[str, ...] = (

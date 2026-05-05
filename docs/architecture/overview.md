@@ -155,3 +155,21 @@ playback halted. Verified end-to-end (bus subscribe pattern) by
 - `message_rendering` — `"prefixed"` (always include
   `[HH:MM display_name]` content prefix; UTC) or `"name_only"`
   (rely on the OpenAI `name` field alone — save tokens in DMs).
+
+## Model-specific budget curves
+
+`[budget.model_curves."<model-name>"]` blocks register per-section
+multipliers for a model. All 14 `TierBudget` field names are valid keys;
+unset fields default to 1.0 (no change). Example:
+
+```toml
+[budget.model_curves."claude-opus-4-7"]
+total_tokens = 2.0
+recent_history_tokens = 2.5
+rag_tokens = 1.5
+```
+
+`CharacterConfig.budget_for(tier, channel_id)` applies the curve when the
+tier's active LLM slot uses that model name. The tier→slot mapping is
+`voice→fast`, `text→prose`, `background→background`. Per-channel
+`total_tokens` overrides take precedence over the curve-scaled value.

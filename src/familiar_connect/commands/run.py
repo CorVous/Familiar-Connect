@@ -297,14 +297,14 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     voice_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.voice_window_size,
-        budget=familiar.config.budgets["voice"],
+        budget=familiar.config.budget_for("voice", None),
         channel_total_tokens=channel_total_tokens or None,
         embedder=embedder,
     )
     text_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.text_window_size,
-        budget=familiar.config.budgets["text"],
+        budget=familiar.config.budget_for("text", None),
         channel_total_tokens=channel_total_tokens or None,
         embedder=embedder,
     )
