@@ -283,6 +283,14 @@ class VoiceResponder:
         if system:
             messages.append(Message(role="system", content=system))
         messages.extend(prompt.recent_history)
+        # Trailing reminder: same content + the per-mode operating
+        # directive ("You are speaking aloud…") so the format gate
+        # lives at the tail of the context, where recency-biased
+        # models are more likely to honor it.
+        trailing = build_final_reminder(
+            viewer_mode="voice", include_mode_instruction=True
+        )
+        messages.append(Message(role="system", content=trailing))
 
         accumulated: list[str] = []
         streamer = SentenceStreamer()

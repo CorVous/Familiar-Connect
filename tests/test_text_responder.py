@@ -954,6 +954,51 @@ class TestIdentityWritePath:
         assert "discord:3" in keys
 
 
+class TestTrailingReminder:
+    """A trailing ``system`` message should follow recent history.
+
+    Re-emits the time + sentinels block plus the text-mode operating
+    directive at the tail of the context so the format gate sits
+    closest to the assistant's next turn.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trailing_system_carries_text_directive(self, tmp_path: Path) -> None:
+        captured: list[list[Message]] = []
+
+        class _CapturingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:
+                captured.append(list(messages))
+                return Message(role="assistant", content="ok")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                captured.append(list(messages))
+                yield "ok"
+
+        llm = _CapturingLLM()
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(llm=llm, send=send, tmp_path=tmp_path)
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        msgs = captured[0]
+        assert msgs[-1].role == "system"
+        assert "Markdown" in msgs[-1].content
+        assert "<silent>" in msgs[-1].content
+        assert "It is now" in msgs[-1].content
+        # The trailing copy includes the text-mode ping/reply sentinels.
+        assert "[@DisplayName]" in msgs[-1].content
+
+
 class TestStripLeakedMetadataPrefix:
     """Defensively drop ``[#id] / [H:MMpm]``-shaped prefixes the LLM may echo."""
 

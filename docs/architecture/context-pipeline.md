@@ -546,6 +546,17 @@ across long-tailed turns. Voice channels see only `<silent>`; text
 channels also list `[@DisplayName]` and `[↩ <message_id>]`. Source:
 `src/familiar_connect/context/final_reminder.py`.
 
+Both responders also append a *second* copy of the same block as a
+trailing `system` message, after recent history, with
+`include_mode_instruction=True`. This appends the per-mode
+operating directive (`"You are speaking aloud. Keep replies short
+(one or two sentences). Avoid markdown."` for voice; the
+text-channel equivalent for text) to the tail copy. The directive
+is also still set up-front by `OperatingModeLayer` — the trailing
+copy is recency insurance: long contexts make models drift away
+from format gates buried at the top of the system prompt, and a
+final-position reminder is the cheapest fix.
+
 There is **no per-channel enumeration** of pingable users. The LLM
 grounds on the names already visible in recent history (where
 `<@USER_ID>` markers were rewritten to `[@DisplayName]` on intake);

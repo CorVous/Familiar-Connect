@@ -434,6 +434,14 @@ class TextResponder:
         )
         messages: list[Message] = [Message(role="system", content=system)]
         messages.extend(prompt.recent_history)
+        # Recency-biased models routinely ignore mode/format directives
+        # buried at the top of a long context. Re-emit them as a
+        # trailing ``system`` message so they sit right before the
+        # assistant's next turn.
+        trailing = build_final_reminder(
+            viewer_mode="text", include_mode_instruction=True
+        )
+        messages.append(Message(role="system", content=trailing))
 
         accumulated: list[str] = []
         silent = SilentDetector()
