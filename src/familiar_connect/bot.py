@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
     from familiar_connect.familiar import Familiar
+    from familiar_connect.history.store import HistoryStore
     from familiar_connect.stt import Transcriber, TranscriptionResult
     from familiar_connect.voice.turn_detection import UtteranceEndpointer
 
@@ -443,6 +444,70 @@ async def ingest_event(
     )
 
 
+def _emoji_repr(emoji: discord.PartialEmoji) -> str:
+    """Stable string for a :class:`discord.PartialEmoji`.
+
+    Unicode emoji → the char itself. Custom emoji → ``<:name:id>``
+    (or ``<a:name:id>`` for animated). Empty input returns ``""`` —
+    caller short-circuits.
+    """
+    if emoji.id is None:
+        return emoji.name or ""
+    if emoji.name is None:
+        return ""
+    prefix = "a" if emoji.animated else ""
+    return f"<{prefix}:{emoji.name}:{emoji.id}>"
+
+
+def apply_reaction_delta(
+    *,
+    store: HistoryStore,
+    familiar_id: str,
+    is_subscribed: Callable[[int], bool],
+    channel_id: int,
+    message_id: int,
+    emoji: discord.PartialEmoji,
+    delta: int,
+) -> None:
+    """Apply ``delta`` to one (message, emoji) row.
+
+    Pure dispatcher — separated from the gateway handler so it's
+    testable without spinning up a Discord bot. Channel-subscription
+    check up front avoids writing rows we'll never read.
+    """
+    if not is_subscribed(channel_id):
+        return
+    name = _emoji_repr(emoji)
+    if not name:
+        return
+    store.bump_reaction(
+        familiar_id=familiar_id,
+        platform_message_id=str(message_id),
+        emoji=name,
+        delta=delta,
+    )
+
+
+def apply_reaction_clear(
+    *,
+    store: HistoryStore,
+    familiar_id: str,
+    is_subscribed: Callable[[int], bool],
+    channel_id: int,
+    message_id: int,
+    emoji: discord.PartialEmoji | None = None,
+) -> None:
+    """Drop all reactions on a message, optionally scoped to one emoji."""
+    if not is_subscribed(channel_id):
+        return
+    name = _emoji_repr(emoji) if emoji is not None else None
+    store.clear_reactions(
+        familiar_id=familiar_id,
+        platform_message_id=str(message_id),
+        emoji=name,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Bot factory
 # ---------------------------------------------------------------------------
@@ -804,6 +869,67 @@ def _register_events(
             channel_id=channel_id,
             user_id=int(user.id),
             is_bot=bool(getattr(user, "bot", False)),
+        )
+
+    def _is_text_subscribed(channel_id: int) -> bool:
+        return (
+            familiar.subscriptions.get(
+                channel_id=channel_id, kind=SubscriptionKind.text
+            )
+            is not None
+        )
+
+    @bot.event
+    async def on_raw_reaction_add(  # noqa: RUF029 — Discord event handler contract
+        payload: discord.RawReactionActionEvent,
+    ) -> None:
+        apply_reaction_delta(
+            store=familiar.history_store,
+            familiar_id=familiar.id,
+            is_subscribed=_is_text_subscribed,
+            channel_id=payload.channel_id,
+            message_id=payload.message_id,
+            emoji=payload.emoji,
+            delta=1,
+        )
+
+    @bot.event
+    async def on_raw_reaction_remove(  # noqa: RUF029 — Discord event handler contract
+        payload: discord.RawReactionActionEvent,
+    ) -> None:
+        apply_reaction_delta(
+            store=familiar.history_store,
+            familiar_id=familiar.id,
+            is_subscribed=_is_text_subscribed,
+            channel_id=payload.channel_id,
+            message_id=payload.message_id,
+            emoji=payload.emoji,
+            delta=-1,
+        )
+
+    @bot.event
+    async def on_raw_reaction_clear(  # noqa: RUF029 — Discord event handler contract
+        payload: discord.RawReactionClearEvent,
+    ) -> None:
+        apply_reaction_clear(
+            store=familiar.history_store,
+            familiar_id=familiar.id,
+            is_subscribed=_is_text_subscribed,
+            channel_id=payload.channel_id,
+            message_id=payload.message_id,
+        )
+
+    @bot.event
+    async def on_raw_reaction_clear_emoji(  # noqa: RUF029 — Discord event handler contract
+        payload: discord.RawReactionClearEmojiEvent,
+    ) -> None:
+        apply_reaction_clear(
+            store=familiar.history_store,
+            familiar_id=familiar.id,
+            is_subscribed=_is_text_subscribed,
+            channel_id=payload.channel_id,
+            message_id=payload.message_id,
+            emoji=payload.emoji,
         )
 
     @bot.event
