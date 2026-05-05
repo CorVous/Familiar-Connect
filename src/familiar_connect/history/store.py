@@ -242,6 +242,22 @@ CREATE INDEX IF NOT EXISTS idx_turns_channel_mode
 CREATE INDEX IF NOT EXISTS idx_turns_platform_msg
     ON turns (familiar_id, platform_message_id);
 
+-- Discord reactions on persisted messages. Keyed by the platform-
+-- native message id so we can update without touching ``turns``;
+-- per (familiar, message, emoji) row stores the live count from
+-- gateway events. ``count = 0`` rows are deleted at write time.
+CREATE TABLE IF NOT EXISTS message_reactions (
+    familiar_id          TEXT    NOT NULL,
+    platform_message_id  TEXT    NOT NULL,
+    emoji                TEXT    NOT NULL,
+    count                INTEGER NOT NULL,
+    updated_at           TEXT    NOT NULL,
+    PRIMARY KEY (familiar_id, platform_message_id, emoji)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_reactions_lookup
+    ON message_reactions (familiar_id, platform_message_id);
+
 CREATE TABLE IF NOT EXISTS turn_mentions (
     turn_id        INTEGER NOT NULL,
     canonical_key  TEXT    NOT NULL,
@@ -887,6 +903,167 @@ class HistoryStore:
             (turn_id,),
         ).fetchall()
         return tuple(str(r["canonical_key"]) for r in rows)
+
+    # ------------------------------------------------------------------
+    # message_reactions: emoji counts keyed by platform_message_id
+    # ------------------------------------------------------------------
+
+    def set_reaction(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        emoji: str,
+        count: int,
+    ) -> None:
+        """Upsert reaction count for one ``(message, emoji)`` pair.
+
+        ``count <= 0`` deletes the row — mirrors Discord semantics
+        where the last user removing a reaction collapses the entry.
+        Idempotent for repeated identical writes (gateway dedup is
+        cheap insurance here).
+        """
+        if count <= 0:
+            self._conn.execute(
+                """
+                DELETE FROM message_reactions
+                 WHERE familiar_id = ?
+                   AND platform_message_id = ?
+                   AND emoji = ?
+                """,
+                (familiar_id, platform_message_id, emoji),
+            )
+            self._conn.commit()
+            return
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO message_reactions
+                (familiar_id, platform_message_id, emoji, count, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(familiar_id, platform_message_id, emoji)
+            DO UPDATE SET count = excluded.count, updated_at = excluded.updated_at
+            """,
+            (familiar_id, platform_message_id, emoji, count, ts),
+        )
+        self._conn.commit()
+
+    def bump_reaction(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        emoji: str,
+        delta: int,
+    ) -> None:
+        """Atomic ±delta on one ``(message, emoji)`` row.
+
+        Drives the gateway hot path —``on_raw_reaction_add`` /
+        ``on_raw_reaction_remove`` deliver per-user toggles, never
+        absolute counts. Floors at zero (a stray remove without a
+        matching add — e.g. bot was offline when the reaction was
+        added — leaves no row rather than persisting a negative).
+        """
+        if delta == 0:
+            return
+        ts = datetime.now(tz=UTC).isoformat()
+        cur = self._conn.execute(
+            """
+            UPDATE message_reactions
+               SET count = count + ?, updated_at = ?
+             WHERE familiar_id = ?
+               AND platform_message_id = ?
+               AND emoji = ?
+            """,
+            (delta, ts, familiar_id, platform_message_id, emoji),
+        )
+        if cur.rowcount == 0 and delta > 0:
+            self._conn.execute(
+                """
+                INSERT INTO message_reactions
+                    (familiar_id, platform_message_id, emoji, count, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (familiar_id, platform_message_id, emoji, delta, ts),
+            )
+        self._conn.execute(
+            """
+            DELETE FROM message_reactions
+             WHERE familiar_id = ?
+               AND platform_message_id = ?
+               AND emoji = ?
+               AND count <= 0
+            """,
+            (familiar_id, platform_message_id, emoji),
+        )
+        self._conn.commit()
+
+    def clear_reactions(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        emoji: str | None = None,
+    ) -> None:
+        """Drop reactions on one message — all (``emoji=None``) or a single emoji.
+
+        Mirrors ``on_raw_reaction_clear`` (no emoji) and
+        ``on_raw_reaction_clear_emoji`` (single emoji wiped).
+        """
+        if emoji is None:
+            self._conn.execute(
+                """
+                DELETE FROM message_reactions
+                 WHERE familiar_id = ?
+                   AND platform_message_id = ?
+                """,
+                (familiar_id, platform_message_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                DELETE FROM message_reactions
+                 WHERE familiar_id = ?
+                   AND platform_message_id = ?
+                   AND emoji = ?
+                """,
+                (familiar_id, platform_message_id, emoji),
+            )
+        self._conn.commit()
+
+    def reactions_for_messages(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_ids: Iterable[str],
+    ) -> dict[str, tuple[tuple[str, int], ...]]:
+        """Batch lookup reactions for many messages in one query.
+
+        Returns ``{platform_message_id: ((emoji, count), ...)}`` —
+        messages with no reactions are absent. Per-message tuples are
+        ordered by descending count, then emoji asc for stable ties.
+        """
+        ids = [str(m) for m in platform_message_ids if m]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT platform_message_id, emoji, count
+              FROM message_reactions
+             WHERE familiar_id = ?
+               AND platform_message_id IN ({placeholders})
+             ORDER BY platform_message_id ASC, count DESC, emoji ASC
+            """,  # noqa: S608
+            (familiar_id, *ids),
+        ).fetchall()
+        out: dict[str, list[tuple[str, int]]] = {}
+        for r in rows:
+            out.setdefault(str(r["platform_message_id"]), []).append((
+                str(r["emoji"]),
+                int(r["count"]),
+            ))
+        return {k: tuple(v) for k, v in out.items()}
 
     def recent(
         self,

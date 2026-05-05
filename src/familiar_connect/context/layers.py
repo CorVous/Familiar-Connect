@@ -178,6 +178,10 @@ class RecentHistoryLayer:
         Mention rewriting. Discord ``<@USER_ID>`` / ``<@!USER_ID>``
         become ``[@DisplayName]`` via :meth:`HistoryStore.resolve_label`
         — symmetric with the LLM's expected output form.
+
+        Reactions. Each turn's ``platform_message_id`` is looked up in
+        ``message_reactions`` (single batch query for the whole window)
+        and rendered as a trailing ``[reactions: 👍 x3 ❤️ x1]`` suffix.
         """
         turns = self._store.recent(
             familiar_id=ctx.familiar_id,
@@ -187,6 +191,12 @@ class RecentHistoryLayer:
         in_window_msg_ids = {
             t.platform_message_id for t in turns if t.platform_message_id
         }
+        reactions = self._store.reactions_for_messages(
+            familiar_id=ctx.familiar_id,
+            platform_message_ids=[
+                t.platform_message_id for t in turns if t.platform_message_id
+            ],
+        )
         rendered = [
             _turn_to_message_with_context(
                 turn=turn,
@@ -194,6 +204,7 @@ class RecentHistoryLayer:
                 familiar_id=ctx.familiar_id,
                 guild_id=ctx.guild_id,
                 in_window_msg_ids=in_window_msg_ids,
+                reactions=reactions.get(turn.platform_message_id or "", ()),
             )
             for turn in turns
         ]
@@ -504,6 +515,14 @@ def _reply_prefix(
     return f"↩ {parent_label} ({parent_ts}): {full}"
 
 
+def _format_reactions(reactions: tuple[tuple[str, int], ...]) -> str:
+    """Render ``[reactions: 👍 x3 ❤️ x1]``; empty input → empty string."""
+    if not reactions:
+        return ""
+    parts = " ".join(f"{e} x{c}" for e, c in reactions)
+    return f"[reactions: {parts}]"
+
+
 def _turn_to_message_with_context(
     *,
     turn: HistoryTurn,
@@ -511,6 +530,7 @@ def _turn_to_message_with_context(
     familiar_id: str,
     guild_id: int | None,
     in_window_msg_ids: set[str],
+    reactions: tuple[tuple[str, int], ...] = (),
 ) -> Message:
     """Render a :class:`HistoryTurn` into an LLM :class:`Message`.
 
@@ -523,14 +543,19 @@ def _turn_to_message_with_context(
     skip the id tag — otherwise the model sees its own past messages
     prefixed with ``[#…]`` and starts emitting that prefix in fresh
     replies (mimicry).
+
+    ``reactions`` (emoji, count) pairs append a ``[reactions: …]``
+    suffix on either role.
     """
     role = turn.role
     author = turn.author
     content = _rewrite_mentions(
         turn.content, store=store, familiar_id=familiar_id, guild_id=guild_id
     )
+    reactions_suffix = _format_reactions(reactions)
     if role == "assistant" or author is None:
-        return Message(role=role, content=content)
+        body = f"{content} {reactions_suffix}" if reactions_suffix else content
+        return Message(role=role, content=body)
     msg_id_tag = f" #{turn.platform_message_id}" if turn.platform_message_id else ""
     label = store.resolve_label(
         canonical_key=author.canonical_key,
@@ -565,6 +590,8 @@ def _turn_to_message_with_context(
             )
 
     prefixed = f"[{ts} {label}{msg_id_tag}] {reply_prefix}{content}"
+    if reactions_suffix:
+        prefixed = f"{prefixed} {reactions_suffix}"
     return Message(role=role, content=prefixed, name=name)
 
 

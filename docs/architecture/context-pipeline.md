@@ -482,6 +482,33 @@ O(1).
   to. The returned platform message id is stored on the assistant
   turn so future user replies *to* the bot can be linked back.
 
+### Reactions (read)
+
+A `message_reactions(familiar_id, platform_message_id, emoji, count,
+updated_at)` table mirrors live emoji counts on every message we
+care about, keyed by the platform-native message id (so it can update
+without touching the `turns` row). Population is gateway-driven —
+no REST polling:
+
+- **Add / remove** — `bot.on_raw_reaction_add` and
+  `on_raw_reaction_remove` translate per-user toggles into
+  `HistoryStore.bump_reaction(±1)`. The bump floors at zero so a
+  stray remove (bot was offline when the original add fired) leaves
+  no negative residue. Subscription-checked: only channels with
+  `/subscribe-text` active accumulate rows.
+- **Clear** — `on_raw_reaction_clear` /
+  `on_raw_reaction_clear_emoji` route to
+  `HistoryStore.clear_reactions`, scoped either to the whole message
+  or one emoji.
+
+`RecentHistoryLayer` batch-fetches reactions for every
+`platform_message_id` in its window with a single
+`reactions_for_messages` call, then appends a
+`[reactions: 👍 x3 ❤️ x1]` suffix on each rendered turn (user *or*
+assistant — the bot reads its own reactions too). One SQL roundtrip
+per assemble, ordered by descending count and emoji asc for stable
+ties.
+
 ### Mentions (read + write)
 
 A `turn_mentions(turn_id, canonical_key)` junction table records
