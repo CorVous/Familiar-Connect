@@ -170,8 +170,10 @@ legacy-friendly shape as importance.
 The seam is intentionally split across three knobs so each can move
 independently:
 
-- `[providers.embedding].backend` — picks the backend (`off` /
-  `hash` / a registered ONNX backend). `off` is the default.
+- `[providers.embedding].backend` — picks the backend. `off`
+  (default), `hash` (no-deps baseline), or `fastembed`
+  (production-grade ONNX sentence embedder; needs the
+  `local-embed` extra).
 - `[providers.memory].projectors` — list `"fact_embedding"` to
   start populating the side-index.
 - `[memory.retrieval].embedding_weight` — turn the signal on at
@@ -181,6 +183,18 @@ To enable, flip all three; to disable, drop `embedding_weight`
 back to 0 (reads quiet) or drop `fact_embedding` from the projector
 list (writes quiet). The side-index can be deleted at any time —
 the next worker tick rebuilds it from `facts`.
+
+`FastEmbedEmbedder` carries the model identifier in its `name`
+(`fastembed:BAAI/bge-small-en-v1.5`); since the storage row key is
+`(fact_id, model)`, a model upgrade accumulates new vectors beside
+the old. Old rows stay queryable for audit but don't leak into the
+active rank — reads filter on the live embedder's `name`. To
+reclaim space, delete superseded rows after switching:
+
+```bash
+sqlite3 data/familiars/<id>/history.db \\
+    "DELETE FROM fact_embeddings WHERE model != 'fastembed:BAAI/bge-base-en-v1.5';"
+```
 
 ## Lorebook (M4)
 

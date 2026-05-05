@@ -281,10 +281,17 @@ class EmbeddingConfig:
         RAG layer skips embedding signal.
     :param dim: dimensionality hint for backends that accept one
         (``hash``). Real backends with a fixed model dim ignore this.
+    :param fastembed_model: model name for the ``fastembed`` backend.
+        Default is BGE-small (384 dim, ~130 MB cached). Swap to
+        ``BAAI/bge-base-en-v1.5`` for higher quality at ~2x cost.
+    :param fastembed_cache_dir: override for fastembed's model cache.
+        ``None`` = ``~/.cache/fastembed``.
     """
 
     backend: str = "off"
     dim: int = 256
+    fastembed_model: str = "BAAI/bge-small-en-v1.5"
+    fastembed_cache_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -704,7 +711,12 @@ def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
     return MemoryProvidersConfig(projectors=tuple(raw_projectors))
 
 
-_EMBEDDING_FIELDS: frozenset[str] = frozenset({"backend", "dim"})
+_EMBEDDING_FIELDS: frozenset[str] = frozenset({
+    "backend",
+    "dim",
+    "fastembed_model",
+    "fastembed_cache_dir",
+})
 
 
 def _parse_embedding_config(raw: dict) -> EmbeddingConfig:
@@ -713,6 +725,9 @@ def _parse_embedding_config(raw: dict) -> EmbeddingConfig:
     ``backend`` is checked against
     :func:`familiar_connect.embedding.factory.known_embedders` so a
     typo fails loudly at config load. ``dim`` must be a positive int.
+    Backend-specific keys (``fastembed_model``, ``fastembed_cache_dir``)
+    are accepted regardless of the active backend so operators can
+    flip ``backend`` without re-typing the rest of the table.
     """
     unknown = set(raw) - _EMBEDDING_FIELDS
     if unknown:
@@ -749,7 +764,33 @@ def _parse_embedding_config(raw: dict) -> EmbeddingConfig:
     if dim_raw <= 0:
         msg = f"[providers.embedding].dim must be > 0, got {dim_raw}"
         raise ConfigError(msg)
-    return EmbeddingConfig(backend=backend, dim=int(dim_raw))
+    fastembed_model = raw.get("fastembed_model", defaults.fastembed_model)
+    if not isinstance(fastembed_model, str) or not fastembed_model:
+        msg = (
+            "[providers.embedding].fastembed_model must be a non-empty string, "
+            f"got {type(fastembed_model).__name__}"
+        )
+        raise ConfigError(msg)
+    fastembed_cache_dir_raw = raw.get(
+        "fastembed_cache_dir", defaults.fastembed_cache_dir
+    )
+    fastembed_cache_dir: str | None
+    if fastembed_cache_dir_raw is None:
+        fastembed_cache_dir = None
+    elif isinstance(fastembed_cache_dir_raw, str):
+        fastembed_cache_dir = fastembed_cache_dir_raw or None
+    else:
+        msg = (
+            "[providers.embedding].fastembed_cache_dir must be a string, "
+            f"got {type(fastembed_cache_dir_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    return EmbeddingConfig(
+        backend=backend,
+        dim=int(dim_raw),
+        fastembed_model=fastembed_model,
+        fastembed_cache_dir=fastembed_cache_dir,
+    )
 
 
 _VALID_MESSAGE_RENDERING: frozenset[str] = frozenset({"prefixed", "name_only"})

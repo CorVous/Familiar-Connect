@@ -9,12 +9,10 @@ Built-ins:
 
 * ``off`` — returns ``None``. Disables the seam end to end.
 * ``hash`` — :class:`HashEmbedder`. Deterministic, no extra deps.
-
-Optional:
-
-* ``fastembed`` — ONNX-backed sentence embedder. Pulls
-  :mod:`fastembed` from the ``local-embed`` extra; raises a
-  pointed install error when unavailable.
+* ``fastembed`` — :class:`FastEmbedEmbedder`. ONNX-backed sentence
+  embedder. Constructed eagerly; the model itself loads lazily on
+  first ``embed()`` so missing the ``local-embed`` extra fails loudly
+  the first time a vector is needed (not at config parse).
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from familiar_connect.embedding.fastembed import FastEmbedEmbedder
 from familiar_connect.embedding.hash import HashEmbedder
 
 if TYPE_CHECKING:
@@ -71,5 +70,13 @@ def _hash_factory(config: EmbeddingConfig) -> Embedder:
     return HashEmbedder(dim=config.dim)
 
 
+def _fastembed_factory(config: EmbeddingConfig) -> Embedder:
+    return FastEmbedEmbedder(
+        model_name=config.fastembed_model,
+        cache_dir=config.fastembed_cache_dir,
+    )
+
+
 register_embedder("off", _off_factory)
 register_embedder("hash", _hash_factory)
+register_embedder("fastembed", _fastembed_factory)

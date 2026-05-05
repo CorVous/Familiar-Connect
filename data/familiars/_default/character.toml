@@ -153,23 +153,39 @@ projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
 # Backend for the ``fact_embedding`` projector and the embedding signal
 # in [memory.retrieval].
 #
-# backend = "off"   No-op (default). RAG layer skips the embedding
-#                   signal even when embedding_weight > 0.
-# backend = "hash"  Deterministic locality-hashing baseline. No deps;
-#                   weak signal, but useful for sanity checks /
-#                   smoke tests.
+# backend = "off"        No-op (default). RAG layer skips the embedding
+#                        signal even when embedding_weight > 0.
+# backend = "hash"       Deterministic locality-hashing baseline. No
+#                        deps; weak signal, but useful for sanity
+#                        checks / smoke tests.
+# backend = "fastembed"  ONNX-backed sentence embedder (Qdrant
+#                        FastEmbed). Real semantic similarity. Needs
+#                        the ``local-embed`` extra; install via
+#                        ``uv sync --extra local-embed``. Default model
+#                        BGE-small downloads ~130 MB on first use,
+#                        cached under ~/.cache/fastembed.
 #
 # To turn on semantic recall:
-#   1. switch ``backend`` here
+#   1. switch ``backend`` here (and install ``local-embed`` for fastembed)
 #   2. add ``"fact_embedding"`` to [providers.memory].projectors
 #   3. raise [memory.retrieval].embedding_weight above 0
 #
 # ``dim`` is the vector size for backends that accept one (``hash``).
 # Real backends with a fixed model dim ignore this knob.
+#
+# ``fastembed_model`` selects the FastEmbed model. Known good options:
+#   BAAI/bge-small-en-v1.5     (default; 384 dim, ~130 MB)
+#   BAAI/bge-base-en-v1.5      (768 dim, ~440 MB; better quality)
+#   sentence-transformers/all-MiniLM-L6-v2  (384 dim, lighter)
+#
+# A model swap accumulates new vectors beside the old (storage keys on
+# the embedder's ``name``, which carries the model name) — no audit
+# history destroyed. Wipe ``fact_embeddings`` to force a re-embed.
 
 [providers.embedding]
-backend = "off"
-dim     = 256
+backend          = "off"
+dim              = 256
+fastembed_model  = "BAAI/bge-small-en-v1.5"
 
 # --- Turn detection --------------------------------------------------------
 #

@@ -469,6 +469,46 @@ class TestEmbeddingConfig:
         with pytest.raises(ConfigError, match="must be a positive integer"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_default_fastembed_model_is_bge_small(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.fastembed_model == "BAAI/bge-small-en-v1.5"
+        assert cfg.embedding.fastembed_cache_dir is None
+
+    def test_fastembed_model_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.embedding]\n"
+            'backend = "fastembed"\n'
+            'fastembed_model = "BAAI/bge-base-en-v1.5"\n'
+            'fastembed_cache_dir = "/var/cache/fastembed"\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.backend == "fastembed"
+        assert cfg.embedding.fastembed_model == "BAAI/bge-base-en-v1.5"
+        assert cfg.embedding.fastembed_cache_dir == "/var/cache/fastembed"
+
+    def test_empty_fastembed_model_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\nfastembed_model = ""\n')
+        with pytest.raises(ConfigError, match="non-empty string"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_string_fastembed_cache_dir_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.embedding]\nfastembed_cache_dir = 42\n")
+        with pytest.raises(ConfigError, match="must be a string"):
+            load_character_config(path, defaults_path=default_profile_path)
+
 
 class TestChannelOverrides:
     def test_no_channels_section_is_empty_map(

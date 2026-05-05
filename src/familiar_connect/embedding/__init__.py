@@ -22,11 +22,13 @@ from familiar_connect.embedding.factory import (
     known_embedders,
     register_embedder,
 )
+from familiar_connect.embedding.fastembed import FastEmbedEmbedder
 from familiar_connect.embedding.hash import HashEmbedder
 from familiar_connect.embedding.protocol import Embedder
 
 __all__ = [
     "Embedder",
+    "FastEmbedEmbedder",
     "HashEmbedder",
     "create_embedder",
     "known_embedders",

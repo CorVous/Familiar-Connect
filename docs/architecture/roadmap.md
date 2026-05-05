@@ -110,7 +110,7 @@ Default keeps every shipped projector. Empty list disables all
 memory projection. See
 [Memory strategies — swap points](memory-strategies.md#swap-points).
 
-### M6 — Embeddings for semantic recall (seam shipped)
+### M6 — Embeddings for semantic recall (shipped)
 
 Phase 1 — seam:
 
@@ -135,11 +135,29 @@ Phase 1 — seam:
   midpoint (0.5) so a partially-populated side-index doesn't
   poison the rank.
 
+Phase 2 — FastEmbed/ONNX backend:
+
+* :class:`FastEmbedEmbedder`
+  (`src/familiar_connect/embedding/fastembed.py`) wraps Qdrant's
+  FastEmbed library. Default model is BGE-small (384 dim, ~130 MB
+  cached under `~/.cache/fastembed`). Lazy-loads on first
+  `embed()` call so the module imports without the extra installed.
+* New `local-embed` install extra:
+  `uv sync --extra local-embed` brings in `fastembed` +
+  `onnxruntime` + `numpy`.
+* Embedder `name` carries the model identifier
+  (`fastembed:BAAI/bge-small-en-v1.5`) so a model upgrade
+  accumulates new rows beside the old — same supersession-style
+  audit trail used everywhere else.
+* `[providers.embedding]` adds `fastembed_model` and
+  `fastembed_cache_dir` knobs.
+
 Operator switch-on:
 
 ```toml
 [providers.embedding]
-backend = "hash"   # or a real ONNX backend once installed
+backend         = "fastembed"
+fastembed_model = "BAAI/bge-small-en-v1.5"
 
 [providers.memory]
 projectors = [
@@ -151,13 +169,11 @@ projectors = [
 embedding_weight = 0.6
 ```
 
-Phase 2 — production-grade backend:
+Phase 3 — ANN at scale (deferred):
 
-* FastEmbed / ONNX wrapper for real semantic recall (the `hash`
-  baseline only correlates with token overlap). Lands behind a new
-  `local-embed` extra; the `Embedder` seam stays unchanged.
-* ANN backend (`sqlite-vec`) once fact volumes outgrow brute-force
-  cosine on BM25 candidates.
+* `sqlite-vec` extension once fact volumes outgrow brute-force
+  cosine over BM25 candidates. The `Embedder` seam doesn't change;
+  the storage path swaps a virtual table for the BLOB column.
 
 See [Memory strategies — embeddings](memory-strategies.md#embeddings-m6).
 

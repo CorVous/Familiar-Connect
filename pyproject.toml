@@ -56,6 +56,16 @@ local-stt-whisper = [
     "faster-whisper >= 1.0",
     "numpy >= 1.26, < 3",
 ]
+# Local embeddings — FastEmbed (Qdrant). ONNX-backed sentence embedders
+# for M6 semantic recall. Default model is BGE-small (~130 MB on first
+# load, cached under ~/.cache/fastembed). onnxruntime is shared with
+# ``local-turn``. Install via:
+#     uv sync --extra local-embed
+local-embed = [
+    "fastembed >= 0.4, < 1",
+    "numpy >= 1.26, < 3",
+    "onnxruntime >= 1.18, < 2",
+]
 
 [dependency-groups]
 dev = [

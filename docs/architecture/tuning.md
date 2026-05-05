@@ -635,8 +635,10 @@ clamped on the store side; non-numeric input drops to NULL.
 
 ```toml
 [providers.embedding]
-backend = "off"           # "off" | "hash"
-dim     = 256             # for backends that accept one
+backend          = "off"   # "off" | "hash" | "fastembed"
+dim              = 256     # hash only — vector size
+fastembed_model  = "BAAI/bge-small-en-v1.5"
+fastembed_cache_dir = ""   # blank = ~/.cache/fastembed
 ```
 
 Three knobs gate the seam — flip all three to turn it on:
@@ -657,16 +659,40 @@ Built-in backends:
 |---|---|---|---|
 | `off` | none | none | default; semantic recall not wanted |
 | `hash` | none | weak (token-overlap baseline) | tests, smoke checks, cold-start without ONNX |
+| `fastembed` | ONNX runtime + ~130 MB model on first load | strong (BGE-small default) | production semantic recall |
 
-Real ONNX backends register at import time (same pattern as the STT
-factory); the seam is stable so a third-party `register_embedder`
-call drops in without touching `RagContextLayer`.
+Third-party backends register at import time (same pattern as the
+STT factory); the seam is stable so `register_embedder` drops in
+without touching `RagContextLayer`.
+
+### FastEmbed install + model selection
+
+```bash
+uv sync --extra local-embed
+```
+
+Brings in `fastembed` + `onnxruntime` + `numpy`. The model itself
+downloads on first use (cached under `~/.cache/fastembed`). Common
+choices:
+
+| `fastembed_model` | Dim | Approx size | Notes |
+|---|---|---|---|
+| `BAAI/bge-small-en-v1.5` | 384 | ~130 MB | Default. Best speed/quality tradeoff. |
+| `BAAI/bge-base-en-v1.5` | 768 | ~440 MB | Higher quality, ~2× slower. |
+| `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB | Smallest; older but well-tested. |
+
+Vectors are tagged with the embedder's `name`
+(`fastembed:<model>`), so upgrading from BGE-small to BGE-base
+accumulates new vectors beside the old. The next
+`FactEmbeddingWorker` tick backfills under the new model name; old
+rows stay queryable for audit but don't leak into the active rank.
 
 Operator playbook:
 
 ```toml
 [providers.embedding]
-backend = "hash"
+backend         = "fastembed"
+fastembed_model = "BAAI/bge-small-en-v1.5"
 
 [providers.memory]
 projectors = [
@@ -678,13 +704,21 @@ projectors = [
 embedding_weight = 0.6
 ```
 
-Side-index lives at `fact_embeddings` keyed `(fact_id, model)`, so a
-backend swap accumulates new vectors beside the old. Wipe the table
-to force a re-embed:
+Side-index lives at `fact_embeddings` keyed `(fact_id, model)`. To
+reclaim space after a model swap, drop rows tagged with the old
+model name:
+
+```bash
+sqlite3 data/familiars/<id>/history.db \\
+    "DELETE FROM fact_embeddings WHERE model = 'fastembed:BAAI/bge-small-en-v1.5';"
+# next FactEmbeddingWorker tick rebuilds under the new model
+```
+
+Or wipe the whole table to force a full re-embed under the active
+model:
 
 ```bash
 sqlite3 data/familiars/<id>/history.db "DELETE FROM fact_embeddings;"
-# next FactEmbeddingWorker tick rebuilds from facts
 ```
 
 ## Memory projectors (M5)
