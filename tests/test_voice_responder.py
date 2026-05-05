@@ -497,6 +497,79 @@ class TestBargeIn:
         await bus.shutdown()
 
     @pytest.mark.asyncio
+    async def test_barge_in_logs_preempted_decision(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Cancel-before-decision emits ``decision=preempted``.
+
+        Regression: turns superseded by a barge-in produced
+        ``[LLM call] status=cancelled`` but **no** ``decision=…`` line,
+        so a continuously-speaking user generated a chain of cancelled
+        LLM calls with no way to correlate them to which transcript
+        was preempted.
+
+        Scenario reproduces the production case: first delta keeps
+        ``SilentDetector`` undecided (``<sil`` matches ``<silent>``
+        prefix), the barge-in lands before the second delta, and the
+        cancel-check at the top of the stream loop fires before any
+        decision is logged.
+        """
+        llm = _ScriptedLLM(deltas=["<sil", "ent>"], delay_ms=100)
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _router, _ = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+
+        async def bargein() -> None:
+            # Land between first and second delta so the cancel check
+            # at the loop top wins before the silent gate latches.
+            await asyncio.sleep(0.15)
+            await responder.handle(_mk_activity_start(turn_id="t-2"), bus)
+
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.voice_responder"
+        ):
+            await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+            task_reply = asyncio.create_task(
+                responder.handle(_mk_final("hi", turn_id="t-1"), bus)
+            )
+            task_barge = asyncio.create_task(bargein())
+            await asyncio.gather(task_reply, task_barge)
+            await responder.wait_until_idle()
+        await bus.shutdown()
+
+        # Match ``decision`` and ``preempted`` independently — ``ls.kv``
+        # interleaves ANSI codes between key and value.
+        preempted = [
+            r
+            for r in caplog.records
+            if "decision" in r.getMessage()
+            and "preempted" in r.getMessage()
+            and "t-1" in r.getMessage()
+        ]
+        # No silent/respond should fire for t-1 — gate never latched.
+        other = [
+            r
+            for r in caplog.records
+            if "decision" in r.getMessage()
+            and ("silent" in r.getMessage() or "respond" in r.getMessage())
+            and "t-1" in r.getMessage()
+        ]
+        assert other == [], (
+            "unexpected silent/respond decision for t-1: "
+            f"{[r.getMessage() for r in other]}"
+        )
+        assert len(preempted) == 1, (
+            "expected one preempted decision for t-1; "
+            f"got {len(preempted)} from records: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
     async def test_barge_in_during_speech_cuts_playback_fast(
         self, tmp_path: Path
     ) -> None:

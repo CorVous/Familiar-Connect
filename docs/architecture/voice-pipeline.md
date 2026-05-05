@@ -395,6 +395,15 @@ Verified sub-200 ms by
 `tests/test_voice_responder.py::TestBargeIn`. See
 [Voice reply loop](overview.md#voice-reply-loop).
 
+Every voice turn emits exactly one decision line for observability:
+
+- `[💤 Voice] decision=silent` — `<silent>` sentinel latched.
+- `[Voice] decision=respond` — gate opened on real content.
+- `[Voice] decision=preempted` — barge-in cancelled the turn before
+  the gate latched. Without this line a continuously-speaking user
+  produced a chain of `[LLM call] status=cancelled` with no way to
+  tell which transcript was dropped.
+
 After `vc.stop()`, `DiscordVoicePlayer` polls `vc.is_playing()` for
 up to 200 ms before releasing the play lock. Pycord's audio thread
 checks the stop flag once per 20 ms tick so the actual wait is one
