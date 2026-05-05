@@ -10,10 +10,10 @@ Dependencies via [uv](https://docs.astral.sh/uv/). Update `uv` first:
 uv self update
 ```
 
-Install project + dev + docs groups:
+Install project + dev + docs groups, plus the `local-turn` extra (numpy + huggingface_hub are imported by the test suite):
 
 ```bash
-uv sync --dev --group docs
+uv sync --dev --group docs --extra local-turn
 ```
 
 See [Installation](getting-started/installation.md) for runtime prerequisites (libopus, Discord token, OpenRouter key, Cartesia key, etc.).
@@ -33,7 +33,7 @@ Red / green TDD:
 Run the same four checks CI runs:
 
 ```bash
-uv sync --dev                 # sync deps
+uv sync --dev --extra local-turn  # sync deps
 uv run ruff check             # lint
 uv run ruff format            # format
 uv run ty check               # type-check
