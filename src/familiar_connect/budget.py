@@ -121,8 +121,13 @@ class Budgeter:
     return them and just let the LLM decide.
     """
 
-    def __init__(self, budget: TierBudget) -> None:
+    def __init__(
+        self,
+        budget: TierBudget,
+        channel_total_tokens: dict[int, int] | None = None,
+    ) -> None:
         self._budget = budget
+        self._channel_total_tokens: dict[int, int] = channel_total_tokens or {}
 
     @property
     def budget(self) -> TierBudget:
@@ -137,15 +142,22 @@ class Budgeter:
         *,
         system_prompt: str,
         history: list[Message],
+        channel_id: int | None = None,
     ) -> tuple[str, list[Message]]:
         """Drop oldest turns until total token count fits.
 
         Returns ``(system_prompt, trimmed_history)``. Newest turns
         retained — they're the immediate conversational context the
         model needs most. ``system_prompt`` is returned unchanged.
+
+        Per-channel ``total_tokens`` overrides the tier cap when set.
         """
         sys_tokens = estimate_tokens(system_prompt)
-        cap = self._budget.total_tokens
+        cap = (
+            self._channel_total_tokens[channel_id]
+            if channel_id is not None and channel_id in self._channel_total_tokens
+            else self._budget.total_tokens
+        )
         kept_reversed: list[Message] = []
         used = sys_tokens
         for msg in reversed(history):

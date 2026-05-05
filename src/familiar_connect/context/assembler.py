@@ -96,6 +96,7 @@ class Assembler:
             system_prompt, recent = self._budgeter.trim(
                 system_prompt=system_prompt,
                 history=recent,
+                channel_id=ctx.channel_id,
             )
         return AssembledPrompt(
             system_prompt=system_prompt,

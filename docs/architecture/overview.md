@@ -140,12 +140,15 @@ playback halted. Verified end-to-end (bus subscribe pattern) by
 
 ## Per-channel latency knobs
 
-`[channels.<id>]` in `character.toml` overrides three knobs:
+`[channels.<id>]` in `character.toml` overrides four knobs:
 
 - `history_window_size` — how many recent turns the `RecentHistoryLayer`
   pulls for this channel. Overrides the tier default
   (`[providers.history].voice_window_size` for voice channels,
   `.text_window_size` for text channels).
+- `total_tokens` — post-assembly trim cap for this channel only. Overrides
+  the `[budget.<tier>].total_tokens` envelope so high-traffic channels can
+  be given a tighter budget without touching the global tier default.
 - `prompt_layers` — ordered list of layer names (currently parsed but
   applied only via the default ordering; per-channel reordering lands
   with Phase 3's richer layer stack).

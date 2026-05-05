@@ -144,6 +144,7 @@ def _default_assembler(
     *,
     window_size: int,
     budget: TierBudget,
+    channel_total_tokens: dict[int, int] | None = None,
     embedder: Embedder | None = None,
 ) -> Assembler:
     """Build the full layer stack with token-aware per-section caps.
@@ -250,7 +251,7 @@ def _default_assembler(
                 ),
             ),
         ],
-        budgeter=Budgeter(budget),
+        budgeter=Budgeter(budget, channel_total_tokens=channel_total_tokens),
     )
 
 
@@ -288,16 +289,23 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     await familiar.bus.start()
 
     embedder = create_embedder(familiar.config.embedding)
+    channel_total_tokens: dict[int, int] = {
+        ch_id: over.total_tokens
+        for ch_id, over in familiar.config.channels.items()
+        if over.total_tokens is not None
+    }
     voice_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.voice_window_size,
         budget=familiar.config.budgets["voice"],
+        channel_total_tokens=channel_total_tokens or None,
         embedder=embedder,
     )
     text_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.text_window_size,
         budget=familiar.config.budgets["text"],
+        channel_total_tokens=channel_total_tokens or None,
         embedder=embedder,
     )
     tts_player: TTSPlayer

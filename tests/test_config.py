@@ -582,6 +582,69 @@ class TestChannelOverrides:
         assert over.history_window_size is None
         assert over.prompt_layers is None
         assert over.message_rendering is None
+        assert over.total_tokens is None
+
+    def test_channel_total_tokens_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 2000\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.channels[12345].total_tokens == 2000
+
+    def test_channel_total_tokens_must_be_positive(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 0\n")
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_channel_total_tokens_must_be_integer(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1.5\n")
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_budget_for_returns_base_when_no_channel_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["text"]
+        assert cfg.budget_for("text", 99999).total_tokens == base.total_tokens
+
+    def test_budget_for_applies_channel_total_tokens(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("text", 12345)
+        assert b.total_tokens == 1234
+        # other caps unchanged from tier default
+        assert b.rag_tokens == cfg.budgets["text"].rag_tokens
+
+    def test_budget_for_ignores_other_channel(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("text", 99999)
+        assert b.total_tokens == cfg.budgets["text"].total_tokens
+
+    def test_budget_for_none_channel_returns_base(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("text", None)
+        assert b.total_tokens == cfg.budgets["text"].total_tokens
 
 
 class TestTurnDetectionConfig:

@@ -7,7 +7,7 @@ Loads ``character.toml`` once on startup, deep-merged over the
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from familiar_connect.budget import TierBudget
@@ -313,6 +313,7 @@ class ChannelOverrides:
     history_window_size: int | None = None
     prompt_layers: tuple[str, ...] | None = None
     message_rendering: str | None = None
+    total_tokens: int | None = None
 
 
 def _default_budgets() -> dict[str, TierBudget]:
@@ -377,6 +378,14 @@ class CharacterConfig:
         """Text-tier window for ``channel_id``; channel override wins."""
         override = self.for_channel(channel_id).history_window_size
         return override if override is not None else self.text_window_size
+
+    def budget_for(self, tier: str, channel_id: int | None) -> TierBudget:
+        """Tier budget with per-channel ``total_tokens`` applied if set."""
+        base = self.budgets[tier]
+        override = self.for_channel(channel_id).total_tokens
+        if override is None:
+            return base
+        return replace(base, total_tokens=override)
 
 
 # ---------------------------------------------------------------------------
@@ -857,10 +866,32 @@ def _parse_channel_overrides(raw: dict) -> dict[int, ChannelOverrides]:
                 )
                 raise ConfigError(msg)
 
+        total_tokens_raw = section.get("total_tokens")
+        total_tokens: int | None
+        if total_tokens_raw is None:
+            total_tokens = None
+        elif isinstance(total_tokens_raw, int) and not isinstance(
+            total_tokens_raw, bool
+        ):
+            if total_tokens_raw <= 0:
+                msg = (
+                    f"[channels.{key}].total_tokens must be positive, "
+                    f"got {total_tokens_raw}"
+                )
+                raise ConfigError(msg)
+            total_tokens = total_tokens_raw
+        else:
+            msg = (
+                f"[channels.{key}].total_tokens must be an integer, "
+                f"got {type(total_tokens_raw).__name__}"
+            )
+            raise ConfigError(msg)
+
         out[channel_id] = ChannelOverrides(
             history_window_size=window,
             prompt_layers=layers,
             message_rendering=rendering,
+            total_tokens=total_tokens,
         )
     return out
 

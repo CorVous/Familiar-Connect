@@ -286,8 +286,13 @@ What's still open (worth doing, but not blocking voice quality):
   prompt caching.
 - Model-specific context-degradation curves (today the same envelope
   applies regardless of model; frontier models could absorb more).
-- Per-channel `total_tokens` overrides (today only the turn-count
-  cap is per-channel).
+
+Shipped since initial A2:
+
+- Per-channel `total_tokens` overrides — `[channels.<id>].total_tokens`
+  in `character.toml` overrides the tier's post-assembly trim cap for
+  that channel. `Budgeter.trim()` selects the channel cap when the
+  `channel_id` matches; other channels use the tier default.
 
 ## Out of scope
 

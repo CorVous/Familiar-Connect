@@ -123,6 +123,44 @@ class TestBudgeterTrim:
         assert sys_out == "LONG " * 1000
 
 
+class TestBudgeterChannelOverride:
+    """Per-channel total_tokens override wired through trim()."""
+
+    def _msgs(self, n: int = 3) -> list[Message]:
+        return [Message(role="user", content="A" * 40) for _ in range(n)]
+
+    def test_channel_override_tightens_budget(self) -> None:
+        # base budget fits all 3; channel override is tight → only newest kept
+        bud = Budgeter(
+            TierBudget(total_tokens=1000),
+            channel_total_tokens={99: 20},
+        )
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=99)
+        assert len(kept) < 3
+        assert kept[-1].content == "A" * 40
+
+    def test_other_channel_uses_base_budget(self) -> None:
+        bud = Budgeter(
+            TierBudget(total_tokens=1000),
+            channel_total_tokens={99: 20},
+        )
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=55)
+        assert len(kept) == 3  # base budget fits all
+
+    def test_none_channel_uses_base_budget(self) -> None:
+        bud = Budgeter(
+            TierBudget(total_tokens=1000),
+            channel_total_tokens={99: 20},
+        )
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=None)
+        assert len(kept) == 3
+
+    def test_no_overrides_dict_behaves_as_before(self) -> None:
+        bud = Budgeter(TierBudget(total_tokens=1000))
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=99)
+        assert len(kept) == 3
+
+
 class TestBudgeterPerf:
     """Hot-path sanity check — ensure the estimator stays microsecond-class."""
 
