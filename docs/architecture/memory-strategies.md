@@ -46,13 +46,15 @@ details for what already ships live in
 | `facts` | `FactExtractor` | `RagContextLayer` (via FTS) |
 | `people_dossiers` | `PeopleDossierWorker` | `PeopleDossierLayer` |
 | `reflections` | `ReflectionWorker` | `ReflectionLayer` |
+| `fact_embeddings` | `FactEmbeddingWorker` (M6, opt-in) | `RagContextLayer` (rerank) |
 
 Every writer is watermark-driven and idempotent; deleting a
 side-index table rebuilds it from `turns`. See
 [Context pipeline](context-pipeline.md) for watermark semantics.
 
 Reads are multi-signal: BM25 + recent-window exclusion + a 1-10
-importance hint per fact (M2). M6 adds embeddings.
+importance hint per fact (M2) + cosine similarity to the cue
+embedding (M6, opt-in).
 
 ## Swap points
 
@@ -87,6 +89,7 @@ Names registered today (built-ins):
 | `rich_note` | `FactExtractor` | `facts` |
 | `people_dossier` | `PeopleDossierWorker` | `people_dossiers` |
 | `reflection` | `ReflectionWorker` | `reflections` |
+| `fact_embedding` | `FactEmbeddingWorker` | `fact_embeddings` |
 
 Operators pick the active set in `character.toml`:
 
@@ -95,7 +98,9 @@ Operators pick the active set in `character.toml`:
 projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
 ```
 
-Default lists all four. Drop a name to disable that writer. Add a
+Default lists the original four (`fact_embedding` is registered but
+opt-in — the seam is wired but stays off until the operator picks
+an embedder backend). Drop a name to disable that writer. Add a
 third-party projector (Graphiti, Cognee, …) by calling
 `register_projector("graphiti", factory)` at import time and listing
 it here. Unknown names fail loudly at config load — a typo never
@@ -105,14 +110,14 @@ exists).
 
 ### 3. Retrieval ranking (`RagContextLayer`)
 
-Three signals fuse at rank time, TOML-driven:
+Four signals fuse at rank time, TOML-driven:
 
 ```toml
 [memory.retrieval]
 bm25_weight       = 1.0
 recency_weight    = 0.0
 importance_weight = 0.6   # M2 — fact's 1-10 hint
-embedding_weight  = 0.0   # M6 — disabled until embeddings ship
+embedding_weight  = 0.0   # M6 — needs an embedder + populated index
 ```
 
 The layer over-fetches BM25 candidates (up to 4× `max_rag_facts`),
@@ -123,9 +128,59 @@ keeps the top N by weighted sum:
 - **Recency** — newest fact id in the batch = 1.0.
 - **Importance** — `importance/10`. Legacy / unscored rows
   (`importance IS NULL`) get the neutral midpoint, never zero.
+- **Embedding** — cosine similarity to the cue mapped from
+  `[-1, 1]` to `[0, 1]` via `(cos + 1) / 2`. Candidates lacking a
+  stored vector get the neutral midpoint (0.5) — same shape as
+  importance. The cue embedding is only computed when at least one
+  candidate has a stored vector, so a cold side-index pays no
+  embed cost.
 
-`importance_weight = 0` reproduces pre-M2 ordering. See
+`importance_weight = 0` reproduces pre-M2 ordering;
+`embedding_weight = 0` (default) reproduces M2-era ordering. See
 [Tuning — retrieval ranking](tuning.md#retrieval-ranking-m2).
+
+## Embeddings (M6)
+
+Vector side-index over `facts` for paraphrase-tolerant recall, fused
+into the existing BM25 + importance rerank.
+
+`fact_embeddings` carries `(fact_id, model, dim, vector, created_at)`
+keyed on `(fact_id, model)`. Vectors are packed little-endian
+float32 in a `BLOB` column — no `sqlite-vec` dependency yet; brute
+cosine over BM25-overfetched candidates is fine at per-host
+volumes. Pairing the row key with `model` (the embedder's
+`Embedder.name`) means a backend swap accumulates new rows beside
+the old; reads filter on the active model so prior runs stay
+queryable for audit but don't leak into ranking.
+
+`FactEmbeddingWorker` is the projector: every 15 s, pulls up to 32
+current facts (`superseded_at IS NULL`) lacking a row for the active
+model, runs the embedder, persists each vector. Watermark is
+implicit — the `LEFT JOIN fact_embeddings` filter is the watermark.
+A model swap, a deleted side-index, or an extension of the active
+embedder all converge on the same idempotent backfill.
+
+`RagContextLayer` reads vectors at rerank time. When
+`embedding_weight > 0` and the layer has an `Embedder`, it pulls
+candidate vectors with one batched query, embeds the cue once, and
+fuses cosine similarity. Missing vectors map to the neutral 0.5 so
+an unembedded candidate isn't penalised relative to a 5/10 — same
+legacy-friendly shape as importance.
+
+The seam is intentionally split across three knobs so each can move
+independently:
+
+- `[providers.embedding].backend` — picks the backend (`off` /
+  `hash` / a registered ONNX backend). `off` is the default.
+- `[providers.memory].projectors` — list `"fact_embedding"` to
+  start populating the side-index.
+- `[memory.retrieval].embedding_weight` — turn the signal on at
+  read time.
+
+To enable, flip all three; to disable, drop `embedding_weight`
+back to 0 (reads quiet) or drop `fact_embedding` from the projector
+list (writes quiet). The side-index can be deleted at any time —
+the next worker tick rebuilds it from `facts`.
 
 ## Lorebook (M4)
 

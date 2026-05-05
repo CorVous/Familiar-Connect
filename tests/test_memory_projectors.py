@@ -12,9 +12,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.embedding import HashEmbedder
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors import projectors as projectors_module
+from familiar_connect.processors.fact_embedding_worker import FactEmbeddingWorker
 from familiar_connect.processors.fact_extractor import FactExtractor
 from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
 from familiar_connect.processors.projectors import (
@@ -48,12 +50,13 @@ class _StubLLM(LLMClient):
         yield reply.content
 
 
-def _ctx() -> ProjectorContext:
+def _ctx(*, embedder: HashEmbedder | None = None) -> ProjectorContext:
     store = HistoryStore(":memory:")
     return ProjectorContext(
         store=store,
         llm_clients={"background": _StubLLM(), "fast": _StubLLM(), "prose": _StubLLM()},
         familiar_id="fam",
+        embedder=embedder,
     )
 
 
@@ -128,6 +131,23 @@ class TestProjectorRegistry:
             assert isinstance(proj.name, str)
             assert proj.name
             assert callable(proj.run)
+
+    def test_fact_embedding_known_but_not_default(self) -> None:
+        """M6 stays opt-in — registered, but not in the default tuple."""
+        assert "fact_embedding" in known_projectors()
+        assert "fact_embedding" not in DEFAULT_PROJECTORS
+
+    def test_fact_embedding_factory_requires_embedder(self) -> None:
+        with pytest.raises(ValueError, match="fact_embedding projector requires"):
+            create_projectors(names=["fact_embedding"], context=_ctx())
+
+    def test_fact_embedding_factory_yields_worker_when_wired(self) -> None:
+        embedder = HashEmbedder(dim=64)
+        [proj] = create_projectors(
+            names=["fact_embedding"],
+            context=_ctx(embedder=embedder),
+        )
+        assert isinstance(proj, FactEmbeddingWorker)
 
 
 class TestMemoryProvidersConfig:

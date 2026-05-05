@@ -29,12 +29,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from familiar_connect.processors.fact_embedding_worker import FactEmbeddingWorker
 from familiar_connect.processors.fact_extractor import FactExtractor
 from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
 from familiar_connect.processors.reflection_worker import ReflectionWorker
 from familiar_connect.processors.summary_worker import SummaryWorker
 
 if TYPE_CHECKING:
+    from familiar_connect.embedding.protocol import Embedder
     from familiar_connect.history.store import HistoryStore
     from familiar_connect.llm import LLMClient
 
@@ -62,11 +64,18 @@ class ProjectorContext:
     factory in :data:`_REGISTRY`. Adding a new input here is the
     extension point — callers don't need to know which projector
     consumes which field.
+
+    :param embedder: text → vector seam for the M6
+        ``fact_embedding`` projector. ``None`` when
+        ``[providers.embedding].backend = "off"`` (default); the
+        ``fact_embedding`` factory raises a config error in that case
+        so a typo never silently disables semantic recall.
     """
 
     store: HistoryStore
     llm_clients: dict[str, LLMClient]
     familiar_id: str
+    embedder: Embedder | None = None
 
 
 ProjectorFactory = Callable[[ProjectorContext], MemoryProjector]
@@ -149,10 +158,26 @@ def _reflection_factory(ctx: ProjectorContext) -> MemoryProjector:
     )
 
 
+def _fact_embedding_factory(ctx: ProjectorContext) -> MemoryProjector:
+    if ctx.embedder is None:
+        msg = (
+            "fact_embedding projector requires a configured embedder. "
+            'set [providers.embedding].backend to a backend other than "off" '
+            '(e.g. "hash") and restart.'
+        )
+        raise ValueError(msg)
+    return FactEmbeddingWorker(
+        store=ctx.store,
+        embedder=ctx.embedder,
+        familiar_id=ctx.familiar_id,
+    )
+
+
 register_projector("rolling_summary", _summary_factory)
 register_projector("rich_note", _rich_note_factory)
 register_projector("people_dossier", _people_dossier_factory)
 register_projector("reflection", _reflection_factory)
+register_projector("fact_embedding", _fact_embedding_factory)
 
 
 DEFAULT_PROJECTORS: tuple[str, ...] = (
@@ -161,4 +186,10 @@ DEFAULT_PROJECTORS: tuple[str, ...] = (
     "people_dossier",
     "reflection",
 )
-"""Names enabled when ``[providers.memory].projectors`` is unset."""
+"""Names enabled when ``[providers.memory].projectors`` is unset.
+
+``fact_embedding`` is registered but **not** in the default tuple —
+M6 stays opt-in so default deployments don't need an embedder
+configured. Operators add it to their projector list once they've
+picked a backend in ``[providers.embedding]``.
+"""

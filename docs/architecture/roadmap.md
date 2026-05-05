@@ -110,13 +110,56 @@ Default keeps every shipped projector. Empty list disables all
 memory projection. See
 [Memory strategies — swap points](memory-strategies.md#swap-points).
 
-### M6 — Embeddings for semantic recall
+### M6 — Embeddings for semantic recall (seam shipped)
 
-Today: FTS5 keyword recall only. Misses paraphrase cues.
+Phase 1 — seam:
 
-Change: embedding provider behind a Protocol; default to local
-FastEmbed/ONNX. Vectors in `sqlite-vec` alongside FTS.
-`RagContextLayer` fuses both. Same TOML weights as M2.
+* :class:`Embedder` Protocol
+  (`src/familiar_connect/embedding/protocol.py`); built-in backends
+  `off` (default) and `hash` (deterministic baseline, no extra
+  deps). Optional ONNX backends register at import time, same
+  pattern as the STT factory.
+* `fact_embeddings` side-index keyed `(fact_id, model)` so a model
+  swap accumulates new rows beside the old — no audit history
+  destroyed. Vectors persisted as packed little-endian float32 in a
+  `BLOB` column (no `sqlite-vec` dependency yet; brute-force cosine
+  over BM25-overfetched candidates is sufficient at per-host
+  volumes).
+* `FactEmbeddingWorker` projector (registered as
+  `fact_embedding`) — watermark-driven over current facts, embeds
+  new rows in batches of 32, idempotent across model swaps.
+* `RagContextLayer` accepts an :class:`Embedder` and fuses cosine
+  similarity with the existing BM25 / recency / importance
+  signals. Weight knob is the pre-existing `embedding_weight` in
+  `[memory.retrieval]`. Unembedded candidates score the neutral
+  midpoint (0.5) so a partially-populated side-index doesn't
+  poison the rank.
+
+Operator switch-on:
+
+```toml
+[providers.embedding]
+backend = "hash"   # or a real ONNX backend once installed
+
+[providers.memory]
+projectors = [
+    "rolling_summary", "rich_note", "people_dossier", "reflection",
+    "fact_embedding",
+]
+
+[memory.retrieval]
+embedding_weight = 0.6
+```
+
+Phase 2 — production-grade backend:
+
+* FastEmbed / ONNX wrapper for real semantic recall (the `hash`
+  baseline only correlates with token overlap). Lands behind a new
+  `local-embed` extra; the `Embedder` seam stays unchanged.
+* ANN backend (`sqlite-vec`) once fact volumes outgrow brute-force
+  cosine on BM25 candidates.
+
+See [Memory strategies — embeddings](memory-strategies.md#embeddings-m6).
 
 ## Voice
 

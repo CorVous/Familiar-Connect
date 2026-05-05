@@ -19,6 +19,7 @@ from familiar_connect.config import (
     ConfigError,
     DeepgramSTTConfig,
     DiscordTextConfig,
+    EmbeddingConfig,
     LLMSlotConfig,
     MemoryRetrievalConfig,
     STTConfig,
@@ -411,6 +412,62 @@ class TestMemoryRetrieval:
         assert r.recency_weight == pytest.approx(0.0)
         assert r.importance_weight == pytest.approx(0.0)
         assert r.embedding_weight == pytest.approx(0.0)
+
+
+class TestEmbeddingConfig:
+    """[providers.embedding] — M6 embedder backend selection."""
+
+    def test_dataclass_default_is_off(self) -> None:
+        e = EmbeddingConfig()
+        assert e.backend == "off"
+        assert e.dim == 256
+
+    def test_shipped_default_is_off(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.backend == "off"
+
+    def test_override_to_hash(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\nbackend = "hash"\ndim = 128\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.backend == "hash"
+        assert cfg.embedding.dim == 128
+
+    def test_unknown_backend_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\nbackend = "magic"\n')
+        with pytest.raises(ConfigError, match="is unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.embedding]\nweird = 1\n")
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_positive_dim_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.embedding]\ndim = 0\n")
+        with pytest.raises(ConfigError, match="must be > 0"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_int_dim_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\ndim = "wide"\n')
+        with pytest.raises(ConfigError, match="must be a positive integer"):
+            load_character_config(path, defaults_path=default_profile_path)
 
 
 class TestChannelOverrides:

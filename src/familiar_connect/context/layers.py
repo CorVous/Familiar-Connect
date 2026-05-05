@@ -7,6 +7,8 @@ invalidation signal. See plan § Design.4 *Prompt composition*.
 from __future__ import annotations
 
 import hashlib
+import logging
+import math
 import operator
 import re
 import tomllib
@@ -25,12 +27,16 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from familiar_connect.context.assembler import AssemblyContext
+    from familiar_connect.embedding.protocol import Embedder
     from familiar_connect.history.store import (
         AccountProfile,
         Fact,
         HistoryStore,
     )
     from familiar_connect.identity import Author
+
+
+_logger = logging.getLogger(__name__)
 
 
 # Discord mention syntax: <@USER_ID>, optionally with ! for nick form.
@@ -465,6 +471,26 @@ def _trim_rag_lines_to_tokens(
     return kept_facts, kept_turns
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity over equal-length float vectors.
+
+    Returns 0.0 on length mismatch or zero norm — caller treats that
+    as the neutral midpoint after normalisation.
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b, strict=True):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if not na or not nb:
+        return 0.0
+    return dot / math.sqrt(na * nb)
+
+
 def _rerank_fact_candidates(
     scored: list[tuple[Fact, float]],
     *,
@@ -472,11 +498,12 @@ def _rerank_fact_candidates(
     bm25_weight: float,
     recency_weight: float,
     importance_weight: float,
+    embedding_weight: float = 0.0,
+    embedding_similarities: dict[int, float] | None = None,
 ) -> list[Fact]:
-    """Fuse BM25 / recency / importance into a single rank, keep top N.
+    """Fuse BM25 / recency / importance / embedding into a single rank.
 
-    All three signals are mapped to ``[0, 1]`` quality (higher = better)
-    before weighting:
+    All four signals map to ``[0, 1]`` quality before weighting:
 
     * **BM25** — FTS5 returns negative numbers (lower = better). The
       best score in the batch maps to 1.0, the worst to 0.0; ties map
@@ -484,12 +511,18 @@ def _rerank_fact_candidates(
     * **Recency** — fact id rank within the batch. Newest = 1.0.
     * **Importance** — ``importance / 10``. ``None`` → neutral 0.5 so
       legacy / unscored rows aren't penalised relative to a 5/10.
+    * **Embedding** — cosine similarity to the cue, mapped from
+      ``[-1, 1]`` to ``[0, 1]`` via ``(cos + 1) / 2``. Facts missing
+      a vector get the neutral midpoint (0.5) so an unembedded
+      candidate isn't penalised relative to an average match — same
+      legacy-friendly shape as importance.
 
     Sort is stable on equal scores; ties fall back to BM25 order
     (the candidate list itself is BM25-ordered when handed in).
     """
     if not scored:
         return []
+    sims = embedding_similarities or {}
     bm25_scores = [s for _, s in scored]
     bm25_min = min(bm25_scores)
     bm25_max = max(bm25_scores)
@@ -510,10 +543,13 @@ def _rerank_fact_candidates(
         bm25_q = (bm25_max - bm25) / bm25_span if bm25_span > 0 else 1.0
         recency_q = recency_rank[fact.id]
         importance_q = (fact.importance / 10.0) if fact.importance is not None else 0.5
+        cos = sims.get(fact.id)
+        embedding_q = ((cos + 1.0) / 2.0) if cos is not None else 0.5
         score = (
             bm25_weight * bm25_q
             + recency_weight * recency_q
             + importance_weight * importance_q
+            + embedding_weight * embedding_q
         )
         # idx is the candidate position from the SQL BM25 sort; used as
         # a stable tiebreak so equal-scored facts keep deterministic order.
@@ -960,9 +996,14 @@ class RagContextLayer:
     :param importance_weight: ranking weight on the extractor's 1-10
         importance hint. 0 disables (default — opt in via TOML).
         ``None`` importance is treated as the neutral midpoint (5/10).
-    :param embedding_weight: M6 placeholder; ignored today, accepted
-        so the constructor's surface stabilises ahead of the
-        embedding projector landing.
+    :param embedding_weight: ranking weight on cosine similarity to
+        the cue embedding (M6). 0 disables. When >0, requires
+        *embedder* — without one, the layer logs once and falls back
+        to BM25-only.
+    :param embedder: text → vector backend used at rerank time.
+        ``None`` matches the M5 default
+        ``[providers.embedding].backend = "off"`` and is the safe
+        no-op even with ``embedding_weight > 0``.
     :param fact_overfetch: when any non-default rank weight is set,
         over-fetch this many BM25 candidates before reranking. Hard
         cap on extra DB work — never exceeds 4x ``max_facts``.
@@ -983,6 +1024,7 @@ class RagContextLayer:
         recency_weight: float = 0.0,
         importance_weight: float = 0.0,
         embedding_weight: float = 0.0,
+        embedder: Embedder | None = None,
         fact_overfetch: int = 12,
     ) -> None:
         self._store = store
@@ -995,21 +1037,66 @@ class RagContextLayer:
         self._recency_weight = float(recency_weight)
         self._importance_weight = float(importance_weight)
         self._embedding_weight = float(embedding_weight)
+        self._embedder = embedder
         self._fact_overfetch = max(int(fact_overfetch), 1)
         self._current_cue: str = ""
+        self._embedder_warned = False
 
     @property
     def _rerank_facts(self) -> bool:
         """True when any non-BM25 weight is set; opts the rerank path on."""
-        return self._recency_weight > 0.0 or self._importance_weight > 0.0
+        return (
+            self._recency_weight > 0.0
+            or self._importance_weight > 0.0
+            or (self._embedding_weight > 0.0 and self._embedder is not None)
+        )
 
     def set_current_cue(self, cue: str) -> None:
         self._current_cue = (cue or "").strip()
+
+    async def _embedding_similarities(
+        self,
+        scored: list[tuple[Fact, float]],
+        *,
+        cue: str,
+    ) -> dict[int, float]:
+        """Cosine sim of cue vs each candidate fact's stored vector.
+
+        Returns ``{}`` when the embedding signal is disabled, the
+        embedder is missing, or no candidate has a stored vector.
+        Only computes the cue embedding when at least one candidate
+        has a vector — saves the embed call on a cold side-index.
+        """
+        if self._embedder is None or self._embedding_weight <= 0.0 or not scored:
+            return {}
+        ids = [f.id for f, _ in scored]
+        stored = self._store.get_fact_embeddings(
+            fact_ids=ids, model=self._embedder.name
+        )
+        if not stored:
+            return {}
+        vectors = await self._embedder.embed([cue])
+        if not vectors:
+            return {}
+        cue_vec = vectors[0]
+        return {fid: _cosine(cue_vec, vec) for fid, vec in stored.items()}
 
     async def build(self, ctx: AssemblyContext) -> str:
         cue = self._current_cue
         if not cue:
             return ""
+        if (
+            self._embedding_weight > 0.0
+            and self._embedder is None
+            and not self._embedder_warned
+        ):
+            _logger.warning(
+                "RagContextLayer: embedding_weight=%.2f but no embedder "
+                "configured (set [providers.embedding].backend); falling back "
+                "to BM25-only ranking.",
+                self._embedding_weight,
+            )
+            self._embedder_warned = True
         # Window cutoff for the current channel: anything newer than
         # this id is already in RecentHistoryLayer's output.
         max_id: int | None = None
@@ -1033,12 +1120,17 @@ class RagContextLayer:
                 query=cue,
                 limit=fetch,
             )
+            sims = await self._embedding_similarities(scored, cue=cue)
             fact_results = _rerank_fact_candidates(
                 scored,
                 limit=self._max_facts,
                 bm25_weight=self._bm25_weight,
                 recency_weight=self._recency_weight,
                 importance_weight=self._importance_weight,
+                embedding_weight=(
+                    self._embedding_weight if self._embedder is not None else 0.0
+                ),
+                embedding_similarities=sims,
             )
         else:
             fact_results = self._store.search_facts(

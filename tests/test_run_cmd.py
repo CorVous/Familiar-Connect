@@ -672,6 +672,7 @@ class TestAsyncMainCleanup:
                 "familiar_connect.commands.run.create_projectors",
                 return_value=[proj],
             ),
+            patch("familiar_connect.commands.run.create_embedder", return_value=None),
             pytest.raises(BaseExceptionGroup),  # TaskGroup wraps the inner raise
         ):
             await _async_main("fake-token", familiar)
@@ -719,6 +720,7 @@ class TestAsyncMainCleanup:
                 "familiar_connect.commands.run.create_projectors",
                 return_value=[proj],
             ),
+            patch("familiar_connect.commands.run.create_embedder", return_value=None),
             pytest.raises(BaseExceptionGroup),
         ):
             await _async_main("fake-token", familiar)

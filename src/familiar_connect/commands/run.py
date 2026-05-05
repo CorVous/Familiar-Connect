@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import argparse
 
+    from familiar_connect.embedding.protocol import Embedder
+
 import discord
 
 from familiar_connect import log_style as ls
@@ -39,6 +41,7 @@ from familiar_connect.context import (
     RecentHistoryLayer,
     ReflectionLayer,
 )
+from familiar_connect.embedding import create_embedder
 from familiar_connect.familiar import Familiar
 from familiar_connect.llm import create_llm_clients
 from familiar_connect.processors import (
@@ -141,6 +144,7 @@ def _default_assembler(
     *,
     window_size: int,
     budget: TierBudget,
+    embedder: Embedder | None = None,
 ) -> Assembler:
     """Build the full layer stack with token-aware per-section caps.
 
@@ -235,6 +239,7 @@ def _default_assembler(
                 recency_weight=retrieval.recency_weight,
                 importance_weight=retrieval.importance_weight,
                 embedding_weight=retrieval.embedding_weight,
+                embedder=embedder,
             ),
             RecentHistoryLayer(
                 store=store,
@@ -282,15 +287,18 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     handle = create_bot(familiar)
     await familiar.bus.start()
 
+    embedder = create_embedder(familiar.config.embedding)
     voice_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.voice_window_size,
         budget=familiar.config.budgets["voice"],
+        embedder=embedder,
     )
     text_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.text_window_size,
         budget=familiar.config.budgets["text"],
+        embedder=embedder,
     )
     tts_player: TTSPlayer
     if familiar.tts_client is not None:
@@ -323,6 +331,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         store=familiar.history_store,
         llm_clients=familiar.llm_clients,
         familiar_id=familiar.id,
+        embedder=embedder,
     )
     projectors = create_projectors(
         names=list(familiar.config.memory_providers.projectors),

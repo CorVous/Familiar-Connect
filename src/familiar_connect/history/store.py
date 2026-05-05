@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import struct
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -413,6 +414,23 @@ AFTER UPDATE ON turns BEGIN
         VALUES ('delete', old.id, old.content);
     INSERT INTO fts_turns (rowid, content) VALUES (new.id, new.content);
 END;
+
+-- Per-fact embeddings (M6). Vectors stored as packed float32 BLOBs;
+-- ``model`` is the embedder's ``name`` so a model swap creates a new
+-- row rather than overwriting (audit history preserved). The
+-- :class:`FactEmbeddingWorker` projector populates this table from
+-- ``facts``; ``RagContextLayer`` reads it at rerank time.
+CREATE TABLE IF NOT EXISTS fact_embeddings (
+    fact_id     INTEGER NOT NULL,
+    model       TEXT    NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB    NOT NULL,
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (fact_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_embeddings_model
+    ON fact_embeddings (model, fact_id);
 """
 
 _TURN_COLS = (
@@ -2154,6 +2172,128 @@ class HistoryStore:
             (ts, new_id, old_id, familiar_id),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # fact embeddings (M6) — semantic recall side-index
+    # ------------------------------------------------------------------
+
+    def set_fact_embedding(
+        self,
+        *,
+        fact_id: int,
+        model: str,
+        vector: list[float],
+    ) -> None:
+        """Persist *vector* for ``(fact_id, model)``; upsert.
+
+        Stored as packed little-endian float32. ``model`` is the
+        embedder's :attr:`Embedder.name`; pairing it with ``fact_id``
+        lets a model swap accumulate new rows beside the old without
+        destroying audit history.
+        """
+        if not vector:
+            msg = "set_fact_embedding requires a non-empty vector"
+            raise ValueError(msg)
+        dim = len(vector)
+        blob = struct.pack(f"<{dim}f", *vector)
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO fact_embeddings (fact_id, model, dim, vector, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (fact_id, model)
+            DO UPDATE SET
+                dim        = excluded.dim,
+                vector     = excluded.vector,
+                created_at = excluded.created_at
+            """,
+            (int(fact_id), model, dim, blob, ts),
+        )
+        self._conn.commit()
+
+    def get_fact_embeddings(
+        self,
+        *,
+        fact_ids: Iterable[int],
+        model: str,
+    ) -> dict[int, list[float]]:
+        """Return ``{fact_id: vector}`` for the requested ids + model.
+
+        Missing rows are simply absent from the result — the caller
+        treats them as "not yet embedded" and skips the embedding
+        signal for that candidate.
+        """
+        ids = [int(i) for i in fact_ids]
+        if not ids:
+            return {}
+        placeholders = ",".join(["?"] * len(ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT fact_id, dim, vector
+              FROM fact_embeddings
+             WHERE model = ? AND fact_id IN ({placeholders})
+            """,  # noqa: S608
+            (model, *ids),
+        ).fetchall()
+        out: dict[int, list[float]] = {}
+        for r in rows:
+            dim = int(r["dim"])
+            blob = bytes(r["vector"])
+            out[int(r["fact_id"])] = list(struct.unpack(f"<{dim}f", blob))
+        return out
+
+    def unembedded_facts(
+        self,
+        *,
+        familiar_id: str,
+        model: str,
+        limit: int,
+    ) -> list[Fact]:
+        """Return current facts lacking an embedding row for ``model``.
+
+        "Current" matches :meth:`recent_facts` defaults — superseded
+        rows are excluded. The projector embeds in id order so an
+        interrupted run resumes deterministically.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT f.id, f.familiar_id, f.channel_id, f.text,
+                   f.source_turn_ids, f.created_at,
+                   f.superseded_at, f.superseded_by, f.subjects_json,
+                   f.valid_from, f.valid_to, f.importance
+              FROM facts AS f
+              LEFT JOIN fact_embeddings AS fe
+                ON fe.fact_id = f.id AND fe.model = ?
+             WHERE f.familiar_id = ?
+               AND f.superseded_at IS NULL
+               AND fe.fact_id IS NULL
+             ORDER BY f.id ASC
+             LIMIT ?
+            """,
+            (model, familiar_id, limit),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def latest_embedded_fact_id(
+        self,
+        *,
+        familiar_id: str,
+        model: str,
+    ) -> int:
+        """Highest ``fact_id`` with an embedding row for ``model``; 0 if none."""
+        row = self._conn.execute(
+            """
+            SELECT MAX(fe.fact_id) AS max_id
+              FROM fact_embeddings AS fe
+              JOIN facts AS f ON f.id = fe.fact_id
+             WHERE fe.model = ? AND f.familiar_id = ?
+            """,
+            (model, familiar_id),
+        ).fetchone()
+        max_id = row["max_id"] if row is not None else None
+        return int(max_id) if max_id is not None else 0
 
     # ------------------------------------------------------------------
     # reflections (M3) — higher-order syntheses

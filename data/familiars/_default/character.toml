@@ -108,19 +108,21 @@ max_lorebook_entries  = 16
 
 # --- Retrieval ranking -----------------------------------------------------
 #
-# Weights blended into RagContextLayer's fact ranking (M2). All four
-# signals are normalised to [0, 1] within the candidate batch before
-# weighting; the top ``max_rag_facts`` are kept.
+# Weights blended into RagContextLayer's fact ranking. All four signals
+# are normalised to [0, 1] within the candidate batch before weighting;
+# the top ``max_rag_facts`` are kept.
 #
 # bm25_weight        — quality of the FTS5 BM25 match. Default 1.0.
 # recency_weight     — newest facts in the candidate batch ranked higher.
 # importance_weight  — extractor's 1-10 hint (``importance/10``). Legacy
 #                      / unscored facts get the neutral midpoint.
-# embedding_weight   — placeholder for M6; ignored today.
+# embedding_weight   — cosine similarity to cue embedding (M6). Needs an
+#                      embedder configured below; without one, the layer
+#                      logs once and falls back to BM25-only.
 #
-# Default reproduces pre-M2 ordering (BM25 only). Raise importance to
-# bias toward safety-critical facts (allergies, names, life events);
-# raise recency to keep retrieval anchored to recent conversation.
+# Default reproduces pre-M2 ordering (BM25 only) plus M2's importance
+# bias. Raise embedding_weight (along with [providers.embedding]) once
+# the fact_embedding projector has populated the side-index.
 
 [memory.retrieval]
 bm25_weight       = 1.0
@@ -140,9 +142,34 @@ embedding_weight  = 0.0
 # rich_note        fact extractor (the "rich-note" projector).
 # people_dossier   per-person summary off the facts watermark.
 # reflection       higher-order syntheses with citation provenance.
+# fact_embedding   M6 — vectors for semantic recall. Opt-in: requires
+#                  [providers.embedding].backend != "off".
 
 [providers.memory]
 projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+
+# --- Embeddings (M6) -------------------------------------------------------
+#
+# Backend for the ``fact_embedding`` projector and the embedding signal
+# in [memory.retrieval].
+#
+# backend = "off"   No-op (default). RAG layer skips the embedding
+#                   signal even when embedding_weight > 0.
+# backend = "hash"  Deterministic locality-hashing baseline. No deps;
+#                   weak signal, but useful for sanity checks /
+#                   smoke tests.
+#
+# To turn on semantic recall:
+#   1. switch ``backend`` here
+#   2. add ``"fact_embedding"`` to [providers.memory].projectors
+#   3. raise [memory.retrieval].embedding_weight above 0
+#
+# ``dim`` is the vector size for backends that accept one (``hash``).
+# Real backends with a fixed model dim ignore this knob.
+
+[providers.embedding]
+backend = "off"
+dim     = 256
 
 # --- Turn detection --------------------------------------------------------
 #

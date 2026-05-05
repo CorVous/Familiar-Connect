@@ -33,7 +33,8 @@ toml baked into the image and tune per host without a rebuild.
 | Turn detection strategy + tuning | `[providers.turn_detection]` + `[providers.turn_detection.local]` | unchanged |
 | Memory projector selection | `[providers.memory]` (M5) | unchanged |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
-| RAG / fact retrieval ranking | `[memory.retrieval]` (M2) | `embedding_weight` wires up at M6 |
+| Embedding backend (M6) | `[providers.embedding]` | unchanged |
+| RAG / fact retrieval ranking | `[memory.retrieval]` (M2 + M6) | unchanged |
 
 ## Environment variables
 
@@ -81,6 +82,11 @@ total_tokens = 24000      # offline workers — summary, dossier, facts
 bm25_weight       = 1.0
 recency_weight    = 0.0
 importance_weight = 0.6   # M2 — see § Retrieval ranking
+embedding_weight  = 0.0   # M6 — needs [providers.embedding] + projector
+
+[providers.embedding]
+backend = "off"           # "off" | "hash"
+dim     = 256             # for backends that accept one
 
 [providers.turn_detection]
 strategy = "deepgram"    # "deepgram" | "ten+smart_turn"
@@ -262,8 +268,11 @@ streaming context exits.
   authored canon (M4). Add hand-written world / setting / lore
   entries that surface only when a key appears in recent turns.
   See [Memory strategies — lorebook](memory-strategies.md#lorebook-m4).
-- **Roadmap M6** — embeddings for paraphrase recall is the next
-  bigger win.
+- **`[providers.embedding].backend`** + `embedding_weight` —
+  semantic recall (M6, opt-in seam). Pick a backend, add
+  `"fact_embedding"` to `[providers.memory].projectors`, and raise
+  `[memory.retrieval].embedding_weight` once the side-index has
+  populated. See [Embeddings (M6)](#embeddings-m6).
 
 ### A/B a strategy on one channel
 
@@ -598,7 +607,7 @@ Today's `[channels.<id>]` knobs:
 bm25_weight       = 1.0
 recency_weight    = 0.0
 importance_weight = 0.6   # M2 — fact's 1-10 importance hint
-embedding_weight  = 0.0   # M6 placeholder
+embedding_weight  = 0.0   # M6 — needs an embedder + populated index
 ```
 
 `RagContextLayer` over-fetches BM25 candidates (up to 4×
@@ -610,7 +619,7 @@ candidate batch, and keeps the top N by weighted sum.
 | `bm25_weight` | `1.0` | FTS5 BM25 quality. Best in batch = 1.0. |
 | `recency_weight` | `0.0` | Newer fact id in batch = 1.0. |
 | `importance_weight` | `0.6` | `importance/10`. NULL = neutral 0.5. |
-| `embedding_weight` | `0.0` | M6 placeholder; ignored today. |
+| `embedding_weight` | `0.0` | Cosine sim to cue embedding. Needs M6 wired. |
 
 `importance_weight = 0` reproduces pre-M2 BM25-only ordering. Raise
 it to bias toward safety-critical facts (allergies, names, life
@@ -621,6 +630,62 @@ Importance itself is set per-fact by `FactExtractor`: the prompt
 asks the LLM for a 1–10 integer (1 = throwaway, 5 = ordinary,
 10 = identity-defining / safety-critical). Out-of-range values are
 clamped on the store side; non-numeric input drops to NULL.
+
+## Embeddings (M6)
+
+```toml
+[providers.embedding]
+backend = "off"           # "off" | "hash"
+dim     = 256             # for backends that accept one
+```
+
+Three knobs gate the seam — flip all three to turn it on:
+
+1. **Backend** — `[providers.embedding].backend`. `off` (default)
+   short-circuits creation; the projector raises if listed without
+   one, and the RAG layer skips the embedding signal even if its
+   weight is positive (warned once at startup).
+2. **Projector** — add `"fact_embedding"` to
+   `[providers.memory].projectors`. The watermark-driven worker
+   embeds every current fact missing a vector for the active
+   model.
+3. **Weight** — `[memory.retrieval].embedding_weight > 0`.
+
+Built-in backends:
+
+| Backend | Cost | Quality | When to use |
+|---|---|---|---|
+| `off` | none | none | default; semantic recall not wanted |
+| `hash` | none | weak (token-overlap baseline) | tests, smoke checks, cold-start without ONNX |
+
+Real ONNX backends register at import time (same pattern as the STT
+factory); the seam is stable so a third-party `register_embedder`
+call drops in without touching `RagContextLayer`.
+
+Operator playbook:
+
+```toml
+[providers.embedding]
+backend = "hash"
+
+[providers.memory]
+projectors = [
+    "rolling_summary", "rich_note", "people_dossier", "reflection",
+    "fact_embedding",
+]
+
+[memory.retrieval]
+embedding_weight = 0.6
+```
+
+Side-index lives at `fact_embeddings` keyed `(fact_id, model)`, so a
+backend swap accumulates new vectors beside the old. Wipe the table
+to force a re-embed:
+
+```bash
+sqlite3 data/familiars/<id>/history.db "DELETE FROM fact_embeddings;"
+# next FactEmbeddingWorker tick rebuilds from facts
+```
 
 ## Memory projectors (M5)
 
@@ -639,10 +704,13 @@ projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
 | `rich_note` | `FactExtractor` | `facts` |
 | `people_dossier` | `PeopleDossierWorker` | `people_dossiers` |
 | `reflection` | `ReflectionWorker` | `reflections` |
+| `fact_embedding` | `FactEmbeddingWorker` | `fact_embeddings` (M6, opt-in) |
 
-Default keeps all four. Drop a name to disable that writer. Empty
-list disables every memory projector (read paths still work — they
-just see stale side-indices).
+Default keeps the original four; `fact_embedding` is registered but
+must be added explicitly because it depends on a configured embedder
+backend (see [Embeddings (M6)](#embeddings-m6)). Drop a name to
+disable that writer. Empty list disables every memory projector
+(read paths still work — they just see stale side-indices).
 
 Third-party projectors (a Graphiti / Cognee / external memory
 service) plug in by calling

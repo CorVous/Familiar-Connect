@@ -231,7 +231,11 @@ class MemoryRetrievalConfig:
     :param importance_weight: ranking weight on the extractor's 1-10
         importance hint (``importance/10``). Legacy / unscored facts
         get the neutral midpoint.
-    :param embedding_weight: M6 placeholder; ignored today.
+    :param embedding_weight: ranking weight on cosine similarity to
+        the cue embedding (M6). Requires
+        ``[providers.embedding].backend != "off"``; without an
+        embedder the layer skips this signal even when the weight is
+        positive (warned once at startup).
     """
 
     bm25_weight: float = 1.0
@@ -261,6 +265,26 @@ class MemoryProvidersConfig:
         "people_dossier",
         "reflection",
     )
+
+
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    """Embedder backend selector from ``[providers.embedding]`` (M6).
+
+    Picks the text → vector backend used by the ``fact_embedding``
+    projector and (when ``[memory.retrieval].embedding_weight > 0``)
+    by :class:`RagContextLayer` at rerank time.
+
+    :param backend: name registered in
+        :mod:`familiar_connect.embedding.factory`. ``"off"`` (default)
+        disables the seam end to end — projector raises if listed,
+        RAG layer skips embedding signal.
+    :param dim: dimensionality hint for backends that accept one
+        (``hash``). Real backends with a fixed model dim ignore this.
+    """
+
+    backend: str = "off"
+    dim: int = 256
 
 
 @dataclass(frozen=True)
@@ -328,6 +352,8 @@ class CharacterConfig:
     memory_providers: MemoryProvidersConfig = field(
         default_factory=MemoryProvidersConfig
     )
+    # M6 — embedder backend selection from [providers.embedding].
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty overrides if none."""
@@ -432,6 +458,14 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     memory_providers = _parse_memory_providers(memory_providers_raw)
 
+    embedding_raw = providers_raw.get("embedding", {})
+    if not isinstance(embedding_raw, dict):
+        msg = (
+            f"[providers.embedding] must be a table, got {type(embedding_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    embedding = _parse_embedding_config(embedding_raw)
+
     budget_raw = data.get("budget", {})
     if not isinstance(budget_raw, dict):
         msg = f"[budget] must be a table, got {type(budget_raw).__name__}"
@@ -475,6 +509,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         discord_text=discord_text,
         memory_retrieval=memory_retrieval,
         memory_providers=memory_providers,
+        embedding=embedding,
     )
 
 
@@ -667,6 +702,54 @@ def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
             )
             raise ConfigError(msg)
     return MemoryProvidersConfig(projectors=tuple(raw_projectors))
+
+
+_EMBEDDING_FIELDS: frozenset[str] = frozenset({"backend", "dim"})
+
+
+def _parse_embedding_config(raw: dict) -> EmbeddingConfig:
+    """Validate ``[providers.embedding]``.
+
+    ``backend`` is checked against
+    :func:`familiar_connect.embedding.factory.known_embedders` so a
+    typo fails loudly at config load. ``dim`` must be a positive int.
+    """
+    unknown = set(raw) - _EMBEDDING_FIELDS
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[providers.embedding] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    defaults = EmbeddingConfig()
+    backend = raw.get("backend", defaults.backend)
+    if not isinstance(backend, str):
+        msg = (
+            f"[providers.embedding].backend must be a string, "
+            f"got {type(backend).__name__}"
+        )
+        raise ConfigError(msg)
+    # Deferred to keep config.py importable without the embedding
+    # registry — same shape as the projector validator.
+    from familiar_connect.embedding.factory import known_embedders  # noqa: PLC0415
+
+    valid = known_embedders()
+    if backend not in valid:
+        valid_list = ", ".join(sorted(valid)) or "(none)"
+        msg = (
+            f"[providers.embedding].backend = {backend!r} is unknown; "
+            f"valid: {valid_list}"
+        )
+        raise ConfigError(msg)
+    dim_raw = raw.get("dim", defaults.dim)
+    if isinstance(dim_raw, bool) or not isinstance(dim_raw, int):
+        msg = (
+            f"[providers.embedding].dim must be a positive integer, "
+            f"got {type(dim_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    if dim_raw <= 0:
+        msg = f"[providers.embedding].dim must be > 0, got {dim_raw}"
+        raise ConfigError(msg)
+    return EmbeddingConfig(backend=backend, dim=int(dim_raw))
 
 
 _VALID_MESSAGE_RENDERING: frozenset[str] = frozenset({"prefixed", "name_only"})
