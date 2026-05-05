@@ -558,6 +558,7 @@ total_tokens = 5000   # rest of the voice envelope inherits from _default
 |---|---|---|
 | `RecentHistoryLayer.window_size` (voice tier) | `100` | `[providers.history].voice_window_size` |
 | `RecentHistoryLayer.window_size` (text tier) | `200` | `[providers.history].text_window_size` |
+| `RecentHistoryLayer.coalesce_max_gap_seconds` | `45.0` | `[providers.history].coalesce_max_gap_seconds` |
 | `RecentHistoryLayer.max_tokens` | `1500` (voice) | `[budget.<tier>].recent_history_tokens` |
 | `RagContextLayer.max_results` | `5` (voice) | `[budget.<tier>].max_rag_turns` |
 | `RagContextLayer.max_facts` | `3` (voice) | `[budget.<tier>].max_rag_facts` |

@@ -24,6 +24,14 @@ aliases    = []
 voice_window_size = 100
 text_window_size  = 200
 
+# Voice transcription emits one user turn per Deepgram segment-final,
+# so a long monologue lands as several consecutive same-speaker rows.
+# At prompt-render time, fragments from the same speaker within this
+# many seconds collapse into one message (earliest timestamp,
+# space-joined content). 0 disables. Discord text turns are unaffected
+# (they carry platform_message_id and never coalesce).
+coalesce_max_gap_seconds = 45.0
+
 # --- Prompt assembly budget ------------------------------------------------
 #
 # Per-tier token caps for the prompt assembler. Each cap is a hard
