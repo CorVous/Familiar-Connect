@@ -66,6 +66,7 @@ Each layer implements a narrow Protocol:
 ```python
 class Layer(Protocol):
     name: str
+
     async def build(self, ctx: AssemblyContext) -> str: ...
     def invalidation_key(self, ctx: AssemblyContext) -> str: ...
 ```
@@ -691,9 +692,15 @@ changed.
 `familiar_connect.diagnostics.cold_cache` provides three detectors:
 
 - `detect_topic_shift` — Jaccard overlap between the new turn's
-  content words and the rolling summary; fires below 0.15.
+  content words and the rolling summary; fires below 0.15. Skipped
+  when the new turn has fewer than `min_tokens` (default 4) content
+  tokens, since short voice fragments would otherwise fire on every
+  utterance regardless of topic continuity.
 - `detect_unknown_proper_noun` — capitalized tokens (3+ chars) in
-  the new turn that don't appear in prior context.
+  the new turn that don't appear in prior context. A small built-in
+  stopword list filters common sentence-starters (`Which`, `But`,
+  `Okay`, `Yeah`, …) so the signal isn't dominated by discourse
+  markers from voice transcripts.
 - `detect_silence_gap` — wall-clock gap above `threshold_seconds`
   (default 300 s).
 

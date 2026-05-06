@@ -36,6 +36,51 @@ _logger = logging.getLogger("familiar_connect.diagnostics.cold_cache")
 _WORD_RE = re.compile(r"[\w']{3,}", re.UNICODE)
 _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]{2,})\b")
 
+# Capitalized discourse markers / sentence-starters that the regex
+# above would otherwise flag on every short voice fragment ("But.",
+# "Okay.", "Which means…"). Stored lowercase; matched case-insensitively.
+# Incomplete by design — additions are cheap, full NER is out of scope.
+_SENTENCE_STARTER_STOPWORDS: frozenset[str] = frozenset({
+    "actually",
+    "also",
+    "and",
+    "but",
+    "for",
+    "however",
+    "just",
+    "like",
+    "maybe",
+    "now",
+    "oh",
+    "okay",
+    "really",
+    "right",
+    "since",
+    "something",
+    "sometimes",
+    "still",
+    "that",
+    "the",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "well",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "why",
+    "yeah",
+    "yes",
+    "you",
+    "your",
+})
+
 
 # ---------------------------------------------------------------------------
 # Signal detectors
@@ -47,7 +92,11 @@ def _tokens(text: str) -> set[str]:
 
 
 def detect_topic_shift(
-    *, new_text: str, prior_context: str, min_overlap: float = 0.15
+    *,
+    new_text: str,
+    prior_context: str,
+    min_overlap: float = 0.15,
+    min_tokens: int = 4,
 ) -> bool:
     """Detect when ``new_text`` shares too few content words with prior.
 
@@ -55,31 +104,46 @@ def detect_topic_shift(
     default 0.15 is intentionally permissive — we want the signal to
     fire often so we can see how it correlates with retrieval
     failures.
+
+    Voice fragments often reduce to 0-1 content tokens after the 3+
+    char filter, which guarantees near-zero Jaccard regardless of
+    actual topic continuity. ``min_tokens`` floors the input length;
+    below it we return ``False`` rather than emit noise.
     """
     new_tokens = _tokens(new_text)
     old_tokens = _tokens(prior_context)
     if not new_tokens or not old_tokens:
         return False
+    if len(new_tokens) < min_tokens:
+        return False
     overlap = len(new_tokens & old_tokens) / len(new_tokens | old_tokens)
     return overlap < min_overlap
 
 
-def detect_unknown_proper_noun(*, new_text: str, prior_context: str) -> list[str]:
+def detect_unknown_proper_noun(
+    *,
+    new_text: str,
+    prior_context: str,
+    stopwords: frozenset[str] = _SENTENCE_STARTER_STOPWORDS,
+) -> list[str]:
     """Return proper nouns in ``new_text`` absent from ``prior_context``.
 
     Proper noun here = capitalized word of 3+ letters. Sentence-start
-    capitalisation inevitably leaks in (``"Tomorrow"``) — that's fine
-    for Phase-3 data collection; we'd refine with an NER pass if the
-    signal proves useful.
+    capitalisation inevitably leaks in (``"Which"``, ``"But"``); the
+    ``stopwords`` set filters the most common offenders. Tradeoff:
+    real names that match a stopword (rare) get suppressed.
     """
     prior_lower = prior_context.lower()
     unknowns: list[str] = []
     seen: set[str] = set()
     for match in _PROPER_NOUN_RE.findall(new_text or ""):
+        lowered = match.lower()
+        if lowered in stopwords:
+            continue
         if match in seen:
             continue
         seen.add(match)
-        if match.lower() not in prior_lower:
+        if lowered not in prior_lower:
             unknowns.append(match)
     return unknowns
 
@@ -117,6 +181,7 @@ def log_signals(
     prev_turn_at: datetime | None,
     current_turn_at: datetime,
     topic_shift_threshold: float = 0.15,
+    topic_shift_min_tokens: int = 4,
     silence_gap_threshold_s: float = 300.0,
 ) -> dict[str, object]:
     """Run all detectors; emit one span per firing signal.
@@ -130,6 +195,7 @@ def log_signals(
         new_text=new_text,
         prior_context=prior_context,
         min_overlap=topic_shift_threshold,
+        min_tokens=topic_shift_min_tokens,
     ):
         fired["topic_shift"] = True
         _logger.info(
