@@ -510,6 +510,40 @@ assistant — the bot reads its own reactions too). One SQL roundtrip
 per assemble, ordered by descending count and emoji asc for stable
 ties.
 
+### Embed unfurls (read)
+
+URL previews arrive on a Discord message as `message.embeds` —
+sometimes pre-attached on `on_message`, more often via a follow-up
+`on_message_edit` once Discord finishes unfurling (typical lag is
+1–2 s). The bot flattens these into the message's stored content so
+the LLM sees the same body humans see in the client.
+
+- **Formatter** — `familiar_connect.sources.discord_embed_text.format_embeds`
+  is duck-typed over `discord.Embed` (any object with `title`,
+  `description`, `author`, `provider`, `fields`, `footer`, `url`
+  attributes works). Each rendered embed is tagged `[embed]` so the
+  LLM can tell unfurl content apart from the user's typed text;
+  multi-embed messages join with a blank line. Image-only embeds
+  fall back to `[link: <url>]` when there's no other text;
+  attribute-less embeds drop entirely.
+- **Inbound (`on_message`)** — `bot.compose_content_with_embeds`
+  appends formatted embed text to `message.content` before the
+  source publishes onto the bus. Most messages arrive with
+  `embeds == []` here; the merge is a no-op.
+- **Edit (`on_message_edit`)** — `bot.apply_message_edit` re-runs
+  the merge once embeds appear and rewrites `turns.content` for
+  the original `platform_message_id` via
+  `HistoryStore.update_turn_content_by_message_id`. The
+  `turns_au_fts` trigger keeps the FTS index in sync; reactions
+  / replies stay attached because the row id never changes. Pure
+  text edits aren't tracked — the handler only fires when the
+  embed list actually changes.
+
+The bot's *first* reply to a URL-bearing message often races the
+unfurl and posts before the embed lands; subsequent prompts assemble
+recent history from the updated row and see the unfurled text. Bot-
+authored edits skip — the responder owns its own turn writes.
+
 ### Mentions (read + write)
 
 A `turn_mentions(turn_id, canonical_key)` junction table records

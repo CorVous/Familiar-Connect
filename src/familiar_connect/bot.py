@@ -31,6 +31,7 @@ from familiar_connect.diagnostics.collector import get_span_collector
 from familiar_connect.diagnostics.report import render_summary_table
 from familiar_connect.identity import Author
 from familiar_connect.sources import DiscordTextSource
+from familiar_connect.sources.discord_embed_text import format_embeds
 from familiar_connect.sources.voice import VoiceSource
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.typing_interrupt import TypingInterruptHandler
@@ -38,7 +39,7 @@ from familiar_connect.voice import DaveVoiceClient
 from familiar_connect.voice.recording_sink import RecordingSink
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
     from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
     from familiar_connect.familiar import Familiar
@@ -444,6 +445,62 @@ async def ingest_event(
     )
 
 
+def compose_content_with_embeds(
+    content: str,
+    embeds: Iterable[object],
+) -> str:
+    """Append rendered embed text to ``content``.
+
+    Mirrors what humans see in the client — the message body plus
+    Discord's URL unfurl below it. ``embeds`` may be empty (no
+    unfurl yet) or contain blank entries; both collapse to the
+    original ``content``. Empty body + non-empty embeds yields the
+    embed text alone (no leading blank line).
+    """
+    embed_text = format_embeds(embeds)
+    if not embed_text:
+        return content
+    if not content:
+        return embed_text
+    return f"{content}\n\n{embed_text}"
+
+
+def apply_message_edit(
+    *,
+    store: HistoryStore,
+    familiar_id: str,
+    is_subscribed: Callable[[int], bool],
+    channel_id: int,
+    message_id: int | str,
+    content: str,
+    embeds: Iterable[object],
+) -> None:
+    """Refresh a stored turn's content when Discord adds an embed.
+
+    Pure dispatcher — separated from the gateway handler so it's
+    testable without spinning up a Discord bot. No-op when:
+
+    - the channel isn't text-subscribed (write nothing we can't read)
+    - the edit carries no embed (pure text edits aren't tracked)
+    - no stored turn matches ``message_id`` (bot came up late)
+
+    Embed text is merged into ``content`` via
+    :func:`compose_content_with_embeds`; the original ``message_id``
+    column lets the FTS update trigger reindex transparently.
+    """
+    if not is_subscribed(channel_id):
+        return
+    embed_text = format_embeds(embeds)
+    if not embed_text:
+        return
+    merged = compose_content_with_embeds(content, embeds)
+    store.update_turn_content_by_message_id(
+        familiar_id=familiar_id,
+        platform_message_id=str(message_id),
+        content=merged,
+    )
+
+
 def _emoji_repr(emoji: discord.PartialEmoji) -> str:
     """Stable string for a :class:`discord.PartialEmoji`.
 
@@ -841,16 +898,51 @@ def _register_events(
             for u in message.mentions
             if not getattr(u, "bot", False)
         )
+        # ``message.embeds`` is usually empty here — Discord unfurls
+        # URLs server-side and fires ``on_message_edit`` a moment
+        # later. Pre-cached unfurls (and bot-author embeds, though
+        # bots are filtered above) do arrive populated, so merge
+        # whatever is on the inbound message and let the edit
+        # handler patch the rest.
+        text = compose_content_with_embeds(message.content, message.embeds or ())
         await ingest_event(
             source=text_source,
             familiar=familiar,
             channel_id=message.channel.id,
             guild_id=message.guild.id if message.guild else None,
             author=Author.from_discord_member(message.author),
-            text=message.content,
+            text=text,
             message_id=str(message.id),
             reply_to_message_id=reply_to,
             mentions=mention_authors,
+        )
+
+    @bot.event
+    async def on_message_edit(  # noqa: RUF029 — Discord event handler contract
+        before: discord.Message,
+        after: discord.Message,
+    ) -> None:
+        # Discord fires this when an embed unfurl finishes (usually
+        # 1-2 s after the original message). We only care about
+        # transitions that *added* embed content — pure text edits
+        # aren't tracked here. Bot-authored edits skip too: the
+        # responder owns its own turn writes.
+        if familiar.bot_user_id is not None and after.author.id == familiar.bot_user_id:
+            return
+        if after.author.bot:
+            return
+        before_embeds = list(getattr(before, "embeds", None) or ())
+        after_embeds = list(getattr(after, "embeds", None) or ())
+        if not after_embeds or before_embeds == after_embeds:
+            return
+        apply_message_edit(
+            store=familiar.history_store,
+            familiar_id=familiar.id,
+            is_subscribed=_is_text_subscribed,
+            channel_id=after.channel.id,
+            message_id=after.id,
+            content=after.content or "",
+            embeds=after_embeds,
         )
 
     @bot.event

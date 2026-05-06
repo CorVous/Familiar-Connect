@@ -281,9 +281,7 @@ class TestLoadCharacterConfig:
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text(
-            "[providers.history]\ntext_silence_gap_fold_seconds = -1\n"
-        )
+        path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = -1\n")
         with pytest.raises(ConfigError, match="text_silence_gap_fold_seconds"):
             load_character_config(path, defaults_path=default_profile_path)
 
@@ -291,9 +289,7 @@ class TestLoadCharacterConfig:
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text(
-            '[providers.history]\ntext_silence_gap_fold_seconds = "big"\n'
-        )
+        path.write_text('[providers.history]\ntext_silence_gap_fold_seconds = "big"\n')
         with pytest.raises(ConfigError, match="text_silence_gap_fold_seconds"):
             load_character_config(path, defaults_path=default_profile_path)
 
@@ -700,9 +696,7 @@ class TestBudgetCurves:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.budget_curves == {}
 
-    def test_curve_parsed(
-        self, tmp_path: Path, default_profile_path: Path
-    ) -> None:
+    def test_curve_parsed(self, tmp_path: Path, default_profile_path: Path) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
             '[budget.model_curves."claude-opus-4-7"]\n'
@@ -720,8 +714,7 @@ class TestBudgetCurves:
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            '[budget.model_curves."claude-opus-4-7"]\n'
-            "no_such_field = 1.5\n"
+            '[budget.model_curves."claude-opus-4-7"]\nno_such_field = 1.5\n'
         )
         with pytest.raises(ConfigError, match="no_such_field"):
             load_character_config(path, defaults_path=default_profile_path)
@@ -730,10 +723,7 @@ class TestBudgetCurves:
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text(
-            '[budget.model_curves."claude-opus-4-7"]\n'
-            "total_tokens = 0.0\n"
-        )
+        path.write_text('[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 0.0\n')
         with pytest.raises(ConfigError, match="total_tokens"):
             load_character_config(path, defaults_path=default_profile_path)
 
@@ -742,8 +732,7 @@ class TestBudgetCurves:
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            '[budget.model_curves."claude-opus-4-7"]\n'
-            'total_tokens = "big"\n'
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = "big"\n'
         )
         with pytest.raises(ConfigError, match="total_tokens"):
             load_character_config(path, defaults_path=default_profile_path)

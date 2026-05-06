@@ -848,6 +848,32 @@ class HistoryStore:
             return None
         return _row_to_turn(row)
 
+    def update_turn_content_by_message_id(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        content: str,
+    ) -> None:
+        """Rewrite ``turns.content`` for one platform message id.
+
+        Used when Discord delivers a URL unfurl after the original
+        ``on_message`` (typical: ``message.embeds`` populates via a
+        follow-up edit a second or two later). Silently no-ops when
+        no row matches — the bot may have come up after the message
+        landed. The ``turns_au_fts`` trigger keeps the FTS index in
+        sync; no bespoke handling here.
+        """
+        self._conn.execute(
+            """
+            UPDATE turns
+               SET content = ?
+             WHERE familiar_id = ? AND platform_message_id = ?
+            """,
+            (content, familiar_id, platform_message_id),
+        )
+        self._conn.commit()
+
     def turns_by_ids(
         self,
         *,
