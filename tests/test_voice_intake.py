@@ -301,6 +301,68 @@ class TestPerUserDispatch:
             clone.stop.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_slow_user_does_not_block_other_users(self) -> None:
+        """One user's slow ``send_audio`` must not stall others' audio.
+
+        Lively voice calls have multiple speakers. A single shared pump
+        loop awaits each ``send_audio`` serially, so any slow user
+        (network blip, slow VAD, GC pause) creates head-of-line
+        blocking for everyone. Per-user pump tasks isolate that.
+        """
+        handle = _make_handle()
+        block = asyncio.Event()
+        clones: list[MagicMock] = []
+        # First user_id observed becomes "slow"; the rest are fast.
+        slow_user_id = 101
+
+        def _make_clone() -> MagicMock:
+            c = MagicMock()
+            c.start = AsyncMock()
+            c.stop = AsyncMock()
+            # The first clone created is for slow_user_id (audio for
+            # 101 lands first below). Stall its send_audio.
+            if not clones:
+
+                async def _slow_send(_pcm: bytes) -> None:
+                    await block.wait()
+
+                c.send_audio = AsyncMock(side_effect=_slow_send)
+            else:
+                c.send_audio = AsyncMock()
+            clones.append(c)
+            return c
+
+        template = MagicMock()
+        template.clone = MagicMock(side_effect=_make_clone)
+        template.start = AsyncMock()
+        template.stop = AsyncMock()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        try:
+            # Slow user speaks first; their send_audio will block.
+            await rt.audio_queue.put((slow_user_id, b"slow-1"))
+            await _drain_loop()
+            # Fast user speaks while slow user is stalled.
+            await rt.audio_queue.put((202, b"fast-1"))
+            await rt.audio_queue.put((202, b"fast-2"))
+            await _drain_loop(20)
+
+            # Fast user's clone must have received both chunks even
+            # though the slow user's send_audio is still pending.
+            assert len(clones) == 2
+            fast_clone = clones[1]
+            fast_sent = [c.args[0] for c in fast_clone.send_audio.await_args_list]
+            assert fast_sent == [b"fast-1", b"fast-2"]
+        finally:
+            block.set()
+            await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
     async def test_idle_watchdog_closes_silent_stream_and_reopens_on_next_audio(
         self,
     ) -> None:

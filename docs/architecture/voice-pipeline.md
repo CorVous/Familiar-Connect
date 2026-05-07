@@ -121,8 +121,12 @@ installed `onnxruntime-gpu` separately.
 
 When `[providers.turn_detection].strategy = "ten+smart_turn"` and the
 model files exist, `bot._start_voice_intake` builds a per-user
-endpointer alongside the per-user Deepgram clone. The pump feeds every
-PCM chunk into both:
+endpointer alongside the per-user Deepgram clone. The shared sink-side
+pump only demuxes audio onto a per-user queue; one drain task per
+user_id then feeds every PCM chunk into both the clone and the
+endpointer. Per-user drain tasks isolate slow speakers (network blip,
+slow VAD, GC pause) so one user's stalled `send_audio`/`feed_audio`
+can't head-of-line-block the rest of the call:
 
 ```
 Discord Opus → RecordingSink → per-user PCM
