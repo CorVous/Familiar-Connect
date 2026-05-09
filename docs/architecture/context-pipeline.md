@@ -753,11 +753,10 @@ changed.
   (default 300 s).
 
 `log_signals()` runs all three and emits one `ColdCache` log line per
-firing signal. **Phase-3 behaviour is instrumentation only** — no
-cache is invalidated on a signal. After collecting a corpus of
+firing signal. Currently **instrumentation only** — no cache is
+invalidated on a signal. After collecting a corpus of
 (signal-fired, retrieval-failed) pairs, the most-predictive signals
-will be wired to force rebuilds of the stale layers. See plan
-§ Context point 3 for the rationale.
+will be wired to force rebuilds of the stale layers.
 
 ## Single-writer pattern
 

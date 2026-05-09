@@ -1,14 +1,13 @@
 # Architecture overview
 
-A Discord bot shell with two-way plumbing for text and voice, plus a
-Twitch EventSub client. Incoming events flow through an in-process
-**event bus** to subscribed **processors**.
+A Discord bot with two-way plumbing for text and voice, plus a Twitch
+EventSub client. Incoming events flow through an in-process **event bus**
+to subscribed **processors** that assemble a layered prompt, call an LLM,
+and reply. Voice replies support sub-200 ms barge-in: a new utterance
+cancels the previous reply's `TurnScope`, stopping the LLM stream and
+flushing the TTS buffer.
 
-Phase 2 adds the voice reply loop with sub-200 ms barge-in: a new
-utterance cancels the previous reply's `TurnScope`, stopping the
-LLM stream and flushing the TTS buffer.
-
-What's wired today. Deeper dives:
+Deeper dives:
 
 - [Memory strategies](memory-strategies.md) — families, current
   implementation, swap points.
@@ -54,7 +53,7 @@ flowchart LR
   - `DiscordTextSource` — called from `on_message`; publishes `discord.text`.
   - `TwitchSource` — drains the `TwitchWatcher` queue; publishes `twitch.event`.
   - `VoiceSource` — drains the Deepgram transcription queue; publishes `voice.activity.start`, `voice.transcript.partial`, `voice.transcript.final`, `voice.activity.end`. All events in one utterance share `turn_id`.
-- **Context assembly** — `Assembler` composes a layered system prompt. Phase-2 layers: `CoreInstructionsLayer` (file: `data/familiars/_default/core_instructions.md`), `CharacterCardLayer` (file: `data/familiars/<id>/character.md`), `OperatingModeLayer` (voice-terse vs text-verbose), `RecentHistoryLayer` (reads from `HistoryStore.recent`). Phase-3 adds rolling summary, cross-channel summary, and FTS-backed RAG.
+- **Context assembly** — `Assembler` composes a layered system prompt in stability-descending order: `CoreInstructionsLayer` (`data/familiars/_default/core_instructions.md`), `CharacterCardLayer` (`data/familiars/<id>/character.md`), `OperatingModeLayer` (voice-terse vs text-verbose), `ConversationSummaryLayer`, `CrossChannelContextLayer`, `LorebookLayer`, `PeopleDossierLayer`, `ReflectionLayer`, `RagContextLayer`, then `RecentHistoryLayer` (user/assistant messages, not system text). See [Context pipeline](context-pipeline.md).
 - **LLM** — `LLMClient` exposes `chat()` (blocking) and `chat_stream()` (async-iterator of content deltas). The streaming variant releases the process-wide rate-limit semaphore as soon as the request is accepted so barge-in cancellation isn't starved.
 - **TTSPlayer** — `speak(text, scope=...)` returns when playback finishes or the turn scope is cancelled. Production default is `DiscordVoicePlayer`, which synthesizes via the configured TTS client and pushes the resulting PCM through `voice_client.play(...)`. When no TTS client is configured the loop falls back to `LoggingTTSPlayer`, which only logs intended speech. `MockTTSPlayer` is used in tests.
 - **BotHandle** — adapter exposed to the lifecycle wiring so bus-only processors can post back to Discord without taking a direct `discord.Bot` reference. Carries `send_text(channel_id, content)`, a `trigger_typing(channel_id)` async-context-manager factory that surfaces Discord's "Bot is typing…" indicator while a reply streams, a `typing_interrupt` policy seam that translates `on_typing` events into turn cancellations and bot-pingpong backoff (see [Discord text channel knobs](tuning.md#discord-text-channel-knobs)), and a `voice_runtime: dict[int, VoiceRuntime]` map populated by `/subscribe-voice`.
@@ -68,7 +67,7 @@ flowchart LR
 - **Transcription** — Deepgram streaming client. The instance loaded at startup acts as a *template*: `clone()` is called once per Discord user that speaks. Diarization stays off — Discord delivers per-SSRC audio, so attribution is exact and not AI-inferred. Knobs live in `[providers.stt.deepgram]`; defaults bias toward fewer mid-sentence cuts (`endpointing_ms=500`, `utterance_end_ms=1500`, `smart_format=true`, `punctuate=true`). Optional `keyterms` biases nova-3 toward project jargon and member display names. Every TOML field has a matching `DEEPGRAM_*` override for container deployments — see [Tuning § STT — Deepgram](tuning.md#stt-deepgram).
 - **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through pycord's voice client. When no TTS client is configured `LoggingTTSPlayer` is used.
 - **OpenRouter LLM client** — one `LLMClient` per call-site slot.
-- **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, and `people_dossiers` are watermarked side-indices.
+- **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, `people_dossiers`, `facts`, `fact_embeddings`, and `reflections` are watermarked side-indices. `AsyncHistoryStore` (`history/async_store.py`) wraps `HistoryStore` in an async facade, dispatching every call to the store's single-threaded `ThreadPoolExecutor` so SQLite is never touched from the event loop.
 - **Subscription registry** — `data/familiars/<id>/subscriptions.toml`, written by the subscribe/unsubscribe slash commands.
 - **Twitch EventSub** — client code present; its queue is drained by `TwitchSource` onto the bus.
 
@@ -149,9 +148,9 @@ playback halted. Verified end-to-end (bus subscribe pattern) by
 - `total_tokens` — post-assembly trim cap for this channel only. Overrides
   the `[budget.<tier>].total_tokens` envelope so high-traffic channels can
   be given a tighter budget without touching the global tier default.
-- `prompt_layers` — ordered list of layer names (currently parsed but
-  applied only via the default ordering; per-channel reordering lands
-  with Phase 3's richer layer stack).
+- `prompt_layers` — ordered list of layer names (parsed but not yet
+  applied; the assembler always uses the default stability-descending
+  order regardless of this field).
 - `message_rendering` — `"prefixed"` (always include
   `[HH:MM display_name]` content prefix; UTC) or `"name_only"`
   (rely on the OpenAI `name` field alone — save tokens in DMs).

@@ -5,15 +5,17 @@ understands speech, and talks back using real AI voices.
 
 ## What's here
 
-A Discord bot shell with working plumbing for text, voice, Twitch
-EventSub, STT, TTS, OpenRouter, and SQLite history. Incoming events
-are logged and dropped — there is no reply path.
+A Discord bot that reads and speaks in Discord text and voice channels,
+backed by an event bus, layered context assembly, and a SQLite memory
+store. Events flow through processors that assemble a prompt, call an
+LLM, and reply.
 
 - CLI entry point: `familiar-connect run --familiar <id>`.
 - Discord text + voice subscriptions (`/subscribe-text`,
   `/subscribe-voice`, plus their `unsubscribe-*` counterparts).
 - Twitch EventSub client.
-- SQLite transcript store (`data/familiars/<id>/history.db`).
+- SQLite history store (`data/familiars/<id>/history.db`) with facts,
+  summaries, dossiers, reflections, and FTS5 + embedding retrieval.
 - OpenRouter `LLMClient`, Deepgram STT, Azure / Cartesia / Gemini TTS.
 
 ## Where to look next
