@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from familiar_connect.context.assembler import AssemblyContext
     from familiar_connect.embedding.protocol import Embedder
+    from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.history.store import (
         AccountProfile,
         Fact,
@@ -151,13 +152,14 @@ class RecentHistoryLayer:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         window_size: int = 20,
         max_tokens: int | None = None,
         coalesce_max_gap_seconds: float = 45.0,
         silence_gap_fold_seconds: float = 0.0,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._window_size = window_size
         self._max_tokens = max_tokens
         # 0 disables; otherwise consecutive same-speaker turns within
@@ -205,7 +207,7 @@ class RecentHistoryLayer:
         marker, and the gap between them is within
         ``coalesce_max_gap_seconds``.
         """
-        turns = self._store.recent(
+        turns = await self._store.recent(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id or 0,
             limit=self._window_size,
@@ -221,7 +223,7 @@ class RecentHistoryLayer:
         in_window_msg_ids = {
             t.platform_message_id for t in turns if t.platform_message_id
         }
-        reactions = self._store.reactions_for_messages(
+        reactions = await self._store.reactions_for_messages(
             familiar_id=ctx.familiar_id,
             platform_message_ids=[
                 t.platform_message_id for t in turns if t.platform_message_id
@@ -230,7 +232,7 @@ class RecentHistoryLayer:
         rendered = [
             _turn_to_message_with_context(
                 turn=turn,
-                store=self._store,
+                store=self._sync,
                 familiar_id=ctx.familiar_id,
                 guild_id=ctx.guild_id,
                 in_window_msg_ids=in_window_msg_ids,
@@ -775,14 +777,15 @@ class ConversationSummaryLayer:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         max_tokens: int | None = None,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._max_tokens = max_tokens
 
     async def build(self, ctx: AssemblyContext) -> str:
-        entry = self._store.get_summary(
+        entry = await self._store.get_summary(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id or 0,
         )
@@ -794,7 +797,7 @@ class ConversationSummaryLayer:
         return "## Conversation so far\n\n" + body
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
-        entry = self._store.get_summary(
+        entry = self._sync.get_summary(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id or 0,
         )
@@ -818,12 +821,13 @@ class CrossChannelContextLayer:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         viewer_map: dict[int, list[int]],
         ttl_seconds: int = 600,
         max_tokens: int | None = None,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._viewer_map = {k: list(v) for k, v in viewer_map.items()}
         self._ttl_seconds = ttl_seconds
         self._max_tokens = max_tokens
@@ -843,7 +847,7 @@ class CrossChannelContextLayer:
         # recently active channel always lands.
         remaining = self._max_tokens
         for source_id in sources:
-            entry = self._store.get_cross_context(
+            entry = await self._store.get_cross_context(
                 familiar_id=ctx.familiar_id,
                 viewer_mode=self._viewer_key(ctx),
                 source_channel_id=source_id,
@@ -871,7 +875,7 @@ class CrossChannelContextLayer:
             return "none"
         parts: list[str] = []
         for source_id in sources:
-            entry = self._store.get_cross_context(
+            entry = self._sync.get_cross_context(
                 familiar_id=ctx.familiar_id,
                 viewer_mode=self._viewer_key(ctx),
                 source_channel_id=source_id,
@@ -905,12 +909,13 @@ class PeopleDossierLayer:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         window_size: int = 20,
         max_people: int = 8,
         max_tokens: int | None = None,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._window_size = window_size
         self._max_people = max_people
         self._max_tokens = max_tokens
@@ -924,7 +929,7 @@ class PeopleDossierLayer:
         """
         if ctx.channel_id is None:
             return []
-        turns = self._store.recent(
+        turns = self._sync.recent(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id,
             limit=self._window_size,
@@ -941,7 +946,7 @@ class PeopleDossierLayer:
         for turn in reversed(turns):  # newest first
             if turn.author is not None:
                 _add(turn.author.canonical_key)
-            for key in self._store.mentions_for_turn(turn_id=turn.id):
+            for key in self._sync.mentions_for_turn(turn_id=turn.id):
                 _add(key)
             if len(ordered) >= self._max_people:
                 break
@@ -954,17 +959,17 @@ class PeopleDossierLayer:
         sections: list[str] = []
         remaining = self._max_tokens
         for key in candidates:
-            entry = self._store.get_people_dossier(
+            entry = await self._store.get_people_dossier(
                 familiar_id=ctx.familiar_id, canonical_key=key
             )
             if entry is None or not entry.dossier_text.strip():
                 continue
-            display = self._store.resolve_label(
+            display = await self._store.resolve_label(
                 canonical_key=key,
                 guild_id=ctx.guild_id,
                 familiar_id=ctx.familiar_id,
             )
-            profile = self._store.get_account_profile(canonical_key=key)
+            profile = await self._store.get_account_profile(canonical_key=key)
             header = _format_profile_header(display, profile)
             section = f"{header}\n\n{entry.dossier_text.strip()}"
             if remaining is not None:
@@ -981,14 +986,14 @@ class PeopleDossierLayer:
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         candidates = self._candidate_keys(ctx)
         latest = (
-            self._store.latest_id(
+            self._sync.latest_id(
                 familiar_id=ctx.familiar_id, channel_id=ctx.channel_id or 0
             )
             or 0
         )
         parts: list[str] = [f"t{latest}", f"cap{self._max_people}"]
         for key in candidates:
-            entry = self._store.get_people_dossier(
+            entry = self._sync.get_people_dossier(
                 familiar_id=ctx.familiar_id, canonical_key=key
             )
             parts.append(
@@ -1045,7 +1050,7 @@ class RagContextLayer:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         max_results: int = 5,
         max_facts: int = 3,
         recent_window_size: int = 0,
@@ -1059,6 +1064,7 @@ class RagContextLayer:
         fact_overfetch: int = 12,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._max_results = max_results
         self._max_facts = max_facts
         self._recent_window_size = recent_window_size
@@ -1101,7 +1107,7 @@ class RagContextLayer:
         if self._embedder is None or self._embedding_weight <= 0.0 or not scored:
             return {}
         ids = [f.id for f, _ in scored]
-        stored = self._store.get_fact_embeddings(
+        stored = await self._store.get_fact_embeddings(
             fact_ids=ids, model=self._embedder.name
         )
         if not stored:
@@ -1132,12 +1138,12 @@ class RagContextLayer:
         # this id is already in RecentHistoryLayer's output.
         max_id: int | None = None
         if self._recent_window_size > 0 and ctx.channel_id is not None:
-            latest = self._store.latest_id(
+            latest = await self._store.latest_id(
                 familiar_id=ctx.familiar_id, channel_id=ctx.channel_id
             )
             if latest is not None:
                 max_id = latest - self._recent_window_size
-        turn_results = self._store.search_turns(
+        turn_results = await self._store.search_turns(
             familiar_id=ctx.familiar_id,
             query=cue,
             limit=self._max_results,
@@ -1146,7 +1152,7 @@ class RagContextLayer:
         if self._rerank_facts:
             fetch = min(self._fact_overfetch, self._max_facts * 4)
             fetch = max(fetch, self._max_facts)
-            scored = self._store.search_facts_scored(
+            scored = await self._store.search_facts_scored(
                 familiar_id=ctx.familiar_id,
                 query=cue,
                 limit=fetch,
@@ -1164,7 +1170,7 @@ class RagContextLayer:
                 embedding_similarities=sims,
             )
         else:
-            fact_results = self._store.search_facts(
+            fact_results = await self._store.search_facts(
                 familiar_id=ctx.familiar_id,
                 query=cue,
                 limit=self._max_facts,
@@ -1176,7 +1182,7 @@ class RagContextLayer:
         # uniformly across facts + turns. Facts come first — usually
         # higher signal per token than retrieved turns.
         fact_lines = [
-            f"- {_render_fact_line(self._store, ctx.familiar_id, f, guild_id=ctx.guild_id)}"  # noqa: E501
+            f"- {_render_fact_line(self._sync, ctx.familiar_id, f, guild_id=ctx.guild_id)}"  # noqa: E501
             for f in fact_results
         ]
         turn_lines = self._render_turn_lines(ctx, turn_results, max_id=max_id)
@@ -1222,7 +1228,7 @@ class RagContextLayer:
             wanted_ids.update(
                 h.id + d for d in range(-self._context_window, self._context_window + 1)
             )
-        expanded = self._store.turns_by_ids(familiar_id=ctx.familiar_id, ids=wanted_ids)
+        expanded = self._sync.turns_by_ids(familiar_id=ctx.familiar_id, ids=wanted_ids)
         hit_channels = {h.channel_id for h in hits}
         kept: list[HistoryTurn] = []
         for t in expanded:
@@ -1245,10 +1251,10 @@ class RagContextLayer:
         for date_label in sorted(by_date):
             lines.append(f"{date_label}:")
             for turn in by_date[date_label]:
-                label = _resolve_turn_label(self._store, ctx, turn)
+                label = _resolve_turn_label(self._sync, ctx, turn)
                 rewritten = _rewrite_mentions(
                     turn.content,
-                    store=self._store,
+                    store=self._sync,
                     familiar_id=ctx.familiar_id,
                     guild_id=ctx.guild_id,
                 )
@@ -1265,8 +1271,8 @@ class RagContextLayer:
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         cue = self._current_cue
-        latest_turn = self._store.latest_fts_id(familiar_id=ctx.familiar_id)
-        latest_fact = self._store.latest_fact_id(familiar_id=ctx.familiar_id)
+        latest_turn = self._sync.latest_fts_id(familiar_id=ctx.familiar_id)
+        latest_fact = self._sync.latest_fact_id(familiar_id=ctx.familiar_id)
         return f"{cue}|t{latest_turn}|f{latest_fact}"
 
 
@@ -1292,18 +1298,19 @@ class ReflectionLayer:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         max_reflections: int = 3,
         max_tokens: int | None = None,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._max_reflections = max(0, max_reflections)
         self._max_tokens = max_tokens
 
     async def build(self, ctx: AssemblyContext) -> str:
         if self._max_reflections <= 0:
             return ""
-        rows = self._store.recent_reflections(
+        rows = await self._store.recent_reflections(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id,
             limit=self._max_reflections,
@@ -1314,7 +1321,7 @@ class ReflectionLayer:
         all_cited_facts: list[int] = []
         for r in rows:
             all_cited_facts.extend(r.cited_fact_ids)
-        stale = self._store.superseded_fact_ids(
+        stale = await self._store.superseded_fact_ids(
             familiar_id=ctx.familiar_id, fact_ids=all_cited_facts
         )
 
@@ -1341,7 +1348,7 @@ class ReflectionLayer:
         return "## Recent reflections\n\n" + "\n".join(sections)
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
-        rows = self._store.recent_reflections(
+        rows = self._sync.recent_reflections(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id,
             limit=1,
@@ -1393,13 +1400,14 @@ class LorebookLayer:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         path: Path,
         recent_window: int = 20,
         max_entries: int = 10,
         max_tokens: int | None = None,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._path = path
         self._recent_window = max(1, recent_window)
         self._max_entries = max(0, max_entries)
@@ -1449,7 +1457,7 @@ class LorebookLayer:
     def _scan_text(self, ctx: AssemblyContext) -> str:
         if ctx.channel_id is None:
             return ""
-        turns = self._store.recent(
+        turns = self._sync.recent(
             familiar_id=ctx.familiar_id,
             channel_id=ctx.channel_id,
             limit=self._recent_window,

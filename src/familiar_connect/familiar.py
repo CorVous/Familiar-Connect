@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from familiar_connect.bus import InProcessEventBus, TurnRouter
 from familiar_connect.config import load_character_config
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.subscriptions import SubscriptionRegistry
 
@@ -41,7 +42,7 @@ class Familiar:
     id: str
     root: Path
     config: CharacterConfig
-    history_store: HistoryStore
+    history_store: AsyncHistoryStore
     llm_clients: dict[str, LLMClient]
     tts_client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient | None
     transcriber: Transcriber | None
@@ -83,7 +84,7 @@ class Familiar:
             defaults_path=defaults_path,
         )
 
-        history_store = HistoryStore(root / "history.db")
+        history_store = AsyncHistoryStore(HistoryStore(root / "history.db"))
         subscriptions = SubscriptionRegistry(root / "subscriptions.toml")
 
         return cls(

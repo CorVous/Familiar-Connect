@@ -24,7 +24,7 @@ from familiar_connect.diagnostics.spans import span
 
 if TYPE_CHECKING:
     from familiar_connect.embedding.protocol import Embedder
-    from familiar_connect.history.store import HistoryStore
+    from familiar_connect.history.async_store import AsyncHistoryStore
 
 _logger = logging.getLogger("familiar_connect.processors.fact_embedding_worker")
 
@@ -45,7 +45,7 @@ class FactEmbeddingWorker:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         embedder: Embedder,
         familiar_id: str,
         batch_size: int = 32,
@@ -74,7 +74,7 @@ class FactEmbeddingWorker:
     @span("fact_embedding.tick")
     async def tick(self) -> int:
         """Embed up to ``batch_size`` unembedded facts; return count written."""
-        pending = self._store.unembedded_facts(
+        pending = await self._store.unembedded_facts(
             familiar_id=self._familiar_id,
             model=self._embedder.name,
             limit=self._batch_size,
@@ -92,7 +92,7 @@ class FactEmbeddingWorker:
             )
             return 0
         for fact, vec in zip(pending, vectors, strict=True):
-            self._store.set_fact_embedding(
+            await self._store.set_fact_embedding(
                 fact_id=fact.id,
                 model=self._embedder.name,
                 vector=vec,

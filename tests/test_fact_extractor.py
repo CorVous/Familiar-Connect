@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message

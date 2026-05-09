@@ -17,6 +17,7 @@ from familiar_connect.context import (
     OperatingModeLayer,
     RecentHistoryLayer,
 )
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 
@@ -130,7 +131,7 @@ class TestRecentHistoryLayer:
             content="hi back",
             author=None,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
 
         messages = await layer.recent_messages(_ctx(channel_id=10))
         contents = [m.content for m in messages]
@@ -150,7 +151,7 @@ class TestRecentHistoryLayer:
             content="hey",
             author=alice,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=10))
         user_msg = next(m for m in messages if m.role == "user")
         # name is derived from platform:user_id, sanitized
@@ -179,7 +180,7 @@ class TestRecentHistoryLayer:
             content="hey",
             author=alice,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=10))
         user_msg = next(m for m in messages if m.role == "user")
         assert re.match(r"^\[\d{2}:\d{2} Alice\] hey$", user_msg.content), (
@@ -197,7 +198,7 @@ class TestRecentHistoryLayer:
                 content=f"m{i}",
                 author=None,
             )
-        layer = RecentHistoryLayer(store=store, window_size=5)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=5)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         assert len(messages) == 5
 
@@ -209,7 +210,7 @@ class TestRecentHistoryLayer:
         the system prompt.
         """
         store = HistoryStore(":memory:")
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         assert not await layer.build(_ctx(channel_id=1))
 
 
@@ -254,7 +255,7 @@ class TestRecentHistoryCoalesceFragments:
             )
             self._set_turn_timestamp(store, row.id, base + timedelta(seconds=2 * i))
 
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=10))
 
         user_msgs = [m for m in messages if m.role == "user"]
@@ -289,7 +290,7 @@ class TestRecentHistoryCoalesceFragments:
             content="yo",
             author=tam,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         assert len([m for m in messages if m.role == "user"]) == 2
 
@@ -320,7 +321,7 @@ class TestRecentHistoryCoalesceFragments:
             content="part two",
             author=cass,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         assert [m.role for m in messages] == ["user", "assistant", "user"]
 
@@ -351,7 +352,7 @@ class TestRecentHistoryCoalesceFragments:
             author=cass,
             platform_message_id="101",
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         assert len([m for m in messages if m.role == "user"]) == 2
 
@@ -386,7 +387,7 @@ class TestRecentHistoryCoalesceFragments:
         # 60s gap — exceeds 45s default
         self._set_turn_timestamp(store, row2.id, base + timedelta(seconds=60))
 
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         assert len([m for m in messages if m.role == "user"]) == 2
 
@@ -416,14 +417,14 @@ class TestRecentHistoryCoalesceFragments:
 
         # 5s ceiling — 10s gap forces split
         strict = RecentHistoryLayer(
-            store=store, window_size=20, coalesce_max_gap_seconds=5
+            store=AsyncHistoryStore(store), window_size=20, coalesce_max_gap_seconds=5
         )
         messages = await strict.recent_messages(_ctx(channel_id=1))
         assert len([m for m in messages if m.role == "user"]) == 2
 
         # 0 disables coalescing entirely — back-to-back turns stay split
         disabled = RecentHistoryLayer(
-            store=store, window_size=20, coalesce_max_gap_seconds=0
+            store=AsyncHistoryStore(store), window_size=20, coalesce_max_gap_seconds=0
         )
         messages = await disabled.recent_messages(_ctx(channel_id=1))
         assert len([m for m in messages if m.role == "user"]) == 2
@@ -478,7 +479,7 @@ class TestSilenceGapFold:
     async def test_no_gap_keeps_all_turns(self) -> None:
         store = self._store_with_turns(gaps_seconds=[60, 60, 60])
         layer = RecentHistoryLayer(
-            store=store, window_size=20, silence_gap_fold_seconds=300
+            store=AsyncHistoryStore(store), window_size=20, silence_gap_fold_seconds=300
         )
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         assert len(msgs) == 4  # all four turns kept
@@ -489,7 +490,7 @@ class TestSilenceGapFold:
         # Gap at position 2 qualifies (600 >= 300); fold → keep turns 2,3
         store = self._store_with_turns(gaps_seconds=[60, 600, 60])
         layer = RecentHistoryLayer(
-            store=store, window_size=20, silence_gap_fold_seconds=300
+            store=AsyncHistoryStore(store), window_size=20, silence_gap_fold_seconds=300
         )
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         contents = [m.content for m in msgs]
@@ -504,7 +505,7 @@ class TestSilenceGapFold:
         # → keep turns 2,3
         store = self._store_with_turns(gaps_seconds=[600, 600, 60])
         layer = RecentHistoryLayer(
-            store=store, window_size=20, silence_gap_fold_seconds=300
+            store=AsyncHistoryStore(store), window_size=20, silence_gap_fold_seconds=300
         )
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         contents = [m.content for m in msgs]
@@ -518,7 +519,7 @@ class TestSilenceGapFold:
         # 0 disables the fold entirely.
         store = self._store_with_turns(gaps_seconds=[3600, 3600])
         layer = RecentHistoryLayer(
-            store=store, window_size=20, silence_gap_fold_seconds=0
+            store=AsyncHistoryStore(store), window_size=20, silence_gap_fold_seconds=0
         )
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         assert len(msgs) == 3
@@ -528,7 +529,7 @@ class TestSilenceGapFold:
         # Gap right before the last turn → only the last turn survives.
         store = self._store_with_turns(gaps_seconds=[60, 60, 3600])
         layer = RecentHistoryLayer(
-            store=store, window_size=20, silence_gap_fold_seconds=300
+            store=AsyncHistoryStore(store), window_size=20, silence_gap_fold_seconds=300
         )
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         contents = [m.content for m in msgs]
@@ -567,7 +568,7 @@ class TestRecentHistoryGuildAwareNames:
             author=cass,
             guild_id=42,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1, guild_id=42))
         user_msg = next(m for m in messages if m.role == "user")
         assert "Aria" in user_msg.content
@@ -620,7 +621,7 @@ class TestRecentHistoryReplyMarkers:
             platform_message_id="msg-2",
             reply_to_message_id="msg-1",
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         child = next(m for m in messages if "child message" in m.content)
         # Marker present, includes Bob.
@@ -677,7 +678,7 @@ class TestRecentHistoryReplyMarkers:
             platform_message_id="msg-child",
             reply_to_message_id="msg-1",
         )
-        layer = RecentHistoryLayer(store=store, window_size=2)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=2)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         child = next(m for m in messages if "child reply" in m.content)
         # Marker AND full parent text appears.
@@ -700,7 +701,7 @@ class TestRecentHistoryReplyMarkers:
             platform_message_id="msg-x",
             reply_to_message_id="msg-ghost",
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         m = next(msg for msg in messages if "orphan reply" in msg.content)
         assert "↩" not in m.content
@@ -730,7 +731,7 @@ class TestRecentHistoryMentionRewriting:
             content="hey <@222>, look at this",
             author=alice,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         user_msg = next(m for m in messages if "look at this" in m.content)
         assert "<@222>" not in user_msg.content
@@ -750,7 +751,7 @@ class TestRecentHistoryMentionRewriting:
             content="hey <@999>",
             author=alice,
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=1))
         user_msg = next(m for m in messages if "hey" in m.content)
         # `[@999]` is the resolved label for unknown account
@@ -801,7 +802,7 @@ class TestAssembler:
         )
         asm = Assembler(
             layers=[
-                RecentHistoryLayer(store=store, window_size=20),
+                RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20),
             ],
         )
         prompt = await asm.assemble(_ctx(channel_id=1))
@@ -842,7 +843,7 @@ class TestAssembler:
                 author=None,
             )
         asm = Assembler(
-            layers=[RecentHistoryLayer(store=store, window_size=20)],
+            layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)],
             budgeter=Budgeter(TierBudget(total_tokens=30)),
         )
         prompt = await asm.assemble(_ctx(channel_id=1))
@@ -863,7 +864,7 @@ class TestAssembler:
                 content=f"m{i}",
                 author=None,
             )
-        asm = Assembler(layers=[RecentHistoryLayer(store=store, window_size=20)])
+        asm = Assembler(layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)])
         prompt = await asm.assemble(_ctx(channel_id=1))
         assert len(prompt.recent_history) == 5
 
@@ -909,7 +910,7 @@ class TestAssembler:
             channel_total_tokens={1: 30},
         )
         asm = Assembler(
-            layers=[RecentHistoryLayer(store=store, window_size=20)],
+            layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)],
             budgeter=bud,
         )
         prompt = await asm.assemble(_ctx(channel_id=1))
@@ -935,7 +936,7 @@ class TestAssembler:
             channel_total_tokens={1: 5},  # tight for channel 1 only
         )
         asm = Assembler(
-            layers=[RecentHistoryLayer(store=store, window_size=20)],
+            layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)],
             budgeter=bud,
         )
         prompt = await asm.assemble(_ctx(channel_id=2))

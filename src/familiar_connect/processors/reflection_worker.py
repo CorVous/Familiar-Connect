@@ -28,13 +28,13 @@ from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
-from familiar_connect.history.store import _TURN_COLS, _row_to_turn
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from familiar_connect.history.store import Fact, HistoryStore, HistoryTurn
+    from familiar_connect.history.async_store import AsyncHistoryStore
+    from familiar_connect.history.store import Fact, HistoryTurn
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.reflection_worker")
@@ -50,7 +50,7 @@ class ReflectionWorker:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
         turns_threshold: int = 20,
@@ -83,26 +83,26 @@ class ReflectionWorker:
     @span("reflection.tick")
     async def tick(self) -> None:
         """One pass: write reflections if enough new turns accumulated."""
-        latest_turn = self._store.latest_id(familiar_id=self._familiar_id)
+        latest_turn = await self._store.latest_id(familiar_id=self._familiar_id)
         if latest_turn is None or latest_turn <= 0:
             return
-        prior_turn_wm, _prior_fact_wm = self._store.latest_reflection_watermarks(
+        prior_turn_wm, _prior_fact_wm = await self._store.latest_reflection_watermarks(
             familiar_id=self._familiar_id
         )
         if latest_turn - prior_turn_wm < self._turns_threshold:
             return
 
-        new_turns = self._turns_in_range(
+        new_turns = await self._turns_in_range(
             min_id_exclusive=prior_turn_wm,
             max_id_inclusive=latest_turn,
         )
         if not new_turns:
             return
 
-        recent_facts = self._store.recent_facts(
+        recent_facts = await self._store.recent_facts(
             familiar_id=self._familiar_id, limit=self._recent_facts_limit
         )
-        latest_fact = self._store.latest_fact_id(familiar_id=self._familiar_id)
+        latest_fact = await self._store.latest_fact_id(familiar_id=self._familiar_id)
 
         prompt = _build_reflection_prompt(
             new_turns=new_turns,
@@ -120,7 +120,7 @@ class ReflectionWorker:
         all_known_fact_ids = (
             set(valid_fact_ids)
             if not valid_fact_ids
-            else _all_fact_ids(self._store, familiar_id=self._familiar_id)
+            else await self._store.all_fact_ids(familiar_id=self._familiar_id)
         )
 
         # Per-channel scoping: pick the most-frequent channel in the
@@ -156,7 +156,7 @@ class ReflectionWorker:
             # is a free-floating opinion, not a synthesis.
             if not cited_turns and not cited_facts:
                 continue
-            self._store.append_reflection(
+            await self._store.append_reflection(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
                 text=text,
@@ -175,33 +175,17 @@ class ReflectionWorker:
             f"{ls.kv('fact_wm', str(latest_fact), vc=ls.LW)}"
         )
 
-    def _turns_in_range(
+    async def _turns_in_range(
         self,
         *,
         min_id_exclusive: int,
         max_id_inclusive: int,
     ) -> list[HistoryTurn]:
-        rows = self._store._conn.execute(  # noqa: SLF001 — tight coupling for the worker
-            f"""
-            SELECT {_TURN_COLS}
-              FROM turns
-             WHERE familiar_id = ?
-               AND id > ?
-               AND id <= ?
-             ORDER BY id ASC
-            """,  # noqa: S608
-            (self._familiar_id, min_id_exclusive, max_id_inclusive),
-        ).fetchall()
-        return [_row_to_turn(r) for r in rows]
-
-
-def _all_fact_ids(store: HistoryStore, *, familiar_id: str) -> set[int]:
-    """Return the set of all known fact ids for *familiar_id* (incl. superseded)."""
-    rows = store._conn.execute(  # noqa: SLF001
-        "SELECT id FROM facts WHERE familiar_id = ?",
-        (familiar_id,),
-    ).fetchall()
-    return {int(r["id"]) for r in rows}
+        return await self._store.turns_in_id_range(
+            familiar_id=self._familiar_id,
+            min_id_exclusive=min_id_exclusive,
+            max_id_inclusive=max_id_inclusive,
+        )
 
 
 def _dominant_channel(turns: Iterable[HistoryTurn]) -> int | None:

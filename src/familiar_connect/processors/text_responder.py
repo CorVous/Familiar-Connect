@@ -153,7 +153,7 @@ if TYPE_CHECKING:
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.bus.router import TurnRouter
     from familiar_connect.context.assembler import Assembler
-    from familiar_connect.history.store import HistoryStore
+    from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.llm import LLMClient
     from familiar_connect.typing_interrupt import TypingInterruptHandler
 
@@ -180,7 +180,7 @@ class TextResponder:
             [int, str, str | None, tuple[int, ...]],
             Awaitable[str | None],
         ],
-        history_store: HistoryStore,
+        history_store: AsyncHistoryStore,
         router: TurnRouter,
         familiar_id: str,
         trigger_typing: TriggerTyping | None = None,
@@ -190,6 +190,7 @@ class TextResponder:
         self._llm = llm_client
         self._send_text = send_text
         self._history = history_store
+        self._sync_history = history_store.sync
         self._router = router
         self._familiar_id = familiar_id
         # discord ``Bot is typing…`` indicator factory; ``None`` opts out
@@ -244,17 +245,17 @@ class TextResponder:
         # this turn. Soft annotation: the accounts table is a "what we
         # most recently saw" cache, not source of truth.
         if author is not None:
-            self._history.upsert_account(author)
+            await self._history.upsert_account(author)
             if guild_id is not None and author.guild_nick is not None:
-                self._history.upsert_guild_nick(
+                await self._history.upsert_guild_nick(
                     canonical_key=author.canonical_key,
                     guild_id=guild_id,
                     nick=author.guild_nick,
                 )
         for m in mentions:
-            self._history.upsert_account(m)
+            await self._history.upsert_account(m)
             if guild_id is not None and m.guild_nick is not None:
-                self._history.upsert_guild_nick(
+                await self._history.upsert_guild_nick(
                     canonical_key=m.canonical_key,
                     guild_id=guild_id,
                     nick=m.guild_nick,
@@ -262,7 +263,7 @@ class TextResponder:
 
         # Persist user turn *before* streaming so RecentHistoryLayer
         # in the same task sees it. Mirrors VoiceResponder.
-        user_turn = self._history.append_turn(
+        user_turn = await self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             role="user",
@@ -273,7 +274,7 @@ class TextResponder:
             reply_to_message_id=reply_to_message_id,
         )
         if mentions:
-            self._history.record_mentions(
+            await self._history.record_mentions(
                 turn_id=user_turn.id,
                 canonical_keys=[m.canonical_key for m in mentions],
             )
@@ -323,9 +324,11 @@ class TextResponder:
         if wants_thread:
             if (
                 target_id
-                and self._history.lookup_turn_by_platform_message_id(
-                    familiar_id=self._familiar_id,
-                    platform_message_id=target_id,
+                and (
+                    await self._history.lookup_turn_by_platform_message_id(
+                        familiar_id=self._familiar_id,
+                        platform_message_id=target_id,
+                    )
                 )
                 is not None
             ):
@@ -357,7 +360,7 @@ class TextResponder:
         # threaded. ``reply_to_message_id`` matches what we passed to
         # ``send_text`` — that's the audit trail for "did the bot
         # thread this reply?".
-        self._history.append_turn(
+        await self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             role="assistant",
@@ -385,14 +388,14 @@ class TextResponder:
         send time. Ambiguous labels (two participants with the same
         nick) keep first-write; a warning is logged.
         """
-        authors = self._history.recent_distinct_authors(
+        authors = self._sync_history.recent_distinct_authors(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             limit=20,
         )
         label_to_key: dict[str, str] = {}
         for a in authors:
-            label = self._history.resolve_label(
+            label = self._sync_history.resolve_label(
                 canonical_key=a.canonical_key,
                 guild_id=guild_id,
                 familiar_id=self._familiar_id,

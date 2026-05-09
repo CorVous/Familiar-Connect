@@ -19,7 +19,7 @@ from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 if TYPE_CHECKING:
     from familiar_connect.bus.envelope import Event
     from familiar_connect.bus.protocols import EventBus
-    from familiar_connect.history.store import HistoryStore
+    from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.identity import Author
 
 _logger = logging.getLogger("familiar_connect.processors.history_writer")
@@ -31,7 +31,7 @@ class HistoryWriter:
     name: str = "history-writer"
     topics: tuple[str, ...] = (TOPIC_DISCORD_TEXT,)
 
-    def __init__(self, *, store: HistoryStore, familiar_id: str) -> None:
+    def __init__(self, *, store: AsyncHistoryStore, familiar_id: str) -> None:
         self._store = store
         self._familiar_id = familiar_id
         # in-process dedup set; survives a single run. Acceptable because
@@ -59,7 +59,7 @@ class HistoryWriter:
         guild_id = payload.get("guild_id")
 
         self._seen.add(event.event_id)
-        self._store.append_turn(
+        await self._store.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             role="user",

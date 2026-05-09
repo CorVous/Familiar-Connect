@@ -28,6 +28,7 @@ from familiar_connect.llm import Message
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.history.store import HistoryStore, HistoryTurn
     from familiar_connect.llm import LLMClient
 
@@ -67,7 +68,7 @@ class FactExtractor:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
         batch_size: int = 10,
@@ -75,6 +76,7 @@ class FactExtractor:
         participants_max: int = 30,
     ) -> None:
         self._store = store
+        self._sync = store.sync
         self._llm = llm_client
         self._familiar_id = familiar_id
         self._batch_size = max(1, batch_size)
@@ -98,7 +100,7 @@ class FactExtractor:
     @span("facts.tick")
     async def tick(self) -> None:
         """Process one batch of unprocessed turns, if enough accumulated."""
-        new_turns = self._store.turns_since_watermark(
+        new_turns = await self._store.turns_since_watermark(
             familiar_id=self._familiar_id,
             limit=self._batch_size,
         )
@@ -107,7 +109,7 @@ class FactExtractor:
 
         participants = _build_participants(
             new_turns,
-            store=self._store,
+            store=self._sync,
             familiar_id=self._familiar_id,
             max_total=self._participants_max,
         )
@@ -148,7 +150,7 @@ class FactExtractor:
             )
             valid_to = _parse_iso_dt(fact.get("valid_to"))
             importance = _parse_importance(fact.get("importance"))
-            self._store.append_fact(
+            await self._store.append_fact(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
                 text=text,
@@ -167,11 +169,11 @@ class FactExtractor:
             if subjects:
                 keys = [s.canonical_key for s in subjects]
                 for tid in source_ids:
-                    self._store.record_mentions(turn_id=tid, canonical_keys=keys)
+                    await self._store.record_mentions(turn_id=tid, canonical_keys=keys)
 
         # Always advance watermark, even on empty/bad output, to prevent loops.
         last_id = new_turns[-1].id
-        self._store.put_writer_watermark(
+        await self._store.put_writer_watermark(
             familiar_id=self._familiar_id, last_written_id=last_id
         )
         _logger.info(

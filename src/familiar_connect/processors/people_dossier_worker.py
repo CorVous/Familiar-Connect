@@ -28,7 +28,8 @@ from familiar_connect.llm import Message
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from familiar_connect.history.store import Fact, HistoryStore
+    from familiar_connect.history.async_store import AsyncHistoryStore
+    from familiar_connect.history.store import Fact
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.people_dossier_worker")
@@ -42,7 +43,7 @@ class PeopleDossierWorker:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
         tick_interval_s: float = 20.0,
@@ -73,7 +74,7 @@ class PeopleDossierWorker:
     @span("people_dossier.tick")
     async def tick(self) -> None:
         """Refresh any dossier whose subject has new facts."""
-        latest_per_subject = self._store.subjects_with_facts(
+        latest_per_subject = await self._store.subjects_with_facts(
             familiar_id=self._familiar_id
         )
         for canonical_key, latest_fact_id in latest_per_subject.items():
@@ -84,14 +85,14 @@ class PeopleDossierWorker:
     # ------------------------------------------------------------------
 
     async def _maybe_refresh(self, canonical_key: str, latest_fact_id: int) -> None:
-        prior = self._store.get_people_dossier(
+        prior = await self._store.get_people_dossier(
             familiar_id=self._familiar_id, canonical_key=canonical_key
         )
         prior_wm = prior.last_fact_id if prior is not None else 0
         if latest_fact_id <= prior_wm:
             return
 
-        new_facts = self._store.facts_for_subject(
+        new_facts = await self._store.facts_for_subject(
             familiar_id=self._familiar_id,
             canonical_key=canonical_key,
             min_id_exclusive=prior_wm,
@@ -99,7 +100,7 @@ class PeopleDossierWorker:
         if not new_facts:
             return
 
-        display = self._store.resolve_label(
+        display = await self._store.resolve_label(
             canonical_key=canonical_key,
             guild_id=None,
             familiar_id=self._familiar_id,
@@ -114,7 +115,7 @@ class PeopleDossierWorker:
         if not text:
             # Don't overwrite a real dossier with an empty reply.
             return
-        self._store.put_people_dossier(
+        await self._store.put_people_dossier(
             familiar_id=self._familiar_id,
             canonical_key=canonical_key,
             last_fact_id=latest_fact_id,

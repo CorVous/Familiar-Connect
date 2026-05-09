@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.bus.router import TurnRouter
     from familiar_connect.context.assembler import Assembler
-    from familiar_connect.history.store import HistoryStore
+    from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
     from familiar_connect.tts_player.protocol import TTSPlayer
@@ -68,7 +68,7 @@ class VoiceResponder:
         assembler: Assembler,
         llm_client: LLMClient,
         tts_player: TTSPlayer,
-        history_store: HistoryStore,
+        history_store: AsyncHistoryStore,
         router: TurnRouter,
         familiar_id: str,
         member_resolver: MemberResolver | None = None,
@@ -77,6 +77,7 @@ class VoiceResponder:
         self._llm = llm_client
         self._tts = tts_player
         self._history = history_store
+        self._sync_history = history_store.sync
         self._router = router
         self._familiar_id = familiar_id
         self._member_resolver = member_resolver
@@ -213,7 +214,7 @@ class VoiceResponder:
         )
 
         # Record the user turn so RecentHistoryLayer picks it up next time.
-        self._history.append_turn(
+        await self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             role="user",
@@ -241,7 +242,7 @@ class VoiceResponder:
             )
             return
 
-        self._history.append_turn(
+        await self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             role="assistant",
@@ -416,12 +417,12 @@ class VoiceResponder:
         Best-effort — instrumentation must never block the reply path.
         """
         try:
-            summary = self._history.get_summary(
+            summary = self._sync_history.get_summary(
                 familiar_id=self._familiar_id, channel_id=channel_id
             )
             prior_context = summary.summary_text if summary is not None else ""
             # Pull the most recent turn's timestamp for silence-gap.
-            recent = self._history.recent(
+            recent = self._sync_history.recent(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
                 limit=1,

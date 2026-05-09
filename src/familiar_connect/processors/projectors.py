@@ -38,7 +38,7 @@ from familiar_connect.processors.summary_worker import SummaryWorker
 
 if TYPE_CHECKING:
     from familiar_connect.embedding.protocol import Embedder
-    from familiar_connect.history.store import HistoryStore
+    from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.llm import LLMClient
 
 
@@ -73,7 +73,7 @@ class ProjectorContext:
         so a typo never silently disables semantic recall.
     """
 
-    store: HistoryStore
+    store: AsyncHistoryStore
     llm_clients: dict[str, LLMClient]
     familiar_id: str
     embedder: Embedder | None = None

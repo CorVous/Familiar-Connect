@@ -21,6 +21,7 @@ import json
 import re
 import sqlite3
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -620,13 +621,14 @@ class HistoryStore:
     def __init__(self, db_path: PathLike) -> None:
         if db_path == ":memory:":
             self._path: Path | None = None
-            self._conn = sqlite3.connect(":memory:")
+            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         else:
             path = Path(db_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._path = path
-            self._conn = sqlite3.connect(path)
+            self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db")
         self._migrate_if_needed()
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
@@ -754,7 +756,8 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close underlying SQLite connection."""
+        """Shut down executor and close underlying SQLite connection."""
+        self._executor.shutdown(wait=False)
         self._conn.close()
 
     # ------------------------------------------------------------------
@@ -1582,6 +1585,61 @@ class HistoryStore:
             )
             for row in rows
         ]
+
+    def all_channel_ids(self, *, familiar_id: str) -> set[int]:
+        """Return the set of all channel ids that have turns for *familiar_id*."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT channel_id FROM turns WHERE familiar_id = ?",
+            (familiar_id,),
+        ).fetchall()
+        return {int(r["channel_id"]) for r in rows}
+
+    def turns_in_id_range(
+        self,
+        *,
+        familiar_id: str,
+        min_id_exclusive: int,
+        max_id_inclusive: int,
+        channel_id: int | None = None,
+    ) -> list[HistoryTurn]:
+        """Return turns whose id falls in ``(min_id_exclusive, max_id_inclusive]``.
+
+        When *channel_id* is given, restricts to that channel.
+        """
+        if channel_id is not None:
+            rows = self._conn.execute(
+                f"""
+                SELECT {_TURN_COLS}
+                  FROM turns
+                 WHERE familiar_id = ?
+                   AND channel_id = ?
+                   AND id > ?
+                   AND id <= ?
+                 ORDER BY id ASC
+                """,  # noqa: S608
+                (familiar_id, channel_id, min_id_exclusive, max_id_inclusive),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"""
+                SELECT {_TURN_COLS}
+                  FROM turns
+                 WHERE familiar_id = ?
+                   AND id > ?
+                   AND id <= ?
+                 ORDER BY id ASC
+                """,  # noqa: S608
+                (familiar_id, min_id_exclusive, max_id_inclusive),
+            ).fetchall()
+        return [_row_to_turn(r) for r in rows]
+
+    def all_fact_ids(self, *, familiar_id: str) -> set[int]:
+        """Return all fact ids for *familiar_id*, including superseded ones."""
+        rows = self._conn.execute(
+            "SELECT id FROM facts WHERE familiar_id = ?",
+            (familiar_id,),
+        ).fetchall()
+        return {int(r["id"]) for r in rows}
 
     def get_cross_context(
         self,

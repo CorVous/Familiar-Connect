@@ -24,7 +24,8 @@ from familiar_connect.diagnostics.spans import span
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
-    from familiar_connect.history.store import Fact, HistoryStore
+    from familiar_connect.history.async_store import AsyncHistoryStore
+    from familiar_connect.history.store import Fact
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.fact_supersede_worker")
@@ -50,7 +51,7 @@ class FactSupersedeWorker:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
         batch_size: int = 5,
@@ -73,7 +74,7 @@ class FactSupersedeWorker:
         the store on the first tick. Tests may call this directly to
         assert the no-new-facts path.
         """
-        self._last_seen_fact_id = self._store.latest_fact_id(
+        self._last_seen_fact_id = self._store.sync.latest_fact_id(
             familiar_id=self._familiar_id
         )
 
@@ -95,7 +96,7 @@ class FactSupersedeWorker:
     @span("fact_supersede.tick")
     async def tick(self) -> int:
         """Evaluate up to ``batch_size`` new current facts. Return supersedes."""
-        candidates = self._store.recent_facts(
+        candidates = await self._store.recent_facts(
             familiar_id=self._familiar_id,
             limit=self._batch_size,
             include_superseded=False,
@@ -132,7 +133,7 @@ class FactSupersedeWorker:
         retired = 0
         seen_priors: set[int] = set()
         for subject in f_new.subjects:
-            priors = self._store.facts_for_subject(
+            priors = await self._store.facts_for_subject(
                 familiar_id=self._familiar_id,
                 canonical_key=subject.canonical_key,
                 include_superseded=False,
@@ -153,7 +154,7 @@ class FactSupersedeWorker:
             )
             for old_id in ids:
                 try:
-                    self._store.supersede_fact(
+                    await self._store.supersede_fact(
                         familiar_id=self._familiar_id,
                         old_id=old_id,
                         new_id=f_new.id,

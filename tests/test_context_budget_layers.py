@@ -19,6 +19,7 @@ from familiar_connect.context import (
     RagContextLayer,
     RecentHistoryLayer,
 )
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 
@@ -49,7 +50,7 @@ class TestRecentHistoryLayerMaxTokens:
                 content=f"message number {i:02d} blah",
                 author=None,
             )
-        layer = RecentHistoryLayer(store=store, window_size=20, max_tokens=40)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20, max_tokens=40)
         msgs = await layer.recent_messages(_ctx())
         # Newest survived; cap honoured.
         assert msgs[-1].content.endswith("09 blah")
@@ -68,7 +69,7 @@ class TestRecentHistoryLayerMaxTokens:
                 content=f"m{i}",
                 author=None,
             )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         msgs = await layer.recent_messages(_ctx())
         assert len(msgs) == 5
 
@@ -88,7 +89,7 @@ class TestRagContextLayerMaxTokens:
                 author=None,
             )
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_results=10,
             max_facts=0,
             max_tokens=20,
@@ -129,7 +130,7 @@ class TestPeopleDossierLayerMaxTokens:
 
         # Cap roughly to fit 1-2 dossiers.
         layer = PeopleDossierLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             window_size=20,
             max_people=10,
             max_tokens=200,
@@ -151,7 +152,7 @@ class TestConversationSummaryLayerMaxTokens:
             summary_text=long_text,
             last_summarised_id=1,
         )
-        layer = ConversationSummaryLayer(store=store, max_tokens=50)
+        layer = ConversationSummaryLayer(store=AsyncHistoryStore(store), max_tokens=50)
         out = await layer.build(_ctx())
         assert estimate_tokens(out) <= 80  # cap + header overhead
 
@@ -170,7 +171,7 @@ class TestCrossChannelContextLayerMaxTokens:
                 source_last_id=1,
             )
         layer = CrossChannelContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             viewer_map={viewer_channel: [10, 20, 30]},
             ttl_seconds=600,
             max_tokens=80,

@@ -26,13 +26,13 @@ from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
-from familiar_connect.history.store import _TURN_COLS, _row_to_turn
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from familiar_connect.history.store import HistoryStore, HistoryTurn
+    from familiar_connect.history.async_store import AsyncHistoryStore
+    from familiar_connect.history.store import HistoryTurn
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.summary_worker")
@@ -46,7 +46,7 @@ class SummaryWorker:
     def __init__(
         self,
         *,
-        store: HistoryStore,
+        store: AsyncHistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
         turns_threshold: int = 10,
@@ -83,7 +83,7 @@ class SummaryWorker:
     @span("summary.tick")
     async def tick(self) -> None:
         """One pass: refresh any stale rolling + cross-channel summaries."""
-        channels = self._channels_with_turns()
+        channels = await self._channels_with_turns()
         for channel_id in channels:
             await self._maybe_refresh_rolling(channel_id)
 
@@ -96,19 +96,19 @@ class SummaryWorker:
     # ------------------------------------------------------------------
 
     async def _maybe_refresh_rolling(self, channel_id: int) -> None:
-        latest = self._store.latest_id(
+        latest = await self._store.latest_id(
             familiar_id=self._familiar_id, channel_id=channel_id
         )
         if latest is None or latest <= 0:
             return
-        prior = self._store.get_summary(
+        prior = await self._store.get_summary(
             familiar_id=self._familiar_id, channel_id=channel_id
         )
         last_summarised = prior.last_summarised_id if prior is not None else 0
         if latest - last_summarised < self._turns_threshold:
             return
 
-        new_turns = self._turns_in_range(
+        new_turns = await self._turns_in_range(
             channel_id=channel_id,
             min_id_exclusive=last_summarised,
             max_id_inclusive=latest,
@@ -124,7 +124,7 @@ class SummaryWorker:
         text = reply.content.strip()
         if not text:
             return
-        self._store.put_summary(
+        await self._store.put_summary(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
             last_summarised_id=latest,
@@ -144,13 +144,13 @@ class SummaryWorker:
     async def _maybe_refresh_cross(
         self, viewer_channel_id: int, source_channel_id: int
     ) -> None:
-        source_latest = self._store.latest_id(
+        source_latest = await self._store.latest_id(
             familiar_id=self._familiar_id, channel_id=source_channel_id
         )
         if source_latest is None or source_latest <= 0:
             return
         viewer_mode = f"voice:{viewer_channel_id}"
-        prior = self._store.get_cross_context(
+        prior = await self._store.get_cross_context(
             familiar_id=self._familiar_id,
             viewer_mode=viewer_mode,
             source_channel_id=source_channel_id,
@@ -162,7 +162,7 @@ class SummaryWorker:
         if prior is None and source_latest < self._cross_k:
             return
 
-        turns = self._turns_in_range(
+        turns = await self._turns_in_range(
             channel_id=source_channel_id,
             min_id_exclusive=prior_source_id,
             max_id_inclusive=source_latest,
@@ -178,7 +178,7 @@ class SummaryWorker:
         text = reply.content.strip()
         if not text:
             return
-        self._store.put_cross_context(
+        await self._store.put_cross_context(
             familiar_id=self._familiar_id,
             viewer_mode=viewer_mode,
             source_channel_id=source_channel_id,
@@ -196,41 +196,23 @@ class SummaryWorker:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _channels_with_turns(self) -> set[int]:
-        """Return channels that have at least one turn for this familiar.
+    async def _channels_with_turns(self) -> set[int]:
+        """Return channels that have at least one turn for this familiar."""
+        return await self._store.all_channel_ids(familiar_id=self._familiar_id)
 
-        Small N — a single scan of distinct channel ids is fine.
-        """
-        rows = self._store._conn.execute(  # noqa: SLF001 — tight coupling OK for the worker
-            """
-            SELECT DISTINCT channel_id
-              FROM turns
-             WHERE familiar_id = ?
-            """,
-            (self._familiar_id,),
-        ).fetchall()
-        return {int(r["channel_id"]) for r in rows}
-
-    def _turns_in_range(
+    async def _turns_in_range(
         self,
         *,
         channel_id: int,
         min_id_exclusive: int,
         max_id_inclusive: int,
     ) -> list[HistoryTurn]:
-        rows = self._store._conn.execute(  # noqa: SLF001
-            f"""
-            SELECT {_TURN_COLS}
-              FROM turns
-             WHERE familiar_id = ?
-               AND channel_id = ?
-               AND id > ?
-               AND id <= ?
-             ORDER BY id ASC
-            """,  # noqa: S608
-            (self._familiar_id, channel_id, min_id_exclusive, max_id_inclusive),
-        ).fetchall()
-        return [_row_to_turn(r) for r in rows]
+        return await self._store.turns_in_id_range(
+            familiar_id=self._familiar_id,
+            channel_id=channel_id,
+            min_id_exclusive=min_id_exclusive,
+            max_id_inclusive=max_id_inclusive,
+        )
 
 
 # ---------------------------------------------------------------------------

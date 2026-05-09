@@ -993,7 +993,7 @@ def _register_events(
         if not after_embeds or before_embeds == after_embeds:
             return
         apply_message_edit(
-            store=familiar.history_store,
+            store=familiar.history_store.sync,
             familiar_id=familiar.id,
             is_subscribed=_is_text_subscribed,
             channel_id=after.channel.id,
@@ -1033,7 +1033,7 @@ def _register_events(
         payload: discord.RawReactionActionEvent,
     ) -> None:
         apply_reaction_delta(
-            store=familiar.history_store,
+            store=familiar.history_store.sync,
             familiar_id=familiar.id,
             is_subscribed=_is_text_subscribed,
             channel_id=payload.channel_id,
@@ -1047,7 +1047,7 @@ def _register_events(
         payload: discord.RawReactionActionEvent,
     ) -> None:
         apply_reaction_delta(
-            store=familiar.history_store,
+            store=familiar.history_store.sync,
             familiar_id=familiar.id,
             is_subscribed=_is_text_subscribed,
             channel_id=payload.channel_id,
@@ -1061,7 +1061,7 @@ def _register_events(
         payload: discord.RawReactionClearEvent,
     ) -> None:
         apply_reaction_clear(
-            store=familiar.history_store,
+            store=familiar.history_store.sync,
             familiar_id=familiar.id,
             is_subscribed=_is_text_subscribed,
             channel_id=payload.channel_id,
@@ -1073,7 +1073,7 @@ def _register_events(
         payload: discord.RawReactionClearEmojiEvent,
     ) -> None:
         apply_reaction_clear(
-            store=familiar.history_store,
+            store=familiar.history_store.sync,
             familiar_id=familiar.id,
             is_subscribed=_is_text_subscribed,
             channel_id=payload.channel_id,
