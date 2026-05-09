@@ -518,5 +518,13 @@ def run(args: argparse.Namespace) -> int:
     )
 
     load_opus()
-    asyncio.run(_async_main(token, familiar))
+    try:
+        asyncio.run(_async_main(token, familiar))
+    except* discord.errors.LoginFailure:
+        _logger.error(
+            "Discord login failed — DISCORD_BOT token is invalid or expired. "
+            "Generate a new token at https://discord.com/developers/applications "
+            "and set it in your environment: DISCORD_BOT=<token>"
+        )
+        return 1
     return 0
