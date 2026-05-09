@@ -24,7 +24,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from huggingface_hub import hf_hub_download
+try:
+    from huggingface_hub import hf_hub_download
+except ModuleNotFoundError as _err:
+    raise ModuleNotFoundError(
+        "huggingface_hub is required for local turn detection. "
+        "Install it with: uv sync --extra local-turn"
+    ) from _err
 
 from familiar_connect import log_style as ls
 from familiar_connect.voice.turn_detection.endpointer import UtteranceEndpointer
