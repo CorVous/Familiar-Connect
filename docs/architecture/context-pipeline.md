@@ -31,6 +31,7 @@ flowchart TB
     turns -->|SummaryWorker| summaries
     turns -->|SummaryWorker| cross
     turns -->|FactExtractor| facts
+    facts -->|FactSupersedeWorker| facts
     facts -->|trigger| fts_facts
     facts -->|PeopleDossierWorker| dossiers
     turns -->|ReflectionWorker| reflections
@@ -162,6 +163,19 @@ A post-extraction filter drops self-capability "facts" (e.g.,
 `I cannot remember names`, `the assistant has no internet access`)
 before they hit the store. See [Fact discipline](#fact-discipline-supersession-and-self-capability)
 for the rationale.
+
+### `FactSupersedeWorker`
+
+Retires prior facts replaced by newer ones about the same subject. Watermark-driven off `facts.id`. Ticks every `tick_interval_s` (default 60 s) — much slower than `FactExtractor` since supersession isn't latency-critical and adds one LLM call per new fact.
+
+Per tick:
+
+1. `recent_facts(familiar_id, include_superseded=False)` returns up to `batch_size` (default 5) current facts. Facts newer than the internal watermark are evaluated oldest-first.
+2. For each new fact, for each of its subjects, pull prior current facts for that subject (capped at `priors_max`, default 20). Ask the LLM which priors the new fact contradicts or directly replaces.
+3. Call `supersede_fact(old_id, new_id)` for each retired id. Already-superseded priors (retired by an earlier subject in the same tick) are skipped silently.
+4. Advance the watermark to the highest fact id seen this tick — even on bad LLM output, preventing a loop on a fact the model can't parse.
+
+Facts without subjects are skipped (the `FactExtractor` must have resolved at least one `canonical_key` for a fact to be eligible). Logs one line per tick only when retirements occur: `[Supersede] evaluated=<n> retired=<n> watermark=<id>`.
 
 ### `PeopleDossierWorker`
 
