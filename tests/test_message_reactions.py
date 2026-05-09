@@ -22,6 +22,7 @@ from familiar_connect.bot import (
 )
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.layers import RecentHistoryLayer
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 
@@ -234,7 +235,7 @@ class TestRecentHistoryReactions:
         store.set_reaction(
             familiar_id="fam", platform_message_id="m1", emoji="❤️", count=1
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         assert msgs[0].role == "user"
         assert "👍 x2" in msgs[0].content
@@ -254,7 +255,7 @@ class TestRecentHistoryReactions:
         store.set_reaction(
             familiar_id="fam", platform_message_id="bot1", emoji="🎉", count=1
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         assert msgs[0].role == "assistant"
         assert "🎉 x1" in msgs[0].content
@@ -270,7 +271,7 @@ class TestRecentHistoryReactions:
             author=_author(),
             platform_message_id="m1",
         )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         assert "reactions" not in msgs[0].content.lower()
 
@@ -409,7 +410,7 @@ class TestRecentHistoryReactionsBatch:
                 emoji="👍",
                 count=1,
             )
-        layer = RecentHistoryLayer(store=store, window_size=20)
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         seen: list[str] = []
         store._conn.set_trace_callback(seen.append)  # type: ignore[attr-defined]
         try:

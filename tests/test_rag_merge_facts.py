@@ -10,6 +10,7 @@ import pytest
 
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.layers import RagContextLayer
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 
 
@@ -34,7 +35,9 @@ class TestRagFactsMerge:
             text="Aria likes strawberries.",
             source_turn_ids=[1],
         )
-        layer = RagContextLayer(store=store, max_results=5, max_facts=3)
+        layer = RagContextLayer(
+            store=AsyncHistoryStore(store), max_results=5, max_facts=3
+        )
         layer.set_current_cue("strawb")
         out = await layer.build(_ctx())
         assert "relevant facts" in out
@@ -51,7 +54,7 @@ class TestRagFactsMerge:
             text="Aria likes strawberries.",
             source_turn_ids=[99],
         )
-        layer = RagContextLayer(store=store, max_facts=3)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_facts=3)
         layer.set_current_cue("strawb")
         out = await layer.build(_ctx())
         assert "Aria likes strawberries" in out
@@ -59,7 +62,7 @@ class TestRagFactsMerge:
 
     def test_invalidation_key_reflects_fact_watermark(self) -> None:
         store = HistoryStore(":memory:")
-        layer = RagContextLayer(store=store)
+        layer = RagContextLayer(store=AsyncHistoryStore(store))
         layer.set_current_cue("foo")
         k1 = layer.invalidation_key(_ctx())
         store.append_fact(
@@ -100,7 +103,7 @@ class TestRagFactImportanceReranking:
             importance=10,
         )
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_facts=1,
             bm25_weight=1.0,
             importance_weight=5.0,
@@ -122,7 +125,7 @@ class TestRagFactImportanceReranking:
             source_turn_ids=[1],
             importance=1,
         )
-        layer = RagContextLayer(store=store, max_facts=5)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_facts=5)
         layer.set_current_cue("strawb")
         out = await layer.build(_ctx())
         assert "Aria likes strawberries" in out
@@ -139,7 +142,7 @@ class TestRagFactImportanceReranking:
             # no importance — legacy / unscored
         )
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_facts=1,
             bm25_weight=1.0,
             importance_weight=2.0,

@@ -9,6 +9,7 @@ import pytest
 from familiar_connect.bus import InProcessEventBus
 from familiar_connect.bus.envelope import Event
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.processors.history_writer import HistoryWriter
@@ -53,7 +54,7 @@ class TestHistoryWriter:
         bus = InProcessEventBus()
         await bus.start()
 
-        writer = HistoryWriter(store=store, familiar_id="fam")
+        writer = HistoryWriter(store=AsyncHistoryStore(store), familiar_id="fam")
         await writer.handle(_discord_text_event(content="hello"), bus)
 
         turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
@@ -71,7 +72,7 @@ class TestHistoryWriter:
         bus = InProcessEventBus()
         await bus.start()
 
-        writer = HistoryWriter(store=store, familiar_id="fam")
+        writer = HistoryWriter(store=AsyncHistoryStore(store), familiar_id="fam")
         ev = _discord_text_event(event_id="dup-1", content="once")
         await writer.handle(ev, bus)
         await writer.handle(ev, bus)  # same event_id
@@ -87,7 +88,7 @@ class TestHistoryWriter:
         bus = InProcessEventBus()
         await bus.start()
 
-        writer = HistoryWriter(store=store, familiar_id="fam")
+        writer = HistoryWriter(store=AsyncHistoryStore(store), familiar_id="fam")
         ev = _discord_text_event(content="not mine")
         # re-stamp for the other familiar
         payload = dict(ev.payload)
@@ -113,7 +114,7 @@ class TestHistoryWriter:
         bus = InProcessEventBus()
         await bus.start()
 
-        writer = HistoryWriter(store=store, familiar_id="fam")
+        writer = HistoryWriter(store=AsyncHistoryStore(store), familiar_id="fam")
         await writer.handle(_discord_text_event(content=""), bus)
         assert store.count(familiar_id="fam") == 0
 
@@ -121,6 +122,6 @@ class TestHistoryWriter:
 
     def test_processor_surface(self) -> None:
         store = HistoryStore(":memory:")
-        writer = HistoryWriter(store=store, familiar_id="fam")
+        writer = HistoryWriter(store=AsyncHistoryStore(store), familiar_id="fam")
         assert writer.name == "history-writer"
         assert TOPIC_DISCORD_TEXT in writer.topics

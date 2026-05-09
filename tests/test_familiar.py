@@ -11,7 +11,7 @@ import shutil
 from typing import TYPE_CHECKING
 
 from familiar_connect.familiar import Familiar
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.subscriptions import SubscriptionRegistry
 from tests.conftest import build_fake_llm_clients
 
@@ -43,7 +43,7 @@ class TestLoadFromDisk:
         assert familiar.id == root.name
         assert familiar.root == root
         assert familiar.config.display_tz == "UTC"
-        assert isinstance(familiar.history_store, HistoryStore)
+        assert isinstance(familiar.history_store, AsyncHistoryStore)
         assert isinstance(familiar.subscriptions, SubscriptionRegistry)
         for slot_name in ("fast", "prose", "background"):
             assert slot_name in familiar.llm_clients

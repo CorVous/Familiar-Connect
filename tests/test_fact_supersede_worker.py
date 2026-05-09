@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors.fact_supersede_worker import FactSupersedeWorker
@@ -79,7 +80,9 @@ class TestFactSupersedeWorkerTick:
         store = HistoryStore(":memory:")
         _seed_subject_facts(store)
         llm = _ScriptedLLM(replies=[_ids_json([])])
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         # Pre-advance watermark past everything.
         worker.prime_watermark()
         await worker.tick()
@@ -90,7 +93,9 @@ class TestFactSupersedeWorkerTick:
     async def test_supersedes_prior_when_llm_flags_it(self) -> None:
         store = HistoryStore(":memory:")
         llm = _ScriptedLLM(replies=[])  # filled after we know old_id
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         old_id, new_id = _seed_subject_facts(store, worker=worker)
         llm._replies.append(_ids_json([old_id]))
         await worker.tick()
@@ -111,7 +116,9 @@ class TestFactSupersedeWorkerTick:
     async def test_empty_reply_leaves_facts_untouched(self) -> None:
         store = HistoryStore(":memory:")
         llm = _ScriptedLLM(replies=[_ids_json([])])
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         old_id, new_id = _seed_subject_facts(store, worker=worker)
         await worker.tick()
 
@@ -123,7 +130,9 @@ class TestFactSupersedeWorkerTick:
         store = HistoryStore(":memory:")
         # 9999 isn't a real fact id; must not crash supersede_fact.
         llm = _ScriptedLLM(replies=[_ids_json([9999])])
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         old_id, new_id = _seed_subject_facts(store, worker=worker)
         await worker.tick()
 
@@ -134,7 +143,9 @@ class TestFactSupersedeWorkerTick:
     async def test_bad_json_is_swallowed(self) -> None:
         store = HistoryStore(":memory:")
         llm = _ScriptedLLM(replies=["not json at all"])
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         old_id, new_id = _seed_subject_facts(store, worker=worker)
         await worker.tick()
 
@@ -147,7 +158,9 @@ class TestFactSupersedeWorkerTick:
         """Worker must never instruct the LLM to retire the new fact itself."""
         store = HistoryStore(":memory:")
         llm = _ScriptedLLM(replies=[])
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         old_id, new_id = _seed_subject_facts(store, worker=worker)
         # If the LLM erroneously names the new fact, the worker filters it.
         llm._replies.append(_ids_json([new_id]))
@@ -163,7 +176,9 @@ class TestFactSupersedeWorkerTick:
     async def test_advances_watermark_so_next_tick_is_noop(self) -> None:
         store = HistoryStore(":memory:")
         llm = _ScriptedLLM(replies=[_ids_json([]), _ids_json([])])
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         _seed_subject_facts(store, worker=worker)
         await worker.tick()
         first_count = len(llm.calls)
@@ -184,7 +199,9 @@ class TestFactSupersedeWorkerTick:
             source_turn_ids=[1],
         )
         llm = _ScriptedLLM(replies=[])
-        worker = FactSupersedeWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = FactSupersedeWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         await worker.tick()
 
         # No subjects -> no LLM call.

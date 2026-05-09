@@ -13,6 +13,7 @@ import pytest
 
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.layers import PeopleDossierLayer
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 
@@ -34,7 +35,7 @@ class TestPeopleDossierLayer:
     @pytest.mark.asyncio
     async def test_empty_when_no_turns(self) -> None:
         store = HistoryStore(":memory:")
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         assert not await layer.build(_ctx())
 
     @pytest.mark.asyncio
@@ -48,7 +49,7 @@ class TestPeopleDossierLayer:
             content="hi",
             author=_author("1", display="Cass"),
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         assert not await layer.build(_ctx())
 
     @pytest.mark.asyncio
@@ -68,7 +69,7 @@ class TestPeopleDossierLayer:
             last_fact_id=5,
             dossier_text="Cass enjoys pho.",
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         out = await layer.build(_ctx())
         assert "Cass" in out
         assert "pho" in out
@@ -106,7 +107,7 @@ class TestPeopleDossierLayer:
             last_fact_id=5,
             dossier_text="Cass enjoys pho.",
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         out = await layer.build(_ctx())
         assert "### Cass" in out
         assert "@cass_login" in out
@@ -132,7 +133,7 @@ class TestPeopleDossierLayer:
             last_fact_id=5,
             dossier_text="Cass enjoys pho.",
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         out = await layer.build(_ctx())
         assert "Cass enjoys pho." in out
         assert "Pronouns:" not in out
@@ -157,7 +158,7 @@ class TestPeopleDossierLayer:
             last_fact_id=3,
             dossier_text="Aria runs a bakery.",
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         out = await layer.build(_ctx())
         assert "Aria" in out
         assert "bakery" in out
@@ -182,7 +183,7 @@ class TestPeopleDossierLayer:
                 content="hi",
                 author=_author(uid, display=display),
             )
-        layer = PeopleDossierLayer(store=store, max_people=2)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store), max_people=2)
         out = await layer.build(_ctx())
         # Most recent two kept (Bo, Aria); oldest (Cass) dropped.
         assert "Bo dossier" in out
@@ -208,7 +209,7 @@ class TestPeopleDossierLayer:
                 content="hi",
                 author=_author(uid, display=display),
             )
-        layer = PeopleDossierLayer(store=store, max_people=2)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store), max_people=2)
         out = await layer.build(_ctx())
         # Both kept; both unique candidates.
         assert "Cass dossier" in out
@@ -232,7 +233,7 @@ class TestPeopleDossierLayer:
             last_fact_id=1,
             dossier_text="Cass dossier.",
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         # Channel 1 has no turns ⇒ no candidates ⇒ empty.
         assert not await layer.build(_ctx(channel_id=1))
 
@@ -251,7 +252,7 @@ class TestPeopleDossierLayer:
             last_fact_id=1,
             dossier_text="Cass dossier.",
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         k1 = layer.invalidation_key(_ctx())
         store.append_turn(
             familiar_id="fam",
@@ -278,7 +279,7 @@ class TestPeopleDossierLayer:
             last_fact_id=1,
             dossier_text="v1",
         )
-        layer = PeopleDossierLayer(store=store)
+        layer = PeopleDossierLayer(store=AsyncHistoryStore(store))
         k1 = layer.invalidation_key(_ctx())
         store.put_people_dossier(
             familiar_id="fam",

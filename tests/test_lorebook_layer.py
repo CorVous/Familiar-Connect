@@ -14,6 +14,7 @@ import pytest
 
 from familiar_connect.context import LorebookLayer
 from familiar_connect.context.assembler import AssemblyContext
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 
 if TYPE_CHECKING:
@@ -48,7 +49,9 @@ def _write_lorebook(path: Path, body: str) -> Path:
 async def test_empty_when_file_missing(tmp_path: Path) -> None:
     store = HistoryStore(":memory:")
     _seed(store, "anything")
-    layer = LorebookLayer(store=store, path=tmp_path / "missing.toml")
+    layer = LorebookLayer(
+        store=AsyncHistoryStore(store), path=tmp_path / "missing.toml"
+    )
     out = await layer.build(_ctx())
     assert not out
 
@@ -61,7 +64,7 @@ async def test_empty_when_no_entries_match(tmp_path: Path) -> None:
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = ["dragon"]\ncontent = "Dragons breathe fire."\n',
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     assert not out
 
@@ -74,7 +77,7 @@ async def test_single_entry_triggers_on_key_match(tmp_path: Path) -> None:
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = ["paris"]\ncontent = "Paris is the capital of France."\n',
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     assert "## Lorebook" in out
     assert "Paris is the capital of France." in out
@@ -88,7 +91,7 @@ async def test_match_is_case_insensitive(tmp_path: Path) -> None:
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = ["paris"]\ncontent = "City info."\n',
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     assert "City info." in out
 
@@ -106,7 +109,7 @@ async def test_multiple_entries_sorted_by_priority_desc(tmp_path: Path) -> None:
             "priority = 100\n"
         ),
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     high = out.index("high-pri dragon")
     low = out.index("low-pri Paris")
@@ -124,7 +127,7 @@ async def test_selective_requires_all_keys(tmp_path: Path) -> None:
             'content = "Both cities matter."\n'
         ),
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     assert not out
 
@@ -140,7 +143,7 @@ async def test_selective_fires_when_all_keys_present(tmp_path: Path) -> None:
             'content = "Both cities matter."\n'
         ),
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     assert "Both cities matter." in out
 
@@ -154,7 +157,7 @@ async def test_max_entries_caps_output(tmp_path: Path) -> None:
         for k, p in [("alpha", 4), ("beta", 3), ("gamma", 2), ("delta", 1)]
     )
     book = _write_lorebook(tmp_path / "lorebook.toml", body)
-    layer = LorebookLayer(store=store, path=book, max_entries=2)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book, max_entries=2)
     out = await layer.build(_ctx())
     assert "alpha-content" in out
     assert "beta-content" in out
@@ -172,7 +175,7 @@ async def test_max_tokens_truncates_block(tmp_path: Path) -> None:
         f'[[entries]]\nkeys = ["beta"]\ncontent = "second entry"\npriority = 1\n'
     )
     book = _write_lorebook(tmp_path / "lorebook.toml", body)
-    layer = LorebookLayer(store=store, path=book, max_tokens=20)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book, max_tokens=20)
     out = await layer.build(_ctx())
     # 20 tokens ≈ 80 chars; the rendered block should be much shorter
     # than the raw 4000-char first entry.
@@ -190,7 +193,7 @@ async def test_only_recent_window_scanned(tmp_path: Path) -> None:
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = ["paris"]\ncontent = "Paris info."\n',
     )
-    layer = LorebookLayer(store=store, path=book, recent_window=10)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book, recent_window=10)
     out = await layer.build(_ctx())
     assert not out
 
@@ -203,7 +206,7 @@ async def test_empty_keys_list_never_fires(tmp_path: Path) -> None:
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = []\ncontent = "should not appear"\n',
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     assert not out
 
@@ -214,7 +217,7 @@ def test_invalidation_key_changes_when_match_set_changes(tmp_path: Path) -> None
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = ["paris"]\ncontent = "city"\n',
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     k0 = layer.invalidation_key(_ctx())
     _seed(store, "tell me about paris")
     k1 = layer.invalidation_key(_ctx())
@@ -228,7 +231,7 @@ def test_invalidation_key_changes_when_file_changes(tmp_path: Path) -> None:
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = ["paris"]\ncontent = "v1"\n',
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     k0 = layer.invalidation_key(_ctx())
     _write_lorebook(
         tmp_path / "lorebook.toml",
@@ -243,7 +246,7 @@ async def test_malformed_toml_yields_empty_block(tmp_path: Path) -> None:
     store = HistoryStore(":memory:")
     _seed(store, "anything")
     book = _write_lorebook(tmp_path / "lorebook.toml", "this is = not valid [[ toml")
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     out = await layer.build(_ctx())
     assert not out
 
@@ -257,7 +260,7 @@ async def test_channel_scope_uses_active_channel(tmp_path: Path) -> None:
         tmp_path / "lorebook.toml",
         '[[entries]]\nkeys = ["paris"]\ncontent = "city"\n',
     )
-    layer = LorebookLayer(store=store, path=book)
+    layer = LorebookLayer(store=AsyncHistoryStore(store), path=book)
     # Channel 2 has no matching turn — layer should opt out.
     out = await layer.build(_ctx(channel_id=2))
     assert not out

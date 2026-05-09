@@ -13,6 +13,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors.summary_worker import SummaryWorker
@@ -58,7 +59,7 @@ class TestRollingSummary:
         llm = _ScriptedLLM(replies=["Alice said hi and things happened."])
 
         worker = SummaryWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=10,
@@ -77,7 +78,7 @@ class TestRollingSummary:
         llm = _ScriptedLLM(replies=["should not be used"])
 
         worker = SummaryWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=10,
@@ -99,7 +100,7 @@ class TestRollingSummary:
         )
 
         worker = SummaryWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=10,
@@ -126,7 +127,7 @@ class TestRollingSummary:
         llm = _ScriptedLLM(replies=["ch1 summary", "ch2 summary"])
 
         worker = SummaryWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=10,
@@ -150,7 +151,7 @@ class TestCrossChannelSummary:
         llm = _ScriptedLLM(replies=["In #general: chit-chat."])
 
         worker = SummaryWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=10,
@@ -175,7 +176,7 @@ class TestCrossChannelSummary:
         llm = _ScriptedLLM(replies=["unused"])
 
         worker = SummaryWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=10,
@@ -198,7 +199,7 @@ class TestCrossChannelSummary:
         llm = _ScriptedLLM(replies=["first cross", "second cross"])
 
         worker = SummaryWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=10,

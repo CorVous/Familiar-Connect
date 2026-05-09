@@ -15,6 +15,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors.reflection_worker import ReflectionWorker
@@ -76,7 +77,7 @@ class TestReflectionWorker:
         llm = _ScriptedLLM(replies=["should not be called"])
 
         worker = ReflectionWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=20,
@@ -100,7 +101,7 @@ class TestReflectionWorker:
         llm = _ScriptedLLM(replies=[reply])
 
         worker = ReflectionWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=20,
@@ -128,7 +129,7 @@ class TestReflectionWorker:
         llm = _ScriptedLLM(replies=[first_reply, "[]"])
 
         worker = ReflectionWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=20,
@@ -158,7 +159,7 @@ class TestReflectionWorker:
         llm = _ScriptedLLM(replies=[reply])
 
         worker = ReflectionWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=20,
@@ -183,7 +184,7 @@ class TestReflectionWorker:
         )
         llm = _ScriptedLLM(replies=[reply])
         worker = ReflectionWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=20,
@@ -202,7 +203,7 @@ class TestReflectionWorker:
         )
         llm = _ScriptedLLM(replies=[reply])
         worker = ReflectionWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=20,
@@ -216,7 +217,7 @@ class TestReflectionWorker:
         _seed_turns(store, 25)
         llm = _ScriptedLLM(replies=["not json at all"])
         worker = ReflectionWorker(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             turns_threshold=20,

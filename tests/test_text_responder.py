@@ -30,6 +30,7 @@ from familiar_connect.context import (
     RecentHistoryLayer,
 )
 from familiar_connect.context.layers import _turn_to_message_with_context
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore, HistoryTurn
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
@@ -157,7 +158,7 @@ def _make_responder(
     assembler = Assembler(
         layers=[
             CoreInstructionsLayer(path=core),
-            RecentHistoryLayer(store=store, window_size=20),
+            RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20),
         ]
     )
     router = router or TurnRouter()
@@ -165,7 +166,7 @@ def _make_responder(
         assembler=assembler,
         llm_client=llm,
         send_text=send,
-        history_store=store,
+        history_store=AsyncHistoryStore(store),
         router=router,
         familiar_id="fam",
         trigger_typing=trigger_typing,

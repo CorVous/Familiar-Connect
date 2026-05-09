@@ -19,6 +19,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
@@ -81,7 +82,9 @@ class TestPeopleDossierWorker:
         )
         llm = _ScriptedLLM(replies=["Cass: enjoys pho."])
 
-        worker = PeopleDossierWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         await worker.tick()
 
         entry = store.get_people_dossier(familiar_id="fam", canonical_key="discord:1")
@@ -101,7 +104,9 @@ class TestPeopleDossierWorker:
         )
         llm = _ScriptedLLM(replies=["should not be used"])
 
-        worker = PeopleDossierWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         await worker.tick()
 
         assert llm.calls == []  # no LLM call when nothing new
@@ -130,7 +135,9 @@ class TestPeopleDossierWorker:
         )
         llm = _ScriptedLLM(replies=["Cass enjoys pho and recently moved to Toronto."])
 
-        worker = PeopleDossierWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         await worker.tick()
 
         # Prior dossier was fed into the prompt.
@@ -155,7 +162,9 @@ class TestPeopleDossierWorker:
         )
         llm = _ScriptedLLM(replies=["Cass dossier.", "Aria dossier."])
 
-        worker = PeopleDossierWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         await worker.tick()
 
         c = store.get_people_dossier(familiar_id="fam", canonical_key="discord:1")
@@ -180,7 +189,9 @@ class TestPeopleDossierWorker:
         # Force refresh by lowering the watermark below the latest fact.
         llm = _ScriptedLLM(replies=["   "])
 
-        worker = PeopleDossierWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         await worker.tick()
 
         entry = store.get_people_dossier(familiar_id="fam", canonical_key="discord:1")
@@ -198,7 +209,9 @@ class TestPeopleDossierWorker:
         )
         llm = _ScriptedLLM(replies=["unused"])
 
-        worker = PeopleDossierWorker(store=store, llm_client=llm, familiar_id="fam")
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"
+        )
         await worker.tick()
 
         assert llm.calls == []

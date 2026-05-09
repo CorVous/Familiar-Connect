@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from familiar_connect.embedding import HashEmbedder
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors import projectors as projectors_module
@@ -54,7 +55,7 @@ class _StubLLM(LLMClient):
 def _ctx(*, embedder: HashEmbedder | None = None) -> ProjectorContext:
     store = HistoryStore(":memory:")
     return ProjectorContext(
-        store=store,
+        store=AsyncHistoryStore(store),
         llm_clients={"background": _StubLLM(), "fast": _StubLLM(), "prose": _StubLLM()},
         familiar_id="fam",
         embedder=embedder,

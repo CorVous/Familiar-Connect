@@ -16,6 +16,7 @@ from familiar_connect.context.layers import (
     CrossChannelContextLayer,
     RagContextLayer,
 )
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import Author
 
@@ -36,14 +37,14 @@ class TestConversationSummaryLayer:
             last_summarised_id=5,
             summary_text="Earlier they talked about foxes.",
         )
-        layer = ConversationSummaryLayer(store=store)
+        layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
         out = await layer.build(_ctx())
         assert "foxes" in out
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_summary(self) -> None:
         store = HistoryStore(":memory:")
-        layer = ConversationSummaryLayer(store=store)
+        layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
         assert not await layer.build(_ctx())
 
     def test_invalidation_key_tracks_watermark(self) -> None:
@@ -54,7 +55,7 @@ class TestConversationSummaryLayer:
             last_summarised_id=5,
             summary_text="v1",
         )
-        layer = ConversationSummaryLayer(store=store)
+        layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
         k1 = layer.invalidation_key(_ctx())
         store.put_summary(
             familiar_id="fam",
@@ -78,7 +79,7 @@ class TestCrossChannelContextLayer:
             summary_text="In #general: banter about pumpkins.",
         )
         layer = CrossChannelContextLayer(
-            store=store, viewer_map={1: [100]}, ttl_seconds=300
+            store=AsyncHistoryStore(store), viewer_map={1: [100]}, ttl_seconds=300
         )
         out = await layer.build(_ctx(channel_id=1, viewer_mode="voice"))
         assert "pumpkins" in out
@@ -102,7 +103,7 @@ class TestCrossChannelContextLayer:
         store._conn.commit()
 
         layer = CrossChannelContextLayer(
-            store=store, viewer_map={1: [100]}, ttl_seconds=60
+            store=AsyncHistoryStore(store), viewer_map={1: [100]}, ttl_seconds=60
         )
         out = await layer.build(_ctx(channel_id=1, viewer_mode="voice"))
         # Stale content should not be rendered; layer opts out.
@@ -118,7 +119,9 @@ class TestCrossChannelContextLayer:
             source_last_id=5,
             summary_text="Something.",
         )
-        layer = CrossChannelContextLayer(store=store, viewer_map={}, ttl_seconds=300)
+        layer = CrossChannelContextLayer(
+            store=AsyncHistoryStore(store), viewer_map={}, ttl_seconds=300
+        )
         assert not await layer.build(_ctx(channel_id=1))
 
     @pytest.mark.asyncio
@@ -139,7 +142,7 @@ class TestCrossChannelContextLayer:
             summary_text="From #alerts: a service restart.",
         )
         layer = CrossChannelContextLayer(
-            store=store, viewer_map={1: [100, 200]}, ttl_seconds=300
+            store=AsyncHistoryStore(store), viewer_map={1: [100, 200]}, ttl_seconds=300
         )
         out = await layer.build(_ctx(channel_id=1))
         assert "apples" in out
@@ -150,7 +153,7 @@ class TestRagContextLayer:
     @pytest.mark.asyncio
     async def test_empty_when_no_cues(self) -> None:
         store = HistoryStore(":memory:")
-        layer = RagContextLayer(store=store, max_results=5)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_results=5)
         # No cues ⇒ empty contribution.
         assert not await layer.build(_ctx())
 
@@ -171,7 +174,7 @@ class TestRagContextLayer:
             content="Sure thing.",
             author=None,
         )
-        layer = RagContextLayer(store=store, max_results=5)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_results=5)
         layer.set_current_cue("fox")
         out = await layer.build(_ctx(channel_id=1))
         assert "fox plan" in out
@@ -186,14 +189,14 @@ class TestRagContextLayer:
             content="Fox on a different familiar.",
             author=None,
         )
-        layer = RagContextLayer(store=store, max_results=5)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_results=5)
         layer.set_current_cue("fox")
         out = await layer.build(_ctx())
         assert not out
 
     def test_invalidation_key_reflects_cue_and_watermark(self) -> None:
         store = HistoryStore(":memory:")
-        layer = RagContextLayer(store=store, max_results=5)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_results=5)
         layer.set_current_cue("fox")
         k1 = layer.invalidation_key(_ctx())
         store.append_turn(
@@ -229,7 +232,9 @@ class TestRagContextLayer:
                 content=f"strawberry observation number {i}",
                 author=None,
             )
-        layer = RagContextLayer(store=store, max_results=10, recent_window_size=20)
+        layer = RagContextLayer(
+            store=AsyncHistoryStore(store), max_results=10, recent_window_size=20
+        )
         layer.set_current_cue("strawberry")
         out = await layer.build(_ctx(channel_id=1))
         # Every numeric mention should be from id 1..10 (older than
@@ -286,7 +291,7 @@ class TestRagContextLayer:
                 display_name="peeks",
             ),
         )
-        layer = RagContextLayer(store=store, max_facts=3)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_facts=3)
         layer.set_current_cue("pho")
         out = await layer.build(_ctx(channel_id=1))
 
@@ -319,7 +324,7 @@ class TestRagContextLayer:
                 FactSubject(canonical_key="discord:111", display_at_write="Cass"),
             ),
         )
-        layer = RagContextLayer(store=store, max_facts=3)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_facts=3)
         layer.set_current_cue("pho")
         out = await layer.build(_ctx(channel_id=1))
 
@@ -341,7 +346,7 @@ class TestRagContextLayer:
             text="An old fact about pho.",
             source_turn_ids=[],
         )
-        layer = RagContextLayer(store=store, max_facts=3)
+        layer = RagContextLayer(store=AsyncHistoryStore(store), max_facts=3)
         layer.set_current_cue("pho")
         out = await layer.build(_ctx(channel_id=1))
 
@@ -368,7 +373,9 @@ class TestRagContextLayer:
         ts = datetime(2026, 5, 3, 14, 29, tzinfo=UTC).isoformat()
         store._conn.execute("UPDATE turns SET timestamp = ? WHERE id = 1", (ts,))
         store._conn.commit()
-        layer = RagContextLayer(store=store, max_results=5, context_window=0)
+        layer = RagContextLayer(
+            store=AsyncHistoryStore(store), max_results=5, context_window=0
+        )
         layer.set_current_cue("brain")
         out = await layer.build(_ctx(channel_id=1))
         assert "## Possibly relevant earlier turns" in out
@@ -394,7 +401,9 @@ class TestRagContextLayer:
         ts = datetime(2026, 5, 2, 3, 2, tzinfo=UTC).isoformat()
         store._conn.execute("UPDATE turns SET timestamp = ? WHERE id = 1", (ts,))
         store._conn.commit()
-        layer = RagContextLayer(store=store, max_results=5, context_window=0)
+        layer = RagContextLayer(
+            store=AsyncHistoryStore(store), max_results=5, context_window=0
+        )
         layer.set_current_cue("blink")
         out = await layer.build(_ctx(channel_id=1))
         assert "> [3:02AM assistant]: *small surprised blink*" in out
@@ -424,7 +433,9 @@ class TestRagContextLayer:
                 content=content,
                 author=None,
             )
-        layer = RagContextLayer(store=store, max_results=5, context_window=1)
+        layer = RagContextLayer(
+            store=AsyncHistoryStore(store), max_results=5, context_window=1
+        )
         layer.set_current_cue("strawberry")
         out = await layer.build(_ctx(channel_id=1))
         # hit + immediate neighbours rendered; unrelated middle still
@@ -449,7 +460,9 @@ class TestRagContextLayer:
             content="strawberry observation",
             author=None,
         )
-        layer = RagContextLayer(store=store, max_results=5)  # default = 0
+        layer = RagContextLayer(
+            store=AsyncHistoryStore(store), max_results=5
+        )  # default = 0
         layer.set_current_cue("strawberry")
         out = await layer.build(_ctx(channel_id=1))
         assert "strawberry observation" in out

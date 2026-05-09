@@ -48,7 +48,10 @@ class TestFactEmbeddingWorkerTick:
         store = _store_with_facts(3)
         embedder = _CountingEmbedder()
         worker = FactEmbeddingWorker(
-            store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            embedder=embedder,
+            familiar_id="fam",
+            batch_size=10,
         )
         written = await worker.tick()
         assert written == 3
@@ -64,7 +67,10 @@ class TestFactEmbeddingWorkerTick:
         store = _store_with_facts(5)
         embedder = _CountingEmbedder()
         worker = FactEmbeddingWorker(
-            store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam", batch_size=2
+            store=AsyncHistoryStore(store),
+            embedder=embedder,
+            familiar_id="fam",
+            batch_size=2,
         )
         written = await worker.tick()
         assert written == 2
@@ -77,7 +83,10 @@ class TestFactEmbeddingWorkerTick:
         store = _store_with_facts(3)
         embedder = _CountingEmbedder()
         worker = FactEmbeddingWorker(
-            store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            embedder=embedder,
+            familiar_id="fam",
+            batch_size=10,
         )
         await worker.tick()
         embedder.calls.clear()
@@ -91,7 +100,10 @@ class TestFactEmbeddingWorkerTick:
         store = _store_with_facts(5)
         embedder = _CountingEmbedder()
         worker = FactEmbeddingWorker(
-            store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam", batch_size=2
+            store=AsyncHistoryStore(store),
+            embedder=embedder,
+            familiar_id="fam",
+            batch_size=2,
         )
         # Three ticks of size 2 cover all 5 facts.
         n1 = await worker.tick()
@@ -107,7 +119,9 @@ class TestFactEmbeddingWorkerTick:
     async def test_real_hash_embedder_persists_vectors_for_recall(self) -> None:
         store = _store_with_facts(2)
         embedder = HashEmbedder(dim=64)
-        worker = FactEmbeddingWorker(store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam")
+        worker = FactEmbeddingWorker(
+            store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam"
+        )
         await worker.tick()
         got = store.get_fact_embeddings(fact_ids=[1, 2], model=embedder.name)
         assert set(got) == {1, 2}
@@ -119,7 +133,9 @@ class TestFactEmbeddingWorkerSafety:
     async def test_empty_store_tick_is_noop(self) -> None:
         store = _store_with_facts(0)
         embedder = _CountingEmbedder()
-        worker = FactEmbeddingWorker(store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam")
+        worker = FactEmbeddingWorker(
+            store=AsyncHistoryStore(store), embedder=embedder, familiar_id="fam"
+        )
         assert await worker.tick() == 0
 
     @pytest.mark.asyncio

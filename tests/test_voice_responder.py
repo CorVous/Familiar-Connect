@@ -34,6 +34,7 @@ from familiar_connect.diagnostics.collector import (
     reset_span_collector,
 )
 from familiar_connect.diagnostics.voice_budget import reset_voice_budget_recorder
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
@@ -125,7 +126,7 @@ def _make_responder(
     assembler = Assembler(
         layers=[
             CoreInstructionsLayer(path=core),
-            RecentHistoryLayer(store=store, window_size=20),
+            RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20),
         ]
     )
     router = router or TurnRouter()
@@ -133,7 +134,7 @@ def _make_responder(
         assembler=assembler,
         llm_client=llm,
         tts_player=player,
-        history_store=store,
+        history_store=AsyncHistoryStore(store),
         router=router,
         familiar_id="fam",
         member_resolver=member_resolver,

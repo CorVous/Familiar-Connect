@@ -17,6 +17,7 @@ import pytest
 
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.layers import RagContextLayer
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 
 
@@ -70,7 +71,7 @@ class TestEmbeddingRerank:
         )
         embedder = _FixedEmbedder({"apple": cue_vec})
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_facts=1,
             bm25_weight=1.0,
             embedding_weight=5.0,  # heavy enough to flip BM25 ties
@@ -103,7 +104,7 @@ class TestEmbeddingRerank:
                 raise AssertionError(msg)
 
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_facts=3,
             bm25_weight=1.0,
             embedding_weight=0.0,
@@ -125,7 +126,7 @@ class TestEmbeddingRerank:
             source_turn_ids=[1],
         )
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_facts=3,
             bm25_weight=1.0,
             embedding_weight=1.0,
@@ -164,7 +165,7 @@ class TestEmbeddingRerank:
         # Cue cosine to fact 1 is 0; fact 2 gets the neutral 0.5.
         embedder = _FixedEmbedder({"strawberries": [1.0, 0.0, 0.0, 0.0]})
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_facts=1,
             bm25_weight=0.0,  # isolate the embedding signal
             embedding_weight=1.0,
@@ -204,7 +205,7 @@ class TestEmbeddingRerank:
 
         embedder = _CountingEmbedder()
         layer = RagContextLayer(
-            store=store,
+            store=AsyncHistoryStore(store),
             max_facts=3,
             bm25_weight=1.0,
             embedding_weight=1.0,

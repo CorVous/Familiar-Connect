@@ -864,7 +864,9 @@ class TestAssembler:
                 content=f"m{i}",
                 author=None,
             )
-        asm = Assembler(layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)])
+        asm = Assembler(
+            layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)]
+        )
         prompt = await asm.assemble(_ctx(channel_id=1))
         assert len(prompt.recent_history) == 5
 

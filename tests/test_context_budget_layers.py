@@ -50,7 +50,9 @@ class TestRecentHistoryLayerMaxTokens:
                 content=f"message number {i:02d} blah",
                 author=None,
             )
-        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20, max_tokens=40)
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store), window_size=20, max_tokens=40
+        )
         msgs = await layer.recent_messages(_ctx())
         # Newest survived; cap honoured.
         assert msgs[-1].content.endswith("09 blah")

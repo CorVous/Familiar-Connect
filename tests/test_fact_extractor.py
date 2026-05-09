@@ -74,7 +74,7 @@ class TestFactExtractorTick:
             ]
         )
         extractor = FactExtractor(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             batch_size=10,
@@ -93,7 +93,10 @@ class TestFactExtractorTick:
         ids = _seed_turns(store, 12)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -113,7 +116,10 @@ class TestFactExtractorTick:
         _seed_turns(store, 10)
         llm = _ScriptedLLM(replies=[_facts_json([]), _facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=5
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=5,
         )
         await extractor.tick()
         await extractor.tick()
@@ -127,7 +133,10 @@ class TestFactExtractorTick:
         _seed_turns(store, 2)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -146,7 +155,10 @@ class TestFactExtractorTick:
         _seed_turns(store, 10)
         llm = _ScriptedLLM(replies=["not json at all, sorry"])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -190,7 +202,10 @@ class TestFactExtractorTick:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -208,7 +223,10 @@ class TestFactExtractorTick:
         _seed_turns(store, 10)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -250,7 +268,10 @@ class TestFactExtractorSubjects:
             )
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -287,7 +308,10 @@ class TestFactExtractorSubjects:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -326,7 +350,10 @@ class TestFactExtractorSubjects:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -361,7 +388,10 @@ class TestFactExtractorSubjects:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -415,7 +445,10 @@ class TestFactExtractorParticipantsWidening:
         store.put_writer_watermark(familiar_id="fam", last_written_id=1)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -468,7 +501,10 @@ class TestFactExtractorParticipantsWidening:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -514,7 +550,7 @@ class TestFactExtractorParticipantsWidening:
         store.put_writer_watermark(familiar_id="fam", last_written_id=50)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store,
+            store=AsyncHistoryStore(store),
             llm_client=llm,
             familiar_id="fam",
             batch_size=10,
@@ -565,7 +601,10 @@ class TestFactExtractorParticipantsWidening:
         store.put_writer_watermark(familiar_id="fam", last_written_id=1)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -617,7 +656,10 @@ class TestFactExtractorMirrorsMentions:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -652,7 +694,10 @@ class TestFactExtractorMirrorsMentions:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -689,7 +734,10 @@ class TestFactExtractorMirrorsMentions:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -724,7 +772,10 @@ class TestFactExtractorBiTemporal:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -751,7 +802,10 @@ class TestFactExtractorBiTemporal:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -766,7 +820,10 @@ class TestFactExtractorBiTemporal:
         _seed_turns(store, 10)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -786,7 +843,10 @@ class TestFactExtractorBiTemporal:
         _seed_turns(store, 10)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -809,7 +869,10 @@ class TestFactExtractorImportance:
         _seed_turns(store, 10)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
 
@@ -841,7 +904,10 @@ class TestFactExtractorImportance:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
         facts = {f.text: f for f in store.recent_facts(familiar_id="fam", limit=10)}
@@ -860,7 +926,10 @@ class TestFactExtractorImportance:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
         facts = store.recent_facts(familiar_id="fam", limit=10)
@@ -893,7 +962,10 @@ class TestFactExtractorImportance:
             ]
         )
         extractor = FactExtractor(
-            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
         )
         await extractor.tick()
         facts = {f.text: f for f in store.recent_facts(familiar_id="fam", limit=10)}
