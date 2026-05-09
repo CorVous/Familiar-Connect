@@ -44,6 +44,7 @@ details for what already ships live in
 | `summaries` | `SummaryWorker` | `ConversationSummaryLayer` |
 | `cross_context_summaries` | `SummaryWorker` | `CrossChannelContextLayer` |
 | `facts` | `FactExtractor` | `RagContextLayer` (via FTS) |
+| `facts.superseded_*` | `FactSupersedeWorker` | every fact reader (filters retired) |
 | `people_dossiers` | `PeopleDossierWorker` | `PeopleDossierLayer` |
 | `reflections` | `ReflectionWorker` | `ReflectionLayer` |
 | `fact_embeddings` | `FactEmbeddingWorker` (M6, opt-in) | `RagContextLayer` (rerank) |
@@ -72,8 +73,8 @@ side-by-side: register both, switch via TOML on a test channel.
 ### 2. Projection writer (`MemoryProjector` Protocol)
 
 The watermark-driven writers — `SummaryWorker`, `FactExtractor`,
-`PeopleDossierWorker`, `ReflectionWorker` — implement a thin
-:class:`MemoryProjector` Protocol (M5):
+`PeopleDossierWorker`, `ReflectionWorker`, `FactSupersedeWorker` —
+implement a thin :class:`MemoryProjector` Protocol (M5):
 
 ```python
 class MemoryProjector(Protocol):
@@ -89,16 +90,17 @@ Names registered today (built-ins):
 | `rich_note` | `FactExtractor` | `facts` |
 | `people_dossier` | `PeopleDossierWorker` | `people_dossiers` |
 | `reflection` | `ReflectionWorker` | `reflections` |
+| `fact_supersede` | `FactSupersedeWorker` | `facts.superseded_at` / `superseded_by` |
 | `fact_embedding` | `FactEmbeddingWorker` | `fact_embeddings` |
 
 Operators pick the active set in `character.toml`:
 
 ```toml
 [providers.memory]
-projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection", "fact_supersede"]
 ```
 
-Default lists the original four (`fact_embedding` is registered but
+Default lists all five built-ins (`fact_embedding` is registered but
 opt-in — the seam is wired but stays off until the operator picks
 an embedder backend). Drop a name to disable that writer. Add a
 third-party projector (Graphiti, Cognee, …) by calling
@@ -299,6 +301,30 @@ prior beliefs remain reconstructable.
 
 Legacy rows (pre-M1) carry `valid_from = valid_to = NULL` and read
 as "always valid"; no backfill — the feature is forward-only.
+
+The two axes are populated by different writers and must not be
+conflated:
+
+- **`valid_to` is for world-time only** — set when the speaker
+  explicitly anchors the end of a fact in real time ("until last
+  June", "ended in 2019"). The `FactExtractor` prompt steers the
+  LLM away from setting it just because a fact looks outdated or
+  has been replaced.
+- **`superseded_at` / `superseded_by` are for retirement
+  bookkeeping** — set by `FactSupersedeWorker`, which evaluates
+  each newly-arrived fact against prior current facts about the
+  same subject and asks the background LLM which (if any) to
+  retire. The strict `HistoryStore.supersede_fact()` raises on
+  re-supersession so a double-write surfaces as a bug rather than
+  silently rewiring the chain.
+
+A fact can be retired (system-time) while its world-time validity
+is still open: e.g., the extractor re-renders the same belief with
+sharper wording — the older row is superseded but its `valid_to`
+stays `NULL`. Conversely, a fact whose `valid_to` is in the past is
+*not* superseded; it just no longer applies in the world. Read
+helpers filter on both columns, so either condition hides a row
+from "current truth" reads.
 
 ## Why rich-note + bi-temporal, not graph-only
 

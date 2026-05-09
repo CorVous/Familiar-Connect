@@ -18,6 +18,7 @@ from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors import projectors as projectors_module
 from familiar_connect.processors.fact_embedding_worker import FactEmbeddingWorker
 from familiar_connect.processors.fact_extractor import FactExtractor
+from familiar_connect.processors.fact_supersede_worker import FactSupersedeWorker
 from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
 from familiar_connect.processors.projectors import (
     DEFAULT_PROJECTORS,
@@ -61,18 +62,23 @@ def _ctx(*, embedder: HashEmbedder | None = None) -> ProjectorContext:
 
 
 class TestProjectorRegistry:
-    def test_default_projectors_lists_four_builtins(self) -> None:
+    def test_default_projectors_lists_five_builtins(self) -> None:
         assert set(DEFAULT_PROJECTORS) == {
             "rolling_summary",
             "rich_note",
             "people_dossier",
             "reflection",
+            "fact_supersede",
         }
 
     def test_known_projectors_includes_all_builtins(self) -> None:
-        assert {"rolling_summary", "rich_note", "people_dossier", "reflection"} <= (
-            known_projectors()
-        )
+        assert {
+            "rolling_summary",
+            "rich_note",
+            "people_dossier",
+            "reflection",
+            "fact_supersede",
+        } <= known_projectors()
 
     def test_create_projectors_returns_instances_in_order(self) -> None:
         projectors = create_projectors(
@@ -84,7 +90,7 @@ class TestProjectorRegistry:
         assert isinstance(projectors[0], FactExtractor)
         assert isinstance(projectors[1], SummaryWorker)
 
-    def test_create_projectors_default_yields_all_four(self) -> None:
+    def test_create_projectors_default_yields_all_builtins(self) -> None:
         projectors = create_projectors(
             names=list(DEFAULT_PROJECTORS),
             context=_ctx(),
@@ -95,6 +101,7 @@ class TestProjectorRegistry:
             FactExtractor,
             PeopleDossierWorker,
             ReflectionWorker,
+            FactSupersedeWorker,
         }
 
     def test_empty_names_yields_empty_list(self) -> None:

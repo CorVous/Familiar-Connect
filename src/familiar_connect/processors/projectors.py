@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from familiar_connect.processors.fact_embedding_worker import FactEmbeddingWorker
 from familiar_connect.processors.fact_extractor import FactExtractor
+from familiar_connect.processors.fact_supersede_worker import FactSupersedeWorker
 from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
 from familiar_connect.processors.reflection_worker import ReflectionWorker
 from familiar_connect.processors.summary_worker import SummaryWorker
@@ -158,6 +159,14 @@ def _reflection_factory(ctx: ProjectorContext) -> MemoryProjector:
     )
 
 
+def _fact_supersede_factory(ctx: ProjectorContext) -> MemoryProjector:
+    return FactSupersedeWorker(
+        store=ctx.store,
+        llm_client=ctx.llm_clients["background"],
+        familiar_id=ctx.familiar_id,
+    )
+
+
 def _fact_embedding_factory(ctx: ProjectorContext) -> MemoryProjector:
     if ctx.embedder is None:
         msg = (
@@ -177,6 +186,7 @@ register_projector("rolling_summary", _summary_factory)
 register_projector("rich_note", _rich_note_factory)
 register_projector("people_dossier", _people_dossier_factory)
 register_projector("reflection", _reflection_factory)
+register_projector("fact_supersede", _fact_supersede_factory)
 register_projector("fact_embedding", _fact_embedding_factory)
 
 
@@ -185,6 +195,7 @@ DEFAULT_PROJECTORS: tuple[str, ...] = (
     "rich_note",
     "people_dossier",
     "reflection",
+    "fact_supersede",
 )
 """Names enabled when ``[providers.memory].projectors`` is unset.
 

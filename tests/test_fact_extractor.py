@@ -772,6 +772,31 @@ class TestFactExtractorBiTemporal:
         system_msg = next(m for m in llm.calls[0] if m.role == "system")
         assert "valid_from" in system_msg.content
 
+    @pytest.mark.asyncio
+    async def test_extract_prompt_warns_off_retirement_use_of_valid_to(self) -> None:
+        """``valid_to`` is world-time, not a retirement marker.
+
+        Conflating the two leaks bookkeeping into the validity column
+        and bypasses the supersession path. The prompt must steer the
+        LLM away from setting ``valid_to`` just because a fact looks
+        outdated.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=store, llm_client=llm, familiar_id="fam", batch_size=10
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        content_lower = system_msg.content.lower()
+        # Must mention valid_to is bounded to a known end (world-time).
+        assert "valid_to" in system_msg.content
+        # And must explicitly warn off retirement / replacement use.
+        assert "outdated" in content_lower or "replaced" in content_lower
+        assert "supersed" in content_lower
+
 
 class TestFactExtractorImportance:
     """M2 — extractor emits a 1-10 importance hint per fact."""

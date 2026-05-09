@@ -264,6 +264,7 @@ class MemoryProvidersConfig:
         "rich_note",
         "people_dossier",
         "reflection",
+        "fact_supersede",
     )
 
 
