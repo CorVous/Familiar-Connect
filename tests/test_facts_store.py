@@ -63,8 +63,8 @@ class TestFactStore:
 
     def test_search_facts_finds_by_content(self) -> None:
         store = _store_with_turns_and_facts()
-        found = store.search_facts(familiar_id="fam", query="strawb", limit=5)
-        # Prefix tokenization makes "strawb" a prefix of "strawberries".
+        found = store.search_facts(familiar_id="fam", query="strawberry", limit=5)
+        # English stemmer maps "strawberry"/"strawberries" to a shared stem.
         assert len(found) == 1
         assert "strawberries" in found[0].text
 
@@ -76,7 +76,7 @@ class TestFactStore:
             text="Other familiar knows strawberries too.",
             source_turn_ids=[1],
         )
-        found = store.search_facts(familiar_id="fam", query="strawb", limit=10)
+        found = store.search_facts(familiar_id="fam", query="strawberry", limit=10)
         # Only the "fam" fact returned
         assert len(found) == 1
         assert found[0].familiar_id == "fam"
@@ -268,7 +268,7 @@ class TestFactSupersession:
             source_turn_ids=[5],
         )
         store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
-        found = store.search_facts(familiar_id="fam", query="strawb", limit=10)
+        found = store.search_facts(familiar_id="fam", query="strawberry", limit=10)
         texts = {f.text for f in found}
         assert "Aria likes strawberries." not in texts
         assert "Aria is allergic to strawberries now." in texts
@@ -634,14 +634,16 @@ class TestFactImportance:
             source_turn_ids=[2],
             importance=2,
         )
-        scored = store.search_facts_scored(familiar_id="fam", query="strawb", limit=5)
+        scored = store.search_facts_scored(
+            familiar_id="fam", query="strawberry", limit=5
+        )
         assert len(scored) == 2
-        # bm25 is a real number; both rows should score (FTS5 returns negative
-        # numbers, lower = better — exposed verbatim so callers can rerank).
+        # bm25 is a real number; both rows score (tantivy returns positive
+        # numbers, higher = better — exposed verbatim so callers can rerank).
         for fact, score in scored:
             assert isinstance(fact, Fact)
             assert isinstance(score, float)
-        # Order matches default search_facts (BM25 ascending = best first).
+        # Order matches default search_facts (BM25 desc = best first).
         assert scored[0][1] <= scored[1][1]
 
     def test_migration_adds_importance_column(self, tmp_path: Path) -> None:

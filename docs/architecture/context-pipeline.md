@@ -5,11 +5,13 @@ side-indices are kept in sync with the raw source of truth.
 
 ## Source of truth vs side-indices
 
-The `turns` table in `data/familiars/<id>/history.db` is the durable,
-append-only source of truth. Every derived artifact — summaries, FTS
-index, cross-channel briefings — lives in the same SQLite database but
-is **regenerable from `turns` alone**. Deleting any side-index row (or
-the whole table) is safe; the next worker tick rebuilds it.
+The `turns` table in `data/familiars/<id>/history.db` (Turso) is the
+durable, append-only source of truth. Every derived artifact —
+summaries, cross-channel briefings, FTS indexes (on disk in
+sibling `fts/turns/` and `fts/facts/` tantivy dirs) — is
+**regenerable from `turns` alone**. Deleting any side-index row (or
+the whole table) is safe; the next worker tick rebuilds it. The
+tantivy indexes auto-rebuild on `HistoryStore.__init__` when missing.
 
 ```mermaid
 flowchart TB
@@ -20,19 +22,19 @@ flowchart TB
     subgraph Indices["Side-indices (regenerable)"]
         summaries[(summaries)]
         cross[(cross_context_summaries)]
-        fts[(fts_turns FTS5)]
+        fts[(fts/turns/ tantivy)]
         facts[(facts)]
-        fts_facts[(fts_facts FTS5)]
+        fts_facts[(fts/facts/ tantivy)]
         dossiers[(people_dossiers)]
         reflections[(reflections)]
     end
 
-    turns -->|trigger| fts
+    turns -->|sync write| fts
     turns -->|SummaryWorker| summaries
     turns -->|SummaryWorker| cross
     turns -->|FactExtractor| facts
     facts -->|FactSupersedeWorker| facts
-    facts -->|trigger| fts_facts
+    facts -->|sync write| fts_facts
     facts -->|PeopleDossierWorker| dossiers
     turns -->|ReflectionWorker| reflections
     facts -->|ReflectionWorker| reflections
@@ -95,7 +97,7 @@ whose key has changed.
 | `CrossChannelContextLayer` | `cross_context_summaries` table, per-viewer map | `<source>:wm<source_last_id>` concatenated |
 | `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions` | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
-| `RagContextLayer` | `fts_turns` + `fts_facts` FTS5 search | `(current_cue, latest_fts_id, latest_fact_id)` |
+| `RagContextLayer` | `fts/turns/` + `fts/facts/` tantivy search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent(channel_id, window_size)` | not cached — it *is* the query |
 
 The `recent_history` layer does not contribute to the system prompt.
@@ -127,24 +129,36 @@ token cost bounded; a periodic full recompute (every *M* compounding
 cycles) is reserved for a later refinement once drift data shows
 it's needed.
 
-### FTS5 triggers
+### Tantivy FTS indexes
 
-`fts_turns` is a contentless FTS5 virtual table over `turns.content`,
-kept in sync by SQLite triggers:
+Two on-disk tantivy indexes — `fts/turns/` and `fts/facts/` under the
+familiar root — sit beside the Turso DB. They live outside the
+database because pyturso wheels don't ship Turso's own FTS module
+yet, and because tantivy queries running outside Turso don't queue
+behind SQL writes (the original "FTS5 blocks the Discord heartbeat"
+bug was a single slow tokeniser query gating every other DB call).
 
-- `turns_ai_fts` — after insert on `turns`, insert into `fts_turns`.
-- `turns_ad_fts` — after delete, remove.
-- `turns_au_fts` — after update, delete+insert.
+Updates are synchronous from `HistoryStore`:
 
-No worker loop; writes are synchronous with `HistoryStore.append_turn`.
-`HistoryStore.rebuild_fts()` drops and repopulates the index from
-`turns` — useful if triggers ever desync.
+- `append_turn` writes the row to Turso, commits, then upserts the
+  `(id, content)` doc into `fts/turns/`.
+- `append_fact` does the same against `fts/facts/`.
+- `update_turn_content_by_message_id` re-adds the row (tantivy treats
+  same-id `add` as upsert).
 
-`fts_facts` mirrors the pattern over `facts.text` with
-`facts_ai_fts` / `facts_ad_fts` triggers. Only insert + delete are
-needed — fact `text` is never rewritten in place (supersession adds
-a new row and marks the old one stale; see [Fact discipline](#fact-discipline-supersession-and-self-capability)
-below).
+Supersession isn't surfaced through the index — facts keep their
+docs, and the SQL validity filter
+(`superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now)`)
+strips retired rows after the FTS join. See
+[Fact discipline](#fact-discipline-supersession-and-self-capability)
+below.
+
+`HistoryStore.rebuild_fts()` drops and repopulates the turns index
+from the `turns` table. The same logic runs implicitly on
+`HistoryStore.__init__` when the index dir is missing or empty but
+the relational tables have rows — which is exactly the state the
+SQLite→Turso migration leaves behind. Delete `fts/` to force a
+reindex.
 
 ### `FactExtractor`
 
@@ -667,17 +681,18 @@ any misping recoverable.
 
 ## RAG retrieval quality
 
-`RagContextLayer` runs the inbound user turn through SQLite FTS5
-against `fts_turns` and `fts_facts`. Two policies keep recall
+`RagContextLayer` runs the inbound user turn through the tantivy
+indexes (`fts/turns/`, `fts/facts/`). Two policies keep recall
 acceptable on free-text chat cues:
 
-- **OR-joined tokens with stopword filtering.** FTS5's default
-  match operator is implicit-AND — every token in the cue must
-  appear in the indexed row, which destroys recall on multi-word
-  chat cues ("hey, do you know about cat toys?" almost never
-  matches a 6-word fact). `_tokenize_fts_query` drops common English
-  stopwords; `_build_fts_match` OR-joins the rest. BM25 ranks on
-  whichever substantive tokens hit. See `src/familiar_connect/history/store.py`.
+- **Disjunctive parse + English analyzer.** Tantivy's query parser
+  defaults to OR semantics, so multi-token chat cues match on any
+  substantive term ("hey, do you know about cat toys?" still hits a
+  6-word fact via `cat`/`toy`). The analyzer chain — lowercase,
+  ascii-fold (so `café` and `cafe` match), custom stopword filter
+  (same ~90-word English list the old `_FTS_STOPWORDS` carried),
+  english stemmer (so `fox`/`foxes` share a stem) — is applied at
+  both index and query time. See `src/familiar_connect/history/fts.py`.
 - **Recent-window exclusion.** The user turn that *seeded* the cue
   is, by construction, the highest-BM25 match against itself — and
   it's already shown verbatim by `RecentHistoryLayer`. RAG passes

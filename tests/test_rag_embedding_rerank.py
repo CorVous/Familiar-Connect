@@ -110,7 +110,7 @@ class TestEmbeddingRerank:
             embedding_weight=0.0,
             embedder=_Boom(),
         )
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         out = await layer.build(_ctx())
         assert "Aria likes strawberries" in out
 
@@ -132,7 +132,7 @@ class TestEmbeddingRerank:
             embedding_weight=1.0,
             embedder=None,
         )
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         with caplog.at_level(logging.WARNING):
             out1 = await layer.build(_ctx())
             out2 = await layer.build(_ctx())
@@ -211,6 +211,6 @@ class TestEmbeddingRerank:
             embedding_weight=1.0,
             embedder=embedder,
         )
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         await layer.build(_ctx())
         assert embedder.calls == 0

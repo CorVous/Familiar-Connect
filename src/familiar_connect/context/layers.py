@@ -572,8 +572,8 @@ def _rerank_fact_candidates(
 
     ranked: list[tuple[float, int, Fact]] = []
     for idx, (fact, bm25) in enumerate(scored):
-        # bm25 is negative; min = best. Normalise so best = 1, worst = 0.
-        bm25_q = (bm25_max - bm25) / bm25_span if bm25_span > 0 else 1.0
+        # tantivy bm25 is positive; max = best. Normalise so best = 1, worst = 0.
+        bm25_q = (bm25 - bm25_min) / bm25_span if bm25_span > 0 else 1.0
         recency_q = recency_rank[fact.id]
         importance_q = (fact.importance / 10.0) if fact.importance is not None else 0.5
         cos = sims.get(fact.id)

@@ -1,8 +1,11 @@
 """Async proxy for :class:`HistoryStore`.
 
-All method calls are dispatched to the store's single-threaded executor so
-SQLite never runs on the event-loop thread.  ``max_workers=1`` on the store's
-own executor guarantees serial access without an explicit Python lock.
+All method calls are dispatched to the store's executor so Turso/tantivy
+never run on the event-loop thread. The store uses ``max_workers=4`` —
+Turso supports concurrent connections (MVCC, one per worker thread via
+:class:`TursoConnection`) and tantivy is internally thread-safe, so
+queries can run in parallel instead of queueing behind whichever request
+just hit a slow FTS path.
 """
 
 from __future__ import annotations
@@ -18,9 +21,10 @@ if TYPE_CHECKING:
 class AsyncHistoryStore:
     """Async proxy for :class:`HistoryStore`.
 
-    Dispatches every call to a dedicated background thread, keeping SQLite off
-    the event loop.  ``max_workers=1`` on the store's own executor serialises
-    all access so no extra Python lock is needed.
+    Dispatches every call to the store's executor so DB IO never blocks
+    the event loop. The 4-worker pool plus Turso MVCC means concurrent
+    callers (live conversation + embedding/reflection workers) stop
+    queueing behind each other.
     """
 
     def __init__(self, store: HistoryStore) -> None:

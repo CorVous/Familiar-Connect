@@ -39,8 +39,8 @@ details for what already ships live in
 
 | Side-index | Writer | Read by |
 |---|---|---|
-| `fts_turns` (FTS5) | SQLite triggers on `turns` | `RagContextLayer` |
-| `fts_facts` (FTS5) | SQLite triggers on `facts` | `RagContextLayer` |
+| `fts/turns/` (tantivy) | sync write from `append_turn` | `RagContextLayer` |
+| `fts/facts/` (tantivy) | sync write from `append_fact` | `RagContextLayer` |
 | `summaries` | `SummaryWorker` | `ConversationSummaryLayer` |
 | `cross_context_summaries` | `SummaryWorker` | `CrossChannelContextLayer` |
 | `facts` | `FactExtractor` | `RagContextLayer` (via FTS) |
