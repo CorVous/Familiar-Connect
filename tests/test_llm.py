@@ -201,6 +201,54 @@ class TestLLMClient:
         payload = client.build_payload(messages)
         assert payload["temperature"] == pytest.approx(0.7)
 
+    def test_payload_omits_provider_when_unset(self) -> None:
+        """Default routing — no ``provider`` field in the request."""
+        client = LLMClient(api_key="k", model="m")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert "provider" not in payload
+
+    def test_payload_pins_provider_order(self) -> None:
+        """``provider_order`` becomes ``provider.order`` for OpenRouter."""
+        client = LLMClient(
+            api_key="k",
+            model="m",
+            provider_order=("z-ai", "deepinfra"),
+        )
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["provider"] == {
+            "order": ["z-ai", "deepinfra"],
+            "allow_fallbacks": True,
+        }
+
+    def test_payload_disables_fallbacks_when_requested(self) -> None:
+        client = LLMClient(
+            api_key="k",
+            model="m",
+            provider_order=("z-ai",),
+            provider_allow_fallbacks=False,
+        )
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["provider"]["allow_fallbacks"] is False
+
+    def test_payload_omits_reasoning_when_unset(self) -> None:
+        """Default — no ``reasoning`` field; defer to model default."""
+        client = LLMClient(api_key="k", model="m")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert "reasoning" not in payload
+
+    def test_payload_reasoning_off_excludes(self) -> None:
+        """``reasoning="off"`` maps to OpenRouter ``reasoning.exclude=True``."""
+        client = LLMClient(api_key="k", model="m", reasoning="off")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["reasoning"] == {"exclude": True}
+
+    @pytest.mark.parametrize("level", ["low", "medium", "high"])
+    def test_payload_reasoning_effort(self, level: str) -> None:
+        """Effort levels map to OpenRouter ``reasoning.effort``."""
+        client = LLMClient(api_key="k", model="m", reasoning=level)
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["reasoning"] == {"effort": level}
+
 
 class TestLLMClientChat:
     @pytest.fixture
@@ -316,6 +364,42 @@ class TestLLMClientChat:
             await client.chat(sample_messages)
 
     @pytest.mark.asyncio
+    async def test_chat_logs_response_body_on_4xx(
+        self,
+        client: LLMClient,
+        sample_messages: list[Message],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A 400 leaves the upstream error body on a WARNING log."""
+        body = (
+            '{"error":{"message":"Unsupported value: '
+            "'temperature' does not support 0.7 with this model.\","
+            '"type":"invalid_request_error"}}'
+        )
+        error = httpx.HTTPStatusError(
+            "Bad Request",
+            request=httpx.Request(
+                "POST", "https://openrouter.ai/api/v1/chat/completions"
+            ),
+            response=httpx.Response(400, text=body),
+        )
+        mock_response = Mock(spec=httpx.Response)
+        mock_response.status_code = 400
+        mock_response.text = body
+        mock_response.raise_for_status.side_effect = error
+
+        caplog.set_level("WARNING", logger="familiar_connect.llm")
+        with (
+            patch.object(client, "_post", return_value=mock_response),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await client.chat(sample_messages)
+
+        joined = "\n".join(rec.message for rec in caplog.records)
+        assert "400" in joined
+        assert "temperature" in joined
+
+    @pytest.mark.asyncio
     async def test_chat_raises_on_empty_choices(
         self,
         client: LLMClient,
@@ -392,22 +476,36 @@ class TestCreateLLMClients:
         for client in clients.values():
             assert client.api_key == "sk-or-test-abc"
 
-    def test_user_override_changes_only_that_slot(
+    def test_user_override_changes_slot(
         self,
         tmp_path: Path,
         default_profile_path: Path,
     ) -> None:
-        """Overriding one slot in the user file doesn't leak into others."""
+        """User config overrides the prose slot from the default profile."""
         path = tmp_path / "character.toml"
         path.write_text(
-            '[llm.main_prose]\nmodel = "user/custom-prose"\ntemperature = 0.9\n',
+            '[llm.prose]\nmodel = "user/custom-prose"\ntemperature = 0.9\n',
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         clients = create_llm_clients("sk-or-test-abc", cfg)
-        assert clients["main_prose"].model == "user/custom-prose"
-        assert clients["main_prose"].temperature == pytest.approx(0.9)
-        # Other slots still carry the default profile's values.
-        assert clients["post_process_style"].model != "user/custom-prose"
+        assert clients["prose"].model == "user/custom-prose"
+        assert clients["prose"].temperature == pytest.approx(0.9)
+
+    def test_reasoning_threaded_through(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Slot reasoning lands on its :class:`LLMClient`."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        # default profile: fast="off", prose+background="medium"
+        assert clients["fast"].reasoning == "off"
+        assert clients["prose"].reasoning == "medium"
+        assert clients["background"].reasoning == "medium"
 
     def test_returns_distinct_client_instances(
         self,

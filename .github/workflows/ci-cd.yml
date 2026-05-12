@@ -25,8 +25,8 @@ jobs:
         run: uv python install 3.13
       
       - name: Install dependencies
-        run: uv sync --dev
-      
+        run: uv sync --dev --extra local-turn
+
       - name: Lint with ruff
         run: uv run ruff check
       

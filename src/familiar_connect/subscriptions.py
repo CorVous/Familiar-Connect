@@ -1,7 +1,7 @@
-"""Persistent subscription registry backed by a TOML sidecar.
+"""Persistent subscription registry backed by TOML sidecar.
 
-Multi-channel, multi-kind. Mutations persist on every write so
-subscriptions survive restarts. Human-editable on disk.
+Multi-channel, multi-kind. Every mutation persists — survives restart.
+Human-editable on disk.
 """
 
 from __future__ import annotations
@@ -33,10 +33,10 @@ class Subscription:
 
 
 class SubscriptionRegistry:
-    """In-memory subscription set backed by a TOML sidecar.
+    """In-memory set backed by TOML sidecar.
 
-    Loads on construction; every mutation rewrites the whole file
-    (tens of rows at most).
+    Loads on construction; mutations rewrite the whole file (tens of
+    rows at most).
     """
 
     def __init__(self, path: Path) -> None:
@@ -49,7 +49,7 @@ class SubscriptionRegistry:
     # ------------------------------------------------------------------
 
     def all(self) -> Iterable[Subscription]:
-        """Yield every registered subscription."""
+        """Every registered subscription."""
         return list(self._rows.values())
 
     def get(
@@ -58,13 +58,12 @@ class SubscriptionRegistry:
         channel_id: int,
         kind: SubscriptionKind,
     ) -> Subscription | None:
-        """Return the subscription for ``(channel_id, kind)``, or ``None``."""
         return self._rows.get((channel_id, kind))
 
     def voice_in_guild(self, guild_id: int) -> Subscription | None:
-        """Return voice subscription in *guild_id*, if any.
+        """Voice subscription in ``guild_id`` if any.
 
-        At most one voice row per guild (``discord.VoiceClient`` constraint).
+        At most one per guild (``discord.VoiceClient`` constraint).
         """
         for sub in self._rows.values():
             if sub.kind is SubscriptionKind.voice and sub.guild_id == guild_id:
@@ -82,9 +81,9 @@ class SubscriptionRegistry:
         kind: SubscriptionKind,
         guild_id: int | None,
     ) -> Subscription:
-        """Add or replace subscription for ``(channel_id, kind)``.
+        """Add or replace ``(channel_id, kind)``; idempotent.
 
-        Idempotent; re-adding updates ``guild_id``.
+        Re-add updates ``guild_id``.
         """
         sub = Subscription(channel_id=channel_id, kind=kind, guild_id=guild_id)
         self._rows[channel_id, kind] = sub

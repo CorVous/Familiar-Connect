@@ -1,19 +1,17 @@
 # Design Decisions Considered and Rejected
 
-These are ideas that were seriously considered during planning and deliberately turned down. They are recorded here so future contributors (including future maintainers revisiting the codebase) don't rediscover them from scratch without the rationale.
+Ideas seriously considered during planning and deliberately turned down. Recorded here so future contributors don't rediscover them from scratch without the rationale.
 
 ## Bridging to a running SillyTavern instance
 
-**The idea:** Run SillyTavern as a side-car process and route Familiar-Connect's context assembly and/or generation through it. SillyTavern has a large, mature extension ecosystem (World Info, stepped thinking, recast post-processing, TunnelVision RAG, and many more) and reusing it directly would short-circuit a great deal of work.
+**The idea:** Run SillyTavern as a side-car process and route Familiar-Connect's context assembly and/or generation through it. SillyTavern has a large, mature extension ecosystem and reusing it directly would short-circuit a great deal of work.
 
 **Why it's rejected:**
 
 - **SillyTavern is a single-user local web app, not a library.** Its extensions are browser-side JavaScript hooked into the chat UI's event bus (`eventSource`, `getContext()`, generation interceptors). None of that is reachable from an external process.
-- **SillyTavern's HTTP server is a thin LLM proxy.** It exists so the browser can dodge CORS for the upstream model API. It does not run the extension pipeline. Calling it from Familiar-Connect would buy us nothing we don't already get by talking to OpenRouter directly.
-- **Running SillyTavern extensions outside SillyTavern requires a headless browser** driving a real ST tab (Playwright / CDP), intercepting `generate` calls, and marshaling chat state in and out. This is high-latency (the bot picked Cartesia for sub-100ms TTFB; a Chromium round-trip blows that budget), fragile across ST versions, and painful to test alongside the bot's `asyncio.TaskGroup`-scoped concurrency.
+- **SillyTavern's HTTP server is a thin LLM proxy.** It exists so the browser can dodge CORS for the upstream model API. It does not run the extension pipeline.
+- **Running SillyTavern extensions outside SillyTavern requires a headless browser** driving a real ST tab (Playwright / CDP), intercepting `generate` calls, and marshaling chat state in and out. High-latency, fragile across ST versions, and painful to test alongside `asyncio.TaskGroup`-scoped concurrency.
 - **SillyTavern's architecture assumes one user, one active chat.** Familiar-Connect is multi-guild and concurrent. Forcing every guild through a single ST session serialises the bot; spawning one ST instance per guild is a deployment nightmare.
-
-**What we take from it instead:** file formats only — Character Card V3, presets, World Info / lorebooks, and the macro vocabulary. These give SillyTavern users a painless on-ramp without making SillyTavern a runtime dependency. See [Context pipeline](context-pipeline.md) for the detailed split.
 
 ## Embedding a SillyTavern extension runtime via headless browser
 
@@ -30,12 +28,10 @@ These are ideas that were seriously considered during planning and deliberately 
 **Why it's rejected as a runtime:**
 
 - **These frameworks assume a synchronous request/response chat app and bury the prompt-assembly step we specifically want to be visible and testable.** Adopting one would mean either fighting its opinions or shoehorning our pipeline inside it.
-- **LangChain's abstractions in particular have been rewritten repeatedly.** Production users commonly end up wrapping their own pipelines on top rather than depending on the framework's own memory/agent layers. We'd be writing the same glue and paying for the dependency anyway.
-- **Each of them wants to own the event loop and the request lifecycle.** Familiar-Connect already has opinions about both (single-process, structured concurrency under `asyncio.TaskGroup`, per-turn deadlines, multi-modality). The framework would be working against us at the layer we care about most.
+- **LangChain's abstractions in particular have been rewritten repeatedly.** Production users commonly end up wrapping their own pipelines on top rather than depending on the framework's own memory/agent layers.
+- **Each of them wants to own the event loop and the request lifecycle.** Familiar-Connect already has opinions about both (single-process, structured concurrency under `asyncio.TaskGroup`, multi-modality). The framework would be working against us at the layer we care about most.
 
-**What we do allow:** importing a *specific utility* from one of these libraries when it's a net simplification. Rule of thumb: if the import gives you a single function you call once (e.g. `llama-index`'s text splitters, a document loader for PDFs/HTML, a tokenizer helper), it's a utility — fine. If it wants to own your event loop, your prompt structure, or your retrieval flow, it's a runtime — not fine.
-
-**What we take from them in spirit:** the "provider / retriever / processor" vocabulary these frameworks popularised. We implement it in a few hundred lines of project-local Python against our own protocols.
+**What we do allow:** importing a *specific utility* from one of these libraries when it's a net simplification. Rule of thumb: if the import gives you a single function you call once (e.g. a text splitter, a document loader, a tokenizer helper), it's a utility — fine. If it wants to own your event loop, your prompt structure, or your retrieval flow, it's a runtime — not fine.
 
 ## Third-party managed memory services
 
@@ -43,23 +39,42 @@ These are ideas that were seriously considered during planning and deliberately 
 
 **The idea:** Outsource long-term memory and user-fact tracking to a managed or self-hosted memory service.
 
-**Why it's rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that principle, and the scale Familiar-Connect targets (one bot, N guilds, a single host, a learning project not headed for wide adoption) does not justify the operational or privacy cost. A plain-text memory directory plus a cheap search agent is strictly simpler and has the additional property that a human can `grep` and edit the familiar's memory directly. See [Memory](memory.md).
+**Why it's rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that principle, and the scale Familiar-Connect targets (one bot, N guilds, a single host) does not justify the operational or privacy cost.
 
-This rejection also applies to **running a memory MCP server we own as a sidecar** for the bot's own internal use. MCP is useful when multiple separate agents need to share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle to manage). MCP stays on the table as a way to later *expose* Familiar-Connect's memory to external tools; it is not how Familiar-Connect consumes its own.
+This rejection also applies to **running a memory MCP server we own as a sidecar** for the bot's own internal use. MCP is useful when multiple separate agents need to share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle to manage).
 
-## A single "side model" shared by every cheap call site
+The *open-source library* underneath Zep — Graphiti — is a different proposition. Graphiti is a Python package with pluggable graph backends; embedding it (or porting its bi-temporal edge logic onto our SQLite store) keeps every byte of state local. M5 [shipped](roadmap.md#m5-pluggable-memory-store-backend-shipped) the projector swap point Graphiti would plug into.
 
-**The idea:** Keep the earlier `main` / `side` LLM split — one `main` client for the spoken reply and one `side` client that every background task (stepped-thinking preprocessor, recast postprocessor, history summariser, content-search agent loop, interjection decider) routes through. Each site would just call `side_model.complete(prompt)` and share budget, temperature, and model with every other cheap call.
+## Letta / MemGPT as the memory runtime
 
-**Why it's rejected:** Six call sites paid a real cost for sharing a single slot. Each one has a different latency/cost/quality profile:
+**The idea:** Adopt Letta (the maintained MemGPT continuation). Give the LLM tools like `core_memory_replace`, `archival_memory_insert`; let it manage its context as virtual memory.
 
-- `main_prose` wants a heavyweight model and warm temperature for reply quality.
-- `post_process_style` is a short rewrite that wants a cheap fast model with tight temperature.
-- `reasoning_context` is a hidden chain-of-thought that wants a model tuned for reasoning at low temperature.
-- `history_summary` wants determinism (low temperature) and a long context window.
-- `memory_search` runs a tool-calling loop and benefits from a model that follows structured prompts.
-- `interjection_decision` is a boolean classifier that wants the cheapest model on the menu.
+**Why it's rejected:**
 
-One "side" pool forced the operator to pick the lowest common denominator. Worse, the `SideModel` Protocol (`complete(prompt: str) -> str`) was sugar for a single-message chat call — a whole abstraction layer (Protocol, adapter, separate module, test module, cognitive "main vs side" distinction) paying for two lines of code. Splitting the slots into six named call sites on the per-familiar `character.toml` gave each site its own model / temperature knob, erased the `SideModel` adapter entirely (every site now holds an `LLMClient` and calls `.chat(messages)` directly), and moved LLM configuration from install-scoped `.env` to character-scoped TOML so swapping `FAMILIAR_ID` swaps the full configuration profile, not just the persona.
+- **`core_memory_replace` is destructive by design.** The LLM mutates source-of-truth in-place. Familiar-Connect commits to the opposite: append-only, supersession over overwrite, bi-temporal records.
+- **Recursive summarization compounds the destruction.** Older context becomes a lossy sketch of itself with no "true at t1, superseded at t2" handle. Breaks audit / contradiction-inspection.
+- **Letta is an agent runtime, not a memory layer.** It owns the loop, tool execution, persistence. Adopting it forks our architecture into theirs.
 
-All slots still share one `OPENROUTER_API_KEY` and the same process-wide rate-limit semaphore in `familiar_connect.llm.get_request_semaphore`, so splitting one client into six does not multiply concurrency against the OpenRouter key. See [Configuration model](configuration-model.md#per-call-site-llm-slots) for the final slot catalogue.
+**Kept from the design:** the two-tier framing — small always-in-context core block vs large on-demand recall layer. Familiar-Connect implements that split today via `core_instructions.md` + `character.md` + the recent-history layer on top of an append-only event log.
+
+## Full-duplex speech-to-speech pipelines (Moshi, Sesame CSM)
+
+**The idea:** Replace cascaded STT → LLM → TTS with a full-duplex S2S model (Moshi, Sesame CSM, Ultravox). ~200 ms theoretical voice-to-voice; native overlap-talk and barge-in.
+
+**Why it's rejected (today):**
+
+- **LLM brain is bundled.** Moshi pins you to Helium 7B; Sesame CSM ships its own LLaMA backbone. We route persona through OpenRouter — that's the most operator-impactful knob in the system.
+- **Tool-calling and prompt knobs degrade.** S2S models don't yet match frontier text LLMs on tool use or prompt engineering.
+- **Cascaded latency can mostly be closed.** Two-stage turn detection (TEN-VAD + Smart Turn) plus sentence-streaming TTS lands cascaded at ~700–900 ms — comfortably inside "feels natural".
+- **Discord audio is constrained.** A 48 kHz Opus stream we don't fully control suits cascaded; S2S stacks expect to own the transport.
+
+**Revisit when** a Mimi-based S2S model gains an external-LLM-brain seam. Tracked in [roadmap V5](roadmap.md#v5-full-duplex-s2s-as-a-research-branch).
+
+## Heavy turn-detection LLM (TEN Turn Detection's 7B classifier)
+
+**The idea:** Replace silence-based endpointing with a fine-tuned 7B LLM (TEN Turn Detection's Qwen 2.5-7B) classifying transcript chunks `finished` / `unfinished` / `wait`.
+
+**Why it's rejected:** wildly overkill for "did the user finish saying 'uh, hold on'". Pipecat's Smart Turn v3 (~360 MB ONNX, ~12 ms, BSD-2) does the same job on filler-word-aware audio for a fraction of the cost. TEN's approach fits enterprise SLAs and rare-language coverage; for a Discord familiar the cheaper classifier wins. Tracked in [roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
+
+**Note:** this rejects the TEN *Turn Detection* 7B model only.
+Stage-1 VAD does use TEN-framework's separate **TEN-VAD** (small native lib + bundled ONNX, Apache 2.0) — see [Voice pipeline — turn detection](voice-pipeline.md#turn-detection).

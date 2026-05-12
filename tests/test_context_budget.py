@@ -1,29 +1,25 @@
-"""Red-first tests for the context-pipeline Budgeter.
+"""Tests for the prompt-assembly budgeter.
 
-Covers familiar_connect.context.budget.Budgeter, which does not exist
-yet. The Budgeter walks a flat list of Contributions, groups them by
-their declared Layer, sorts each layer's contributions by priority
-(higher first), and joins them up to a per-layer token budget. Content
-that exceeds the budget is truncated at sentence / word boundaries
-where possible and recorded in a BudgetResult.dropped list so the
-pipeline can log it.
-
-Token counting for the first pass is a simple character-count
-heuristic (~4 chars per token). tiktoken can replace it later without
-changing the Budgeter's contract.
+Covers token estimation and the post-assembly history trimmer.
+Per-tier defaults live in ``data/familiars/_default/character.toml``;
+:mod:`tests.test_config` exercises that path.
 """
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from familiar_connect.context.budget import (
+from familiar_connect.budget import (
     Budgeter,
-    BudgetResult,
-    DroppedNote,
+    ModelBudgetCurve,
+    TierBudget,
+    estimate_message_tokens,
+    estimate_messages_tokens,
     estimate_tokens,
 )
-from familiar_connect.context.types import Contribution, Layer
+from familiar_connect.llm import Message
 
 
 class TestEstimateTokens:
@@ -31,260 +27,229 @@ class TestEstimateTokens:
         assert estimate_tokens("") == 0
 
     def test_short_string_rounds_up(self) -> None:
-        """A 5-character string is ~2 tokens under the 4-chars-per-token heuristic."""
-        # We only require the estimator is monotonic and nonzero for nonempty;
-        # the exact rounding rule is an implementation detail but we check
-        # that it returns at least 1 for any nonempty input.
-        assert estimate_tokens("hello") >= 1
+        # ceil(len/4) — 5 chars → 2 tokens
+        assert estimate_tokens("hello") == 2
 
-    def test_longer_string_has_more_tokens(self) -> None:
-        short = estimate_tokens("hello")
-        long = estimate_tokens("hello " * 100)
-        assert long > short
+    def test_overcount_safe(self) -> None:
+        """Heuristic should over-, not under-count vs typical English."""
+        text = "The quick brown fox jumps over the lazy dog."  # 44 chars
+        # Real tokenization is ~10 tokens; our heuristic returns 11.
+        assert estimate_tokens(text) >= 10
 
+    def test_message_overhead_added(self) -> None:
+        """Per-message framing pushes a one-char message above its content."""
+        m = Message(role="user", content="x")
+        # content = 1 token, +overhead of 4 = 5
+        assert estimate_message_tokens(m) >= 5
 
-class TestBudgeterEmpty:
-    def test_no_contributions_yields_empty_layers(self) -> None:
-        b = Budgeter()
-        result = b.fill(
-            contributions=[],
-            budget_by_layer={
-                Layer.character: 100,
-                Layer.content: 100,
-            },
-        )
-        assert isinstance(result, BudgetResult)
-        assert not result.by_layer.get(Layer.character, "")
-        assert not result.by_layer.get(Layer.content, "")
-        assert result.dropped == []
+    def test_message_with_name_costs_more(self) -> None:
+        a = Message(role="user", content="x")
+        b = Message(role="user", content="x", name="alice_42")
+        assert estimate_message_tokens(b) > estimate_message_tokens(a)
 
-
-class TestBudgeterSingleContribution:
-    def test_under_budget_passes_through_verbatim(self) -> None:
-        b = Budgeter()
-        c = Contribution(
-            layer=Layer.character,
-            priority=10,
-            text="A short description.",
-            estimated_tokens=10,
-            source="char:desc",
-        )
-        result = b.fill([c], {Layer.character: 1000})
-        assert result.by_layer[Layer.character] == "A short description."
-        assert result.dropped == []
-
-    def test_over_budget_truncates(self) -> None:
-        """A contribution larger than its layer budget is truncated to fit."""
-        b = Budgeter()
-        long_text = "word " * 1000  # ~5000 chars, ~1250 tokens
-        c = Contribution(
-            layer=Layer.character,
-            priority=10,
-            text=long_text,
-            estimated_tokens=1250,
-            source="char:bloat",
-        )
-        result = b.fill([c], {Layer.character: 50})  # 50-token budget
-
-        # The resulting text fits within the budget.
-        kept_tokens = estimate_tokens(result.by_layer[Layer.character])
-        assert kept_tokens <= 50
-
-        # And we report what we dropped.
-        assert len(result.dropped) == 1
-        note = result.dropped[0]
-        assert isinstance(note, DroppedNote)
-        assert note.layer is Layer.character
-        assert note.source == "char:bloat"
-        assert note.reason == "truncated"
-        assert note.tokens_dropped > 0
-
-
-class TestBudgeterMultipleContributionsInOneLayer:
-    def test_joined_in_priority_order(self) -> None:
-        b = Budgeter()
-        high = Contribution(
-            layer=Layer.content,
-            priority=100,
-            text="high-priority snippet",
-            estimated_tokens=6,
-            source="rag:1",
-        )
-        low = Contribution(
-            layer=Layer.content,
-            priority=1,
-            text="low-priority snippet",
-            estimated_tokens=6,
-            source="rag:2",
-        )
-        # Insert in reverse order to prove the Budgeter sorts rather than
-        # preserving insertion order.
-        result = b.fill([low, high], {Layer.content: 1000})
-
-        text = result.by_layer[Layer.content]
-        assert text.index("high-priority snippet") < text.index("low-priority snippet")
-        assert result.dropped == []
-
-    def test_over_budget_drops_lowest_priority_first(self) -> None:
-        b = Budgeter()
-        high = Contribution(
-            layer=Layer.content,
-            priority=100,
-            text="A" * 40,  # ~10 tokens
-            estimated_tokens=10,
-            source="rag:high",
-        )
-        low = Contribution(
-            layer=Layer.content,
-            priority=1,
-            text="B" * 40,  # ~10 tokens
-            estimated_tokens=10,
-            source="rag:low",
-        )
-        result = b.fill([high, low], {Layer.content: 10})  # only the high fits
-
-        text = result.by_layer[Layer.content]
-        assert "A" * 40 in text
-        assert "B" * 40 not in text
-
-        # The low-priority one was fully dropped.
-        assert len(result.dropped) == 1
-        assert result.dropped[0].source == "rag:low"
-        assert result.dropped[0].reason == "dropped"
-        assert result.dropped[0].tokens_dropped >= 10
-
-    def test_over_budget_truncates_last_kept_when_partially_over(self) -> None:
-        """Partial-fit contributions are truncated, not dropped entirely.
-
-        When the highest-priority contribution fits but the next one
-        only partially fits, the next one is truncated rather than
-        dropped entirely.
-        """
-        b = Budgeter()
-        high = Contribution(
-            layer=Layer.content,
-            priority=100,
-            text="KEEP. " * 5,  # ~7 tokens
-            estimated_tokens=7,
-            source="rag:high",
-        )
-        medium = Contribution(
-            layer=Layer.content,
-            priority=50,
-            text="also keep some of this but not all of it. " * 10,
-            estimated_tokens=100,
-            source="rag:medium",
-        )
-        result = b.fill([high, medium], {Layer.content: 30})
-
-        text = result.by_layer[Layer.content]
-        assert "KEEP. " in text
-        # Some of the medium snippet should remain, but not all of it.
-        assert "also keep some of this" in text
-        # Total fits in the budget.
-        assert estimate_tokens(text) <= 30
-
-        # The medium contribution was truncated, not dropped.
-        assert any(
-            note.source == "rag:medium" and note.reason == "truncated"
-            for note in result.dropped
-        )
-
-
-class TestBudgeterMultipleLayers:
-    def test_layers_budgeted_independently(self) -> None:
-        b = Budgeter()
-        char = Contribution(
-            layer=Layer.character,
-            priority=10,
-            text="Character description.",
-            estimated_tokens=5,
-            source="char",
-        )
-        content = Contribution(
-            layer=Layer.content,
-            priority=10,
-            text="Retrieved snippet.",
-            estimated_tokens=5,
-            source="content",
-        )
-        result = b.fill(
-            [char, content],
-            {Layer.character: 1000, Layer.content: 1000},
-        )
-        assert result.by_layer[Layer.character] == "Character description."
-        assert result.by_layer[Layer.content] == "Retrieved snippet."
-        assert result.dropped == []
-
-    def test_missing_budget_layer_drops_contribution(self) -> None:
-        """A contribution for a layer with no declared budget is dropped and logged."""
-        b = Budgeter()
-        c = Contribution(
-            layer=Layer.content,
-            priority=10,
-            text="orphan snippet",
-            estimated_tokens=3,
-            source="rag:orphan",
-        )
-        result = b.fill([c], {Layer.character: 1000})
-
-        assert not result.by_layer.get(Layer.content, "")
-        assert len(result.dropped) == 1
-        assert result.dropped[0].source == "rag:orphan"
-        assert result.dropped[0].reason == "dropped"
-
-
-class TestBudgeterZeroBudget:
-    def test_zero_budget_drops_all(self) -> None:
-        b = Budgeter()
-        c = Contribution(
-            layer=Layer.content,
-            priority=10,
-            text="anything",
-            estimated_tokens=2,
-            source="rag:any",
-        )
-        result = b.fill([c], {Layer.content: 0})
-        assert not result.by_layer.get(Layer.content, "")
-        assert len(result.dropped) == 1
-
-
-class TestBudgeterAcceptsFrozenInput:
-    def test_contribution_list_not_mutated(self) -> None:
-        b = Budgeter()
-        original = [
-            Contribution(
-                layer=Layer.content,
-                priority=p,
-                text=f"text{p}",
-                estimated_tokens=2,
-                source=f"src{p}",
-            )
-            for p in (1, 10, 5)
+    def test_messages_sum(self) -> None:
+        msgs = [
+            Message(role="user", content="abcd"),
+            Message(role="assistant", content="efgh"),
         ]
-        snapshot = list(original)
-        b.fill(original, {Layer.content: 1000})
-        assert original == snapshot, "Budgeter must not mutate its input list"
-
-
-class TestDroppedNote:
-    def test_fields(self) -> None:
-        note = DroppedNote(
-            layer=Layer.content,
-            source="rag:x",
-            reason="dropped",
-            tokens_dropped=5,
+        assert estimate_messages_tokens(msgs) == sum(
+            estimate_message_tokens(m) for m in msgs
         )
-        assert note.layer is Layer.content
-        assert note.source == "rag:x"
-        assert note.reason == "dropped"
-        assert note.tokens_dropped == 5
 
-    def test_invalid_reason_rejected(self) -> None:
-        with pytest.raises(ValueError, match="reason"):
-            DroppedNote(
-                layer=Layer.content,
-                source="x",
-                reason="explosion",  # not "dropped" or "truncated"
-                tokens_dropped=1,
-            )
+
+class TestTierBudgetFields:
+    def test_overriding_one_field_leaves_others_at_default(self) -> None:
+        """Each cap is independent — no proportional auto-derivation."""
+        a = TierBudget()
+        b = TierBudget(total_tokens=9999)
+        assert b.total_tokens == 9999
+        # Other fields untouched.
+        assert b.recent_history_tokens == a.recent_history_tokens
+        assert b.rag_tokens == a.rag_tokens
+        assert b.max_dossier_people == a.max_dossier_people
+
+    def test_explicit_subcap_used_directly(self) -> None:
+        b = TierBudget(recent_history_tokens=500)
+        assert b.recent_history_tokens == 500
+
+
+class TestBudgeterTrim:
+    def test_under_budget_passthrough(self) -> None:
+        bud = Budgeter(TierBudget(total_tokens=1000))
+        sys = "short prompt"
+        msgs = [
+            Message(role="user", content="hi"),
+            Message(role="assistant", content="yo"),
+        ]
+        sys_out, msgs_out = bud.trim(system_prompt=sys, history=msgs)
+        assert sys_out == sys
+        assert msgs_out == msgs
+
+    def test_drops_oldest_when_over_budget(self) -> None:
+        # Tiny budget forces eviction.
+        bud = Budgeter(TierBudget(total_tokens=20))
+        sys = ""  # no static cost
+        msgs = [
+            Message(role="user", content="A" * 40),  # ~10 tokens content + 4 overhead
+            Message(role="user", content="B" * 40),
+            Message(role="user", content="C" * 40),
+        ]
+        _, kept = bud.trim(system_prompt=sys, history=msgs)
+        # Newest survives; oldest is dropped first.
+        assert kept[-1].content == "C" * 40
+        assert "A" * 40 not in [m.content for m in kept]
+
+    def test_keeps_at_least_newest_turn_even_if_oversize(self) -> None:
+        """A single huge turn isn't dropped — the user's last message is sacred."""
+        bud = Budgeter(TierBudget(total_tokens=10))
+        msgs = [Message(role="user", content="Z" * 10000)]
+        _, kept = bud.trim(system_prompt="", history=msgs)
+        assert len(kept) == 1
+
+    def test_system_prompt_eats_into_history_budget(self) -> None:
+        sys = "S" * 4000  # ~1000 tokens
+        bud = Budgeter(TierBudget(total_tokens=1100))
+        msgs = [
+            Message(role="user", content="A" * 200),  # ~50 tokens + overhead
+            Message(role="user", content="B" * 200),
+            Message(role="user", content="C" * 200),
+            Message(role="user", content="D" * 200),
+        ]
+        _, kept = bud.trim(system_prompt=sys, history=msgs)
+        # Some turns dropped because static prompt ate most of the budget.
+        assert len(kept) < len(msgs)
+        assert kept[-1].content == "D" * 200
+
+    def test_system_prompt_returned_unchanged(self) -> None:
+        bud = Budgeter(TierBudget(total_tokens=10))
+        sys_out, _ = bud.trim(system_prompt="LONG " * 1000, history=[])
+        assert sys_out == "LONG " * 1000
+
+
+class TestModelBudgetCurve:
+    def test_defaults_are_all_one(self) -> None:
+        c = ModelBudgetCurve()
+        for field_val in vars(c).values():
+            assert field_val == pytest.approx(1.0)
+
+    def test_partial_override_leaves_others_at_one(self) -> None:
+        c = ModelBudgetCurve(total_tokens=2.0, rag_tokens=1.5)
+        assert c.total_tokens == pytest.approx(2.0)
+        assert c.rag_tokens == pytest.approx(1.5)
+        assert c.recent_history_tokens == pytest.approx(1.0)
+        assert c.dossier_tokens == pytest.approx(1.0)
+
+
+class TestTierBudgetApplyCurve:
+    def test_identity_curve_returns_equivalent_budget(self) -> None:
+        b = TierBudget(total_tokens=4000, rag_tokens=500)
+        assert b.apply_curve(ModelBudgetCurve()) == b
+
+    def test_scale_total_tokens(self) -> None:
+        b = TierBudget(total_tokens=1000)
+        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=2.0))
+        assert scaled.total_tokens == 2000
+        assert scaled.rag_tokens == b.rag_tokens  # unchanged
+
+    def test_scale_rounds_to_nearest_int(self) -> None:
+        b = TierBudget(total_tokens=1000)
+        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=1.5))
+        assert scaled.total_tokens == 1500
+
+    def test_scale_minimum_is_one(self) -> None:
+        # Near-zero multiplier must not produce 0 or negative tokens.
+        b = TierBudget(total_tokens=1)
+        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=0.001))
+        assert scaled.total_tokens >= 1
+
+    def test_scale_all_token_fields(self) -> None:
+        b = TierBudget(
+            total_tokens=8000,
+            recent_history_tokens=2000,
+            rag_tokens=400,
+            dossier_tokens=400,
+            summary_tokens=200,
+            cross_channel_tokens=200,
+            reflection_tokens=200,
+            lorebook_tokens=200,
+        )
+        c = ModelBudgetCurve(
+            total_tokens=2.0,
+            recent_history_tokens=2.0,
+            rag_tokens=1.5,
+            dossier_tokens=1.5,
+            summary_tokens=1.5,
+            cross_channel_tokens=1.5,
+            reflection_tokens=1.5,
+            lorebook_tokens=1.5,
+        )
+        scaled = b.apply_curve(c)
+        assert scaled.total_tokens == 16000
+        assert scaled.recent_history_tokens == 4000
+        assert scaled.rag_tokens == 600
+        assert scaled.dossier_tokens == 600
+
+    def test_scale_count_fields(self) -> None:
+        b = TierBudget(max_rag_turns=5, max_rag_facts=3, max_reflections=3)
+        scaled = b.apply_curve(ModelBudgetCurve(max_rag_turns=2.0, max_rag_facts=2.0))
+        assert scaled.max_rag_turns == 10
+        assert scaled.max_rag_facts == 6
+        assert scaled.max_reflections == b.max_reflections  # unchanged
+
+
+class TestBudgeterChannelOverride:
+    """Per-channel total_tokens override wired through trim()."""
+
+    def _msgs(self, n: int = 3) -> list[Message]:
+        return [Message(role="user", content="A" * 40) for _ in range(n)]
+
+    def test_channel_override_tightens_budget(self) -> None:
+        # base budget fits all 3; channel override is tight → only newest kept
+        bud = Budgeter(
+            TierBudget(total_tokens=1000),
+            channel_total_tokens={99: 20},
+        )
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=99)
+        assert len(kept) < 3
+        assert kept[-1].content == "A" * 40
+
+    def test_other_channel_uses_base_budget(self) -> None:
+        bud = Budgeter(
+            TierBudget(total_tokens=1000),
+            channel_total_tokens={99: 20},
+        )
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=55)
+        assert len(kept) == 3  # base budget fits all
+
+    def test_none_channel_uses_base_budget(self) -> None:
+        bud = Budgeter(
+            TierBudget(total_tokens=1000),
+            channel_total_tokens={99: 20},
+        )
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=None)
+        assert len(kept) == 3
+
+    def test_no_overrides_dict_behaves_as_before(self) -> None:
+        bud = Budgeter(TierBudget(total_tokens=1000))
+        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=99)
+        assert len(kept) == 3
+
+
+class TestBudgeterPerf:
+    """Hot-path sanity check — ensure the estimator stays microsecond-class."""
+
+    def test_estimate_messages_under_one_ms(self) -> None:
+        """30 turns of typical voice content shouldn't approach 1ms."""
+        msgs = [
+            Message(role="user", content="The quick brown fox jumped over " * 5)
+            for _ in range(30)
+        ]
+        # Warm.
+        estimate_messages_tokens(msgs)
+        t0 = time.perf_counter()
+        for _ in range(1000):
+            estimate_messages_tokens(msgs)
+        elapsed = time.perf_counter() - t0
+        # 1000 iters of 30-msg estimate. 1ms per iter would be 1s total —
+        # generous bound; in practice should be sub-millisecond per iter.
+        assert elapsed < 1.0, f"estimator too slow: {elapsed:.3f}s for 1000 iters"

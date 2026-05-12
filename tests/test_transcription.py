@@ -8,17 +8,21 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import aiohttp
 import pytest
 
-from familiar_connect.transcription import (
+from familiar_connect.config import DeepgramSTTConfig
+from familiar_connect.stt import (
+    TranscriptionEvent,
+    TranscriptionResult,
+)
+from familiar_connect.stt.deepgram import (
     DEEPGRAM_WS_URL,
     DEFAULT_IDLE_FINALIZE_S,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DeepgramTranscriber,
-    TranscriptionEvent,
-    TranscriptionResult,
-    create_transcriber_from_env,
+    create_deepgram_transcriber,
 )
 
 
@@ -146,8 +150,8 @@ class TestDeepgramTranscriber:
         assert "utterance_end_ms" in params
 
     def test_builds_ws_url_emits_endpointing(self) -> None:
-        """Default endpointing_ms is serialized on the URL."""
-        client = DeepgramTranscriber(api_key="test-key")
+        """``endpointing_ms`` is serialized on the URL as ``endpointing``."""
+        client = DeepgramTranscriber(api_key="test-key", endpointing_ms=300)
         params = parse_qs(urlparse(client.build_ws_url()).query)
         assert params["endpointing"] == ["300"]
 
@@ -166,6 +170,62 @@ class TestDeepgramTranscriber:
         url = client.build_ws_url()
         params = parse_qs(urlparse(url).query)
         assert params["diarize"] == ["true"]
+
+    def test_default_endpointing_widened(self) -> None:
+        """Default endpointing must give speakers room to breathe mid-sentence.
+
+        Discord packets carry one user's voice, but a thinking pause
+        of 300 ms still slices a thought in half. 500 ms is the
+        baseline that survived field testing.
+        """
+        client = DeepgramTranscriber(api_key="test-key")
+        assert client.endpointing_ms >= 500
+
+    def test_default_utterance_end_ms_widened(self) -> None:
+        """Default ``utterance_end_ms`` should be at least 1500 ms."""
+        client = DeepgramTranscriber(api_key="test-key")
+        assert client.utterance_end_ms >= 1500
+
+    def test_smart_format_enabled_by_default(self) -> None:
+        """``smart_format`` is on by default — punctuation, numbers, units."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["smart_format"] == ["true"]
+
+    def test_punctuate_enabled_by_default(self) -> None:
+        """``punctuate`` is on by default; smart_format implies it but make explicit."""
+        client = DeepgramTranscriber(api_key="test-key")
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        assert params["punctuate"] == ["true"]
+
+    def test_keyterms_threaded_into_ws_url(self) -> None:
+        """Keyterm prompting biases nova-3 toward provided jargon/names."""
+        client = DeepgramTranscriber(
+            api_key="test-key",
+            keyterms=("rebasing", "lifecycle mesh", "Tam"),
+        )
+        params = parse_qs(urlparse(client.build_ws_url()).query)
+        # Deepgram accepts repeated ``keyterm=…`` query params.
+        assert params["keyterm"] == ["rebasing", "lifecycle mesh", "Tam"]
+
+    def test_no_keyterms_omits_param(self) -> None:
+        """Without keyterms the URL must not contain ``keyterm=``."""
+        client = DeepgramTranscriber(api_key="test-key")
+        url = client.build_ws_url()
+        assert "keyterm=" not in url
+
+    def test_clone_preserves_keyterms_and_format_flags(self) -> None:
+        """clone() carries every config knob across, including new ones."""
+        original = DeepgramTranscriber(
+            api_key="test-key",
+            smart_format=False,
+            punctuate=False,
+            keyterms=("alpha", "beta"),
+        )
+        cloned = original.clone()
+        assert cloned.smart_format is False
+        assert cloned.punctuate is False
+        assert cloned.keyterms == ("alpha", "beta")
 
     def test_builds_headers(self) -> None:
         """Headers include Authorization with Token prefix."""
@@ -304,20 +364,31 @@ class TestDeepgramTranscriberParseResponse:
         assert result.speaker == 1
 
 
-class _AsyncIter:
-    """Wrap a list of items into an async iterator for mocking __aiter__."""
+def _closed_msg() -> MagicMock:
+    """WSMessage with type=CLOSED for the receive() drain after items run out."""
+    m = MagicMock()
+    m.type = aiohttp.WSMsgType.CLOSED
+    m.data = None
+    m.extra = None
+    return m
 
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
 
-    def __aiter__(self) -> _AsyncIter:
-        return self
+def _make_receive(items: list[object]) -> AsyncMock:
+    """Build an AsyncMock that returns ``items`` then CLOSED messages forever.
 
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration:
-            raise StopAsyncIteration from None
+    Mirrors aiohttp's ``ClientWebSocketResponse.receive()``: each call yields
+    the next message; once exhausted, repeated calls return the same CLOSED
+    sentinel so the receive loop can break cleanly.
+    """
+    queue = list(items)
+    closed = _closed_msg()
+
+    def _next(*_: object, **__: object) -> object:
+        if queue:
+            return queue.pop(0)
+        return closed
+
+    return AsyncMock(side_effect=_next)
 
 
 class TestDeepgramTranscriberLifecycle:
@@ -334,8 +405,9 @@ class TestDeepgramTranscriberLifecycle:
         ws.send_json = AsyncMock()
         ws.close = AsyncMock()
         ws.closed = False
+        ws.exception = MagicMock(return_value=None)
         items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        ws.receive = _make_receive(items)
         return ws
 
     @pytest.mark.asyncio
@@ -601,8 +673,9 @@ class TestDeepgramReconnect:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = 1006
+        ws.exception = MagicMock(return_value=None)
         items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        ws.receive = _make_receive(items)
         return ws
 
     @pytest.mark.asyncio
@@ -735,29 +808,26 @@ class TestReplayBuffer:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = close_code
+        ws.exception = MagicMock(return_value=None)
         items = messages if messages is not None else []
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter(items))
+        ws.receive = _make_receive(items)
         return ws
 
     def _make_open_ws_mock(self) -> MagicMock:
-        """WS that stays open forever (pending future aiter)."""
+        """WS that stays open forever (pending receive)."""
         ws = MagicMock()
         ws.send_bytes = AsyncMock()
         ws.send_json = AsyncMock()
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = None
+        ws.exception = MagicMock(return_value=None)
         pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
 
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
+        async def _wait(*_: object, **__: object) -> object:
+            return await pending
 
-            async def __anext__(self) -> object:
-                await pending
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
+        ws.receive = AsyncMock(side_effect=_wait)
         return ws
 
     @pytest.mark.asyncio
@@ -841,7 +911,7 @@ class TestReplayBuffer:
 
         with (
             patch.object(client, "_ws_connect", new=connect_mock),
-            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
+            patch("familiar_connect.stt.deepgram.asyncio.sleep", new=_track_sleep),
         ):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
@@ -966,7 +1036,8 @@ class TestExponentialBackoff:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = close_code
-        ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+        ws.exception = MagicMock(return_value=None)
+        ws.receive = _make_receive([])
         return ws
 
     def _make_open_ws_mock(self) -> MagicMock:
@@ -977,17 +1048,13 @@ class TestExponentialBackoff:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = None
+        ws.exception = MagicMock(return_value=None)
         pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
 
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
+        async def _wait(*_: object, **__: object) -> object:
+            return await pending
 
-            async def __anext__(self) -> object:
-                await pending
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
+        ws.receive = AsyncMock(side_effect=_wait)
         return ws
 
     @pytest.mark.asyncio
@@ -1008,7 +1075,7 @@ class TestExponentialBackoff:
 
         with (
             patch.object(client, "_ws_connect", new=connect_mock),
-            patch("familiar_connect.transcription.asyncio.sleep", new=_track_sleep),
+            patch("familiar_connect.stt.deepgram.asyncio.sleep", new=_track_sleep),
         ):
             queue: asyncio.Queue[TranscriptionEvent] = asyncio.Queue()
             await client.start(queue)
@@ -1050,22 +1117,18 @@ class TestDeepgramKeepAlive:
         ws.close = AsyncMock()
         ws.closed = False
         ws.close_code = None
-        items = messages if messages is not None else []
-        # Keep the aiter alive for the duration of the test so the receive
+        ws.exception = MagicMock(return_value=None)
+        items = list(messages) if messages is not None else []
+        # Keep receive() alive for the duration of the test so the receive
         # loop doesn't exit and trigger a reconnect during keepalive checks.
         pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
 
-        class _Never:
-            def __aiter__(self) -> _Never:
-                return self
+        async def _receive(*_: object, **__: object) -> object:
+            if items:
+                return items.pop(0)
+            return await pending  # wait forever — test will cancel via stop()
 
-            async def __anext__(self) -> object:
-                if items:
-                    return items.pop(0)
-                await pending  # wait forever — test will cancel via stop()
-                raise StopAsyncIteration
-
-        ws.__aiter__ = MagicMock(return_value=_Never())
+        ws.receive = AsyncMock(side_effect=_receive)
         return ws
 
     @staticmethod
@@ -1164,7 +1227,8 @@ class TestDeepgramKeepAlive:
         ws1.close = AsyncMock()
         ws1.closed = False
         ws1.close_code = 1006
-        ws1.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+        ws1.exception = MagicMock(return_value=None)
+        ws1.receive = _make_receive([])
 
         ws2 = self._make_ws_mock()
         connect_mock = AsyncMock(side_effect=[ws1, ws2])
@@ -1180,28 +1244,12 @@ class TestDeepgramKeepAlive:
                 await client.stop()
 
 
-class TestCreateTranscriberFromEnv:
-    def test_creates_from_env(self) -> None:
-        """Factory reads DEEPGRAM_API_KEY and optional overrides."""
-        env = {
-            "DEEPGRAM_API_KEY": "sk-deepgram-test-abc",
-            "DEEPGRAM_MODEL": "nova-2",
-            "DEEPGRAM_LANGUAGE": "es",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_transcriber_from_env()
-
-        assert client.api_key == "sk-deepgram-test-abc"
-        assert client.model == "nova-2"
-        assert client.language == "es"
-
-    def test_uses_defaults_when_optional_missing(self) -> None:
-        """Factory uses defaults for model and language when not in env."""
+class TestCreateDeepgramTranscriber:
+    def test_uses_default_config(self) -> None:
+        """Factory falls back to ``DeepgramSTTConfig()`` when no config passed."""
         env = {"DEEPGRAM_API_KEY": "sk-deepgram-test-abc"}
         with patch.dict(os.environ, env, clear=False):
-            os.environ.pop("DEEPGRAM_MODEL", None)
-            os.environ.pop("DEEPGRAM_LANGUAGE", None)
-            client = create_transcriber_from_env()
+            client = create_deepgram_transcriber()
 
         assert client.api_key == "sk-deepgram-test-abc"
         assert client.model == DEFAULT_MODEL
@@ -1213,21 +1261,36 @@ class TestCreateTranscriberFromEnv:
             patch.dict(os.environ, {}, clear=True),
             pytest.raises(ValueError, match=r"DEEPGRAM_API_KEY"),
         ):
-            create_transcriber_from_env()
+            create_deepgram_transcriber()
 
-    def test_reconnect_knobs_from_env(self) -> None:
-        """Factory wires reconnect/buffer/keepalive knobs from env vars."""
-        env = {
-            "DEEPGRAM_API_KEY": "sk-test",
-            "DEEPGRAM_REPLAY_BUFFER_S": "10.0",
-            "DEEPGRAM_KEEPALIVE_INTERVAL_S": "5.0",
-            "DEEPGRAM_RECONNECT_MAX_ATTEMPTS": "3",
-            "DEEPGRAM_RECONNECT_BACKOFF_CAP_S": "32.0",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            client = create_transcriber_from_env()
+    def test_toml_config_flows_through(self) -> None:
+        """``DeepgramSTTConfig`` knobs reach the transcriber unchanged."""
+        cfg = DeepgramSTTConfig(
+            model="nova-2",
+            language="es",
+            endpointing_ms=275,
+            utterance_end_ms=1750,
+            smart_format=False,
+            punctuate=False,
+            keyterms=("lifecycle mesh", "Tam"),
+            replay_buffer_s=8.0,
+            keepalive_interval_s=2.5,
+            reconnect_max_attempts=7,
+            reconnect_backoff_cap_s=20.0,
+            idle_close_s=45.0,
+        )
+        with patch.dict(os.environ, {"DEEPGRAM_API_KEY": "sk-test"}, clear=True):
+            client = create_deepgram_transcriber(cfg)
 
-        assert client.replay_buffer_s == pytest.approx(10.0)
-        assert pytest.approx(5.0) == client._KEEPALIVE_INTERVAL
-        assert client._MAX_RECONNECTS == 3
-        assert pytest.approx(32.0) == client._RECONNECT_BACKOFF_CAP
+        assert client.model == "nova-2"
+        assert client.language == "es"
+        assert client.endpointing_ms == 275
+        assert client.utterance_end_ms == 1750
+        assert client.smart_format is False
+        assert client.punctuate is False
+        assert client.keyterms == ("lifecycle mesh", "Tam")
+        assert client.replay_buffer_s == pytest.approx(8.0)
+        assert pytest.approx(2.5) == client._KEEPALIVE_INTERVAL
+        assert client._MAX_RECONNECTS == 7
+        assert pytest.approx(20.0) == client._RECONNECT_BACKOFF_CAP
+        assert pytest.approx(45.0) == client._IDLE_CLOSE_S

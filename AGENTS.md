@@ -24,7 +24,7 @@ Always follow red/green TDD:
 
 ## After Every Code Assignment
 
-1. Run `uv sync --dev` to keep dependencies up to date
+1. Run `uv sync --dev --extra local-turn` to keep dependencies up to date (the `local-turn` extra brings in `numpy` + `huggingface_hub`, which test collection imports unconditionally)
 2. Run `uv run ruff check` to lint
 3. Run `uv run ruff format` to format
 4. Run `uv run ty check` to type-check

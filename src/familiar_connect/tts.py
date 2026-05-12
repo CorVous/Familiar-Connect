@@ -1,7 +1,7 @@
-"""TTS clients — Cartesia (WebSocket), Azure (Speech SDK), and Gemini.
+"""TTS clients — Cartesia (WebSocket), Azure (Speech SDK), Gemini.
 
-All three return :class:`TTSResult` with raw PCM audio + per-word timestamps.
-Timestamps drive mid-speech yield in the voice interruption flow.
+All return :class:`TTSResult` with raw PCM audio + per-word timestamps.
+Timestamps drive mid-speech yield in voice interruption flow.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from datetime import timedelta
 
     from google.genai import Client as _GenaiClient
@@ -46,7 +47,7 @@ _AZURE_TICKS_PER_MS: float = 10_000.0
 """100-nanosecond ticks per millisecond — Azure SDK offset unit."""
 
 GEMINI_SAMPLE_RATE = 24000
-"""Native output rate for Gemini TTS (24 kHz). Upsampled to 48 kHz before use."""
+"""Gemini TTS native rate (24 kHz); upsampled to 48 kHz before use."""
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,7 @@ class CartesiaTTSClient:
         self.sample_rate = sample_rate
 
     def build_ws_url(self: Self) -> str:
-        """Return the Cartesia WebSocket URL with auth in the query string."""
+        """Cartesia WebSocket URL with auth in query string."""
         query = urlencode(
             {
                 "api_key": self.api_key,
@@ -102,7 +103,7 @@ class CartesiaTTSClient:
         return f"{self.ws_url}?{query}"
 
     def build_headers(self: Self) -> dict[str, str]:
-        """Return REST headers (kept for any non-WS call sites / tests)."""
+        """REST headers (for non-WS call sites / tests)."""
         return {
             "X-API-Key": self.api_key,
             "Cartesia-Version": CARTESIA_API_VERSION,
@@ -110,7 +111,7 @@ class CartesiaTTSClient:
         }
 
     def build_payload(self: Self, text: str, *, context_id: str) -> dict[str, Any]:
-        """Build JSON payload for one-shot TTS synthesis."""
+        """JSON payload for one-shot TTS synthesis."""
         return {
             "context_id": context_id,
             "model_id": self.model,
@@ -134,13 +135,13 @@ class CartesiaTTSClient:
         session: aiohttp.ClientSession,
         url: str,
     ) -> aiohttp.ClientWebSocketResponse:
-        """Open a WebSocket connection. Extracted for testability."""
+        """Open WebSocket. Extracted for testability."""
         return await session.ws_connect(url)
 
     async def synthesize(self: Self, text: str) -> TTSResult:
-        """Synthesize *text* via WebSocket; return audio + word timestamps.
+        """Synthesize via WebSocket; return audio + word timestamps.
 
-        :raises RuntimeError: on Cartesia ``error`` event or unexpected close.
+        Raises ``RuntimeError`` on Cartesia ``error`` event or unexpected close.
         """
         context_id = uuid.uuid4().hex
         url = self.build_ws_url()
@@ -205,6 +206,74 @@ class CartesiaTTSClient:
             msg = f"Cartesia TTS error (status={status}): {err}"
             raise RuntimeError(msg)
         return False
+
+    async def synthesize_stream(self: Self, text: str) -> AsyncIterator[bytes]:
+        """Yield raw mono PCM chunks as Cartesia produces them.
+
+        Lower-latency variant of :meth:`synthesize`: callers can start
+        playback on the first chunk instead of waiting for the full
+        utterance. ``timestamps`` events are dropped — chunk consumers
+        get audio only. Errors and unexpected closes raise just like
+        :meth:`synthesize`.
+
+        Yields:
+            bytes: raw mono ``pcm_s16le`` chunks at the configured sample rate.
+
+        """
+        context_id = uuid.uuid4().hex
+        url = self.build_ws_url()
+        payload = self.build_payload(text, context_id=context_id)
+        first_at: float | None = None
+        last_at: float | None = None
+        total_bytes = 0
+
+        async with aiohttp.ClientSession() as session:
+            ws = await self._ws_connect(session, url)
+            try:
+                await ws.send_json(payload)
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        event = json.loads(msg.data)
+                        event_type = event.get("type")
+                        if event_type == "chunk":
+                            data = event.get("data")
+                            if isinstance(data, str):
+                                chunk = base64.b64decode(data)
+                                if not chunk:
+                                    continue
+                                now = asyncio.get_event_loop().time()
+                                if first_at is None:
+                                    first_at = now
+                                last_at = now
+                                total_bytes += len(chunk)
+                                yield chunk
+                        elif event_type == "done":
+                            break
+                        elif event_type == "error":
+                            err = event.get("error") or "unknown error"
+                            status = event.get("status_code")
+                            msg_txt = f"Cartesia TTS error (status={status}): {err}"
+                            raise RuntimeError(msg_txt)
+                        # timestamps event silently dropped
+                    elif msg.type in {
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    }:
+                        msg_txt = (
+                            f"Cartesia WebSocket closed unexpectedly (type={msg.type})"
+                        )
+                        raise RuntimeError(msg_txt)
+            finally:
+                if not ws.closed:
+                    await ws.close()
+
+        first_to_last_ms = (last_at - first_at) * 1000 if first_at and last_at else 0
+        _logger.info(
+            f"{ls.tag('🔉 TTS', ls.C)} "
+            f"{ls.word('Cartesia/stream', ls.C)} "
+            f"{ls.kv('audio', f'{total_bytes}b', vc=ls.LW)} "
+            f"{ls.kv('span_ms', f'{first_to_last_ms:.0f}', vc=ls.LW)}"
+        )
 
 
 def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:

@@ -57,28 +57,15 @@ nav:
       - getting-started/on-disk-layout.md
       - getting-started/slash-commands.md
       - getting-started/troubleshooting.md
-  - Guides:
-      - guides/bootstrapping.md
-      - guides/twitch.md
-      - guides/metrics.md
   - Architecture:
       - architecture/overview.md
       - architecture/context-pipeline.md
-      - architecture/message-flow.md
-      - architecture/chattiness-fsm.md
-      - architecture/concurrency-model.md
-      - architecture/memory.md
+      - architecture/memory-strategies.md
+      - architecture/voice-pipeline.md
+      - architecture/streaming-bus.md
       - architecture/configuration-model.md
-      - architecture/conversation-flow.md
-      - architecture/voice-input.md
-      - architecture/interruption.md
-      - architecture/typing-simulation.md
-      - architecture/session-logging.md
+      - architecture/tuning.md
       - architecture/security.md
       - architecture/decisions.md
-  - Roadmap:
-      - roadmap/index.md
-      - roadmap/voice-logging.md
-      - roadmap/web-search.md
-      - roadmap/gemini-tts-expressivity.md
+      - architecture/roadmap.md
   - Contributing: contributing.md

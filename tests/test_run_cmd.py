@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from familiar_connect.budget import TierBudget
 from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
+    _async_main,
+    _default_assembler,
     _resolve_familiar_root,
     load_opus,
     run,
+)
+from familiar_connect.context.layers import (
+    ConversationSummaryLayer,
+    CrossChannelContextLayer,
+    PeopleDossierLayer,
+    RagContextLayer,
+    RecentHistoryLayer,
 )
 
 if TYPE_CHECKING:
@@ -27,13 +40,9 @@ def _fake_character_config() -> MagicMock:
     itself uses (``tts.voice_id`` / ``tts.model``).
     """
     config = MagicMock(name="character_config")
+    config.tts.provider = "azure"
     config.tts.voice_id = "test-voice-id"
     config.tts.model = "test-model"
-    # numeric attrs the [Config] startup log formats inline
-    config.interrupt_tolerance.value = "medium"
-    config.interrupt_tolerance.base_probability = 0.5
-    config.min_interruption_s = 0.3
-    config.short_long_boundary_s = 2.0
     return config
 
 
@@ -244,21 +253,25 @@ def test_run_starts_asyncio_with_familiar(tmp_path: Path) -> None:
         ),
         patch(
             "familiar_connect.commands.run.create_llm_clients",
-            return_value={"main_prose": MagicMock()},
+            return_value={
+                "fast": MagicMock(),
+                "prose": MagicMock(),
+                "background": MagicMock(),
+            },
         ),
         patch(
             "familiar_connect.commands.run.create_tts_client",
             return_value=None,
         ),
         patch(
-            "familiar_connect.commands.run.create_transcriber_from_env",
+            "familiar_connect.commands.run.create_transcriber",
             return_value=None,
         ),
         patch(
             "familiar_connect.commands.run.Familiar.load_from_disk",
             return_value=MagicMock(
                 id="aria",
-                config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                config=MagicMock(),
             ),
         ),
         patch("familiar_connect.commands.run.load_opus"),
@@ -303,21 +316,25 @@ def test_run_loads_config_before_building_clients(tmp_path: Path) -> None:
         ) as mock_load_config,
         patch(
             "familiar_connect.commands.run.create_llm_clients",
-            return_value={"main_prose": MagicMock()},
+            return_value={
+                "fast": MagicMock(),
+                "prose": MagicMock(),
+                "background": MagicMock(),
+            },
         ) as mock_create_llm,
         patch(
             "familiar_connect.commands.run.create_tts_client",
             return_value=None,
         ),
         patch(
-            "familiar_connect.commands.run.create_transcriber_from_env",
+            "familiar_connect.commands.run.create_transcriber",
             return_value=None,
         ),
         patch(
             "familiar_connect.commands.run.Familiar.load_from_disk",
             return_value=MagicMock(
                 id="aria",
-                config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                config=MagicMock(),
             ),
         ),
         patch("familiar_connect.commands.run.load_opus"),
@@ -357,7 +374,7 @@ class TestRunTranscriberIntegration:
         self,
         tmp_path: Path,
     ) -> None:
-        """A successful create_transcriber_from_env reaches load_from_disk."""
+        """A successful create_transcriber reaches load_from_disk."""
         (tmp_path / "aria").mkdir()
         args = argparse.Namespace(familiar="aria")
         mock_transcriber = MagicMock(name="transcriber")
@@ -375,21 +392,25 @@ class TestRunTranscriberIntegration:
             ),
             patch(
                 "familiar_connect.commands.run.create_llm_clients",
-                return_value={"main_prose": MagicMock()},
+                return_value={
+                    "fast": MagicMock(),
+                    "prose": MagicMock(),
+                    "background": MagicMock(),
+                },
             ),
             patch(
                 "familiar_connect.commands.run.create_tts_client",
                 return_value=None,
             ),
             patch(
-                "familiar_connect.commands.run.create_transcriber_from_env",
+                "familiar_connect.commands.run.create_transcriber",
                 return_value=mock_transcriber,
             ) as mock_create,
             patch(
                 "familiar_connect.commands.run.Familiar.load_from_disk",
                 return_value=MagicMock(
                     id="aria",
-                    config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                    config=MagicMock(),
                 ),
             ) as mock_load,
             patch("familiar_connect.commands.run.load_opus"),
@@ -426,21 +447,25 @@ class TestRunTranscriberIntegration:
             ),
             patch(
                 "familiar_connect.commands.run.create_llm_clients",
-                return_value={"main_prose": MagicMock()},
+                return_value={
+                    "fast": MagicMock(),
+                    "prose": MagicMock(),
+                    "background": MagicMock(),
+                },
             ),
             patch(
                 "familiar_connect.commands.run.create_tts_client",
                 return_value=None,
             ),
             patch(
-                "familiar_connect.commands.run.create_transcriber_from_env",
+                "familiar_connect.commands.run.create_transcriber",
                 side_effect=ValueError("DEEPGRAM_API_KEY not set"),
             ),
             patch(
                 "familiar_connect.commands.run.Familiar.load_from_disk",
                 return_value=MagicMock(
                     id="aria",
-                    config=MagicMock(default_mode=MagicMock(value="full_rp")),
+                    config=MagicMock(),
                 ),
             ) as mock_load,
             patch("familiar_connect.commands.run.load_opus"),
@@ -455,3 +480,290 @@ class TestRunTranscriberIntegration:
 
         assert result == 0
         assert mock_load.call_args.kwargs.get("transcriber") is None
+
+
+# ---------------------------------------------------------------------------
+# run — turn detection TOML selector (A1)
+# ---------------------------------------------------------------------------
+
+
+def _fake_character_config_with_turn_strategy(strategy: str) -> MagicMock:
+    config = _fake_character_config()
+    config.turn_detection.strategy = strategy
+    return config
+
+
+def _run_with_strategy(tmp_path: Path, strategy: str):
+    """Run :func:`run` with all deps patched; return mocks for assertions."""
+    args = argparse.Namespace(familiar="aria")
+    env = {"DISCORD_BOT": "fake-token", "OPENROUTER_API_KEY": "sk-test"}
+
+    mock_load = MagicMock(
+        return_value=MagicMock(id="aria", config=MagicMock()),
+    )
+    mock_create_local = MagicMock(return_value=None)
+
+    with (
+        patch.dict("os.environ", env, clear=True),
+        patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+        patch(
+            "familiar_connect.commands.run.load_character_config",
+            return_value=_fake_character_config_with_turn_strategy(strategy),
+        ),
+        patch(
+            "familiar_connect.commands.run.create_llm_clients",
+            return_value={
+                "fast": MagicMock(),
+                "prose": MagicMock(),
+                "background": MagicMock(),
+            },
+        ),
+        patch("familiar_connect.commands.run.create_tts_client", return_value=None),
+        patch(
+            "familiar_connect.commands.run.create_transcriber",
+            return_value=None,
+        ),
+        patch(
+            "familiar_connect.commands.run.create_local_turn_detector",
+            mock_create_local,
+        ),
+        patch("familiar_connect.commands.run.Familiar.load_from_disk", mock_load),
+        patch("familiar_connect.commands.run.load_opus"),
+        patch(
+            "familiar_connect.commands.run._async_main",
+            new_callable=MagicMock,
+            return_value=MagicMock(name="coroutine"),
+        ),
+        patch("familiar_connect.commands.run.asyncio.run"),
+    ):
+        result = run(args)
+
+    return result, mock_load, mock_create_local
+
+
+class TestRunTurnDetectionTomlSelector:
+    """TOML ``[providers.turn_detection] strategy`` drives detector creation."""
+
+    def test_deepgram_strategy_skips_local_detector(self, tmp_path: Path) -> None:
+        """strategy='deepgram' → create_local_turn_detector not called."""
+        (tmp_path / "aria").mkdir()
+        _result, mock_load, mock_create_local = _run_with_strategy(tmp_path, "deepgram")
+        mock_create_local.assert_not_called()
+        assert mock_load.call_args.kwargs.get("local_turn_detector") is None
+
+    def test_ten_smart_turn_strategy_creates_local_detector(
+        self, tmp_path: Path
+    ) -> None:
+        """strategy='ten+smart_turn' → create_local_turn_detector called."""
+        (tmp_path / "aria").mkdir()
+        mock_detector = MagicMock(name="detector")
+        args = argparse.Namespace(familiar="aria")
+        env = {"DISCORD_BOT": "fake-token", "OPENROUTER_API_KEY": "sk-test"}
+        mock_load = MagicMock(return_value=MagicMock(id="aria", config=MagicMock()))
+
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+            patch(
+                "familiar_connect.commands.run.load_character_config",
+                return_value=_fake_character_config_with_turn_strategy(
+                    "ten+smart_turn"
+                ),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_llm_clients",
+                return_value={
+                    "fast": MagicMock(),
+                    "prose": MagicMock(),
+                    "background": MagicMock(),
+                },
+            ),
+            patch("familiar_connect.commands.run.create_tts_client", return_value=None),
+            patch(
+                "familiar_connect.commands.run.create_transcriber",
+                return_value=None,
+            ),
+            patch(
+                "familiar_connect.commands.run.create_local_turn_detector",
+                return_value=mock_detector,
+            ) as mock_create,
+            patch("familiar_connect.commands.run.Familiar.load_from_disk", mock_load),
+            patch("familiar_connect.commands.run.load_opus"),
+            patch(
+                "familiar_connect.commands.run._async_main",
+                new_callable=MagicMock,
+                return_value=MagicMock(name="coroutine"),
+            ),
+            patch("familiar_connect.commands.run.asyncio.run"),
+        ):
+            result = run(args)
+
+        assert result == 0
+        mock_create.assert_called_once()
+        assert mock_load.call_args.kwargs.get("local_turn_detector") is mock_detector
+
+
+# ---------------------------------------------------------------------------
+# _async_main — shutdown cleanup
+# ---------------------------------------------------------------------------
+
+
+def _fake_familiar_for_async_main() -> MagicMock:
+    """Build a Familiar mock shaped just enough for ``_async_main`` plumbing."""
+    fam = MagicMock(name="familiar")
+    fam.id = "test"
+    fam.tts_client = None
+    fam.bus = MagicMock()
+    fam.bus.start = AsyncMock()
+    fam.bus.shutdown = AsyncMock()
+    fam.router = MagicMock()
+    fam.router.shutdown = MagicMock()
+    llm = MagicMock(name="llm")
+    llm.close = AsyncMock()
+    fam.llm_clients = {"fast": llm, "prose": llm, "background": llm}
+    fam.history_store = MagicMock()
+    fam.config = MagicMock(voice_window_size=10, text_window_size=10)
+    fam.root = MagicMock()
+    return fam
+
+
+async def _hang() -> None:
+    await asyncio.sleep(60)
+
+
+@pytest.mark.filterwarnings("ignore:coroutine '_hang' was never awaited:RuntimeWarning")
+class TestAsyncMainCleanup:
+    """Pin the ``finally``-block cleanup so leaked aiohttp sessions don't return."""
+
+    @pytest.mark.asyncio
+    async def test_closes_bot_and_transcriber_on_bot_start_failure(self) -> None:
+        """``bot.start`` failure must still trigger ``bot.close`` and ``transcriber.stop``."""  # noqa: E501
+        familiar = _fake_familiar_for_async_main()
+        familiar.transcriber = MagicMock(name="transcriber")
+        familiar.transcriber.stop = AsyncMock()
+
+        bot = MagicMock(name="bot")
+        bot.start = AsyncMock(side_effect=RuntimeError("login failed"))
+        bot.close = AsyncMock()
+        handle = MagicMock(bot=bot)
+
+        proj = MagicMock(name="projector")
+        proj.run = AsyncMock(side_effect=_hang)
+        proj.name = "stub-projector"
+
+        with (
+            patch("familiar_connect.commands.run.create_bot", return_value=handle),
+            patch("familiar_connect.commands.run._default_assembler"),
+            patch(
+                "familiar_connect.commands.run._run_debug_processor",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_voice_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_text_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch("familiar_connect.commands.run.VoiceResponder"),
+            patch("familiar_connect.commands.run.TextResponder"),
+            patch(
+                "familiar_connect.commands.run.create_projectors",
+                return_value=[proj],
+            ),
+            patch("familiar_connect.commands.run.create_embedder", return_value=None),
+            pytest.raises(BaseExceptionGroup),  # TaskGroup wraps the inner raise
+        ):
+            await _async_main("fake-token", familiar)
+
+        bot.close.assert_awaited_once()
+        familiar.transcriber.stop.assert_awaited_once()
+        familiar.bus.shutdown.assert_awaited_once()
+        familiar.router.shutdown.assert_called_once()
+        # one shared mock backs all three slots — close fires per slot
+        assert familiar.llm_clients["prose"].close.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_skips_transcriber_when_none(self) -> None:
+        """No transcriber → cleanup must still close the bot, no AttributeError."""
+        familiar = _fake_familiar_for_async_main()
+        familiar.transcriber = None
+
+        bot = MagicMock(name="bot")
+        bot.start = AsyncMock(side_effect=RuntimeError("nope"))
+        bot.close = AsyncMock()
+        handle = MagicMock(bot=bot)
+
+        proj = MagicMock(name="projector")
+        proj.run = AsyncMock(side_effect=_hang)
+        proj.name = "stub-projector"
+
+        with (
+            patch("familiar_connect.commands.run.create_bot", return_value=handle),
+            patch("familiar_connect.commands.run._default_assembler"),
+            patch(
+                "familiar_connect.commands.run._run_debug_processor",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_voice_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_text_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch("familiar_connect.commands.run.VoiceResponder"),
+            patch("familiar_connect.commands.run.TextResponder"),
+            patch(
+                "familiar_connect.commands.run.create_projectors",
+                return_value=[proj],
+            ),
+            patch("familiar_connect.commands.run.create_embedder", return_value=None),
+            pytest.raises(BaseExceptionGroup),
+        ):
+            await _async_main("fake-token", familiar)
+
+        bot.close.assert_awaited_once()
+
+
+class TestDefaultAssemblerLayerOrder:
+    """Pin the system-prompt layer order for OpenAI prompt-cache friendliness.
+
+    OpenAI caches the longest matching prompt prefix; any layer that
+    changes between turns invalidates everything *after* it. The fix is
+    to place the slowest-refreshing dynamic layer first and the
+    per-turn-changing one last.
+    """
+
+    def _layer_order(self, tmp_path: Path) -> list[str]:
+        familiar = MagicMock(name="familiar")
+        familiar.root = tmp_path
+        familiar.history_store = MagicMock(name="history_store")
+        asm = _default_assembler(
+            familiar, window_size=20, budget=TierBudget(total_tokens=3000)
+        )
+        return [type(layer).__name__ for layer in asm._layers]
+
+    def test_conversation_summary_precedes_cross_channel(self, tmp_path: Path) -> None:
+        """ConvSummary refreshes every N turns; cross-channel fans across sources."""
+        order = self._layer_order(tmp_path)
+        assert order.index(ConversationSummaryLayer.__name__) < order.index(
+            CrossChannelContextLayer.__name__
+        )
+
+    def test_people_dossier_precedes_rag(self, tmp_path: Path) -> None:
+        """RAG flips every turn; dossier only on per-fact watermark advance."""
+        order = self._layer_order(tmp_path)
+        assert order.index(PeopleDossierLayer.__name__) < order.index(
+            RagContextLayer.__name__
+        )
+
+    def test_rag_is_last_system_prompt_layer(self, tmp_path: Path) -> None:
+        """RAG sits at system-prompt tail; only RecentHistory follows (in messages)."""
+        order = self._layer_order(tmp_path)
+        rag = order.index(RagContextLayer.__name__)
+        recent = order.index(RecentHistoryLayer.__name__)
+        assert rag == recent - 1
+        assert recent == len(order) - 1

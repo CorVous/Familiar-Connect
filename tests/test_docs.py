@@ -52,22 +52,8 @@ INSTALLATION_DOC = DOCS_ROOT / "getting-started" / "installation.md"
 # drift over growing these lists.
 
 #: Env vars mentioned in docs that aren't read directly by our code.
-#: Typically third-party vars we document for operator convenience,
-#: or planned-feature configuration where the read path doesn't exist yet.
-#:
-#: NOTE: ``TWITCH_CLIENT_ID`` and ``TWITCH_ACCESS_TOKEN`` are documented
-#: in ``docs/guides/twitch.md`` for the planned ``/twitch connect``
-#: slash command group, but the read path isn't wired up yet. Remove
-#: these entries once ``familiar_connect.twitch`` starts reading them
-#: from the environment.
-ENV_VAR_ALLOWLIST: frozenset[str] = frozenset({
-    "TWITCH_CLIENT_ID",
-    "TWITCH_ACCESS_TOKEN",
-    # module-level constant documented in voice-input.md as a tuning knob;
-    # not an env var — the SHOUT_CASE pattern false-positively matches it
-    # now that voice-input.md has env-context cues.
-    "DEFAULT_IDLE_FINALIZE_S",
-})
+#: Typically third-party vars we document for operator convenience.
+ENV_VAR_ALLOWLIST: frozenset[str] = frozenset()
 
 #: Markdown files under ``docs/`` that intentionally live outside the
 #: published ``mkdocs.yml`` nav (e.g. shared includes).

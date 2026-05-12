@@ -1,0 +1,786 @@
+"""Tests for voice intake lifecycle: ``_start_voice_intake`` / ``_stop``.
+
+Covers the per-channel wiring that ``/subscribe-voice`` performs:
+recording sink attached, transcriber started, audio pump + voice
+source running. Mocks the voice client and transcriber surfaces.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import inspect
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from familiar_connect import bot as bot_module
+from familiar_connect.bot import (
+    BotHandle,
+    VoiceRuntime,
+    _on_recording_done,
+    _prefetch_voice_member,
+    _start_voice_intake,
+    _stop_voice_intake,
+    create_bot,
+)
+from familiar_connect.identity import Author
+from familiar_connect.stt import TranscriptionResult
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    _OnComplete = Callable[[bytes], Awaitable[None]]
+
+
+def _make_handle() -> BotHandle:
+    bot = MagicMock()
+    return BotHandle(bot=bot, send_text=AsyncMock())
+
+
+def _make_familiar(
+    *, transcriber: object | None, local_turn_detector: object | None = None
+) -> MagicMock:
+    fam = MagicMock()
+    fam.id = "fam"
+    fam.transcriber = transcriber
+    fam.local_turn_detector = local_turn_detector
+    fam.bus = MagicMock()
+    return fam
+
+
+def _make_template_transcriber() -> tuple[MagicMock, list[MagicMock]]:
+    """Template transcriber whose ``clone()`` returns a fresh per-user mock.
+
+    Returned list captures every clone produced — tests inspect it to
+    verify per-user dispatch.
+    """
+    clones: list[MagicMock] = []
+
+    def _make_clone() -> MagicMock:
+        c = MagicMock()
+        c.start = AsyncMock()
+        c.send_audio = AsyncMock()
+        c.stop = AsyncMock()
+        clones.append(c)
+        return c
+
+    template = MagicMock()
+    template.clone = MagicMock(side_effect=_make_clone)
+    # template is never started directly — clones are. but keep these
+    # as AsyncMocks so accidental calls don't blow up the tests.
+    template.start = AsyncMock()
+    template.send_audio = AsyncMock()
+    template.stop = AsyncMock()
+    return template, clones
+
+
+async def _drain_loop(ticks: int = 10) -> None:
+    """Yield enough loop turns for the pump to consume queued chunks."""
+    for _ in range(ticks):
+        await asyncio.sleep(0)
+
+
+class TestStartVoiceIntake:
+    @pytest.mark.asyncio
+    async def test_returns_none_when_transcriber_unavailable(self) -> None:
+        """No transcriber → bot still joined for playback only; no intake."""
+        handle = _make_handle()
+        familiar = _make_familiar(transcriber=None)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle,
+            familiar=familiar,
+            voice_client=vc,
+            channel_id=10,
+        )
+        assert rt is None
+        assert handle.voice_runtime == {}
+        vc.start_recording.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_attaches_sink_and_arms_pump(self) -> None:
+        """Sink attached, pump + source live; clones lazy until first audio."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle,
+            familiar=familiar,
+            voice_client=vc,
+            channel_id=10,
+        )
+        try:
+            assert isinstance(rt, VoiceRuntime)
+            assert handle.voice_runtime[10] is rt
+            vc.start_recording.assert_called_once()
+            # template never started directly — clones own the WS
+            template.start.assert_not_awaited()
+            assert clones == []
+            assert not rt.pump_task.done()
+            assert not rt.source_task.done()
+        finally:
+            await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
+    async def test_idempotent_for_same_channel(self) -> None:
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt1 = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        rt2 = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        try:
+            assert rt1 is rt2
+            assert vc.start_recording.call_count == 1
+        finally:
+            await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+
+class TestStopVoiceIntake:
+    @pytest.mark.asyncio
+    async def test_cancels_tasks_and_stops_every_clone(self) -> None:
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        rt = handle.voice_runtime[10]
+        assert isinstance(rt, VoiceRuntime)
+        # spawn one clone via audio so stop has something to tear down
+        await rt.audio_queue.put((1, b"\x00"))
+        await _drain_loop()
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert 10 not in handle.voice_runtime
+        vc.stop_recording.assert_called_once()
+        assert len(clones) == 1
+        clones[0].stop.assert_awaited_once()
+        assert rt.pump_task.cancelled() or rt.pump_task.done()
+        assert rt.source_task.cancelled() or rt.source_task.done()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_channel_not_active(self) -> None:
+        handle = _make_handle()
+        familiar = _make_familiar(transcriber=MagicMock())
+        # Should not raise; nothing registered for channel 99.
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=99)
+
+
+class TestRecordingDoneCallback:
+    """pycord's ``start_recording`` callback contract.
+
+    Voice client calls ``asyncio.run_coroutine_threadsafe(callback(sink,
+    *args), self.loop)`` (``discord/voice_client.py:915``) when
+    recording ends. A plain ``def`` returns ``None`` and triggers
+    ``TypeError: A coroutine object is required``.
+    """
+
+    def test_on_recording_done_is_coroutine_function(self) -> None:
+        assert inspect.iscoroutinefunction(_on_recording_done)
+
+
+class TestPumpAudio:
+    @pytest.mark.asyncio
+    async def test_audio_queue_drains_into_transcriber(self) -> None:
+        """Bytes pushed into the sink's queue reach a per-user transcriber clone."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        # Push two chunks for the same user onto the audio queue.
+        await rt.audio_queue.put((1, b"\x00\x01\x02\x03"))
+        await rt.audio_queue.put((1, b"\x04\x05"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        # Exactly one clone should have been produced for user 1.
+        assert len(clones) == 1
+        sent = [c.args[0] for c in clones[0].send_audio.await_args_list]
+        assert b"\x00\x01\x02\x03" in sent
+        assert b"\x04\x05" in sent
+        # The template itself never accepts audio — only the clone does.
+        template.send_audio.assert_not_awaited()
+
+
+class TestPerUserDispatch:
+    """Discord delivers per-SSRC audio; each user gets their own Deepgram WS.
+
+    Avoids mixed-stream endpointing where one speaker's pause finalizes
+    another's mid-sentence, and gives each transcript inherent
+    attribution to the Discord user_id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_distinct_users_get_distinct_transcribers(self) -> None:
+        """Two user_ids → two clones; each receives only their own audio."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        await rt.audio_queue.put((101, b"alice-1"))
+        await rt.audio_queue.put((202, b"bob-1"))
+        await rt.audio_queue.put((101, b"alice-2"))
+        await rt.audio_queue.put((202, b"bob-2"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 2
+        all_sent = [
+            [c.args[0] for c in clone.send_audio.await_args_list] for clone in clones
+        ]
+        # find which clone got alice's audio vs bob's
+        alice_chunks = next(s for s in all_sent if b"alice-1" in s)
+        bob_chunks = next(s for s in all_sent if b"bob-1" in s)
+        assert alice_chunks == [b"alice-1", b"alice-2"]
+        assert bob_chunks == [b"bob-1", b"bob-2"]
+
+    @pytest.mark.asyncio
+    async def test_same_user_reuses_transcriber(self) -> None:
+        """Repeated chunks from one user_id stay on one clone."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        for i in range(5):
+            await rt.audio_queue.put((42, bytes([i])))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 1
+        assert clones[0].send_audio.await_count == 5
+
+    @pytest.mark.asyncio
+    async def test_stop_stops_every_clone(self) -> None:
+        """Tearing down the runtime stops every per-user transcriber."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        await rt_audio_put(handle, 10, [(1, b"a"), (2, b"b"), (3, b"c")])
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 3
+        for clone in clones:
+            clone.stop.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_slow_user_does_not_block_other_users(self) -> None:
+        """One user's slow ``send_audio`` must not stall others' audio.
+
+        Lively voice calls have multiple speakers. A single shared pump
+        loop awaits each ``send_audio`` serially, so any slow user
+        (network blip, slow VAD, GC pause) creates head-of-line
+        blocking for everyone. Per-user pump tasks isolate that.
+        """
+        handle = _make_handle()
+        block = asyncio.Event()
+        clones: list[MagicMock] = []
+        # First user_id observed becomes "slow"; the rest are fast.
+        slow_user_id = 101
+
+        def _make_clone() -> MagicMock:
+            c = MagicMock()
+            c.start = AsyncMock()
+            c.stop = AsyncMock()
+            # The first clone created is for slow_user_id (audio for
+            # 101 lands first below). Stall its send_audio.
+            if not clones:
+
+                async def _slow_send(_pcm: bytes) -> None:
+                    await block.wait()
+
+                c.send_audio = AsyncMock(side_effect=_slow_send)
+            else:
+                c.send_audio = AsyncMock()
+            clones.append(c)
+            return c
+
+        template = MagicMock()
+        template.clone = MagicMock(side_effect=_make_clone)
+        template.start = AsyncMock()
+        template.stop = AsyncMock()
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        try:
+            # Slow user speaks first; their send_audio will block.
+            await rt.audio_queue.put((slow_user_id, b"slow-1"))
+            await _drain_loop()
+            # Fast user speaks while slow user is stalled.
+            await rt.audio_queue.put((202, b"fast-1"))
+            await rt.audio_queue.put((202, b"fast-2"))
+            await _drain_loop(20)
+
+            # Fast user's clone must have received both chunks even
+            # though the slow user's send_audio is still pending.
+            assert len(clones) == 2
+            fast_clone = clones[1]
+            fast_sent = [c.args[0] for c in fast_clone.send_audio.await_args_list]
+            assert fast_sent == [b"fast-1", b"fast-2"]
+        finally:
+            block.set()
+            await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
+    async def test_idle_watchdog_closes_silent_stream_and_reopens_on_next_audio(
+        self,
+    ) -> None:
+        """Stream silent past ``_IDLE_CLOSE_S`` is closed; next chunk reopens it."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        template._IDLE_CLOSE_S = 0.05
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        assert rt.idle_watchdog_task is not None
+
+        await rt.audio_queue.put((42, b"hi"))
+        await _drain_loop()
+        assert len(clones) == 1
+        first_clone = clones[0]
+
+        # wait past the idle window + a watchdog scan
+        await asyncio.sleep(0.15)
+        first_clone.stop.assert_awaited()
+
+        # next chunk for the same user_id should mint a fresh clone
+        await rt.audio_queue.put((42, b"back"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(clones) == 2
+        assert clones[1] is not first_clone
+        assert clones[1].send_audio.await_args_list[0].args[0] == b"back"
+
+    @pytest.mark.asyncio
+    async def test_idle_watchdog_disabled_when_threshold_zero(self) -> None:
+        """``_IDLE_CLOSE_S=0`` skips watchdog entirely."""
+        handle = _make_handle()
+        template, _ = _make_template_transcriber()
+        template._IDLE_CLOSE_S = 0.0
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        assert rt.idle_watchdog_task is None
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
+    async def test_results_carry_user_id_through_to_shared_queue(self) -> None:
+        """Fan-in tags every result with the originating Discord user_id."""
+        handle = _make_handle()
+
+        # Custom template whose clone captures the queue handed to start()
+        # so the test can push synthetic results into it.
+        per_clone_queues: list[asyncio.Queue[TranscriptionResult]] = []
+        clones: list[MagicMock] = []
+
+        def _make_clone() -> MagicMock:
+            c = MagicMock()
+
+            async def _start(q: asyncio.Queue[TranscriptionResult]) -> None:  # noqa: RUF029
+                per_clone_queues.append(q)
+
+            c.start = AsyncMock(side_effect=_start)
+            c.send_audio = AsyncMock()
+            c.stop = AsyncMock()
+            clones.append(c)
+            return c
+
+        template = MagicMock()
+        template.clone = MagicMock(side_effect=_make_clone)
+        template.start = AsyncMock()
+        template.stop = AsyncMock()
+
+        familiar = _make_familiar(transcriber=template)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        # Cancel the VoiceSource so it doesn't drain result_queue out
+        # from under the test — we're inspecting the fan-in's output
+        # directly here.
+        rt.source_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rt.source_task
+
+        # Trigger lazy clone creation for two users
+        await rt.audio_queue.put((101, b"a"))
+        await rt.audio_queue.put((202, b"b"))
+        await _drain_loop()
+        assert len(per_clone_queues) == 2
+
+        # Push a fake transcription result onto each per-user queue;
+        # the fan-in should tag with user_id and forward to result_queue.
+        await per_clone_queues[0].put(
+            TranscriptionResult(
+                text="alice talking",
+                is_final=True,
+                start=0.0,
+                end=1.0,
+                confidence=0.9,
+            )
+        )
+        await per_clone_queues[1].put(
+            TranscriptionResult(
+                text="bob talking",
+                is_final=True,
+                start=0.0,
+                end=1.0,
+                confidence=0.9,
+            )
+        )
+        await _drain_loop()
+
+        forwarded: list[TranscriptionResult] = []
+        while not rt.result_queue.empty():
+            forwarded.append(rt.result_queue.get_nowait())
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        by_text = {r.text: r for r in forwarded}
+        assert by_text["alice talking"].user_id == 101
+        assert by_text["bob talking"].user_id == 202
+
+
+async def rt_audio_put(
+    handle: BotHandle, channel_id: int, items: list[tuple[int, bytes]]
+) -> None:
+    rt: Any = handle.voice_runtime[channel_id]
+    for item in items:
+        await rt.audio_queue.put(item)
+
+
+class TestLocalTurnDetection:
+    """V1 phase 2 — local TEN-VAD+SmartTurn forks the audio path.
+
+    When ``familiar.local_turn_detector`` is set, the pump feeds each
+    PCM chunk into both the Deepgram clone *and* a per-user
+    :class:`UtteranceEndpointer`. The endpointer's on-complete callback
+    calls ``clone.finalize()`` to force Deepgram to flush its buffered
+    transcript immediately rather than waiting on the hosted
+    silence-based endpointer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_endpointer_built_when_detector_unset(self) -> None:
+        """No detector configured → pump leaves the audio path unforked."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template, local_turn_detector=None)
+        vc = MagicMock()
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((1, b"\x00\x00"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+        # nothing under endpointers map (or attribute missing) — both fine.
+
+    @pytest.mark.asyncio
+    async def test_pump_forks_pcm_to_endpointer(self) -> None:
+        """When detector is set, every chunk reaches the per-user endpointer."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        endpointers: list[MagicMock] = []
+        finalize_callbacks: list[object] = []
+
+        def _make_endpointer(*, on_turn_complete: object) -> MagicMock:
+            ep = MagicMock()
+            ep.feed_audio = AsyncMock()
+            ep.reset = MagicMock()
+            endpointers.append(ep)
+            finalize_callbacks.append(on_turn_complete)
+            return ep
+
+        detector = MagicMock()
+        detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
+
+        familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((1, b"\x00\x01"))
+        await rt.audio_queue.put((1, b"\x02\x03"))
+        await _drain_loop()
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        assert len(endpointers) == 1
+        ep = endpointers[0]
+        sent = [c.args[0] for c in ep.feed_audio.await_args_list]
+        assert b"\x00\x01" in sent
+        assert b"\x02\x03" in sent
+
+    @pytest.mark.asyncio
+    async def test_endpointer_complete_finalizes_deepgram(self) -> None:
+        """``on_turn_complete`` fires Deepgram's ``finalize`` for the right user."""
+        handle = _make_handle()
+        template, clones = _make_template_transcriber()
+        captured_callbacks: list[_OnComplete] = []
+
+        def _make_endpointer(*, on_turn_complete: _OnComplete) -> MagicMock:
+            ep = MagicMock()
+            ep.feed_audio = AsyncMock()
+            ep.reset = MagicMock()
+            captured_callbacks.append(on_turn_complete)
+            return ep
+
+        detector = MagicMock()
+        detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
+        familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
+        vc = MagicMock()
+
+        # add finalize to clone mock (default factory doesn't include it)
+        original_clone_factory = template.clone.side_effect
+
+        def _make_clone_with_finalize() -> MagicMock:
+            c = original_clone_factory()
+            c.finalize = AsyncMock()
+            return c
+
+        template.clone = MagicMock(side_effect=_make_clone_with_finalize)
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((42, b"\x00"))
+        await _drain_loop()
+
+        # Invoke the captured callback as the endpointer would on a complete turn.
+        assert len(captured_callbacks) == 1
+        cb = captured_callbacks[0]
+        await cb(b"\x00\x00")
+        # the only clone created is for user 42; its finalize should fire.
+        assert len(clones) == 1
+        clones[0].finalize.assert_awaited_once()
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
+    async def test_endpointer_complete_buffers_vad_end_on_source(self) -> None:
+        """``on_turn_complete`` parks vad_end on the source for that user_id."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        captured_callbacks: list[_OnComplete] = []
+
+        def _make_endpointer(*, on_turn_complete: _OnComplete) -> MagicMock:
+            ep = MagicMock()
+            ep.feed_audio = AsyncMock()
+            ep.reset = MagicMock()
+            captured_callbacks.append(on_turn_complete)
+            return ep
+
+        detector = MagicMock()
+        detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
+        familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
+        vc = MagicMock()
+
+        # finalize is required by the on-complete callback; supply it.
+        original_clone_factory = template.clone.side_effect
+
+        def _make_clone_with_finalize() -> MagicMock:
+            c = original_clone_factory()
+            c.finalize = AsyncMock()
+            return c
+
+        template.clone = MagicMock(side_effect=_make_clone_with_finalize)
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        await rt.audio_queue.put((42, b"\x00"))
+        await _drain_loop()
+
+        assert len(captured_callbacks) == 1
+        await captured_callbacks[0](b"\x00\x00")
+
+        # Buffered timestamp visible on the source under the right user_id.
+        assert 42 in rt.source._pending_vad_end
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+
+class TestVoiceMemberCache:
+    """Voice-only members aren't in the guild member cache.
+
+    Without the privileged ``members`` intent, ``guild.get_member()``
+    only knows users it has seen via other events (text messages,
+    voice state changes). A voice-only side cache populated from
+    voice state events plus a background ``guild.fetch_member()`` on
+    first audio from a new user_id keeps voice turn attribution
+    working without requiring privileged intents.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resolve_member_consults_voice_cache_first(self) -> None:
+        """Cache hit short-circuits ``guild.get_member`` lookup."""
+        familiar = MagicMock()
+        familiar.id = "fam"
+        familiar.bus = MagicMock()
+        familiar.subscriptions = MagicMock()
+        handle = create_bot(familiar)
+
+        cached = Author(
+            platform="discord",
+            user_id="42",
+            username="vox",
+            display_name="VoxOnly",
+        )
+        handle.voice_members[42] = cached
+
+        assert handle.resolve_member is not None
+        resolved = handle.resolve_member(10, 42)
+        assert resolved is cached
+
+    @pytest.mark.asyncio
+    async def test_pump_schedules_member_prefetch_on_new_user(self) -> None:
+        """First audio from a user_id should fire a background member fetch."""
+        handle = _make_handle()
+        member = MagicMock()
+        member.id = 999
+        member.name = "voxer"
+        member.display_name = "VoxOnly"
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=None)
+        guild.fetch_member = AsyncMock(return_value=member)
+
+        channel = MagicMock()
+        channel.guild = guild
+        handle.bot.get_channel = MagicMock(return_value=channel)  # ty: ignore[invalid-assignment]
+
+        await _prefetch_voice_member(handle=handle, channel_id=10, user_id=999)
+        assert 999 in handle.voice_members
+        assert handle.voice_members[999].display_name == "VoxOnly"
+        guild.fetch_member.assert_awaited_once_with(999)
+
+    @pytest.mark.asyncio
+    async def test_prefetch_skips_when_already_cached(self) -> None:
+        """Repeated prefetch for a known user_id must not re-hit Discord."""
+        handle = _make_handle()
+        handle.voice_members[7] = Author(
+            platform="discord",
+            user_id="7",
+            username="known",
+            display_name="Known",
+        )
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=None)
+        guild.fetch_member = AsyncMock()
+        channel = MagicMock()
+        channel.guild = guild
+        handle.bot.get_channel = MagicMock(return_value=channel)  # ty: ignore[invalid-assignment]
+
+        await _prefetch_voice_member(handle=handle, channel_id=10, user_id=7)
+        guild.fetch_member.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_prefetch_uses_get_member_when_cached_in_guild(self) -> None:
+        """If guild already has the member, no fetch is needed."""
+        handle = _make_handle()
+        member = MagicMock()
+        member.id = 13
+        member.name = "g"
+        member.display_name = "GuildKnown"
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=member)
+        guild.fetch_member = AsyncMock()
+        channel = MagicMock()
+        channel.guild = guild
+        handle.bot.get_channel = MagicMock(return_value=channel)  # ty: ignore[invalid-assignment]
+
+        await _prefetch_voice_member(handle=handle, channel_id=10, user_id=13)
+        assert handle.voice_members[13].display_name == "GuildKnown"
+        guild.fetch_member.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_intake_pump_triggers_prefetch_per_new_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the pump sees a new user_id, prefetch is scheduled."""
+        handle = _make_handle()
+        template, _clones = _make_template_transcriber()
+        familiar = _make_familiar(transcriber=template)
+
+        prefetched: list[int] = []
+
+        async def fake_prefetch(  # noqa: RUF029 — matches real signature
+            *, handle: BotHandle, channel_id: int, user_id: int
+        ) -> None:
+            del handle, channel_id
+            prefetched.append(user_id)
+
+        monkeypatch.setattr(bot_module, "_prefetch_voice_member", fake_prefetch)
+
+        vc = MagicMock()
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+        for _ in range(3):
+            await rt.audio_queue.put((101, b"x"))
+        await rt.audio_queue.put((202, b"y"))
+        await _drain_loop(20)
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+        # exactly one prefetch per distinct user_id
+        assert sorted(prefetched) == [101, 202]

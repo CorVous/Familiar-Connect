@@ -78,7 +78,11 @@ _TAG_RE = re.compile(r"^\x1b\[\d+m\[\x1b\[\d+m([^\x1b]+)\x1b\[\d+m\]\x1b\[0m")
 
 
 class StyledFormatter(logging.Formatter):
-    """Repaint leading tag + append level label for WARNING/ERROR; DEBUG prefix kept."""
+    """Repaint leading tag + append level label for WARNING/ERROR; DEBUG prefix kept.
+
+    Preserves stdlib behavior of appending exception/stack traces — without
+    this, `_logger.exception(...)` would silently drop the traceback.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         msg = record.getMessage()
@@ -91,7 +95,20 @@ class StyledFormatter(logging.Formatter):
                 msg,
                 count=1,
             )
-            return new_msg if n else f"{color}{label}{RS}: {msg}"
-        if lvl == logging.DEBUG:
-            return f"{LW}DEBUG{RS}: {msg}"
-        return msg
+            out = new_msg if n else f"{color}{label}{RS}: {msg}"
+        elif lvl == logging.DEBUG:
+            out = f"{LW}DEBUG{RS}: {msg}"
+        else:
+            out = msg
+        # mirror logging.Formatter: append exc_info / stack_info if present
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            if not out.endswith("\n"):
+                out += "\n"
+            out += record.exc_text
+        if record.stack_info:
+            if not out.endswith("\n"):
+                out += "\n"
+            out += self.formatStack(record.stack_info)
+        return out

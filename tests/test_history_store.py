@@ -20,7 +20,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from familiar_connect.config import ChannelMode
 from familiar_connect.history.store import (
     HistoryStore,
     HistoryTurn,
@@ -602,7 +601,7 @@ class TestModeColumn:
             familiar_id=_FAMILIAR,
             role="user",
             content="hello",
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
         # Verify via raw SQL that the mode column exists and has the right value.
         row = s._conn.execute(
@@ -633,28 +632,28 @@ class TestModeColumn:
             familiar_id=_FAMILIAR,
             role="user",
             content="rp turn",
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
         s.append_turn(
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
             content="voice turn",
-            mode=ChannelMode.imitate_voice,
+            mode="imitate_voice",
         )
         s.append_turn(
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
             content="another rp",
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
 
         rp_turns = s.recent(
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             limit=10,
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
         assert [t.content for t in rp_turns] == ["rp turn", "another rp"]
 
@@ -662,7 +661,7 @@ class TestModeColumn:
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             limit=10,
-            mode=ChannelMode.imitate_voice,
+            mode="imitate_voice",
         )
         assert [t.content for t in voice_turns] == ["voice turn"]
 
@@ -739,7 +738,7 @@ class TestModeColumn:
             role="user",
             content="new turn",
             author=_ALICE,
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
         row = s._conn.execute(
             "SELECT mode, author_platform FROM turns WHERE content = 'new turn'"
@@ -755,14 +754,14 @@ class TestModeColumn:
             familiar_id=_FAMILIAR,
             role="user",
             content="rp",
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
         s.append_turn(
             channel_id=_CHANNEL,
             familiar_id=_FAMILIAR,
             role="user",
             content="voice",
-            mode=ChannelMode.imitate_voice,
+            mode="imitate_voice",
         )
         turns = s.recent(
             channel_id=_CHANNEL,
@@ -871,21 +870,21 @@ class TestDistinctOtherChannels:
             familiar_id=_FAMILIAR,
             role="user",
             content="a",
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
         s.append_turn(
             channel_id=200,
             familiar_id=_FAMILIAR,
             role="user",
             content="b",
-            mode=ChannelMode.text_conversation_rp,
+            mode="text_conversation_rp",
         )
         s.append_turn(
             channel_id=300,
             familiar_id=_FAMILIAR,
             role="user",
             content="c",
-            mode=ChannelMode.imitate_voice,
+            mode="imitate_voice",
         )
         others = s.distinct_other_channels(
             familiar_id=_FAMILIAR,
@@ -905,7 +904,7 @@ class TestDistinctOtherChannels:
             familiar_id=_FAMILIAR,
             role="user",
             content="only",
-            mode=ChannelMode.full_rp,
+            mode="full_rp",
         )
         others = s.distinct_other_channels(
             familiar_id=_FAMILIAR,

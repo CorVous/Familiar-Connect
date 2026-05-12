@@ -1,229 +1,879 @@
-# Context Pipeline
+# Context pipeline
 
-The context pipeline is the single path between "something happened" and "call the LLM" for both text and voice. Providers assemble contributions concurrently, a budgeter packs them into layered system-prompt slots, the LLM is called, and post-processors run over the reply before it reaches TTS or Discord.
+How a user turn becomes a system-prompt sent to the LLM, and how
+side-indices are kept in sync with the raw source of truth.
 
-!!! success "Status: Implemented"
-    Steps 1–10 below have all shipped. The pipeline, memory store, character unpacker, lorebook importer, providers (`CharacterProvider`, `HistoryProvider`, `ContentSearchProvider`), and both initial processors (`SteppedThinkingPreProcessor`, `RecastPostProcessor`) are in place and individually toggleable per familiar and per modality.
+## Source of truth vs side-indices
 
-    **Still deferred:** the per-turn monitoring dashboard, a `/context` slash command that shows the last assembled context, and a `familiar init --from-card` subcommand. See [Roadmap](../roadmap/index.md).
-
-## Shape of one reply turn
+The `turns` table in `data/familiars/<id>/history.db` is the durable,
+append-only source of truth. Every derived artifact — summaries, FTS
+index, cross-channel briefings — lives in the same SQLite database but
+is **regenerable from `turns` alone**. Deleting any side-index row (or
+the whole table) is safe; the next worker tick rebuilds it.
 
 ```mermaid
 flowchart TB
-    req([ContextRequest<br/>author + utterance + modality + deadline])
-    req --> tg
-
-    subgraph tg[asyncio.TaskGroup - providers run in parallel]
-        direction LR
-        char[CharacterProvider<br/>self/*.md]
-        hist[HistoryProvider<br/>recent + summary]
-        content[ContentSearchProvider<br/>agentic grep/read]
+    subgraph SoT["Source of truth"]
+        turns[(turns)]
     end
 
-    tg --> contribs([list of Contribution<br/>layer + priority + text + tokens])
-    contribs --> budget[Budgeter.fill<br/>pack by priority, truncate tail]
-    budget --> pre[Pre-processors<br/>SteppedThinkingPreProcessor, ...]
-    pre --> llm[OpenRouter<br/>streaming completion]
-    llm --> post[Post-processors<br/>RecastPostProcessor, ...]
-    post --> out([Reply → TTS / Discord<br/>+ HistoryStore write])
+    subgraph Indices["Side-indices (regenerable)"]
+        summaries[(summaries)]
+        cross[(cross_context_summaries)]
+        fts[(fts_turns FTS5)]
+        facts[(facts)]
+        fts_facts[(fts_facts FTS5)]
+        dossiers[(people_dossiers)]
+        reflections[(reflections)]
+    end
 
-    classDef phase fill:#f4ecff,stroke:#6a1b9a;
-    class budget,pre,llm,post phase;
+    turns -->|trigger| fts
+    turns -->|SummaryWorker| summaries
+    turns -->|SummaryWorker| cross
+    turns -->|FactExtractor| facts
+    facts -->|FactSupersedeWorker| facts
+    facts -->|trigger| fts_facts
+    facts -->|PeopleDossierWorker| dossiers
+    turns -->|ReflectionWorker| reflections
+    facts -->|ReflectionWorker| reflections
+
+    subgraph Assembler[Prompt assembly]
+        core[CoreInstructionsLayer]
+        card[CharacterCardLayer]
+        mode[OperatingModeLayer]
+        lore[LorebookLayer]
+        xc[CrossChannelContextLayer]
+        sum[ConversationSummaryLayer]
+        ref[ReflectionLayer]
+        ppl[PeopleDossierLayer]
+        rag[RagContextLayer]
+        hist[RecentHistoryLayer]
+    end
+
+    cross --> xc
+    summaries --> sum
+    dossiers --> ppl
+    reflections --> ref
+    fts --> rag
+    fts_facts --> rag
+    turns --> hist
+    turns --> ppl
 ```
 
-Every provider runs with its own `asyncio.timeout`; a straggler past
-its deadline is dropped and logged, not awaited, so no single slow
-provider can stall the reply. A failing provider is caught and logged
-too — the rest of the pipeline carries on with whatever contributions
-did return.
+## Layers
 
-## Working assumptions
+Each layer implements a narrow Protocol:
 
-- **Concurrency: `asyncio` + `asyncio.TaskGroup`** throughout.
-- **No new long-running dependencies** (no vector DB, no memory daemon, no MCP sidecar for our own memory).
-- **No third-party state services** (no mem0, no Zep, no hosted vector DB, no OpenAI embeddings in the first pass).
-- **Memory source of truth is the per-familiar plain-text directory.** See [Memory](memory.md).
-- **Providers and processors are registered in code.** No plugin discovery, no dynamic loading.
-- **Single operator, one active familiar per process.** Multiple character folders may coexist under `data/familiars/<id>/`, but exactly one is active at a time (selected by `FAMILIAR_ID`). See [Configuration model](configuration-model.md).
+```python
+class Layer(Protocol):
+    name: str
 
----
-
-## 1. Protocols, dataclasses, and the pipeline
-
-Package: `familiar_connect.context`.
-
-- `context/types.py` — `ContextRequest`, `Contribution`, `Layer` enum, `Modality` enum.
-- `context/protocols.py` — `ContextProvider`, `PreProcessor`, `PostProcessor`.
-- `context/pipeline.py` — `ContextPipeline` orchestrator.
-
-Shapes:
-
-- **`ContextRequest`** — triggering event, `familiar_id`, originating `channel_id`, originating `guild_id` (observability only), `author: Author | None` (see [Identity model](configuration-model.md#identity-model)), utterance, `Modality` (`"voice"` or `"text"`), target token budget, and a deadline.
-- **`Contribution`** — `layer: Layer`, `priority: int`, `text: str`, `estimated_tokens: int`, `source: str`.
-- **`Layer` enum** — `core`, `character`, `content`, `history_summary`, `recent_history`, `author_note`, `depth_inject`.
-- **`ContextProvider`** — `Protocol` with `async def contribute(request: ContextRequest) -> list[Contribution]`.
-- **`PreProcessor` / `PostProcessor`** — `Protocol`s with `async def process(...)`.
-- **`ContextPipeline.run(request)`** — opens an `asyncio.TaskGroup`, spawns every enabled provider with the per-provider deadline via `asyncio.timeout`, collects contributions, hands them to the budgeter, calls the LLM, and then runs post-processors over the reply.
-
-Guarantees:
-
-- Slow providers past their deadline are dropped with a logged warning; the pipeline never stalls on one straggler.
-- A failing provider does not poison other providers — the pipeline catches, logs, and continues.
-- Pre-processors run in registration order; post-processors run in reverse registration order (so they wrap symmetrically).
-- Modality on the request reaches each provider, so providers can branch on it.
-
-## 2. Token budgeter
-
-Module: `familiar_connect.context.budget`.
-
-- Wraps `tiktoken` for OpenAI-family models and falls back to a character-count heuristic for non-OpenAI models.
-- `Budgeter.fill(layers, contributions, budget_by_layer)` walks contributions in priority order, assigns them to layers, truncates from the lowest-priority end when a layer's budget is exceeded, and emits a structured log entry for any dropped or truncated content.
-- Truncation prefers sentence boundaries, falls back to whitespace, and finally to a hard slice.
-
-A typical allocation for an 8k-token request budget, with the default
-providers enabled, looks like this (numbers illustrative — the
-per-layer budget is configurable per familiar):
-
-```mermaid
----
-config:
-  sankey:
-    showValues: false
----
-sankey-beta
-Request budget,Character,1500
-Request budget,Recent history,2500
-Request budget,History summary,800
-Request budget,Content search,1500
-Request budget,Stepped thinking,500
-Request budget,Reserved for completion,1200
+    async def build(self, ctx: AssemblyContext) -> str: ...
+    def invalidation_key(self, ctx: AssemblyContext) -> str: ...
 ```
 
-Layers on the right are filled highest-priority first. If a layer
-overflows its slot, the lowest-priority contribution in that layer is
-truncated or dropped, and the drop is logged with enough metadata that
-`/context` (when it ships) can show "this turn dropped the rolling
-summary because recent-history overflowed."
+`build` returns the layer's text contribution (empty string opts out).
+`invalidation_key` is a short string; the `Assembler` memoises
+`build` results keyed on `(layer.name, invalidation_key)`. Two
+`assemble` calls with the same context re-run `build` only for layers
+whose key has changed.
 
-## 3. `MemoryStore`
+### Static, file-sourced
 
-Module: `familiar_connect.memory.store`. Covered in detail on the [Memory](memory.md) page — this is the single piece of new infrastructure the agentic-search design adds.
+| Layer | Source | Invalidation |
+|---|---|---|
+| `CoreInstructionsLayer` | `data/familiars/_default/core_instructions.md` | BLAKE2b content hash — catches sub-second edits |
+| `CharacterCardLayer` | `data/familiars/<id>/character.md` (optional sidecar) | BLAKE2b content hash |
+| `OperatingModeLayer` | in-memory `modes` dict, keyed on `viewer_mode` | `viewer_mode` |
+| `LorebookLayer` | `data/familiars/<id>/lorebook.toml` (optional) | file content hash + matched entry indices |
 
-## 4. Character-card unpacker
+### Dynamic
 
-Module: `familiar_connect.bootstrap.unpack_character`.
+| Layer | Source | Invalidation |
+|---|---|---|
+| `ConversationSummaryLayer` | `summaries` table | `ch<id>:wm<last_summarised_id>` |
+| `CrossChannelContextLayer` | `cross_context_summaries` table, per-viewer map | `<source>:wm<source_last_id>` concatenated |
+| `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions` | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
+| `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
+| `RagContextLayer` | `fts_turns` + `fts_facts` FTS5 search | `(current_cue, latest_fts_id, latest_fact_id)` |
+| `RecentHistoryLayer` | `turns.recent(channel_id, window_size)` | not cached — it *is* the query |
 
-On familiar creation, the unpacker reads a Character Card V3 and writes one Markdown file per field into `memory/self/` (`description.md`, `personality.md`, `scenario.md`, `first_mes.md`, `mes_example.md`, `system_prompt.md`, `post_history_instructions.md`). The original card bytes are preserved alongside as `self/.original.png` so a future unpacker revision can re-run against the source.
+The `recent_history` layer does not contribute to the system prompt.
+It populates the `recent_history` list on `AssembledPrompt`, which
+the responder appends as `Message` objects.
 
-Idempotent: re-unpacking the same card is a no-op; re-unpacking a *different* card errors unless `overwrite=True` is passed.
+## Watermark-driven workers
 
-See the [Bootstrapping guide](../guides/bootstrapping.md) for usage.
+### `SummaryWorker`
 
-## 5. `CharacterProvider`
+Runs as a background task on a `tick_interval_s` (default 5s). Per
+tick:
 
-Module: `familiar_connect.context.providers.character`.
+1. **Per-channel rolling summary** — for each channel with turns,
+   compare `latest_id` to `summaries.last_summarised_id`. If the gap
+   is `>= turns_threshold` (default 10), build a prompt with
+   `(prior summary, new turns since watermark)`, call `LLMClient.chat`,
+   write the result to `summaries`.
+2. **Cross-channel summary** — for each `(viewer_channel, source)`
+   pair in `cross_channel_map`, compare `source.latest_id` to
+   `cross_context_summaries.source_last_id`. If the gap is `>= cross_k`
+   (default 5), build a briefing-style prompt with
+   `(prior summary, new turns in source)` and write to
+   `cross_context_summaries`.
 
-Reads `self/*.md` from the familiar's `MemoryStore` and emits one or more `Contribution(layer=Layer.character, priority=HIGH)` entries. Always on — a familiar with no character is not a bot. No LLM calls; pure filesystem read.
+Both strategies compound: new summaries are built on top of prior
+ones rather than recomputed from raw turns each time. This keeps
+token cost bounded; a periodic full recompute (every *M* compounding
+cycles) is reserved for a later refinement once drift data shows
+it's needed.
 
-## 6. `HistoryProvider`
+### FTS5 triggers
 
-Module: `familiar_connect.context.providers.history`.
+`fts_turns` is a contentless FTS5 virtual table over `turns.content`,
+kept in sync by SQLite triggers:
 
-Reads from the existing text/voice history store and emits two contributions per call:
+- `turns_ai_fts` — after insert on `turns`, insert into `fts_turns`.
+- `turns_ad_fts` — after delete, remove.
+- `turns_au_fts` — after update, delete+insert.
 
-- The last N turns verbatim (`Layer.recent_history`, high priority).
-- A `Layer.history_summary` contribution built from older turns via the `history_summary` LLM slot.
+No worker loop; writes are synchronous with `HistoryStore.append_turn`.
+`HistoryStore.rebuild_fts()` drops and repopulates the index from
+`turns` — useful if triggers ever desync.
 
-Summaries are cached in SQLite keyed by `(familiar_id, last_summarised_id)` — global per familiar, regardless of which channel each older turn happened in — so they are only regenerated when new turns have actually been added to the familiar's history. The recent rolling window is partitioned per channel; the rolling summary is global per familiar. Compression target is roughly 10:1.
+`fts_facts` mirrors the pattern over `facts.text` with
+`facts_ai_fts` / `facts_ad_fts` triggers. Only insert + delete are
+needed — fact `text` is never rewritten in place (supersession adds
+a new row and marks the old one stale; see [Fact discipline](#fact-discipline-supersession-and-self-capability)
+below).
 
-**Background refresh.** The summariser runs off the critical path. On a cache miss (or stale cache), `contribute()` returns the current cache contents immediately — empty on the very first turn, or the previous summary if one exists — and schedules a background `asyncio.Task` to rebuild the summary. The fresh value lands in the cache and is picked up on the next turn. Concurrent refreshes for the same target watermark dedupe to a single task. Same pattern applies to cross-context "meanwhile elsewhere" summaries. A first-turn user sees only the recent-history layer; from turn two onwards the summary layer is populated. This trades one turn of freshness for keeping the 8+ s summariser cost out of every reply's latency.
+### `FactExtractor`
 
-## 7. Wiring: single-character install, subscriptions, channel configs
+Watermark-driven off `memory_writer_watermark`. Every
+`tick_interval_s` (default 15 s), `turns_since_watermark(limit=batch_size)`
+returns up to `batch_size` un-processed turns; if fewer than
+`batch_size` are available the tick is a no-op (wait for more).
+Otherwise a single LLM call extracts a JSON list of
+`{text, source_turn_ids}` facts, which are persisted with provenance
+pointing back to the originating turn ids. The watermark advances to
+the last processed turn id **whether or not** extraction produced
+any facts — otherwise a malformed response would stall the worker on
+the same batch forever.
 
-Delivered in one commit on top of step 10:
+A post-extraction filter drops self-capability "facts" (e.g.,
+`I cannot remember names`, `the assistant has no internet access`)
+before they hit the store. See [Fact discipline](#fact-discipline-supersession-and-self-capability)
+for the rationale.
 
-- **`familiar_connect.config`** — `CharacterConfig`, `ChannelConfig`, `ChannelMode` enum, `channel_config_for_mode` defaults table, TOML loaders via stdlib `tomllib`.
-- **`familiar_connect.subscriptions`** — `SubscriptionRegistry` persisted to `data/familiars/<id>/subscriptions.toml`. Replaced the old single-slot `text_session` registry.
-- **`familiar_connect.channel_config`** — `ChannelConfigStore` with lazy per-channel TOML sidecars under `data/familiars/<id>/channels/`.
-- **`familiar_connect.context.render`** — `assemble_chat_messages` owns the SillyTavern-accurate `Layer.depth_inject` placement (insert at position-from-end of the full chat list, clamped to after the system prompt).
-- **`familiar_connect.familiar`** — `Familiar` dataclass bundles config, memory store, history store, per-slot `LLMClient`s (keyed by slot name), providers, processors, subscriptions, and channel configs. `Familiar.load_from_disk` is the sole constructor. `Familiar.build_pipeline(channel_config)` filters registered providers/processors per channel mode.
-- **`bot.py`** — `/awaken` and `/sleep` are gone; `/subscribe-text`, `/unsubscribe-text`, `/subscribe-my-voice`, `/unsubscribe-voice`, `/channel-full-rp`, `/channel-text-conversation-rp`, and `/channel-imitate-voice` replaced them. `on_message` routes every subscribed message through the pipeline, runs post-processors, and persists both turns to `HistoryStore`. Text and voice responses stay on their own modality — only the voice path drives TTS.
-- **`commands/run.py`** — selects the active familiar via `FAMILIAR_ID` env var (or `--familiar` flag), builds the `Familiar` bundle from disk, and hands it to `create_bot`.
-- **`ContextPipeline`** gained a `post_processors` parameter and a `run_post_processors` method; the bot calls it on the main LLM reply before TTS/history. Processors run in reverse registration order; a processor that raises is caught and its stage skipped.
-- **Schema break** — `owner_user_id` has been dropped from `ContextRequest`, `HistoryStore`, and every call site. Existing `history.db` files need to be deleted before running this branch.
-- **`text_session.py`** was deleted. History lives in `HistoryStore`; session state lives in `SubscriptionRegistry`.
+### `FactSupersedeWorker`
 
-## 8. `ContentSearchProvider`
+Retires prior facts replaced by newer ones about the same subject. Watermark-driven off `facts.id`. Ticks every `tick_interval_s` (default 60 s) — much slower than `FactExtractor` since supersession isn't latency-critical and adds one LLM call per new fact.
 
-Module: `familiar_connect.context.providers.content_search`.
+Per tick:
 
-A multi-tier provider scoped to a single familiar's `MemoryStore`. Each `contribute()` call runs the tiers in order and returns all emitted Contributions.
+1. `recent_facts(familiar_id, include_superseded=False)` returns up to `batch_size` (default 5) current facts. Facts newer than the internal watermark are evaluated oldest-first.
+2. For each new fact, for each of its subjects, pull prior current facts for that subject (capped at `priors_max`, default 20). Ask the LLM which priors the new fact contradicts or directly replaces.
+3. Call `supersede_fact(old_id, new_id)` for each retired id. Already-superseded priors (retired by an earlier subject in the same tick) are skipped silently.
+4. Advance the watermark to the highest fact id seen this tick — even on bad LLM output, preventing a loop on a fact the model can't parse.
 
-### Tier 1 — Deterministic people lookup
+Facts without subjects are skipped (the `FactExtractor` must have resolved at least one `canonical_key` for a fact to be eligible). Logs one line per tick only when retirements occur: `[Supersede] evaluated=<n> retired=<n> watermark=<id>`.
 
-No LLM involvement. Runs first. For every `contribute()` call, loads `people/<slug>.md` for each author in a priority-ordered set, deduplicated and preserved head-first under budget pressure:
+### `PeopleDossierWorker`
 
-1. **Speaker** — `request.author`, the most recent user to respond.
-2. **Pending-turn batch** — every distinct author in `request.pending_turns` (the buffered messages being responded to).
-3. **Recent channel participants** — the 5 most-recently-seen distinct users in the channel, fetched via `HistoryStore.recent_distinct_authors`. Tunable via `ContentSearchProvider(recent_author_limit=...)`.
-4. **Utterance mentions** — tokenize the utterance (single words, capitalized mid-sentence words, hyphenated phrases) and resolve each candidate against `people/_aliases.json` — the writer-maintained `{ "lowercased-name": "author-slug" }` index — then load the mapped canonical file.
+Compounds per-person summaries off the facts watermark. Same shape as
+`SummaryWorker` (compound prior + new evidence with one LLM call) but
+keyed by `canonical_key` instead of `channel_id`. Cadence is
+intentionally a quarter of `SummaryWorker`'s tick (`tick_interval_s = 20 s`):
+people-level evidence churns slower than turn-by-turn summaries, and
+the read path (`PeopleDossierLayer`) is a cheap SQLite lookup that
+doesn't wait on the worker.
 
-Each loaded file is truncated to ~800 tokens. When the combined total exceeds `content_cap_tokens`, tail files are dropped in that same order — the speaker always survives, pending-batch and recent-history authors survive ahead of mere utterance mentions. Emitted at priority 85 with source `content_search.people`.
+Per tick:
 
-This tier is the correctness floor — the people-file guarantee documented in [Memory → People lookup guarantee](memory.md#people-lookup-guarantee). It runs regardless of whether the agent-loop tier succeeds, fails, or returns empty.
+1. `subjects_with_facts(familiar_id)` returns
+   `{canonical_key: max(facts.id)}` across non-superseded facts whose
+   `subjects_json` lists each key.
+2. For each subject, compare against its `people_dossiers.last_fact_id`
+   watermark. Skip when nothing is new.
+3. `facts_for_subject(canonical_key, min_id_exclusive=watermark)`
+   pulls the new evidence; the worker feeds prior dossier + new facts
+   to the LLM and writes the result back with the updated watermark.
 
-### Tier 2 — Embedding retrieval
+Empty LLM replies are dropped — a blank response must not blow away
+an existing dossier. Subjects whose only facts are superseded
+disappear from the candidate set; the dossier row stays put.
 
-Optional semantic retrieval over the SQLite embedding cache (see [Memory → Derived indices](memory.md#derived-indices)). Embeds the utterance via `fastembed` / ONNX and returns the top-K chunks by cosine similarity. Chunks whose `rel_path` was already loaded by tier 1 are excluded so the filter doesn't see duplicates.
+### `ReflectionWorker`
 
-The embedding index is built (or refreshed) as a fire-and-forget background task on the first `contribute()` call. A stale or missing index returns `[]` — tier 1 is the correctness floor.
+Writes higher-order syntheses over recent turns + facts (M3). Ticks
+every `tick_interval_s` (default 60 s) — slower than
+`PeopleDossierWorker` because reflections are themes and patterns,
+not turn-by-turn updates.
 
-### Tier 3 — Single-shot filter
+Per tick:
 
-One cheap-LLM call with the utterance, the top-K retrieved snippets (≤150 tokens each), and a note about which people files tier 1 already included. The model emits one of:
+1. Read `latest_id(turns)` for the familiar; compare to the newest
+   reflection row's `last_turn_id` watermark. Skip if the gap is
+   `< turns_threshold` (default 20).
+2. Pull turns since the watermark plus the most recent N facts (for
+   evidence the reflection can cite even when the turns themselves
+   don't surface them).
+3. Ask the background-tier LLM for at most `max_reflections_per_tick`
+   (default 3) reflections, each with `cited_turn_ids` /
+   `cited_fact_ids`.
+4. Persist each row that cites at least one valid id; drop rows
+   that hallucinate everything. The row's `last_turn_id` /
+   `last_fact_id` columns snapshot the worker's view at write time
+   — also serve as the next tick's watermark, no separate watermark
+   table.
 
-- `ANSWER: <merged context>` — forwarded to the main model.
-- `ANSWER:` (empty) — nothing worth forwarding.
-- `ESCALATE: <reason>; GREP: <pattern>` — the filter runs one `store.grep(pattern)` call, feeds the results back in a second forced-answer prompt, and surfaces whatever the model says. 2 LLM calls max.
+`ReflectionLayer` reads recent rows on assemble and renders citation
+breadcrumbs `[T#42, F#7]`. Rows that cite at least one superseded
+fact are flagged `(stale)`; the row itself is never deleted.
 
-**Output** — up to one `Contribution(layer=Layer.content, ...)` at priority 70 and source `content_search.rag`.
+## Fact discipline: supersession and self-capability
 
-**Graceful failure** — if the filter or the retriever raises, the deterministic tier's contributions are still returned.
+The facts store holds **observations about the world**, with
+provenance back to the source turns. Two policies keep it from
+silently rotting:
 
-**Deterministic mode for tests** — the cheap model client is injectable so tests can substitute a scripted responder.
+### No self-capability statements
 
-## 9. SillyTavern lorebook / world-info importer
+A "fact" like *the assistant cannot remember names or faces* is a
+self-description, not an observation — it expires the instant the
+underlying capability changes (e.g., once entity resolution lands).
+Such statements belong in the system prompt or in a runtime-computed
+self-description, not in a persistent facts table where they'd
+silently mislead the model long after they stopped being true.
 
-Module: `familiar_connect.bootstrap.import_silly_tavern`.
+The `FactExtractor` handles this in two layers:
 
-Reads a SillyTavern lorebook or world-info JSON file and writes one Markdown file per entry into a subdirectory of the memory store. Each output file is plain Markdown: the entry title as the H1, the content as the body, and the trigger keywords as a short bulleted list at the top (kept for human reference; the runtime does not use them). See the [Bootstrapping guide](../guides/bootstrapping.md) for usage.
+1. **Prompt-side**: the extractor's system message explicitly
+   instructs the LLM not to emit facts about itself, the assistant,
+   or its own limitations.
+2. **Post-filter**: `_is_self_capability(text)` matches a small set
+   of first-person and "the assistant/AI/model" patterns at the
+   start of the fact. Matched facts are dropped (logged at DEBUG)
+   before `append_fact`. This is belt-and-braces — even if the
+   model ignores the prompt instruction, the row never lands.
 
-## 10. Processors
+### Supersession instead of overwrite
 
-Modules:
+For facts that legitimately go stale (people change jobs,
+preferences shift, contradictions emerge): replace the old fact with
+a new one and mark the old row `superseded_at = now`,
+`superseded_by = <new_id>`. The old row stays in the table.
 
-- `familiar_connect.context.processors.stepped_thinking`
-- `familiar_connect.context.processors.recast`
+- `recent_facts` and `search_facts` default to `WHERE superseded_at
+  IS NULL` — reads see "what's currently true".
+- Pass `include_superseded=True` for audit, contradiction
+  inspection, or future provenance UIs.
+- `supersede_fact(old_id, new_id)` is the only write API; it
+  refuses to re-supersede an already-superseded row (signals an
+  upstream bug rather than absorbing it silently).
 
-**`SteppedThinkingPreProcessor`** runs a cheap model with a focused "think step by step about what the user is really asking" prompt, appends the result as a hidden assistant-visible note in the outgoing context, and marks it so it is never surfaced to the user. When wired with a `HistoryStore`, the reasoning prompt includes a window of recent channel turns and all buffered pending turns — not just the single trigger utterance — so the reasoning model can contextualise the reply. Inspired by SillyTavern's `st-stepped-thinking`.
+The `fts_facts` index covers all rows including superseded ones
+(the FTS triggers don't filter); read paths apply the
+`superseded_at IS NULL` filter via the JOIN to `facts`. Keeping
+superseded text indexed means re-superseding (e.g., reverting an
+incorrect supersession via a new fact) doesn't require an FTS
+rebuild.
 
-**`RecastPostProcessor`** takes the main LLM reply and runs a focused cleanup pass with a cheap model: strip formatting artefacts, tighten tone, optionally rewrite for speech (since the reply is headed to TTS). Inspired by SillyTavern's `recast-post-processing`.
+Cache invalidation: `latest_fact_id` counts all rows including
+superseded ones, so the `RagContextLayer` cache key flips whenever
+a new fact is appended — and supersession-by-replacement always
+appends, so the key naturally moves. (A future "manual supersede
+without replacement" path would need to track supersession state in
+the key directly; not built today.)
 
-Both are **off by default for voice** (to protect TTFB) and **on by default for text**.
+### Subject metadata: surviving nickname rot
 
----
+Display names appear verbatim in fact text ("Cass likes pho"), but
+Discord and Twitch users can rebrand freely. Without an out-of-band
+link to a stable identifier, every fact about a renamed user becomes
+referentially orphaned — FTS keeps matching the stale name, and the
+model has no way to know the new nickname is the same person.
 
-## Non-goals for the first pass
+The fix is a soft annotation on each fact: an optional
+`subjects_json` column storing
+`[{canonical_key, display_at_write}]` for each person the
+extractor identified. `Author.canonical_key`
+(`platform:user_id`) is stable across renames; `display_at_write`
+is the name the LLM saw when the fact was authored.
 
-Tracked so they don't sneak back in mid-implementation.
+**Write path.** `FactExtractor` builds a participants manifest
+(`canonical_key → current display name`) from two sources, batch-first:
+the authors of the current batch (with per-turn `guild_id` for
+label resolution), then `recent_distinct_authors` per channel
+touched by the batch — capped at `participants_max` (default 30).
+The widening matters because a batch where only one user speaks
+otherwise forecloses on linking other names in the turn text;
+including recent prior speakers lets the LLM resolve "what about
+Aria?" to her canonical key even when she didn't speak in this
+batch. Cap keeps prompt size bounded.
 
-- **Any third-party vector store or embedding API.** Vector retrieval ships locally via `fastembed`/ONNX and a SQLite `.index/embeddings.sqlite` — see [Memory → Derived indices](memory.md#derived-indices).
-- **Any SillyTavern keyword/World Info runtime.** Imports flatten to Markdown; there is no keyword walker.
-- **Plugin discovery / dynamic loading.** Providers and processors are registered in code at startup.
-- **Cross-familiar shared memory.** Each familiar's memory directory is isolated; two familiars never see each other's memories.
-- **Per-guild config or per-guild familiar overrides.** A familiar's behaviour is identical regardless of which guild it's invoked in. `guild_id` is carried on `ContextRequest` as observability only.
-- **LLM-driven memory housekeeping** (duplicate detection, conflict reconciliation, stale-entry flagging). Planned as a future add-on.
-- **The voice "fast path + elaboration path" parallel-generation strategy.** The pipeline shape doesn't preclude it, but we don't build it now.
-- **Any third-party state service.** See [Design decisions](decisions.md).
-- **Bridging to a running SillyTavern instance** in any form. Rejected — see [Design decisions](decisions.md).
+The manifest is injected into the LLM prompt alongside the turns
+themselves. The LLM is asked to optionally tag each fact with
+`subject_keys` — a list of canonical keys from the manifest. The
+extractor validates
+those keys against the manifest (unknowns are dropped silently),
+pairs each with the current display name, and persists them via
+`HistoryStore.append_fact(subjects=...)`.
+
+**Read path.** `RagContextLayer` renders fact text verbatim and
+appends a soft annotation when any subject's current display name
+differs from `display_at_write`:
+
+> `- Cass likes pho. (Cass is now known as peeks)`
+
+Resolution goes through `HistoryStore.resolve_label(canonical_key,
+guild_id)`, which prefers per-guild nick → global_name → username →
+turn snapshot → user_id. If the canonical key resolves to the bare
+user_id (nothing else found) or matches `display_at_write`, no
+annotation is added.
+
+**Why annotation, not substitution.** Identity consolidation is
+provisional. Mic-sharing on Discord, relayed quotes ("Bob says
+hi"), and plain ambiguity all break a clean 1:1 mapping from a
+mentioned name to a canonical key. Treating the extractor's hint
+as authoritative and rewriting fact text would launder a guess
+into source-of-truth. Appending `(was: …; now: …)` keeps the
+original observation intact and makes the link visible as a hint.
+
+**Forward-only.** Existing facts have `subjects_json = NULL` and
+render unchanged. The doc/code flow expects readers to live with
+the unannotated tail; backfilling is theoretically possible (walk
+each fact's `source_turn_ids`, pull the originating Author) but
+not worth the migration code for a bounded dev-test corpus.
+
+## People dossiers
+
+The dossier feature combines the prompt-layer pattern with the
+summary-caching pattern: per-person summaries are compounded off the
+facts watermark by `PeopleDossierWorker` and stitched into the
+system prompt by `PeopleDossierLayer`. The two halves are decoupled
+through the `people_dossiers` table, so the read path stays a
+cheap SQLite lookup and the LLM-driven refresh stays off the hot
+path.
+
+### Storage
+
+```
+people_dossiers (
+    familiar_id    TEXT NOT NULL,
+    canonical_key  TEXT NOT NULL,
+    last_fact_id   INTEGER NOT NULL,
+    dossier_text   TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (familiar_id, canonical_key)
+)
+```
+
+One row per person. `last_fact_id` is the watermark over `facts.id`
+that the worker has already folded into `dossier_text` —
+`PeopleDossierWorker` skips refresh when nothing in `facts` has
+moved past it. Same shape as `summaries`.
+
+### Layer (read path)
+
+`PeopleDossierLayer` walks the active channel's last `window_size`
+turns newest-first. For each turn it appends the author's
+`canonical_key` and any `turn_mentions` rows to an ordered candidate
+list, deduping on first sight (so most-recent occurrence wins).
+The list is truncated to `max_people` — same hard-count budgeting
+style as `RecentHistoryLayer.window_size`. Candidates without a
+stored dossier are skipped silently; the worker fills them in
+within one tick.
+
+The render is one Markdown block:
+
+```
+## People in this conversation
+
+### Cass
+@cass_login · she/her
+Bio: Lover of pho.
+
+Cass enjoys pho. Lives in Toronto.
+
+### Aria
+@aria_codes
+Bio: Runs a bakery on Queen St.
+
+Aria runs a bakery on Queen St.
+```
+
+Display names come from `HistoryStore.resolve_label`, so per-guild
+nicknames win over snapshot labels — symmetric with the rest of
+the read path. The optional second line carries `@username` and
+profile pronouns (omitted when missing); the `Bio:` line is capped
+at 240 characters to keep the header lightweight. Profile fields
+flow in via `Author.from_discord_member` (read defensively via
+`getattr` — pronouns/bio aren't always populated on bot tokens) and
+are persisted by `HistoryStore.upsert_account`. `accounts.pronouns`
+and `accounts.bio` columns are added by an idempotent migration on
+existing DBs.
+
+Cache invalidation key: `t<latest_id>:cap<n>:<key>:f<wm>,…`. New
+turns flip `latest_id` (changing the candidate set); a worker
+refresh flips `f<wm>` for that key.
+
+### Why a separate worker
+
+Folding dossier refresh into `FactExtractor` would couple two
+unrelated cadences (extracting new facts vs compounding per-person
+summaries) and double the LLM cost on every batch. Splitting them
+keeps each worker's prompt narrowly scoped, lets the dossier worker
+tick on its own clock (4× slower), and preserves the existing
+single-responsibility shape of the worker family.
+
+## Discord identity, replies, and mentions
+
+A Discord account exposes four name fields — `id`, `username`,
+`global_name`, per-guild `nick` — plus message-level relations
+(`reference` for replies, `mentions` for pings). The pipeline
+navigates all of them so the bot can both *understand* who's
+speaking to whom and *act* by threading replies and pinging users
+deliberately.
+
+### Identity model
+
+Two new tables sit alongside the existing `turns` snapshot:
+
+- `accounts(canonical_key PK, platform, user_id, username,
+  global_name, pronouns, bio, last_seen_at)` — stable per-account
+  row, last-write wins on identity columns; profile columns
+  (`pronouns`, `bio`) preserve the prior non-NULL value via
+  `COALESCE` so a profile-less re-observation doesn't clobber an
+  earlier richer one. One row per `(platform, user_id)`.
+- `account_guild_nicks(canonical_key, guild_id, nick, last_seen_at)`
+  — per-guild override, primary-keyed by both columns. NULL `nick`
+  is meaningful: "we observed them with no override".
+
+`turns.author_*` columns stay as a self-contained snapshot — they
+are the historical receipt of what the bot saw at write time. The
+`accounts` tables are the live identity cache. `resolve_label`
+walks them in preference order:
+
+1. `account_guild_nicks.nick` for the active `(canonical_key,
+   guild_id)`
+2. `accounts.global_name`
+3. `accounts.username`
+4. The latest turn's `Author.label` (snapshot fallback for
+   pre-feature rows)
+5. The bare `user_id` portion of `canonical_key`
+
+This means the read path always shows the freshest per-guild
+display name even when the snapshot baked into older turns is
+stale.
+
+### Replies (read + write)
+
+Each turn carries two new `TEXT` columns: `platform_message_id`
+(the Discord snowflake) and `reply_to_message_id` (the parent
+snowflake when `discord.Message.reference` was set). A
+`(familiar_id, platform_message_id)` index makes parent lookup
+O(1).
+
+- **Read.** `RecentHistoryLayer` resolves each turn's
+  `reply_to_message_id` through
+  `HistoryStore.lookup_turn_by_platform_message_id`. Render depth is
+  adaptive: when the parent is already inside the same recent-
+  history window, the child gets a short marker plus a ≤80-char
+  snippet (`[14:32 Alice ↩ Bob: parent…] child`) — the full parent
+  is about to render anyway. When the parent is *outside* the
+  window, the child carries the full parent content (capped at
+  ~400 chars) so the reply stays intelligible without the reader
+  having to scroll. Unknown parent ids drop the marker silently.
+- **Write — opt-in.** `bot.send_text` accepts an optional
+  `reply_to_message_id`; when set, the post threads via
+  `discord.MessageReference(message_id=…, fail_if_not_exists=False)`.
+  Threading is *not* the default: a normal reply just posts.
+  `TextResponder` only threads when the LLM deliberately asks for
+  it by emitting a `[↩]` (or `[reply]`) marker anywhere in its
+  output. The marker is stripped before sending; presence flips
+  the `reply_to_message_id` argument from `None` to the inbound
+  message id. This is the abilility the bot reaches for in busy
+  channels where it isn't obvious which message it's responding
+  to. The returned platform message id is stored on the assistant
+  turn so future user replies *to* the bot can be linked back.
+
+### Reactions (read)
+
+A `message_reactions(familiar_id, platform_message_id, emoji, count,
+updated_at)` table mirrors live emoji counts on every message we
+care about, keyed by the platform-native message id (so it can update
+without touching the `turns` row). Population is gateway-driven —
+no REST polling:
+
+- **Add / remove** — `bot.on_raw_reaction_add` and
+  `on_raw_reaction_remove` translate per-user toggles into
+  `HistoryStore.bump_reaction(±1)`. The bump floors at zero so a
+  stray remove (bot was offline when the original add fired) leaves
+  no negative residue. Subscription-checked: only channels with
+  `/subscribe-text` active accumulate rows.
+- **Clear** — `on_raw_reaction_clear` /
+  `on_raw_reaction_clear_emoji` route to
+  `HistoryStore.clear_reactions`, scoped either to the whole message
+  or one emoji.
+
+`RecentHistoryLayer` batch-fetches reactions for every
+`platform_message_id` in its window with a single
+`reactions_for_messages` call, then appends a
+`[reactions: 👍 x3 ❤️ x1]` suffix on each rendered turn (user *or*
+assistant — the bot reads its own reactions too). One SQL roundtrip
+per assemble, ordered by descending count and emoji asc for stable
+ties.
+
+### Embed unfurls (read)
+
+URL previews arrive on a Discord message as `message.embeds` —
+sometimes pre-attached on `on_message`, more often via a follow-up
+`on_message_edit` once Discord finishes unfurling (typical lag is
+1–2 s). The bot flattens these into the message's stored content so
+the LLM sees the same body humans see in the client.
+
+- **Formatter** — `familiar_connect.sources.discord_embed_text.format_embeds`
+  is duck-typed over `discord.Embed` (any object with `title`,
+  `description`, `author`, `provider`, `fields`, `footer`, `url`
+  attributes works). Each rendered embed is tagged `[embed]` so the
+  LLM can tell unfurl content apart from the user's typed text;
+  multi-embed messages join with a blank line. Image-only embeds
+  fall back to `[link: <url>]` when there's no other text;
+  attribute-less embeds drop entirely.
+- **Inbound (`on_message`)** — `bot.compose_content_with_embeds`
+  appends formatted embed text to `message.content` before the
+  source publishes onto the bus. Most messages arrive with
+  `embeds == []` here; the merge is a no-op.
+- **Edit (`on_message_edit`)** — `bot.apply_message_edit` re-runs
+  the merge once embeds appear and rewrites `turns.content` for
+  the original `platform_message_id` via
+  `HistoryStore.update_turn_content_by_message_id`. The
+  `turns_au_fts` trigger keeps the FTS index in sync; reactions
+  / replies stay attached because the row id never changes. Pure
+  text edits aren't tracked — the handler only fires when the
+  embed list actually changes.
+
+The bot's *first* reply to a URL-bearing message often races the
+unfurl and posts before the embed lands; subsequent prompts assemble
+recent history from the updated row and see the unfurled text. Bot-
+authored edits skip — the responder owns its own turn writes.
+
+### Mentions (read + write)
+
+A `turn_mentions(turn_id, canonical_key)` junction table records
+who is salient in each turn. Two writers populate it:
+
+- **Discord pings** — on intake, `bot.on_message` reads
+  `message.mentions`, the source publishes them as `Author` objects
+  in the event payload, and `TextResponder` upserts each one into
+  `accounts` (keeping the identity cache fresh) and inserts the
+  `turn_mentions` rows.
+- **Fact-extractor subjects** — when `FactExtractor` resolves a
+  fact's `subject_keys` against the participants manifest, it
+  mirrors the canonical keys into `turn_mentions` for each of the
+  fact's `source_turn_ids`. This bridges bare-text references
+  ("what about Aria?") that never raised a Discord ping but that
+  the LLM successfully linked to a known canonical key. Inserts
+  are PK-deduped, so a turn that was both pinged and fact-extracted
+  ends up with the union of keys.
+
+Downstream, `PeopleDossierLayer` reads `mentions_for_turn` and
+treats every recorded canonical key as a candidate for dossier
+inclusion — the layer doesn't care which writer added the row.
+
+In rendered prompts, Discord's raw `<@USER_ID>` markers in turn
+content are rewritten to `[@DisplayName]` via `resolve_label` —
+symmetric with the form the LLM is asked to *emit* on output.
+
+### Bot-emitted pings
+
+A short, channel-agnostic addendum is appended to the system prompt
+on every text reply:
+
+```
+## Output controls
+
+- Ping a user by writing `[@DisplayName]` using a name that
+  appears in recent messages. Unrecognised names render as
+  plain text without pinging.
+- Optionally prefix your message with `[↩]` to thread it as a
+  reply to the message you're responding to. …
+- To reply to a *specific* earlier message, write
+  `[↩ <message_id>]` using the `#<id>` shown next to that message
+  in recent history. Unknown ids fall back to the triggering
+  message id.
+```
+
+`RecentHistoryLayer` surfaces `platform_message_id` next to each
+turn's speaker (`[14:32 Alice #1234567890] hi`) when present, so
+the model can target a specific earlier message via
+`[↩ 1234567890]`. The marker parser captures the optional id and
+`TextResponder` validates it against
+`HistoryStore.lookup_turn_by_platform_message_id`; unknown ids
+silently degrade to threading on the inbound message.
+
+### Final reminder
+
+Every system prompt closes with a small block restating *current
+time* (`YYYY-MM-DD H:MMpm UTC`) and the literal sentinels the
+responder honours. The block is rebuilt per-call (cheap), so the
+model never sees a stale clock — useful when the prompt cache lives
+across long-tailed turns. Voice channels see only `<silent>`; text
+channels also list `[@DisplayName]` and `[↩ <message_id>]`. Source:
+`src/familiar_connect/context/final_reminder.py`.
+
+Both responders also append a *second* copy of the same block as a
+trailing `system` message, after recent history, with
+`include_mode_instruction=True`. This appends the per-mode
+operating directive (`"You are speaking aloud. Keep replies short
+(one or two sentences). Avoid markdown."` for voice; the
+text-channel equivalent for text) to the tail copy. The directive
+is also still set up-front by `OperatingModeLayer` — the trailing
+copy is recency insurance: long contexts make models drift away
+from format gates buried at the top of the system prompt, and a
+final-position reminder is the cheapest fix.
+
+There is **no per-channel enumeration** of pingable users. The LLM
+grounds on the names already visible in recent history (where
+`<@USER_ID>` markers were rewritten to `[@DisplayName]` on intake);
+the responder then tries to resolve whatever the model emits.
+Resolution uses a `label → canonical_key` map built from
+`recent_distinct_authors` + `resolve_label` — enough to pin the
+right user when guild nicknames keep names unambiguous, and to
+silently drop anything else.
+
+Known markers become `<@user_id>` and contribute to
+`AllowedMentions(users=…)`. Unknown markers degrade to plain
+`@DisplayName` (no ping). `send_text` always passes
+`discord.AllowedMentions(everyone=False, roles=False, users=[…])`
+restricted to the resolved ids — even if the LLM smuggles a raw
+`<@123>` for someone outside the active set, Discord will not
+deliver the notification.
+
+Ambiguous labels (two participants sharing a display name in the
+same channel) keep first-write and log a warning. Guild nicknames
+usually keep this from happening; the AllowedMentions guard makes
+any misping recoverable.
+
+### What we deliberately don't do
+
+- No `@everyone` / role-mention support on the bot's output side.
+  Discord's bot/role permissions are the gate.
+- No mention-of-bot / addressivity heuristics. The decision of
+  *when* the bot speaks is unchanged by this work; only *how*.
+- No backfill of legacy turns or facts. Legacy rows just don't
+  participate in reply lookups (orphan markers drop silently) and
+  fall back to their `author_*` snapshot for label resolution.
+
+## RAG retrieval quality
+
+`RagContextLayer` runs the inbound user turn through SQLite FTS5
+against `fts_turns` and `fts_facts`. Two policies keep recall
+acceptable on free-text chat cues:
+
+- **OR-joined tokens with stopword filtering.** FTS5's default
+  match operator is implicit-AND — every token in the cue must
+  appear in the indexed row, which destroys recall on multi-word
+  chat cues ("hey, do you know about cat toys?" almost never
+  matches a 6-word fact). `_tokenize_fts_query` drops common English
+  stopwords; `_build_fts_match` OR-joins the rest. BM25 ranks on
+  whichever substantive tokens hit. See `src/familiar_connect/history/store.py`.
+- **Recent-window exclusion.** The user turn that *seeded* the cue
+  is, by construction, the highest-BM25 match against itself — and
+  it's already shown verbatim by `RecentHistoryLayer`. RAG passes
+  `max_id = latest_in_channel - recent_window_size` to
+  `search_turns`, scoping retrieval to turns *older* than the
+  recent-history window. `recent_window_size` is wired in
+  `commands/run.py` to the same value as `RecentHistoryLayer`.
+
+Both policies surface in the `RagContextLayer`'s constructor
+parameters (`recent_window_size` defaulting to 0 for tests / callers
+that don't opt in; the production wiring sets it).
+
+**Rendering.** Retrieved hits are no longer flat ``- [Alice] text``
+lines — each hit pulls ``id ± context_window`` neighbours from the
+same channel (default 1, dropping any neighbour the recent-history
+window already shows) and the result is grouped by UTC date:
+
+```
+## Possibly relevant earlier turns
+
+2026-05-03:
+> [2:29PM Peebo]: i can't understand what you guys are saying
+> [2:30PM Peebo]: my brain's dying
+> [2:33PM Cassidy]: Dude maybe you should take a break
+```
+
+Date headers, 12-hour clock, and the surrounding turns make each
+hit interpretable on its own — the model doesn't have to guess at
+when or in what tone the line landed.
+
+Open work the current retrieval doesn't address:
+
+- **Embeddings** would beat keyword matching on semantic recall (e.g.,
+  cue "What did Aria order at lunch?" → fact "Aria likes pho"). Out
+  of scope for the present pipeline.
+- **Cue extraction** — using the raw user turn as the cue is noisy.
+  Pulling named entities or topic words out of the turn first would
+  improve precision without embeddings.
+
+## Expiry semantics for cross-channel summaries
+
+Cross-channel summaries can go stale in two ways:
+
+1. **Turn-count watermark** — source channel has gained `cross_k`
+   turns since the last cached summary. `SummaryWorker` regenerates.
+2. **Wall-clock TTL** — summary is older than `ttl_seconds`
+   (default 600 s) at assembly time. `CrossChannelContextLayer`
+   **suppresses** the stale summary in its `build` output (layer opts
+   out); the summary row stays in SQLite and is replaced on the next
+   worker tick.
+
+The TTL is enforced on the *read* path so a long-idle familiar doesn't
+leak stale cross-channel content into a fresh prompt while the worker
+hasn't ticked. The watermark is enforced on the *write* path so the
+worker doesn't wake up and rebuild summaries that haven't meaningfully
+changed.
+
+## Cold-cache signals (research-phase)
+
+`familiar_connect.diagnostics.cold_cache` provides three detectors:
+
+- `detect_topic_shift` — Jaccard overlap between the new turn's
+  content words and the rolling summary; fires below 0.15. Skipped
+  when the new turn has fewer than `min_tokens` (default 4) content
+  tokens, since short voice fragments would otherwise fire on every
+  utterance regardless of topic continuity.
+- `detect_unknown_proper_noun` — capitalized tokens (3+ chars) in
+  the new turn that don't appear in prior context. A small built-in
+  stopword list filters common sentence-starters (`Which`, `But`,
+  `Okay`, `Yeah`, …) so the signal isn't dominated by discourse
+  markers from voice transcripts.
+- `detect_silence_gap` — wall-clock gap above `threshold_seconds`
+  (default 300 s).
+
+`log_signals()` runs all three and emits one `ColdCache` log line per
+firing signal. Currently **instrumentation only** — no cache is
+invalidated on a signal. After collecting a corpus of
+(signal-fired, retrieval-failed) pairs, the most-predictive signals
+will be wired to force rebuilds of the stale layers.
+
+## Single-writer pattern
+
+Each responder owns user-turn writes for its own topic. `TextResponder`
+appends the user turn (from a `discord.text` event) before calling
+`Assembler.assemble`, and `VoiceResponder` does the same for voice
+finals. Single-writer-in-the-same-task gives `RecentHistoryLayer`
+read-after-write consistency: the new turn is in SQLite *before* the
+LLM prompt is built, so the model always sees the message it's being
+asked to respond to. A separate writer task (e.g. an earlier
+`HistoryWriter` design) would race the responder and produce stale
+prompts.
+
+`HistoryWriter` (`processors/history_writer.py`) is kept in the
+codebase as a reference implementation of the single-writer + dedup
+pattern, but it is no longer wired into the run loop.
+
+## Multi-party addressivity
+
+Every channel the familiar joins is multi-party — humans talk to each
+other, not just to the bot. Two pieces collaborate to handle "is this
+turn for me?" without a separate gating LLM call:
+
+1. **Message format carries speaker + time.** `RecentHistoryLayer`
+   renders user turns as `[HH:MM Display Name] content` (UTC).
+   Different speakers get different prefixes; the rhythm of timestamps
+   tells the model whether a conversation is flowing between humans.
+2. **Silent sentinel in the reply.** The system prompt instructs the
+   model to emit the literal token `<silent>` as its *entire* reply
+   when the latest message is not for it. `SilentDetector`
+   (`familiar_connect.silence`) inspects the streaming reply
+   delta-by-delta; on a prefix match it short-circuits the stream,
+   the responder skips Discord posting / TTS, and no assistant turn
+   is appended. The user turn is still recorded — observation is not
+   gated by response.
+
+The sentinel is best-effort: it relies on the model following the
+system-prompt instruction. A stray `<silent>` mid-reply is treated as
+content (prefix-only match); the decision latches once made and
+subsequent deltas don't re-open it.
+
+## Data flow per user turn
+
+```
+Discord text on channel C
+  → DiscordTextSource publishes discord.text
+  → TextResponder:
+      appends user turn to `turns` (fts_turns trigger fires; row indexed)
+      seeds RagContextLayer cue = content
+      Assembler.assemble(ctx, viewer_mode="text")
+      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
+      if `<silent>` detected: bail (no send, no assistant turn)
+      else: BotHandle.send_text(channel_id, reply); append assistant turn
+      router.end_turn(scope)
+
+Voice transcript final on channel C (voice:C)
+  → VoiceSource publishes voice.transcript.final
+  → VoiceResponder:
+      logs cold-cache signals (prior summary vs new text, silence gap)
+      appends user turn directly
+      seeds RagContextLayer cue = text
+      Assembler.assemble(ctx)
+        → cached CoreInstructions / CharacterCard / OperatingMode
+        → CrossChannelContextLayer: TTL-checked read from cross_context_summaries
+        → ConversationSummaryLayer: read from summaries
+        → PeopleDossierLayer: read from people_dossiers, capped at max_people
+        → RagContextLayer: FTS search on cue
+        → RecentHistoryLayer: last N turns for channel C
+      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
+      if `<silent>` detected: bail (no TTS, no assistant turn)
+      else: TTSPlayer.speak; append assistant turn
+
+Background: SummaryWorker tick (every 5 s)
+  → for each channel: maybe regenerate rolling summary
+  → for each viewer×source: maybe regenerate cross-channel summary
+
+Background: PeopleDossierWorker tick (every 20 s)
+  → subjects_with_facts(familiar_id) → {canonical_key: max_fact_id}
+  → for each subject whose watermark moved: compound prior dossier + new facts
+```
+
+## Configuration
+
+Per-channel overrides in `character.toml` (`[channels.<id>]`):
+
+- `history_window_size` — overrides the tier default
+  (`voice_window_size` / `text_window_size`) for this channel's
+  `RecentHistoryLayer`.
+- `prompt_layers` — explicit ordered list of layer names (parsed; the
+  full wiring of per-channel reordering arrives alongside richer layer
+  stacks).
+- `message_rendering` — `"prefixed"` (keep `[HH:MM display_name]` in
+  content) or `"name_only"` (rely on OpenAI `name` field).
+
+`SummaryWorker` honours:
+
+- `turns_threshold` (default 10) — new turns before rolling summary
+  regenerates.
+- `cross_k` (default 5) — new turns in source channel before
+  cross-channel summary regenerates.
+- `cross_channel_map: dict[int, list[int]]` — per-viewer source list.
+- `tick_interval_s` (default 5) — seconds between ticks.
+
+`CrossChannelContextLayer` honours:
+
+- `ttl_seconds` (default 600) — read-side staleness threshold.
+- `viewer_map` — mirrors `cross_channel_map` on the worker side.
+
+`PeopleDossierWorker` honours:
+
+- `tick_interval_s` (default 20) — seconds between ticks (¼ of
+  `SummaryWorker`'s default).
+
+`PeopleDossierLayer` honours:
+
+- `window_size` (default 20) — how far back into the channel to
+  look when collecting candidate canonical keys (authors + mentions).
+- `max_people` (default 8) — hard cap on dossiers rendered per
+  prompt; oldest mentions drop first when the candidate set exceeds
+  the cap.

@@ -17,15 +17,55 @@ dependencies = [
     "tzdata >= 2025.1",
     "azure-cognitiveservices-speech >= 1.42.0, < 2",
     "google-genai >= 1.51.0, < 2",
-    "numpy >= 2, < 3",
     "colorama>=0.4.6",
-    # local ONNX embeddings for ContentSearchProvider tier 2 — no third-party API
-    "fastembed >= 0.4, < 1",
     "tomli-w >= 1.2, < 2",
 ]
 
 [project.scripts]
 familiar-connect = "familiar_connect.cli:main"
+
+[project.optional-dependencies]
+# Local turn-detection: TEN-VAD (Apache 2.0, native lib + ONNX bundled
+# inside the wheel) + Pipecat Smart Turn v3 (~360 MB ONNX, lives under
+# data/models/ — download separately). Installed via:
+#     uv sync --extra local-turn
+# numpy carries both ten-vad's int16 I/O and onnxruntime's tensors.
+# ten-vad ships only via git; pin to a tag once upstream cuts releases.
+# See docs/architecture/voice-pipeline.md.
+local-turn = [
+    "onnxruntime >= 1.18, < 2",
+    "numpy >= 1.26, < 3",
+    "ten-vad",
+    "huggingface-hub >= 0.25, < 1",
+]
+# Local STT — NeMo Parakeet-TDT 0.6B v3 (CC-BY-4.0 model, Apache 2.0
+# toolkit). Pulls torch + ~600 MB of weights on first load; opt-in by
+# design. Pair with ``local-turn`` so the endpointer drives
+# ``finalize()`` (Parakeet has no internal silence detector). Install via:
+#     uv sync --extra local-turn --extra local-stt-parakeet
+# See docs/architecture/voice-pipeline.md.
+local-stt-parakeet = [
+    "nemo-toolkit[asr] >= 2.0",
+    "numpy >= 1.26, < 3",
+]
+# Local STT — FasterWhisper (CTranslate2). Lighter than NeMo (no torch);
+# the ``small`` model is ~150 MB. Same finalize-driven shape as
+# Parakeet — pair with ``local-turn``. Install via:
+#     uv sync --extra local-turn --extra local-stt-whisper
+local-stt-whisper = [
+    "faster-whisper >= 1.0",
+    "numpy >= 1.26, < 3",
+]
+# Local embeddings — FastEmbed (Qdrant). ONNX-backed sentence embedders
+# for M6 semantic recall. Default model is BGE-small (~130 MB on first
+# load, cached under ~/.cache/fastembed). onnxruntime is shared with
+# ``local-turn``. Install via:
+#     uv sync --extra local-embed
+local-embed = [
+    "fastembed >= 0.4, < 1",
+    "numpy >= 1.26, < 3",
+    "onnxruntime >= 1.18, < 2",
+]
 
 [dependency-groups]
 dev = [
@@ -65,6 +105,10 @@ version-file = "src/familiar_connect/_version.py"
 [tool.uv]
 default-groups = ["dev", "docs"]
 exclude-newer = "7d"
+
+[tool.uv.sources]
+# ten-vad isn't on PyPI; install from upstream git.
+ten-vad = { git = "https://github.com/TEN-framework/ten-vad.git" }
 
 [tool.uv.exclude-newer-package]
 defusedxml = "1d"
@@ -171,19 +215,7 @@ ignore = [
     "FBT003", # Boolean positional args common in mock assertions
     "ANN202", # Private helper annotations not critical in tests
     "PLC2701", # Tests import private names for unit testing
-    "TID251", # Bootstrap-package banned-api is runtime-only; tests may import it
 ]
-# The bootstrap package is what the banned-api rule is pointing at — its own
-# modules don't import themselves across the banned boundary, but the guard
-# rule below wouldn't distinguish, so silence it here defensively.
-"src/familiar_connect/bootstrap/**/*.py" = ["TID251"]
-
-[tool.ruff.lint.flake8-tidy-imports.banned-api]
-# Runtime reply pipeline (bot.py, familiar.py, commands/run.py) must never
-# import from this one-shot operator subpackage. See docs/guides/bootstrapping.md
-# for rationale. Bootstrap tests and the bootstrap modules themselves are
-# exempted via per-file-ignores above.
-"familiar_connect.bootstrap".msg = "Bootstrap utilities are operator-only and must not be imported by the runtime. If you need a helper at runtime, promote it to a runtime module first. See docs/guides/bootstrapping.md."
 
 [tool.ruff.format]
 preview = true # No cowards allowed!

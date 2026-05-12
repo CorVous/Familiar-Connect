@@ -17,7 +17,11 @@ needed.
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
+import struct
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,14 +30,24 @@ from typing import TYPE_CHECKING
 from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
-    from familiar_connect.config import ChannelMode
+    from collections.abc import Iterable
 
 PathLike = str | Path
 
 
 @dataclass(frozen=True)
 class HistoryTurn:
-    """Single persisted conversational turn."""
+    """Single persisted conversational turn.
+
+    :param platform_message_id: native id from the platform of origin
+        (Discord snowflake, etc.). ``None`` for legacy rows or
+        platform-less inputs.
+    :param reply_to_message_id: parent ``platform_message_id`` when
+        this turn is a reply (e.g. ``message.reference`` on Discord).
+    :param guild_id: Discord guild scoping per-guild nicknames for
+        rendering. ``None`` for DMs / non-Discord platforms / legacy
+        rows where the column wasn't populated.
+    """
 
     id: int
     timestamp: datetime
@@ -41,6 +55,9 @@ class HistoryTurn:
     author: Author | None
     content: str
     channel_id: int = 0
+    platform_message_id: str | None = None
+    reply_to_message_id: str | None = None
+    guild_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -79,20 +96,140 @@ class WatermarkEntry:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class AccountProfile:
+    """Read-side projection of ``accounts`` profile metadata.
+
+    Populated on Discord ingestion via :meth:`HistoryStore.upsert_account`;
+    consumed by :class:`PeopleDossierLayer` to surface basic identity
+    (username, pronouns, bio) on the prompt header.
+    """
+
+    canonical_key: str
+    username: str | None
+    global_name: str | None
+    pronouns: str | None
+    bio: str | None
+
+
+@dataclass(frozen=True)
+class PeopleDossierEntry:
+    """Cached per-person dossier compounded from facts mentioning ``canonical_key``.
+
+    ``last_fact_id`` is a watermark over ``facts.id`` — the worker
+    refreshes when ``subjects_with_facts`` reports a higher id for
+    this subject. Mirrors :class:`SummaryEntry`.
+    """
+
+    canonical_key: str
+    last_fact_id: int
+    dossier_text: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class FactSubject:
+    """Soft link from a fact to one canonical identity.
+
+    The extractor's best guess at *who* a fact is about. Provisional —
+    mic-sharing, relayed quotes, ambiguous mentions all break a clean
+    1:1 mapping. Stored to enable display-name resolution at read time
+    without claiming authoritative subject identification.
+
+    :param canonical_key: stable ``platform:user_id`` from
+        :class:`~familiar_connect.identity.Author`.
+    :param display_at_write: display name as seen by the extractor
+        when the fact was authored. Used as a substring anchor at
+        read time when the current display name differs.
+    """
+
+    canonical_key: str
+    display_at_write: str
+
+
+@dataclass(frozen=True)
+class Reflection:
+    """Higher-order synthesis over recent turns + facts (M3).
+
+    Written by :class:`ReflectionWorker`; read by
+    :class:`ReflectionLayer`. ``cited_turn_ids`` / ``cited_fact_ids``
+    are forever-provenance — never edited, never trimmed. A reflection
+    citing a superseded fact stays in the table; the read path flags
+    it stale rather than dropping it (audit trail beats silent loss).
+
+    :param last_turn_id: highest ``turns.id`` visible to the worker at
+        write time. Doubles as the next tick's watermark — one row per
+        write, not a separate table.
+    :param last_fact_id: highest ``facts.id`` visible to the worker at
+        write time. Same role as ``last_turn_id`` for the facts axis.
+    """
+
+    id: int
+    familiar_id: str
+    channel_id: int | None
+    text: str
+    cited_turn_ids: tuple[int, ...]
+    cited_fact_ids: tuple[int, ...]
+    created_at: datetime
+    last_turn_id: int
+    last_fact_id: int
+
+
+@dataclass(frozen=True)
+class Fact:
+    """Atomic fact extracted from one or more turns.
+
+    :param source_turn_ids: ids in ``turns`` the fact was distilled
+        from — forever provenance, per plan § Design.5.
+    :param superseded_at: system-time — when this fact was retired,
+        or ``None`` if still current. Supersession keeps the row (no
+        delete) so the prior state stays visible for audit.
+    :param superseded_by: id of the replacement fact, or ``None`` if
+        still current.
+    :param subjects: best-effort canonical-key annotations. Empty
+        tuple for legacy rows or when the extractor couldn't link a
+        name to any participant.
+    :param valid_from: world-time — when the fact began applying.
+        Default is the source turn's timestamp; LLM may override when
+        an explicit "as of …" phrase is detected. ``None`` only on
+        legacy rows pre-M1.
+    :param valid_to: world-time — when the fact stopped applying;
+        ``None`` while still in effect.
+    :param importance: 1-10 hint for retrieval ranking (M2). ``None``
+        on legacy rows or when the extractor declined to score.
+        Treated as the neutral midpoint by rank-time consumers.
+    """
+
+    id: int
+    familiar_id: str
+    channel_id: int | None
+    text: str
+    source_turn_ids: tuple[int, ...]
+    created_at: datetime
+    superseded_at: datetime | None = None
+    superseded_by: int | None = None
+    subjects: tuple[FactSubject, ...] = ()
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    importance: int | None = None
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    familiar_id          TEXT    NOT NULL,
-    channel_id           INTEGER NOT NULL,
-    guild_id             INTEGER,
-    role                 TEXT    NOT NULL,
-    author_platform      TEXT,
-    author_user_id       TEXT,
-    author_username      TEXT,
-    author_display_name  TEXT,
-    content              TEXT    NOT NULL,
-    timestamp            TEXT    NOT NULL,
-    mode                 TEXT
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id            TEXT    NOT NULL,
+    channel_id             INTEGER NOT NULL,
+    guild_id               INTEGER,
+    role                   TEXT    NOT NULL,
+    author_platform        TEXT,
+    author_user_id         TEXT,
+    author_username        TEXT,
+    author_display_name    TEXT,
+    content                TEXT    NOT NULL,
+    timestamp              TEXT    NOT NULL,
+    mode                   TEXT,
+    platform_message_id    TEXT,
+    reply_to_message_id    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -103,6 +240,34 @@ CREATE INDEX IF NOT EXISTS idx_turns_global
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel_mode
     ON turns (familiar_id, channel_id, mode, id);
+
+CREATE INDEX IF NOT EXISTS idx_turns_platform_msg
+    ON turns (familiar_id, platform_message_id);
+
+-- Discord reactions on persisted messages. Keyed by the platform-
+-- native message id so we can update without touching ``turns``;
+-- per (familiar, message, emoji) row stores the live count from
+-- gateway events. ``count = 0`` rows are deleted at write time.
+CREATE TABLE IF NOT EXISTS message_reactions (
+    familiar_id          TEXT    NOT NULL,
+    platform_message_id  TEXT    NOT NULL,
+    emoji                TEXT    NOT NULL,
+    count                INTEGER NOT NULL,
+    updated_at           TEXT    NOT NULL,
+    PRIMARY KEY (familiar_id, platform_message_id, emoji)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_reactions_lookup
+    ON message_reactions (familiar_id, platform_message_id);
+
+CREATE TABLE IF NOT EXISTS turn_mentions (
+    turn_id        INTEGER NOT NULL,
+    canonical_key  TEXT    NOT NULL,
+    PRIMARY KEY (turn_id, canonical_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_turn_mentions_canonical
+    ON turn_mentions (canonical_key, turn_id);
 
 CREATE TABLE IF NOT EXISTS summaries (
     familiar_id         TEXT    NOT NULL,
@@ -128,12 +293,323 @@ CREATE TABLE IF NOT EXISTS memory_writer_watermark (
     last_written_id   INTEGER NOT NULL,
     created_at        TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS people_dossiers (
+    familiar_id    TEXT    NOT NULL,
+    canonical_key  TEXT    NOT NULL,
+    last_fact_id   INTEGER NOT NULL,
+    dossier_text   TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL,
+    PRIMARY KEY (familiar_id, canonical_key)
+);
+
+-- Reflections (M3). Higher-order syntheses over recent turns + facts.
+-- Provenance forever via cited_turn_ids / cited_fact_ids (JSON arrays).
+-- ``last_turn_id`` / ``last_fact_id`` snapshot the worker's view at
+-- write time so the next tick can detect freshness without a separate
+-- watermark table. Citations to superseded facts surface as "stale" at
+-- read time; the row itself is never deleted.
+CREATE TABLE IF NOT EXISTS reflections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id     TEXT    NOT NULL,
+    channel_id      INTEGER,
+    text            TEXT    NOT NULL,
+    cited_turn_ids  TEXT    NOT NULL,  -- JSON array
+    cited_fact_ids  TEXT    NOT NULL,  -- JSON array
+    created_at      TEXT    NOT NULL,
+    last_turn_id    INTEGER NOT NULL,  -- watermark over turns at write
+    last_fact_id    INTEGER NOT NULL   -- watermark over facts at write
+);
+
+CREATE INDEX IF NOT EXISTS idx_reflections_familiar
+    ON reflections (familiar_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_reflections_familiar_channel
+    ON reflections (familiar_id, channel_id, id);
+
+-- Identity. One row per (platform, user_id). Last-write wins.
+CREATE TABLE IF NOT EXISTS accounts (
+    canonical_key  TEXT PRIMARY KEY,           -- "discord:123" / "twitch:456"
+    platform       TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    username       TEXT,                        -- global handle
+    global_name    TEXT,                        -- global display name
+    pronouns       TEXT,                        -- profile pronouns; NULL when unknown
+    bio            TEXT,                        -- profile bio; NULL when unknown
+    last_seen_at   TEXT NOT NULL
+);
+
+-- Per-guild nickname cache. NULL nick = explicit "no override".
+CREATE TABLE IF NOT EXISTS account_guild_nicks (
+    canonical_key  TEXT NOT NULL,
+    guild_id       INTEGER NOT NULL,
+    nick           TEXT,
+    last_seen_at   TEXT NOT NULL,
+    PRIMARY KEY (canonical_key, guild_id)
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id       TEXT    NOT NULL,
+    channel_id        INTEGER,
+    text              TEXT    NOT NULL,
+    source_turn_ids   TEXT    NOT NULL,  -- JSON array of ids in ``turns``
+    created_at        TEXT    NOT NULL,  -- system-time write
+    superseded_at     TEXT,               -- system-time retire; NULL = current
+    superseded_by     INTEGER,            -- NULL = current; FK-by-convention
+    subjects_json     TEXT,               -- JSON list; NULL = legacy fact
+    valid_from        TEXT,               -- world-time start; NULL = legacy
+    valid_to          TEXT,               -- world-time end; NULL = still applies
+    importance        INTEGER             -- 1-10; NULL = unknown / legacy
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_familiar
+    ON facts (familiar_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_facts_familiar_current
+    ON facts (familiar_id, superseded_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_facts_familiar_validity
+    ON facts (familiar_id, valid_from, valid_to);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
+    text,
+    content='facts',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS facts_ai_fts
+AFTER INSERT ON facts BEGIN
+    INSERT INTO fts_facts (rowid, text) VALUES (new.id, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_ad_fts
+AFTER DELETE ON facts BEGIN
+    INSERT INTO fts_facts (fts_facts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_turns USING fts5(
+    content,
+    content='turns',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Keep the FTS index in sync with ``turns``.
+CREATE TRIGGER IF NOT EXISTS turns_ai_fts
+AFTER INSERT ON turns BEGIN
+    INSERT INTO fts_turns (rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS turns_ad_fts
+AFTER DELETE ON turns BEGIN
+    INSERT INTO fts_turns (fts_turns, rowid, content)
+        VALUES ('delete', old.id, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS turns_au_fts
+AFTER UPDATE ON turns BEGIN
+    INSERT INTO fts_turns (fts_turns, rowid, content)
+        VALUES ('delete', old.id, old.content);
+    INSERT INTO fts_turns (rowid, content) VALUES (new.id, new.content);
+END;
+
+-- Per-fact embeddings (M6). Vectors stored as packed float32 BLOBs;
+-- ``model`` is the embedder's ``name`` so a model swap creates a new
+-- row rather than overwriting (audit history preserved). The
+-- :class:`FactEmbeddingWorker` projector populates this table from
+-- ``facts``; ``RagContextLayer`` reads it at rerank time.
+CREATE TABLE IF NOT EXISTS fact_embeddings (
+    fact_id     INTEGER NOT NULL,
+    model       TEXT    NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB    NOT NULL,
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (fact_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_embeddings_model
+    ON fact_embeddings (model, fact_id);
 """
 
 _TURN_COLS = (
     "id, timestamp, role, author_platform, author_user_id, "
-    "author_username, author_display_name, content, channel_id"
+    "author_username, author_display_name, content, channel_id, "
+    "platform_message_id, reply_to_message_id, guild_id"
 )
+
+
+_FTS_TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
+
+# Drop common English stopwords before FTS matching. Without this, casual
+# chat cues like "hey do you know about X" dilute BM25 scoring (every token
+# is OR'd) and produce noisy hits on conversational filler. Keep the list
+# small and high-confidence — over-filtering hurts recall.
+_FTS_STOPWORDS = frozenset({
+    "a",
+    "about",
+    "an",
+    "and",
+    "any",
+    "anything",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "but",
+    "by",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "done",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "hey",
+    "hi",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "its",
+    "just",
+    "know",
+    "lol",
+    "me",
+    "my",
+    "no",
+    "not",
+    "of",
+    "ok",
+    "on",
+    "or",
+    "our",
+    "out",
+    "she",
+    "so",
+    "some",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "to",
+    "too",
+    "up",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "would",
+    "yes",
+    "you",
+    "your",
+    "yours",
+})
+
+
+def _tokenize_fts_query(query: str) -> list[str]:
+    """Tokenize free-form text into FTS5 MATCH tokens.
+
+    Strips punctuation, lowercases, drops English stopwords, and
+    appends the FTS5 prefix operator (``*``) to tokens of 3+ chars so
+    ``fox`` also matches ``foxes`` (default tokenizer has no stemmer).
+    Returns ``[]`` for empty / all-stopword input — caller short-
+    circuits when no useful tokens remain.
+
+    See :func:`_build_fts_match` for how callers compose the result
+    into an OR-joined MATCH expression.
+    """
+    if not query or not query.strip():
+        return []
+    out: list[str] = []
+    for tok in _FTS_TOKEN_RE.findall(query):
+        low = tok.lower()
+        if low in _FTS_STOPWORDS:
+            continue
+        if len(low) >= 3:
+            out.append(f"{low}*")
+        else:
+            out.append(low)
+    return out
+
+
+def _facts_validity_where(
+    *,
+    include_superseded: bool,
+    as_of: datetime | None,
+    alias: str = "",
+) -> tuple[str, tuple[object, ...]]:
+    """Build SQL fragment + params for the ``facts`` validity filter.
+
+    Default ("current truth"):
+        ``superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now)``
+
+    With ``as_of``:
+        bi-temporal slice — ``valid_from`` IS NULL or <= as_of, and
+        ``valid_to`` IS NULL or > as_of. Includes superseded rows so
+        audit queries can recover prior beliefs (overrides
+        ``include_superseded``).
+    """
+    prefix = f"{alias}." if alias else ""
+    if as_of is not None:
+        ts = as_of.isoformat()
+        clause = (
+            f"AND ({prefix}valid_from IS NULL OR {prefix}valid_from <= ?) "
+            f"AND ({prefix}valid_to IS NULL OR {prefix}valid_to > ?)"
+        )
+        return clause, (ts, ts)
+    parts: list[str] = []
+    params: list[object] = []
+    if not include_superseded:
+        parts.append(f"AND {prefix}superseded_at IS NULL")
+    now_ts = datetime.now(tz=UTC).isoformat()
+    parts.append(f"AND ({prefix}valid_to IS NULL OR {prefix}valid_to > ?)")
+    params.append(now_ts)
+    return " ".join(parts), tuple(params)
+
+
+def _build_fts_match(query: str) -> str:
+    """OR-joined MATCH expression for free-form text.
+
+    FTS5's default operator is implicit AND — every token must appear
+    in the indexed row. That destroys recall on multi-word chat cues
+    (a 16-token query that mixes filler with substantive nouns
+    almost never matches a 6-word fact). OR-joining lets BM25 rank
+    on whichever substantive tokens hit; common tokens contribute
+    little weight.
+    """
+    return " OR ".join(_tokenize_fts_query(query))
 
 
 class HistoryStore:
@@ -145,13 +621,14 @@ class HistoryStore:
     def __init__(self, db_path: PathLike) -> None:
         if db_path == ":memory:":
             self._path: Path | None = None
-            self._conn = sqlite3.connect(":memory:")
+            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         else:
             path = Path(db_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._path = path
-            self._conn = sqlite3.connect(path)
+            self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db")
         self._migrate_if_needed()
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
@@ -211,9 +688,13 @@ class HistoryStore:
             "author_user_id",
             "author_username",
             "author_display_name",
+            "platform_message_id",
+            "reply_to_message_id",
         ):
             if col not in columns:
                 self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
+        if "guild_id" not in columns:
+            self._conn.execute("ALTER TABLE turns ADD COLUMN guild_id INTEGER")
         self._conn.commit()
 
         # summaries: old PK was (familiar_id) only; new adds channel_id.
@@ -230,12 +711,53 @@ class HistoryStore:
                 self._conn.execute("DROP TABLE summaries")
                 self._conn.commit()
 
+        # accounts: add profile columns if missing. Pre-existing rows
+        # default to NULL — populated next time the user is observed.
+        accounts_row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'"
+        ).fetchone()
+        if accounts_row is not None:
+            accounts_cols = {
+                col["name"]
+                for col in self._conn.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            if "pronouns" not in accounts_cols:
+                self._conn.execute("ALTER TABLE accounts ADD COLUMN pronouns TEXT")
+            if "bio" not in accounts_cols:
+                self._conn.execute("ALTER TABLE accounts ADD COLUMN bio TEXT")
+            self._conn.commit()
+
+        # facts: add supersession columns if missing. Existing facts
+        # default to current (NULL on both columns).
+        facts_row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='facts'"
+        ).fetchone()
+        if facts_row is not None:
+            facts_cols = {
+                col["name"]
+                for col in self._conn.execute("PRAGMA table_info(facts)").fetchall()
+            }
+            if "superseded_at" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_at TEXT")
+            if "superseded_by" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_by INTEGER")
+            if "subjects_json" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN subjects_json TEXT")
+            if "valid_from" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT")
+            if "valid_to" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_to TEXT")
+            if "importance" not in facts_cols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN importance INTEGER")
+            self._conn.commit()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close underlying SQLite connection."""
+        """Shut down executor and close underlying SQLite connection."""
+        self._executor.shutdown(wait=False)
         self._conn.close()
 
     # ------------------------------------------------------------------
@@ -251,11 +773,18 @@ class HistoryStore:
         content: str,
         author: Author | None = None,
         guild_id: int | None = None,
-        mode: ChannelMode | None = None,
+        mode: str | None = None,
+        platform_message_id: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> HistoryTurn:
-        """Append a single turn and return its persisted form."""
+        """Append a single turn and return its persisted form.
+
+        *mode* is a free-form string tag on the ``turns.mode`` column.
+        *platform_message_id* / *reply_to_message_id* are platform-
+        native ids (Discord snowflakes, etc.) stored as TEXT so any
+        platform's id format fits.
+        """
         timestamp = datetime.now(tz=UTC)
-        mode_value = mode.value if mode is not None else None
         platform = author.platform if author is not None else None
         user_id = author.user_id if author is not None else None
         username = author.username if author is not None else None
@@ -266,8 +795,9 @@ class HistoryStore:
                 (familiar_id, channel_id, guild_id,
                  role, author_platform, author_user_id,
                  author_username, author_display_name,
-                 content, timestamp, mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content, timestamp, mode,
+                 platform_message_id, reply_to_message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -280,7 +810,9 @@ class HistoryStore:
                 display_name,
                 content,
                 timestamp.isoformat(),
-                mode_value,
+                mode,
+                platform_message_id,
+                reply_to_message_id,
             ),
         )
         self._conn.commit()
@@ -293,19 +825,305 @@ class HistoryStore:
             channel_id=channel_id,
         )
 
+    def lookup_turn_by_platform_message_id(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+    ) -> HistoryTurn | None:
+        """Find the turn carrying ``platform_message_id`` for ``familiar_id``.
+
+        Returns ``None`` if no row matches — used by the read path to
+        resolve reply parents. The column index
+        ``idx_turns_platform_msg`` keeps this O(1) per familiar.
+        """
+        row = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ? AND platform_message_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,  # noqa: S608
+            (familiar_id, platform_message_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_turn(row)
+
+    def update_turn_content_by_message_id(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        content: str,
+    ) -> None:
+        """Rewrite ``turns.content`` for one platform message id.
+
+        Used when Discord delivers a URL unfurl after the original
+        ``on_message`` (typical: ``message.embeds`` populates via a
+        follow-up edit a second or two later). Silently no-ops when
+        no row matches — the bot may have come up after the message
+        landed. The ``turns_au_fts`` trigger keeps the FTS index in
+        sync; no bespoke handling here.
+        """
+        self._conn.execute(
+            """
+            UPDATE turns
+               SET content = ?
+             WHERE familiar_id = ? AND platform_message_id = ?
+            """,
+            (content, familiar_id, platform_message_id),
+        )
+        self._conn.commit()
+
+    def turns_by_ids(
+        self,
+        *,
+        familiar_id: str,
+        ids: Iterable[int],
+    ) -> list[HistoryTurn]:
+        """Fetch turns by id, scoped to ``familiar_id``, oldest first.
+
+        Used by RAG to expand each FTS hit into a small surrounding
+        window (hit ± neighbours) without a per-id round trip.
+        """
+        unique_ids = sorted({int(i) for i in ids})
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ?
+               AND id IN ({placeholders})
+             ORDER BY id ASC
+            """,  # noqa: S608
+            (familiar_id, *unique_ids),
+        ).fetchall()
+        return [_row_to_turn(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # turn_mentions: many-to-many from a turn to mentioned canonical_keys
+    # ------------------------------------------------------------------
+
+    def record_mentions(
+        self,
+        *,
+        turn_id: int,
+        canonical_keys: Iterable[str],
+    ) -> None:
+        """Record the canonical keys mentioned in ``turn_id``.
+
+        Idempotent — re-recording the same keys is a no-op thanks to
+        the (turn_id, canonical_key) primary key. Empty input is a
+        no-op too. Order is not preserved; reads come back sorted by
+        canonical_key for determinism.
+        """
+        seen: set[str] = set()
+        rows: list[tuple[int, str]] = []
+        for key in canonical_keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((turn_id, key))
+        if not rows:
+            return
+        self._conn.executemany(
+            """
+            INSERT OR IGNORE INTO turn_mentions (turn_id, canonical_key)
+            VALUES (?, ?)
+            """,
+            rows,
+        )
+        self._conn.commit()
+
+    def mentions_for_turn(self, *, turn_id: int) -> tuple[str, ...]:
+        """Return the canonical keys mentioned in ``turn_id``, sorted."""
+        rows = self._conn.execute(
+            """
+            SELECT canonical_key FROM turn_mentions
+             WHERE turn_id = ?
+             ORDER BY canonical_key ASC
+            """,
+            (turn_id,),
+        ).fetchall()
+        return tuple(str(r["canonical_key"]) for r in rows)
+
+    # ------------------------------------------------------------------
+    # message_reactions: emoji counts keyed by platform_message_id
+    # ------------------------------------------------------------------
+
+    def set_reaction(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        emoji: str,
+        count: int,
+    ) -> None:
+        """Upsert reaction count for one ``(message, emoji)`` pair.
+
+        ``count <= 0`` deletes the row — mirrors Discord semantics
+        where the last user removing a reaction collapses the entry.
+        Idempotent for repeated identical writes (gateway dedup is
+        cheap insurance here).
+        """
+        if count <= 0:
+            self._conn.execute(
+                """
+                DELETE FROM message_reactions
+                 WHERE familiar_id = ?
+                   AND platform_message_id = ?
+                   AND emoji = ?
+                """,
+                (familiar_id, platform_message_id, emoji),
+            )
+            self._conn.commit()
+            return
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO message_reactions
+                (familiar_id, platform_message_id, emoji, count, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(familiar_id, platform_message_id, emoji)
+            DO UPDATE SET count = excluded.count, updated_at = excluded.updated_at
+            """,
+            (familiar_id, platform_message_id, emoji, count, ts),
+        )
+        self._conn.commit()
+
+    def bump_reaction(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        emoji: str,
+        delta: int,
+    ) -> None:
+        """Atomic ±delta on one ``(message, emoji)`` row.
+
+        Drives the gateway hot path —``on_raw_reaction_add`` /
+        ``on_raw_reaction_remove`` deliver per-user toggles, never
+        absolute counts. Floors at zero (a stray remove without a
+        matching add — e.g. bot was offline when the reaction was
+        added — leaves no row rather than persisting a negative).
+        """
+        if delta == 0:
+            return
+        ts = datetime.now(tz=UTC).isoformat()
+        cur = self._conn.execute(
+            """
+            UPDATE message_reactions
+               SET count = count + ?, updated_at = ?
+             WHERE familiar_id = ?
+               AND platform_message_id = ?
+               AND emoji = ?
+            """,
+            (delta, ts, familiar_id, platform_message_id, emoji),
+        )
+        if cur.rowcount == 0 and delta > 0:
+            self._conn.execute(
+                """
+                INSERT INTO message_reactions
+                    (familiar_id, platform_message_id, emoji, count, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (familiar_id, platform_message_id, emoji, delta, ts),
+            )
+        self._conn.execute(
+            """
+            DELETE FROM message_reactions
+             WHERE familiar_id = ?
+               AND platform_message_id = ?
+               AND emoji = ?
+               AND count <= 0
+            """,
+            (familiar_id, platform_message_id, emoji),
+        )
+        self._conn.commit()
+
+    def clear_reactions(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_id: str,
+        emoji: str | None = None,
+    ) -> None:
+        """Drop reactions on one message — all (``emoji=None``) or a single emoji.
+
+        Mirrors ``on_raw_reaction_clear`` (no emoji) and
+        ``on_raw_reaction_clear_emoji`` (single emoji wiped).
+        """
+        if emoji is None:
+            self._conn.execute(
+                """
+                DELETE FROM message_reactions
+                 WHERE familiar_id = ?
+                   AND platform_message_id = ?
+                """,
+                (familiar_id, platform_message_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                DELETE FROM message_reactions
+                 WHERE familiar_id = ?
+                   AND platform_message_id = ?
+                   AND emoji = ?
+                """,
+                (familiar_id, platform_message_id, emoji),
+            )
+        self._conn.commit()
+
+    def reactions_for_messages(
+        self,
+        *,
+        familiar_id: str,
+        platform_message_ids: Iterable[str],
+    ) -> dict[str, tuple[tuple[str, int], ...]]:
+        """Batch lookup reactions for many messages in one query.
+
+        Returns ``{platform_message_id: ((emoji, count), ...)}`` —
+        messages with no reactions are absent. Per-message tuples are
+        ordered by descending count, then emoji asc for stable ties.
+        """
+        ids = [str(m) for m in platform_message_ids if m]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT platform_message_id, emoji, count
+              FROM message_reactions
+             WHERE familiar_id = ?
+               AND platform_message_id IN ({placeholders})
+             ORDER BY platform_message_id ASC, count DESC, emoji ASC
+            """,  # noqa: S608
+            (familiar_id, *ids),
+        ).fetchall()
+        out: dict[str, list[tuple[str, int]]] = {}
+        for r in rows:
+            out.setdefault(str(r["platform_message_id"]), []).append((
+                str(r["emoji"]),
+                int(r["count"]),
+            ))
+        return {k: tuple(v) for k, v in out.items()}
+
     def recent(
         self,
         *,
         familiar_id: str,
         channel_id: int,
         limit: int,
-        mode: ChannelMode | None = None,
+        mode: str | None = None,
     ) -> list[HistoryTurn]:
         """Return most recent turns in channel, oldest-first.
 
         Per-channel partitioning prevents bleed between conversations.
-        When *mode* is set, only matching turns returned (prevents
-        cross-mode style contamination).
+        When *mode* is set, only matching legacy-tag turns returned.
         """
         if limit <= 0:
             return []
@@ -318,7 +1136,7 @@ class HistoryStore:
                  ORDER BY id DESC
                  LIMIT ?
                 """,  # noqa: S608
-                (familiar_id, channel_id, mode.value, limit),
+                (familiar_id, channel_id, mode, limit),
             ).fetchall()
         else:
             rows = self._conn.execute(
@@ -373,6 +1191,207 @@ class HistoryStore:
             )
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # accounts + per-guild nicknames
+    # ------------------------------------------------------------------
+
+    def upsert_account(self, author: Author) -> None:
+        """Insert or refresh the canonical identity row for an Author.
+
+        Last-write wins on ``username`` / ``global_name`` / ``pronouns``
+        / ``bio``; ``last_seen_at`` always stamps now. ``canonical_key``
+        is the primary key, so re-upserting an existing user is cheap.
+        Profile fields (pronouns, bio) only overwrite when the new
+        value is non-NULL — bot tokens often can't read them, so a
+        later read shouldn't clobber a richer earlier observation.
+        Does not touch per-guild nicks — see :meth:`upsert_guild_nick`.
+        """
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO accounts
+                (canonical_key, platform, user_id, username, global_name,
+                 pronouns, bio, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (canonical_key) DO UPDATE SET
+                username     = excluded.username,
+                global_name  = excluded.global_name,
+                pronouns     = COALESCE(excluded.pronouns, accounts.pronouns),
+                bio          = COALESCE(excluded.bio, accounts.bio),
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                author.canonical_key,
+                author.platform,
+                author.user_id,
+                author.username,
+                author.global_name,
+                author.pronouns,
+                author.bio,
+                ts,
+            ),
+        )
+        self._conn.commit()
+
+    def get_account_profile(self, *, canonical_key: str) -> AccountProfile | None:
+        """Return cached profile fields for ``canonical_key``.
+
+        Powers the per-person header in :class:`PeopleDossierLayer` —
+        cheap lookup against the ``accounts`` table. ``None`` when no
+        row exists; missing columns surface as ``None`` on the result.
+        """
+        row = self._conn.execute(
+            """
+            SELECT username, global_name, pronouns, bio
+              FROM accounts
+             WHERE canonical_key = ?
+            """,
+            (canonical_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AccountProfile(
+            canonical_key=canonical_key,
+            username=row["username"],
+            global_name=row["global_name"],
+            pronouns=row["pronouns"],
+            bio=row["bio"],
+        )
+
+    def upsert_guild_nick(
+        self,
+        *,
+        canonical_key: str,
+        guild_id: int,
+        nick: str | None,
+    ) -> None:
+        """Cache a per-guild nickname. ``nick=None`` records "no override".
+
+        Per-guild row is keyed by ``(canonical_key, guild_id)``, so a
+        user with distinct nicks per guild gets distinct rows. NULL
+        ``nick`` is meaningful: it says "we observed this user in
+        this guild and they had no nickname override" — distinct from
+        "we've never seen them in this guild" (no row at all).
+        """
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO account_guild_nicks
+                (canonical_key, guild_id, nick, last_seen_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (canonical_key, guild_id) DO UPDATE SET
+                nick         = excluded.nick,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (canonical_key, guild_id, nick, ts),
+        )
+        self._conn.commit()
+
+    def resolve_label(
+        self,
+        *,
+        canonical_key: str,
+        guild_id: int | None,
+        familiar_id: str | None = None,
+    ) -> str:
+        """Return the best display name for ``canonical_key`` in *guild_id*.
+
+        Preference order:
+        1. ``account_guild_nicks.nick`` for ``(canonical_key, guild_id)``
+        2. ``accounts.global_name``
+        3. ``accounts.username``
+        4. ``latest_author_for(familiar_id, canonical_key).label`` —
+           snapshot from the most recent turn. Useful for legacy rows
+           where no ``accounts`` upsert has happened. Skipped when
+           *familiar_id* is omitted.
+        5. bare ``user_id`` parsed from canonical_key
+
+        Always returns a non-empty string — unknown keys still produce
+        ``"<user_id>"`` so callers don't have to handle ``None``.
+        """
+        if guild_id is not None:
+            row = self._conn.execute(
+                """
+                SELECT nick FROM account_guild_nicks
+                 WHERE canonical_key = ? AND guild_id = ?
+                """,
+                (canonical_key, guild_id),
+            ).fetchone()
+            if row is not None and row["nick"]:
+                return str(row["nick"])
+        row = self._conn.execute(
+            """
+            SELECT global_name, username FROM accounts
+             WHERE canonical_key = ?
+            """,
+            (canonical_key,),
+        ).fetchone()
+        if row is not None:
+            if row["global_name"]:
+                return str(row["global_name"])
+            if row["username"]:
+                return str(row["username"])
+        # Snapshot fallback: the latest turn carries an Author whose
+        # display_name was correct at the moment of writing. Cheaper
+        # than a join, and a sensible "last we saw them" answer for
+        # legacy rows that pre-date the accounts table.
+        if familiar_id is not None:
+            snapshot = self.latest_author_for(
+                familiar_id=familiar_id, canonical_key=canonical_key
+            )
+            if snapshot is not None:
+                return snapshot.label
+        # Fall back to the user_id portion of the canonical_key.
+        if ":" in canonical_key:
+            return canonical_key.partition(":")[2] or canonical_key
+        return canonical_key
+
+    # ------------------------------------------------------------------
+    # latest_author_for (legacy shim)
+    # ------------------------------------------------------------------
+
+    def latest_author_for(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+    ) -> Author | None:
+        """Return the :class:`Author` from the most recent turn with this key.
+
+        Display names rotate (Discord/Twitch nicks); the latest turn
+        carries the freshest one. Returns ``None`` if no turn matches —
+        e.g. the user hasn't spoken in this familiar, or the
+        canonical_key isn't well-formed. Used by
+        :class:`RagContextLayer` to resolve stale fact-subject names
+        at read time.
+        """
+        if ":" not in canonical_key:
+            return None
+        platform, _, user_id = canonical_key.partition(":")
+        if not platform or not user_id:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT author_platform, author_user_id,
+                   author_username, author_display_name
+              FROM turns
+             WHERE familiar_id = ?
+               AND author_platform = ?
+               AND author_user_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (familiar_id, platform, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return Author(
+            platform=str(row["author_platform"]),
+            user_id=str(row["author_user_id"]),
+            username=row["author_username"],
+            display_name=row["author_display_name"],
+        )
 
     def older_than(
         self,
@@ -567,6 +1586,61 @@ class HistoryStore:
             for row in rows
         ]
 
+    def all_channel_ids(self, *, familiar_id: str) -> set[int]:
+        """Return the set of all channel ids that have turns for *familiar_id*."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT channel_id FROM turns WHERE familiar_id = ?",
+            (familiar_id,),
+        ).fetchall()
+        return {int(r["channel_id"]) for r in rows}
+
+    def turns_in_id_range(
+        self,
+        *,
+        familiar_id: str,
+        min_id_exclusive: int,
+        max_id_inclusive: int,
+        channel_id: int | None = None,
+    ) -> list[HistoryTurn]:
+        """Return turns whose id falls in ``(min_id_exclusive, max_id_inclusive]``.
+
+        When *channel_id* is given, restricts to that channel.
+        """
+        if channel_id is not None:
+            rows = self._conn.execute(
+                f"""
+                SELECT {_TURN_COLS}
+                  FROM turns
+                 WHERE familiar_id = ?
+                   AND channel_id = ?
+                   AND id > ?
+                   AND id <= ?
+                 ORDER BY id ASC
+                """,  # noqa: S608
+                (familiar_id, channel_id, min_id_exclusive, max_id_inclusive),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"""
+                SELECT {_TURN_COLS}
+                  FROM turns
+                 WHERE familiar_id = ?
+                   AND id > ?
+                   AND id <= ?
+                 ORDER BY id ASC
+                """,  # noqa: S608
+                (familiar_id, min_id_exclusive, max_id_inclusive),
+            ).fetchall()
+        return [_row_to_turn(r) for r in rows]
+
+    def all_fact_ids(self, *, familiar_id: str) -> set[int]:
+        """Return all fact ids for *familiar_id*, including superseded ones."""
+        rows = self._conn.execute(
+            "SELECT id FROM facts WHERE familiar_id = ?",
+            (familiar_id,),
+        ).fetchall()
+        return {int(r["id"]) for r in rows}
+
     def get_cross_context(
         self,
         *,
@@ -699,6 +1773,863 @@ class HistoryStore:
         ).fetchall()
         return [_row_to_turn(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # people_dossiers — per-person summaries compounded from facts
+    # ------------------------------------------------------------------
+
+    def get_people_dossier(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+    ) -> PeopleDossierEntry | None:
+        """Return the cached dossier for ``canonical_key``, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT canonical_key, last_fact_id, dossier_text, created_at
+              FROM people_dossiers
+             WHERE familiar_id = ? AND canonical_key = ?
+            """,
+            (familiar_id, canonical_key),
+        ).fetchone()
+        if row is None:
+            return None
+        return PeopleDossierEntry(
+            canonical_key=str(row["canonical_key"]),
+            last_fact_id=int(row["last_fact_id"]),
+            dossier_text=str(row["dossier_text"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def put_people_dossier(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+        last_fact_id: int,
+        dossier_text: str,
+    ) -> None:
+        """Insert or replace the dossier for ``canonical_key``."""
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO people_dossiers
+                (familiar_id, canonical_key,
+                 last_fact_id, dossier_text, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (familiar_id, canonical_key)
+            DO UPDATE SET
+                last_fact_id = excluded.last_fact_id,
+                dossier_text = excluded.dossier_text,
+                created_at   = excluded.created_at
+            """,
+            (familiar_id, canonical_key, last_fact_id, dossier_text, ts),
+        )
+        self._conn.commit()
+
+    def subjects_with_facts(self, *, familiar_id: str) -> dict[str, int]:
+        """Map ``canonical_key`` → ``max(facts.id)`` across current facts.
+
+        Excludes superseded facts — the dossier should track current
+        truth, and a subject whose only facts are stale shouldn't keep
+        showing up as a refresh candidate. Scans ``subjects_json`` in
+        Python; fine at expected per-familiar volumes (a SQLite virtual
+        index would be a later optimisation if profiling demands it).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, subjects_json
+              FROM facts
+             WHERE familiar_id = ?
+               AND subjects_json IS NOT NULL
+               AND superseded_at IS NULL
+             ORDER BY id ASC
+            """,
+            (familiar_id,),
+        ).fetchall()
+        out: dict[str, int] = {}
+        for row in rows:
+            try:
+                parsed = json.loads(row["subjects_json"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(parsed, list):
+                continue
+            fact_id = int(row["id"])
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("canonical_key")
+                if not isinstance(key, str):
+                    continue
+                # ORDER BY id ASC ⇒ later assignment wins ⇒ max id.
+                out[key] = fact_id
+        return out
+
+    def facts_for_subject(
+        self,
+        *,
+        familiar_id: str,
+        canonical_key: str,
+        min_id_exclusive: int = 0,
+        include_superseded: bool = False,
+        as_of: datetime | None = None,
+    ) -> list[Fact]:
+        """Return facts mentioning ``canonical_key``, ASC by id.
+
+        Pre-filters with ``subjects_json LIKE`` (cheap; the JSON form
+        wraps each key in quotes so substring collisions like
+        ``discord:1`` vs ``discord:11`` don't false-positive). Final
+        membership check parses the JSON in Python. ``as_of`` mirrors
+        :meth:`recent_facts` semantics.
+        """
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of
+        )
+        like_pattern = f'%"{canonical_key}"%'
+        rows = self._conn.execute(
+            f"""
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to, importance
+              FROM facts
+             WHERE familiar_id = ?
+               AND id > ?
+               AND subjects_json IS NOT NULL
+               AND subjects_json LIKE ?
+               {where}
+             ORDER BY id ASC
+            """,  # noqa: S608
+            (familiar_id, min_id_exclusive, like_pattern, *params),
+        ).fetchall()
+        out: list[Fact] = []
+        for row in rows:
+            fact = _row_to_fact(row)
+            if any(s.canonical_key == canonical_key for s in fact.subjects):
+                out.append(fact)
+        return out
+
+    # ------------------------------------------------------------------
+    # FTS side-index over ``turns.content``
+    # ------------------------------------------------------------------
+
+    def search_turns(
+        self,
+        *,
+        familiar_id: str,
+        query: str,
+        limit: int,
+        channel_id: int | None = None,
+        max_id: int | None = None,
+    ) -> list[HistoryTurn]:
+        """Return turns whose content matches the FTS *query*.
+
+        Empty/whitespace *query* and queries that reduce to only
+        stopwords return ``[]``. Tokens are OR-joined and BM25-ranked;
+        see :func:`_build_fts_match`.
+
+        :param max_id: if set, only turns with ``id <= max_id`` are
+            considered. Used by :class:`RagContextLayer` to keep RAG
+            from re-surfacing turns already covered by
+            :class:`RecentHistoryLayer`.
+        """
+        if limit <= 0:
+            return []
+        match_expr = _build_fts_match(query)
+        if not match_expr:
+            return []
+
+        params: list[object] = [match_expr, familiar_id]
+        where_extra = ""
+        if channel_id is not None:
+            where_extra += "AND t.channel_id = ?\n"
+            params.append(channel_id)
+        if max_id is not None:
+            where_extra += "AND t.id <= ?\n"
+            params.append(max_id)
+        params.append(limit)
+
+        rows = self._conn.execute(
+            f"""
+            SELECT {", ".join("t." + c for c in _TURN_COLS.split(", "))}
+              FROM fts_turns AS fts
+              JOIN turns AS t ON t.id = fts.rowid
+             WHERE fts_turns MATCH ?
+               AND t.familiar_id = ?
+               {where_extra}
+             ORDER BY bm25(fts_turns) ASC, t.id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            params,
+        ).fetchall()
+        return [_row_to_turn(r) for r in rows]
+
+    def rebuild_fts(self) -> None:
+        """Drop and repopulate the ``fts_turns`` index from ``turns``.
+
+        Cheap relative to re-running every LLM call; cheap enough to
+        run at startup if triggers ever get out of sync.
+        """
+        self._conn.executescript(
+            """
+            DELETE FROM fts_turns;
+            INSERT INTO fts_turns (rowid, content)
+            SELECT id, content FROM turns;
+            """
+        )
+        self._conn.commit()
+
+    def latest_fts_id(self, *, familiar_id: str) -> int:
+        """Return the highest turn id currently indexed for ``familiar_id``.
+
+        The FTS index is updated by trigger in lockstep with ``turns``
+        writes, so this is an ``id``-lookup, not a separate watermark.
+        """
+        row = self._conn.execute(
+            """
+            SELECT MAX(t.id) AS max_id
+              FROM fts_turns AS fts
+              JOIN turns AS t ON t.id = fts.rowid
+             WHERE t.familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        max_id = row["max_id"] if row is not None else None
+        return int(max_id) if max_id is not None else 0
+
+    # ------------------------------------------------------------------
+    # Facts — atomic distilled statements with provenance
+    # ------------------------------------------------------------------
+
+    def append_fact(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int | None,
+        text: str,
+        source_turn_ids: Iterable[int],
+        subjects: Iterable[FactSubject] = (),
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
+        importance: int | None = None,
+    ) -> Fact:
+        """Persist one fact. ``source_turn_ids`` and ``subjects`` stored as JSON.
+
+        ``subjects`` is the extractor's best-effort link to canonical
+        identities — see :class:`FactSubject`.
+
+        ``valid_from`` / ``valid_to`` are world-time (when the fact
+        applied in the world). When ``valid_from`` is omitted it
+        defaults to ``created_at``; callers (e.g. ``FactExtractor``)
+        pass the source turn's timestamp explicitly. ``valid_to``
+        defaults to ``None`` — fact still applies.
+
+        ``importance`` is the extractor's 1-10 ranking hint (M2).
+        Out-of-range values clamp to ``[1, 10]`` so a stray LLM number
+        can't poison rank-time math. ``None`` is preserved verbatim —
+        downstream consumers treat it as a neutral midpoint.
+        """
+        ids = [int(i) for i in source_turn_ids]
+        subjects_tuple = tuple(subjects)
+        subjects_blob: str | None = (
+            json.dumps([
+                {
+                    "canonical_key": s.canonical_key,
+                    "display_at_write": s.display_at_write,
+                }
+                for s in subjects_tuple
+            ])
+            if subjects_tuple
+            else None
+        )
+        ts = datetime.now(tz=UTC)
+        valid_from_eff = valid_from if valid_from is not None else ts
+        importance_eff: int | None
+        if importance is None:
+            importance_eff = None
+        else:
+            importance_eff = max(1, min(10, int(importance)))
+        cur = self._conn.execute(
+            """
+            INSERT INTO facts (familiar_id, channel_id, text,
+                               source_turn_ids, created_at, subjects_json,
+                               valid_from, valid_to, importance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                familiar_id,
+                channel_id,
+                text,
+                json.dumps(ids),
+                ts.isoformat(),
+                subjects_blob,
+                valid_from_eff.isoformat(),
+                valid_to.isoformat() if valid_to is not None else None,
+                importance_eff,
+            ),
+        )
+        self._conn.commit()
+        return Fact(
+            id=int(cur.lastrowid or 0),
+            familiar_id=familiar_id,
+            channel_id=channel_id,
+            text=text,
+            source_turn_ids=tuple(ids),
+            created_at=ts,
+            subjects=subjects_tuple,
+            valid_from=valid_from_eff,
+            valid_to=valid_to,
+            importance=importance_eff,
+        )
+
+    def recent_facts(
+        self,
+        *,
+        familiar_id: str,
+        limit: int,
+        include_superseded: bool = False,
+        as_of: datetime | None = None,
+    ) -> list[Fact]:
+        """Return the ``limit`` most recent facts, newest first.
+
+        Default ("current truth"): excludes superseded facts and any
+        whose world-time ``valid_to`` is in the past.
+
+        ``as_of`` switches to a bi-temporal world-time slice — returns
+        facts whose ``valid_from <= as_of`` and (``valid_to`` is NULL
+        or > ``as_of``). Includes superseded rows so audit queries can
+        recover prior beliefs (overrides ``include_superseded``).
+        """
+        if limit <= 0:
+            return []
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of
+        )
+        rows = self._conn.execute(
+            f"""
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to, importance
+              FROM facts
+             WHERE familiar_id = ?
+               {where}
+             ORDER BY id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            (familiar_id, *params, limit),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def search_facts(
+        self,
+        *,
+        familiar_id: str,
+        query: str,
+        limit: int,
+        include_superseded: bool = False,
+        as_of: datetime | None = None,
+    ) -> list[Fact]:
+        """FTS search over ``facts.text``.
+
+        See :meth:`search_turns` for tokenisation notes. Validity
+        filtering matches :meth:`recent_facts`: default = current
+        truth (not superseded, not expired); ``as_of`` switches to a
+        bi-temporal world-time slice including superseded rows.
+        """
+        if limit <= 0:
+            return []
+        match_expr = _build_fts_match(query)
+        if not match_expr:
+            return []
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of, alias="f"
+        )
+        rows = self._conn.execute(
+            f"""
+            SELECT f.id, f.familiar_id, f.channel_id, f.text,
+                   f.source_turn_ids, f.created_at,
+                   f.superseded_at, f.superseded_by, f.subjects_json,
+                   f.valid_from, f.valid_to, f.importance
+              FROM fts_facts AS fts
+              JOIN facts AS f ON f.id = fts.rowid
+             WHERE fts_facts MATCH ?
+               AND f.familiar_id = ?
+               {where}
+             ORDER BY bm25(fts_facts) ASC, f.id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            (match_expr, familiar_id, *params, limit),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def search_facts_scored(
+        self,
+        *,
+        familiar_id: str,
+        query: str,
+        limit: int,
+        include_superseded: bool = False,
+        as_of: datetime | None = None,
+    ) -> list[tuple[Fact, float]]:
+        """Like :meth:`search_facts`, but pairs each row with its BM25 score.
+
+        FTS5's ``bm25()`` returns negative numbers — lower = better
+        match. Exposed verbatim so :class:`RagContextLayer` can fuse it
+        with importance and recency at rank time (M2).
+        """
+        if limit <= 0:
+            return []
+        match_expr = _build_fts_match(query)
+        if not match_expr:
+            return []
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of, alias="f"
+        )
+        rows = self._conn.execute(
+            f"""
+            SELECT f.id, f.familiar_id, f.channel_id, f.text,
+                   f.source_turn_ids, f.created_at,
+                   f.superseded_at, f.superseded_by, f.subjects_json,
+                   f.valid_from, f.valid_to, f.importance,
+                   bm25(fts_facts) AS bm25_score
+              FROM fts_facts AS fts
+              JOIN facts AS f ON f.id = fts.rowid
+             WHERE fts_facts MATCH ?
+               AND f.familiar_id = ?
+               {where}
+             ORDER BY bm25(fts_facts) ASC, f.id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            (match_expr, familiar_id, *params, limit),
+        ).fetchall()
+        return [(_row_to_fact(r), float(r["bm25_score"])) for r in rows]
+
+    def latest_fact_id(self, *, familiar_id: str) -> int:
+        """Return highest ``facts.id`` for ``familiar_id``; 0 if none.
+
+        Counts superseded rows too — the cache invalidation key only
+        needs to change on writes, and supersession-by-replacement
+        already adds a new row so the id ticks up naturally.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(id) AS max_id FROM facts WHERE familiar_id = ?",
+            (familiar_id,),
+        ).fetchone()
+        max_id = row["max_id"] if row is not None else None
+        return int(max_id) if max_id is not None else 0
+
+    def supersede_fact(
+        self,
+        *,
+        familiar_id: str,
+        old_id: int,
+        new_id: int,
+    ) -> None:
+        """Mark ``old_id`` as superseded by ``new_id``.
+
+        Both ids must belong to ``familiar_id``. The old row keeps its
+        text and provenance; only ``superseded_at`` (now, UTC) and
+        ``superseded_by`` are written. Re-superseding a row that's
+        already superseded raises ``ValueError`` — that signals an
+        upstream bug (double-write) rather than something to silently
+        absorb.
+        """
+        row = self._conn.execute(
+            "SELECT superseded_at FROM facts WHERE id = ? AND familiar_id = ?",
+            (old_id, familiar_id),
+        ).fetchone()
+        if row is None:
+            msg = f"unknown fact id={old_id} for familiar={familiar_id}"
+            raise ValueError(msg)
+        if row["superseded_at"] is not None:
+            msg = f"fact id={old_id} already superseded"
+            raise ValueError(msg)
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            UPDATE facts
+               SET superseded_at = ?, superseded_by = ?
+             WHERE id = ? AND familiar_id = ?
+            """,
+            (ts, new_id, old_id, familiar_id),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # fact embeddings (M6) — semantic recall side-index
+    # ------------------------------------------------------------------
+
+    def set_fact_embedding(
+        self,
+        *,
+        fact_id: int,
+        model: str,
+        vector: list[float],
+    ) -> None:
+        """Persist *vector* for ``(fact_id, model)``; upsert.
+
+        Stored as packed little-endian float32. ``model`` is the
+        embedder's :attr:`Embedder.name`; pairing it with ``fact_id``
+        lets a model swap accumulate new rows beside the old without
+        destroying audit history.
+        """
+        if not vector:
+            msg = "set_fact_embedding requires a non-empty vector"
+            raise ValueError(msg)
+        dim = len(vector)
+        blob = struct.pack(f"<{dim}f", *vector)
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO fact_embeddings (fact_id, model, dim, vector, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (fact_id, model)
+            DO UPDATE SET
+                dim        = excluded.dim,
+                vector     = excluded.vector,
+                created_at = excluded.created_at
+            """,
+            (int(fact_id), model, dim, blob, ts),
+        )
+        self._conn.commit()
+
+    def get_fact_embeddings(
+        self,
+        *,
+        fact_ids: Iterable[int],
+        model: str,
+    ) -> dict[int, list[float]]:
+        """Return ``{fact_id: vector}`` for the requested ids + model.
+
+        Missing rows are simply absent from the result — the caller
+        treats them as "not yet embedded" and skips the embedding
+        signal for that candidate.
+        """
+        ids = [int(i) for i in fact_ids]
+        if not ids:
+            return {}
+        placeholders = ",".join(["?"] * len(ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT fact_id, dim, vector
+              FROM fact_embeddings
+             WHERE model = ? AND fact_id IN ({placeholders})
+            """,  # noqa: S608
+            (model, *ids),
+        ).fetchall()
+        out: dict[int, list[float]] = {}
+        for r in rows:
+            dim = int(r["dim"])
+            blob = bytes(r["vector"])
+            out[int(r["fact_id"])] = list(struct.unpack(f"<{dim}f", blob))
+        return out
+
+    def unembedded_facts(
+        self,
+        *,
+        familiar_id: str,
+        model: str,
+        limit: int,
+    ) -> list[Fact]:
+        """Return current facts lacking an embedding row for ``model``.
+
+        "Current" matches :meth:`recent_facts` defaults — superseded
+        rows are excluded. The projector embeds in id order so an
+        interrupted run resumes deterministically.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT f.id, f.familiar_id, f.channel_id, f.text,
+                   f.source_turn_ids, f.created_at,
+                   f.superseded_at, f.superseded_by, f.subjects_json,
+                   f.valid_from, f.valid_to, f.importance
+              FROM facts AS f
+              LEFT JOIN fact_embeddings AS fe
+                ON fe.fact_id = f.id AND fe.model = ?
+             WHERE f.familiar_id = ?
+               AND f.superseded_at IS NULL
+               AND fe.fact_id IS NULL
+             ORDER BY f.id ASC
+             LIMIT ?
+            """,
+            (model, familiar_id, limit),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def latest_embedded_fact_id(
+        self,
+        *,
+        familiar_id: str,
+        model: str,
+    ) -> int:
+        """Highest ``fact_id`` with an embedding row for ``model``; 0 if none."""
+        row = self._conn.execute(
+            """
+            SELECT MAX(fe.fact_id) AS max_id
+              FROM fact_embeddings AS fe
+              JOIN facts AS f ON f.id = fe.fact_id
+             WHERE fe.model = ? AND f.familiar_id = ?
+            """,
+            (model, familiar_id),
+        ).fetchone()
+        max_id = row["max_id"] if row is not None else None
+        return int(max_id) if max_id is not None else 0
+
+    # ------------------------------------------------------------------
+    # reflections (M3) — higher-order syntheses
+    # ------------------------------------------------------------------
+
+    def append_reflection(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int | None,
+        text: str,
+        cited_turn_ids: Iterable[int],
+        cited_fact_ids: Iterable[int],
+        last_turn_id: int,
+        last_fact_id: int,
+    ) -> Reflection:
+        """Insert a new reflection row.
+
+        ``last_turn_id`` / ``last_fact_id`` snapshot the worker's view
+        at write time — also serve as the next tick's watermark.
+        """
+        turn_ids = [int(i) for i in cited_turn_ids]
+        fact_ids = [int(i) for i in cited_fact_ids]
+        ts = datetime.now(tz=UTC)
+        cur = self._conn.execute(
+            """
+            INSERT INTO reflections
+                (familiar_id, channel_id, text,
+                 cited_turn_ids, cited_fact_ids, created_at,
+                 last_turn_id, last_fact_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                familiar_id,
+                channel_id,
+                text,
+                json.dumps(turn_ids),
+                json.dumps(fact_ids),
+                ts.isoformat(),
+                int(last_turn_id),
+                int(last_fact_id),
+            ),
+        )
+        self._conn.commit()
+        return Reflection(
+            id=int(cur.lastrowid or 0),
+            familiar_id=familiar_id,
+            channel_id=channel_id,
+            text=text,
+            cited_turn_ids=tuple(turn_ids),
+            cited_fact_ids=tuple(fact_ids),
+            created_at=ts,
+            last_turn_id=int(last_turn_id),
+            last_fact_id=int(last_fact_id),
+        )
+
+    def recent_reflections(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int | None = None,
+        limit: int,
+    ) -> list[Reflection]:
+        """Return ``limit`` most recent reflections, newest first.
+
+        ``channel_id`` scopes to one channel; ``None`` returns reflections
+        regardless of channel scope (including channel-agnostic rows).
+        """
+        if limit <= 0:
+            return []
+        if channel_id is None:
+            rows = self._conn.execute(
+                """
+                SELECT id, familiar_id, channel_id, text,
+                       cited_turn_ids, cited_fact_ids, created_at,
+                       last_turn_id, last_fact_id
+                  FROM reflections
+                 WHERE familiar_id = ?
+                 ORDER BY id DESC
+                 LIMIT ?
+                """,
+                (familiar_id, limit),
+            ).fetchall()
+        else:
+            # Include channel-agnostic rows (channel_id IS NULL) so a
+            # global reflection still surfaces in any channel.
+            rows = self._conn.execute(
+                """
+                SELECT id, familiar_id, channel_id, text,
+                       cited_turn_ids, cited_fact_ids, created_at,
+                       last_turn_id, last_fact_id
+                  FROM reflections
+                 WHERE familiar_id = ?
+                   AND (channel_id = ? OR channel_id IS NULL)
+                 ORDER BY id DESC
+                 LIMIT ?
+                """,
+                (familiar_id, channel_id, limit),
+            ).fetchall()
+        return [_row_to_reflection(r) for r in rows]
+
+    def latest_reflection_watermarks(
+        self,
+        *,
+        familiar_id: str,
+    ) -> tuple[int, int]:
+        """Return (last_turn_id, last_fact_id) of the newest reflection.
+
+        ``(0, 0)`` if no reflections exist for *familiar_id*. Used by
+        :class:`ReflectionWorker` to decide whether enough new turns
+        / facts have accumulated to write again.
+        """
+        row = self._conn.execute(
+            """
+            SELECT last_turn_id, last_fact_id
+              FROM reflections
+             WHERE familiar_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return (0, 0)
+        return (int(row["last_turn_id"]), int(row["last_fact_id"]))
+
+    def superseded_fact_ids(
+        self,
+        *,
+        familiar_id: str,
+        fact_ids: Iterable[int],
+    ) -> set[int]:
+        """Return the subset of ``fact_ids`` that are superseded.
+
+        Used by :class:`ReflectionLayer` to flag stale citations on
+        read. Empty input returns ``set()`` without a query.
+        """
+        ids = [int(i) for i in fact_ids]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT id
+              FROM facts
+             WHERE familiar_id = ?
+               AND id IN ({placeholders})
+               AND superseded_at IS NOT NULL
+            """,  # noqa: S608
+            (familiar_id, *ids),
+        ).fetchall()
+        return {int(r["id"]) for r in rows}
+
+
+def _row_to_reflection(row: sqlite3.Row) -> Reflection:
+    try:
+        turn_ids = tuple(int(x) for x in json.loads(row["cited_turn_ids"]))
+    except (ValueError, TypeError):
+        turn_ids = ()
+    try:
+        fact_ids = tuple(int(x) for x in json.loads(row["cited_fact_ids"]))
+    except (ValueError, TypeError):
+        fact_ids = ()
+    channel = row["channel_id"]
+    return Reflection(
+        id=int(row["id"]),
+        familiar_id=str(row["familiar_id"]),
+        channel_id=int(channel) if channel is not None else None,
+        text=str(row["text"]),
+        cited_turn_ids=turn_ids,
+        cited_fact_ids=fact_ids,
+        created_at=datetime.fromisoformat(row["created_at"]),
+        last_turn_id=int(row["last_turn_id"]),
+        last_fact_id=int(row["last_fact_id"]),
+    )
+
+
+def _row_to_fact(row: sqlite3.Row) -> Fact:
+    ids_raw = row["source_turn_ids"]
+    try:
+        ids = tuple(int(x) for x in json.loads(ids_raw))
+    except (ValueError, TypeError):
+        ids = ()
+    channel = row["channel_id"]
+    superseded_at_raw: str | None
+    superseded_by_raw: int | None
+    try:
+        superseded_at_raw = row["superseded_at"]
+    except (IndexError, KeyError):
+        superseded_at_raw = None
+    try:
+        superseded_by_raw = row["superseded_by"]
+    except (IndexError, KeyError):
+        superseded_by_raw = None
+    try:
+        subjects_raw = row["subjects_json"]
+    except (IndexError, KeyError):
+        subjects_raw = None
+    subjects: tuple[FactSubject, ...] = ()
+    if subjects_raw:
+        try:
+            parsed = json.loads(subjects_raw)
+        except (ValueError, TypeError):
+            parsed = []
+        if isinstance(parsed, list):
+            subjects = tuple(
+                FactSubject(
+                    canonical_key=str(item["canonical_key"]),
+                    display_at_write=str(item["display_at_write"]),
+                )
+                for item in parsed
+                if isinstance(item, dict)
+                and "canonical_key" in item
+                and "display_at_write" in item
+            )
+    try:
+        valid_from_raw = row["valid_from"]
+    except (IndexError, KeyError):
+        valid_from_raw = None
+    try:
+        valid_to_raw = row["valid_to"]
+    except (IndexError, KeyError):
+        valid_to_raw = None
+    try:
+        importance_raw = row["importance"]
+    except (IndexError, KeyError):
+        importance_raw = None
+    return Fact(
+        id=int(row["id"]),
+        familiar_id=str(row["familiar_id"]),
+        channel_id=int(channel) if channel is not None else None,
+        text=str(row["text"]),
+        source_turn_ids=ids,
+        created_at=datetime.fromisoformat(row["created_at"]),
+        superseded_at=(
+            datetime.fromisoformat(superseded_at_raw)
+            if superseded_at_raw is not None
+            else None
+        ),
+        superseded_by=int(superseded_by_raw) if superseded_by_raw is not None else None,
+        subjects=subjects,
+        valid_from=(
+            datetime.fromisoformat(valid_from_raw)
+            if valid_from_raw is not None
+            else None
+        ),
+        valid_to=(
+            datetime.fromisoformat(valid_to_raw) if valid_to_raw is not None else None
+        ),
+        importance=int(importance_raw) if importance_raw is not None else None,
+    )
+
 
 def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
     """Rebuild a HistoryTurn from a SELECT row. Author is reconstructed.
@@ -724,6 +2655,18 @@ def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
     else:
         author = None
 
+    try:
+        platform_message_id = row["platform_message_id"]
+    except (IndexError, KeyError):
+        platform_message_id = None
+    try:
+        reply_to_message_id = row["reply_to_message_id"]
+    except (IndexError, KeyError):
+        reply_to_message_id = None
+    try:
+        guild_id_raw = row["guild_id"]
+    except (IndexError, KeyError):
+        guild_id_raw = None
     return HistoryTurn(
         id=int(row["id"]),
         timestamp=datetime.fromisoformat(row["timestamp"]),
@@ -731,4 +2674,11 @@ def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
         author=author,
         content=str(row["content"]),
         channel_id=channel_id,
+        platform_message_id=(
+            str(platform_message_id) if platform_message_id is not None else None
+        ),
+        reply_to_message_id=(
+            str(reply_to_message_id) if reply_to_message_id is not None else None
+        ),
+        guild_id=int(guild_id_raw) if guild_id_raw is not None else None,
     )

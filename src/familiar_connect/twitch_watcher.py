@@ -1,8 +1,8 @@
 """Twitch EventSub WebSocket watcher.
 
-Connects to Twitch's EventSub WebSocket (via twitchAPI), registers
-listeners for the event types enabled in TwitchWatcherConfig, and
-forwards resulting TwitchEvent objects to an asyncio.Queue.
+Connects to Twitch EventSub WebSocket (via twitchAPI), registers
+listeners for events enabled in TwitchWatcherConfig, forwards
+resulting TwitchEvent objects to an asyncio.Queue.
 """
 
 from __future__ import annotations
@@ -78,11 +78,10 @@ class TwitchWatcher:
         self.moderator_id = moderator_id if moderator_id is not None else broadcaster_id
 
     # ------------------------------------------------------------------
-    # Synchronous handlers — accept the .event data object from twitchAPI
+    # sync handlers — accept .event data object from twitchAPI
     # ------------------------------------------------------------------
 
     def handle_follow(self, data: ChannelFollowData) -> TwitchEvent | None:
-        """Convert a ChannelFollowData into a TwitchEvent."""
         return build_follow_event(
             config=self.config,
             channel=self.channel,
@@ -90,10 +89,7 @@ class TwitchWatcher:
         )
 
     def handle_subscription(self, data: ChannelSubscribeData) -> TwitchEvent | None:
-        """Convert a ChannelSubscribeData into a TwitchEvent.
-
-        Gift subs arrive via handle_gift_subscription; is_gift=True is ignored here.
-        """
+        """Subscription event; gift subs arrive via handle_gift_subscription."""
         if data.is_gift:
             return None
         return build_subscription_event(
@@ -106,7 +102,6 @@ class TwitchWatcher:
     def handle_gift_subscription(
         self, data: ChannelSubscriptionGiftData
     ) -> TwitchEvent | None:
-        """Convert a ChannelSubscriptionGiftData into a TwitchEvent."""
         gifter = (
             None
             if data.is_anonymous
@@ -123,10 +118,10 @@ class TwitchWatcher:
     def handle_resubscription(
         self, data: ChannelSubscriptionMessageData
     ) -> TwitchEvent | None:
-        """Convert a ChannelSubscriptionMessageData into a TwitchEvent.
+        """Resub event.
 
-        cumulative_months is Optional on the Twitch side; fall back to
-        duration_months (always present) when it is absent.
+        cumulative_months Optional on Twitch side; falls back to
+        duration_months (always present).
         """
         months = (
             data.cumulative_months
@@ -143,7 +138,6 @@ class TwitchWatcher:
         )
 
     def handle_cheer(self, data: ChannelCheerData) -> TwitchEvent | None:
-        """Convert a ChannelCheerData into a TwitchEvent."""
         viewer = (
             None
             if data.is_anonymous
@@ -160,7 +154,6 @@ class TwitchWatcher:
     def handle_channel_point_redemption(
         self, data: ChannelPointsCustomRewardRedemptionData
     ) -> TwitchEvent | None:
-        """Convert a ChannelPointsCustomRewardRedemptionData into a TwitchEvent."""
         return build_channel_point_event(
             config=self.config,
             channel=self.channel,
@@ -172,7 +165,6 @@ class TwitchWatcher:
     def handle_ad_break_begin(
         self, _data: ChannelAdBreakBeginData
     ) -> TwitchEvent | None:
-        """Convert a ChannelAdBreakBeginData into a TwitchEvent."""
         return build_ad_start_event(config=self.config, channel=self.channel)
 
     # ------------------------------------------------------------------
@@ -184,12 +176,11 @@ class TwitchWatcher:
         eventsub: EventSubWebsocket,
         send: asyncio.Queue[TwitchEvent] | None = None,
     ) -> None:
-        """Register EventSub callbacks on *eventsub* for all enabled event types.
+        """Register EventSub callbacks on ``eventsub`` for all enabled event types.
 
-        *send* is the asyncio.Queue that callbacks will forward events to.
-        When called from run() this is always provided; the parameter is
-        optional only so the method can be called standalone in tests that
-        only check which listen_* methods are invoked.
+        send: asyncio.Queue callbacks forward events to. Always provided
+        from :meth:`run`; optional for standalone test calls that only
+        check which ``listen_*`` methods are invoked.
         """
         if self.config.follows_enabled:
             await eventsub.listen_channel_follow_v2(

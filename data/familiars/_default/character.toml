@@ -1,8 +1,8 @@
 # Default familiar profile — checked into the repo.
 #
-# This file is the single source of truth for configuration defaults.
-# When another familiar's `character.toml` omits a field (or a whole
-# [llm.*] or [tts] section), the loader falls back to the value here.
+# Sole source of truth for configuration defaults. When another
+# familiar's `character.toml` omits a field, the loader falls back
+# to the value here.
 #
 # New familiars should copy this file as a starting template:
 #
@@ -13,139 +13,328 @@
 # the directory as a reference, not a runnable familiar. Do not set
 # FAMILIAR_ID=_default.
 
-# --- Persona and behaviour -------------------------------------------------
-
-default_mode  = "text_conversation_rp"
-display_tz    = "UTC"
-aliases       = []
-chattiness    = "Balanced — responds when the conversation is relevant"
-interjection  = "average"
-text_lull_timeout  = 10.0
-voice_lull_timeout = 5.0
-
-# --- Voice interruption handling (voice channels only) --------------------
-#
-# When the familiar is speaking or generating and a user starts talking,
-# the interruption detector classifies by duration and dispatches to the
-# appropriate handler. `interrupt_tolerance` controls the probability of
-# pushing through a short interruption mid-speech (higher = more
-# stubborn). See docs/roadmap/interruption-flow.md.
-
-[voice.interruption]
-interrupt_tolerance   = "average"   # very_meek | meek | average | stubborn | very_stubborn
-min_interruption_s    = 2.0         # back-channel filter threshold
-short_long_boundary_s = 30.0        # short (polite pause) vs. long (regen)
-
-# --- Typing simulation (text channels only) -------------------------------
-#
-# Chunks the LLM reply into paragraphs and sends each after a length-
-# proportional "typing..." delay. A new user message mid-delivery cancels
-# the remaining chunks; already-sent chunks become the assistant turn.
-#
-# Per-mode defaults live in channel_config_for_mode() — text_conversation_rp
-# enables; full_rp and imitate_voice disable. Uncomment below to override
-# familiar-wide (or per-channel via channels/<id>.toml).
-# See docs/architecture/typing-simulation.md.
-#
-# [typing_simulation]
-# enabled                  = true
-# chars_per_second         = 40.0    # ~240 wpm
-# min_delay_s              = 0.8
-# max_delay_s              = 6.0
-# inter_line_pause_s       = 0.7
-# sentence_split_threshold = 400     # chars — paragraphs above split by sentence
+display_tz = "UTC"
+aliases    = []
 
 [providers.history]
-window_size = 20
+# Hard upper bounds on history turns per tier — safety nets behind
+# the token-aware budget below. Lower these only to force a tighter
+# absolute cap on prompt size; the Budgeter's token cap usually
+# bites first.
+voice_window_size = 100
+text_window_size  = 200
 
-# --- Memory writer (post-session summarisation into long-term memory) ---------
+# Voice transcription emits one user turn per Deepgram segment-final,
+# so a long monologue lands as several consecutive same-speaker rows.
+# At prompt-render time, fragments from the same speaker within this
+# many seconds collapse into one message (earliest timestamp,
+# space-joined content). 0 disables. Discord text turns are unaffected
+# (they carry platform_message_id and never coalesce).
+coalesce_max_gap_seconds = 45.0
 
-[memory_writer]
-turn_threshold = 50     # run writer after this many new turns
-idle_timeout   = 1800.0 # run writer after 30 min of silence
+# --- Prompt assembly budget ------------------------------------------------
+#
+# Per-tier token caps for the prompt assembler. Each cap is a hard
+# number — no proportional / "auto" derivation. Override one knob in
+# a per-familiar character.toml and the rest stay put (TOML deep-merge).
+#
+# total_tokens          post-assembly trim cap; Budgeter drops oldest
+#                       history turns to fit.
+# recent_history_tokens cap on the recent-history block while building.
+# rag_tokens            cap on the RAG-context block.
+# dossier_tokens        cap on people-dossier block.
+# summary_tokens        cap on the conversation-summary block.
+# cross_channel_tokens  cap on cross-channel context.
+# reflection_tokens     cap on reflections block (M3).
+# lorebook_tokens       cap on lorebook block (M4).
+# max_history_turns     hard upper bound on history turn count
+#                       (safety net behind recent_history_tokens).
+# max_rag_turns         hard cap on RAG turn results.
+# max_rag_facts         hard cap on RAG fact results.
+# max_dossier_people    hard cap on dossier rows.
+# max_reflections       hard cap on rendered reflection rows (M3).
+# max_lorebook_entries  hard cap on rendered lorebook entries (M4).
+#
+# Defaults sized for: voice models hold up to ~3 k well; thoughtful
+# (text) replies fine up to ~8 k; offline workers absorb ~24 k.
 
-[layers.depth_inject]
-position = 0
-role     = "system"
+[budget.voice]
+total_tokens          = 3000
+recent_history_tokens = 1500
+rag_tokens            = 450
+dossier_tokens        = 450
+summary_tokens        = 300
+cross_channel_tokens  = 300
+reflection_tokens     = 300
+lorebook_tokens       = 300
+max_history_turns     = 100
+max_rag_turns         = 5
+max_rag_facts         = 3
+max_dossier_people    = 8
+max_reflections       = 3
+max_lorebook_entries  = 6
+
+[budget.text]
+total_tokens          = 8000
+recent_history_tokens = 4000
+rag_tokens            = 1200
+dossier_tokens        = 1200
+summary_tokens        = 800
+cross_channel_tokens  = 800
+reflection_tokens     = 800
+lorebook_tokens       = 800
+max_history_turns     = 200
+max_rag_turns         = 8
+max_rag_facts         = 5
+max_dossier_people    = 12
+max_reflections       = 5
+max_lorebook_entries  = 10
+
+[budget.background]
+total_tokens          = 24000
+recent_history_tokens = 12000
+rag_tokens            = 4000
+dossier_tokens        = 4000
+summary_tokens        = 2000
+cross_channel_tokens  = 2000
+reflection_tokens     = 2000
+lorebook_tokens       = 2000
+max_history_turns     = 500
+max_rag_turns         = 12
+max_rag_facts         = 8
+max_dossier_people    = 16
+max_reflections       = 8
+max_lorebook_entries  = 16
+
+# --- Retrieval ranking -----------------------------------------------------
+#
+# Weights blended into RagContextLayer's fact ranking. All four signals
+# are normalised to [0, 1] within the candidate batch before weighting;
+# the top ``max_rag_facts`` are kept.
+#
+# bm25_weight        — quality of the FTS5 BM25 match. Default 1.0.
+# recency_weight     — newest facts in the candidate batch ranked higher.
+# importance_weight  — extractor's 1-10 hint (``importance/10``). Legacy
+#                      / unscored facts get the neutral midpoint.
+# embedding_weight   — cosine similarity to cue embedding (M6). Needs an
+#                      embedder configured below; without one, the layer
+#                      logs once and falls back to BM25-only.
+#
+# Default reproduces pre-M2 ordering (BM25 only) plus M2's importance
+# bias. Raise embedding_weight (along with [providers.embedding]) once
+# the fact_embedding projector has populated the side-index.
+
+[memory.retrieval]
+bm25_weight       = 1.0
+recency_weight    = 0.0
+importance_weight = 0.6
+embedding_weight  = 0.0
+
+# --- Memory projectors (M5) -----------------------------------------------
+#
+# Watermark-driven writers that project ``turns`` into side-indices.
+# Each name maps to a registered factory in
+# ``familiar_connect.processors.projectors``. Default keeps every
+# shipped projector — drop one to disable it, add a third-party
+# projector by registering it at import time and listing the name.
+#
+# rolling_summary  per-channel + cross-channel rolling summaries.
+# rich_note        fact extractor (the "rich-note" projector).
+# people_dossier   per-person summary off the facts watermark.
+# reflection       higher-order syntheses with citation provenance.
+# fact_embedding   M6 — vectors for semantic recall. Opt-in: requires
+#                  [providers.embedding].backend != "off".
+
+[providers.memory]
+projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+
+# --- Embeddings (M6) -------------------------------------------------------
+#
+# Backend for the ``fact_embedding`` projector and the embedding signal
+# in [memory.retrieval].
+#
+# backend = "off"        No-op (default). RAG layer skips the embedding
+#                        signal even when embedding_weight > 0.
+# backend = "hash"       Deterministic locality-hashing baseline. No
+#                        deps; weak signal, but useful for sanity
+#                        checks / smoke tests.
+# backend = "fastembed"  ONNX-backed sentence embedder (Qdrant
+#                        FastEmbed). Real semantic similarity. Needs
+#                        the ``local-embed`` extra; install via
+#                        ``uv sync --extra local-embed``. Default model
+#                        BGE-small downloads ~130 MB on first use,
+#                        cached under ~/.cache/fastembed.
+#
+# To turn on semantic recall:
+#   1. switch ``backend`` here (and install ``local-embed`` for fastembed)
+#   2. add ``"fact_embedding"`` to [providers.memory].projectors
+#   3. raise [memory.retrieval].embedding_weight above 0
+#
+# ``dim`` is the vector size for backends that accept one (``hash``).
+# Real backends with a fixed model dim ignore this knob.
+#
+# ``fastembed_model`` selects the FastEmbed model. Known good options:
+#   BAAI/bge-small-en-v1.5     (default; 384 dim, ~130 MB)
+#   BAAI/bge-base-en-v1.5      (768 dim, ~440 MB; better quality)
+#   sentence-transformers/all-MiniLM-L6-v2  (384 dim, lighter)
+#
+# A model swap accumulates new vectors beside the old (storage keys on
+# the embedder's ``name``, which carries the model name) — no audit
+# history destroyed. Wipe ``fact_embeddings`` to force a re-embed.
+
+[providers.embedding]
+backend          = "off"
+dim              = 256
+fastembed_model  = "BAAI/bge-small-en-v1.5"
+
+# --- Turn detection --------------------------------------------------------
+#
+# strategy = "deepgram"        Deepgram's hosted endpointer. Default.
+# strategy = "ten+smart_turn"  Local TEN-VAD + Smart Turn v3 chain. Saves
+#                              ~150-200 ms of endpointing latency, and is
+#                              required when [providers.stt].backend is a
+#                              local backend (parakeet, faster_whisper) —
+#                              those have no internal endpointer.
+#                              Needs the ``local-turn`` extra + the Smart
+#                              Turn ONNX (default path is below).
+
+[providers.turn_detection]
+strategy = "deepgram"   # "deepgram" | "ten+smart_turn"
+
+[providers.turn_detection.local]
+# Knobs for the TEN-VAD + Smart Turn chain. Read only when strategy =
+# "ten+smart_turn". Defaults are field-tested; rarely need tweaking.
+#
+# Smart Turn weights are pulled from HuggingFace on first use (cached
+# under ~/.cache/huggingface). The default is the CPU ONNX export,
+# which matches the ``onnxruntime`` shipped by the local-turn extra.
+# If you've installed ``onnxruntime-gpu`` separately, switch
+# smart_turn_filename to ``smart-turn-v3.2-gpu.onnx``.
+smart_turn_repo_id    = "pipecat-ai/smart-turn-v3"
+smart_turn_filename   = "smart-turn-v3.2-cpu.onnx"
+silence_ms            = 200    # silence after speech before SmartTurn fires
+speech_start_ms       = 100    # consecutive speech before "speaking" latches
+vad_threshold         = 0.5    # TEN-VAD activation threshold
+smart_turn_threshold  = 0.5    # SmartTurn completion-probability cut
+vad_hop_size          = 256    # samples per VAD frame; 256 = 16 ms at 16 kHz
+
+# --- Speech-to-text --------------------------------------------------------
+#
+# Pick by what you care about:
+#                          Deepgram     Parakeet (NeMo)    FasterWhisper (CT2)
+# location                 cloud        local              local
+# cost                     paid         free               free
+# latency to final         lowest       moderate           moderate (CPU int8)
+# install size             tiny         heavy (torch+CUDA) light (no torch)
+# accuracy (English)       high         highest local      strong local
+# secret                   API key      —                  —
+# pairing requirement      —            ten+smart_turn     ten+smart_turn
+#
+# Default: deepgram. Switch backend by changing the ``backend`` field
+# below; each backend reads its own ``[providers.stt.<backend>]`` table.
+
+[providers.stt]
+backend = "deepgram"            # "deepgram" | "parakeet" | "faster_whisper"
+
+[providers.stt.deepgram]
+# DEEPGRAM_API_KEY is the only env input; everything else lives here.
+model                   = "nova-3"
+language                = "en"
+endpointing_ms          = 500   # silence ms before a segment finalizes
+utterance_end_ms        = 1500  # speech-end grace window
+smart_format            = true
+punctuate               = true
+keyterms                = []    # bias nova-3 toward jargon / proper nouns
+replay_buffer_s         = 5.0
+keepalive_interval_s    = 3.0
+reconnect_max_attempts  = 5
+reconnect_backoff_cap_s = 16.0
+idle_close_s            = 30.0  # close per-user stream after silence; 0 disables
+
+[providers.stt.parakeet]
+# Install: ``uv sync --extra local-turn --extra local-stt-parakeet``.
+model_name   = "nvidia/parakeet-tdt-0.6b-v3"
+device       = "auto"           # "auto" | "cuda" | "cpu"
+idle_close_s = 30.0
+
+[providers.stt.faster_whisper]
+# Install: ``uv sync --extra local-turn --extra local-stt-whisper``.
+model_size   = "small"          # "tiny" | "base" | "small" | "medium" | "large-v3"
+device       = "auto"           # "auto" | "cuda" | "cpu"
+compute_type = "auto"           # "auto" | "int8" | "float16" | "float32"
+language     = "en"
+idle_close_s = 30.0
 
 # --- Text-to-speech --------------------------------------------------------
 #
-# provider: "azure" (default) or "cartesia"
+# provider: "azure" (default), "cartesia", or "gemini"
 #
 # Azure:    set AZURE_SPEECH_KEY + AZURE_SPEECH_REGION env vars.
-#           azure_voice is any Azure Neural voice name.
-#
 # Cartesia: set CARTESIA_API_KEY env var.
-#           cartesia_voice_id is the Cartesia voice UUID.
-#           cartesia_model is the model name, e.g. "sonic-3".
-#
-# greetings: list of strings to randomly pick from when joining voice.
-#           Empty list falls back to "Hello!" (hardcoded default).
+# Gemini:   set GOOGLE_API_KEY env var.
 
 [tts]
-provider    = "azure"
-azure_voice = "en-US-AmberNeural"
+provider          = "azure"
+azure_voice       = "en-US-AmberNeural"
 cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"
 gemini_voice      = "Kore"
 gemini_model      = "gemini-3.1-flash-tts-preview"
-# Optional structured performance direction for Gemini. Any subset may be set;
-# unset fields are omitted from the composed prompt. All six are combined into
-# an Audio Profile / Scene / Director's Notes block prepended to each synthesis
-# request. Audio tags ([laughs], [whispers], [short pause], etc.) embedded in
-# LLM replies flow through automatically — no config needed.
-# gemini_audio_profile = "warm, curious 20-something"
-# gemini_scene         = "relaxed late-night voice chat"
-# gemini_context       = "casual banter with friends"
-# gemini_style         = "playful, conversational"
-# gemini_pace          = "natural, with thoughtful pauses"
-# gemini_accent        = "neutral American"
-greetings  = []
+greetings         = []
 
 # --- LLM slots -------------------------------------------------------------
 #
-# Every LLM call site in the codebase has its own slot here. Each slot
-# carries its own model and temperature so a familiar can trade off cost,
-# latency, and quality per call site independently.
+# Tiered by latency / quality. Pick the slot that matches each call
+# site's tolerance for thinking time and tool wiring.
 #
-# Unset slots in a familiar's own character.toml inherit from this file.
+# fast       — voice replies. Reasoning off, tools off. Sub-second TTFT.
+# prose      — text-channel replies. Reasoning on for craft.
+# background — summaries / fact extraction / dossiers. Reasoning + tools.
+#
+# reasoning: "off" | "low" | "medium" | "high" | omit (model default).
+#   GLM 5.1 reasons by default — set "off" to suppress; Haiku 4.5
+#   never reasons regardless. OpenRouter maps to its `reasoning`
+#   parameter (effort levels, or `exclude=true` for "off").
+#
+# tool_calling: bool, surface only today — call-site wiring lands later.
+#
+# provider_order pins OpenRouter routing for prompt-cache stability.
+# STOPGAP — drop once OpenRouter's default routing reliably hits a
+# cache-supporting provider. See docs/architecture/tuning.md
+# § provider pinning.
 
-# Main reply path: the familiar's spoken reply to a Discord message.
-[llm.main_prose]
-model       = "z-ai/glm-5.1"
-temperature = 0.7
+[llm.fast]
+model        = "anthropic/claude-haiku-4.5"
+temperature  = 0.7
+reasoning    = "off"
+tool_calling = false
 
-# Recast post-processor: rewrite the reply for tone or spoken delivery.
-[llm.post_process_style]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.5
+[llm.prose]
+model          = "z-ai/glm-5.1"
+temperature    = 0.7
+provider_order = ["z-ai"]            # first-party — best caching for GLM
+reasoning      = "medium"
+tool_calling   = false
 
-# Stepped-thinking pre-processor: hidden chain-of-thought before replying.
-[llm.reasoning_context]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.3
+[llm.background]
+model          = "z-ai/glm-5.1"
+temperature    = 0.7
+provider_order = ["z-ai"]
+reasoning      = "medium"
+tool_calling   = true
 
-# History provider: summarise own-channel and cross-channel history.
-[llm.history_summary]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.4
+# --- Discord text-channel behavior ----------------------------------------
+#
+# respond_to_typing: when other users start typing in a subscribed
+# channel, treat that as an interruption — cancel any in-flight LLM
+# stream so the bot doesn't talk over them. Default true.
+# typing_backoff_initial_s / typing_backoff_max_s: when *another bot*
+# (e.g. another familiar-connect instance) is typing in the same
+# channel, hold off responding by an exponentially doubling window —
+# initial doubles up to max — so two bots don't pingpong on each
+# other's typing indicators.
 
-# Content-search provider: agentic memory / lore retrieval loop.
-[llm.memory_search]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.4
-
-# Memory writer: post-session summarisation into long-term memory files.
-[llm.memory_writer]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.3
-
-# Chattiness monitor: decide whether to proactively join a conversation.
-[llm.interjection_decision]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.5
-
-# Mood evaluator: classify emotional context of recent turns → interrupt bias.
-[llm.mood_eval]
-model       = "mistralai/mistral-small-2603"
-temperature = 0.3
+[discord.text]
+respond_to_typing        = true
+typing_backoff_initial_s = 1.0
+typing_backoff_max_s     = 30.0

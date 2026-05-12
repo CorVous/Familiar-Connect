@@ -1,7 +1,11 @@
 """Tests for logging configuration."""
 
+from __future__ import annotations
+
 import logging
 import re
+import sys
+from types import TracebackType
 
 import pytest
 
@@ -11,14 +15,30 @@ from familiar_connect.log_style import StyledFormatter
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+_ExcInfo = (
+    tuple[type[BaseException], BaseException, TracebackType | None]
+    | tuple[None, None, None]
+    | None
+)
+
 
 def _strip(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 
-def _record(level: int, msg: str) -> logging.LogRecord:
+def _record(
+    level: int,
+    msg: str,
+    exc_info: _ExcInfo = None,
+) -> logging.LogRecord:
     return logging.LogRecord(
-        name="t", level=level, pathname="", lineno=0, msg=msg, args=(), exc_info=None
+        name="t",
+        level=level,
+        pathname="",
+        lineno=0,
+        msg=msg,
+        args=(),
+        exc_info=exc_info,
     )
 
 
@@ -157,3 +177,42 @@ def test_formatter_untagged_warning_falls_back_to_prefix() -> None:
 def test_formatter_untagged_error_falls_back_to_prefix() -> None:
     out = StyledFormatter().format(_record(logging.ERROR, "bare error"))
     assert _strip(out) == "ERROR: bare error"
+
+
+def _capture_exc_info(exc: BaseException) -> _ExcInfo:
+    """Raise + catch to populate ``sys.exc_info`` with a real traceback."""
+    try:
+        raise exc  # noqa: TRY301 — fixture deliberately raises to capture traceback
+    except BaseException:  # noqa: BLE001 — test fixture, re-captured below
+        return sys.exc_info()
+
+
+def test_formatter_appends_exception_traceback() -> None:
+    """``_logger.exception`` relies on this — exc_info traceback must follow message."""
+    exc_info = _capture_exc_info(RuntimeError("boom"))
+    out = StyledFormatter().format(_record(logging.ERROR, "Command failed", exc_info))
+    stripped = _strip(out)
+    assert "ERROR: Command failed" in stripped
+    assert "Traceback (most recent call last):" in stripped
+    assert "RuntimeError: boom" in stripped
+
+
+def test_formatter_appends_exception_traceback_with_tag() -> None:
+    exc_info = _capture_exc_info(ValueError("kaboom"))
+    msg = f"{ls.tag('Boot', ls.M)} startup failed"
+    out = StyledFormatter().format(_record(logging.ERROR, msg, exc_info))
+    stripped = _strip(out)
+    assert stripped.startswith("[Boot] ERROR startup failed")
+    assert "Traceback (most recent call last):" in stripped
+    assert "ValueError: kaboom" in stripped
+
+
+def test_formatter_info_does_not_get_double_traceback() -> None:
+    """Cached exc_text must not be rendered twice on subsequent format calls."""
+    exc_info = _capture_exc_info(RuntimeError("once"))
+    record = _record(logging.ERROR, "Command failed", exc_info)
+    fmt = StyledFormatter()
+    first = _strip(fmt.format(record))
+    second = _strip(fmt.format(record))
+    assert first.count("RuntimeError: once") == 1
+    assert second.count("RuntimeError: once") == 1

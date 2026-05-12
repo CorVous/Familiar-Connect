@@ -1,301 +1,174 @@
 # Architecture overview
 
-An AI familiar that joins Discord voice channels, listens, understands
-speech, and talks back using real AI voices.
+A Discord bot with two-way plumbing for text and voice, plus a Twitch
+EventSub client. Incoming events flow through an in-process **event bus**
+to subscribed **processors** that assemble a layered prompt, call an LLM,
+and reply. Voice replies support sub-200 ms barge-in: a new utterance
+cancels the previous reply's `TurnScope`, stopping the LLM stream and
+flushing the TTS buffer.
 
-## Goals
+Deeper dives:
 
-- **Single runtime.** The entire backend runs as one Python process
-  using `asyncio`. No separate worker scripts, no external message
-  broker.
-- **Unified entry point.** One `familiar-connect run` starts
-  everything — Discord gateway, voice capture, transcription, LLM,
-  TTS, and Twitch listener all run as concurrent tasks under a single
-  `asyncio.TaskGroup`.
-- **Local-first.** The context layer makes no calls to third-party
-  state stores. All context state lives in-process, in the filesystem
-  next to the bot, or in the bot's own SQLite. The only network calls
-  in the context layer are to the LLM endpoints we're already using
-  for generation.
-- **Single operator, one active familiar per process.**
-  Familiar-Connect is run by a single admin on their own machine —
-  there is no multi-user / multi-tenant ambition. Multiple character
-  folders may coexist under `data/familiars/`, but exactly one is
-  active at a time. See
-  [Configuration model](configuration-model.md) for the detailed
-  ownership rules.
-
-## Target architecture
-
-All components run as coroutines within a single `asyncio` event
-loop, scoped by `asyncio.TaskGroup` for structured concurrency and
-clean cancellation (Python 3.13+):
-
-```mermaid
-flowchart TB
-    dv([Discord voice channel]) --> cap[Audio capture]
-    cap --> aq[(asyncio.Queue&#58; PCM)]
-    aq --> stt[Transcription<br/>Deepgram streaming]
-    stt --> tq[(asyncio.Queue&#58; text)]
-    tw([Twitch EventSub]) --> tq
-    tq --> cm[ConversationMonitor<br/>chattiness &amp; interjection]
-    cm --> cp[Context pipeline]
-    cp --> or[OpenRouter<br/>streaming completion]
-    or --> tts[TTS<br/>Cartesia / Azure]
-    tts --> oq[(asyncio.Queue&#58; audio)]
-    oq --> dvp([Discord voice playback])
-
-    classDef queue fill:#eee,stroke:#888,stroke-dasharray:3 3;
-    class aq,tq,oq queue;
-```
-
-Every box runs under one root `asyncio.TaskGroup` — a crash anywhere
-cancels the whole reply path.
-
-Development uses red/green TDD throughout.
-
-## External services
-
-The runtime talks to five outside services. Two are required; the rest
-are optional and the bot degrades gracefully without them.
+- [Memory strategies](memory-strategies.md) — families, current
+  implementation, swap points.
+- [Voice pipeline](voice-pipeline.md) — cascaded vs S2S,
+  two-stage turn detection, sentence streaming, swap points.
+- [Tuning](tuning.md) — every operator knob, one page.
+- [Roadmap](roadmap.md) — research-driven priorities.
 
 ```mermaid
 flowchart LR
-    subgraph required [Required]
-        direction TB
-        discord[Discord Gateway]
-        openrouter[OpenRouter LLM]
-    end
+    dt([Discord text])     --> dts[DiscordTextSource]
+    dv([Discord voice])    --> deepg[Deepgram]
+    tw([Twitch EventSub])  --> tws[TwitchSource]
 
-    bot([familiar-connect<br/>runtime])
+    deepg --> vs[VoiceSource]
 
-    subgraph optional [Optional]
-        direction TB
-        cartesia[Cartesia TTS]
-        azure[Azure Speech]
-        deepgram[Deepgram STT]
-        twitch[Twitch EventSub]
-    end
+    dts --> bus{{Event bus}}
+    tws --> bus
+    vs --> bus
 
-    discord <--> bot
-    openrouter <--> bot
-    bot --> cartesia
-    bot --> azure
-    deepgram --> bot
-    twitch --> bot
+    bus --> dbg[DebugLoggerProcessor]
+    bus --> vr[VoiceResponder]
+    bus --> tr[TextResponder]
+
+    vr --> asm[Assembler]
+    vr --> llm[[LLMClient.chat_stream]]
+    vr --> tts[[TTSPlayer]]
+    vr -.cancel scope.-> rr[TurnRouter]
+
+    tr --> asm
+    tr --> llm
+    tr --> send[[BotHandle.send_text]]
+    tr -.cancel scope.-> rr
 ```
 
-- **Discord Gateway** (required) — `DISCORD_BOT`. The bot has nothing
-  to listen to or speak into without it.
-- **OpenRouter** (required) — `OPENROUTER_API_KEY`. The reply
-  generation call. Model selectable per-familiar.
-- **Cartesia / Azure Speech** (optional) — TTS providers. Without
-  either, the bot still replies in text channels it is subscribed to.
-- **Deepgram** (optional) — streaming STT for voice input. See
-  [Voice input](voice-input.md) for the wiring.
-- **Twitch EventSub** (optional) — only needed if a familiar uses the
-  Twitch commentary features in the
-  [Twitch guide](../guides/twitch.md).
+## Components
 
-See [Installation](../getting-started/installation.md) for the exact
-env-var names, the minimal "just text replies" configuration, and how
-to turn each optional service on.
+- **CLI** — `familiar-connect run --familiar <id>` (argparse, subcommand dispatch).
+- **Configuration** — TOML with deep-merge over `data/familiars/_default/character.toml`. Per-channel overrides live under `[channels.<id>]`. See [Configuration model](configuration-model.md).
+- **Event bus** — in-process, topic-keyed fan-out. `InProcessEventBus` implements the `EventBus` Protocol. Per-topic `BackpressurePolicy` (`BLOCK`, `DROP_OLDEST`, `DROP_NEWEST`, `UNBOUNDED`). Lifecycle: `starting → running → draining → stopped`.
+- **Turn router** — `TurnRouter.begin_turn(session_id, turn_id)` cancels any prior `TurnScope` in the same session before registering the new one; different sessions are independent.
+- **Stream sources** — publish onto the bus.
+  - `DiscordTextSource` — called from `on_message`; publishes `discord.text`.
+  - `TwitchSource` — drains the `TwitchWatcher` queue; publishes `twitch.event`.
+  - `VoiceSource` — drains the Deepgram transcription queue; publishes `voice.activity.start`, `voice.transcript.partial`, `voice.transcript.final`, `voice.activity.end`. All events in one utterance share `turn_id`.
+- **Context assembly** — `Assembler` composes a layered system prompt in stability-descending order: `CoreInstructionsLayer` (`data/familiars/_default/core_instructions.md`), `CharacterCardLayer` (`data/familiars/<id>/character.md`), `OperatingModeLayer` (voice-terse vs text-verbose), `ConversationSummaryLayer`, `CrossChannelContextLayer`, `LorebookLayer`, `PeopleDossierLayer`, `ReflectionLayer`, `RagContextLayer`, then `RecentHistoryLayer` (user/assistant messages, not system text). See [Context pipeline](context-pipeline.md).
+- **LLM** — `LLMClient` exposes `chat()` (blocking) and `chat_stream()` (async-iterator of content deltas). The streaming variant releases the process-wide rate-limit semaphore as soon as the request is accepted so barge-in cancellation isn't starved.
+- **TTSPlayer** — `speak(text, scope=...)` returns when playback finishes or the turn scope is cancelled. Production default is `DiscordVoicePlayer`, which synthesizes via the configured TTS client and pushes the resulting PCM through `voice_client.play(...)`. When no TTS client is configured the loop falls back to `LoggingTTSPlayer`, which only logs intended speech. `MockTTSPlayer` is used in tests.
+- **BotHandle** — adapter exposed to the lifecycle wiring so bus-only processors can post back to Discord without taking a direct `discord.Bot` reference. Carries `send_text(channel_id, content)`, a `trigger_typing(channel_id)` async-context-manager factory that surfaces Discord's "Bot is typing…" indicator while a reply streams, a `typing_interrupt` policy seam that translates `on_typing` events into turn cancellations and bot-pingpong backoff (see [Discord text channel knobs](tuning.md#discord-text-channel-knobs)), and a `voice_runtime: dict[int, VoiceRuntime]` map populated by `/subscribe-voice`.
+- **Processors** — subscribe to topics.
+  - `DebugLoggerProcessor` — one log line per event on every subscribed topic.
+  - `TextResponder` — consumes `discord.text` (appends the user turn directly, seeds the RAG cue, assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Owning the user-turn write keeps read-after-write consistency for `RecentHistoryLayer` in the same task. A `SilentDetector` watches stream deltas; on a `<silent>` sentinel reply the post and assistant-turn append are skipped (the user turn is still recorded). Discord's "Bot is typing…" indicator opens lazily inside the stream loop — only after `SilentDetector` rules out the sentinel — so reasoning that resolves to `<silent>` doesn't flicker the indicator. Before each reply the responder consults `TypingInterruptHandler` for any active bot-pingpong backoff window — see [Discord text channel knobs](tuning.md#discord-text-channel-knobs). See also [Multi-party addressivity](context-pipeline.md#multi-party-addressivity).
+  - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped. Silent-sentinel handling mirrors `TextResponder`: on `<silent>`, TTS is not invoked.
+- **Diagnostics** — `@span(name)` decorator in `familiar_connect.diagnostics.spans` emits timing logs (`span=<name> ms=<n> status=<ok|error>`) and feeds a process-wide `SpanCollector`; `/diagnostics` slash command renders the live p50/p95 table. `voice_budget.VoiceBudgetRecorder` stamps four phase markers per voice turn (`stt_final` / `llm_first_token` / `tts_first_audio` / `playback_start`) and emits `voice.stt_to_ttft`, `voice.ttft_to_tts`, `voice.tts_to_playback`, `voice.total` spans into the same collector — see [voice pipeline § per-turn budget telemetry](voice-pipeline.md#per-turn-budget-telemetry). Each `LLMClient.chat_stream` call also emits `llm.ttfb.<slot>`, `llm.ttft.<slot>`, `llm.total.<slot>` spans plus a structured `[LLM call]` log line carrying input chars, model, OpenRouter-selected provider, prompt/completion/cached token counts (when the upstream returns them via the `usage: { include: true }` flag).
+- **Discord text** — `on_message` event handler + `subscribe-text` / `unsubscribe-text` slash commands. Built on py-cord.
+- **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption). On subscribe the bot attaches a `RecordingSink` and runs a `VoiceSource` task draining transcripts onto the bus. The audio pump dispatches per Discord user_id: the first audio chunk from a new SSRC lazily clones the configured Deepgram transcriber and opens a fresh WebSocket for that speaker, so two people talking concurrently get independent endpointing and don't slice each other's sentences. A per-user fan-in tags every result with the originating user_id before forwarding to the shared result queue. On unsubscribe the pump, source, and every per-user fan-in are cancelled, recording is stopped, and every per-user transcriber is closed.
+- **Transcription** — Deepgram streaming client. The instance loaded at startup acts as a *template*: `clone()` is called once per Discord user that speaks. Diarization stays off — Discord delivers per-SSRC audio, so attribution is exact and not AI-inferred. Knobs live in `[providers.stt.deepgram]`; defaults bias toward fewer mid-sentence cuts (`endpointing_ms=500`, `utterance_end_ms=1500`, `smart_format=true`, `punctuate=true`). Optional `keyterms` biases nova-3 toward project jargon and member display names. Every TOML field has a matching `DEEPGRAM_*` override for container deployments — see [Tuning § STT — Deepgram](tuning.md#stt-deepgram).
+- **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through pycord's voice client. When no TTS client is configured `LoggingTTSPlayer` is used.
+- **OpenRouter LLM client** — one `LLMClient` per call-site slot.
+- **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, `people_dossiers`, `facts`, `fact_embeddings`, and `reflections` are watermarked side-indices. `AsyncHistoryStore` (`history/async_store.py`) wraps `HistoryStore` in an async facade, dispatching every call to the store's single-threaded `ThreadPoolExecutor` so SQLite is never touched from the event loop.
+- **Subscription registry** — `data/familiars/<id>/subscriptions.toml`, written by the subscribe/unsubscribe slash commands.
+- **Twitch EventSub** — client code present; its queue is drained by `TwitchSource` onto the bus.
 
-## Core components
+## Topics
 
-### Discord bot
-Built with **py-cord**. Voice send/receive uses **davey** to handle
-Discord's DAVE (Audio/Video E2E Encryption) protocol. The subscription
-surface and channel-mode slash commands are documented in
-[Slash commands](../getting-started/slash-commands.md).
+Topic strings live in `familiar_connect.bus.topics`:
 
-### Transcription
-
-**Primary: Deepgram (Nova-2, streaming)**
-
-- Native WebSocket streaming API, ~300ms latency, strong accuracy
-- Handles raw PCM streams directly — maps well to Discord's audio
-  pipeline
-- Good Python SDK (`deepgram-sdk`)
-
-**Fallback: faster-whisper (local)**
-
-- Zero cost, no rate limits, no external dependency
-- Requires a GPU for real-time performance
-- Good offline / privacy-preserving option
-
-Pipeline: Discord 48kHz Opus → decode to PCM → resample to 16kHz →
-stream to Deepgram WebSocket (or feed chunks to faster-whisper).
-
-Incoming voice audio is fed into the `ConversationMonitor` via
-`VoiceLullMonitor` debouncing — see [Voice input](voice-input.md) for
-the full wiring.
-
-### AI response (OpenRouter)
-
-The LLM call is the core of the bot's reply path. Its inputs — system
-prompt, retrieved knowledge, conversation history, per-user notes —
-are assembled by the [Context pipeline](context-pipeline.md), *not*
-inline in the bot loop. The LLM client (`familiar_connect.llm`) only
-speaks to OpenRouter; it is deliberately unaware of where its messages
-came from so the pipeline can be tested and extended in isolation.
-
-- **Provider:** OpenRouter. Model selection is per-call-site and per
-  familiar — set individually in `character.toml` under
-  `[llm.main_prose]`, `[llm.post_process_style]`,
-  `[llm.reasoning_context]`, `[llm.history_summary]`,
-  `[llm.memory_search]`, `[llm.interjection_decision]`,
-  and `[llm.mood_eval]`.
-- **Streaming:** Responses are streamed so the TTS path can start
-  speaking before the full reply arrives.
-- **Per-call-site slots:** Each provider/processor holds its own
-  `LLMClient` drawn from the slot it owns, so a familiar can pin a
-  cheap model (e.g. `openai/gpt-4o-mini`) on the cheap slots while
-  still using a heavyweight model on `main_prose`. The process-wide
-  rate-limit semaphore is shared across every slot.
-
-### Context pipeline
-
-Everything upstream of the OpenRouter call — character cards, system
-prompt assembly, memory retrieval, conversation history, and the
-cheap side calls each call site makes from its own `LLMClient` slot
-— is assembled by a single **context pipeline** that runs as a
-scoped `asyncio.TaskGroup` on every reply. The pipeline is the
-architectural backbone for all "AI behaviour knobs" in the bot.
-
-See [Context pipeline](context-pipeline.md) for the full design and
-step-by-step implementation history, and [Memory](memory.md) for the
-on-disk memory directory the pipeline reads and writes.
-
-### Text-to-speech
-
-Both providers are implemented; the active one is set via `[tts].provider`
-in `character.toml`. Default is `"azure"`.
-
-**Azure Speech (default, `provider = "azure"`)**
-
-- Default voice: `en-US-AmberNeural` (set `azure_voice` to change)
-- Requires `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` env vars
-- Runs via the `azure-cognitiveservices-speech` SDK in a thread executor
-- Outputs `Raw48Khz16BitMonoPcm` — no resampling needed for Discord
-- Word-boundary events feed per-word timestamps for interruption detection
-
-**Cartesia Sonic (`provider = "cartesia"`)**
-
-- Purpose-built for real-time conversational AI; sub-100ms TTFB
-- Native WebSocket streaming
-- Requires `CARTESIA_API_KEY` env var; set `voice_id` + `model` in `[tts]`
-
-Pipeline: LLM text → TTS (Azure SDK / Cartesia WebSocket) → PCM →
-resample to 48kHz Opus → Discord voice playback.
-
-### Voice interruption
-
-When a user speaks during an active voice response, `InterruptionDetector`
-classifies the burst and dispatches one of five paths:
-
-| State | Classification | Action |
+| Topic | Payload | Backpressure default |
 |---|---|---|
-| `GENERATING` | *discarded* | Drop. Generation continues. |
-| `GENERATING` | *short* | Polite wait — delivery gate holds playback until user is quiet. Interrupter transcript flushed to history after original buffer. |
-| `GENERATING` | *long* | Cancel `generation_task` immediately on boundary crossing. Re-generate with interruption context. |
-| `SPEAKING` | *short* | Tolerance roll decides yield or push-through. Yield: `vc.stop()`, re-synthesize remaining words, resume. Push-through: audio continues; interrupter transcript written to history. |
-| `SPEAKING` | *long* | Tolerance roll → yield → `vc.stop()`, write delivered portion to history, re-generate with delivered + interrupter transcript as context. |
+| `discord.text` | channel, guild, `Author`, content | unbounded |
+| `discord.voice.state` | member, channel | unbounded |
+| `voice.audio.raw` | PCM chunk + speaker | drop-oldest |
+| `voice.transcript.partial` | text + turn_id + user_id | block |
+| `voice.transcript.final` | text + turn_id + user_id + speaker | block |
+| `voice.activity.start` / `.end` | turn_id | block |
+| `twitch.event` | `TwitchEvent` | unbounded |
+| `llm.response.chunk` / `.final` | text delta / message | block |
+| `tts.audio.chunk` / `.final` | audio bytes + word timestamps | block |
 
-`ResponseTracker` holds per-guild state (`IDLE / GENERATING / SPEAKING`),
-the cancellable LLM task, word timestamps for word-boundary splits, and
-scratch fields consumed by the post-playback dispatch logic.
+## Voice reply loop
 
-See [Voice interruption](interruption.md) for the full design, configuration
-reference, and sequence diagrams.
+```
+voice.activity.start  → TurnRouter.begin_turn(session, turn_id)
+                         → prior scope.cancel()
+                         → TTSPlayer.stop()  (flush in-flight audio)
 
-### Twitch integration
+voice.transcript.final → if scope.turn_id == event.turn_id:
+                           history.append(user turn)
+                           Assembler.assemble(ctx)
+                           LLMClient.chat_stream(messages)
+                             (bail if scope.is_cancelled())
+                           TTSPlayer.speak(reply, scope=scope)
+                           history.append(assistant turn)
+                           router.end_turn(scope)
+```
 
-Connects to Twitch EventSub WebSocket as a task in the root
-`asyncio.TaskGroup`. See the [Twitch guide](../guides/twitch.md) for
-the event catalogue and slash command surface.
+`voice.transcript.final` is spawned as a per-(session, user) `asyncio.Task`, so the
+bus dispatcher returns to the subscription loop immediately. A subsequent
+`voice.activity.start` runs `prior.cancel()` while the prior turn is still
+parked at an LLM or TTS await point — without the spawn, the dispatcher
+would sit inside the prior `handle()` and the cancel signal would arrive
+only after the old reply had played in full.
 
-### Monitoring dashboard
+Scope keys are per `(channel_id, user_id)`. Discord delivers per-SSRC audio
+so every speaker fires their own `activity.start`; channel-level scoping
+would let any speaker barge any other speaker's in-flight reply, which is
+not desired. Same-speaker self-barge still works as expected — the player's
+poll loop catches `scope.is_cancelled()` and stops `vc.play()` within one
+poll tick. A global `TTSPlayer.stop()` from `_on_activity_start` would also
+cut a *different* user's in-flight reply (Discord exposes one shared voice
+client per channel), so cancellation only flows through the scope.
 
-**Starlette + Hypercorn** (asyncio-native web dashboard):
+Voice user turns are appended to history with the speaker's `Author`
+resolved through `BotHandle.resolve_member(channel_id, user_id)`. The
+resolver consults a voice-member side cache populated by two sources:
+`on_voice_state_update` events for state changes (join/mute/move) and
+a background `guild.fetch_member()` triggered when the audio pump sees
+a new user_id for the first time. The side cache works around the
+absence of the privileged `members` intent — without it
+`guild.get_member()` only knows users seen through other events
+(messages, voice state changes) and silently returns `None` for
+voice-only joiners. A cache miss records the turn anonymously rather
+than blocking the audio path on a Discord fetch.
 
-- Hypercorn runs on asyncio and mounts as a task in the bot's root
-  `asyncio.TaskGroup`
-- Routes:
-    - `/health` — JSON status of each service (Discord, Twitch,
-      transcription, TTS, LLM)
-    - `/events` — Recent event log via SSE or WebSocket
-    - `/context` — Per-turn, per-provider latency and token metrics
-      from the context pipeline, so provider/processor enable/disable
-      decisions can be made from real measurements
+Barge-in latency budget: 200 ms from a new `voice.activity.start` to TTS
+playback halted. Verified end-to-end (bus subscribe pattern) by
+`tests/test_voice_responder.py::TestDispatchLoop` and
+`::TestBargeIn::test_barge_in_during_speech_cuts_playback_fast`.
 
-!!! warning "Dashboard not yet shipped"
-    The `PipelineOutput.outcomes` data is already captured per turn
-    and `bot.py` logs a structured line per outcome; the web
-    dashboard itself is a separate work item. See the
-    [Context pipeline](context-pipeline.md) page for the full list
-    of deferred items.
+## Per-channel latency knobs
 
-## Resilience
+`[channels.<id>]` in `character.toml` overrides four knobs:
 
-**Third-party service calls.** Service clients (`LLMClient`,
-`CartesiaTTSClient`, the Deepgram transcriber) raise on failure;
-callers decide the fallback. Every `except` clause on a service
-call enumerates its exception types — either directly (e.g.
-`(httpx.HTTPError, ValueError, KeyError)` for `LLMClient.chat`)
-or via a Protocol-declared type (e.g. `PreProcessorError` for
-pre-processors). No catch-all `except Exception:` is used on new
-code; contract violations surface loudly.
+- `history_window_size` — how many recent turns the `RecentHistoryLayer`
+  pulls for this channel. Overrides the tier default
+  (`[providers.history].voice_window_size` for voice channels,
+  `.text_window_size` for text channels).
+- `total_tokens` — post-assembly trim cap for this channel only. Overrides
+  the `[budget.<tier>].total_tokens` envelope so high-traffic channels can
+  be given a tighter budget without touching the global tier default.
+- `prompt_layers` — ordered list of layer names (parsed but not yet
+  applied; the assembler always uses the default stability-descending
+  order regardless of this field).
+- `message_rendering` — `"prefixed"` (always include
+  `[HH:MM display_name]` content prefix; UTC) or `"name_only"`
+  (rely on the OpenAI `name` field alone — save tokens in DMs).
 
-- **Main reply failure (`bot.py`).** The main-prose `LLMClient.chat`
-  call in both the text and voice reply paths catches the closed
-  raise set `(httpx.HTTPError, ValueError, KeyError)`, logs a
-  warning, and returns silently. No apology text, no reaction, no
-  history write for the failed turn — the user sees nothing and
-  can simply retry. `LLMClient`'s own 120 s httpx timeout is the
-  ceiling; no extra `asyncio.timeout` wrapper is added because the
-  main reply is the one call for which a long wait is preferable
-  to a fallback.
-- **LLM retry policy.** `LLMClient` retries only on HTTP 429 with
-  exponential backoff (honouring `Retry-After` when present, up
-  to `_MAX_DELAY_S`). Every other failure — transport error,
-  non-2xx response, malformed payload — is the caller's
-  responsibility.
-- **TTS failure.** `CartesiaTTSClient.synthesize` raises on every
-  non-2xx response and on any transport error. The `bot.py` call
-  sites swallow TTS exceptions with `_logger.exception` so a
-  missing voice clip never blocks a text reply. The client itself
-  has no retry logic.
-- **Context pipeline pre-processors.** The pre-processor loop in
-  `ContextPipeline.assemble` catches the Protocol-declared
-  `PreProcessorError` only, logs a warning, and passes the last
-  successful request on to the next stage. Any other exception
-  escaping `PreProcessor.process` is a contract violation and
-  propagates out of the pipeline — this is intentional so bugs
-  surface loudly rather than being silently hidden.
-- **Context pipeline providers and post-processors.** Providers
-  run under a scoped `asyncio.TaskGroup` with per-provider
-  deadlines; misses are recorded as `"timeout"` / `"error"`
-  outcomes. Post-processors are each wrapped in a pass-through
-  `try/except` so a failing cleanup pass degrades to a no-op for
-  just that stage.
+## Model-specific budget curves
 
-## Persistence
+`[budget.model_curves."<model-name>"]` blocks register per-section
+multipliers for a model. All 14 `TierBudget` field names are valid keys;
+unset fields default to 1.0 (no change). Example:
 
-- Raw transcripts of every conversation are stored verbatim in
-  SQLite (`familiar_connect.history.store.HistoryStore`).
-- The [memory directory](memory.md) contains the distilled,
-  human-readable form of everything the familiar "knows." It is the
-  *model's* view of the world.
-- Per-turn performance traces (latency, token counts, provider
-  outcomes, A/B tags) are persisted in a separate SQLite DB —
-  `data/familiars/<id>/metrics.db` — via
-  `familiar_connect.metrics.SQLiteCollector`. See
-  [Metrics and profiling](../guides/metrics.md) for the data model,
-  the logging-vs-metrics boundary, and CLI usage.
-- Derived artefacts — rolling summaries, future vector indices, tag
-  caches — are rebuildable from the raw transcript store and the
-  memory directory. Losing them is annoying but not destructive.
-- Original imported character cards are kept verbatim alongside the
-  unpacked `self/` files (`memory/self/.original.png`), so a future
-  change to the unpacking logic can re-run against the originals.
+```toml
+[budget.model_curves."claude-opus-4-7"]
+total_tokens = 2.0
+recent_history_tokens = 2.5
+rag_tokens = 1.5
+```
+
+`CharacterConfig.budget_for(tier, channel_id)` applies the curve when the
+tier's active LLM slot uses that model name. The tier→slot mapping is
+`voice→fast`, `text→prose`, `background→background`. Per-channel
+`total_tokens` overrides take precedence over the curve-scaled value.

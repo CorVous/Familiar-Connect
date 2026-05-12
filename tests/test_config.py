@@ -1,11 +1,8 @@
-"""Red-first tests for the per-character / per-channel config loader.
+"""Tests for the simplified CharacterConfig / TOML loader.
 
-Step 7 of docs/architecture/context-pipeline.md. The bot reads a
-character's TOML sidecar at startup and a per-channel TOML sidecar
-lazily on first use. Both are optional — missing files produce sane
-defaults so a brand-new install with an empty ``data/`` works.
-
-Covers familiar_connect.config, which doesn't exist yet.
+Covers TOML deep-merge over the default profile, the tiered LLM
+slots (``fast`` / ``prose`` / ``background``), and the TTS config
+table.
 """
 
 from __future__ import annotations
@@ -14,686 +11,992 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.budget import TierBudget
 from familiar_connect.config import (
-    DEFAULT_CHANNEL_MODE,
     LLM_SLOT_NAMES,
-    ChannelConfig,
-    ChannelMode,
+    ChannelOverrides,
     CharacterConfig,
     ConfigError,
-    Interjection,
-    InterruptTolerance,
-    channel_config_for_mode,
-    load_channel_config,
+    DeepgramSTTConfig,
+    DiscordTextConfig,
+    EmbeddingConfig,
+    LLMSlotConfig,
+    MemoryRetrievalConfig,
+    STTConfig,
+    TTSConfig,
+    TurnDetectionConfig,
     load_character_config,
 )
-from familiar_connect.context.types import Layer
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
-# ChannelMode enum
-# ---------------------------------------------------------------------------
+class TestLLMSlotNames:
+    def test_tiered_slots(self) -> None:
+        assert frozenset({"fast", "prose", "background"}) == LLM_SLOT_NAMES
 
 
-class TestChannelMode:
-    def test_values(self) -> None:
-        assert ChannelMode.full_rp.value == "full_rp"
-        assert ChannelMode.text_conversation_rp.value == "text_conversation_rp"
-        assert ChannelMode.imitate_voice.value == "imitate_voice"
-
-    def test_from_string_recognises_all_modes(self) -> None:
-        assert ChannelMode("full_rp") is ChannelMode.full_rp
-        assert ChannelMode("text_conversation_rp") is ChannelMode.text_conversation_rp
-        assert ChannelMode("imitate_voice") is ChannelMode.imitate_voice
-
-
-# ---------------------------------------------------------------------------
-# Mode defaults
-# ---------------------------------------------------------------------------
-
-
-class TestModeDefaults:
-    def test_full_rp_enables_all_providers(self) -> None:
-        cfg = channel_config_for_mode(ChannelMode.full_rp)
-        assert "character" in cfg.providers_enabled
-        assert "history" in cfg.providers_enabled
-        assert "content_search" in cfg.providers_enabled
-
-    def test_full_rp_enables_both_processors(self) -> None:
-        cfg = channel_config_for_mode(ChannelMode.full_rp)
-        assert "stepped_thinking" in cfg.preprocessors_enabled
-        assert "recast" in cfg.postprocessors_enabled
-
-    def test_text_conversation_rp_omits_content_search(self) -> None:
-        cfg = channel_config_for_mode(ChannelMode.text_conversation_rp)
-        # Content search IS on in text_conversation_rp so lore files work
-        # in casual text chat; only imitate_voice drops it for TTFB.
-        assert "content_search" in cfg.providers_enabled
-        assert "character" in cfg.providers_enabled
-        assert "history" in cfg.providers_enabled
-        assert cfg.budget_by_layer.get(Layer.content, 0) == 2000
-
-    def test_imitate_voice_drops_content_search_for_latency(self) -> None:
-        """Voice TTFB is too tight to carry the content-search agent.
-
-        The extra 2-5 side-model calls per turn would blow the voice
-        reply budget, so ``imitate_voice`` drops the provider entirely.
-        """
-        cfg = channel_config_for_mode(ChannelMode.imitate_voice)
-        assert "content_search" not in cfg.providers_enabled
-        assert cfg.budget_by_layer.get(Layer.content, 0) == 0
-
-    def test_imitate_voice_drops_stepped_thinking_for_latency(self) -> None:
-        cfg = channel_config_for_mode(ChannelMode.imitate_voice)
-        assert "stepped_thinking" not in cfg.preprocessors_enabled
-        # Recast stays on for the voice-flavour rewrite.
-        assert "recast" in cfg.postprocessors_enabled
-
-    def test_imitate_voice_has_tighter_budget_than_full_rp(self) -> None:
-        voice = channel_config_for_mode(ChannelMode.imitate_voice)
-        full = channel_config_for_mode(ChannelMode.full_rp)
-        assert voice.budget_tokens < full.budget_tokens
-        assert voice.deadline_s <= full.deadline_s
-
-    def test_every_mode_enables_mode_instructions_provider(self) -> None:
-        """Every built-in mode ships the per-mode instruction knob."""
-        for mode in ChannelMode:
-            cfg = channel_config_for_mode(mode)
-            assert "mode_instructions" in cfg.providers_enabled, (
-                f"{mode.value} must enable mode_instructions"
-            )
-
-    def test_every_mode_budgets_the_author_note_layer(self) -> None:
-        """Guard against a mode that forgets its own instruction budget.
-
-        ``author_note`` is where :class:`ModeInstructionProvider`
-        lands — a mode that doesn't budget for the layer would
-        silently drop its own instruction file.
-        """
-        for mode in ChannelMode:
-            cfg = channel_config_for_mode(mode)
-            assert cfg.budget_by_layer.get(Layer.author_note, 0) > 0, (
-                f"{mode.value} must allocate budget for Layer.author_note"
-            )
-
-
-# ---------------------------------------------------------------------------
-# load_character_config
-# ---------------------------------------------------------------------------
+class TestCharacterConfigDefaults:
+    def test_fields(self) -> None:
+        cfg = CharacterConfig()
+        assert cfg.display_tz == "UTC"
+        assert cfg.aliases == []
+        assert cfg.voice_window_size == 100
+        assert cfg.text_window_size == 200
+        assert cfg.llm == {}
+        assert isinstance(cfg.tts, TTSConfig)
 
 
 class TestLoadCharacterConfig:
-    def test_missing_file_returns_defaults(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        cfg = load_character_config(
-            tmp_path / "does-not-exist.toml",
-            defaults_path=default_profile_path,
-        )
-        assert isinstance(cfg, CharacterConfig)
-        assert cfg.default_mode is DEFAULT_CHANNEL_MODE
-
-    def test_reads_default_mode_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
+    def test_missing_defaults_raises(self, tmp_path: Path) -> None:
         path = tmp_path / "character.toml"
-        path.write_text('default_mode = "full_rp"\n')
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.default_mode is ChannelMode.full_rp
-
-    def test_reads_history_window_size(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            "[providers.history]\nwindow_size = 42\n",
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.history_window_size == 42
-
-    def test_reads_depth_inject_position(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            '[layers.depth_inject]\nposition = 4\nrole = "user"\n',
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.depth_inject_position == 4
-        assert cfg.depth_inject_role == "user"
-
-    def test_unknown_mode_string_raises(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('default_mode = "chaos"\n')
-        with pytest.raises(ConfigError, match="chaos"):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_malformed_toml_raises(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text("this is = = not toml\n")
-        with pytest.raises(ConfigError):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_missing_defaults_file_raises(self, tmp_path: Path) -> None:
-        target = tmp_path / "character.toml"
-        target.write_text("")
+        path.write_text("display_tz = 'UTC'\n")
         with pytest.raises(ConfigError, match="default character profile"):
-            load_character_config(
-                target,
-                defaults_path=tmp_path / "missing-defaults.toml",
-            )
+            load_character_config(path, defaults_path=tmp_path / "missing.toml")
 
-    def test_user_slot_override_wins_over_defaults(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_defaults_only_roundtrip(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            '[llm.main_prose]\nmodel = "user/custom-model"\ntemperature = 0.9\n',
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        # Overridden slot reflects the user value.
-        assert cfg.llm["main_prose"].model == "user/custom-model"
-        assert cfg.llm["main_prose"].temperature == 0.9  # noqa: RUF069
-        # Untouched slots still come from the default profile.
-        assert "reasoning_context" in cfg.llm
-        assert cfg.llm["reasoning_context"].model
-
-    def test_unknown_llm_slot_raises(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('[llm.nonexistent]\nmodel = "foo/bar"\n')
-        with pytest.raises(ConfigError, match="unknown LLM slot"):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_llm_slot_requires_non_empty_model(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('[llm.main_prose]\nmodel = ""\n')
-        with pytest.raises(ConfigError, match="must be a non-empty string"):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_llm_slot_temperature_out_of_range_raises(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            '[llm.main_prose]\nmodel = "user/m"\ntemperature = 5.0\n',
-        )
-        with pytest.raises(ConfigError, match=r"temperature must be in"):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_tts_section_parsed(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            '[tts]\ncartesia_voice_id = "user-voice"\ncartesia_model = "sonic-4"\n',
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.tts.cartesia_voice_id == "user-voice"
-        assert cfg.tts.cartesia_model == "sonic-4"
-
-    def test_tts_greetings_parsed(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            '[tts]\nvoice_id = "v"\nmodel = "m"\ngreetings = ["Hi!", "Hello!"]\n',
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.tts.greetings == ["Hi!", "Hello!"]
-
-    def test_tts_greetings_must_be_list(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('[tts]\ngreetings = "not-a-list"\n')
-        with pytest.raises(ConfigError, match="must be a list"):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_tts_greetings_defaults_empty(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('[tts]\nvoice_id = "v"\nmodel = "m"\n')
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.tts.greetings == []
-
-    def test_defaults_populate_every_llm_slot(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        """An empty user file must still produce a fully-populated llm dict."""
         path = tmp_path / "character.toml"
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert set(cfg.llm.keys()) == set(LLM_SLOT_NAMES)
-        for slot in LLM_SLOT_NAMES:
-            assert cfg.llm[slot].model  # non-empty
+        assert cfg.display_tz == "UTC"
+        for slot_name in ("fast", "prose", "background"):
+            assert slot_name in cfg.llm
+            assert isinstance(cfg.llm[slot_name], LLMSlotConfig)
 
-
-# ---------------------------------------------------------------------------
-# load_channel_config
-# ---------------------------------------------------------------------------
-
-
-class TestLoadChannelConfig:
-    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
-        assert load_channel_config(tmp_path / "missing.toml") is None
-
-    def test_reads_mode(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "imitate_voice"\n')
-        cfg = load_channel_config(path)
-        assert isinstance(cfg, ChannelConfig)
-        assert cfg.mode is ChannelMode.imitate_voice
-
-    def test_mode_drives_provider_set(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert "content_search" in cfg.providers_enabled
-
-    def test_unknown_mode_raises(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "nonsense"\n')
-        with pytest.raises(ConfigError):
-            load_channel_config(path)
-
-
-# ---------------------------------------------------------------------------
-# Interjection enum
-# ---------------------------------------------------------------------------
-
-
-class TestInterjectionEnum:
-    def test_tier_values(self) -> None:
-        """All five tiers exist with the expected string values."""
-        assert Interjection("very_quiet") is Interjection.very_quiet
-        assert Interjection("quiet") is Interjection.quiet
-        assert Interjection("average") is Interjection.average
-        assert Interjection("eager") is Interjection.eager
-        assert Interjection("very_eager") is Interjection.very_eager
-
-    def test_starting_intervals(self) -> None:
-        assert Interjection.very_quiet.starting_interval == 15
-        assert Interjection.quiet.starting_interval == 12
-        assert Interjection.average.starting_interval == 9
-        assert Interjection.eager.starting_interval == 6
-        assert Interjection.very_eager.starting_interval == 3
-
-
-# ---------------------------------------------------------------------------
-# CharacterConfig conversation-flow fields
-# ---------------------------------------------------------------------------
-
-
-class TestCharacterConfigConversationFields:
-    def test_defaults_when_file_absent(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        cfg = load_character_config(
-            tmp_path / "no-such-file.toml",
-            defaults_path=default_profile_path,
-        )
-        assert cfg.aliases == []
-        assert cfg.chattiness == "Balanced — responds when the conversation is relevant"
-        assert cfg.interjection is Interjection.average
-        assert cfg.text_lull_timeout == 10.0  # noqa: RUF069
-
-    def test_reads_aliases_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_user_overrides_default(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text('aliases = ["aria", "ari"]\n')
+        path.write_text('display_tz = "America/New_York"\naliases = ["m"]\n')
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.aliases == ["aria", "ari"]
+        assert cfg.display_tz == "America/New_York"
+        assert cfg.aliases == ["m"]
 
-    def test_empty_aliases_list(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_unknown_llm_slot_rejected(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("aliases = []\n")
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.aliases == []
-
-    def test_reads_chattiness_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('chattiness = "Shy and reserved"\n')
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.chattiness == "Shy and reserved"
-
-    def test_reads_interjection_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('interjection = "eager"\n')
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.interjection is Interjection.eager
-
-    def test_reads_text_lull_timeout_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text("text_lull_timeout = 5.0\n")
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.text_lull_timeout == 5.0  # noqa: RUF069
-
-    def test_unknown_interjection_value_raises(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text('interjection = "obnoxious"\n')
-        with pytest.raises(ConfigError, match="obnoxious"):
+        path.write_text('[llm.mystery]\nmodel = "foo"\n')
+        with pytest.raises(ConfigError, match="unknown LLM slot"):
             load_character_config(path, defaults_path=default_profile_path)
 
-    def test_all_interjection_tiers_load_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_legacy_main_prose_rejected(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
-        for tier in Interjection:
-            path = tmp_path / f"character_{tier.value}.toml"
-            path.write_text(f'interjection = "{tier.value}"\n')
-            cfg = load_character_config(path, defaults_path=default_profile_path)
-            assert cfg.interjection is tier
-
-
-# InterruptTolerance enum and [voice.interruption] TOML section
-# ---------------------------------------------------------------------------
-
-
-class TestInterruptToleranceEnum:
-    def test_tier_values(self) -> None:
-        """All five tiers exist with the expected string values."""
-        assert InterruptTolerance("very_meek") is InterruptTolerance.very_meek
-        assert InterruptTolerance("meek") is InterruptTolerance.meek
-        assert InterruptTolerance("average") is InterruptTolerance.average
-        assert InterruptTolerance("stubborn") is InterruptTolerance.stubborn
-        assert InterruptTolerance("very_stubborn") is InterruptTolerance.very_stubborn
-
-    def test_base_probabilities(self) -> None:
-        assert InterruptTolerance.very_meek.base_probability == 0.10  # noqa: RUF069
-        assert InterruptTolerance.meek.base_probability == 0.20  # noqa: RUF069
-        assert InterruptTolerance.average.base_probability == 0.30  # noqa: RUF069
-        assert InterruptTolerance.stubborn.base_probability == 0.45  # noqa: RUF069
-        assert InterruptTolerance.very_stubborn.base_probability == 0.60  # noqa: RUF069
-
-
-class TestVoiceInterruptionConfig:
-    def test_defaults_when_section_absent(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        cfg = load_character_config(
-            tmp_path / "no-such-file.toml",
-            defaults_path=default_profile_path,
-        )
-        assert cfg.interrupt_tolerance is InterruptTolerance.average
-        assert cfg.min_interruption_s == 2.0  # noqa: RUF069
-        assert cfg.short_long_boundary_s == 30.0  # noqa: RUF069
-
-    def test_reads_tolerance_tier(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
+        """The retired ``main_prose`` slot fails loudly post-split."""
         path = tmp_path / "character.toml"
-        path.write_text(
-            '[voice.interruption]\ninterrupt_tolerance = "stubborn"\n',
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.interrupt_tolerance is InterruptTolerance.stubborn
-
-    def test_reads_min_interruption(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            "[voice.interruption]\nmin_interruption_s = 2.25\n",
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.min_interruption_s == 2.25  # noqa: RUF069
-
-    def test_reads_short_long_boundary(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            "[voice.interruption]\nshort_long_boundary_s = 6.0\n",
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.short_long_boundary_s == 6.0  # noqa: RUF069
-
-    def test_unknown_tolerance_tier_raises(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            '[voice.interruption]\ninterrupt_tolerance = "defiant"\n',
-        )
-        with pytest.raises(ConfigError, match="defiant"):
+        path.write_text('[llm.main_prose]\nmodel = "m"\n')
+        with pytest.raises(ConfigError, match="unknown LLM slot 'main_prose'"):
             load_character_config(path, defaults_path=default_profile_path)
 
-    def test_all_tolerance_tiers_load_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
-    ) -> None:
-        for tier in InterruptTolerance:
-            path = tmp_path / f"character_{tier.value}.toml"
-            path.write_text(
-                f'[voice.interruption]\ninterrupt_tolerance = "{tier.value}"\n',
-            )
-            cfg = load_character_config(path, defaults_path=default_profile_path)
-            assert cfg.interrupt_tolerance is tier
-
-    def test_negative_min_interruption_raises(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_temperature_out_of_range(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text(
-            "[voice.interruption]\nmin_interruption_s = -1.0\n",
-        )
-        with pytest.raises(ConfigError, match="min_interruption_s"):
+        path.write_text('[llm.prose]\nmodel = "m"\ntemperature = 3.0\n')
+        with pytest.raises(ConfigError, match="temperature must be in"):
             load_character_config(path, defaults_path=default_profile_path)
 
-    def test_boundary_must_exceed_min(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_provider_order_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``provider_order`` pins OpenRouter routing for cache stability.
+
+        Stopgap until OpenRouter routing improves or model swaps; the
+        config plumbing is decoupled so the pin can be dropped by
+        deleting the line.
+        """
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.prose]\nmodel = "z-ai/glm-5.1"\n'
+            'provider_order = ["z-ai", "deepinfra"]\n'
+            "provider_allow_fallbacks = false\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        slot = cfg.llm["prose"]
+        assert slot.provider_order == ("z-ai", "deepinfra")
+        assert slot.provider_allow_fallbacks is False
+
+    def test_provider_order_omitted_means_none(self, tmp_path: Path) -> None:
+        """Slot without ``provider_order`` parses to ``None`` (default routing).
+
+        Uses a custom default profile so the shipped default's pin
+        doesn't bleed in via TOML merge.
+        """
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\n'
+            '[llm.prose]\nmodel = "x"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\n')
+        cfg = load_character_config(path, defaults_path=defaults)
+        slot = cfg.llm["prose"]
+        assert slot.provider_order is None
+        assert slot.provider_allow_fallbacks is True
+
+    def test_provider_order_must_be_list_of_strings(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\nprovider_order = [1, 2]\n')
+        with pytest.raises(ConfigError, match="provider_order"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_reasoning_levels_parsed(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            "[voice.interruption]\n"
-            "min_interruption_s = 3.0\n"
-            "short_long_boundary_s = 2.0\n",
+            '[llm.fast]\nmodel = "m"\nreasoning = "off"\n'
+            '[llm.prose]\nmodel = "m"\nreasoning = "medium"\n'
+            '[llm.background]\nmodel = "m"\nreasoning = "high"\n'
         )
-        with pytest.raises(ConfigError, match="short_long_boundary_s"):
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm["fast"].reasoning == "off"
+        assert cfg.llm["prose"].reasoning == "medium"
+        assert cfg.llm["background"].reasoning == "high"
+
+    def test_reasoning_omitted_means_none(self, tmp_path: Path) -> None:
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\n'
+            '[llm.prose]\nmodel = "x"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
+        cfg = load_character_config(tmp_path / "missing.toml", defaults_path=defaults)
+        assert cfg.llm["prose"].reasoning is None
+
+    def test_invalid_reasoning_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\nreasoning = "ultra"\n')
+        with pytest.raises(ConfigError, match="reasoning"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_reasoning_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\nreasoning = true\n')
+        with pytest.raises(ConfigError, match="reasoning"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_tool_calling_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.background]\nmodel = "m"\ntool_calling = true\n'
+            '[llm.fast]\nmodel = "m"\ntool_calling = false\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm["background"].tool_calling is True
+        assert cfg.llm["fast"].tool_calling is False
+
+    def test_tool_calling_omitted_defaults_false(self, tmp_path: Path) -> None:
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\n'
+            '[llm.prose]\nmodel = "x"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
+        cfg = load_character_config(tmp_path / "missing.toml", defaults_path=defaults)
+        assert cfg.llm["prose"].tool_calling is False
+
+    def test_tool_calling_must_be_bool(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\ntool_calling = "yes"\n')
+        with pytest.raises(ConfigError, match="tool_calling"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_tts_provider_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[tts]\nprovider = "mysterybox"\n')
+        with pytest.raises(ConfigError, match=r"\[tts\]\.provider"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_history_window_split_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.history]\nvoice_window_size = 25\ntext_window_size = 60\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.voice_window_size == 25
+        assert cfg.text_window_size == 60
+
+    def test_legacy_window_size_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """The retired ``[providers.history].window_size`` fails loudly."""
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\nwindow_size = 50\n")
+        with pytest.raises(ConfigError, match="window_size"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_voice_window_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\nvoice_window_size = 0\n")
+        with pytest.raises(ConfigError, match="voice_window_size"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_text_window_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\ntext_window_size = -1\n")
+        with pytest.raises(ConfigError, match="text_window_size"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_text_silence_gap_fold_defaults_to_zero(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_silence_gap_fold_seconds == pytest.approx(0.0)
+
+    def test_text_silence_gap_fold_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = 1800\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_silence_gap_fold_seconds == pytest.approx(1800.0)
+
+    def test_text_silence_gap_fold_rejects_negative(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = -1\n")
+        with pytest.raises(ConfigError, match="text_silence_gap_fold_seconds"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_text_silence_gap_fold_rejects_non_numeric(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.history]\ntext_silence_gap_fold_seconds = "big"\n')
+        with pytest.raises(ConfigError, match="text_silence_gap_fold_seconds"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_text_silence_gap_fold_accepts_zero(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = 0\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_silence_gap_fold_seconds == pytest.approx(0.0)
+
+
+class TestBudgets:
+    def test_shipped_default_voice_budget(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``_default/character.toml`` is the source of truth for voice."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        v = cfg.budgets["voice"]
+        assert v.total_tokens == 3000
+        assert v.recent_history_tokens == 1500
+        assert v.rag_tokens == 450
+        assert v.dossier_tokens == 450
+        assert v.summary_tokens == 300
+        assert v.cross_channel_tokens == 300
+        assert v.max_history_turns == 100
+        assert v.max_rag_turns == 5
+        assert v.max_rag_facts == 3
+        assert v.max_dossier_people == 8
+
+    def test_shipped_default_text_and_background(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.budgets["text"].total_tokens == 8000
+        assert cfg.budgets["background"].total_tokens == 24000
+
+    def test_partial_override_keeps_other_subcaps(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """Override one knob; the rest inherit from ``_default``."""
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.voice]\ntotal_tokens = 5000\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        v = cfg.budgets["voice"]
+        assert v.total_tokens == 5000
+        # Untouched — TOML deep-merge over the default.
+        assert v.recent_history_tokens == 1500
+        assert v.rag_tokens == 450
+        assert v.max_dossier_people == 8
+        # Other tiers untouched.
+        assert cfg.budgets["text"].total_tokens == 8000
+
+    def test_subcap_overrides_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[budget.text]\n"
+            "total_tokens = 10000\n"
+            "recent_history_tokens = 4000\n"
+            "rag_tokens = 1000\n"
+            "max_dossier_people = 12\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budgets["text"]
+        assert b.total_tokens == 10000
+        assert b.recent_history_tokens == 4000
+        assert b.rag_tokens == 1000
+        assert b.max_dossier_people == 12
+
+    def test_unknown_tier_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.mystery]\ntotal_tokens = 100\n")
+        with pytest.raises(ConfigError, match="unknown budget tier"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.voice]\nwobble = 5\n")
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_negative_total_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.voice]\ntotal_tokens = -1\n")
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_dataclass_default_is_voice_tier(self) -> None:
+        """Programmatic ``TierBudget()`` matches the voice envelope."""
+        b = TierBudget()
+        assert b.total_tokens == 3000
+        assert b.recent_history_tokens == 1500
+
+
+class TestMemoryRetrieval:
+    """[memory.retrieval] — M2 importance-weighted retrieval weights."""
+
+    def test_shipped_default_weights(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        r = cfg.memory_retrieval
+        assert r.bm25_weight == pytest.approx(1.0)
+        assert r.recency_weight == pytest.approx(0.0)
+        assert r.importance_weight == pytest.approx(0.6)
+        assert r.embedding_weight == pytest.approx(0.0)
+
+    def test_partial_override(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[memory.retrieval]\nimportance_weight = 1.5\nrecency_weight = 0.4\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        r = cfg.memory_retrieval
+        assert r.importance_weight == pytest.approx(1.5)
+        assert r.recency_weight == pytest.approx(0.4)
+        assert r.bm25_weight == pytest.approx(1.0)  # untouched
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[memory.retrieval]\nmagic_weight = 1\n")
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_negative_weight_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[memory.retrieval]\nimportance_weight = -1\n")
+        with pytest.raises(ConfigError, match="non-negative"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_numeric_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[memory.retrieval]\nimportance_weight = "high"\n')
+        with pytest.raises(ConfigError, match="non-negative number"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_dataclass_default_is_pre_m2_bm25_only(self) -> None:
+        r = MemoryRetrievalConfig()
+        assert r.bm25_weight == pytest.approx(1.0)
+        assert r.recency_weight == pytest.approx(0.0)
+        assert r.importance_weight == pytest.approx(0.0)
+        assert r.embedding_weight == pytest.approx(0.0)
+
+
+class TestEmbeddingConfig:
+    """[providers.embedding] — M6 embedder backend selection."""
+
+    def test_dataclass_default_is_off(self) -> None:
+        e = EmbeddingConfig()
+        assert e.backend == "off"
+        assert e.dim == 256
+
+    def test_shipped_default_is_off(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.backend == "off"
+
+    def test_override_to_hash(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\nbackend = "hash"\ndim = 128\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.backend == "hash"
+        assert cfg.embedding.dim == 128
+
+    def test_unknown_backend_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\nbackend = "magic"\n')
+        with pytest.raises(ConfigError, match="is unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.embedding]\nweird = 1\n")
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_positive_dim_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.embedding]\ndim = 0\n")
+        with pytest.raises(ConfigError, match="must be > 0"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_int_dim_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\ndim = "wide"\n')
+        with pytest.raises(ConfigError, match="must be a positive integer"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_default_fastembed_model_is_bge_small(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.fastembed_model == "BAAI/bge-small-en-v1.5"
+        assert cfg.embedding.fastembed_cache_dir is None
+
+    def test_fastembed_model_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.embedding]\n"
+            'backend = "fastembed"\n'
+            'fastembed_model = "BAAI/bge-base-en-v1.5"\n'
+            'fastembed_cache_dir = "/var/cache/fastembed"\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.embedding.backend == "fastembed"
+        assert cfg.embedding.fastembed_model == "BAAI/bge-base-en-v1.5"
+        assert cfg.embedding.fastembed_cache_dir == "/var/cache/fastembed"
+
+    def test_empty_fastembed_model_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.embedding]\nfastembed_model = ""\n')
+        with pytest.raises(ConfigError, match="non-empty string"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_string_fastembed_cache_dir_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.embedding]\nfastembed_cache_dir = 42\n")
+        with pytest.raises(ConfigError, match="must be a string"):
             load_character_config(path, defaults_path=default_profile_path)
 
 
-# ---------------------------------------------------------------------------
-# CharacterConfig memory-writer fields
-# ---------------------------------------------------------------------------
-
-
-class TestCharacterConfigMemoryWriterFields:
-    def test_defaults_when_file_absent(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+class TestChannelOverrides:
+    def test_no_channels_section_is_empty_map(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
-        cfg = load_character_config(
-            tmp_path / "no-such-file.toml",
-            defaults_path=default_profile_path,
-        )
-        assert cfg.memory_writer_turn_threshold == 50
-        assert cfg.memory_writer_idle_timeout == 1800.0  # noqa: RUF069
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.channels == {}
 
-    def test_reads_memory_writer_section_from_toml(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_channel_overrides_parsed(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            "[memory_writer]\nturn_threshold = 30\nidle_timeout = 900.0\n",
+            "[channels.12345]\n"
+            "history_window_size = 8\n"
+            'message_rendering = "name_only"\n'
+            'prompt_layers = ["core_instructions", "character_card"]\n'
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.memory_writer_turn_threshold == 30
-        assert cfg.memory_writer_idle_timeout == 900.0  # noqa: RUF069
+        over = cfg.channels[12345]
+        assert over.history_window_size == 8
+        assert over.message_rendering == "name_only"
+        assert over.prompt_layers == ("core_instructions", "character_card")
 
-    def test_partial_memory_writer_section(
-        self,
-        tmp_path: Path,
-        default_profile_path: Path,
+    def test_voice_window_for_falls_back_to_default(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[memory_writer]\nturn_threshold = 100\n")
+        path.write_text(
+            "[providers.history]\nvoice_window_size = 20\n\n"
+            "[channels.12345]\nhistory_window_size = 8\n"
+        )
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.memory_writer_turn_threshold == 100
+        assert cfg.voice_window_for(12345) == 8  # override
+        assert cfg.voice_window_for(99999) == 20  # default
+        assert cfg.voice_window_for(None) == 20
 
-
-# ---------------------------------------------------------------------------
-# load_channel_config — backdrop and channel_name
-# ---------------------------------------------------------------------------
-
-
-class TestLoadChannelConfigBackdrop:
-    def test_reads_backdrop(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\nbackdrop = "Speak like a pirate."\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.backdrop_override == "Speak like a pirate."
-
-    def test_backdrop_stripped(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\nbackdrop = "  trimmed  "\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.backdrop_override == "trimmed"
-
-    def test_backdrop_empty_string_yields_none(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\nbackdrop = ""\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.backdrop_override is None
-
-    def test_backdrop_whitespace_only_yields_none(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\nbackdrop = "   "\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.backdrop_override is None
-
-    def test_backdrop_non_string_raises(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\nbackdrop = 42\n')
-        with pytest.raises(ConfigError):
-            load_channel_config(path)
-
-    def test_backdrop_absent_yields_none(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.backdrop_override is None
-
-    def test_channel_name_parsed(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('channel_name = "general"\nmode = "full_rp"\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.channel_name == "general"
-
-    def test_channel_name_absent_yields_none(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "full_rp"\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.channel_name is None
-
-    def test_channel_name_non_string_raises(self, tmp_path: Path) -> None:
-        path = tmp_path / "channel.toml"
-        path.write_text('channel_name = 99\nmode = "full_rp"\n')
-        with pytest.raises(ConfigError):
-            load_channel_config(path)
-
-    def test_existing_sidecars_without_new_fields_still_load(
-        self, tmp_path: Path
+    def test_text_window_for_falls_back_to_default(
+        self, tmp_path: Path, default_profile_path: Path
     ) -> None:
-        """Backward-compat: sidecars that pre-date backdrop/channel_name load fine."""
-        path = tmp_path / "channel.toml"
-        path.write_text('mode = "text_conversation_rp"\n')
-        cfg = load_channel_config(path)
-        assert cfg is not None
-        assert cfg.mode is ChannelMode.text_conversation_rp
-        assert cfg.backdrop_override is None
-        assert cfg.channel_name is None
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.history]\ntext_window_size = 50\n\n"
+            "[channels.12345]\nhistory_window_size = 8\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.text_window_for(12345) == 8  # override
+        assert cfg.text_window_for(99999) == 50  # default
+        assert cfg.text_window_for(None) == 50
+
+    def test_invalid_window_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\nhistory_window_size = 0\n")
+        with pytest.raises(ConfigError, match="must be positive"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_invalid_message_rendering_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[channels.12345]\nmessage_rendering = "garble"\n')
+        with pytest.raises(ConfigError, match="message_rendering"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_channel_overrides_dataclass_default(self) -> None:
+        over = ChannelOverrides()
+        assert over.history_window_size is None
+        assert over.prompt_layers is None
+        assert over.message_rendering is None
+        assert over.total_tokens is None
+
+    def test_channel_total_tokens_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 2000\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.channels[12345].total_tokens == 2000
+
+    def test_channel_total_tokens_must_be_positive(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 0\n")
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_channel_total_tokens_must_be_integer(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1.5\n")
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_budget_for_returns_base_when_no_channel_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["text"]
+        assert cfg.budget_for("text", 99999).total_tokens == base.total_tokens
+
+    def test_budget_for_applies_channel_total_tokens(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("text", 12345)
+        assert b.total_tokens == 1234
+        # other caps unchanged from tier default
+        assert b.rag_tokens == cfg.budgets["text"].rag_tokens
+
+    def test_budget_for_ignores_other_channel(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("text", 99999)
+        assert b.total_tokens == cfg.budgets["text"].total_tokens
+
+    def test_budget_for_none_channel_returns_base(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("text", None)
+        assert b.total_tokens == cfg.budgets["text"].total_tokens
+
+
+class TestBudgetCurves:
+    def test_no_curves_section_empty_dict(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.budget_curves == {}
+
+    def test_curve_parsed(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[budget.model_curves."claude-opus-4-7"]\n'
+            "total_tokens = 2.0\n"
+            "rag_tokens = 1.5\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        curve = cfg.budget_curves["claude-opus-4-7"]
+        assert curve.total_tokens == pytest.approx(2.0)
+        assert curve.rag_tokens == pytest.approx(1.5)
+        assert curve.recent_history_tokens == pytest.approx(1.0)  # default
+
+    def test_unknown_curve_field_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[budget.model_curves."claude-opus-4-7"]\nno_such_field = 1.5\n'
+        )
+        with pytest.raises(ConfigError, match="no_such_field"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_positive_multiplier_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 0.0\n')
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_non_numeric_multiplier_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = "big"\n'
+        )
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_budget_for_applies_curve_when_model_matches(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        # Wire fast slot to a model that has a curve.
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "claude-opus-4-7"\napi_key_env = "X"\n\n'
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["voice"]
+        b = cfg.budget_for("voice", None)
+        assert b.total_tokens == round(base.total_tokens * 2.0)
+        # Sub-caps unaffected by a curve that only sets total_tokens.
+        assert b.rag_tokens == base.rag_tokens
+
+    def test_budget_for_no_curve_returns_base(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["voice"]
+        b = cfg.budget_for("voice", None)
+        assert b.total_tokens == base.total_tokens
+
+    def test_budget_for_channel_override_wins_over_curve(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "claude-opus-4-7"\napi_key_env = "X"\n\n'
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n\n'
+            "[channels.99]\ntotal_tokens = 1234\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        b = cfg.budget_for("voice", 99)
+        # Explicit channel value wins over the scaled value.
+        assert b.total_tokens == 1234
+
+    def test_budget_for_curve_not_applied_for_different_model(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "claude-sonnet-4-6"\napi_key_env = "X"\n\n'
+            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        base = cfg.budgets["voice"]
+        b = cfg.budget_for("voice", None)
+        # Sonnet is active; opus curve should not be applied.
+        assert b.total_tokens == base.total_tokens
+
+
+class TestTurnDetectionConfig:
+    def test_default_strategy_is_deepgram(self) -> None:
+        cfg = TurnDetectionConfig()
+        assert cfg.strategy == "deepgram"
+
+    def test_omitted_section_uses_default(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.strategy == "deepgram"
+
+    def test_ten_plus_smart_turn_strategy_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.turn_detection]\nstrategy = "ten+smart_turn"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.strategy == "ten+smart_turn"
+
+    def test_deepgram_strategy_explicit(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.turn_detection]\nstrategy = "deepgram"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.strategy == "deepgram"
+
+    def test_unknown_strategy_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.turn_detection]\nstrategy = "mystery"\n')
+        match = r"\[providers\.turn_detection\]\.strategy"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_strategy_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.turn_detection]\nstrategy = 42\n")
+        match = r"\[providers\.turn_detection\]\.strategy"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestSTTConfig:
+    def test_default_backend_is_deepgram(self) -> None:
+        cfg = STTConfig()
+        assert cfg.backend == "deepgram"
+        assert isinstance(cfg.deepgram, DeepgramSTTConfig)
+
+    def test_deepgram_defaults_match_shipped_values(self) -> None:
+        """Defaults mirror the previous DEEPGRAM_* env var defaults."""
+        cfg = DeepgramSTTConfig()
+        assert cfg.model == "nova-3"
+        assert cfg.language == "en"
+        assert cfg.endpointing_ms == 500
+        assert cfg.utterance_end_ms == 1500
+        assert cfg.smart_format is True
+        assert cfg.punctuate is True
+        assert cfg.keyterms == ()
+        assert cfg.replay_buffer_s == pytest.approx(5.0)
+        assert cfg.keepalive_interval_s == pytest.approx(3.0)
+        assert cfg.reconnect_max_attempts == 5
+        assert cfg.reconnect_backoff_cap_s == pytest.approx(16.0)
+        assert cfg.idle_close_s == pytest.approx(30.0)
+
+    def test_omitted_section_uses_defaults(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.stt.backend == "deepgram"
+        assert cfg.stt.deepgram.endpointing_ms == 500
+        assert cfg.stt.deepgram.utterance_end_ms == 1500
+        assert cfg.stt.deepgram.keyterms == ()
+
+    def test_deepgram_knobs_overridden(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.stt.deepgram]\n"
+            'model = "nova-2"\n'
+            'language = "es"\n'
+            "endpointing_ms = 300\n"
+            "utterance_end_ms = 1200\n"
+            "smart_format = false\n"
+            "punctuate = false\n"
+            'keyterms = ["lifecycle mesh", "Tam"]\n'
+            "replay_buffer_s = 7.5\n"
+            "keepalive_interval_s = 2.0\n"
+            "reconnect_max_attempts = 8\n"
+            "reconnect_backoff_cap_s = 32.0\n"
+            "idle_close_s = 45.0\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        dg = cfg.stt.deepgram
+        assert dg.model == "nova-2"
+        assert dg.language == "es"
+        assert dg.endpointing_ms == 300
+        assert dg.utterance_end_ms == 1200
+        assert dg.smart_format is False
+        assert dg.punctuate is False
+        assert dg.keyterms == ("lifecycle mesh", "Tam")
+        assert dg.replay_buffer_s == pytest.approx(7.5)
+        assert dg.keepalive_interval_s == pytest.approx(2.0)
+        assert dg.reconnect_max_attempts == 8
+        assert dg.reconnect_backoff_cap_s == pytest.approx(32.0)
+        assert dg.idle_close_s == pytest.approx(45.0)
+
+    def test_unknown_backend_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.stt]\nbackend = "mystery"\n')
+        match = r"\[providers\.stt\]\.backend"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_backend_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.stt]\nbackend = 42\n")
+        match = r"\[providers\.stt\]\.backend"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_endpointing_ms_must_be_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.stt.deepgram]\nendpointing_ms = 1.5\n")
+        match = r"endpointing_ms"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_keyterms_must_be_list_of_strings(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.stt.deepgram]\nkeyterms = [1, 2]\n")
+        match = r"keyterms"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestDiscordTextConfig:
+    """``[discord.text]`` knobs for the typing-indicator + interruption path."""
+
+    def test_defaults(self) -> None:
+        cfg = DiscordTextConfig()
+        # Default: respect other users typing — treat as interruption.
+        assert cfg.respond_to_typing is True
+        # Backoff envelope for "another familiar-connect bot is typing"
+        # — initial pause doubles up to the cap to avoid pingpong.
+        assert cfg.typing_backoff_initial_s > 0
+        assert cfg.typing_backoff_max_s >= cfg.typing_backoff_initial_s
+
+    def test_present_on_character_config(self) -> None:
+        cfg = CharacterConfig()
+        assert isinstance(cfg.discord_text, DiscordTextConfig)
+
+    def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[discord.text]\n"
+            "respond_to_typing = false\n"
+            "typing_backoff_initial_s = 2.5\n"
+            "typing_backoff_max_s = 60.0\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.discord_text.respond_to_typing is False
+        assert cfg.discord_text.typing_backoff_initial_s == pytest.approx(2.5)
+        assert cfg.discord_text.typing_backoff_max_s == pytest.approx(60.0)
+
+    def test_respond_to_typing_must_be_bool(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[discord.text]\nrespond_to_typing = "yes"\n')
+        with pytest.raises(ConfigError, match="respond_to_typing"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[discord.text]\nunknown_knob = 1\n")
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_backoff_max_must_not_be_below_initial(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[discord.text]\n"
+            "typing_backoff_initial_s = 5.0\n"
+            "typing_backoff_max_s = 1.0\n"
+        )
+        with pytest.raises(ConfigError, match="typing_backoff_max_s"):
+            load_character_config(path, defaults_path=default_profile_path)

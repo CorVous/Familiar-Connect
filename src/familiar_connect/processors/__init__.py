@@ -1,0 +1,22 @@
+"""Event processors. Phase 1 ships the debug processor only.
+
+See plan § Design.2, plan § Rollout Phase 1.
+"""
+
+from __future__ import annotations
+
+from familiar_connect.processors.debug_logger import DebugLoggerProcessor
+from familiar_connect.processors.fact_extractor import FactExtractor
+from familiar_connect.processors.history_writer import HistoryWriter
+from familiar_connect.processors.summary_worker import SummaryWorker
+from familiar_connect.processors.text_responder import TextResponder
+from familiar_connect.processors.voice_responder import VoiceResponder
+
+__all__ = [
+    "DebugLoggerProcessor",
+    "FactExtractor",
+    "HistoryWriter",
+    "SummaryWorker",
+    "TextResponder",
+    "VoiceResponder",
+]
