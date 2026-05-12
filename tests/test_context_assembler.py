@@ -464,7 +464,7 @@ class TestSilenceGapFold:
         )
         self._set_ts(store, row.id, t)
         for i, gap in enumerate(gaps_seconds):
-            t = t + timedelta(seconds=gap)
+            t += timedelta(seconds=gap)
             row = store.append_turn(
                 familiar_id="fam",
                 channel_id=channel_id,

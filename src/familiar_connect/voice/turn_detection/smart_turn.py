@@ -24,15 +24,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-try:
+_IMPORT_ERROR: Exception | None
+if TYPE_CHECKING:
     import numpy as np
     import onnxruntime as ort
-except ImportError as exc:  # pragma: no cover — only hit without the extra
-    msg = (
-        "SmartTurnDetector requires the 'local-turn' extra. Install with "
-        "`uv sync --extra local-turn`."
-    )
-    raise RuntimeError(msg) from exc
+
+    _IMPORT_ERROR = None
+else:
+    try:
+        import numpy as np
+        import onnxruntime as ort
+
+        _IMPORT_ERROR = None
+    except ImportError as exc:  # pragma: no cover — only hit without the extra
+        np = None
+        ort = None
+        _IMPORT_ERROR = exc
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,6 +56,12 @@ class SmartTurnDetector:
         threshold: float = 0.5,
         max_duration_s: float = 16.0,
     ) -> None:
+        if _IMPORT_ERROR is not None:
+            msg = (
+                "SmartTurnDetector requires the 'local-turn' extra. "
+                "Install with `uv sync --extra local-turn`."
+            )
+            raise RuntimeError(msg) from _IMPORT_ERROR
         self.sample_rate = sample_rate
         self.threshold = threshold
         self._max_samples = int(max_duration_s * sample_rate)

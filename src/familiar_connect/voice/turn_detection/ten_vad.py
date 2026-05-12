@@ -19,15 +19,24 @@ never pay the runtime cost.
 
 from __future__ import annotations
 
-try:
+from typing import TYPE_CHECKING
+
+_IMPORT_ERROR: Exception | None
+if TYPE_CHECKING:
     import numpy as np
     from ten_vad import TenVad as _TenVadNative
-except ImportError as exc:  # pragma: no cover — only hit without the extra
-    msg = (
-        "TenVAD requires the 'local-turn' extra. Install with "
-        "`uv sync --extra local-turn`."
-    )
-    raise RuntimeError(msg) from exc
+
+    _IMPORT_ERROR = None
+else:
+    try:
+        import numpy as np
+        from ten_vad import TenVad as _TenVadNative
+
+        _IMPORT_ERROR = None
+    except ImportError as exc:  # pragma: no cover — only hit without the extra
+        np = None
+        _TenVadNative = None
+        _IMPORT_ERROR = exc
 
 # TEN-VAD native hop sizes at 16 kHz: 160 (10 ms) or 256 (16 ms).
 _VALID_HOP_SIZES_16K: tuple[int, ...] = (160, 256)
@@ -43,6 +52,12 @@ class TenVAD:
         hop_size: int = 256,
         threshold: float = 0.5,
     ) -> None:
+        if _IMPORT_ERROR is not None:
+            msg = (
+                "TenVAD requires the 'local-turn' extra. "
+                "Install with `uv sync --extra local-turn`."
+            )
+            raise RuntimeError(msg) from _IMPORT_ERROR
         if sample_rate != 16000:
             msg = f"sample_rate must be 16000 Hz; got {sample_rate}"
             raise ValueError(msg)

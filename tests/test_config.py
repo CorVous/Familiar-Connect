@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from familiar_connect.budget import ModelBudgetCurve, TierBudget
+from familiar_connect.budget import TierBudget
 from familiar_connect.config import (
     LLM_SLOT_NAMES,
     ChannelOverrides,
@@ -267,7 +267,7 @@ class TestLoadCharacterConfig:
         path = tmp_path / "character.toml"
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.text_silence_gap_fold_seconds == 0.0
+        assert cfg.text_silence_gap_fold_seconds == pytest.approx(0.0)
 
     def test_text_silence_gap_fold_parsed(
         self, tmp_path: Path, default_profile_path: Path
@@ -275,7 +275,7 @@ class TestLoadCharacterConfig:
         path = tmp_path / "character.toml"
         path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = 1800\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.text_silence_gap_fold_seconds == 1800.0
+        assert cfg.text_silence_gap_fold_seconds == pytest.approx(1800.0)
 
     def test_text_silence_gap_fold_rejects_negative(
         self, tmp_path: Path, default_profile_path: Path
@@ -299,7 +299,7 @@ class TestLoadCharacterConfig:
         path = tmp_path / "character.toml"
         path.write_text("[providers.history]\ntext_silence_gap_fold_seconds = 0\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.text_silence_gap_fold_seconds == 0.0
+        assert cfg.text_silence_gap_fold_seconds == pytest.approx(0.0)
 
 
 class TestBudgets:
@@ -705,9 +705,9 @@ class TestBudgetCurves:
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         curve = cfg.budget_curves["claude-opus-4-7"]
-        assert curve.total_tokens == 2.0
-        assert curve.rag_tokens == 1.5
-        assert curve.recent_history_tokens == 1.0  # default
+        assert curve.total_tokens == pytest.approx(2.0)
+        assert curve.rag_tokens == pytest.approx(1.5)
+        assert curve.recent_history_tokens == pytest.approx(1.0)  # default
 
     def test_unknown_curve_field_rejected(
         self, tmp_path: Path, default_profile_path: Path

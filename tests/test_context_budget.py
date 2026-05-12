@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from familiar_connect.budget import (
     Budgeter,
     ModelBudgetCurve,
@@ -128,14 +130,14 @@ class TestModelBudgetCurve:
     def test_defaults_are_all_one(self) -> None:
         c = ModelBudgetCurve()
         for field_val in vars(c).values():
-            assert field_val == 1.0
+            assert field_val == pytest.approx(1.0)
 
     def test_partial_override_leaves_others_at_one(self) -> None:
         c = ModelBudgetCurve(total_tokens=2.0, rag_tokens=1.5)
-        assert c.total_tokens == 2.0
-        assert c.rag_tokens == 1.5
-        assert c.recent_history_tokens == 1.0
-        assert c.dossier_tokens == 1.0
+        assert c.total_tokens == pytest.approx(2.0)
+        assert c.rag_tokens == pytest.approx(1.5)
+        assert c.recent_history_tokens == pytest.approx(1.0)
+        assert c.dossier_tokens == pytest.approx(1.0)
 
 
 class TestTierBudgetApplyCurve:

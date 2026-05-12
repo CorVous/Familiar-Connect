@@ -24,14 +24,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-try:
-    from huggingface_hub import hf_hub_download
-except ModuleNotFoundError as _err:
-    raise ModuleNotFoundError(
-        "huggingface_hub is required for local turn detection. "
-        "Install it with: uv sync --extra local-turn"
-    ) from _err
-
 from familiar_connect import log_style as ls
 from familiar_connect.voice.turn_detection.endpointer import UtteranceEndpointer
 from familiar_connect.voice.turn_detection.smart_turn import SmartTurnDetector
@@ -96,6 +88,17 @@ def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | N
     warning) on any download or filesystem error — the bot falls back
     to Deepgram-only endpointing rather than crashing.
     """
+    # lazy: huggingface_hub is the `local-turn` extra, not always installed
+    try:
+        from huggingface_hub import hf_hub_download  # noqa: PLC0415
+    except ModuleNotFoundError:
+        _logger.warning(
+            f"{ls.tag('🎙️  Voice', ls.Y)} "
+            f"{ls.kv('local_turn_detection', 'disabled', vc=ls.LY)} "
+            f"{ls.kv('reason', 'huggingface_hub_missing', vc=ls.LW)} "
+            f"{ls.kv('hint', 'uv sync --extra local-turn', vc=ls.LW)}"
+        )
+        return None
     try:
         resolved = Path(
             hf_hub_download(

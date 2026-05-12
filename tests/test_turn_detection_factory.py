@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-_HF_DOWNLOAD = "familiar_connect.voice.turn_detection.factory.hf_hub_download"
+_HF_DOWNLOAD = "huggingface_hub.hf_hub_download"
 
 
 class TestCreateLocalTurnDetector:
