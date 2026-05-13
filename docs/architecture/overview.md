@@ -59,14 +59,16 @@ flowchart LR
 - **BotHandle** — adapter exposed to the lifecycle wiring so bus-only processors can post back to Discord without taking a direct `discord.Bot` reference. Carries `send_text(channel_id, content)`, a `trigger_typing(channel_id)` async-context-manager factory that surfaces Discord's "Bot is typing…" indicator while a reply streams, a `typing_interrupt` policy seam that translates `on_typing` events into turn cancellations and bot-pingpong backoff (see [Discord text channel knobs](tuning.md#discord-text-channel-knobs)), and a `voice_runtime: dict[int, VoiceRuntime]` map populated by `/subscribe-voice`.
 - **Processors** — subscribe to topics.
   - `DebugLoggerProcessor` — one log line per event on every subscribed topic.
-  - `TextResponder` — consumes `discord.text` (appends the user turn directly, seeds the RAG cue, assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Owning the user-turn write keeps read-after-write consistency for `RecentHistoryLayer` in the same task. A `SilentDetector` watches stream deltas; on a `<silent>` sentinel reply the post and assistant-turn append are skipped (the user turn is still recorded). Discord's "Bot is typing…" indicator opens lazily inside the stream loop — only after `SilentDetector` rules out the sentinel — so reasoning that resolves to `<silent>` doesn't flicker the indicator. Before each reply the responder consults `TypingInterruptHandler` for any active bot-pingpong backoff window — see [Discord text channel knobs](tuning.md#discord-text-channel-knobs). See also [Multi-party addressivity](context-pipeline.md#multi-party-addressivity).
-  - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped. Silent-sentinel handling mirrors `TextResponder`: on `<silent>`, TTS is not invoked.
+  - `TextResponder` — consumes `discord.text` (appends the user turn directly, seeds the RAG cue, assembles prompt with `viewer_mode="text"`, streams LLM, posts via `BotHandle.send_text`, appends the assistant turn). Owning the user-turn write keeps read-after-write consistency for `RecentHistoryLayer` in the same task. A `SilentDetector` watches stream deltas; on a `<silent>` sentinel reply the post and assistant-turn append are skipped (the user turn is still recorded). Discord's "Bot is typing…" indicator opens lazily inside the stream loop — only after `SilentDetector` rules out the sentinel — so reasoning that resolves to `<silent>` doesn't flicker the indicator. Before each reply the responder consults `TypingInterruptHandler` for any active bot-pingpong backoff window — see [Discord text channel knobs](tuning.md#discord-text-channel-knobs). See also [Multi-party addressivity](context-pipeline.md#multi-party-addressivity). When the slot has `tool_calling = true` and a `ToolRegistry` is wired, the responder runs `agentic_loop` instead of bare `chat_stream`; intermediate `assistant` (with `tool_calls`) and `role=tool` turns are persisted to history.
+  - `VoiceResponder` — consumes `voice.activity.start` (cancels prior scope via the router; fires `TTSPlayer.stop`) and `voice.transcript.final` (appends user turn, assembles prompt, streams LLM, speaks). Stale finals (mismatched `turn_id`) are dropped. Silent-sentinel handling mirrors `TextResponder`: on `<silent>`, TTS is not invoked. Under tool calling, speech is streamed to TTS as content deltas arrive; tool execution happens only after the stream closes. An iteration that returns a tool call with empty content triggers a short filler phrase (constructor-configurable `tool_filler_phrases`) before the handler runs, so the user never hears a silent gap.
+  - `AlarmWaker` — consumes `alarm.fired`; republishes a synthetic `discord.text` event so the matching `TextResponder` produces a follow-up reply with content `[alarm fired: {reason}]`. Voice-origin alarms fall back to text (MVP).
 - **Diagnostics** — `@span(name)` decorator in `familiar_connect.diagnostics.spans` emits timing logs (`span=<name> ms=<n> status=<ok|error>`) and feeds a process-wide `SpanCollector`; `/diagnostics` slash command renders the live p50/p95 table. `voice_budget.VoiceBudgetRecorder` stamps four phase markers per voice turn (`stt_final` / `llm_first_token` / `tts_first_audio` / `playback_start`) and emits `voice.stt_to_ttft`, `voice.ttft_to_tts`, `voice.tts_to_playback`, `voice.total` spans into the same collector — see [voice pipeline § per-turn budget telemetry](voice-pipeline.md#per-turn-budget-telemetry). Each `LLMClient.chat_stream` call also emits `llm.ttfb.<slot>`, `llm.ttft.<slot>`, `llm.total.<slot>` spans plus a structured `[LLM call]` log line carrying input chars, model, OpenRouter-selected provider, prompt/completion/cached token counts (when the upstream returns them via the `usage: { include: true }` flag).
 - **Discord text** — `on_message` event handler + `subscribe-text` / `unsubscribe-text` slash commands. Built on py-cord.
 - **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption). On subscribe the bot attaches a `RecordingSink` and runs a `VoiceSource` task draining transcripts onto the bus. The audio pump dispatches per Discord user_id: the first audio chunk from a new SSRC lazily clones the configured Deepgram transcriber and opens a fresh WebSocket for that speaker, so two people talking concurrently get independent endpointing and don't slice each other's sentences. A per-user fan-in tags every result with the originating user_id before forwarding to the shared result queue. On unsubscribe the pump, source, and every per-user fan-in are cancelled, recording is stopped, and every per-user transcriber is closed.
 - **Transcription** — Deepgram streaming client. The instance loaded at startup acts as a *template*: `clone()` is called once per Discord user that speaks. Diarization stays off — Discord delivers per-SSRC audio, so attribution is exact and not AI-inferred. Knobs live in `[providers.stt.deepgram]`; defaults bias toward fewer mid-sentence cuts (`endpointing_ms=500`, `utterance_end_ms=1500`, `smart_format=true`, `punctuate=true`). Optional `keyterms` biases nova-3 toward project jargon and member display names. Every TOML field has a matching `DEEPGRAM_*` override for container deployments — see [Tuning § STT — Deepgram](tuning.md#stt-deepgram).
 - **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through pycord's voice client. When no TTS client is configured `LoggingTTSPlayer` is used.
-- **OpenRouter LLM client** — one `LLMClient` per call-site slot.
+- **OpenRouter LLM client** — one `LLMClient` per call-site slot. The slot config's `tool_calling` flag plumbs into `LLMClient.tool_calling_enabled`; responders gate on it before installing the tool registry and running the agentic loop. `stream_completion(messages, tools=...)` yields `LLMDelta` chunks (content + accumulated tool-call fragments + finish reason) and is the streaming primitive the agentic loop drives.
+- **Tool subsystem** — `familiar_connect.tools/`. `ToolRegistry` indexes `Tool` definitions (JSON-Schema parameters + async handler). `agentic_loop(...)` runs streaming → tool execution → re-call until the model stops calling tools (capped at 5 iterations, 10s per handler). `AlarmScheduler` owns one `asyncio.Task` per pending alarm sleeping until `scheduled_at`, then marks the row fired and publishes `alarm.fired`. On startup it reloads any rows left pending from the previous process; past-due rows fire immediately. The first tools shipped are `set_alarm(when|delay_seconds, reason)` and `cancel_alarm(alarm_id)`. See [Tool calling](#tool-calling).
 - **SQLite history store** — `data/familiars/<id>/history.db`. Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, `people_dossiers`, `facts`, `fact_embeddings`, and `reflections` are watermarked side-indices. `AsyncHistoryStore` (`history/async_store.py`) wraps `HistoryStore` in an async facade, dispatching every call to the store's single-threaded `ThreadPoolExecutor` so SQLite is never touched from the event loop.
 - **Subscription registry** — `data/familiars/<id>/subscriptions.toml`, written by the subscribe/unsubscribe slash commands.
 - **Twitch EventSub** — client code present; its queue is drained by `TwitchSource` onto the bus.
@@ -86,6 +88,7 @@ Topic strings live in `familiar_connect.bus.topics`:
 | `twitch.event` | `TwitchEvent` | unbounded |
 | `llm.response.chunk` / `.final` | text delta / message | block |
 | `tts.audio.chunk` / `.final` | audio bytes + word timestamps | block |
+| `alarm.fired` | alarm_id, channel_id, channel_kind, reason, scheduled_at, fired_at | unbounded |
 
 ## Voice reply loop
 
@@ -136,6 +139,72 @@ Barge-in latency budget: 200 ms from a new `voice.activity.start` to TTS
 playback halted. Verified end-to-end (bus subscribe pattern) by
 `tests/test_voice_responder.py::TestDispatchLoop` and
 `::TestBargeIn::test_barge_in_during_speech_cuts_playback_fast`.
+
+## Tool calling
+
+The familiar can invoke in-process tools mid-turn — an agentic loop: stream
+→ run tools → re-stream with results → repeat until the model stops calling
+tools. Toggled per LLM slot via `[llm.<slot>].tool_calling = true`; the
+shipped slot defaults leave the voice and text slots off and only the
+`background` slot on, so deployments opt in deliberately. When enabled the
+responders install the global `ToolRegistry` and run `agentic_loop` instead
+of bare `chat_stream`.
+
+Voice has a hard ordering constraint: long silent gaps mid-utterance are
+unacceptable. Three layers of defense ensure speech reaches TTS before a
+tool runs:
+
+1. **Mechanical**: `agentic_loop` is a single streaming call per iteration.
+   Content deltas reach TTS as they arrive; `tool_call` deltas are buffered
+   and executed only after the stream closes. No reordering required and
+   no extra round-trip.
+2. **Sharpened prompt**: the voice final-reminder layer appends "Always
+   speak at least a brief acknowledgement before calling a tool. Never
+   reply with a tool call alone." End-placed for weight on the immediate
+   turn; targets the empty-content failure mode specifically.
+3. **Filler backstop**: if an iteration closes with a tool call and no
+   spoken content, the voice responder injects a short stock phrase
+   (constructor-configured `tool_filler_phrases`) before the handler
+   runs. Round-robin rotation keeps the same phrase from repeating.
+   Guarantees no audible silence regardless of whether the model
+   honored layer 2.
+
+The text responder has no such constraint; intermediate iterations may post
+nothing to Discord, and only the terminal text reply is sent via
+`BotHandle.send_text`. Intermediate assistant turns (with `tool_calls`)
+and `role=tool` results are still persisted to history for audit and
+prompt-rebuild on later turns; `RecentHistoryLayer` surfaces them as a
+compact `→ name(args)` / `(tool→) ...` summary in the rebuilt prompt.
+
+### Alarm flow
+
+```
+set_alarm tool call          → AlarmScheduler.add(...)
+                                  → INSERT INTO alarms (...)
+                                  → asyncio.create_task(_sleep_then_fire)
+                                ↳ returns {alarm_id, scheduled_at, ack}
+
+(time passes)
+
+_sleep_then_fire timer        → UPDATE alarms SET fired_at = ...
+                                → bus.publish(alarm.fired, ...)
+
+AlarmWaker.handle(event)      → bus.publish(discord.text,
+                                  content="[alarm fired: {reason}]")
+
+TextResponder.handle(...)     → normal reply loop
+```
+
+Alarms persist in `data/familiars/<id>/history.db` (new `alarms` table) so
+they survive restart. The scheduler reloads pending rows on `start()` and
+re-schedules them; past-due rows fire immediately. Cancellation flips
+`cancelled_at` and stops the in-flight sleep task; the `cancel_alarm` tool
+exposes this to the model.
+
+For voice-originated alarms, the MVP falls back to publishing the synthetic
+text event with the voice channel id. Real Discord voice channels and text
+channels have distinct ids, so production wiring needs an explicit
+voice-to-text fallback channel map (out of scope for the initial cut).
 
 ## Per-channel latency knobs
 

@@ -47,6 +47,7 @@ def build_final_reminder(
     viewer_mode: str,
     now: datetime | None = None,
     include_mode_instruction: bool = False,
+    tools_enabled: bool = False,
 ) -> str:
     """Render the closing reminder block.
 
@@ -55,6 +56,10 @@ def build_final_reminder(
     has no equivalent for. ``include_mode_instruction`` appends the
     per-mode operating directive — used by the trailing-system-message
     copy so the directive lands at the tail of the context window.
+    ``tools_enabled`` (voice only) appends a short instruction that
+    targets the empty-content tool_call failure mode — the model is
+    nudged to speak before invoking a tool so the user doesn't hear
+    silence mid-turn.
     """
     when = _fmt_when(now or datetime.now(tz=UTC))
     lines = [
@@ -76,4 +81,12 @@ def build_final_reminder(
         instruction = _MODE_INSTRUCTIONS.get(viewer_mode)
         if instruction:
             lines.extend(["", instruction])
+    if tools_enabled and viewer_mode == "voice":
+        lines.extend([
+            "",
+            (
+                "Always speak at least a brief acknowledgement before "
+                "calling a tool. Never reply with a tool call alone."
+            ),
+        ])
     return "\n".join(lines)

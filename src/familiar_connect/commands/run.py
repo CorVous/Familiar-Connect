@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Callable
 
     from familiar_connect.embedding.protocol import Embedder
 
@@ -54,6 +55,10 @@ from familiar_connect.processors.projectors import (
     create_projectors,
 )
 from familiar_connect.stt import create_transcriber
+from familiar_connect.tools.alarm import build_alarm_tool, build_cancel_alarm_tool
+from familiar_connect.tools.registry import ToolContext, ToolRegistry
+from familiar_connect.tools.scheduler import AlarmScheduler
+from familiar_connect.tools.waker import AlarmWaker
 from familiar_connect.tts import create_tts_client
 from familiar_connect.tts_player import (
     DiscordVoicePlayer,
@@ -269,6 +274,12 @@ async def _run_text_responder(familiar: Familiar, responder: TextResponder) -> N
         await responder.handle(event, familiar.bus)
 
 
+async def _run_alarm_waker(familiar: Familiar, waker: AlarmWaker) -> None:
+    """Drain ``alarm.fired`` events into the :class:`AlarmWaker`."""
+    async for event in familiar.bus.subscribe(waker.topics):
+        await waker.handle(event, familiar.bus)
+
+
 def _first_voice_client(handle: BotHandle) -> discord.VoiceClient | None:
     """Pick any active voice client from the runtime map.
 
@@ -319,6 +330,38 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         )
     else:
         tts_player = LoggingTTSPlayer()
+
+    # Tool-calling: scheduler + registry + per-turn context factory.
+    # Wired into both responders so set_alarm/cancel_alarm are available
+    # when the per-slot ``tool_calling`` flag is set. The familiar's
+    # ``llm_clients`` already carry ``tool_calling_enabled`` (see
+    # :func:`create_llm_clients`); the responders check that flag before
+    # entering the agentic loop, so wiring is always safe.
+    alarm_scheduler = AlarmScheduler(
+        history=familiar.history_store,
+        bus=familiar.bus,
+        familiar_id=familiar.id,
+    )
+    tool_registry = ToolRegistry()
+    tool_registry.register(build_alarm_tool(alarm_scheduler))
+    tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
+
+    def _make_tool_context(channel_kind: str) -> Callable[[int, str], ToolContext]:
+        def _build(channel_id: int, turn_id: str) -> ToolContext:
+            return ToolContext(
+                familiar_id=familiar.id,
+                channel_id=channel_id,
+                channel_kind=channel_kind,
+                turn_id=turn_id,
+                history=familiar.history_store,
+                bus=familiar.bus,
+                scheduler=alarm_scheduler,
+            )
+
+        return _build
+
+    alarm_waker = AlarmWaker(familiar_id=familiar.id)
+
     voice_responder = VoiceResponder(
         assembler=voice_assembler,
         llm_client=familiar.llm_clients["fast"],
@@ -327,6 +370,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         router=familiar.router,
         familiar_id=familiar.id,
         member_resolver=handle.resolve_member,
+        tool_registry=tool_registry,
+        tool_context_factory=_make_tool_context("voice"),
     )
     text_responder = TextResponder(
         assembler=text_assembler,
@@ -337,6 +382,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         familiar_id=familiar.id,
         trigger_typing=handle.trigger_typing,
         typing_handler=handle.typing_interrupt,
+        tool_registry=tool_registry,
+        tool_context_factory=_make_tool_context("text"),
     )
     projector_context = ProjectorContext(
         store=familiar.history_store,
@@ -349,6 +396,10 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         context=projector_context,
     )
 
+    # Load any pending alarms now so they start counting down before
+    # the bot accepts new traffic.
+    await alarm_scheduler.start()
+
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_run_debug_processor(familiar), name="debug-logger")
@@ -359,6 +410,10 @@ async def _async_main(token: str, familiar: Familiar) -> None:
             tg.create_task(
                 _run_text_responder(familiar, text_responder),
                 name="text-responder",
+            )
+            tg.create_task(
+                _run_alarm_waker(familiar, alarm_waker),
+                name="alarm-waker",
             )
             for proj in projectors:
                 tg.create_task(proj.run(), name=proj.name)
@@ -372,6 +427,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         if familiar.transcriber is not None:
             with contextlib.suppress(Exception):
                 await familiar.transcriber.stop()
+        with contextlib.suppress(Exception):
+            await alarm_scheduler.shutdown()
         familiar.router.shutdown()
         await familiar.bus.shutdown()
         for client in familiar.llm_clients.values():

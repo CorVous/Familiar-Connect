@@ -651,6 +651,10 @@ class TestAsyncMainCleanup:
         proj.run = AsyncMock(side_effect=_hang)
         proj.name = "stub-projector"
 
+        scheduler_mock = MagicMock(name="alarm_scheduler")
+        scheduler_mock.start = AsyncMock()
+        scheduler_mock.shutdown = AsyncMock()
+
         with (
             patch("familiar_connect.commands.run.create_bot", return_value=handle),
             patch("familiar_connect.commands.run._default_assembler"),
@@ -666,8 +670,17 @@ class TestAsyncMainCleanup:
                 "familiar_connect.commands.run._run_text_responder",
                 side_effect=lambda *_a, **_kw: _hang(),
             ),
+            patch(
+                "familiar_connect.commands.run._run_alarm_waker",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
             patch("familiar_connect.commands.run.VoiceResponder"),
             patch("familiar_connect.commands.run.TextResponder"),
+            patch(
+                "familiar_connect.commands.run.AlarmScheduler",
+                return_value=scheduler_mock,
+            ),
+            patch("familiar_connect.commands.run.AlarmWaker"),
             patch(
                 "familiar_connect.commands.run.create_projectors",
                 return_value=[proj],
@@ -699,6 +712,10 @@ class TestAsyncMainCleanup:
         proj.run = AsyncMock(side_effect=_hang)
         proj.name = "stub-projector"
 
+        scheduler_mock = MagicMock(name="alarm_scheduler")
+        scheduler_mock.start = AsyncMock()
+        scheduler_mock.shutdown = AsyncMock()
+
         with (
             patch("familiar_connect.commands.run.create_bot", return_value=handle),
             patch("familiar_connect.commands.run._default_assembler"),
@@ -714,8 +731,17 @@ class TestAsyncMainCleanup:
                 "familiar_connect.commands.run._run_text_responder",
                 side_effect=lambda *_a, **_kw: _hang(),
             ),
+            patch(
+                "familiar_connect.commands.run._run_alarm_waker",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
             patch("familiar_connect.commands.run.VoiceResponder"),
             patch("familiar_connect.commands.run.TextResponder"),
+            patch(
+                "familiar_connect.commands.run.AlarmScheduler",
+                return_value=scheduler_mock,
+            ),
+            patch("familiar_connect.commands.run.AlarmWaker"),
             patch(
                 "familiar_connect.commands.run.create_projectors",
                 return_value=[proj],

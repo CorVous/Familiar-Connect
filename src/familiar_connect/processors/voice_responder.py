@@ -29,7 +29,7 @@ from familiar_connect.diagnostics.voice_budget import (
     PHASE_TTS_FIRST_AUDIO,
     get_voice_budget_recorder,
 )
-from familiar_connect.llm import Message
+from familiar_connect.llm import LLMDelta, Message
 from familiar_connect.sentence_streamer import SentenceStreamer
 from familiar_connect.silence import SilentDetector
 
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
+    from familiar_connect.tools.registry import ToolContext, ToolRegistry
     from familiar_connect.tts_player.protocol import TTSPlayer
 
     # ``(channel_id, user_id) -> Author | None``. Wired from the bot to
@@ -72,6 +73,13 @@ class VoiceResponder:
         router: TurnRouter,
         familiar_id: str,
         member_resolver: MemberResolver | None = None,
+        tool_registry: ToolRegistry | None = None,
+        tool_context_factory: Callable[[int, str], ToolContext] | None = None,
+        tool_filler_phrases: tuple[str, ...] = (
+            "one sec...",
+            "hold on...",
+            "checking...",
+        ),
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -85,6 +93,14 @@ class VoiceResponder:
         # when a newer final from the same speaker arrives. cross-user
         # finals coexist — only the TTS player serializes playback.
         self._inflight: dict[str, asyncio.Task[None]] = {}
+        # agentic-loop wiring — see :meth:`_stream_and_speak_with_tools`.
+        self._tool_registry = tool_registry
+        self._tool_context_factory = tool_context_factory
+        # short stock phrases spoken before tool execution when the
+        # iteration produced no spoken content. rotated round-robin so
+        # repeat use doesn't always say the same word.
+        self._tool_filler_phrases = tool_filler_phrases
+        self._tool_filler_idx = 0
 
     @staticmethod
     def _user_id_from_event(event: Event) -> int | None:
@@ -278,7 +294,12 @@ class VoiceResponder:
             viewer_mode="voice",
         )
         prompt = await self._assembler.assemble(ctx)
-        reminder = build_final_reminder(viewer_mode="voice")
+        tool_mode = (
+            self._tool_registry is not None
+            and self._tool_context_factory is not None
+            and self._llm.tool_calling_enabled
+        )
+        reminder = build_final_reminder(viewer_mode="voice", tools_enabled=tool_mode)
         system = "\n\n".join(s for s in (prompt.system_prompt, reminder) if s)
         messages: list[Message] = []
         if system:
@@ -287,11 +308,20 @@ class VoiceResponder:
         # Trailing reminder: same content + the per-mode operating
         # directive ("You are speaking aloud…") so the format gate
         # lives at the tail of the context, where recency-biased
-        # models are more likely to honor it.
+        # models are more likely to honor it. End-placed tool nudge
+        # piggybacks on the trailing copy so it lands closest to the
+        # next assistant turn.
         trailing = build_final_reminder(
-            viewer_mode="voice", include_mode_instruction=True
+            viewer_mode="voice",
+            include_mode_instruction=True,
+            tools_enabled=tool_mode,
         )
         messages.append(Message(role="system", content=trailing))
+
+        if tool_mode:
+            return await self._stream_and_speak_with_tools(
+                scope, channel_id=channel_id, messages=messages
+            )
 
         accumulated: list[str] = []
         streamer = SentenceStreamer()
@@ -370,6 +400,159 @@ class VoiceResponder:
             return None
 
         return "".join(accumulated)
+
+    async def _stream_and_speak_with_tools(
+        self,
+        scope: TurnScope,
+        *,
+        channel_id: int,
+        messages: list[Message],
+    ) -> str | None:
+        """Agentic-loop variant of :meth:`_stream_and_speak`.
+
+        Streams content to TTS as it arrives via ``on_delta``, executes
+        tools after each stream closes, and re-prompts until the model
+        stops calling tools. When an iteration closes with a tool_call
+        and no spoken content, a stock filler phrase is spoken before
+        the handler runs so the user never hears a long silent gap.
+        """
+        from familiar_connect.tools.loop import agentic_loop  # noqa: PLC0415
+
+        ctx_factory = self._tool_context_factory
+        registry = self._tool_registry
+        if ctx_factory is None or registry is None:  # pragma: no cover — guard
+            return None
+        tool_ctx = ctx_factory(channel_id, scope.turn_id)
+
+        accumulated: list[str] = []
+        streamer = SentenceStreamer()
+        silent = SilentDetector()
+        pending: list[str] = []
+        gate_open = False
+        budget = get_voice_budget_recorder()
+        first_delta_seen = False
+        decision_logged = False
+
+        async def _drain_pending() -> None:
+            while pending:
+                if scope.is_cancelled():
+                    return
+                await self._speak(pending.pop(0), scope=scope)
+
+        async def _on_delta(delta: LLMDelta) -> None:
+            nonlocal first_delta_seen, gate_open, decision_logged
+            if scope.is_cancelled():
+                return
+            if not delta.content:
+                return
+            if not first_delta_seen:
+                budget.record(turn_id=scope.turn_id, phase=PHASE_LLM_FIRST_TOKEN)
+                first_delta_seen = True
+            accumulated.append(delta.content)
+            if not gate_open:
+                decision = silent.feed(delta.content)
+                if decision is True:
+                    _logger.info(
+                        f"{ls.tag('💤 Voice', ls.B)} "
+                        f"{ls.kv('decision', 'silent', vc=ls.LB)} "
+                        f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                    )
+                    pending.clear()
+                    return
+                if decision is False:
+                    gate_open = True
+                    self._log_respond(scope.turn_id)
+                    decision_logged = True
+            pending.extend(streamer.feed(delta.content))
+            if gate_open:
+                await _drain_pending()
+
+        async def _on_before_tools(assistant: Message) -> None:
+            # flush any in-flight sentence boundary so we don't speak
+            # a half-formed clause after tool execution.
+            if gate_open:
+                tail = streamer.flush()
+                if tail.strip():
+                    pending.append(tail)
+                await _drain_pending()
+            # filler backstop: empty content with imminent tools →
+            # speak a short stock phrase so the user hears acknowledgement
+            # before the silent tool window.
+            if assistant.tool_calls and not (assistant.content or "").strip():
+                phrase = self._next_filler_phrase()
+                if phrase and not scope.is_cancelled():
+                    await self._speak(phrase, scope=scope)
+
+        async def _on_iteration_end(
+            assistant: Message,
+            tool_msgs: list[Message],
+        ) -> None:
+            # only persist intermediate iterations — the terminal
+            # text-only iteration is handled by :meth:`_on_final`
+            # alongside the user turn.
+            if not assistant.tool_calls:
+                return
+            import json as _json  # noqa: PLC0415 — keep top minimal
+
+            await self._history.append_turn(
+                familiar_id=self._familiar_id,
+                channel_id=channel_id,
+                role="assistant",
+                content=assistant.content or "",
+                author=None,
+                tool_calls_json=_json.dumps(assistant.tool_calls),
+            )
+            for tm in tool_msgs:
+                await self._history.append_turn(
+                    familiar_id=self._familiar_id,
+                    channel_id=channel_id,
+                    role="tool",
+                    content=tm.content,
+                    tool_call_id=tm.tool_call_id,
+                )
+
+        try:
+            await agentic_loop(
+                llm=self._llm,
+                messages=messages,
+                registry=registry,
+                ctx=tool_ctx,
+                on_delta=_on_delta,
+                on_before_tools=_on_before_tools,
+                on_iteration_end=_on_iteration_end,
+            )
+        except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
+            _logger.warning(
+                f"{ls.tag('Voice', ls.R)} "
+                f"{ls.kv('llm_agentic_error', repr(exc), vc=ls.R)}"
+            )
+            return None
+
+        # flush any trailing sentence from the terminal iteration
+        if gate_open:
+            tail = streamer.flush()
+            if tail.strip():
+                pending.append(tail)
+            await _drain_pending()
+        # short / whitespace-only terminal content: still mark respond
+        # so the empty-reply log doesn't double-fire.
+        if not gate_open and silent.decided is None and "".join(accumulated).strip():
+            self._log_respond(scope.turn_id)
+            decision_logged = True
+        if scope.is_cancelled() and not decision_logged:
+            self._log_preempted(scope.turn_id)
+            return None
+        return "".join(accumulated)
+
+    def _next_filler_phrase(self) -> str:
+        """Round-robin select a filler from the configured list."""
+        if not self._tool_filler_phrases:
+            return ""
+        phrase = self._tool_filler_phrases[
+            self._tool_filler_idx % len(self._tool_filler_phrases)
+        ]
+        self._tool_filler_idx += 1
+        return phrase
 
     def _log_respond(self, turn_id: str) -> None:
         """One ``decision=respond`` line per turn, matching the silent log."""

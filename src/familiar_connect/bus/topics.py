@@ -24,3 +24,6 @@ TOPIC_LLM_RESPONSE_FINAL = "llm.response.final"
 
 TOPIC_TTS_AUDIO_CHUNK = "tts.audio.chunk"
 TOPIC_TTS_AUDIO_FINAL = "tts.audio.final"
+
+# Tool-driven wakes ---------------------------------------------------------
+TOPIC_ALARM_FIRED = "alarm.fired"

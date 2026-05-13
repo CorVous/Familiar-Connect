@@ -1,0 +1,213 @@
+"""Agentic tool-execution loop.
+
+Drives :meth:`LLMClient.stream_completion` through one or more
+iterations: stream deltas, accumulate ``content`` + ``tool_calls``,
+execute tools, append results, re-call. Terminates when the model
+returns no tool calls or ``max_iterations`` is reached.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from familiar_connect import log_style as ls
+from familiar_connect.llm import LLMDelta, Message
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from familiar_connect.llm import LLMClient
+    from familiar_connect.tools.registry import Tool, ToolContext, ToolRegistry
+
+_logger = logging.getLogger(__name__)
+
+_DEFAULT_MAX_ITERATIONS = 5
+
+OnDelta = "Callable[[LLMDelta], Awaitable[None]]"
+OnIterationEnd = "Callable[[Message, list[Message]], Awaitable[None]]"
+
+
+@dataclass
+class AgenticResult:
+    """Outcome of an :func:`agentic_loop` run."""
+
+    final_content: str
+    iterations: int
+    tool_calls_made: int
+    transcript: list[Message] = field(default_factory=list)
+
+
+def _accumulate_tool_calls(
+    pending: dict[int, dict[str, Any]],
+    fragments: list[dict[str, Any]],
+) -> None:
+    """Merge streaming tool-call fragments into the pending dict by index."""
+    for frag in fragments:
+        idx = frag.get("index", 0)
+        if not isinstance(idx, int):
+            continue
+        bucket = pending.setdefault(
+            idx,
+            {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        if isinstance(frag.get("id"), str):
+            bucket["id"] = frag["id"]
+        if isinstance(frag.get("type"), str):
+            bucket["type"] = frag["type"]
+        fn = frag.get("function") or {}
+        if isinstance(fn, dict):
+            if isinstance(fn.get("name"), str) and fn["name"]:
+                bucket["function"]["name"] = fn["name"]
+            if isinstance(fn.get("arguments"), str):
+                bucket["function"]["arguments"] += fn["arguments"]
+
+
+def _finalize_tool_calls(pending: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order pending tool calls by index and strip empty ones."""
+    return [pending[i] for i in sorted(pending) if pending[i].get("id")]
+
+
+async def _execute_tool(
+    tool: Tool,
+    args: dict[str, Any],
+    ctx: ToolContext,
+) -> str:
+    """Run ``tool.handler`` with a timeout; convert exceptions to error JSON."""
+    try:
+        return await asyncio.wait_for(tool.handler(args, ctx), timeout=tool.timeout_s)
+    except TimeoutError:
+        return json.dumps({"error": f"timeout after {tool.timeout_s}s"})
+    except Exception as exc:  # noqa: BLE001 — surface anything as tool error
+        return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+
+
+async def _run_tool_call(
+    tc: dict[str, Any],
+    registry: ToolRegistry,
+    ctx: ToolContext,
+) -> Message:
+    """Resolve + execute one tool call; return the ``role=tool`` message."""
+    call_id = tc.get("id") or ""
+    fn = tc.get("function") or {}
+    name = fn.get("name") or ""
+    raw_args = fn.get("arguments") or "{}"
+
+    try:
+        decoded = json.loads(raw_args) if raw_args.strip() else {}
+    except (ValueError, json.JSONDecodeError) as exc:
+        content = json.dumps({"error": f"invalid arguments JSON: {exc}"})
+        return Message(role="tool", content=content, tool_call_id=call_id)
+    if not isinstance(decoded, dict):
+        content = json.dumps({"error": "invalid arguments JSON: not a JSON object"})
+        return Message(role="tool", content=content, tool_call_id=call_id)
+    args = decoded
+
+    try:
+        tool = registry.get(name)
+    except KeyError:
+        content = json.dumps({"error": f"unknown tool: {name}"})
+        return Message(role="tool", content=content, tool_call_id=call_id)
+
+    content = await _execute_tool(tool, args, ctx)
+    return Message(role="tool", content=content, tool_call_id=call_id)
+
+
+async def agentic_loop(
+    *,
+    llm: LLMClient,
+    messages: list[Message],
+    registry: ToolRegistry,
+    ctx: ToolContext,
+    on_delta: Callable[[LLMDelta], Awaitable[None]] | None = None,
+    on_before_tools: Callable[[Message], Awaitable[None]] | None = None,
+    on_iteration_end: Callable[[Message, list[Message]], Awaitable[None]] | None = None,
+    max_iterations: int = _DEFAULT_MAX_ITERATIONS,
+) -> AgenticResult:
+    """Run streaming + tool execution until the model stops calling tools.
+
+    Args:
+        llm: client whose ``stream_completion`` drives each iteration.
+        messages: starting transcript; mutated in place with assistant +
+            tool turns.
+        registry: tools the model may call. Empty registry → ``tools=None``
+            on every call (no agentic loop; first iteration is terminal).
+        ctx: per-turn context handed to handlers.
+        on_delta: awaited per ``LLMDelta`` so callers can stream content
+            to TTS / Discord / etc.
+        on_before_tools: awaited *after* the assistant message is built
+            but *before* tool handlers run. Voice mode uses this to
+            inject a filler phrase when content was empty and tools
+            are about to consume time.
+        on_iteration_end: awaited once per iteration with the assistant
+            message produced and the tool-result messages just appended.
+            Used by responders to persist intermediate turns.
+        max_iterations: hard cap; protects against runaway tool loops.
+
+    Returns:
+        :class:`AgenticResult` with the final assistant text + counters.
+
+    """
+    tools_payload = registry.as_openai_tools() if any(registry.tools()) else None
+    last_content = ""
+    iterations = 0
+    tool_calls_made = 0
+
+    while iterations < max_iterations:
+        iterations += 1
+        content_buf: list[str] = []
+        pending_tool_calls: dict[int, dict[str, Any]] = {}
+
+        async for delta in llm.stream_completion(messages, tools=tools_payload):
+            if delta.content:
+                content_buf.append(delta.content)
+            if delta.tool_calls:
+                _accumulate_tool_calls(pending_tool_calls, delta.tool_calls)
+            if on_delta is not None:
+                await on_delta(delta)
+
+        content = "".join(content_buf)
+        tool_calls = _finalize_tool_calls(pending_tool_calls)
+        assistant_msg = Message(
+            role="assistant",
+            content=content,
+            tool_calls=tool_calls or None,
+        )
+        messages.append(assistant_msg)
+
+        if tool_calls and on_before_tools is not None:
+            await on_before_tools(assistant_msg)
+
+        tool_msgs: list[Message] = []
+        for tc in tool_calls:
+            tool_calls_made += 1
+            tool_msg = await _run_tool_call(tc, registry, ctx)
+            messages.append(tool_msg)
+            tool_msgs.append(tool_msg)
+
+        if on_iteration_end is not None:
+            await on_iteration_end(assistant_msg, tool_msgs)
+
+        last_content = content
+        if not tool_calls:
+            break
+        if iterations >= max_iterations:
+            _logger.warning(
+                f"{ls.tag('Tools', ls.LY)} "
+                f"{ls.kv('hit_max_iterations', str(max_iterations), vc=ls.LY)}"
+            )
+            break
+
+    return AgenticResult(
+        final_content=last_content,
+        iterations=iterations,
+        tool_calls_made=tool_calls_made,
+        transcript=messages,
+    )
