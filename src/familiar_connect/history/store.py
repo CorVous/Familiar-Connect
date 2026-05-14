@@ -21,6 +21,7 @@ import json
 import re
 import sqlite3
 import struct
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,6 +32,7 @@ from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Any
 
 PathLike = str | Path
 
@@ -229,7 +231,9 @@ CREATE TABLE IF NOT EXISTS turns (
     timestamp              TEXT    NOT NULL,
     mode                   TEXT,
     platform_message_id    TEXT,
-    reply_to_message_id    TEXT
+    reply_to_message_id    TEXT,
+    tool_calls_json        TEXT,
+    tool_call_id           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -432,6 +436,25 @@ CREATE TABLE IF NOT EXISTS fact_embeddings (
 
 CREATE INDEX IF NOT EXISTS idx_fact_embeddings_model
     ON fact_embeddings (model, fact_id);
+
+-- Scheduled wakes (tool-driven). Append-only with soft-delete:
+-- ``fired_at`` flips when the scheduler dispatches; ``cancelled_at``
+-- flips when a user/tool cancels. Pending rows have both NULL.
+CREATE TABLE IF NOT EXISTS alarms (
+    id                   TEXT    PRIMARY KEY,
+    familiar_id          TEXT    NOT NULL,
+    channel_id           INTEGER NOT NULL,
+    channel_kind         TEXT    NOT NULL CHECK(channel_kind IN ('text','voice')),
+    scheduled_at         TEXT    NOT NULL,
+    reason               TEXT    NOT NULL,
+    originating_turn_id  TEXT,
+    fired_at             TEXT,
+    cancelled_at         TEXT,
+    created_at           TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_alarms_pending
+    ON alarms (familiar_id, fired_at, cancelled_at, scheduled_at);
 """
 
 _TURN_COLS = (
@@ -695,6 +718,12 @@ class HistoryStore:
                 self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
         if "guild_id" not in columns:
             self._conn.execute("ALTER TABLE turns ADD COLUMN guild_id INTEGER")
+        # tool calling: assistant tool_calls stored as JSON, tool-role
+        # turns reference the call id they answered.
+        if "tool_calls_json" not in columns:
+            self._conn.execute("ALTER TABLE turns ADD COLUMN tool_calls_json TEXT")
+        if "tool_call_id" not in columns:
+            self._conn.execute("ALTER TABLE turns ADD COLUMN tool_call_id TEXT")
         self._conn.commit()
 
         # summaries: old PK was (familiar_id) only; new adds channel_id.
@@ -776,6 +805,8 @@ class HistoryStore:
         mode: str | None = None,
         platform_message_id: str | None = None,
         reply_to_message_id: str | None = None,
+        tool_calls_json: str | None = None,
+        tool_call_id: str | None = None,
     ) -> HistoryTurn:
         """Append a single turn and return its persisted form.
 
@@ -783,6 +814,9 @@ class HistoryStore:
         *platform_message_id* / *reply_to_message_id* are platform-
         native ids (Discord snowflakes, etc.) stored as TEXT so any
         platform's id format fits.
+        *tool_calls_json* carries the assistant's invoked tool calls
+        (JSON-encoded list); *tool_call_id* references the call a
+        ``role=tool`` turn is answering.
         """
         timestamp = datetime.now(tz=UTC)
         platform = author.platform if author is not None else None
@@ -796,8 +830,9 @@ class HistoryStore:
                  role, author_platform, author_user_id,
                  author_username, author_display_name,
                  content, timestamp, mode,
-                 platform_message_id, reply_to_message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 platform_message_id, reply_to_message_id,
+                 tool_calls_json, tool_call_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -813,6 +848,8 @@ class HistoryStore:
                 mode,
                 platform_message_id,
                 reply_to_message_id,
+                tool_calls_json,
+                tool_call_id,
             ),
         )
         self._conn.commit()
@@ -2530,6 +2567,98 @@ class HistoryStore:
             (familiar_id, *ids),
         ).fetchall()
         return {int(r["id"]) for r in rows}
+
+    # ------------------------------------------------------------------
+    # alarms
+    # ------------------------------------------------------------------
+
+    def insert_alarm(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int,
+        channel_kind: str,
+        scheduled_at: str,
+        reason: str,
+        originating_turn_id: str | None = None,
+    ) -> str:
+        """Insert a new alarm row; return its id.
+
+        ``scheduled_at`` is an ISO-8601 UTC timestamp. ``channel_kind``
+        must be ``"text"`` or ``"voice"`` (enforced by CHECK constraint).
+        """
+        alarm_id = uuid.uuid4().hex
+        created_at = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO alarms
+                (id, familiar_id, channel_id, channel_kind,
+                 scheduled_at, reason, originating_turn_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alarm_id,
+                familiar_id,
+                channel_id,
+                channel_kind,
+                scheduled_at,
+                reason,
+                originating_turn_id,
+                created_at,
+            ),
+        )
+        self._conn.commit()
+        return alarm_id
+
+    def list_pending_alarms(self, *, familiar_id: str) -> list[dict[str, Any]]:
+        """Return pending alarms (not fired, not cancelled) for ``familiar_id``.
+
+        Rows are dicts; ordered by ``scheduled_at`` ascending.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, familiar_id, channel_id, channel_kind,
+                   scheduled_at, reason, originating_turn_id,
+                   fired_at, cancelled_at, created_at
+              FROM alarms
+             WHERE familiar_id = ?
+               AND fired_at IS NULL
+               AND cancelled_at IS NULL
+             ORDER BY scheduled_at ASC
+            """,
+            (familiar_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_alarm_fired(self, *, alarm_id: str, fired_at: str) -> bool:
+        """Stamp ``fired_at`` on one alarm; ``True`` if a row was updated."""
+        cur = self._conn.execute(
+            """
+            UPDATE alarms
+               SET fired_at = ?
+             WHERE id = ?
+               AND fired_at IS NULL
+               AND cancelled_at IS NULL
+            """,
+            (fired_at, alarm_id),
+        )
+        self._conn.commit()
+        return (cur.rowcount or 0) > 0
+
+    def cancel_alarm(self, *, alarm_id: str, cancelled_at: str) -> bool:
+        """Stamp ``cancelled_at`` on one alarm; ``True`` if a row was updated."""
+        cur = self._conn.execute(
+            """
+            UPDATE alarms
+               SET cancelled_at = ?
+             WHERE id = ?
+               AND fired_at IS NULL
+               AND cancelled_at IS NULL
+            """,
+            (cancelled_at, alarm_id),
+        )
+        self._conn.commit()
+        return (cur.rowcount or 0) > 0
 
 
 def _row_to_reflection(row: sqlite3.Row) -> Reflection:

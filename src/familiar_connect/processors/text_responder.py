@@ -24,7 +24,7 @@ from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.final_reminder import build_final_reminder
 from familiar_connect.identity import Author
-from familiar_connect.llm import Message
+from familiar_connect.llm import LLMDelta, Message
 from familiar_connect.silence import SilentDetector
 
 # LLM ping vocabulary: ``[@DisplayName]`` markers in the model's
@@ -155,6 +155,7 @@ if TYPE_CHECKING:
     from familiar_connect.context.assembler import Assembler
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.llm import LLMClient
+    from familiar_connect.tools.registry import ToolContext, ToolRegistry
     from familiar_connect.typing_interrupt import TypingInterruptHandler
 
     # Optional Discord typing-indicator hook. Wrapped around the
@@ -185,6 +186,8 @@ class TextResponder:
         familiar_id: str,
         trigger_typing: TriggerTyping | None = None,
         typing_handler: TypingInterruptHandler | None = None,
+        tool_registry: ToolRegistry | None = None,
+        tool_context_factory: Callable[[int, str], ToolContext] | None = None,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -198,6 +201,11 @@ class TextResponder:
         # typing-event policy — bot pingpong backoff + user-typing cancel.
         # ``None`` disables both behaviors (tests, future non-discord paths).
         self._typing_handler = typing_handler
+        # agentic-loop tool registry. when paired with a non-None
+        # ``tool_context_factory`` and ``llm.tool_calling_enabled``, the
+        # responder runs ``agentic_loop`` instead of bare ``chat_stream``.
+        self._tool_registry = tool_registry
+        self._tool_context_factory = tool_context_factory
         # in-process dedup; bus does not republish today, but cheap insurance
         self._seen: set[str] = set()
 
@@ -446,6 +454,19 @@ class TextResponder:
         )
         messages.append(Message(role="system", content=trailing))
 
+        tool_mode = (
+            self._tool_registry is not None
+            and self._tool_context_factory is not None
+            and self._llm.tool_calling_enabled
+        )
+        if tool_mode:
+            return await self._stream_reply_with_tools(
+                scope,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                messages=messages,
+            )
+
         accumulated: list[str] = []
         silent = SilentDetector()
         # Typing indicator stays closed until ``SilentDetector`` rules
@@ -488,3 +509,116 @@ class TextResponder:
                 )
                 return None
             return "".join(accumulated)
+
+    async def _stream_reply_with_tools(
+        self,
+        scope: TurnScope,
+        *,
+        channel_id: int,
+        guild_id: int | None,
+        messages: list[Message],
+    ) -> str | None:
+        """Agentic-loop variant of :meth:`_stream_reply`.
+
+        Streams content into the silent detector + typing indicator
+        exactly like the bare path, but defers terminal text to the
+        loop helper which can fold in tool execution. Intermediate
+        assistant turns (with ``tool_calls``) and ``role=tool`` turns
+        are persisted via ``on_iteration_end``; the terminal turn is
+        skipped here and left to :meth:`handle` to persist alongside
+        the ``send_text`` call.
+        """
+        # `_tool_context_factory` is guaranteed non-None in this branch
+        # (see callsite). Same for `_tool_registry`.
+        ctx_factory = self._tool_context_factory
+        registry = self._tool_registry
+        if ctx_factory is None or registry is None:  # pragma: no cover — guard
+            return None
+        ctx = ctx_factory(channel_id, scope.turn_id)
+
+        # ``agentic_loop`` returns the terminal assistant content. The
+        # responder's ``handle`` will persist it + post via send_text.
+        silent = SilentDetector()
+        typing_started = False
+        bail_silent = False
+
+        async with contextlib.AsyncExitStack() as stack:
+
+            async def _on_delta(delta: LLMDelta) -> None:
+                nonlocal typing_started, bail_silent
+                if scope.is_cancelled() or bail_silent:
+                    return
+                if not delta.content:
+                    return
+                decision = silent.feed(delta.content)
+                if decision is True:
+                    bail_silent = True
+                    return
+                if (
+                    decision is False
+                    and not typing_started
+                    and self._trigger_typing is not None
+                ):
+                    await stack.enter_async_context(self._trigger_typing(channel_id))
+                    typing_started = True
+
+            async def _on_iter_end(
+                assistant: Message,
+                tool_msgs: list[Message],
+            ) -> None:
+                # Skip persistence for the terminal text-only iteration —
+                # ``handle()`` writes the final assistant turn alongside
+                # the platform message id from ``send_text``.
+                if not assistant.tool_calls:
+                    return
+                import json as _json  # noqa: PLC0415 — local import keeps top minimal
+
+                await self._history.append_turn(
+                    familiar_id=self._familiar_id,
+                    channel_id=channel_id,
+                    role="assistant",
+                    content=assistant.content or "",
+                    author=None,
+                    guild_id=guild_id,
+                    tool_calls_json=_json.dumps(assistant.tool_calls),
+                )
+                for tm in tool_msgs:
+                    await self._history.append_turn(
+                        familiar_id=self._familiar_id,
+                        channel_id=channel_id,
+                        role="tool",
+                        content=tm.content,
+                        tool_call_id=tm.tool_call_id,
+                        guild_id=guild_id,
+                    )
+
+            try:
+                # local import — avoids dragging tools into module top
+                # for callers that never use them.
+                from familiar_connect.tools.loop import agentic_loop  # noqa: PLC0415
+
+                result = await agentic_loop(
+                    llm=self._llm,
+                    messages=messages,
+                    registry=registry,
+                    ctx=ctx,
+                    on_delta=_on_delta,
+                    on_iteration_end=_on_iter_end,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    f"{ls.tag('Text', ls.R)} "
+                    f"{ls.kv('llm_agentic_error', repr(exc), vc=ls.R)}"
+                )
+                return None
+
+        if bail_silent:
+            _logger.info(
+                f"{ls.tag('💤 Text', ls.B)} "
+                f"{ls.kv('decision', 'silent', vc=ls.LB)} "
+                f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+            )
+            return None
+        if scope.is_cancelled():
+            return None
+        return result.final_content

@@ -299,6 +299,39 @@ Shipped since initial A2:
   that model; all 14 sections are independently tunable. Channel
   `total_tokens` overrides take precedence over the curve-scaled value.
 
+### A3 — Tool calling (shipped, MVP)
+
+In-process tool registry + agentic loop, gated by the per-slot
+`tool_calling` flag. First tool: `set_alarm(when|delay_seconds, reason)`
+plus its companion `cancel_alarm(alarm_id)` — exercises the whole call
+shape (deferred execution, persistence across restarts, a bus-driven
+wake that re-enters the turn pipeline).
+
+What landed:
+
+- `LLMClient.stream_completion(messages, tools=...)` yields `LLMDelta`
+  chunks (content + accumulated tool-call fragments + finish reason).
+  `chat_stream` remains as a thin wrapper for callers that don't care
+  about tool plumbing.
+- `familiar_connect.tools/`: `ToolRegistry`, `agentic_loop`, the
+  `set_alarm` / `cancel_alarm` tools, `AlarmScheduler` (DB-backed,
+  asyncio-driven), and the `AlarmWaker` processor that translates
+  `alarm.fired` into a synthetic `discord.text` event.
+- `alarms` table in `data/familiars/<id>/history.db` and
+  `tool_calls_json` / `tool_call_id` columns on the existing `turns`
+  table for full audit of intermediate turns.
+- Voice-mode ordering with three defenses: mechanical buffering of
+  tool_call deltas to end-of-stream, an end-placed prompt that
+  discourages empty-content tool calls, and a `[voice].tool_filler_phrases`
+  backstop that the responder speaks before slow handlers.
+
+See [Tool calling](overview.md#tool-calling).
+
+Future work (not landed): pre-tool eval suite that asserts the
+configured model produces non-empty content alongside any tool_call,
+per supported model. Until then the filler backstop is the model-agnostic
+floor.
+
 ## Out of scope
 
 - **Letta / MemGPT-style core-memory edit tools** — destructive,
