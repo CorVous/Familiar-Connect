@@ -55,6 +55,7 @@ nav:
   - Getting started:
       - getting-started/installation.md
       - getting-started/on-disk-layout.md
+      - getting-started/initializing-from-narrative.md
       - getting-started/slash-commands.md
       - getting-started/troubleshooting.md
   - Architecture:
