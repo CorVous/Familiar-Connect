@@ -86,5 +86,7 @@ parser in `src/familiar_connect/cli.py`. Run `uv run familiar-connect
 
 <!-- @cli-help: familiar-connect run -->
 
+<!-- @cli-help: familiar-connect init -->
+
 Once the bot is online, see [Slash commands](slash-commands.md) for
 the subscription surface.

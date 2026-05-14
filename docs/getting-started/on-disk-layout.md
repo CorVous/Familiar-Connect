@@ -46,3 +46,7 @@ azure_voice = "en-US-AmberNeural"
 
 See the [Configuration model](../architecture/configuration-model.md)
 for the full surface.
+
+To bootstrap this folder from a folder of narrative markdown rather
+than hand-writing `character.md` + `lorebook.toml`, see
+[Initializing a familiar from narrative](initializing-from-narrative.md).

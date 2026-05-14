@@ -350,6 +350,13 @@ projector, not a replacement.
 Mixing them lets the agent rewrite its own character description.
 Keeping them split makes the trust boundary inspectable.
 
+`familiar-connect init` (see
+[Initializing a familiar from narrative](../getting-started/initializing-from-narrative.md))
+holds the same line: it generates `character.md` / `character.toml` /
+`lorebook.toml` from narrative source, and deliberately does not
+pre-seed `facts`, `people_dossiers`, or `reflections`. Experiential
+memory only ever comes from real `turns`.
+
 ## Operator playbook
 
 ### Rebuild a side-index
