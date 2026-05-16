@@ -45,7 +45,11 @@ Surface today:
 - `[llm.fast]` / `[llm.prose]` / `[llm.background]` — tiered LLM slots
   (model, temperature, optional `provider_order`, `reasoning`,
   `tool_calling`). See [Tuning — LLM slots](tuning.md#llm-slots) for
-  the schema and the call-site → slot mapping.
+  the schema and the call-site → slot mapping. The `tool_calling` flag
+  is now wired end-to-end: when `true`, the responder for that slot
+  installs the in-process `ToolRegistry` (currently `set_alarm` and
+  `cancel_alarm`) and runs the agentic loop. See
+  [Tool calling](overview.md#tool-calling).
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
 
 ### Default profile

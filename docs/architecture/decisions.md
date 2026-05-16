@@ -78,3 +78,31 @@ The *open-source library* underneath Zep — Graphiti — is a different proposi
 
 **Note:** this rejects the TEN *Turn Detection* 7B model only.
 Stage-1 VAD does use TEN-framework's separate **TEN-VAD** (small native lib + bundled ONNX, Apache 2.0) — see [Voice pipeline — turn detection](voice-pipeline.md#turn-detection).
+
+## Two-phase tool calling for voice (speak, then tools)
+
+**The idea:** When voice tool calling is enabled, issue two LLM round-trips per
+turn — first without tools to produce the spoken reply, then with tools to
+decide on a tool call. Mechanical ordering of "speak before tool" with no
+reliance on prompt instructions.
+
+**Why it's rejected:**
+
+- **Doubles the LLM round-trip cost** on every voice turn that doesn't end
+  up calling a tool — i.e. almost all of them. Time-to-first-token already
+  dominates the voice latency budget.
+- **Single streaming call already orders content before tool_calls** for the
+  models we route (OpenAI / Anthropic via OpenRouter). The streaming SSE
+  itself emits content deltas first, then `tool_calls` deltas, then a
+  `finish_reason`. Buffering the tool_call deltas until the stream closes
+  is the same effect with zero added latency.
+
+**What we ship instead** (see [Tool calling](overview.md#tool-calling)):
+three defenses in depth. (1) Mechanical: the agentic loop is a single
+streaming call per iteration with tool_call deltas buffered to end-of-stream.
+(2) Sharpened, end-placed prompt nudging the model to speak before invoking
+tools — targeting the *empty-content tool_call* failure mode specifically.
+(3) A filler-phrase backstop that the voice responder injects into TTS
+when an iteration closes with a tool call and no spoken content. Layers
+2 and 3 cover the model-compliance variance across slot configurations
+without paying the round-trip tax of layer (A).

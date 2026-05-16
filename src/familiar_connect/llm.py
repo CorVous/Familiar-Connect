@@ -65,18 +65,36 @@ def get_request_semaphore(
 
 @dataclass
 class Message:
-    """Chat message with optional speaker name."""
+    """Chat message — content + optional speaker name + tool fields."""
 
     role: str
     content: str
     name: str | None = None
+    # assistant turns invoking tools — list of OpenAI ``tool_calls`` dicts
+    # ``{"id", "type":"function", "function":{"name","arguments"}}``.
+    tool_calls: list[dict[str, Any]] | None = None
+    # tool-role turns reference the call they answered.
+    tool_call_id: str | None = None
 
-    def to_dict(self: Self) -> dict[str, str]:
+    def to_dict(self: Self) -> dict[str, Any]:
         """Serialize to OpenAI-compatible message dict."""
-        d: dict[str, str] = {"role": self.role, "content": self.content}
+        d: dict[str, Any] = {"role": self.role, "content": self.content}
         if self.name is not None:
             d["name"] = self.name
+        if self.tool_calls is not None:
+            d["tool_calls"] = self.tool_calls
+        if self.tool_call_id is not None:
+            d["tool_call_id"] = self.tool_call_id
         return d
+
+
+@dataclass
+class LLMDelta:
+    """One streaming chunk: content text and/or tool-call fragments."""
+
+    content: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    finish_reason: str | None = None
 
 
 @dataclass
@@ -123,6 +141,7 @@ class LLMClient:
         provider_order: tuple[str, ...] | None = None,
         provider_allow_fallbacks: bool = True,
         reasoning: str | None = None,
+        tool_calling: bool = False,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -138,6 +157,9 @@ class LLMClient:
         # OpenRouter reasoning effort. ``None`` = model default;
         # ``"off"`` → ``exclude=True``; ``"low"|"medium"|"high"`` → ``effort=…``.
         self.reasoning = reasoning
+        # gate for the agentic-loop / tool-registry plumbing. responders
+        # read this to decide whether to install tools on a call.
+        self.tool_calling_enabled = tool_calling
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
@@ -179,6 +201,8 @@ class LLMClient:
     def build_payload(
         self: Self,
         messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -195,6 +219,9 @@ class LLMClient:
             payload["reasoning"] = {"exclude": True}
         elif self.reasoning is not None:
             payload["reasoning"] = {"effort": self.reasoning}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         return payload
 
     async def _post(
@@ -239,8 +266,15 @@ class LLMClient:
         assert response is not None  # noqa: S101 — loop always runs at least once
         return response
 
-    async def chat(self: Self, messages: list[Message]) -> Message:
-        """Send messages to OpenRouter; return assistant reply."""
+    async def chat(
+        self: Self,
+        messages: list[Message],
+    ) -> Message:
+        """Send messages to OpenRouter; return assistant reply.
+
+        If the model elects to call tools, the returned :class:`Message`
+        has ``tool_calls`` populated and ``content`` may be empty.
+        """
         url = f"{self.base_url}/chat/completions"
         headers = self.build_headers()
         payload = self.build_payload(messages)
@@ -257,28 +291,34 @@ class LLMClient:
             raise ValueError(msg)
 
         reply = choices[0]["message"]
-        return Message(role=reply["role"], content=reply["content"])
+        # ``content`` may be ``None`` when the model only emitted tool_calls.
+        # Normalize to empty string so callers can treat content uniformly.
+        content = reply.get("content") or ""
+        tc = reply.get("tool_calls")
+        tc_list: list[dict[str, Any]] | None = None
+        if isinstance(tc, list) and tc:
+            tc_list = [item for item in tc if isinstance(item, dict)]
+        return Message(role=reply["role"], content=content, tool_calls=tc_list)
 
-    async def chat_stream(
+    async def stream_completion(
         self: Self,
         messages: list[Message],
-    ) -> AsyncIterator[str]:
-        """Stream assistant content deltas.
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[LLMDelta]:
+        """Stream assistant deltas.
 
-        Required for barge-in: TTS starts on first delta; mid-stream
-        cancellation actually saves work.
-
-        No retry loop (unlike :meth:`chat`) — retries on a streaming
-        call would hold the rate-limit slot through sleeps and starve
-        cancellation. On 429 caller sees :class:`httpx.HTTPStatusError`.
+        Barge-in remains supported via generator close / cancel — no
+        retry loop holds the rate-limit slot through sleeps.
 
         Yields:
-            content delta strings as they arrive.
+            one :class:`LLMDelta` per parsed SSE chunk that carries
+            content text, tool-call fragments, or a finish reason.
 
         """
         url = f"{self.base_url}/chat/completions"
         headers = self.build_headers()
-        payload = self.build_payload(messages)
+        payload = self.build_payload(messages, tools=tools)
         payload["stream"] = True
         # ask OpenRouter for a trailing chunk carrying token usage +
         # the provider that served the call. costs one extra SSE chunk
@@ -286,9 +326,6 @@ class LLMClient:
         payload["usage"] = {"include": True}
 
         http = self._get_http()
-        # acquire rate-limit slot only for request *initiation* —
-        # holding across the stream would starve barge-in cancellation
-        # (stalled reader pins slot). release once server accepts.
         metrics = _CallMetrics(slot=self.slot, model=self.model)
         metrics.input_chars = sum(len(m.content) for m in messages)
         metrics.t_start = time.perf_counter()
@@ -299,9 +336,6 @@ class LLMClient:
         try:
             response = await stream_cm.__aenter__()  # noqa: PLC2801
             if response.status_code >= 400:
-                # streamed responses don't populate ``.text`` until the
-                # body is read — pull it explicitly so upstream error
-                # message survives ``raise_for_status``.
                 with contextlib.suppress(Exception):
                     await response.aread()
                 body = getattr(response, "text", "") or ""
@@ -331,14 +365,23 @@ class LLMClient:
                 if event is None:
                     continue
                 metrics.absorb(event)
-                for delta in _content_deltas(event):
-                    if metrics.t_first_delta is None:
-                        metrics.t_first_delta = time.perf_counter()
-                    yield delta
+                content_parts = _content_deltas(event)
+                tool_call_parts = _tool_call_deltas(event)
+                finish = _finish_reason(event)
+                if not content_parts and not tool_call_parts and finish is None:
+                    continue
+                joined_content = "".join(content_parts)
+                if joined_content and metrics.t_first_delta is None:
+                    metrics.t_first_delta = time.perf_counter()
+                yield LLMDelta(
+                    content=joined_content,
+                    tool_calls=tool_call_parts,
+                    finish_reason=finish,
+                )
         except (GeneratorExit, asyncio.CancelledError):
-            # Caller closed the generator (barge-in / silent gate /
-            # scope cancel). Not an upstream failure — distinct status
-            # so /diagnostics shows real provider errors clearly.
+            # caller closed the generator (barge-in / silent gate /
+            # scope cancel). distinct status so /diagnostics shows
+            # real provider errors clearly.
             metrics.status = "cancelled"
             raise
         except Exception:
@@ -349,6 +392,36 @@ class LLMClient:
             with contextlib.suppress(Exception):
                 await stream_cm.__aexit__(None, None, None)
             metrics.emit()
+
+    async def chat_stream(
+        self: Self,
+        messages: list[Message],
+    ) -> AsyncIterator[str]:
+        """Stream assistant content deltas as strings.
+
+        Thin wrapper over :meth:`stream_completion` that projects to
+        content only. Explicitly closes the inner generator on caller
+        ``aclose`` so the inner ``finally`` (metrics emit, semaphore
+        release, body close) actually runs.
+
+        Yields:
+            content delta strings as they arrive.
+
+        """
+        inner = self.stream_completion(messages)
+        try:
+            async for delta in inner:
+                if delta.content:
+                    yield delta.content
+        finally:
+            # ``stream_completion`` is concretely an async generator;
+            # ``AsyncIterator`` doesn't promise ``aclose`` but the
+            # runtime object does. Suppress so any non-generator
+            # iterator passed in via a test mock doesn't crash cleanup.
+            aclose = getattr(inner, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
 
 
 def _parse_sse_event(line: str) -> dict[str, Any] | None:
@@ -391,6 +464,30 @@ def _content_deltas(event: dict[str, Any]) -> list[str]:
         if isinstance(delta, str) and delta:
             out.append(delta)
     return out
+
+
+def _tool_call_deltas(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract tool-call delta fragments from a parsed SSE chunk.
+
+    OpenAI/OpenRouter streams emit tool_calls as a list with an
+    ``index`` per call; callers must accumulate ``function.arguments``
+    string fragments by index until the stream closes.
+    """
+    out: list[dict[str, Any]] = []
+    for choice in event.get("choices") or []:
+        tcs = (choice.get("delta") or {}).get("tool_calls")
+        if isinstance(tcs, list):
+            out.extend(tc for tc in tcs if isinstance(tc, dict))
+    return out
+
+
+def _finish_reason(event: dict[str, Any]) -> str | None:
+    """Pull ``finish_reason`` off the first choice if present."""
+    for choice in event.get("choices") or []:
+        fr = choice.get("finish_reason")
+        if isinstance(fr, str):
+            return fr
+    return None
 
 
 def _parse_sse_deltas(line: str) -> list[str]:
@@ -500,6 +597,7 @@ def create_llm_clients(
             provider_order=slot.provider_order,
             provider_allow_fallbacks=slot.provider_allow_fallbacks,
             reasoning=slot.reasoning,
+            tool_calling=slot.tool_calling,
         )
         temp = slot.temperature if slot.temperature is not None else "default"
         log_parts = [
