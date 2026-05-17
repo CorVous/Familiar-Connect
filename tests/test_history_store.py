@@ -29,7 +29,11 @@ from familiar_connect.history.store import (
 from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
+    from typing import Any
+
+    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +773,82 @@ class TestModeColumn:
             limit=10,
         )
         assert len(turns) == 2
+
+    def test_migration_idempotent_when_alter_fails_with_no_such_table(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Migration tolerates Turso reporting "no such table" on ALTER.
+
+        Observed in the wild on pyturso 0.5.1 (Windows): ``sqlite_master``
+        + ``PRAGMA table_info`` agree the table exists, but ``ALTER TABLE
+        … ADD COLUMN`` raises ``Parse error: no such table``. The
+        migration must swallow that and let ``_SCHEMA`` create / repair
+        the table on the same init.
+        """
+        import turso  # noqa: PLC0415
+
+        from familiar_connect.history.store import HistoryStore  # noqa: PLC0415
+
+        db_path = tmp_path / "history.db"
+
+        # Hand-build the legacy state directly: ``turns`` exists, and
+        # ``accounts`` exists without the new ``pronouns`` / ``bio``
+        # columns. This is what the migration is designed to upgrade.
+        c = turso.connect(str(db_path), experimental_features="index_method")
+        c.executescript(
+            """
+            CREATE TABLE turns (
+                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id            TEXT    NOT NULL,
+                channel_id             INTEGER NOT NULL,
+                guild_id               INTEGER,
+                role                   TEXT    NOT NULL,
+                author_platform        TEXT,
+                author_user_id         TEXT,
+                author_username        TEXT,
+                author_display_name    TEXT,
+                content                TEXT    NOT NULL,
+                timestamp              TEXT    NOT NULL,
+                mode                   TEXT,
+                platform_message_id    TEXT,
+                reply_to_message_id    TEXT,
+                tool_calls_json        TEXT,
+                tool_call_id           TEXT
+            );
+            CREATE TABLE accounts (
+                canonical_key TEXT PRIMARY KEY,
+                platform      TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                username      TEXT,
+                global_name   TEXT,
+                last_seen_at  TEXT NOT NULL
+            );
+            """
+        )
+        c.commit()
+        c.close()
+
+        # Make every ``ALTER TABLE accounts ADD COLUMN`` blow up with
+        # the user-reported parse error, even though ``accounts`` is in
+        # ``sqlite_master``.
+        real_execute = turso.Cursor.execute
+
+        def fake_execute(
+            cursor: turso.Cursor,
+            sql: str,
+            params: Sequence[Any] | Mapping[str, Any] = (),
+        ) -> turso.Cursor:
+            if "ALTER TABLE accounts ADD COLUMN" in sql:
+                msg = "Parse error: no such table: accounts"
+                raise turso.DatabaseError(msg)
+            return real_execute(cursor, sql, params)
+
+        monkeypatch.setattr(turso.Cursor, "execute", fake_execute)
+
+        # Re-opening must not raise. The post-migration ``_SCHEMA`` pass
+        # leaves the DB in a usable state for the rest of the bot.
+        s2 = HistoryStore(db_path)
+        s2.close()
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import turso
+
 from familiar_connect.history.fts import FtsIndex
 from familiar_connect.history.turso_compat import TursoConnection
 from familiar_connect.identity import Author
@@ -495,6 +497,28 @@ class HistoryStore:
         # Detect and bulk-reindex.
         self._reindex_if_empty()
 
+    def _safe_add_column(self, table: str, column: str, type_: str) -> None:
+        """ALTER TABLE ADD COLUMN, swallowing benign migration errors.
+
+        Tolerates two parse-error variants:
+
+        * ``duplicate column`` — column already added on a prior run
+        * ``no such table`` — table absent (or pyturso 0.5.1 reporting
+          phantom state inconsistent with ``sqlite_master``/``PRAGMA
+          table_info``; observed on Windows). ``_SCHEMA``'s
+          ``CREATE TABLE IF NOT EXISTS`` runs after migration and
+          creates the table fresh with the new columns.
+
+        Other ``DatabaseError`` instances propagate.
+        """
+        try:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_}")
+        except turso.DatabaseError as exc:
+            msg = str(exc).lower()
+            if "duplicate column" in msg or "no such table" in msg:
+                return
+            raise
+
     def _migrate_if_needed(self) -> None:
         """Idempotent migrations for the ``turns`` and ``summaries`` tables."""
         row = self._conn.execute(
@@ -510,7 +534,7 @@ class HistoryStore:
 
         # legacy: add mode column if missing
         if "mode" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN mode TEXT")
+            self._safe_add_column("turns", "mode", "TEXT")
             self._conn.commit()
 
         # identity migration: drop bare ``speaker`` in favour of four
@@ -529,7 +553,7 @@ class HistoryStore:
                 "author_display_name",
             ):
                 if col not in columns:
-                    self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
+                    self._safe_add_column("turns", col, "TEXT")
             self._conn.execute("""
                 UPDATE turns
                    SET author_display_name = speaker,
@@ -554,15 +578,15 @@ class HistoryStore:
             "reply_to_message_id",
         ):
             if col not in columns:
-                self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
+                self._safe_add_column("turns", col, "TEXT")
         if "guild_id" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN guild_id INTEGER")
+            self._safe_add_column("turns", "guild_id", "INTEGER")
         # tool calling: assistant tool_calls stored as JSON, tool-role
         # turns reference the call id they answered.
         if "tool_calls_json" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN tool_calls_json TEXT")
+            self._safe_add_column("turns", "tool_calls_json", "TEXT")
         if "tool_call_id" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN tool_call_id TEXT")
+            self._safe_add_column("turns", "tool_call_id", "TEXT")
         self._conn.commit()
 
         # summaries: old PK was (familiar_id) only; new adds channel_id.
@@ -590,9 +614,9 @@ class HistoryStore:
                 for col in self._conn.execute("PRAGMA table_info(accounts)").fetchall()
             }
             if "pronouns" not in accounts_cols:
-                self._conn.execute("ALTER TABLE accounts ADD COLUMN pronouns TEXT")
+                self._safe_add_column("accounts", "pronouns", "TEXT")
             if "bio" not in accounts_cols:
-                self._conn.execute("ALTER TABLE accounts ADD COLUMN bio TEXT")
+                self._safe_add_column("accounts", "bio", "TEXT")
             self._conn.commit()
 
         # facts: add supersession columns if missing. Existing facts
@@ -606,17 +630,17 @@ class HistoryStore:
                 for col in self._conn.execute("PRAGMA table_info(facts)").fetchall()
             }
             if "superseded_at" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_at TEXT")
+                self._safe_add_column("facts", "superseded_at", "TEXT")
             if "superseded_by" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_by INTEGER")
+                self._safe_add_column("facts", "superseded_by", "INTEGER")
             if "subjects_json" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN subjects_json TEXT")
+                self._safe_add_column("facts", "subjects_json", "TEXT")
             if "valid_from" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT")
+                self._safe_add_column("facts", "valid_from", "TEXT")
             if "valid_to" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_to TEXT")
+                self._safe_add_column("facts", "valid_to", "TEXT")
             if "importance" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN importance INTEGER")
+                self._safe_add_column("facts", "importance", "INTEGER")
             self._conn.commit()
 
     # ------------------------------------------------------------------

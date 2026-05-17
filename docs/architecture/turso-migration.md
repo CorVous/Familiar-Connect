@@ -120,6 +120,12 @@ that matters, dump the post-migration Turso file's `turns` /
 - **`threadsafety=1`** — connections must not be shared across
   threads. `TursoConnection` handles per-thread connections; do
   not reach inside it.
+- **`ALTER TABLE` can spuriously report "no such table"** on Windows
+  even when `sqlite_master` and `PRAGMA table_info` agree the table
+  exists. `HistoryStore._safe_add_column` swallows that parse error
+  (and `duplicate column`); the post-migration `_SCHEMA` pass's
+  `CREATE TABLE IF NOT EXISTS` is the safety net for genuinely
+  missing tables.
 
 ## Recovering corrupt tantivy indexes
 
