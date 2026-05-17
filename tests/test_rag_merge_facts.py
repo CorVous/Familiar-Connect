@@ -38,7 +38,7 @@ class TestRagFactsMerge:
         layer = RagContextLayer(
             store=AsyncHistoryStore(store), max_results=5, max_facts=3
         )
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         out = await layer.build(_ctx())
         assert "relevant facts" in out
         assert "Aria likes strawberries" in out
@@ -55,7 +55,7 @@ class TestRagFactsMerge:
             source_turn_ids=[99],
         )
         layer = RagContextLayer(store=AsyncHistoryStore(store), max_facts=3)
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         out = await layer.build(_ctx())
         assert "Aria likes strawberries" in out
         assert "earlier turns" not in out
@@ -109,7 +109,7 @@ class TestRagFactImportanceReranking:
             importance_weight=5.0,
             recency_weight=0.0,
         )
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         out = await layer.build(_ctx())
         assert "severely allergic" in out
         assert "casually mentioned" not in out
@@ -126,7 +126,7 @@ class TestRagFactImportanceReranking:
             importance=1,
         )
         layer = RagContextLayer(store=AsyncHistoryStore(store), max_facts=5)
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         out = await layer.build(_ctx())
         assert "Aria likes strawberries" in out
 
@@ -147,6 +147,6 @@ class TestRagFactImportanceReranking:
             bm25_weight=1.0,
             importance_weight=2.0,
         )
-        layer.set_current_cue("strawb")
+        layer.set_current_cue("strawberry")
         out = await layer.build(_ctx())
         assert "Legacy fact about strawberries" in out

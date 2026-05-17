@@ -67,5 +67,6 @@ nav:
       - architecture/tuning.md
       - architecture/security.md
       - architecture/decisions.md
+      - architecture/turso-migration.md
       - architecture/roadmap.md
   - Contributing: contributing.md

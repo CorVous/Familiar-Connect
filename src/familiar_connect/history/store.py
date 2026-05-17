@@ -1,4 +1,4 @@
-"""SQLite-backed persistent conversation history.
+"""Turso-backed persistent conversation history (FTS via tantivy).
 
 One database per familiar. Two core tables:
 
@@ -9,30 +9,38 @@ One database per familiar. Two core tables:
   with a ``last_summarised_id`` watermark for cache freshness.
   See ``docs/architecture/context-pipeline.md`` for rationale.
 
+Relational storage uses Turso (SQLite-compatible Rust rewrite); FTS
+lives in a sibling tantivy index under ``fts/turns/`` and ``fts/facts/``
+because pyturso wheels don't ship the FTS module yet. See
+``docs/architecture/turso-migration.md`` for the migration story.
+
 ``familiar_id`` is explicit (not implicit) so tests can exercise
-multiple familiars against one store. Synchronous API — SQLite is
-fast enough at per-host volumes; wrap with ``asyncio.to_thread`` if
-needed.
+multiple familiars against one store. Synchronous API; the
+:class:`AsyncHistoryStore` wrapper dispatches calls to a thread pool
+that holds per-thread Turso connections.
 """
 
 from __future__ import annotations
 
 import json
-import re
-import sqlite3
 import struct
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from familiar_connect.history.fts import FtsIndex
+from familiar_connect.history.turso_compat import TursoConnection
 from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from typing import Any
+
+# Result rows come back as ``turso.Row``; spell as ``Any`` to keep the
+# private ``_row_to_*`` helpers free of a third-party type alias.
+Row = Any
 
 PathLike = str | Path
 
@@ -376,50 +384,6 @@ CREATE INDEX IF NOT EXISTS idx_facts_familiar_current
 CREATE INDEX IF NOT EXISTS idx_facts_familiar_validity
     ON facts (familiar_id, valid_from, valid_to);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
-    text,
-    content='facts',
-    content_rowid='id',
-    tokenize='unicode61 remove_diacritics 2'
-);
-
-CREATE TRIGGER IF NOT EXISTS facts_ai_fts
-AFTER INSERT ON facts BEGIN
-    INSERT INTO fts_facts (rowid, text) VALUES (new.id, new.text);
-END;
-
-CREATE TRIGGER IF NOT EXISTS facts_ad_fts
-AFTER DELETE ON facts BEGIN
-    INSERT INTO fts_facts (fts_facts, rowid, text)
-        VALUES ('delete', old.id, old.text);
-END;
-
-CREATE VIRTUAL TABLE IF NOT EXISTS fts_turns USING fts5(
-    content,
-    content='turns',
-    content_rowid='id',
-    tokenize='unicode61 remove_diacritics 2'
-);
-
--- Keep the FTS index in sync with ``turns``.
-CREATE TRIGGER IF NOT EXISTS turns_ai_fts
-AFTER INSERT ON turns BEGIN
-    INSERT INTO fts_turns (rowid, content) VALUES (new.id, new.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS turns_ad_fts
-AFTER DELETE ON turns BEGIN
-    INSERT INTO fts_turns (fts_turns, rowid, content)
-        VALUES ('delete', old.id, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS turns_au_fts
-AFTER UPDATE ON turns BEGIN
-    INSERT INTO fts_turns (fts_turns, rowid, content)
-        VALUES ('delete', old.id, old.content);
-    INSERT INTO fts_turns (rowid, content) VALUES (new.id, new.content);
-END;
-
 -- Per-fact embeddings (M6). Vectors stored as packed float32 BLOBs;
 -- ``model`` is the embedder's ``name`` so a model swap creates a new
 -- row rather than overwriting (audit history preserved). The
@@ -464,129 +428,6 @@ _TURN_COLS = (
 )
 
 
-_FTS_TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
-
-# Drop common English stopwords before FTS matching. Without this, casual
-# chat cues like "hey do you know about X" dilute BM25 scoring (every token
-# is OR'd) and produce noisy hits on conversational filler. Keep the list
-# small and high-confidence — over-filtering hurts recall.
-_FTS_STOPWORDS = frozenset({
-    "a",
-    "about",
-    "an",
-    "and",
-    "any",
-    "anything",
-    "are",
-    "as",
-    "at",
-    "be",
-    "been",
-    "but",
-    "by",
-    "can",
-    "could",
-    "did",
-    "do",
-    "does",
-    "doing",
-    "done",
-    "for",
-    "from",
-    "had",
-    "has",
-    "have",
-    "having",
-    "he",
-    "her",
-    "here",
-    "hey",
-    "hi",
-    "him",
-    "his",
-    "how",
-    "i",
-    "if",
-    "in",
-    "is",
-    "it",
-    "its",
-    "just",
-    "know",
-    "lol",
-    "me",
-    "my",
-    "no",
-    "not",
-    "of",
-    "ok",
-    "on",
-    "or",
-    "our",
-    "out",
-    "she",
-    "so",
-    "some",
-    "than",
-    "that",
-    "the",
-    "their",
-    "them",
-    "then",
-    "there",
-    "these",
-    "they",
-    "this",
-    "those",
-    "to",
-    "too",
-    "up",
-    "very",
-    "was",
-    "we",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "will",
-    "with",
-    "would",
-    "yes",
-    "you",
-    "your",
-    "yours",
-})
-
-
-def _tokenize_fts_query(query: str) -> list[str]:
-    """Tokenize free-form text into FTS5 MATCH tokens.
-
-    Strips punctuation, lowercases, drops English stopwords, and
-    appends the FTS5 prefix operator (``*``) to tokens of 3+ chars so
-    ``fox`` also matches ``foxes`` (default tokenizer has no stemmer).
-    Returns ``[]`` for empty / all-stopword input — caller short-
-    circuits when no useful tokens remain.
-
-    See :func:`_build_fts_match` for how callers compose the result
-    into an OR-joined MATCH expression.
-    """
-    if not query or not query.strip():
-        return []
-    out: list[str] = []
-    for tok in _FTS_TOKEN_RE.findall(query):
-        low = tok.lower()
-        if low in _FTS_STOPWORDS:
-            continue
-        if len(low) >= 3:
-            out.append(f"{low}*")
-        else:
-            out.append(low)
-    return out
-
-
 def _facts_validity_where(
     *,
     include_superseded: bool,
@@ -622,19 +463,6 @@ def _facts_validity_where(
     return " ".join(parts), tuple(params)
 
 
-def _build_fts_match(query: str) -> str:
-    """OR-joined MATCH expression for free-form text.
-
-    FTS5's default operator is implicit AND — every token must appear
-    in the indexed row. That destroys recall on multi-word chat cues
-    (a 16-token query that mixes filler with substantive nouns
-    almost never matches a 6-word fact). OR-joining lets BM25 rank
-    on whichever substantive tokens hit; common tokens contribute
-    little weight.
-    """
-    return " OR ".join(_tokenize_fts_query(query))
-
-
 class HistoryStore:
     """Persistent SQLite store for turns + rolling summaries.
 
@@ -644,17 +472,28 @@ class HistoryStore:
     def __init__(self, db_path: PathLike) -> None:
         if db_path == ":memory:":
             self._path: Path | None = None
-            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._conn = TursoConnection(":memory:")
+            fts_turns_path: Path | None = None
+            fts_facts_path: Path | None = None
         else:
             path = Path(db_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._path = path
-            self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db")
+            self._conn = TursoConnection(path)
+            fts_root = path.parent / "fts"
+            fts_turns_path = fts_root / "turns"
+            fts_facts_path = fts_root / "facts"
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db")
         self._migrate_if_needed()
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._fts_turns = FtsIndex(fts_turns_path)
+        self._fts_facts = FtsIndex(fts_facts_path)
+        # Tantivy indexes are independent files; on first run after the
+        # sqlite→turso migration (or after the user nukes ``fts/``)
+        # they're empty while ``turns``/``facts`` already have rows.
+        # Detect and bulk-reindex.
+        self._reindex_if_empty()
 
     def _migrate_if_needed(self) -> None:
         """Idempotent migrations for the ``turns`` and ``summaries`` tables."""
@@ -785,9 +624,38 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Shut down executor and close underlying SQLite connection."""
+        """Shut down executor, FTS writers, and Turso connections."""
         self._executor.shutdown(wait=False)
-        self._conn.close()
+        try:
+            self._fts_turns.close()
+        finally:
+            try:
+                self._fts_facts.close()
+            finally:
+                self._conn.close()
+
+    def _reindex_if_empty(self) -> None:
+        """Bulk-rebuild a tantivy index when relational rows lack matching docs.
+
+        Triggers on first run after the sqlite→turso migration script
+        (which copies relational data but doesn't rebuild FTS) and on
+        any later run where the user dropped ``fts/`` to recover from
+        a corrupted index.
+        """
+        if self._fts_turns.is_empty():
+            rows = self._conn.execute(
+                "SELECT id, content FROM turns ORDER BY id ASC"
+            ).fetchall()
+            if rows:
+                self._fts_turns.add_many([
+                    (int(r["id"]), str(r["content"])) for r in rows
+                ])
+        if self._fts_facts.is_empty():
+            rows = self._conn.execute(
+                "SELECT id, text FROM facts ORDER BY id ASC"
+            ).fetchall()
+            if rows:
+                self._fts_facts.add_many([(int(r["id"]), str(r["text"])) for r in rows])
 
     # ------------------------------------------------------------------
     # turns
@@ -853,8 +721,10 @@ class HistoryStore:
             ),
         )
         self._conn.commit()
+        turn_id = int(cur.lastrowid or 0)
+        self._fts_turns.add(turn_id, content)
         return HistoryTurn(
-            id=int(cur.lastrowid or 0),
+            id=turn_id,
             timestamp=timestamp,
             role=role,
             author=author,
@@ -901,9 +771,12 @@ class HistoryStore:
         ``on_message`` (typical: ``message.embeds`` populates via a
         follow-up edit a second or two later). Silently no-ops when
         no row matches — the bot may have come up after the message
-        landed. The ``turns_au_fts`` trigger keeps the FTS index in
-        sync; no bespoke handling here.
+        landed. Refreshes the tantivy index for the affected row.
         """
+        rows = self._conn.execute(
+            "SELECT id FROM turns WHERE familiar_id = ? AND platform_message_id = ?",
+            (familiar_id, platform_message_id),
+        ).fetchall()
         self._conn.execute(
             """
             UPDATE turns
@@ -913,6 +786,8 @@ class HistoryStore:
             (content, familiar_id, platform_message_id),
         )
         self._conn.commit()
+        for row in rows:
+            self._fts_turns.add(int(row["id"]), content)
 
     def turns_by_ids(
         self,
@@ -1963,8 +1838,11 @@ class HistoryStore:
         """Return turns whose content matches the FTS *query*.
 
         Empty/whitespace *query* and queries that reduce to only
-        stopwords return ``[]``. Tokens are OR-joined and BM25-ranked;
-        see :func:`_build_fts_match`.
+        stopwords return ``[]``. Tantivy's English analyzer
+        (lowercase + ascii_fold + stopwords + english stemmer) handles
+        tokenisation; the default disjunctive parse ORs the substantive
+        terms together so chat-style cues still rank by BM25 on the
+        nouns that hit.
 
         :param max_id: if set, only turns with ``id <= max_id`` are
             considered. Used by :class:`RagContextLayer` to keep RAG
@@ -1973,11 +1851,17 @@ class HistoryStore:
         """
         if limit <= 0:
             return []
-        match_expr = _build_fts_match(query)
-        if not match_expr:
+        # Overfetch from FTS so post-filter (familiar/channel/max_id)
+        # doesn't starve the result. Cap at 10x to bound work.
+        fts_limit = max(limit * 4, limit)
+        hits = self._fts_turns.search(query, limit=fts_limit)
+        if not hits:
             return []
+        score_by_id = dict(hits)
+        candidate_ids = list(score_by_id)
 
-        params: list[object] = [match_expr, familiar_id]
+        params: list[object] = [familiar_id, *candidate_ids]
+        placeholders = ",".join("?" for _ in candidate_ids)
         where_extra = ""
         if channel_id is not None:
             where_extra += "AND t.channel_id = ?\n"
@@ -1985,51 +1869,44 @@ class HistoryStore:
         if max_id is not None:
             where_extra += "AND t.id <= ?\n"
             params.append(max_id)
-        params.append(limit)
-
         rows = self._conn.execute(
             f"""
             SELECT {", ".join("t." + c for c in _TURN_COLS.split(", "))}
-              FROM fts_turns AS fts
-              JOIN turns AS t ON t.id = fts.rowid
-             WHERE fts_turns MATCH ?
-               AND t.familiar_id = ?
+              FROM turns AS t
+             WHERE t.familiar_id = ?
+               AND t.id IN ({placeholders})
                {where_extra}
-             ORDER BY bm25(fts_turns) ASC, t.id DESC
-             LIMIT ?
             """,  # noqa: S608
             params,
         ).fetchall()
-        return [_row_to_turn(r) for r in rows]
+        turns = [_row_to_turn(r) for r in rows]
+        # Re-rank by BM25 desc (higher = better in tantivy), tie-break by
+        # newer-first to match the old ``ORDER BY ..., t.id DESC``.
+        turns.sort(key=lambda t: (-score_by_id.get(t.id, 0.0), -t.id))
+        return turns[:limit]
 
     def rebuild_fts(self) -> None:
-        """Drop and repopulate the ``fts_turns`` index from ``turns``.
+        """Drop and repopulate the tantivy turns index from ``turns``.
 
         Cheap relative to re-running every LLM call; cheap enough to
-        run at startup if triggers ever get out of sync.
+        run at startup if the index ever gets out of sync.
         """
-        self._conn.executescript(
-            """
-            DELETE FROM fts_turns;
-            INSERT INTO fts_turns (rowid, content)
-            SELECT id, content FROM turns;
-            """
-        )
-        self._conn.commit()
+        self._fts_turns.clear()
+        rows = self._conn.execute(
+            "SELECT id, content FROM turns ORDER BY id ASC"
+        ).fetchall()
+        self._fts_turns.add_many([(int(r["id"]), str(r["content"])) for r in rows])
 
     def latest_fts_id(self, *, familiar_id: str) -> int:
         """Return the highest turn id currently indexed for ``familiar_id``.
 
-        The FTS index is updated by trigger in lockstep with ``turns``
-        writes, so this is an ``id``-lookup, not a separate watermark.
+        The tantivy index is updated synchronously with each
+        :meth:`append_turn`, so the highest indexed id equals the
+        highest ``turns.id`` for the familiar. Cheap MAX query rather
+        than a tantivy round trip.
         """
         row = self._conn.execute(
-            """
-            SELECT MAX(t.id) AS max_id
-              FROM fts_turns AS fts
-              JOIN turns AS t ON t.id = fts.rowid
-             WHERE t.familiar_id = ?
-            """,
+            "SELECT MAX(id) AS max_id FROM turns WHERE familiar_id = ?",
             (familiar_id,),
         ).fetchone()
         max_id = row["max_id"] if row is not None else None
@@ -2107,8 +1984,10 @@ class HistoryStore:
             ),
         )
         self._conn.commit()
+        fact_id = int(cur.lastrowid or 0)
+        self._fts_facts.add(fact_id, text)
         return Fact(
-            id=int(cur.lastrowid or 0),
+            id=fact_id,
             familiar_id=familiar_id,
             channel_id=channel_id,
             text=text,
@@ -2159,6 +2038,52 @@ class HistoryStore:
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
 
+    def _fact_candidates_by_fts(
+        self,
+        *,
+        familiar_id: str,
+        query: str,
+        limit: int,
+        include_superseded: bool,
+        as_of: datetime | None,
+    ) -> list[tuple[Fact, float]]:
+        """Shared FTS lookup for fact search methods.
+
+        Runs the tantivy query, joins back to ``facts`` with the
+        validity filter, and re-ranks by BM25 desc then id desc.
+        Returns ``[(fact, score)]`` truncated to *limit*.
+        """
+        if limit <= 0:
+            return []
+        # Overfetch from FTS so validity/familiar filters don't starve
+        # the result. 4x is enough in practice (validity is cheap).
+        fts_limit = max(limit * 4, limit)
+        hits = self._fts_facts.search(query, limit=fts_limit)
+        if not hits:
+            return []
+        score_by_id = dict(hits)
+        candidate_ids = list(score_by_id)
+        placeholders = ",".join("?" for _ in candidate_ids)
+        where, params = _facts_validity_where(
+            include_superseded=include_superseded, as_of=as_of, alias="f"
+        )
+        rows = self._conn.execute(
+            f"""
+            SELECT f.id, f.familiar_id, f.channel_id, f.text,
+                   f.source_turn_ids, f.created_at,
+                   f.superseded_at, f.superseded_by, f.subjects_json,
+                   f.valid_from, f.valid_to, f.importance
+              FROM facts AS f
+             WHERE f.familiar_id = ?
+               AND f.id IN ({placeholders})
+               {where}
+            """,  # noqa: S608
+            (familiar_id, *candidate_ids, *params),
+        ).fetchall()
+        scored = [(_row_to_fact(r), score_by_id.get(int(r["id"]), 0.0)) for r in rows]
+        scored.sort(key=lambda pair: (-pair[1], -pair[0].id))
+        return scored[:limit]
+
     def search_facts(
         self,
         *,
@@ -2175,31 +2100,16 @@ class HistoryStore:
         truth (not superseded, not expired); ``as_of`` switches to a
         bi-temporal world-time slice including superseded rows.
         """
-        if limit <= 0:
-            return []
-        match_expr = _build_fts_match(query)
-        if not match_expr:
-            return []
-        where, params = _facts_validity_where(
-            include_superseded=include_superseded, as_of=as_of, alias="f"
-        )
-        rows = self._conn.execute(
-            f"""
-            SELECT f.id, f.familiar_id, f.channel_id, f.text,
-                   f.source_turn_ids, f.created_at,
-                   f.superseded_at, f.superseded_by, f.subjects_json,
-                   f.valid_from, f.valid_to, f.importance
-              FROM fts_facts AS fts
-              JOIN facts AS f ON f.id = fts.rowid
-             WHERE fts_facts MATCH ?
-               AND f.familiar_id = ?
-               {where}
-             ORDER BY bm25(fts_facts) ASC, f.id DESC
-             LIMIT ?
-            """,  # noqa: S608
-            (match_expr, familiar_id, *params, limit),
-        ).fetchall()
-        return [_row_to_fact(r) for r in rows]
+        return [
+            fact
+            for fact, _ in self._fact_candidates_by_fts(
+                familiar_id=familiar_id,
+                query=query,
+                limit=limit,
+                include_superseded=include_superseded,
+                as_of=as_of,
+            )
+        ]
 
     def search_facts_scored(
         self,
@@ -2212,36 +2122,20 @@ class HistoryStore:
     ) -> list[tuple[Fact, float]]:
         """Like :meth:`search_facts`, but pairs each row with its BM25 score.
 
-        FTS5's ``bm25()`` returns negative numbers — lower = better
-        match. Exposed verbatim so :class:`RagContextLayer` can fuse it
-        with importance and recency at rank time (M2).
+        Tantivy's BM25 is positive (higher = better). Callers fusing
+        with other signals (importance, recency, embedding similarity)
+        should treat the score as a non-negative weight; the prior
+        SQLite FTS5 ``bm25()`` returned negative numbers (lower =
+        better), so consumers may have an inverted-sign assumption to
+        revisit.
         """
-        if limit <= 0:
-            return []
-        match_expr = _build_fts_match(query)
-        if not match_expr:
-            return []
-        where, params = _facts_validity_where(
-            include_superseded=include_superseded, as_of=as_of, alias="f"
+        return self._fact_candidates_by_fts(
+            familiar_id=familiar_id,
+            query=query,
+            limit=limit,
+            include_superseded=include_superseded,
+            as_of=as_of,
         )
-        rows = self._conn.execute(
-            f"""
-            SELECT f.id, f.familiar_id, f.channel_id, f.text,
-                   f.source_turn_ids, f.created_at,
-                   f.superseded_at, f.superseded_by, f.subjects_json,
-                   f.valid_from, f.valid_to, f.importance,
-                   bm25(fts_facts) AS bm25_score
-              FROM fts_facts AS fts
-              JOIN facts AS f ON f.id = fts.rowid
-             WHERE fts_facts MATCH ?
-               AND f.familiar_id = ?
-               {where}
-             ORDER BY bm25(fts_facts) ASC, f.id DESC
-             LIMIT ?
-            """,  # noqa: S608
-            (match_expr, familiar_id, *params, limit),
-        ).fetchall()
-        return [(_row_to_fact(r), float(r["bm25_score"])) for r in rows]
 
     def latest_fact_id(self, *, familiar_id: str) -> int:
         """Return highest ``facts.id`` for ``familiar_id``; 0 if none.
@@ -2661,7 +2555,7 @@ class HistoryStore:
         return (cur.rowcount or 0) > 0
 
 
-def _row_to_reflection(row: sqlite3.Row) -> Reflection:
+def _row_to_reflection(row: Row) -> Reflection:
     try:
         turn_ids = tuple(int(x) for x in json.loads(row["cited_turn_ids"]))
     except (ValueError, TypeError):
@@ -2684,7 +2578,7 @@ def _row_to_reflection(row: sqlite3.Row) -> Reflection:
     )
 
 
-def _row_to_fact(row: sqlite3.Row) -> Fact:
+def _row_to_fact(row: Row) -> Fact:
     ids_raw = row["source_turn_ids"]
     try:
         ids = tuple(int(x) for x in json.loads(ids_raw))
@@ -2760,7 +2654,7 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
     )
 
 
-def _row_to_turn(row: sqlite3.Row) -> HistoryTurn:
+def _row_to_turn(row: Row) -> HistoryTurn:
     """Rebuild a HistoryTurn from a SELECT row. Author is reconstructed.
 
     channel_id missing from older SELECTs that don't need it; fall

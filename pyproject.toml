@@ -19,6 +19,8 @@ dependencies = [
     "google-genai >= 1.51.0, < 2",
     "colorama>=0.4.6",
     "tomli-w >= 1.2, < 2",
+    "pyturso>=0.5.1",
+    "tantivy>=0.26.0",
 ]
 
 [project.scripts]
@@ -215,6 +217,12 @@ ignore = [
     "FBT003", # Boolean positional args common in mock assertions
     "ANN202", # Private helper annotations not critical in tests
     "PLC2701", # Tests import private names for unit testing
+]
+"scripts/**/*.py" = [
+    "INP001", # one-shot CLI tools, not packages
+    "T201", # print is the CLI's output channel
+    "PLC0415", # late import keeps script invocable without optional deps
+    "SLF001", # migration tooling needs the store's internal connection
 ]
 
 [tool.ruff.format]
