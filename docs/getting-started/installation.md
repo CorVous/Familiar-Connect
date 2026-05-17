@@ -12,6 +12,34 @@
 - *(optional, voice only)* One of: Azure Cognitive Services key + region, a Cartesia API key, or a Google Gemini API key
 - *(optional, voice only)* A Deepgram API key for speech transcription
 
+### Windows: C++ build tools required for `pyturso`
+
+`pyturso` (the Rust-backed SQLite replacement that backs the history
+store) does **not** ship Windows wheels — `uv sync` falls back to a
+source build, which needs a Rust toolchain *and* the MSVC linker
+(`link.exe`). uv's bootstrap installs Rust automatically; the linker
+is on you.
+
+Install the **Visual Studio Build Tools** with the *"Desktop
+development with C++"* workload (this provides `link.exe` and the
+Windows SDK):
+
+- Download:
+  <https://visualstudio.microsoft.com/visual-cpp-build-tools/>
+- In the installer, check **Desktop development with C++**. The
+  default selection (MSVC, Windows SDK) is sufficient.
+- Open a fresh PowerShell after install so `link.exe` is on `PATH`,
+  then re-run `uv sync --dev`.
+
+VS Code alone is *not* sufficient — the installer is the standalone
+Build Tools package, no full Visual Studio required. The first
+`uv sync` after installing the toolchain will compile pyturso from
+source (one-time, a few minutes); subsequent syncs reuse the cached
+wheel.
+
+WSL/Ubuntu is the supported alternative if you'd rather not install
+the MSVC toolchain — pyturso ships a Linux x86_64 wheel.
+
 ## Environment variables
 
 Create a `.env` in the repo root (loaded automatically on startup).

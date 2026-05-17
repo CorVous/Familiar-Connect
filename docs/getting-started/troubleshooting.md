@@ -12,6 +12,16 @@ Common startup errors and what they mean:
 - **`Opus library not found — voice playback will not work`** — voice
   commands still run, but no audio; install libopus.
 
+## Install-time errors
+
+- **`Failed to build pyturso==0.5.1` → `error: linker link.exe not
+  found`** (Windows) — pyturso has no Windows wheel, so uv builds it
+  from source. The Rust toolchain it bootstraps cannot link without
+  MSVC's `link.exe`. Install the Visual Studio Build Tools with the
+  *"Desktop development with C++"* workload, then re-run `uv sync`.
+  See
+  [Installation → Windows: C++ build tools required for pyturso](installation.md#windows-c-build-tools-required-for-pyturso).
+
 ## Runtime symptoms
 
 - **Bot joined voice but no audio plays** — confirm libopus loaded
