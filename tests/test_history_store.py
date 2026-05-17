@@ -850,6 +850,49 @@ class TestModeColumn:
         s2 = HistoryStore(db_path)
         s2.close()
 
+    def test_schema_tolerates_already_exists_on_create_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``CREATE INDEX IF NOT EXISTS`` may still raise on Turso.
+
+        Observed on pyturso 0.5.1 (Windows): the ``IF NOT EXISTS`` clause
+        is not honored for indexes, and re-opening a populated DB blows
+        up with ``Parse error: index "idx_turns_channel" already exists``.
+        Schema execution must swallow that.
+        """
+        import turso  # noqa: PLC0415
+
+        from familiar_connect.history.store import HistoryStore  # noqa: PLC0415
+
+        db_path = tmp_path / "history.db"
+
+        # Initial open creates tables + indexes.
+        HistoryStore(db_path).close()
+
+        # Pretend Turso forgets that ``idx_turns_channel`` already
+        # exists when ``IF NOT EXISTS`` should have made the second
+        # CREATE a no-op.
+        real_execute = turso.Cursor.execute
+        triggered = {"count": 0}
+
+        def fake_execute(
+            cursor: turso.Cursor,
+            sql: str,
+            params: Sequence[Any] | Mapping[str, Any] = (),
+        ) -> turso.Cursor:
+            if "CREATE INDEX IF NOT EXISTS idx_turns_channel\n" in sql:
+                triggered["count"] += 1
+                msg = 'Parse error: index "idx_turns_channel" already exists'
+                raise turso.DatabaseError(msg)
+            return real_execute(cursor, sql, params)
+
+        monkeypatch.setattr(turso.Cursor, "execute", fake_execute)
+
+        # Re-opening must not raise.
+        s2 = HistoryStore(db_path)
+        s2.close()
+        assert triggered["count"] >= 1
+
 
 # ---------------------------------------------------------------------------
 # Per-channel summary scope

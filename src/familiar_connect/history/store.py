@@ -487,7 +487,7 @@ class HistoryStore:
             fts_facts_path = fts_root / "facts"
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db")
         self._migrate_if_needed()
-        self._conn.executescript(_SCHEMA)
+        self._execute_schema(_SCHEMA)
         self._conn.commit()
         self._fts_turns = FtsIndex(fts_turns_path)
         self._fts_facts = FtsIndex(fts_facts_path)
@@ -496,6 +496,36 @@ class HistoryStore:
         # they're empty while ``turns``/``facts`` already have rows.
         # Detect and bulk-reindex.
         self._reindex_if_empty()
+
+    def _execute_schema(self, script: str) -> None:
+        """Run an idempotent schema script, tolerating Turso parse quirks.
+
+        Plain ``executescript`` aborts on the first statement that
+        raises. Observed on pyturso 0.5.1 (Windows): ``CREATE INDEX IF
+        NOT EXISTS`` is not honored consistently, raising ``Parse
+        error: index "…" already exists`` on a second open. Strip
+        line + trailing comments (some contain ``;``) then split and
+        execute one statement at a time; ``already exists`` parse
+        errors are swallowed because every statement in ``_SCHEMA``
+        is shaped ``CREATE … IF NOT EXISTS``.
+        """
+        cleaned_lines: list[str] = []
+        for raw_line in script.splitlines():
+            comment_pos = raw_line.find("--")
+            line = raw_line[:comment_pos] if comment_pos != -1 else raw_line
+            if line.strip():
+                cleaned_lines.append(line)
+        cleaned = "\n".join(cleaned_lines)
+        for raw in cleaned.split(";"):
+            stmt = raw.strip()
+            if not stmt:
+                continue
+            try:
+                self._conn.execute(stmt)
+            except turso.DatabaseError as exc:
+                if "already exists" in str(exc).lower():
+                    continue
+                raise
 
     def _safe_add_column(self, table: str, column: str, type_: str) -> None:
         """ALTER TABLE ADD COLUMN, swallowing benign migration errors.
