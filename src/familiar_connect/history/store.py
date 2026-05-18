@@ -588,8 +588,14 @@ class HistoryStore:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
             actual = {row["name"] for row in rows}
+            _logger.info(
+                f"{ls.tag('History', ls.C)} "
+                f"{ls.kv('attempt', str(attempt))} "
+                f"{ls.kv('sqlite_master_tables', ','.join(sorted(actual)) or '<none>')}"
+            )
             missing = _EXPECTED_TABLES - actual
             if not missing:
+                self._probe_expected_tables()
                 return
             if attempt == 2:
                 msg = (
@@ -605,6 +611,34 @@ class HistoryStore:
             self._execute_schema(_SCHEMA)
             self._conn.commit()
             self._conn.reopen()
+
+    def _probe_expected_tables(self) -> None:
+        """Run a no-op ``SELECT`` against each expected table.
+
+        ``sqlite_master`` reports a row for the table, but pyturso
+        0.5.1 on Windows has been seen to refuse statement
+        preparation against tables that *should* exist
+        (``Parse error: no such table: <name>``). Probe each table
+        explicitly and log the result so we can tell — from a
+        single boot log — whether the schema is consistent or
+        ``sqlite_master`` is reporting phantom entries.
+        """
+        for table in sorted(_EXPECTED_TABLES):
+            try:
+                self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchall()  # noqa: S608
+            except Exception as exc:  # noqa: BLE001
+                _logger.error(
+                    f"{ls.tag('History', ls.R)} "
+                    f"{ls.kv('probe_table', table)} "
+                    f"{ls.kv('error', type(exc).__name__)} "
+                    f"{ls.kv('detail', str(exc))}"
+                )
+            else:
+                _logger.info(
+                    f"{ls.tag('History', ls.G)} "
+                    f"{ls.kv('probe_table', table)} "
+                    f"{ls.kv('result', 'ok')}"
+                )
 
     def _safe_add_column(self, table: str, column: str, type_: str) -> None:
         """ALTER TABLE ADD COLUMN, swallowing benign migration errors.
