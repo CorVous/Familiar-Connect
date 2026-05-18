@@ -117,12 +117,20 @@ that matters, dump the post-migration Turso file's `turns` /
   revisit consolidating.
 - **No read-your-writes inside a transaction for Turso FTS** — not
   relevant here since we don't use Turso FTS.
-- **`threadsafety=1`** — connections must not be shared across
-  threads. `TursoConnection` keeps one shared `turso.Connection`
-  per instance and serialises every call through an internal lock
-  (same model for file-backed DBs and `:memory:`). Throughput is
-  fine because `AsyncHistoryStore` still hops DB calls off the
-  event loop.
+- **`threadsafety=1` + thread-affine internal state** —
+  connections must not be shared across threads. Worse, even
+  *serialised* cross-thread access on Windows can fail with
+  ``Parse error: no such table: …`` after a table was just
+  created and observed via `sqlite_master` on the opening
+  thread, suggesting pyturso keeps state that's affine to the
+  OS thread that first touched the connection.
+  `TursoConnection` sidesteps both by owning a
+  ``max_workers=1`` ``ThreadPoolExecutor``: ``connect``, the
+  ``execute`` family, cursor fetches, ``commit``, ``reopen``,
+  and ``close`` all dispatch onto that one OS thread. Callers
+  from any thread see a normal ``sqlite3.Connection``-like API;
+  `AsyncHistoryStore`'s 4-worker executor still hops DB calls
+  off the event loop, but they re-serialise at the turso thread.
 - **Cross-connection schema cache staleness** — a worker thread's
   freshly-opened Turso connection can fail to see tables / indexes
   the main thread just committed, surfacing as

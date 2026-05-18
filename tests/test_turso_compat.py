@@ -10,7 +10,7 @@ DBs as well as ``:memory:``.
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from familiar_connect.history.turso_compat import TursoConnection
 
@@ -87,6 +87,62 @@ def test_file_backed_returns_same_connection_object(tmp_path: Path) -> None:
         th.join()
 
         assert captured == [main_conn]
+    finally:
+        tc.close()
+
+
+def test_all_turso_calls_route_through_one_os_thread(tmp_path: Path) -> None:
+    """Pin every turso call to one dedicated OS thread.
+
+    pyturso 0.5.1 has thread-affine internal state; route everything
+    through one OS thread regardless of caller. The trace callback
+    fires inside the executor, so its observed ``threading.get_ident()``
+    reveals which thread actually invoked pyturso. Calls from the main
+    thread *and* a worker thread must surface the same identifier.
+    """
+    tc = TursoConnection(tmp_path / "thread.db")
+    seen: set[int] = set()
+    tc.set_trace_callback(lambda _sql: seen.add(threading.get_ident()))
+    try:
+        tc.execute("CREATE TABLE t (id INTEGER)")
+
+        def worker() -> None:
+            tc.execute("INSERT INTO t VALUES (1)")
+            tc.execute("SELECT id FROM t").fetchall()
+
+        th = threading.Thread(target=worker)
+        th.start()
+        th.join()
+
+        assert len(seen) == 1
+        assert threading.get_ident() not in seen
+    finally:
+        tc.close()
+
+
+def test_cursor_methods_work_from_worker_thread(tmp_path: Path) -> None:
+    """Cursor proxies must dispatch fetchone/fetchall/lastrowid/rowcount."""
+    tc = TursoConnection(tmp_path / "cur.db")
+    try:
+        tc.execute("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)")
+        cur = tc.execute("INSERT INTO t (v) VALUES ('a')")
+        assert int(cur.lastrowid or 0) > 0
+
+        results: dict[str, Any] = {}
+
+        def worker() -> None:
+            results["one"] = tc.execute("SELECT v FROM t").fetchone()
+            results["all"] = tc.execute("SELECT v FROM t").fetchall()
+            upd = tc.execute("UPDATE t SET v='b' WHERE v='a'")
+            results["rowcount"] = upd.rowcount
+
+        th = threading.Thread(target=worker)
+        th.start()
+        th.join()
+
+        assert results["one"]["v"] == "a"
+        assert [r["v"] for r in results["all"]] == ["a"]
+        assert results["rowcount"] == 1
     finally:
         tc.close()
 
