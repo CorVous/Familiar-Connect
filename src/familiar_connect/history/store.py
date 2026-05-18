@@ -23,6 +23,8 @@ that holds per-thread Turso connections.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import struct
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -33,12 +35,15 @@ from typing import TYPE_CHECKING, Any
 
 import turso
 
+from familiar_connect import log_style as ls
 from familiar_connect.history.fts import FtsIndex
 from familiar_connect.history.turso_compat import TursoConnection
 from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+_logger = logging.getLogger(__name__)
 
 # Result rows come back as ``turso.Row``; spell as ``Any`` to keep the
 # private ``_row_to_*`` helpers free of a third-party type alias.
@@ -429,6 +434,13 @@ _TURN_COLS = (
     "platform_message_id, reply_to_message_id, guild_id"
 )
 
+# Table names declared in _SCHEMA — used by HistoryStore to verify the
+# schema is intact after init (pyturso 0.5.1 on Windows occasionally
+# drops CREATE TABLE statements; see _ensure_expected_tables).
+_EXPECTED_TABLES: frozenset[str] = frozenset(
+    re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _SCHEMA)
+)
+
 
 def _facts_validity_where(
     *,
@@ -487,15 +499,26 @@ class HistoryStore:
             fts_facts_path = fts_root / "facts"
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db")
         self._migrate_if_needed()
-        self._execute_schema(_SCHEMA)
         self._conn.commit()
-        # pyturso 0.5.1 on Windows retains a stale schema cache after
-        # the migration + _SCHEMA pass — subsequent reads of just-created
-        # tables raise ``Parse error: no such table: …``. Reopening
-        # forces a fresh sqlite_master read. Skip for ``:memory:`` —
-        # reopening would discard the just-built schema.
+        # pyturso 0.5.1 on Windows: migration's ``sqlite_master`` /
+        # ``PRAGMA table_info`` queries pollute the schema cache so
+        # the following ``CREATE TABLE IF NOT EXISTS`` silently fails
+        # with ``Parse error: no such table: …`` (swallowed by
+        # ``_execute_schema``). Reopening clears the cache so schema
+        # creation runs against a fresh read of sqlite_master. Skip
+        # for ``:memory:`` — reopening would lose the migration.
         if self._path is not None:
             self._conn.reopen()
+        self._execute_schema(_SCHEMA)
+        self._conn.commit()
+        # Reopen again so runtime queries see the just-created tables
+        # (same cache-staleness bug applies on the read side).
+        if self._path is not None:
+            self._conn.reopen()
+        # Defensive verify + one retry on a fresh connection: if the
+        # first ``_execute_schema`` pass silently swallowed a CREATE
+        # for any expected table, re-run on the fresh cache.
+        self._ensure_expected_tables()
         self._fts_turns = FtsIndex(fts_turns_path)
         self._fts_facts = FtsIndex(fts_facts_path)
         # Tantivy indexes are independent files; on first run after the
@@ -545,6 +568,43 @@ class HistoryStore:
                 if any(f in msg for f in self._SCHEMA_PARSE_ERROR_FRAGMENTS):
                     continue
                 raise
+
+    def _ensure_expected_tables(self) -> None:
+        """Re-run ``_SCHEMA`` if any expected table is missing.
+
+        pyturso 0.5.1 on Windows can silently drop a CREATE TABLE
+        statement when the schema cache is polluted by earlier
+        ``sqlite_master`` / ``PRAGMA`` queries: ``_execute_schema``
+        sees ``Parse error: no such table: <name>`` and swallows it,
+        but the table never lands on disk. After the post-schema
+        reopen, sweep ``sqlite_master`` for the expected set; if any
+        are missing, run ``_execute_schema`` again on the now-fresh
+        cache and reopen once more. Raise on the second miss.
+        """
+        if self._path is None:
+            return
+        for attempt in (1, 2):
+            rows = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            actual = {row["name"] for row in rows}
+            missing = _EXPECTED_TABLES - actual
+            if not missing:
+                return
+            if attempt == 2:
+                msg = (
+                    f"history schema incomplete after retry; "
+                    f"missing tables: {sorted(missing)}"
+                )
+                raise RuntimeError(msg)
+            _logger.warning(
+                f"{ls.tag('History', ls.Y)} "
+                f"{ls.kv('missing_tables', ','.join(sorted(missing)))} "
+                f"{ls.kv('action', 'retry-schema')}"
+            )
+            self._execute_schema(_SCHEMA)
+            self._conn.commit()
+            self._conn.reopen()
 
     def _safe_add_column(self, table: str, column: str, type_: str) -> None:
         """ALTER TABLE ADD COLUMN, swallowing benign migration errors.

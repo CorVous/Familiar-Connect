@@ -100,6 +100,36 @@ class TestConstruction:
         )
         assert s.count(familiar_id="x", channel_id=1) == 1
 
+    def test_init_creates_all_expected_tables(self, tmp_path: Path) -> None:
+        """Smoke-test that ``_SCHEMA`` runs cleanly on a fresh DB."""
+        s = HistoryStore(tmp_path / "history.db")
+        rows = s._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        tables = {row["name"] for row in rows}
+        # spot-check the table that surfaced the original Windows bug
+        assert "alarms" in tables
+
+    def test_init_recovers_from_missing_table(self, tmp_path: Path) -> None:
+        """If a table is missing on re-open, init must re-create it.
+
+        Simulates the Windows pyturso 0.5.1 case where the first
+        ``_execute_schema`` pass silently dropped a ``CREATE TABLE``
+        due to a stale schema cache. Re-opening ``HistoryStore`` on
+        the corrupted DB should heal the schema.
+        """
+        db_path = tmp_path / "history.db"
+        s = HistoryStore(db_path)
+        s._conn.execute("DROP TABLE alarms")
+        s._conn.commit()
+        s.close()
+
+        s2 = HistoryStore(db_path)
+        rows = s2._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='alarms'"
+        ).fetchall()
+        assert len(rows) == 1
+
 
 # ---------------------------------------------------------------------------
 # append_turn

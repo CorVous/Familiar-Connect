@@ -133,10 +133,23 @@ that matters, dump the post-migration Turso file's `turns` /
   connection, pyturso 0.5.1 on Windows can fail to see a table it
   just created (e.g. `SELECT … FROM alarms` after
   `CREATE TABLE IF NOT EXISTS alarms` on the same connection
-  raises `Parse error: no such table: alarms`). `HistoryStore`
-  calls `TursoConnection.reopen()` after the migration + `_SCHEMA`
-  pass to discard the stale cache and re-read `sqlite_master` from
-  disk.
+  raises `Parse error: no such table: alarms`). Worse, the
+  pollution can cause `CREATE TABLE IF NOT EXISTS` itself to throw
+  the same parse error and silently fail (the error is swallowed
+  by `_execute_schema`, leaving the table absent on disk). To
+  defend against both:
+    1. `HistoryStore.__init__` calls `TursoConnection.reopen()`
+       between `_migrate_if_needed` and `_execute_schema(_SCHEMA)`
+       so DDL runs against a fresh, unpolluted cache.
+    2. It calls `reopen()` again after `_execute_schema` so
+       runtime reads see the new tables.
+    3. `_ensure_expected_tables` sweeps `sqlite_master`
+       post-reopen against the expected set parsed from `_SCHEMA`
+       (`_EXPECTED_TABLES`); if any are missing, it re-runs
+       `_execute_schema` once on the fresh connection and reopens
+       again. If the second pass still leaves tables missing it
+       raises with a clear message rather than continuing into a
+       broken store.
 - **`ALTER TABLE` can spuriously report "no such table"** on Windows
   even when `sqlite_master` and `PRAGMA table_info` agree the table
   exists. `HistoryStore._safe_add_column` swallows that parse error
