@@ -105,6 +105,24 @@ class TursoConnection:
         with self._lock:
             self._conn().rollback()
 
+    def reopen(self) -> None:
+        """Close the underlying connection and open a fresh one.
+
+        pyturso 0.5.1 on Windows can hold a stale schema cache even
+        after ``CREATE TABLE`` + ``commit`` on the same connection —
+        a subsequent ``SELECT`` from the just-created table raises
+        ``Parse error: no such table: …``. Reopening forces pyturso
+        to re-read ``sqlite_master`` from disk into a fresh cache.
+        Use after schema setup / migrations; never mid-transaction.
+        """
+        with self._lock:
+            if self._closed:
+                msg = "TursoConnection is closed"
+                raise RuntimeError(msg)
+            with contextlib.suppress(Exception):
+                self._shared.close()
+            self._shared = self._open_new()
+
     def close(self) -> None:
         with self._lock:
             if self._closed:

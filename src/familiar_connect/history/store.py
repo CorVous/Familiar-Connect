@@ -489,6 +489,13 @@ class HistoryStore:
         self._migrate_if_needed()
         self._execute_schema(_SCHEMA)
         self._conn.commit()
+        # pyturso 0.5.1 on Windows retains a stale schema cache after
+        # the migration + _SCHEMA pass — subsequent reads of just-created
+        # tables raise ``Parse error: no such table: …``. Reopening
+        # forces a fresh sqlite_master read. Skip for ``:memory:`` —
+        # reopening would discard the just-built schema.
+        if self._path is not None:
+            self._conn.reopen()
         self._fts_turns = FtsIndex(fts_turns_path)
         self._fts_facts = FtsIndex(fts_facts_path)
         # Tantivy indexes are independent files; on first run after the

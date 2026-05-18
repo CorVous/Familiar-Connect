@@ -89,3 +89,30 @@ def test_file_backed_returns_same_connection_object(tmp_path: Path) -> None:
         assert captured == [main_conn]
     finally:
         tc.close()
+
+
+def test_reopen_swaps_underlying_connection_and_preserves_data(
+    tmp_path: Path,
+) -> None:
+    """``reopen()`` discards stale schema cache by opening a fresh connection.
+
+    pyturso 0.5.1 on Windows can hold a stale schema cache *on the same
+    connection* even after ``CREATE TABLE`` + ``commit``. Closing and
+    re-opening forces a fresh read of ``sqlite_master`` from disk.
+    """
+    db_path = tmp_path / "reopen.db"
+    tc = TursoConnection(db_path)
+    try:
+        tc.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        tc.execute("INSERT INTO t VALUES (42)")
+        tc.commit()
+
+        before = tc._conn()
+        tc.reopen()
+        after = tc._conn()
+
+        assert before is not after
+        row = tc.execute("SELECT id FROM t").fetchone()
+        assert int(row["id"]) == 42
+    finally:
+        tc.close()

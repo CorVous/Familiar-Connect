@@ -129,6 +129,14 @@ that matters, dump the post-migration Turso file's `turns` /
   `Parse error: no such table: …` from inside the executor. This
   is why `TursoConnection` shares a single underlying connection
   across threads; opening a second one would re-expose the bug.
+- **Same-connection schema cache staleness** — even on the *same*
+  connection, pyturso 0.5.1 on Windows can fail to see a table it
+  just created (e.g. `SELECT … FROM alarms` after
+  `CREATE TABLE IF NOT EXISTS alarms` on the same connection
+  raises `Parse error: no such table: alarms`). `HistoryStore`
+  calls `TursoConnection.reopen()` after the migration + `_SCHEMA`
+  pass to discard the stale cache and re-read `sqlite_master` from
+  disk.
 - **`ALTER TABLE` can spuriously report "no such table"** on Windows
   even when `sqlite_master` and `PRAGMA table_info` agree the table
   exists. `HistoryStore._safe_add_column` swallows that parse error
