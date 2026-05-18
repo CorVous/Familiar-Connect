@@ -118,8 +118,17 @@ that matters, dump the post-migration Turso file's `turns` /
 - **No read-your-writes inside a transaction for Turso FTS** — not
   relevant here since we don't use Turso FTS.
 - **`threadsafety=1`** — connections must not be shared across
-  threads. `TursoConnection` handles per-thread connections; do
-  not reach inside it.
+  threads. `TursoConnection` keeps one shared `turso.Connection`
+  per instance and serialises every call through an internal lock
+  (same model for file-backed DBs and `:memory:`). Throughput is
+  fine because `AsyncHistoryStore` still hops DB calls off the
+  event loop.
+- **Cross-connection schema cache staleness** — a worker thread's
+  freshly-opened Turso connection can fail to see tables / indexes
+  the main thread just committed, surfacing as
+  `Parse error: no such table: …` from inside the executor. This
+  is why `TursoConnection` shares a single underlying connection
+  across threads; opening a second one would re-expose the bug.
 - **`ALTER TABLE` can spuriously report "no such table"** on Windows
   even when `sqlite_master` and `PRAGMA table_info` agree the table
   exists. `HistoryStore._safe_add_column` swallows that parse error
