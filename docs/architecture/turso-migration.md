@@ -126,13 +126,16 @@ that matters, dump the post-migration Turso file's `turns` /
   (and `duplicate column`); the post-migration `_SCHEMA` pass's
   `CREATE TABLE IF NOT EXISTS` is the safety net for genuinely
   missing tables.
-- **`CREATE INDEX IF NOT EXISTS` is not honored consistently** on
+- **`CREATE … IF NOT EXISTS` is not honored consistently** on
   Windows either — re-opening a populated DB can raise
-  `Parse error: index "…" already exists` even though the clause
-  should make the statement a no-op.
+  `Parse error: index "…" already exists` (stale index cache) or
+  `Parse error: table '…' does not exist` (schema cache lags behind
+  the CREATE TABLE we just ran on the same connection) even though
+  the clause should make the statement a no-op.
   `HistoryStore._execute_schema` walks `_SCHEMA` one statement at a
-  time and swallows any `already exists` parse error so re-opens
-  are tolerated.
+  time and swallows the parse-error variants in
+  `_SCHEMA_PARSE_ERROR_FRAGMENTS` so re-opens are tolerated; a
+  skipped index is harmless (the next clean run will create it).
 
 ## Recovering corrupt tantivy indexes
 

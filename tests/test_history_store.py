@@ -893,6 +893,47 @@ class TestModeColumn:
         s2.close()
         assert triggered["count"] >= 1
 
+    def test_schema_tolerates_does_not_exist_on_create_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-open survives Turso falsely claiming an indexed table is missing.
+
+        Observed on pyturso 0.5.1 (Windows): ``CREATE INDEX IF NOT EXISTS
+        idx_message_reactions_lookup ON message_reactions (…)`` raises
+        ``Parse error: Error: table 'message_reactions' does not exist``
+        even when ``message_reactions`` is in ``sqlite_master``. The
+        schema executor must swallow that; the index can be created on
+        a later run once Turso's parser catches up.
+        """
+        import turso  # noqa: PLC0415
+
+        from familiar_connect.history.store import HistoryStore  # noqa: PLC0415
+
+        db_path = tmp_path / "history.db"
+
+        # Initial open populates the schema.
+        HistoryStore(db_path).close()
+
+        real_execute = turso.Cursor.execute
+        triggered = {"count": 0}
+
+        def fake_execute(
+            cursor: turso.Cursor,
+            sql: str,
+            params: Sequence[Any] | Mapping[str, Any] = (),
+        ) -> turso.Cursor:
+            if "CREATE INDEX IF NOT EXISTS idx_message_reactions_lookup" in sql:
+                triggered["count"] += 1
+                msg = "Parse error: Error: table 'message_reactions' does not exist."
+                raise turso.DatabaseError(msg)
+            return real_execute(cursor, sql, params)
+
+        monkeypatch.setattr(turso.Cursor, "execute", fake_execute)
+
+        s2 = HistoryStore(db_path)
+        s2.close()
+        assert triggered["count"] >= 1
+
 
 # ---------------------------------------------------------------------------
 # Per-channel summary scope

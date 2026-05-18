@@ -497,17 +497,28 @@ class HistoryStore:
         # Detect and bulk-reindex.
         self._reindex_if_empty()
 
+    # pyturso 0.5.1 (Windows) emits a grab-bag of parse errors when
+    # re-running ``CREATE … IF NOT EXISTS`` against a populated DB:
+    # ``already exists`` (index cache stale), ``no such table`` /
+    # ``does not exist`` (schema cache lags behind the CREATE TABLE
+    # we just ran). All of them are benign on an idempotent schema —
+    # the table / index is either already present or will be created
+    # on a later run once Turso catches up.
+    _SCHEMA_PARSE_ERROR_FRAGMENTS = (
+        "already exists",
+        "no such table",
+        "does not exist",
+    )
+
     def _execute_schema(self, script: str) -> None:
         """Run an idempotent schema script, tolerating Turso parse quirks.
 
         Plain ``executescript`` aborts on the first statement that
-        raises. Observed on pyturso 0.5.1 (Windows): ``CREATE INDEX IF
-        NOT EXISTS`` is not honored consistently, raising ``Parse
-        error: index "…" already exists`` on a second open. Strip
-        line + trailing comments (some contain ``;``) then split and
-        execute one statement at a time; ``already exists`` parse
-        errors are swallowed because every statement in ``_SCHEMA``
-        is shaped ``CREATE … IF NOT EXISTS``.
+        raises. Strip line + trailing comments (some contain ``;``)
+        then split and execute one statement at a time, swallowing
+        the parse-error variants listed in
+        ``_SCHEMA_PARSE_ERROR_FRAGMENTS`` because every statement in
+        ``_SCHEMA`` is shaped ``CREATE … IF NOT EXISTS``.
         """
         cleaned_lines: list[str] = []
         for raw_line in script.splitlines():
@@ -523,7 +534,8 @@ class HistoryStore:
             try:
                 self._conn.execute(stmt)
             except turso.DatabaseError as exc:
-                if "already exists" in str(exc).lower():
+                msg = str(exc).lower()
+                if any(f in msg for f in self._SCHEMA_PARSE_ERROR_FRAGMENTS):
                     continue
                 raise
 
