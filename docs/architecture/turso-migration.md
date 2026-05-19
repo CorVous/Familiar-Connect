@@ -166,10 +166,13 @@ that matters, dump the post-migration Turso file's `turns` /
   the table via `_SCHEMA` and then never writing to it). After
   `_ensure_expected_tables` is satisfied,
   `HistoryStore._heal_phantom_tables` probes each expected table
-  with a no-op `SELECT`; for any that fail, it `DROP`s them
-  (escalating to `PRAGMA writable_schema=ON` +
-  `DELETE FROM sqlite_master` if pyturso can't even parse the
-  `DROP`), reopens, re-runs `_execute_schema`, and verifies.
+  with a no-op `SELECT`; for any that fail, it `DROP`s them, then
+  re-runs `_execute_schema` and verifies. If pyturso can't even
+  parse the `DROP` (it doesn't support `PRAGMA writable_schema`),
+  init falls back to a stdlib `sqlite3` connection on the same
+  file (same on-disk format) to surgically `DELETE FROM
+  sqlite_master WHERE name = ?` under `writable_schema=ON`, then
+  re-opens Turso on the repaired file.
   Stale `fts_*` virtual-table rows left over from the sqlite-era
   FTS5 schema are also stripped in the same sweep — Turso has no
   FTS5 support so those entries are permanently unparseable.

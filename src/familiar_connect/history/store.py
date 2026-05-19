@@ -627,15 +627,17 @@ class HistoryStore:
         from the sqlite-era FTS5 schema — Turso has no FTS5 support so
         those rows are permanently unparseable clutter.
 
-        Heal strategy: probe → ``DROP TABLE`` → escalate to
-        ``PRAGMA writable_schema`` + ``DELETE FROM sqlite_master`` if
-        pyturso can't parse the ``DROP`` → re-run ``_execute_schema``
-        on a fresh connection to recreate. **Data inside a broken table
-        is unrecoverable** — by construction it was unreadable to start
-        with — but the migration's row-count check (see
+        Heal strategy: probe → ``DROP TABLE`` → escalate to a stdlib
+        ``sqlite3`` connection (same on-disk format, supports
+        ``PRAGMA writable_schema``) for surgical ``DELETE FROM
+        sqlite_master`` if pyturso can't even parse the ``DROP`` →
+        re-open under Turso and re-run ``_execute_schema`` so the
+        dropped tables get recreated. **Data inside a broken table
+        is unrecoverable** — by construction it was unreadable to
+        start with — but the migration's row-count check (see
         ``scripts/migrate_sqlite_to_turso.py``) would have caught a
-        mismatch, so any table broken at init time was almost certainly
-        empty at migration time.
+        mismatch, so any table broken at init time was almost
+        certainly empty at migration time.
         """
         if self._path is None:
             return
@@ -654,10 +656,16 @@ class HistoryStore:
             f"{ls.kv('stale_fts_entries', ','.join(stale_fts) or '<none>')} "
             f"{ls.kv('action', 'heal')}"
         )
-        for name in [*broken, *stale_fts]:
-            self._drop_phantom(name)
+        needs_sqlite3 = [
+            name
+            for name in [*broken, *stale_fts]
+            if not self._try_drop_via_turso(name)
+        ]
         self._conn.commit()
-        self._conn.reopen()
+        if needs_sqlite3:
+            self._delete_sqlite_master_rows_via_sqlite3(needs_sqlite3)
+        else:
+            self._conn.reopen()
         self._execute_schema(_SCHEMA)
         self._conn.commit()
         self._conn.reopen()
@@ -680,29 +688,54 @@ class HistoryStore:
             return False
         return True
 
-    def _drop_phantom(self, name: str) -> None:
-        """Remove a (possibly phantom) ``sqlite_master`` row.
+    def _try_drop_via_turso(self, name: str) -> bool:
+        """Attempt ``DROP TABLE`` via the Turso connection.
 
-        Try the standard ``DROP TABLE`` first; if pyturso refuses
-        because it can't parse the table name, fall back to a direct
-        ``DELETE FROM sqlite_master`` under
-        ``PRAGMA writable_schema=ON``.
+        Returns ``True`` if the drop succeeded, ``False`` if pyturso
+        refused because it can't parse the (phantom) table name —
+        caller falls back to a stdlib ``sqlite3`` surgical removal.
+        Other ``DatabaseError`` variants propagate.
         """
         try:
             self._conn.execute(f"DROP TABLE {name}")
         except turso.DatabaseError as exc:
             msg = str(exc).lower()
-            if "no such table" not in msg and "does not exist" not in msg:
-                raise
-        else:
+            if "no such table" in msg or "does not exist" in msg:
+                return False
+            raise
+        return True
+
+    def _delete_sqlite_master_rows_via_sqlite3(self, names: list[str]) -> None:
+        """Remove ``sqlite_master`` rows via stdlib ``sqlite3``.
+
+        pyturso 0.5.1 doesn't support ``PRAGMA writable_schema``, so
+        we can't surgically delete phantom rows from ``sqlite_master``
+        through a Turso connection. Drop to stdlib ``sqlite3``, which
+        speaks the same on-disk format and supports the standard
+        PRAGMA, to remove the bad entries; then re-open Turso on the
+        repaired file so the rest of init can proceed.
+
+        Closes the current ``TursoConnection`` (releasing the file
+        lock), runs the sqlite3 session, then assigns a fresh
+        ``TursoConnection`` back into ``self._conn``.
+        """
+        if self._path is None:  # defensive — heal already guards this
             return
-        self._conn.execute("PRAGMA writable_schema=ON")
+        self._conn.close()
         try:
-            self._conn.execute(
-                f"DELETE FROM sqlite_master WHERE name='{name}'"  # noqa: S608
-            )
+            import sqlite3  # noqa: PLC0415 — stdlib, only used on this fallback path
+
+            raw = sqlite3.connect(self._path)
+            try:
+                raw.execute("PRAGMA writable_schema = ON")
+                for name in names:
+                    raw.execute("DELETE FROM sqlite_master WHERE name = ?", (name,))
+                raw.execute("PRAGMA writable_schema = OFF")
+                raw.commit()
+            finally:
+                raw.close()
         finally:
-            self._conn.execute("PRAGMA writable_schema=OFF")
+            self._conn = TursoConnection(self._path)
 
     def _safe_add_column(self, table: str, column: str, type_: str) -> None:
         """ALTER TABLE ADD COLUMN, swallowing benign migration errors.
