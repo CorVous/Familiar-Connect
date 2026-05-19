@@ -706,7 +706,7 @@ class HistoryStore:
         return True
 
     def _delete_sqlite_master_rows_via_sqlite3(self, names: list[str]) -> None:
-        """Remove ``sqlite_master`` rows via stdlib ``sqlite3``.
+        """Remove ``sqlite_master`` rows + dependent indexes via stdlib ``sqlite3``.
 
         pyturso 0.5.1 doesn't support ``PRAGMA writable_schema``, so
         we can't surgically delete phantom rows from ``sqlite_master``
@@ -714,6 +714,13 @@ class HistoryStore:
         speaks the same on-disk format and supports the standard
         PRAGMA, to remove the bad entries; then re-open Turso on the
         repaired file so the rest of init can proceed.
+
+        For each name, deletes both the table row (``name = ?``) and
+        any dependent index rows (``tbl_name = ?``) — without the
+        latter, pyturso panics on the next open with
+        ``all automatic indexes parsed from sqlite_schema should have
+        been consumed, but N remain``. Also clears ``sqlite_sequence``
+        entries for AUTOINCREMENT tables.
 
         Closes the current ``TursoConnection`` (releasing the file
         lock), runs the sqlite3 session, then assigns a fresh
@@ -728,8 +735,23 @@ class HistoryStore:
             raw = sqlite3.connect(self._path)
             try:
                 raw.execute("PRAGMA writable_schema = ON")
+                has_seq = (
+                    raw.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='sqlite_sequence'"
+                    ).fetchone()
+                    is not None
+                )
                 for name in names:
-                    raw.execute("DELETE FROM sqlite_master WHERE name = ?", (name,))
+                    raw.execute(
+                        "DELETE FROM sqlite_master "
+                        "WHERE name = ? OR tbl_name = ?",
+                        (name, name),
+                    )
+                    if has_seq:
+                        raw.execute(
+                            "DELETE FROM sqlite_sequence WHERE name = ?", (name,)
+                        )
                 raw.execute("PRAGMA writable_schema = OFF")
                 raw.commit()
             finally:
