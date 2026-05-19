@@ -519,6 +519,12 @@ class HistoryStore:
         # first ``_execute_schema`` pass silently swallowed a CREATE
         # for any expected table, re-run on the fresh cache.
         self._ensure_expected_tables()
+        # Heal phantom sqlite_master entries: pyturso 0.5.1 on Windows
+        # has been observed to leave rows in sqlite_master that point
+        # at no valid btree (likely from the sqlite→turso migration
+        # script creating tables it then never wrote to). Probe each
+        # expected table; drop + recreate any that can't be queried.
+        self._heal_phantom_tables()
         self._fts_turns = FtsIndex(fts_turns_path)
         self._fts_facts = FtsIndex(fts_facts_path)
         # Tantivy indexes are independent files; on first run after the
@@ -588,14 +594,8 @@ class HistoryStore:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
             actual = {row["name"] for row in rows}
-            _logger.info(
-                f"{ls.tag('History', ls.C)} "
-                f"{ls.kv('attempt', str(attempt))} "
-                f"{ls.kv('sqlite_master_tables', ','.join(sorted(actual)) or '<none>')}"
-            )
             missing = _EXPECTED_TABLES - actual
             if not missing:
-                self._probe_expected_tables()
                 return
             if attempt == 2:
                 msg = (
@@ -612,33 +612,97 @@ class HistoryStore:
             self._conn.commit()
             self._conn.reopen()
 
-    def _probe_expected_tables(self) -> None:
-        """Run a no-op ``SELECT`` against each expected table.
+    def _heal_phantom_tables(self) -> None:
+        """Drop + recreate tables that sqlite_master lists but parser can't find.
 
-        ``sqlite_master`` reports a row for the table, but pyturso
-        0.5.1 on Windows has been seen to refuse statement
-        preparation against tables that *should* exist
-        (``Parse error: no such table: <name>``). Probe each table
-        explicitly and log the result so we can tell — from a
-        single boot log — whether the schema is consistent or
-        ``sqlite_master`` is reporting phantom entries.
+        pyturso 0.5.1 on Windows leaves rows in ``sqlite_master`` that
+        point at no valid btree: ``SELECT name FROM sqlite_master``
+        returns the table, but ``SELECT 1 FROM <table> LIMIT 1`` raises
+        ``Parse error: no such table: <name>``. Most-likely cause: the
+        ``sqlite→turso`` migration script (``HistoryStore(staging)``)
+        created the table via ``_SCHEMA`` but the table is never written
+        to during migration, leaving it in a bad state.
+
+        Also clean up stale ``fts_*`` virtual table entries left over
+        from the sqlite-era FTS5 schema — Turso has no FTS5 support so
+        those rows are permanently unparseable clutter.
+
+        Heal strategy: probe → ``DROP TABLE`` → escalate to
+        ``PRAGMA writable_schema`` + ``DELETE FROM sqlite_master`` if
+        pyturso can't parse the ``DROP`` → re-run ``_execute_schema``
+        on a fresh connection to recreate. **Data inside a broken table
+        is unrecoverable** — by construction it was unreadable to start
+        with — but the migration's row-count check (see
+        ``scripts/migrate_sqlite_to_turso.py``) would have caught a
+        mismatch, so any table broken at init time was almost certainly
+        empty at migration time.
         """
-        for table in sorted(_EXPECTED_TABLES):
-            try:
-                self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchall()  # noqa: S608
-            except Exception as exc:  # noqa: BLE001
-                _logger.error(
-                    f"{ls.tag('History', ls.R)} "
-                    f"{ls.kv('probe_table', table)} "
-                    f"{ls.kv('error', type(exc).__name__)} "
-                    f"{ls.kv('detail', str(exc))}"
-                )
-            else:
-                _logger.info(
-                    f"{ls.tag('History', ls.G)} "
-                    f"{ls.kv('probe_table', table)} "
-                    f"{ls.kv('result', 'ok')}"
-                )
+        if self._path is None:
+            return
+        broken = [t for t in sorted(_EXPECTED_TABLES) if not self._probe_table(t)]
+        stale_fts = sorted(
+            row["name"]
+            for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'fts_%'"
+            ).fetchall()
+        )
+        if not broken and not stale_fts:
+            return
+        _logger.warning(
+            f"{ls.tag('History', ls.Y)} "
+            f"{ls.kv('broken_tables', ','.join(broken) or '<none>')} "
+            f"{ls.kv('stale_fts_entries', ','.join(stale_fts) or '<none>')} "
+            f"{ls.kv('action', 'heal')}"
+        )
+        for name in [*broken, *stale_fts]:
+            self._drop_phantom(name)
+        self._conn.commit()
+        self._conn.reopen()
+        self._execute_schema(_SCHEMA)
+        self._conn.commit()
+        self._conn.reopen()
+        still_broken = [t for t in broken if not self._probe_table(t)]
+        if still_broken:
+            msg = f"unable to heal tables after recreate: {sorted(still_broken)}"
+            raise RuntimeError(msg)
+        if broken:
+            _logger.info(
+                f"{ls.tag('History', ls.G)} "
+                f"{ls.kv('healed_tables', ','.join(broken))} "
+                f"{ls.kv('result', 'ok')}"
+            )
+
+    def _probe_table(self, table: str) -> bool:
+        """Return ``True`` iff a no-op ``SELECT`` against *table* succeeds."""
+        try:
+            self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchall()  # noqa: S608
+        except turso.DatabaseError:
+            return False
+        return True
+
+    def _drop_phantom(self, name: str) -> None:
+        """Remove a (possibly phantom) ``sqlite_master`` row.
+
+        Try the standard ``DROP TABLE`` first; if pyturso refuses
+        because it can't parse the table name, fall back to a direct
+        ``DELETE FROM sqlite_master`` under
+        ``PRAGMA writable_schema=ON``.
+        """
+        try:
+            self._conn.execute(f"DROP TABLE {name}")
+        except turso.DatabaseError as exc:
+            msg = str(exc).lower()
+            if "no such table" not in msg and "does not exist" not in msg:
+                raise
+        else:
+            return
+        self._conn.execute("PRAGMA writable_schema=ON")
+        try:
+            self._conn.execute(
+                f"DELETE FROM sqlite_master WHERE name='{name}'"  # noqa: S608
+            )
+        finally:
+            self._conn.execute("PRAGMA writable_schema=OFF")
 
     def _safe_add_column(self, table: str, column: str, type_: str) -> None:
         """ALTER TABLE ADD COLUMN, swallowing benign migration errors.

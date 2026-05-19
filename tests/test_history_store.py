@@ -130,6 +130,24 @@ class TestConstruction:
         ).fetchall()
         assert len(rows) == 1
 
+    def test_heal_recreates_broken_table_via_init(self, tmp_path: Path) -> None:
+        """Init must heal a table that's been dropped between runs.
+
+        Stand-in for the pyturso 0.5.1 "phantom sqlite_master entry"
+        case: drop ``alarms`` after a clean init, re-open. The second
+        ``HistoryStore`` should detect the missing table during heal
+        and recreate it without raising.
+        """
+        db_path = tmp_path / "history.db"
+        s = HistoryStore(db_path)
+        s._conn.execute("DROP TABLE alarms")
+        s._conn.commit()
+        s.close()
+
+        s2 = HistoryStore(db_path)
+        # probe must succeed — heal recreated the table
+        s2._conn.execute("SELECT 1 FROM alarms LIMIT 1").fetchall()
+
 
 # ---------------------------------------------------------------------------
 # append_turn

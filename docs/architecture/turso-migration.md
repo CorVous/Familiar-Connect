@@ -158,6 +158,25 @@ that matters, dump the post-migration Turso file's `turns` /
        again. If the second pass still leaves tables missing it
        raises with a clear message rather than continuing into a
        broken store.
+- **Phantom `sqlite_master` rows** — the most pathological case
+  observed on Windows: `sqlite_master` lists the expected table,
+  but `SELECT 1 FROM <table> LIMIT 1` still raises
+  `Parse error: no such table: <name>`. The row exists but points
+  at no valid btree (likely from the migration script creating
+  the table via `_SCHEMA` and then never writing to it). After
+  `_ensure_expected_tables` is satisfied,
+  `HistoryStore._heal_phantom_tables` probes each expected table
+  with a no-op `SELECT`; for any that fail, it `DROP`s them
+  (escalating to `PRAGMA writable_schema=ON` +
+  `DELETE FROM sqlite_master` if pyturso can't even parse the
+  `DROP`), reopens, re-runs `_execute_schema`, and verifies.
+  Stale `fts_*` virtual-table rows left over from the sqlite-era
+  FTS5 schema are also stripped in the same sweep — Turso has no
+  FTS5 support so those entries are permanently unparseable.
+  Data inside a broken table is by definition unreachable, so the
+  recreate is non-destructive in practice (and the migration's
+  row-count check would have caught a count mismatch at migration
+  time).
 - **`ALTER TABLE` can spuriously report "no such table"** on Windows
   even when `sqlite_master` and `PRAGMA table_info` agree the table
   exists. `HistoryStore._safe_add_column` swallows that parse error
