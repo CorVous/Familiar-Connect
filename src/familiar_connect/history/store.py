@@ -446,8 +446,8 @@ def _sanitise_db_via_sqlite3(path: Path) -> None:
     """Strip sqlite-era cruft pyturso can't open, before Turso touches the file.
 
     The sqlite→turso migration script (or any earlier sqlite-era
-    run) can leave two things in ``sqlite_master`` that pyturso 0.5.1
-    refuses to load at ``turso.connect`` time:
+    run) can leave several classes of rows in ``sqlite_master`` that
+    pyturso 0.5.1 refuses to load at ``turso.connect`` time:
 
     * ``type='trigger'`` rows — pyturso bails with
       ``Database contains triggers but --experimental-triggers flag is
@@ -456,12 +456,15 @@ def _sanitise_db_via_sqlite3(path: Path) -> None:
     * ``fts_*`` virtual-table rows from the sqlite-era FTS5 index —
       Turso has no FTS5 support, so these are permanently unparseable
       and can also trip up trigger / index validation on open.
+    * Orphan auto-indexes (``sqlite_autoindex_<table>_N``) whose
+      parent ``<table>`` was removed by a prior heal pass — sqlite3
+      itself reports ``malformed database schema`` on the next read.
 
-    Open the file via stdlib ``sqlite3`` (same on-disk format, supports
-    ``PRAGMA writable_schema``) and ``DELETE`` both classes of rows
-    before pyturso ever sees the file. No-op if the file doesn't exist
-    or isn't a valid SQLite database (e.g. zero-byte from a previous
-    interrupted init).
+    Open the file via stdlib ``sqlite3``, set
+    ``PRAGMA writable_schema = ON`` **before** any read so sqlite's
+    integrity validation is suppressed, then ``DELETE`` all the bad
+    rows. No-op if the file doesn't exist or isn't a valid SQLite
+    database (e.g. zero-byte from a previous interrupted init).
     """
     if not path.exists() or path.stat().st_size < 16:
         return
@@ -472,6 +475,10 @@ def _sanitise_db_via_sqlite3(path: Path) -> None:
     except sqlite3.DatabaseError:
         return
     try:
+        # writable_schema must be ON before the first read of sqlite_master —
+        # otherwise sqlite3 validates the schema and raises "malformed
+        # database schema" when an orphan index is present.
+        raw.execute("PRAGMA writable_schema = ON")
         triggers = [
             row[0]
             for row in raw.execute(
@@ -484,20 +491,32 @@ def _sanitise_db_via_sqlite3(path: Path) -> None:
                 "SELECT name FROM sqlite_master WHERE name LIKE 'fts_%'"
             ).fetchall()
         ]
-        if not triggers and not fts:
+        orphan_indexes = [
+            row[0]
+            for row in raw.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' "
+                "AND tbl_name NOT IN "
+                "(SELECT name FROM sqlite_master WHERE type='table')"
+            ).fetchall()
+        ]
+        if not triggers and not fts and not orphan_indexes:
+            raw.execute("PRAGMA writable_schema = OFF")
             return
         _logger.warning(
             f"{ls.tag('History', ls.Y)} "
             f"{ls.kv('preflight_triggers', ','.join(triggers) or '<none>')} "
             f"{ls.kv('preflight_fts', ','.join(fts) or '<none>')} "
+            f"{ls.kv('orphan_indexes', ','.join(orphan_indexes) or '<none>')} "
             f"{ls.kv('action', 'strip')}"
         )
-        raw.execute("PRAGMA writable_schema = ON")
         for name in [*triggers, *fts]:
             raw.execute(
                 "DELETE FROM sqlite_master WHERE name = ? OR tbl_name = ?",
                 (name, name),
             )
+        for name in orphan_indexes:
+            raw.execute("DELETE FROM sqlite_master WHERE name = ?", (name,))
         raw.execute("PRAGMA writable_schema = OFF")
         raw.commit()
     finally:
