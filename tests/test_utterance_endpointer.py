@@ -17,6 +17,7 @@ Trace shape:
 from __future__ import annotations
 
 import struct
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -211,6 +212,45 @@ class TestReset:
 
         st.is_complete.assert_not_called()
         assert calls == []
+
+
+class TestSmartTurnOffloaded:
+    @pytest.mark.asyncio
+    async def test_is_complete_runs_off_event_loop_thread(self) -> None:
+        """SmartTurn ONNX inference must dispatch off the asyncio thread.
+
+        Sync inference (up to 16 s of audio through wav2vec2-derived
+        ONNX) blocks the loop long enough to trip Discord's heartbeat
+        watchdog and time out Deepgram's WebSocket. Pin offload via
+        ``threading.get_ident()`` — caller thread (loop) and inference
+        thread must differ.
+        """
+        calls: list[bytes] = []
+        pattern = [True] * 3 + [False] * 16
+        vad = _make_vad(pattern)
+        st = MagicMock()
+        seen_threads: list[int] = []
+
+        def _is_complete(_audio: bytes) -> bool:
+            seen_threads.append(threading.get_ident())
+            return True
+
+        st.is_complete = MagicMock(side_effect=_is_complete)
+        ep = UtteranceEndpointer(
+            vad=vad,
+            smart_turn=st,
+            on_turn_complete=_capture_callback(calls),
+            silence_ms=200,
+            speech_start_ms=32,
+        )
+        loop_thread = threading.get_ident()
+        for _ in range(len(pattern)):
+            await ep.feed_audio(_input_chunk(1500))
+
+        assert seen_threads, "is_complete should have been called"
+        assert loop_thread not in seen_threads, (
+            "is_complete blocked the event loop thread"
+        )
 
 
 class TestSubchunkFraming:

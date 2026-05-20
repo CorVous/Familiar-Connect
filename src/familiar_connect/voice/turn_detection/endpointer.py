@@ -23,6 +23,7 @@ A subsequent speech-then-silence cycle does.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from familiar_connect.voice.audio import Resampler48to16
@@ -131,7 +132,12 @@ class UtteranceEndpointer:
         if self._post_incomplete:
             return
 
-        verdict = self._smart_turn.is_complete(bytes(self._utterance))
+        # SmartTurn ONNX inference runs wav2vec2 over up to 16 s of audio;
+        # dispatch off-loop so a slow call can't stall Deepgram keepalives
+        # or Discord's voice heartbeat (10 s watchdog).
+        verdict = await asyncio.to_thread(
+            self._smart_turn.is_complete, bytes(self._utterance)
+        )
         if verdict:
             audio = bytes(self._utterance)
             self._utterance.clear()
