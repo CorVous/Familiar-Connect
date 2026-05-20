@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 import pytest
 
 from familiar_connect.history.store import Fact, FactSubject, HistoryStore
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _store_with_turns_and_facts() -> HistoryStore:
@@ -152,48 +147,6 @@ class TestFactSubjects:
             FactSubject(canonical_key="discord:123", display_at_write="Cass"),
         )
 
-    def test_migration_adds_subjects_column(self, tmp_path: Path) -> None:
-        """Existing installs without ``subjects_json`` get the column added.
-
-        Pre-existing rows return ``subjects=()`` — no backfill, the
-        feature is forward-only.
-        """
-        db_path = tmp_path / "history.db"
-        conn = sqlite3.connect(db_path)
-        conn.executescript(
-            """
-            CREATE TABLE facts (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id       TEXT    NOT NULL,
-                channel_id        INTEGER,
-                text              TEXT    NOT NULL,
-                source_turn_ids   TEXT    NOT NULL,
-                created_at        TEXT    NOT NULL,
-                superseded_at     TEXT,
-                superseded_by     INTEGER
-            );
-            CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id TEXT NOT NULL,
-                channel_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            );
-            INSERT INTO facts (familiar_id, channel_id, text,
-                               source_turn_ids, created_at)
-            VALUES ('fam', 1, 'Legacy fact.', '[1]', '2026-04-26T00:00:00+00:00');
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        store = HistoryStore(db_path)
-        facts = store.recent_facts(familiar_id="fam", limit=10)
-        assert len(facts) == 1
-        assert facts[0].text == "Legacy fact."
-        assert facts[0].subjects == ()
-
 
 class TestFactSupersession:
     """Version chains: facts that go stale are superseded, not overwritten.
@@ -290,51 +243,6 @@ class TestFactSupersession:
         store = _store_with_turns_and_facts()
         with pytest.raises(ValueError, match="unknown fact"):
             store.supersede_fact(familiar_id="fam", old_id=999, new_id=1)
-
-    def test_migration_adds_supersede_columns_to_pre_existing_table(
-        self, tmp_path: Path
-    ) -> None:
-        """Existing installs created ``facts`` without supersede columns.
-
-        Opening a HistoryStore against such a DB must add them
-        idempotently — no data loss, defaults to current.
-        """
-        db_path = tmp_path / "history.db"
-        # Hand-build the pre-supersession facts schema.
-        conn = sqlite3.connect(db_path)
-        conn.executescript(
-            """
-            CREATE TABLE facts (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id       TEXT    NOT NULL,
-                channel_id        INTEGER,
-                text              TEXT    NOT NULL,
-                source_turn_ids   TEXT    NOT NULL,
-                created_at        TEXT    NOT NULL
-            );
-            CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id TEXT NOT NULL,
-                channel_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            );
-            INSERT INTO facts (familiar_id, channel_id, text,
-                               source_turn_ids, created_at)
-            VALUES ('fam', 1, 'Old fact.', '[1]', '2026-04-26T00:00:00+00:00');
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        # Re-open via HistoryStore — migration should add the columns.
-        store = HistoryStore(db_path)
-        facts = store.recent_facts(familiar_id="fam", limit=10)
-        assert len(facts) == 1
-        assert facts[0].text == "Old fact."
-        assert facts[0].superseded_at is None
-        assert facts[0].superseded_by is None
 
 
 class TestFactBiTemporal:
@@ -522,50 +430,6 @@ class TestFactBiTemporal:
         )
         assert {f.text for f in slice_march} == {"Aria worked at Acme."}
 
-    def test_migration_adds_validity_columns(self, tmp_path: Path) -> None:
-        """Pre-existing ``facts`` tables get ``valid_from``/``valid_to`` added.
-
-        Pre-existing rows return ``valid_from = None`` and ``valid_to =
-        None`` — no backfill, the feature is forward-only. Default
-        reads still surface them (NULL ``valid_to`` ⇒ still applies).
-        """
-        db_path = tmp_path / "history.db"
-        conn = sqlite3.connect(db_path)
-        conn.executescript(
-            """
-            CREATE TABLE facts (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id       TEXT    NOT NULL,
-                channel_id        INTEGER,
-                text              TEXT    NOT NULL,
-                source_turn_ids   TEXT    NOT NULL,
-                created_at        TEXT    NOT NULL,
-                superseded_at     TEXT,
-                superseded_by     INTEGER,
-                subjects_json     TEXT
-            );
-            CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id TEXT NOT NULL,
-                channel_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            );
-            INSERT INTO facts (familiar_id, channel_id, text,
-                               source_turn_ids, created_at)
-            VALUES ('fam', 1, 'Legacy fact.', '[1]', '2026-04-26T00:00:00+00:00');
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        store = HistoryStore(db_path)
-        facts = store.recent_facts(familiar_id="fam", limit=10)
-        assert len(facts) == 1
-        assert facts[0].valid_from is None
-        assert facts[0].valid_to is None
-
 
 class TestFactImportance:
     """Importance score (M2): 1-10 hint for retrieval ranking.
@@ -645,46 +509,3 @@ class TestFactImportance:
             assert isinstance(score, float)
         # Order matches default search_facts (BM25 desc = best first).
         assert scored[0][1] <= scored[1][1]
-
-    def test_migration_adds_importance_column(self, tmp_path: Path) -> None:
-        """Pre-existing ``facts`` tables get ``importance`` added.
-
-        Legacy rows return ``importance=None``; no backfill — forward-only.
-        """
-        db_path = tmp_path / "history.db"
-        conn = sqlite3.connect(db_path)
-        conn.executescript(
-            """
-            CREATE TABLE facts (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id       TEXT    NOT NULL,
-                channel_id        INTEGER,
-                text              TEXT    NOT NULL,
-                source_turn_ids   TEXT    NOT NULL,
-                created_at        TEXT    NOT NULL,
-                superseded_at     TEXT,
-                superseded_by     INTEGER,
-                subjects_json     TEXT,
-                valid_from        TEXT,
-                valid_to          TEXT
-            );
-            CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id TEXT NOT NULL,
-                channel_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            );
-            INSERT INTO facts (familiar_id, channel_id, text,
-                               source_turn_ids, created_at)
-            VALUES ('fam', 1, 'Legacy fact.', '[1]', '2026-04-26T00:00:00+00:00');
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        store = HistoryStore(db_path)
-        facts = store.recent_facts(familiar_id="fam", limit=10)
-        assert len(facts) == 1
-        assert facts[0].importance is None

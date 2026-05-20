@@ -15,12 +15,6 @@ index dirs are also created lazily, alongside the DB. Multiple
 character folders can sit side-by-side under `data/familiars/`;
 only the one you point `FAMILIAR_ID` at is loaded per process.
 
-After upgrading past the SQLite→Turso migration (May 2026), each
-familiar directory may also contain `history.db.legacy-<UTC-ISO>` —
-a backup of the pre-migration SQLite file. Safe to delete once
-you've confirmed the new Turso DB is healthy. See
-[Turso migration](../architecture/turso-migration.md).
-
 ## Example `character.toml`
 
 ```toml

@@ -11,13 +11,13 @@ One database per familiar. Two core tables:
 
 Relational storage uses Turso (SQLite-compatible Rust rewrite); FTS
 lives in a sibling tantivy index under ``fts/turns/`` and ``fts/facts/``
-because pyturso wheels don't ship the FTS module yet. See
-``docs/architecture/turso-migration.md`` for the migration story.
+because pyturso wheels don't ship the FTS module.
 
 ``familiar_id`` is explicit (not implicit) so tests can exercise
 multiple familiars against one store. Synchronous API; the
 :class:`AsyncHistoryStore` wrapper dispatches calls to a thread pool
-that holds per-thread Turso connections.
+that funnels every Turso call onto one dedicated OS thread inside
+:class:`TursoConnection`.
 """
 
 from __future__ import annotations
@@ -484,140 +484,10 @@ class HistoryStore:
             fts_turns_path = fts_root / "turns"
             fts_facts_path = fts_root / "facts"
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db")
-        self._migrate_if_needed()
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._fts_turns = FtsIndex(fts_turns_path)
         self._fts_facts = FtsIndex(fts_facts_path)
-        # Tantivy indexes are independent files; on first run after the
-        # sqlite→turso migration (or after the user nukes ``fts/``)
-        # they're empty while ``turns``/``facts`` already have rows.
-        # Detect and bulk-reindex.
-        self._reindex_if_empty()
-
-    def _migrate_if_needed(self) -> None:
-        """Idempotent migrations for the ``turns`` and ``summaries`` tables."""
-        row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='turns'"
-        ).fetchone()
-        if row is None:
-            return
-
-        columns = {
-            col["name"]
-            for col in self._conn.execute("PRAGMA table_info(turns)").fetchall()
-        }
-
-        # legacy: add mode column if missing
-        if "mode" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN mode TEXT")
-            self._conn.commit()
-
-        # identity migration: drop bare ``speaker`` in favour of four
-        # author_* columns. Legacy speaker strings are preserved as
-        # ``author_display_name`` with a synthesised ``legacy-discord``
-        # platform key so historical turns keep their attribution.
-        # Cleanup debt: remove this branch + the related legacy test
-        # once every live install has been upgraded past the speaker
-        # schema. See docs/architecture/memory.md § Legacy history
-        # migration.
-        if "speaker" in columns:
-            for col in (
-                "author_platform",
-                "author_user_id",
-                "author_username",
-                "author_display_name",
-            ):
-                if col not in columns:
-                    self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
-            self._conn.execute("""
-                UPDATE turns
-                   SET author_display_name = speaker,
-                       author_platform = 'legacy-discord',
-                       author_user_id = speaker
-                 WHERE speaker IS NOT NULL
-                   AND author_platform IS NULL
-            """)
-            self._conn.execute("ALTER TABLE turns DROP COLUMN speaker")
-            self._conn.commit()
-            columns = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(turns)").fetchall()
-            }
-
-        for col in (
-            "author_platform",
-            "author_user_id",
-            "author_username",
-            "author_display_name",
-            "platform_message_id",
-            "reply_to_message_id",
-        ):
-            if col not in columns:
-                self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
-        if "guild_id" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN guild_id INTEGER")
-        # tool calling: assistant tool_calls stored as JSON, tool-role
-        # turns reference the call id they answered.
-        if "tool_calls_json" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN tool_calls_json TEXT")
-        if "tool_call_id" not in columns:
-            self._conn.execute("ALTER TABLE turns ADD COLUMN tool_call_id TEXT")
-        self._conn.commit()
-
-        # summaries: old PK was (familiar_id) only; new adds channel_id.
-        # summaries are a cache — drop + recreate is safe
-        summary_row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='summaries'"
-        ).fetchone()
-        if summary_row is not None:
-            summary_cols = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(summaries)").fetchall()
-            }
-            if "channel_id" not in summary_cols:
-                self._conn.execute("DROP TABLE summaries")
-                self._conn.commit()
-
-        # accounts: add profile columns if missing. Pre-existing rows
-        # default to NULL — populated next time the user is observed.
-        accounts_row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'"
-        ).fetchone()
-        if accounts_row is not None:
-            accounts_cols = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(accounts)").fetchall()
-            }
-            if "pronouns" not in accounts_cols:
-                self._conn.execute("ALTER TABLE accounts ADD COLUMN pronouns TEXT")
-            if "bio" not in accounts_cols:
-                self._conn.execute("ALTER TABLE accounts ADD COLUMN bio TEXT")
-            self._conn.commit()
-
-        # facts: add supersession columns if missing. Existing facts
-        # default to current (NULL on both columns).
-        facts_row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='facts'"
-        ).fetchone()
-        if facts_row is not None:
-            facts_cols = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(facts)").fetchall()
-            }
-            if "superseded_at" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_at TEXT")
-            if "superseded_by" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_by INTEGER")
-            if "subjects_json" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN subjects_json TEXT")
-            if "valid_from" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT")
-            if "valid_to" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN valid_to TEXT")
-            if "importance" not in facts_cols:
-                self._conn.execute("ALTER TABLE facts ADD COLUMN importance INTEGER")
-            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -633,29 +503,6 @@ class HistoryStore:
                 self._fts_facts.close()
             finally:
                 self._conn.close()
-
-    def _reindex_if_empty(self) -> None:
-        """Bulk-rebuild a tantivy index when relational rows lack matching docs.
-
-        Triggers on first run after the sqlite→turso migration script
-        (which copies relational data but doesn't rebuild FTS) and on
-        any later run where the user dropped ``fts/`` to recover from
-        a corrupted index.
-        """
-        if self._fts_turns.is_empty():
-            rows = self._conn.execute(
-                "SELECT id, content FROM turns ORDER BY id ASC"
-            ).fetchall()
-            if rows:
-                self._fts_turns.add_many([
-                    (int(r["id"]), str(r["content"])) for r in rows
-                ])
-        if self._fts_facts.is_empty():
-            rows = self._conn.execute(
-                "SELECT id, text FROM facts ORDER BY id ASC"
-            ).fetchall()
-            if rows:
-                self._fts_facts.add_many([(int(r["id"]), str(r["text"])) for r in rows])
 
     # ------------------------------------------------------------------
     # turns

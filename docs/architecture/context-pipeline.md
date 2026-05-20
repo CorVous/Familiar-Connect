@@ -154,11 +154,9 @@ strips retired rows after the FTS join. See
 below.
 
 `HistoryStore.rebuild_fts()` drops and repopulates the turns index
-from the `turns` table. The same logic runs implicitly on
-`HistoryStore.__init__` when the index dir is missing or empty but
-the relational tables have rows — which is exactly the state the
-SQLite→Turso migration leaves behind. Delete `fts/` to force a
-reindex.
+from the `turns` table. Run it after deleting `fts/` (or after any
+state where the tantivy index is out of sync with the relational
+tables).
 
 ### `FactExtractor`
 

@@ -10,14 +10,8 @@ ids so it can:
 
 from __future__ import annotations
 
-import sqlite3
-from typing import TYPE_CHECKING
-
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _author(user_id: str, name: str = "Cass") -> Author:
@@ -169,52 +163,3 @@ class TestTurnMentions:
         )
         store.record_mentions(turn_id=turn.id, canonical_keys=[])
         assert store.mentions_for_turn(turn_id=turn.id) == ()
-
-
-class TestMigrations:
-    def test_migration_adds_columns_to_existing_turns_table(
-        self, tmp_path: Path
-    ) -> None:
-        """Older DB without platform_message_id / reply_to_message_id."""
-        db_path = tmp_path / "history.db"
-        conn = sqlite3.connect(db_path)
-        conn.executescript(
-            """
-            CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id TEXT NOT NULL,
-                channel_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            );
-            INSERT INTO turns (familiar_id, channel_id, role, content, timestamp)
-            VALUES ('fam', 1, 'user', 'old', '2026-04-26T00:00:00+00:00');
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        store = HistoryStore(db_path)
-        # New columns + helpers exist; lookup of legacy turn returns None
-        # (no platform_message_id stored on it).
-        assert (
-            store.lookup_turn_by_platform_message_id(
-                familiar_id="fam", platform_message_id="anything"
-            )
-            is None
-        )
-        # New writes work.
-        new = store.append_turn(
-            familiar_id="fam",
-            channel_id=1,
-            role="user",
-            content="new",
-            author=_author("111"),
-            platform_message_id="new-msg-id",
-        )
-        looked = store.lookup_turn_by_platform_message_id(
-            familiar_id="fam", platform_message_id="new-msg-id"
-        )
-        assert looked is not None
-        assert looked.id == new.id

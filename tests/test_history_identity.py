@@ -9,14 +9,8 @@ preference order. See ``docs/architecture/context-pipeline.md``.
 
 from __future__ import annotations
 
-import sqlite3
-from typing import TYPE_CHECKING
-
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TestAccountsUpsert:
@@ -211,41 +205,3 @@ class TestResolveLabel:
         assert (
             store.resolve_label(canonical_key="discord:111", guild_id=None) == "Cassidy"
         )
-
-
-class TestMigrations:
-    def test_migration_adds_accounts_and_guild_nicks(self, tmp_path: Path) -> None:
-        """Old DBs without these tables get them on open."""
-        db_path = tmp_path / "history.db"
-        # Pre-create a turns table only (no accounts).
-        conn = sqlite3.connect(db_path)
-        conn.executescript(
-            """
-            CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id TEXT NOT NULL,
-                channel_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            );
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        store = HistoryStore(db_path)
-        # New tables should exist and be empty.
-        store.upsert_account(
-            Author(
-                platform="discord",
-                user_id="1",
-                username="ada",
-                display_name="Ada",
-            )
-        )
-        row = store._conn.execute(
-            "SELECT canonical_key FROM accounts WHERE canonical_key = ?",
-            ("discord:1",),
-        ).fetchone()
-        assert row is not None
