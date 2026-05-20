@@ -158,6 +158,16 @@ that matters, dump the post-migration Turso file's `turns` /
        again. If the second pass still leaves tables missing it
        raises with a clear message rather than continuing into a
        broken store.
+- **Open-time refusal on sqlite-era cruft** — pyturso 0.5.1 bails
+  at `turso.connect` time if the DB contains *any* trigger
+  (`Database contains triggers but --experimental-triggers flag is
+  not set`) or unparseable FTS5 virtual tables, both of which the
+  sqlite-era schema produced. `HistoryStore.__init__` runs
+  `_sanitise_db_via_sqlite3` *before* opening the
+  `TursoConnection`: it opens the file via stdlib `sqlite3` (same
+  on-disk format, supports `PRAGMA writable_schema`) and
+  `DELETE`s any `type='trigger'` row and any `name LIKE 'fts_%'`
+  row (along with their dependents). No-op on fresh DBs.
 - **Phantom `sqlite_master` rows** — the most pathological case
   observed on Windows: `sqlite_master` lists the expected table,
   but `SELECT 1 FROM <table> LIMIT 1` still raises

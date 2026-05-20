@@ -442,6 +442,68 @@ _EXPECTED_TABLES: frozenset[str] = frozenset(
 )
 
 
+def _sanitise_db_via_sqlite3(path: Path) -> None:
+    """Strip sqlite-era cruft pyturso can't open, before Turso touches the file.
+
+    The sqlite→turso migration script (or any earlier sqlite-era
+    run) can leave two things in ``sqlite_master`` that pyturso 0.5.1
+    refuses to load at ``turso.connect`` time:
+
+    * ``type='trigger'`` rows — pyturso bails with
+      ``Database contains triggers but --experimental-triggers flag is
+      not set`` even when the triggers themselves are unused leftovers
+      (e.g. the FTS5 sync triggers from the sqlite-era schema).
+    * ``fts_*`` virtual-table rows from the sqlite-era FTS5 index —
+      Turso has no FTS5 support, so these are permanently unparseable
+      and can also trip up trigger / index validation on open.
+
+    Open the file via stdlib ``sqlite3`` (same on-disk format, supports
+    ``PRAGMA writable_schema``) and ``DELETE`` both classes of rows
+    before pyturso ever sees the file. No-op if the file doesn't exist
+    or isn't a valid SQLite database (e.g. zero-byte from a previous
+    interrupted init).
+    """
+    if not path.exists() or path.stat().st_size < 16:
+        return
+    import sqlite3  # noqa: PLC0415 — stdlib, only used on this fallback path
+
+    try:
+        raw = sqlite3.connect(path)
+    except sqlite3.DatabaseError:
+        return
+    try:
+        triggers = [
+            row[0]
+            for row in raw.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            ).fetchall()
+        ]
+        fts = [
+            row[0]
+            for row in raw.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'fts_%'"
+            ).fetchall()
+        ]
+        if not triggers and not fts:
+            return
+        _logger.warning(
+            f"{ls.tag('History', ls.Y)} "
+            f"{ls.kv('preflight_triggers', ','.join(triggers) or '<none>')} "
+            f"{ls.kv('preflight_fts', ','.join(fts) or '<none>')} "
+            f"{ls.kv('action', 'strip')}"
+        )
+        raw.execute("PRAGMA writable_schema = ON")
+        for name in [*triggers, *fts]:
+            raw.execute(
+                "DELETE FROM sqlite_master WHERE name = ? OR tbl_name = ?",
+                (name, name),
+            )
+        raw.execute("PRAGMA writable_schema = OFF")
+        raw.commit()
+    finally:
+        raw.close()
+
+
 def _facts_validity_where(
     *,
     include_superseded: bool,
@@ -493,6 +555,12 @@ class HistoryStore:
             path = Path(db_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._path = path
+            # pyturso refuses to open DBs that contain triggers (without
+            # ``--experimental-triggers``) or FTS5 virtual tables. Both
+            # can be left behind from the sqlite-era schema on upgrade.
+            # Strip them via stdlib sqlite3 before pyturso ever sees
+            # the file.
+            _sanitise_db_via_sqlite3(path)
             self._conn = TursoConnection(path)
             fts_root = path.parent / "fts"
             fts_turns_path = fts_root / "turns"
@@ -642,25 +710,14 @@ class HistoryStore:
         if self._path is None:
             return
         broken = [t for t in sorted(_EXPECTED_TABLES) if not self._probe_table(t)]
-        stale_fts = sorted(
-            row["name"]
-            for row in self._conn.execute(
-                "SELECT name FROM sqlite_master WHERE name LIKE 'fts_%'"
-            ).fetchall()
-        )
-        if not broken and not stale_fts:
+        if not broken:
             return
         _logger.warning(
             f"{ls.tag('History', ls.Y)} "
-            f"{ls.kv('broken_tables', ','.join(broken) or '<none>')} "
-            f"{ls.kv('stale_fts_entries', ','.join(stale_fts) or '<none>')} "
+            f"{ls.kv('broken_tables', ','.join(broken))} "
             f"{ls.kv('action', 'heal')}"
         )
-        needs_sqlite3 = [
-            name
-            for name in [*broken, *stale_fts]
-            if not self._try_drop_via_turso(name)
-        ]
+        needs_sqlite3 = [name for name in broken if not self._try_drop_via_turso(name)]
         self._conn.commit()
         if needs_sqlite3:
             self._delete_sqlite_master_rows_via_sqlite3(needs_sqlite3)
@@ -744,8 +801,7 @@ class HistoryStore:
                 )
                 for name in names:
                     raw.execute(
-                        "DELETE FROM sqlite_master "
-                        "WHERE name = ? OR tbl_name = ?",
+                        "DELETE FROM sqlite_master WHERE name = ? OR tbl_name = ?",
                         (name, name),
                     )
                     if has_seq:
