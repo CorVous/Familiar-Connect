@@ -339,6 +339,18 @@ CREATE INDEX IF NOT EXISTS idx_reflections_familiar
 CREATE INDEX IF NOT EXISTS idx_reflections_familiar_channel
     ON reflections (familiar_id, channel_id, id);
 
+-- Reflection watermark. Advanced every tick (even when the LLM
+-- returns "[]" or all items are dropped) so a no-op tick can't pin
+-- the worker to an ever-growing turn window. Without this the
+-- reflection prompt balloons until the LLM bills the caller for the
+-- entire chat history every 60s.
+CREATE TABLE IF NOT EXISTS reflection_watermark (
+    familiar_id   TEXT    PRIMARY KEY,
+    last_turn_id  INTEGER NOT NULL,
+    last_fact_id  INTEGER NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
+
 -- Identity. One row per (platform, user_id). Last-write wins.
 CREATE TABLE IF NOT EXISTS accounts (
     canonical_key  TEXT PRIMARY KEY,           -- "discord:123" / "twitch:456"
@@ -2262,12 +2274,24 @@ class HistoryStore:
         *,
         familiar_id: str,
     ) -> tuple[int, int]:
-        """Return (last_turn_id, last_fact_id) of the newest reflection.
+        """Return (last_turn_id, last_fact_id) the worker last processed.
 
-        ``(0, 0)`` if no reflections exist for *familiar_id*. Used by
-        :class:`ReflectionWorker` to decide whether enough new turns
-        / facts have accumulated to write again.
+        Prefers the explicit ``reflection_watermark`` row — advanced on
+        every tick, including no-op ticks — and falls back to the
+        newest reflection row for back-compat with databases written
+        before the watermark table existed. ``(0, 0)`` if neither
+        exists.
         """
+        wm = self._conn.execute(
+            """
+            SELECT last_turn_id, last_fact_id
+              FROM reflection_watermark
+             WHERE familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if wm is not None:
+            return (int(wm["last_turn_id"]), int(wm["last_fact_id"]))
         row = self._conn.execute(
             """
             SELECT last_turn_id, last_fact_id
@@ -2281,6 +2305,36 @@ class HistoryStore:
         if row is None:
             return (0, 0)
         return (int(row["last_turn_id"]), int(row["last_fact_id"]))
+
+    def set_reflection_watermark(
+        self,
+        *,
+        familiar_id: str,
+        last_turn_id: int,
+        last_fact_id: int,
+    ) -> None:
+        """Upsert the reflection watermark for *familiar_id*.
+
+        Called by :class:`ReflectionWorker` at the end of every tick —
+        regardless of whether a reflection row was written — so a
+        no-substance LLM reply can't pin the worker to an ever-growing
+        turn window.
+        """
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO reflection_watermark
+                (familiar_id, last_turn_id, last_fact_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (familiar_id)
+            DO UPDATE SET
+                last_turn_id = excluded.last_turn_id,
+                last_fact_id = excluded.last_fact_id,
+                updated_at   = excluded.updated_at
+            """,
+            (familiar_id, int(last_turn_id), int(last_fact_id), ts),
+        )
+        self._conn.commit()
 
     def superseded_fact_ids(
         self,

@@ -225,3 +225,78 @@ class TestReflectionWorker:
         # Should not raise.
         await worker.tick()
         assert store.recent_reflections(familiar_id="fam", limit=10) == []
+
+    @pytest.mark.asyncio
+    async def test_watermark_advances_when_llm_returns_empty(self) -> None:
+        """Empty LLM reply still advances the watermark.
+
+        Without this, the next tick re-sends the same growing window —
+        ballooning into 100k-token prompts.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 25)
+        # LLM says "nothing of substance" — explicitly allowed by the
+        # prompt — but watermark must still advance.
+        llm = _ScriptedLLM(replies=["[]", "[]"])
+        worker = ReflectionWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=20,
+        )
+        await worker.tick()
+        # Add 5 more — still below threshold relative to the new mark.
+        _seed_turns(store, 5)
+        await worker.tick()
+        # Should have only called once; second tick noops because the
+        # watermark advanced past turn 25.
+        assert len(llm.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_watermark_advances_when_malformed_reply(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 25)
+        llm = _ScriptedLLM(replies=["not json", "not json"])
+        worker = ReflectionWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=20,
+        )
+        await worker.tick()
+        _seed_turns(store, 5)
+        await worker.tick()
+        # Second tick should be a noop — watermark advanced even though
+        # the first LLM reply was garbage.
+        assert len(llm.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_caps_turn_window_per_tick(self) -> None:
+        """Prompt never includes more than ``max_turns_per_tick`` turns.
+
+        Even if the watermark is far behind (e.g. first run on a
+        long-lived db), we cap the window so a single tick can't
+        explode into a 100k-token prompt.
+        """
+        store = HistoryStore(":memory:")
+        turn_ids = _seed_turns(store, 500)
+        llm = _ScriptedLLM(replies=["[]"])
+        worker = ReflectionWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=20,
+            max_turns_per_tick=50,
+        )
+        await worker.tick()
+
+        assert len(llm.calls) == 1
+        user_prompt = llm.calls[0][1].content
+        # Count "id=" markers — one per turn included.
+        included = user_prompt.count("- id=")
+        assert included == 50
+        # Most recent turns must be present; oldest must not.
+        assert f"id={turn_ids[-1]} " in user_prompt
+        assert f"id={turn_ids[0]} " not in user_prompt
+        assert f"id={turn_ids[-50]} " in user_prompt
+        assert f"id={turn_ids[-51]} " not in user_prompt
