@@ -11,20 +11,18 @@ One database per familiar. Two core tables:
 
 Relational storage uses Turso (SQLite-compatible Rust rewrite); FTS
 lives in a sibling tantivy index under ``fts/turns/`` and ``fts/facts/``
-because pyturso wheels don't ship the FTS module yet. See
-``docs/architecture/turso-migration.md`` for the migration story.
+because pyturso wheels don't ship the FTS module.
 
 ``familiar_id`` is explicit (not implicit) so tests can exercise
 multiple familiars against one store. Synchronous API; the
 :class:`AsyncHistoryStore` wrapper dispatches calls to a thread pool
-that holds per-thread Turso connections.
+that funnels every Turso call onto one dedicated OS thread inside
+:class:`TursoConnection`.
 """
 
 from __future__ import annotations
 
 import json
-import logging
-import re
 import struct
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -33,17 +31,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import turso
-
-from familiar_connect import log_style as ls
 from familiar_connect.history.fts import FtsIndex
 from familiar_connect.history.turso_compat import TursoConnection
 from familiar_connect.identity import Author
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-
-_logger = logging.getLogger(__name__)
 
 # Result rows come back as ``turso.Row``; spell as ``Any`` to keep the
 # private ``_row_to_*`` helpers free of a third-party type alias.
@@ -434,94 +427,6 @@ _TURN_COLS = (
     "platform_message_id, reply_to_message_id, guild_id"
 )
 
-# Table names declared in _SCHEMA — used by HistoryStore to verify the
-# schema is intact after init (pyturso 0.5.1 on Windows occasionally
-# drops CREATE TABLE statements; see _ensure_expected_tables).
-_EXPECTED_TABLES: frozenset[str] = frozenset(
-    re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _SCHEMA)
-)
-
-
-def _sanitise_db_via_sqlite3(path: Path) -> None:
-    """Strip sqlite-era cruft pyturso can't open, before Turso touches the file.
-
-    The sqlite→turso migration script (or any earlier sqlite-era
-    run) can leave several classes of rows in ``sqlite_master`` that
-    pyturso 0.5.1 refuses to load at ``turso.connect`` time:
-
-    * ``type='trigger'`` rows — pyturso bails with
-      ``Database contains triggers but --experimental-triggers flag is
-      not set`` even when the triggers themselves are unused leftovers
-      (e.g. the FTS5 sync triggers from the sqlite-era schema).
-    * ``fts_*`` virtual-table rows from the sqlite-era FTS5 index —
-      Turso has no FTS5 support, so these are permanently unparseable
-      and can also trip up trigger / index validation on open.
-    * Orphan auto-indexes (``sqlite_autoindex_<table>_N``) whose
-      parent ``<table>`` was removed by a prior heal pass — sqlite3
-      itself reports ``malformed database schema`` on the next read.
-
-    Open the file via stdlib ``sqlite3``, set
-    ``PRAGMA writable_schema = ON`` **before** any read so sqlite's
-    integrity validation is suppressed, then ``DELETE`` all the bad
-    rows. No-op if the file doesn't exist or isn't a valid SQLite
-    database (e.g. zero-byte from a previous interrupted init).
-    """
-    if not path.exists() or path.stat().st_size < 16:
-        return
-    import sqlite3  # noqa: PLC0415 — stdlib, only used on this fallback path
-
-    try:
-        raw = sqlite3.connect(path)
-    except sqlite3.DatabaseError:
-        return
-    try:
-        # writable_schema must be ON before the first read of sqlite_master —
-        # otherwise sqlite3 validates the schema and raises "malformed
-        # database schema" when an orphan index is present.
-        raw.execute("PRAGMA writable_schema = ON")
-        triggers = [
-            row[0]
-            for row in raw.execute(
-                "SELECT name FROM sqlite_master WHERE type='trigger'"
-            ).fetchall()
-        ]
-        fts = [
-            row[0]
-            for row in raw.execute(
-                "SELECT name FROM sqlite_master WHERE name LIKE 'fts_%'"
-            ).fetchall()
-        ]
-        orphan_indexes = [
-            row[0]
-            for row in raw.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='index' "
-                "AND tbl_name NOT IN "
-                "(SELECT name FROM sqlite_master WHERE type='table')"
-            ).fetchall()
-        ]
-        if not triggers and not fts and not orphan_indexes:
-            raw.execute("PRAGMA writable_schema = OFF")
-            return
-        _logger.warning(
-            f"{ls.tag('History', ls.Y)} "
-            f"{ls.kv('preflight_triggers', ','.join(triggers) or '<none>')} "
-            f"{ls.kv('preflight_fts', ','.join(fts) or '<none>')} "
-            f"{ls.kv('orphan_indexes', ','.join(orphan_indexes) or '<none>')} "
-            f"{ls.kv('action', 'strip')}"
-        )
-        for name in [*triggers, *fts]:
-            raw.execute(
-                "DELETE FROM sqlite_master WHERE name = ? OR tbl_name = ?",
-                (name, name),
-            )
-        for name in orphan_indexes:
-            raw.execute("DELETE FROM sqlite_master WHERE name = ?", (name,))
-        raw.execute("PRAGMA writable_schema = OFF")
-        raw.commit()
-    finally:
-        raw.close()
-
 
 def _facts_validity_where(
     *,
@@ -574,411 +479,15 @@ class HistoryStore:
             path = Path(db_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._path = path
-            # pyturso refuses to open DBs that contain triggers (without
-            # ``--experimental-triggers``) or FTS5 virtual tables. Both
-            # can be left behind from the sqlite-era schema on upgrade.
-            # Strip them via stdlib sqlite3 before pyturso ever sees
-            # the file.
-            _sanitise_db_via_sqlite3(path)
             self._conn = TursoConnection(path)
             fts_root = path.parent / "fts"
             fts_turns_path = fts_root / "turns"
             fts_facts_path = fts_root / "facts"
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db")
-        self._migrate_if_needed()
+        self._conn.executescript(_SCHEMA)
         self._conn.commit()
-        # pyturso 0.5.1 on Windows: migration's ``sqlite_master`` /
-        # ``PRAGMA table_info`` queries pollute the schema cache so
-        # the following ``CREATE TABLE IF NOT EXISTS`` silently fails
-        # with ``Parse error: no such table: …`` (swallowed by
-        # ``_execute_schema``). Reopening clears the cache so schema
-        # creation runs against a fresh read of sqlite_master. Skip
-        # for ``:memory:`` — reopening would lose the migration.
-        if self._path is not None:
-            self._conn.reopen()
-        self._execute_schema(_SCHEMA)
-        self._conn.commit()
-        # Reopen again so runtime queries see the just-created tables
-        # (same cache-staleness bug applies on the read side).
-        if self._path is not None:
-            self._conn.reopen()
-        # Defensive verify + one retry on a fresh connection: if the
-        # first ``_execute_schema`` pass silently swallowed a CREATE
-        # for any expected table, re-run on the fresh cache.
-        self._ensure_expected_tables()
-        # Heal phantom sqlite_master entries: pyturso 0.5.1 on Windows
-        # has been observed to leave rows in sqlite_master that point
-        # at no valid btree (likely from the sqlite→turso migration
-        # script creating tables it then never wrote to). Probe each
-        # expected table; drop + recreate any that can't be queried.
-        self._heal_phantom_tables()
         self._fts_turns = FtsIndex(fts_turns_path)
         self._fts_facts = FtsIndex(fts_facts_path)
-        # Tantivy indexes are independent files; on first run after the
-        # sqlite→turso migration (or after the user nukes ``fts/``)
-        # they're empty while ``turns``/``facts`` already have rows.
-        # Detect and bulk-reindex.
-        self._reindex_if_empty()
-
-    # pyturso 0.5.1 (Windows) emits a grab-bag of parse errors when
-    # re-running ``CREATE … IF NOT EXISTS`` against a populated DB:
-    # ``already exists`` (index cache stale), ``no such table`` /
-    # ``does not exist`` (schema cache lags behind the CREATE TABLE
-    # we just ran). All of them are benign on an idempotent schema —
-    # the table / index is either already present or will be created
-    # on a later run once Turso catches up.
-    _SCHEMA_PARSE_ERROR_FRAGMENTS = (
-        "already exists",
-        "no such table",
-        "does not exist",
-    )
-
-    def _execute_schema(self, script: str) -> None:
-        """Run an idempotent schema script, tolerating Turso parse quirks.
-
-        Plain ``executescript`` aborts on the first statement that
-        raises. Strip line + trailing comments (some contain ``;``)
-        then split and execute one statement at a time, swallowing
-        the parse-error variants listed in
-        ``_SCHEMA_PARSE_ERROR_FRAGMENTS`` because every statement in
-        ``_SCHEMA`` is shaped ``CREATE … IF NOT EXISTS``.
-        """
-        cleaned_lines: list[str] = []
-        for raw_line in script.splitlines():
-            comment_pos = raw_line.find("--")
-            line = raw_line[:comment_pos] if comment_pos != -1 else raw_line
-            if line.strip():
-                cleaned_lines.append(line)
-        cleaned = "\n".join(cleaned_lines)
-        for raw in cleaned.split(";"):
-            stmt = raw.strip()
-            if not stmt:
-                continue
-            try:
-                self._conn.execute(stmt)
-            except turso.DatabaseError as exc:
-                msg = str(exc).lower()
-                if any(f in msg for f in self._SCHEMA_PARSE_ERROR_FRAGMENTS):
-                    continue
-                raise
-
-    def _ensure_expected_tables(self) -> None:
-        """Re-run ``_SCHEMA`` if any expected table is missing.
-
-        pyturso 0.5.1 on Windows can silently drop a CREATE TABLE
-        statement when the schema cache is polluted by earlier
-        ``sqlite_master`` / ``PRAGMA`` queries: ``_execute_schema``
-        sees ``Parse error: no such table: <name>`` and swallows it,
-        but the table never lands on disk. After the post-schema
-        reopen, sweep ``sqlite_master`` for the expected set; if any
-        are missing, run ``_execute_schema`` again on the now-fresh
-        cache and reopen once more. Raise on the second miss.
-        """
-        if self._path is None:
-            return
-        for attempt in (1, 2):
-            rows = self._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-            actual = {row["name"] for row in rows}
-            missing = _EXPECTED_TABLES - actual
-            if not missing:
-                return
-            if attempt == 2:
-                msg = (
-                    f"history schema incomplete after retry; "
-                    f"missing tables: {sorted(missing)}"
-                )
-                raise RuntimeError(msg)
-            _logger.warning(
-                f"{ls.tag('History', ls.Y)} "
-                f"{ls.kv('missing_tables', ','.join(sorted(missing)))} "
-                f"{ls.kv('action', 'retry-schema')}"
-            )
-            self._execute_schema(_SCHEMA)
-            self._conn.commit()
-            self._conn.reopen()
-
-    def _heal_phantom_tables(self) -> None:
-        """Drop + recreate tables that sqlite_master lists but parser can't find.
-
-        pyturso 0.5.1 on Windows leaves rows in ``sqlite_master`` that
-        point at no valid btree: ``SELECT name FROM sqlite_master``
-        returns the table, but ``SELECT 1 FROM <table> LIMIT 1`` raises
-        ``Parse error: no such table: <name>``. Most-likely cause: the
-        ``sqlite→turso`` migration script (``HistoryStore(staging)``)
-        created the table via ``_SCHEMA`` but the table is never written
-        to during migration, leaving it in a bad state.
-
-        Also clean up stale ``fts_*`` virtual table entries left over
-        from the sqlite-era FTS5 schema — Turso has no FTS5 support so
-        those rows are permanently unparseable clutter.
-
-        Heal strategy: probe → ``DROP TABLE`` → escalate to a stdlib
-        ``sqlite3`` connection (same on-disk format, supports
-        ``PRAGMA writable_schema``) for surgical ``DELETE FROM
-        sqlite_master`` if pyturso can't even parse the ``DROP`` →
-        re-open under Turso and re-run ``_execute_schema`` so the
-        dropped tables get recreated. **Data inside a broken table
-        is unrecoverable** — by construction it was unreadable to
-        start with — but the migration's row-count check (see
-        ``scripts/migrate_sqlite_to_turso.py``) would have caught a
-        mismatch, so any table broken at init time was almost
-        certainly empty at migration time.
-        """
-        if self._path is None:
-            return
-        broken = [t for t in sorted(_EXPECTED_TABLES) if not self._probe_table(t)]
-        if not broken:
-            return
-        _logger.warning(
-            f"{ls.tag('History', ls.Y)} "
-            f"{ls.kv('broken_tables', ','.join(broken))} "
-            f"{ls.kv('action', 'heal')}"
-        )
-        needs_sqlite3 = [name for name in broken if not self._try_drop_via_turso(name)]
-        self._conn.commit()
-        if needs_sqlite3:
-            self._delete_sqlite_master_rows_via_sqlite3(needs_sqlite3)
-        else:
-            self._conn.reopen()
-        self._execute_schema(_SCHEMA)
-        self._conn.commit()
-        self._conn.reopen()
-        still_broken = [t for t in broken if not self._probe_table(t)]
-        if still_broken:
-            msg = f"unable to heal tables after recreate: {sorted(still_broken)}"
-            raise RuntimeError(msg)
-        if broken:
-            _logger.info(
-                f"{ls.tag('History', ls.G)} "
-                f"{ls.kv('healed_tables', ','.join(broken))} "
-                f"{ls.kv('result', 'ok')}"
-            )
-
-    def _probe_table(self, table: str) -> bool:
-        """Return ``True`` iff a no-op ``SELECT`` against *table* succeeds."""
-        try:
-            self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchall()  # noqa: S608
-        except turso.DatabaseError:
-            return False
-        return True
-
-    def _try_drop_via_turso(self, name: str) -> bool:
-        """Attempt ``DROP TABLE`` via the Turso connection.
-
-        Returns ``True`` if the drop succeeded, ``False`` if pyturso
-        refused because it can't parse the (phantom) table name —
-        caller falls back to a stdlib ``sqlite3`` surgical removal.
-        Other ``DatabaseError`` variants propagate.
-        """
-        try:
-            self._conn.execute(f"DROP TABLE {name}")
-        except turso.DatabaseError as exc:
-            msg = str(exc).lower()
-            if "no such table" in msg or "does not exist" in msg:
-                return False
-            raise
-        return True
-
-    def _delete_sqlite_master_rows_via_sqlite3(self, names: list[str]) -> None:
-        """Remove ``sqlite_master`` rows + dependent indexes via stdlib ``sqlite3``.
-
-        pyturso 0.5.1 doesn't support ``PRAGMA writable_schema``, so
-        we can't surgically delete phantom rows from ``sqlite_master``
-        through a Turso connection. Drop to stdlib ``sqlite3``, which
-        speaks the same on-disk format and supports the standard
-        PRAGMA, to remove the bad entries; then re-open Turso on the
-        repaired file so the rest of init can proceed.
-
-        For each name, deletes both the table row (``name = ?``) and
-        any dependent index rows (``tbl_name = ?``) — without the
-        latter, pyturso panics on the next open with
-        ``all automatic indexes parsed from sqlite_schema should have
-        been consumed, but N remain``. Also clears ``sqlite_sequence``
-        entries for AUTOINCREMENT tables.
-
-        Closes the current ``TursoConnection`` (releasing the file
-        lock), runs the sqlite3 session, then assigns a fresh
-        ``TursoConnection`` back into ``self._conn``.
-        """
-        if self._path is None:  # defensive — heal already guards this
-            return
-        self._conn.close()
-        try:
-            import sqlite3  # noqa: PLC0415 — stdlib, only used on this fallback path
-
-            raw = sqlite3.connect(self._path)
-            try:
-                raw.execute("PRAGMA writable_schema = ON")
-                has_seq = (
-                    raw.execute(
-                        "SELECT 1 FROM sqlite_master "
-                        "WHERE type='table' AND name='sqlite_sequence'"
-                    ).fetchone()
-                    is not None
-                )
-                for name in names:
-                    raw.execute(
-                        "DELETE FROM sqlite_master WHERE name = ? OR tbl_name = ?",
-                        (name, name),
-                    )
-                    if has_seq:
-                        raw.execute(
-                            "DELETE FROM sqlite_sequence WHERE name = ?", (name,)
-                        )
-                raw.execute("PRAGMA writable_schema = OFF")
-                raw.commit()
-            finally:
-                raw.close()
-        finally:
-            self._conn = TursoConnection(self._path)
-
-    def _safe_add_column(self, table: str, column: str, type_: str) -> None:
-        """ALTER TABLE ADD COLUMN, swallowing benign migration errors.
-
-        Tolerates two parse-error variants:
-
-        * ``duplicate column`` — column already added on a prior run
-        * ``no such table`` — table absent (or pyturso 0.5.1 reporting
-          phantom state inconsistent with ``sqlite_master``/``PRAGMA
-          table_info``; observed on Windows). ``_SCHEMA``'s
-          ``CREATE TABLE IF NOT EXISTS`` runs after migration and
-          creates the table fresh with the new columns.
-
-        Other ``DatabaseError`` instances propagate.
-        """
-        try:
-            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_}")
-        except turso.DatabaseError as exc:
-            msg = str(exc).lower()
-            if "duplicate column" in msg or "no such table" in msg:
-                return
-            raise
-
-    def _migrate_if_needed(self) -> None:
-        """Idempotent migrations for the ``turns`` and ``summaries`` tables."""
-        row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='turns'"
-        ).fetchone()
-        if row is None:
-            return
-
-        columns = {
-            col["name"]
-            for col in self._conn.execute("PRAGMA table_info(turns)").fetchall()
-        }
-
-        # legacy: add mode column if missing
-        if "mode" not in columns:
-            self._safe_add_column("turns", "mode", "TEXT")
-            self._conn.commit()
-
-        # identity migration: drop bare ``speaker`` in favour of four
-        # author_* columns. Legacy speaker strings are preserved as
-        # ``author_display_name`` with a synthesised ``legacy-discord``
-        # platform key so historical turns keep their attribution.
-        # Cleanup debt: remove this branch + the related legacy test
-        # once every live install has been upgraded past the speaker
-        # schema. See docs/architecture/memory.md § Legacy history
-        # migration.
-        if "speaker" in columns:
-            for col in (
-                "author_platform",
-                "author_user_id",
-                "author_username",
-                "author_display_name",
-            ):
-                if col not in columns:
-                    self._safe_add_column("turns", col, "TEXT")
-            self._conn.execute("""
-                UPDATE turns
-                   SET author_display_name = speaker,
-                       author_platform = 'legacy-discord',
-                       author_user_id = speaker
-                 WHERE speaker IS NOT NULL
-                   AND author_platform IS NULL
-            """)
-            self._conn.execute("ALTER TABLE turns DROP COLUMN speaker")
-            self._conn.commit()
-            columns = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(turns)").fetchall()
-            }
-
-        for col in (
-            "author_platform",
-            "author_user_id",
-            "author_username",
-            "author_display_name",
-            "platform_message_id",
-            "reply_to_message_id",
-        ):
-            if col not in columns:
-                self._safe_add_column("turns", col, "TEXT")
-        if "guild_id" not in columns:
-            self._safe_add_column("turns", "guild_id", "INTEGER")
-        # tool calling: assistant tool_calls stored as JSON, tool-role
-        # turns reference the call id they answered.
-        if "tool_calls_json" not in columns:
-            self._safe_add_column("turns", "tool_calls_json", "TEXT")
-        if "tool_call_id" not in columns:
-            self._safe_add_column("turns", "tool_call_id", "TEXT")
-        self._conn.commit()
-
-        # summaries: old PK was (familiar_id) only; new adds channel_id.
-        # summaries are a cache — drop + recreate is safe
-        summary_row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='summaries'"
-        ).fetchone()
-        if summary_row is not None:
-            summary_cols = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(summaries)").fetchall()
-            }
-            if "channel_id" not in summary_cols:
-                self._conn.execute("DROP TABLE summaries")
-                self._conn.commit()
-
-        # accounts: add profile columns if missing. Pre-existing rows
-        # default to NULL — populated next time the user is observed.
-        accounts_row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'"
-        ).fetchone()
-        if accounts_row is not None:
-            accounts_cols = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(accounts)").fetchall()
-            }
-            if "pronouns" not in accounts_cols:
-                self._safe_add_column("accounts", "pronouns", "TEXT")
-            if "bio" not in accounts_cols:
-                self._safe_add_column("accounts", "bio", "TEXT")
-            self._conn.commit()
-
-        # facts: add supersession columns if missing. Existing facts
-        # default to current (NULL on both columns).
-        facts_row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='facts'"
-        ).fetchone()
-        if facts_row is not None:
-            facts_cols = {
-                col["name"]
-                for col in self._conn.execute("PRAGMA table_info(facts)").fetchall()
-            }
-            if "superseded_at" not in facts_cols:
-                self._safe_add_column("facts", "superseded_at", "TEXT")
-            if "superseded_by" not in facts_cols:
-                self._safe_add_column("facts", "superseded_by", "INTEGER")
-            if "subjects_json" not in facts_cols:
-                self._safe_add_column("facts", "subjects_json", "TEXT")
-            if "valid_from" not in facts_cols:
-                self._safe_add_column("facts", "valid_from", "TEXT")
-            if "valid_to" not in facts_cols:
-                self._safe_add_column("facts", "valid_to", "TEXT")
-            if "importance" not in facts_cols:
-                self._safe_add_column("facts", "importance", "INTEGER")
-            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -994,29 +503,6 @@ class HistoryStore:
                 self._fts_facts.close()
             finally:
                 self._conn.close()
-
-    def _reindex_if_empty(self) -> None:
-        """Bulk-rebuild a tantivy index when relational rows lack matching docs.
-
-        Triggers on first run after the sqlite→turso migration script
-        (which copies relational data but doesn't rebuild FTS) and on
-        any later run where the user dropped ``fts/`` to recover from
-        a corrupted index.
-        """
-        if self._fts_turns.is_empty():
-            rows = self._conn.execute(
-                "SELECT id, content FROM turns ORDER BY id ASC"
-            ).fetchall()
-            if rows:
-                self._fts_turns.add_many([
-                    (int(r["id"]), str(r["content"])) for r in rows
-                ])
-        if self._fts_facts.is_empty():
-            rows = self._conn.execute(
-                "SELECT id, text FROM facts ORDER BY id ASC"
-            ).fetchall()
-            if rows:
-                self._fts_facts.add_many([(int(r["id"]), str(r["text"])) for r in rows])
 
     # ------------------------------------------------------------------
     # turns
