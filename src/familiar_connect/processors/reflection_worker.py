@@ -4,14 +4,22 @@ Compounds higher-order syntheses over recent turns + facts. Ticks
 slower than :class:`PeopleDossierWorker` (default 60 s vs 20 s) — the
 goal is one reflection-write per ~20-30 new turns, not per fact.
 
-The worker reads the latest reflection row's
-``(last_turn_id, last_fact_id)`` as its watermark; when at least
-``turns_threshold`` new turns have accumulated, it asks the LLM
-"what high-level questions do recent events raise?" and persists each
-answer as one ``reflections`` row with ``cited_turn_ids`` /
-``cited_fact_ids`` provenance. Rows whose only cited ids the LLM
-hallucinates are dropped silently; rows where some ids are valid keep
-the valid subset.
+The worker reads ``(last_turn_id, last_fact_id)`` from the
+``reflection_watermark`` table; when at least ``turns_threshold`` new
+turns have accumulated, it asks the LLM "what high-level questions do
+recent events raise?" and persists each answer as one ``reflections``
+row with ``cited_turn_ids`` / ``cited_fact_ids`` provenance. Rows
+whose only cited ids the LLM hallucinates are dropped silently; rows
+where some ids are valid keep the valid subset.
+
+Two guardrails prevent runaway token spend:
+
+* The window per tick is capped at ``max_turns_per_tick`` — even if
+  the watermark is far behind, only the most recent N turns enter the
+  prompt. Reflections are best-effort syntheses, not exhaustive.
+* The watermark advances at the end of every tick, even when the LLM
+  returns ``[]`` or every item is dropped. Without this, a no-op tick
+  re-sends the same growing window on the next tick.
 
 All LLM traffic is ``chat`` (not ``chat_stream``) — the worker runs
 off the hot path.
@@ -55,6 +63,7 @@ class ReflectionWorker:
         familiar_id: str,
         turns_threshold: int = 20,
         max_reflections_per_tick: int = 3,
+        max_turns_per_tick: int = 50,
         recent_facts_limit: int = 20,
         tick_interval_s: float = 60.0,
     ) -> None:
@@ -63,6 +72,7 @@ class ReflectionWorker:
         self._familiar_id = familiar_id
         self._turns_threshold = max(1, turns_threshold)
         self._max_per_tick = max(1, max_reflections_per_tick)
+        self._max_turns_per_tick = max(1, max_turns_per_tick)
         self._recent_facts_limit = max(0, recent_facts_limit)
         self._tick_interval_s = tick_interval_s
 
@@ -92,17 +102,47 @@ class ReflectionWorker:
         if latest_turn - prior_turn_wm < self._turns_threshold:
             return
 
+        latest_fact = await self._store.latest_fact_id(familiar_id=self._familiar_id)
+        # Always advance the watermark to ``latest_turn`` regardless of
+        # how this tick lands — empty LLM reply, malformed JSON, all
+        # items filtered, all are no-ops on the reflections table but
+        # must not pin the worker to a growing window.
+        try:
+            await self._do_tick(
+                prior_turn_wm=prior_turn_wm,
+                latest_turn=latest_turn,
+                latest_fact=latest_fact,
+            )
+        finally:
+            await self._store.set_reflection_watermark(
+                familiar_id=self._familiar_id,
+                last_turn_id=latest_turn,
+                last_fact_id=latest_fact,
+            )
+
+    async def _do_tick(
+        self,
+        *,
+        prior_turn_wm: int,
+        latest_turn: int,
+        latest_fact: int,
+    ) -> None:
         new_turns = await self._turns_in_range(
             min_id_exclusive=prior_turn_wm,
             max_id_inclusive=latest_turn,
         )
         if not new_turns:
             return
+        # Cap the window — bursty chat or first run on a long-lived db
+        # can otherwise ship hundreds of turns per tick. Keep the tail
+        # (most recent) since that's what reflection actually cares
+        # about; older turns are skipped, not deferred.
+        if len(new_turns) > self._max_turns_per_tick:
+            new_turns = new_turns[-self._max_turns_per_tick :]
 
         recent_facts = await self._store.recent_facts(
             familiar_id=self._familiar_id, limit=self._recent_facts_limit
         )
-        latest_fact = await self._store.latest_fact_id(familiar_id=self._familiar_id)
 
         prompt = _build_reflection_prompt(
             new_turns=new_turns,

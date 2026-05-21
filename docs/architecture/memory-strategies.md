@@ -252,17 +252,27 @@ row carries:
 - `cited_turn_ids` / `cited_fact_ids` — forever-provenance JSON
   arrays. Citations render as breadcrumbs `[T#42, F#7]` so the
   reading model can map a synthesis back to its source.
-- `last_turn_id` / `last_fact_id` — watermark snapshotting the
-  worker's view at write time. The next tick uses the newest row's
-  watermark as its lower bound; no separate watermark table.
+- `last_turn_id` / `last_fact_id` — snapshot of the worker's view at
+  write time. Citations render against this snapshot; the worker's
+  own watermark lives in a separate `reflection_watermark` table.
 
 `ReflectionWorker` ticks every 60 s; fires when at least
-`turns_threshold` (default 20) new turns have arrived since the
-newest reflection. It builds a prompt over the new turns plus the
-20 most recent facts, asks for at most 3 reflections per tick, and
-persists each answer that cites at least one valid turn or fact
+`turns_threshold` (default 20) new turns have arrived since the last
+watermark. It builds a prompt over the new turns (capped at
+`max_turns_per_tick`, default 50, taking the most-recent tail) plus
+the 20 most recent facts, asks for at most 3 reflections per tick,
+and persists each answer that cites at least one valid turn or fact
 id. Uncited answers are dropped — a free-floating opinion isn't a
 synthesis.
+
+The watermark advances to `latest_turn` at the end of every tick,
+even when the LLM returns `[]` or every item is filtered. Without
+that, a no-substance reply would pin the worker to a growing
+unprocessed window, and the next tick would re-send the same
+(plus-more) turns — the prompt would balloon into 100k+ tokens
+every 60 s. Capping `max_turns_per_tick` is the second guardrail:
+even on a fresh worker against a long-lived database, one tick
+can't ship hundreds of turns at the LLM.
 
 `ReflectionLayer` reads the most recent rows scoped to the active
 channel (channel-agnostic rows surface in every channel), renders
