@@ -47,7 +47,7 @@ class TurnRouter:
 
         Map not cleared — caller inspects post-shutdown state for
         diagnostics.
-        """  # keep — non-obvious invariant
+        """
         for scope in self._active.values():
             scope.cancel()
 

@@ -1,8 +1,9 @@
 """Transcriber Protocol + shared transcription result types.
 
-V3 phase 1: lifts the implicit shape of :class:`DeepgramTranscriber` into a
-``Protocol`` so local-model backends (FasterWhisper, Parakeet) drop in
-behind ``[providers.stt].backend`` without code-path changes downstream.
+V3 phase 1: lifts implicit shape of :class:`DeepgramTranscriber` into
+a ``Protocol`` so local-model backends (FasterWhisper, Parakeet) drop
+in behind ``[providers.stt].backend`` without code-path changes
+downstream.
 """
 
 from __future__ import annotations

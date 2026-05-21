@@ -556,9 +556,9 @@ def apply_message_edit(
 
 
 def _emoji_repr(emoji: discord.PartialEmoji) -> str:
-    """Stable string for a :class:`discord.PartialEmoji`.
+    """Stable string for :class:`discord.PartialEmoji`.
 
-    Unicode emoji → the char itself. Custom emoji → ``<:name:id>``
+    Unicode emoji → char itself. Custom emoji → ``<:name:id>``
     (or ``<a:name:id>`` for animated). Empty input returns ``""`` —
     caller short-circuits.
     """
@@ -582,9 +582,9 @@ def apply_reaction_delta(
 ) -> None:
     """Apply ``delta`` to one (message, emoji) row.
 
-    Pure dispatcher — separated from the gateway handler so it's
-    testable without spinning up a Discord bot. Channel-subscription
-    check up front avoids writing rows we'll never read.
+    Pure dispatcher — separated from gateway handler so testable
+    without spinning up Discord bot. Channel-subscription check up
+    front avoids writing rows we'll never read.
     """
     if not is_subscribed(channel_id):
         return
@@ -608,7 +608,7 @@ def apply_reaction_clear(
     message_id: int,
     emoji: discord.PartialEmoji | None = None,
 ) -> None:
-    """Drop all reactions on a message, optionally scoped to one emoji."""
+    """Drop all reactions on message, optionally scoped to one emoji."""
     if not is_subscribed(channel_id):
         return
     name = _emoji_repr(emoji) if emoji is not None else None
@@ -625,11 +625,11 @@ def apply_reaction_clear(
 
 
 def create_bot(familiar: Familiar) -> BotHandle:
-    """Construct the Discord client and register slash commands + events.
+    """Construct Discord client, register slash commands + events.
 
-    Returns a :class:`BotHandle` carrying the bot plus the
-    ``send_text`` callback bus processors use for outbound posts and
-    the per-channel voice runtime map.
+    Returns :class:`BotHandle` carrying bot plus ``send_text``
+    callback (bus processors use for outbound posts) and per-channel
+    voice runtime map.
     """
     intents = discord.Intents.default()
     intents.message_content = True
@@ -646,17 +646,17 @@ def create_bot(familiar: Familiar) -> BotHandle:
         """Resolve channel by id, post ``content`` via ``channel.send``.
 
         Resolves on each call — channel cache may miss right after
-        startup; ``fetch_channel`` is the fallback.
+        startup; ``fetch_channel`` is fallback.
 
-        ``reply_to_message_id``: when set, threads the post to that
+        ``reply_to_message_id``: when set, threads post to that
         message via ``discord.MessageReference``.
         ``mention_user_ids``: populates ``AllowedMentions(users=...)``
-        so only those user ids actually receive a notification, even
-        if the content contains other ``<@…>`` markers.
+        so only those user ids receive notification, even if content
+        contains other ``<@…>`` markers.
 
-        Returns the platform message id of the posted message (so
-        ``TextResponder`` can persist it for future reply lookups),
-        or ``None`` if the send failed.
+        Returns platform message id of posted message (so
+        ``TextResponder`` can persist for future reply lookups), or
+        ``None`` on send failure.
         """
         channel = bot.get_channel(channel_id)
         if channel is None:
@@ -673,7 +673,7 @@ def create_bot(familiar: Familiar) -> BotHandle:
             _logger.warning("send_text: channel %d not messageable", channel_id)
             return None
 
-        # Always restrict who can be pinged. Defers @everyone / role
+        # always restrict who can be pinged. defers @everyone / role
         # decisions to Discord's bot-and-role permissions.
         allowed = discord.AllowedMentions(
             everyone=False,
@@ -713,9 +713,9 @@ def create_bot(familiar: Familiar) -> BotHandle:
     async def trigger_typing(channel_id: int):  # noqa: ANN202 — py-cord typing CM
         """Run ``async with channel.typing():`` for *channel_id*.
 
-        Falls through silently when the channel isn't messageable yet
+        Falls through silently when channel isn't messageable yet
         (cache miss right after startup) or Discord rejects the
-        ``typing`` REST call; the bot still posts the reply.
+        ``typing`` REST call; bot still posts the reply.
         """
         channel = bot.get_channel(channel_id)
         if channel is None or not isinstance(channel, discord.abc.Messageable):
@@ -750,13 +750,13 @@ def create_bot(familiar: Familiar) -> BotHandle:
     )
 
     def resolve_member(channel_id: int, user_id: int) -> Author | None:
-        """Look up Discord member for a voice user_id; return Author.
+        """Look up Discord member for voice user_id; return Author.
 
         Order: voice-member side cache → ``guild.get_member`` (cache).
-        Returns ``None`` on miss; the caller treats that as an anonymous
-        voice turn rather than blocking on a Discord fetch — the audio
-        path can't tolerate REST round-trips. Prefetch warms the cache
-        in the background per ``_prefetch_voice_member``.
+        Returns ``None`` on miss; caller treats that as anonymous
+        voice turn rather than blocking on Discord fetch — audio path
+        can't tolerate REST round-trips. Prefetch warms cache in
+        background per ``_prefetch_voice_member``.
         """
         cached = handle.voice_members.get(user_id)
         if cached is not None:
@@ -837,7 +837,7 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             await ctx.respond("Could not join voice.", ephemeral=True)
             return
 
-        # Bring up sink + transcriber + voice source. Returns None if
+        # bring up sink + transcriber + voice source. returns None if
         # no transcriber configured — bot still joined for playback.
         rt = await _start_voice_intake(
             handle=handle,
@@ -878,10 +878,10 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             await ctx.respond("Not in a voice channel here.", ephemeral=True)
             return
 
-        # Defer immediately — Discord's interaction token expires after
-        # 3 s. With per-user transcribers each having their own WS,
-        # teardown easily exceeds that. defer() converts the response
-        # to "thinking…"; the followup below replaces it.
+        # defer immediately — Discord's interaction token expires after
+        # 3 s. with per-user transcribers each having their own WS,
+        # teardown easily exceeds that. defer() converts response to
+        # "thinking…"; followup below replaces it.
         with contextlib.suppress(discord.DiscordException):
             await ctx.defer(ephemeral=True)
 
@@ -952,12 +952,11 @@ def _register_events(
             for u in message.mentions
             if not getattr(u, "bot", False)
         )
-        # ``message.embeds`` is usually empty here — Discord unfurls
-        # URLs server-side and fires ``on_message_edit`` a moment
-        # later. Pre-cached unfurls (and bot-author embeds, though
-        # bots are filtered above) do arrive populated, so merge
-        # whatever is on the inbound message and let the edit
-        # handler patch the rest.
+        # ``message.embeds`` usually empty here — Discord unfurls URLs
+        # server-side and fires ``on_message_edit`` a moment later.
+        # pre-cached unfurls (and bot-author embeds, though bots
+        # filtered above) do arrive populated, so merge whatever is
+        # on inbound message and let edit handler patch the rest.
         text = compose_content_with_embeds(message.content, message.embeds or ())
         await ingest_event(
             source=text_source,
@@ -976,11 +975,11 @@ def _register_events(
         before: discord.Message,
         after: discord.Message,
     ) -> None:
-        # Discord fires this when an embed unfurl finishes (usually
-        # 1-2 s after the original message). We only care about
-        # transitions that *added* embed content — pure text edits
-        # aren't tracked here. Bot-authored edits skip too: the
-        # responder owns its own turn writes.
+        # Discord fires this when embed unfurl finishes (usually
+        # 1-2 s after original message). only care about transitions
+        # that *added* embed content — pure text edits aren't tracked
+        # here. bot-authored edits skip too: responder owns its own
+        # turn writes.
         if familiar.bot_user_id is not None and after.author.id == familiar.bot_user_id:
             return
         if after.author.bot:
@@ -1092,9 +1091,9 @@ def _register_events(
         sub = familiar.subscriptions.voice_in_guild(member.guild.id)
         if sub is None or sub.channel_id != after.channel.id:
             return
-        # Warm the voice-member cache. This is the only reliable place
-        # to learn voice-only members without the privileged ``members``
-        # intent — message events miss anyone who never types.
+        # warm voice-member cache. only reliable place to learn
+        # voice-only members without privileged ``members`` intent —
+        # message events miss anyone who never types.
         handle.voice_members[member.id] = Author.from_discord_member(member)
         _logger.info(
             f"{ls.tag('🎙️  Voice', ls.G)} "

@@ -1,15 +1,15 @@
 """Text reply orchestrator.
 
-Consumes ``discord.text`` events and produces an LLM reply, posted via
-the injected ``send_text`` callback. Mirrors :class:`VoiceResponder`
-but skips TTS — text channels render the assistant string directly.
+Consumes ``discord.text`` events; produces LLM reply, posted via
+injected ``send_text`` callback. Mirrors :class:`VoiceResponder` but
+skips TTS — text channels render assistant string directly.
 
 Owns user-turn writes for ``discord.text`` (single-writer per channel
-keeps read-after-write consistency for ``RecentHistoryLayer`` in the
-same task — a separate :class:`HistoryWriter` task would race with
-the responder's ``assemble`` call). Cancellation flows through
-:class:`TurnRouter` so future barge-in (e.g. user sends a follow-up
-mid-stream) cancels in-flight LLM work.
+keeps read-after-write consistency for ``RecentHistoryLayer`` in same
+task — separate :class:`HistoryWriter` task would race responder's
+``assemble`` call). Cancellation flows through :class:`TurnRouter`
+so future barge-in (e.g. user sends follow-up mid-stream) cancels
+in-flight LLM work.
 """
 
 from __future__ import annotations
@@ -27,33 +27,33 @@ from familiar_connect.identity import Author
 from familiar_connect.llm import LLMDelta, Message
 from familiar_connect.silence import SilentDetector
 
-# LLM ping vocabulary: ``[@DisplayName]`` markers in the model's
-# output. Symmetric with the form ``RecentHistoryLayer`` rewrites
-# inbound ``<@USER_ID>`` mentions into.
+# LLM ping vocabulary: ``[@DisplayName]`` markers in model's
+# output. symmetric with form ``RecentHistoryLayer`` rewrites
+# inbound ``<@USER_ID>`` mentions into
 _PING_MARKER_RE = re.compile(r"\[@([^\]\n]+)\]")
 
-# Thread-reply marker. Either ``[↩]`` (matches the inbound reply
-# glyph the read path uses) or ``[reply]`` for tokenizer safety.
-# Optional whitespace + token after the glyph captures a target
-# ``platform_message_id`` — the LLM can point at a specific message
-# (visible as ``#<id>`` in recent history). Bare ``[↩]`` keeps the
-# legacy meaning: thread to the triggering message.
+# thread-reply marker. either ``[↩]`` (matches inbound reply glyph
+# read path uses) or ``[reply]`` for tokenizer safety. optional
+# whitespace + token after glyph captures target
+# ``platform_message_id`` — LLM can point at specific message
+# (visible as ``#<id>`` in recent history). bare ``[↩]`` keeps
+# legacy meaning: thread to triggering message
 _THREAD_MARKER_RE = re.compile(r"\[(?:↩|reply)(?:\s+([^\]\n]+))?\]")
 
-# Defense-in-depth: when the model leaks a metadata-shaped prefix
-# like ``[#1500709436557445449]`` or ``[4:03AM]`` at the very start
-# of the reply (mimicking the recent-history rendering format), drop
-# it. Conservative: only matches a bracketed clump containing ``#``,
+# defense-in-depth: when model leaks metadata-shaped prefix like
+# ``[#1500709436557445449]`` or ``[4:03AM]`` at very start of reply
+# (mimicking recent-history rendering format), drop it.
+# conservative: only matches bracketed clump containing ``#``,
 # digits + ``:``, or ``AM/PM``, optionally followed by another such
-# bracket, so we don't eat a legitimate ``[note]`` opener.
+# bracket, so we don't eat a legitimate ``[note]`` opener
 _LEAKED_META_PREFIX_RE = re.compile(
     r"^\s*(?:\[[^\]\n]*(?:#\d|\d:\d|[AP]M)[^\]\n]*\]\s*)+"
 )
 
-# Short addendum to the system prompt explaining the two output
-# controls. Costs ~5 lines; doesn't enumerate per-channel
-# participants — the LLM grounds names in recent history, the
-# resolver attempts a match against active speakers at send time.
+# short addendum to system prompt explaining two output controls.
+# costs ~5 lines; doesn't enumerate per-channel participants — LLM
+# grounds names in recent history, resolver attempts match against
+# active speakers at send time
 _BOT_OUTPUT_INSTRUCTIONS = (
     "## Output controls\n\n"
     "- The `[H:MM Name #id]` prefix on each user message is read-only "

@@ -1,9 +1,9 @@
 """Memory-projector registry (M5).
 
-Lifts the watermark-driven writers — :class:`SummaryWorker`,
+Lifts watermark-driven writers — :class:`SummaryWorker`,
 :class:`FactExtractor`, :class:`PeopleDossierWorker`,
-:class:`ReflectionWorker` — behind a ``MemoryProjector`` Protocol so
-that operators can swap or extend the strategy via TOML:
+:class:`ReflectionWorker` — behind ``MemoryProjector`` Protocol so
+operators can swap or extend strategy via TOML:
 
 .. code:: toml
 
@@ -11,15 +11,15 @@ that operators can swap or extend the strategy via TOML:
    projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
 
 Default keeps every shipped projector. Third-party projectors
-(Graphiti, Cognee) register themselves alongside via
-:func:`register_projector` — same call signature as the built-ins.
+(Graphiti, Cognee) register alongside via
+:func:`register_projector` — same call signature as built-ins.
 
 Design constraints:
 
 * Each projector exposes ``name: str`` (label for logs / TaskGroup
   names) and ``async def run(self) -> None`` (forever loop). That's
-  it — the registry is intentionally thin.
-* Factories take a :class:`ProjectorContext` so the registry stays
+  it — registry is intentionally thin.
+* Factories take :class:`ProjectorContext` so registry stays
   decoupled from per-projector constructor signatures.
 """
 
@@ -45,11 +45,11 @@ if TYPE_CHECKING:
 class MemoryProjector(Protocol):
     """Backend writer projecting ``turns`` into a side-index.
 
-    Implementations run as a long-lived asyncio task. ``run`` is the
-    forever loop; cancellation stops the task. The shipped projectors
-    are watermark-driven and idempotent — each side-index is
-    regenerable from ``turns``. A third-party projector (Graphiti,
-    Cognee) plugs in here.
+    Implementations run as long-lived asyncio task. ``run`` is the
+    forever loop; cancellation stops the task. Shipped projectors are
+    watermark-driven and idempotent — each side-index regenerable
+    from ``turns``. Third-party projector (Graphiti, Cognee) plugs in
+    here.
     """
 
     name: str
@@ -61,16 +61,16 @@ class MemoryProjector(Protocol):
 class ProjectorContext:
     """Inputs available to projector factories.
 
-    Built once in ``commands/run.py`` and reused across every
-    factory in :data:`_REGISTRY`. Adding a new input here is the
-    extension point — callers don't need to know which projector
-    consumes which field.
+    Built once in ``commands/run.py``, reused across every factory in
+    :data:`_REGISTRY`. Adding a new input here is the extension
+    point — callers don't need to know which projector consumes which
+    field.
 
-    :param embedder: text → vector seam for the M6
-        ``fact_embedding`` projector. ``None`` when
-        ``[providers.embedding].backend = "off"`` (default); the
-        ``fact_embedding`` factory raises a config error in that case
-        so a typo never silently disables semantic recall.
+    :param embedder: text → vector seam for M6 ``fact_embedding``
+        projector. ``None`` when ``[providers.embedding].backend =
+        "off"`` (default); ``fact_embedding`` factory raises config
+        error in that case so a typo never silently disables semantic
+        recall.
     """
 
     store: AsyncHistoryStore
@@ -88,15 +88,14 @@ _REGISTRY: dict[str, ProjectorFactory] = {}
 def register_projector(name: str, factory: ProjectorFactory) -> None:
     """Register *factory* under *name*. Re-registration overwrites.
 
-    Third-party projectors call this at import time; the
-    ``[providers.memory].projectors`` selector then picks them up by
-    name.
+    Third-party projectors call at import time;
+    ``[providers.memory].projectors`` selector picks them up by name.
     """
     _REGISTRY[name] = factory
 
 
 def known_projectors() -> set[str]:
-    """Names registered today (built-ins + any third-party additions)."""
+    """Names registered today (built-ins plus any third-party additions)."""
     return set(_REGISTRY)
 
 
@@ -199,7 +198,7 @@ DEFAULT_PROJECTORS: tuple[str, ...] = (
 )
 """Names enabled when ``[providers.memory].projectors`` is unset.
 
-``fact_embedding`` is registered but **not** in the default tuple —
+``fact_embedding`` registered but **not** in the default tuple —
 M6 stays opt-in so default deployments don't need an embedder
 configured. Operators add it to their projector list once they've
 picked a backend in ``[providers.embedding]``.

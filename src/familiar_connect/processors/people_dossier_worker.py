@@ -58,7 +58,7 @@ class PeopleDossierWorker:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Forever loop — tick on an interval. Cancel to stop."""
+        """Forever loop; tick on interval. Cancel to stop."""
         while True:
             try:
                 await self.tick()
@@ -113,7 +113,7 @@ class PeopleDossierWorker:
         reply = await self._llm.chat(prompt)
         text = reply.content.strip()
         if not text:
-            # Don't overwrite a real dossier with an empty reply.
+            # don't overwrite real dossier with empty reply
             return
         await self._store.put_people_dossier(
             familiar_id=self._familiar_id,

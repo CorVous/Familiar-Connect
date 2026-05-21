@@ -40,17 +40,17 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-# Discord mention syntax: <@USER_ID>, optionally with ! for nick form.
+# discord mention syntax: <@USER_ID>, ! variant for nick form
 _DISCORD_MENTION_RE = re.compile(r"<@!?(\d+)>")
 
-# Soft-cap on a parent reply's full content when inlined into a child's prefix.
+# soft cap on parent reply's full content inlined into child's prefix
 _REPLY_PARENT_FULL_CAP = 400
-# Snippet cap when the parent is already in the recent window.
+# snippet cap when parent is already in recent window
 _REPLY_PARENT_SNIPPET_CAP = 80
 
 
 class Layer(Protocol):
-    """Protocol for a single prompt layer.
+    """Single prompt layer protocol.
 
     ``build`` returns the layer's text contribution to the system
     prompt (empty string opts out). ``invalidation_key`` is a short
@@ -70,10 +70,10 @@ class Layer(Protocol):
 
 
 def _content_hash(path: Path) -> str:
-    """Short content hash, used as an invalidation key for file layers.
+    """Short content hash; invalidation key for file layers.
 
-    Content hash (not mtime) so sub-second edits are caught —
-    filesystem mtime resolution is sometimes coarser than test timing.
+    Content hash (not mtime) so sub-second edits are caught — fs
+    mtime resolution is sometimes coarser than test timing.
     """
     if not path.exists():
         return "missing"
@@ -117,9 +117,9 @@ class CharacterCardLayer:
 class OperatingModeLayer:
     """Per-viewer-mode directive block.
 
-    Voice channels want terse replies; text channels allow markdown.
-    The ``modes`` mapping is keyed by :attr:`AssemblyContext.viewer_mode`.
-    Unknown modes yield ``""`` (layer opts out).
+    Voice channels want terse replies; text allows markdown.
+    ``modes`` keyed by :attr:`AssemblyContext.viewer_mode`. Unknown
+    modes yield ``""`` (layer opts out).
     """
 
     name: str = "operating_mode"
@@ -142,9 +142,9 @@ class OperatingModeLayer:
 class RecentHistoryLayer:
     """Verbatim tail of ``turns`` for the active channel.
 
-    Unlike the other layers, this contributes to the ``recent_history``
-    message list rather than the system prompt. :meth:`build` returns
-    ``""`` so the assembler's system-prompt composition skips it.
+    Unlike other layers, contributes to ``recent_history`` message
+    list rather than system prompt. :meth:`build` returns ``""`` so
+    assembler's system-prompt composition skips it.
     """
 
     name: str = "recent_history"
@@ -182,30 +182,29 @@ class RecentHistoryLayer:
         """Last ``window_size`` turns as LLM messages.
 
         User turns get a ``name`` (platform:user_id) + ``[HH:MM
-        display_name]`` content prefix — needed for multi-user channels
-        to distinguish speakers and gauge rhythm.
+        display_name]`` content prefix — multi-user channels need
+        speaker disambiguation and rhythm cues.
 
-        Reply marker. Turns whose ``reply_to_message_id`` resolves to a
-        known parent get a ``↩`` prefix carrying parent's author + text.
-        Depth adapts: in-window parents contribute a short snippet (full
-        text rendering imminent); out-of-window parents contribute full
-        content (capped) so the reply stays intelligible.
+        Reply marker. Turns whose ``reply_to_message_id`` resolves to
+        a known parent get a ``↩`` prefix carrying parent's author +
+        text. Depth-adaptive: in-window parents contribute a short
+        snippet (full text rendering imminent); out-of-window parents
+        contribute full content (capped) so reply stays intelligible.
 
         Mention rewriting. Discord ``<@USER_ID>`` / ``<@!USER_ID>``
         become ``[@DisplayName]`` via :meth:`HistoryStore.resolve_label`
-        — symmetric with the LLM's expected output form.
+        — symmetric with LLM's expected output form.
 
-        Reactions. Each turn's ``platform_message_id`` is looked up in
-        ``message_reactions`` (single batch query for the whole window)
-        and rendered as a trailing ``[reactions: 👍 x3 ❤️ x1]`` suffix.
+        Reactions. Each turn's ``platform_message_id`` looked up in
+        ``message_reactions`` (single batch query for whole window),
+        rendered as trailing ``[reactions: 👍 x3 ❤️ x1]`` suffix.
 
-        Voice-fragment coalescing. Deepgram emits one ``user`` turn per
-        segment-final, so a long monologue arrives as several
-        consecutive same-speaker rows. Merge them into one rendered
-        message — earliest timestamp, content joined by single space —
+        Voice-fragment coalescing. Deepgram emits one ``user`` turn
+        per segment-final, so a long monologue arrives as several
+        consecutive same-speaker rows. Merged into one rendered
+        message (earliest timestamp, content joined by single space)
         when neither side carries a platform message id or reply
-        marker, and the gap between them is within
-        ``coalesce_max_gap_seconds``.
+        marker and gap between them ≤ ``coalesce_max_gap_seconds``.
         """
         turns = await self._store.recent(
             familiar_id=ctx.familiar_id,
@@ -246,16 +245,16 @@ class RecentHistoryLayer:
 
 
 def _silence_fold_index(turns: list[HistoryTurn], *, min_gap_seconds: float) -> int:
-    """Return index of first turn to keep after the last qualifying gap.
+    """Index of first turn to keep after the last qualifying gap.
 
-    Scans *turns* (oldest-first) and returns the index of the turn
-    immediately following the last gap >= *min_gap_seconds*. Returns 0
-    when no qualifying gap exists (keep all) or when disabled (≤ 0).
+    Scans *turns* oldest-first; returns index of turn immediately
+    following the last gap >= *min_gap_seconds*. 0 when no qualifying
+    gap exists (keep all) or when disabled (≤ 0).
 
-    Using the *last* qualifying gap means the fold point advances as
-    the channel fills with new bursts, which keeps the retained window
-    stable: once a gap is no longer the last one, earlier turns were
-    already summarised by the rolling summary worker.
+    Using the *last* qualifying gap means fold point advances as
+    channel fills with new bursts, keeping the retained window
+    stable: once a gap is no longer last, earlier turns were already
+    summarised by rolling summary worker.
     """
     if min_gap_seconds <= 0 or len(turns) < 2:
         return 0
@@ -274,12 +273,13 @@ def _coalesce_voice_fragments(
 
     Merges turns where:
     - same ``role`` and same ``author.canonical_key``
-    - both sides lack ``platform_message_id`` and ``reply_to_message_id``
-      (Discord text turns and explicit replies are out of scope)
+    - both sides lack ``platform_message_id`` and
+      ``reply_to_message_id`` (Discord text turns + explicit replies
+      out of scope)
     - timestamp gap ≤ ``max_gap_seconds``
 
-    Merged turn keeps the earliest timestamp and joins content with a
-    single space. ``max_gap_seconds <= 0`` disables coalescing.
+    Merged turn keeps earliest timestamp; joins content with single
+    space. ``max_gap_seconds <= 0`` disables coalescing.
     """
     if max_gap_seconds <= 0 or not turns:
         return turns
@@ -333,15 +333,16 @@ def _render_fact_line(
     """Render fact text with optional rename annotations.
 
     Original text preserved verbatim — that's what was observed. For
-    each subject whose current display name differs from the baked-in
-    one, append a soft hint: ``(Cass is now known as peeks)``.
-    Unchanged names / unresolvable canonical keys add nothing.
+    each subject whose current display name differs from the
+    baked-in one, append a soft hint: ``(Cass is now known as
+    peeks)``. Unchanged names / unresolvable canonical keys add
+    nothing.
 
     Subject → canonical_key is the extractor's best guess, not
-    authoritative — mic-sharing and relays break 1:1 mapping. Render is
-    intentionally additive (not substituted) to preserve the original.
+    authoritative — mic-sharing and relays break 1:1 mapping. Render
+    is additive (not substituted) to preserve the original.
     Resolution via :meth:`HistoryStore.resolve_label` so active-guild
-    nicknames beat the snapshot name.
+    nicknames beat snapshot name.
     """
     if not fact.subjects:
         return fact.text

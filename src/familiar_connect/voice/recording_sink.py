@@ -1,4 +1,4 @@
-"""Custom py-cord Sink that bridges threaded audio capture to asyncio."""
+"""py-cord Sink bridging threaded audio capture to asyncio."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _logger = logging.getLogger(__name__)
 
 
 class RecordingSink(Sink):
-    """Stereo-to-mono conversion + thread-safe queue bridge for transcription.
+    """Stereo→mono + thread-safe queue bridge for transcription.
 
     py-cord calls :meth:`write` from a background thread;
     ``call_soon_threadsafe`` pushes to the asyncio queue.
@@ -41,7 +41,7 @@ class RecordingSink(Sink):
 
     @Filters.container
     def write(self: Self, data: bytes, user: int) -> None:
-        """Convert stereo to mono, push ``(user, mono)`` to queue.
+        """Convert stereo→mono, push ``(user, mono)`` to queue.
 
         Called from py-cord's recording thread — must not ``await``.
         """
@@ -59,4 +59,4 @@ class RecordingSink(Sink):
         self.finished = True
 
     def format_audio(self: Self, audio: object) -> None:
-        """No-op — sink does not write audio to files."""
+        """No-op — sink doesn't write audio to files."""

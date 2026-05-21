@@ -1,6 +1,6 @@
 """Per-character configuration from TOML.
 
-Loads ``character.toml`` once on startup, deep-merged over the
+Loads ``character.toml`` once on startup, deep-merged over
 ``_default/character.toml`` defaults.
 """
 
@@ -26,7 +26,7 @@ tier has its own :class:`TierBudget` envelope.
 
 
 class ConfigError(Exception):
-    """Raised when a config file is malformed or references an unknown value."""
+    """Malformed config file or unknown value reference."""
 
 
 LLM_SLOT_NAMES: frozenset[str] = frozenset({"fast", "prose", "background"})
@@ -45,13 +45,13 @@ REASONING_LEVELS: frozenset[str] = frozenset({"off", "low", "medium", "high"})
 
 * ``"off"`` — explicitly suppress (OpenRouter ``reasoning.exclude``).
 * ``"low"`` / ``"medium"`` / ``"high"`` — effort levels.
-* omitted (``None``) — defer to the model's default.
+* omitted (``None``) — defer to model's default.
 """
 
 
 @dataclass(frozen=True)
 class LLMSlotConfig:
-    """Per-call-site LLM config loaded from a ``[llm.<slot>]`` TOML section."""
+    """Per-call-site LLM config from ``[llm.<slot>]`` TOML section."""
 
     model: str
     temperature: float | None = None
@@ -77,12 +77,12 @@ class LocalTurnConfig:
     """V1 local-turn-detection knobs from ``[providers.turn_detection.local]``.
 
     Read only when ``[providers.turn_detection].strategy = "ten+smart_turn"``.
-    Defaults match the V1 field-tested values; rarely need tweaking.
+    Defaults match V1 field-tested values; rarely need tweaking.
 
-    Smart Turn weights are pulled from HuggingFace on first use (cached
-    under ``~/.cache/huggingface``). Default filename is the CPU ONNX
-    export — switch to ``smart-turn-v3.2-gpu.onnx`` if ``onnxruntime-gpu``
-    is installed.
+    Smart Turn weights pulled from HuggingFace on first use (cached
+    under ``~/.cache/huggingface``). Default filename is CPU ONNX
+    export — switch to ``smart-turn-v3.2-gpu.onnx`` if
+    ``onnxruntime-gpu`` installed.
     """
 
     smart_turn_repo_id: str = "pipecat-ai/smart-turn-v3"
@@ -110,7 +110,7 @@ _STT_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet", "faster_whisp
 class DeepgramSTTConfig:
     """Deepgram knobs from ``[providers.stt.deepgram]``.
 
-    Non-secret. ``DEEPGRAM_API_KEY`` is the only env input.
+    Non-secret. ``DEEPGRAM_API_KEY`` is only env input.
     """
 
     model: str = "nova-3"
@@ -146,8 +146,8 @@ class FasterWhisperSTTConfig:
     """FasterWhisper (CTranslate2) knobs from ``[providers.stt.faster_whisper]``.
 
     Local CTranslate2-backed Whisper. Same pairing requirement as
-    Parakeet — no internal silence detector, so ``finalize()`` is
-    driven by the local turn detector.
+    Parakeet — no internal silence detector, so ``finalize()`` driven
+    by local turn detector.
     """
 
     model_size: str = "small"  # "tiny" | "base" | "small" | "medium" | "large-v3"
@@ -180,7 +180,7 @@ DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 
 @dataclass(frozen=True)
 class TTSConfig:
-    """Text-to-speech config loaded from the ``[tts]`` TOML section."""
+    """Text-to-speech config from ``[tts]`` TOML section."""
 
     provider: str = "azure"
     cartesia_voice_id: str | None = None
@@ -202,13 +202,13 @@ class DiscordTextConfig:
     """``[discord.text]`` knobs — typing-indicator + interruption behavior.
 
     ``respond_to_typing``: treat other users' typing-start events as
-    interruptions of the bot's in-flight reply (cancels the active
+    interruptions of bot's in-flight reply (cancels active
     :class:`TurnScope`). Default ``True`` — respect users typing.
     ``typing_backoff_initial_s`` / ``typing_backoff_max_s``: when
     another bot (e.g. another familiar-connect instance) is typing in
-    the same channel, hold off responding for an exponentially
-    increasing window — initial doubles toward max — to avoid two
-    bots pingponging on each other's typing events.
+    same channel, hold off responding for exponentially increasing
+    window — initial doubles toward max — to avoid two bots
+    pingponging on each other's typing events.
     """
 
     respond_to_typing: bool = True

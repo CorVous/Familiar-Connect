@@ -1,9 +1,9 @@
 """Utterance endpointer — TEN-VAD + Smart Turn over a 48 kHz PCM stream.
 
 Drives V1 phase 2: per-user audio in, "turn complete" callback out.
-Owns three building blocks:
+Three building blocks:
 
-- :class:`Resampler48to16` — 3:1 decimation to TEN-VAD's native rate.
+- :class:`Resampler48to16` — 3:1 decimation to TEN-VAD native rate.
 - :class:`TenVAD` — per-16 ms is-speech probability.
 - :class:`SmartTurnDetector` — semantic completion classifier.
 
@@ -16,9 +16,9 @@ State machine (per user):
 - ``POST_INCOMPLETE`` → fresh speech → ``SPEAKING`` again
 - ``POST_INCOMPLETE`` → continued silence → no reclassification
 
-The classifier is invoked on the silence-after-speech edge only;
-extra silence after an ``incomplete`` verdict doesn't refire it.
-A subsequent speech-then-silence cycle does.
+Classifier invoked on the silence-after-speech edge only; extra
+silence after an ``incomplete`` verdict doesn't refire it. Subsequent
+speech-then-silence cycle does.
 """
 
 from __future__ import annotations
@@ -45,10 +45,10 @@ class UtteranceEndpointer:
     """Per-user local turn-detection state machine.
 
     Caller feeds 48 kHz mono int16 PCM via :meth:`feed_audio` (any
-    chunk length); endpointer resamples, frames into 16 ms VAD windows,
-    and on a silence-after-speech edge runs Smart Turn over the buffered
-    16 kHz utterance audio. ``on_turn_complete`` is awaited with the
-    buffered audio whenever Smart Turn classifies ``complete``.
+    chunk length); endpointer resamples, frames into 16 ms VAD
+    windows, and on silence-after-speech edge runs Smart Turn over
+    buffered 16 kHz utterance audio. ``on_turn_complete`` awaited
+    with buffered audio whenever Smart Turn classifies ``complete``.
     """
 
     def __init__(
@@ -67,7 +67,7 @@ class UtteranceEndpointer:
         self._speech_chunks_threshold = max(1, int(speech_start_ms / _VAD_CHUNK_MS))
 
         self._resampler = Resampler48to16()
-        # remainder bytes from a partial VAD frame — accumulate next feed
+        # remainder bytes from partial VAD frame — accumulate next feed
         self._frame_carry: bytearray = bytearray()
         self._utterance: bytearray = bytearray()
 
@@ -78,7 +78,7 @@ class UtteranceEndpointer:
         self._silence_streak: int = 0
 
     def reset(self) -> None:
-        """Drop all buffered audio + VAD/streak state. Resampler resets too."""
+        """Drop buffered audio + VAD/streak state; resets resampler too."""
         self._resampler.reset()
         self._frame_carry.clear()
         self._utterance.clear()
@@ -89,14 +89,14 @@ class UtteranceEndpointer:
         self._vad.reset()
 
     async def feed_audio(self, pcm_48k: bytes) -> None:
-        """Resample, frame into 16 ms VAD windows, advance the state machine."""
+        """Resample, frame into 16 ms VAD windows, advance state machine."""
         if not pcm_48k:
             return
         resampled = self._resampler.feed(pcm_48k)
         if not resampled:
             return
         self._frame_carry.extend(resampled)
-        # consume as many full VAD frames as the carry holds
+        # consume as many full VAD frames as carry holds
         while len(self._frame_carry) >= _VAD_CHUNK_BYTES:
             frame = bytes(self._frame_carry[:_VAD_CHUNK_BYTES])
             del self._frame_carry[:_VAD_CHUNK_BYTES]
@@ -127,14 +127,14 @@ class UtteranceEndpointer:
         if self._silence_streak < self._silence_chunks_threshold:
             return
 
-        # silence threshold hit after speech → classify (unless we already did
-        # and got `incomplete` and haven't seen new speech since).
+        # silence threshold hit after speech → classify (unless already
+        # did and got `incomplete` with no new speech since).
         if self._post_incomplete:
             return
 
-        # SmartTurn ONNX inference runs wav2vec2 over up to 16 s of audio;
-        # dispatch off-loop so a slow call can't stall Deepgram keepalives
-        # or Discord's voice heartbeat (10 s watchdog).
+        # SmartTurn ONNX runs wav2vec2 over up to 16 s of audio;
+        # dispatch off-loop so slow call can't stall Deepgram
+        # keepalives or Discord voice heartbeat (10 s watchdog).
         verdict = await asyncio.to_thread(
             self._smart_turn.is_complete, bytes(self._utterance)
         )
@@ -147,6 +147,6 @@ class UtteranceEndpointer:
             self._vad.reset()
             await self._on_complete(audio)
         else:
-            # keep buffer; await fresh speech, then a fresh silence streak
+            # keep buffer; await fresh speech, then fresh silence streak
             self._post_incomplete = True
             self._speaking = False

@@ -166,7 +166,7 @@ Two layers pin the state machine:
 ## STT (transcription)
 
 **Today:** `DeepgramTranscriber` in `familiar_connect.stt.deepgram`.
-Per-speaker clone-from-template pattern; one stream per Discord user,
+Per-speaker clone-from-template; one stream per Discord user,
 lazy-opened, closed after `idle_close_s`.
 
 **Pluggability:** V3 phase 1 lifted the clone-template shape into a
@@ -177,17 +177,17 @@ the Protocol; backend selection lives in `stt.factory`, dispatched on
 
 V3 phase 2 added `ParakeetTranscriber` (NeMo Parakeet-TDT 0.6B v3,
 local, no API key); phase 3 added `FasterWhisperTranscriber`
-(`faster-whisper` over CTranslate2). Both use buffer-and-finalize
-semantics: 48 kHz Discord PCM is resampled to 16 kHz mono and
-accumulated; `finalize()` runs the model and emits one `is_final=True`
-result. Neither has an internal endpointer, so both must pair with
+(`faster-whisper` over CTranslate2). Both use buffer-and-finalize:
+48 kHz Discord PCM is resampled to 16 kHz mono and accumulated;
+`finalize()` runs the model and emits one `is_final=True` result.
+Neither has an internal endpointer, so both must pair with
 `[providers.turn_detection].strategy = "ten+smart_turn"` — the local
 endpointer drives `finalize()` on turn-complete.
 
 Install with `uv sync --extra local-turn --extra local-stt-parakeet`
 or `--extra local-stt-whisper` (or both). Parakeet pulls torch +
-~600 MB of weights; FasterWhisper is lighter (~150 MB for the `small`
-model, no torch).
+~600 MB of weights; FasterWhisper is lighter (~150 MB for `small`,
+no torch).
 
 **Partial vs final transcripts.** Modal's benchmark: partials are a
 UX feature, not a latency feature. The LLM can't start until the
@@ -198,8 +198,8 @@ partials.
 ## LLM
 
 `LLMClient.chat_stream` over OpenRouter. Already streaming, cancellable
-via `TurnScope`. Stays. Lesson: don't waste the streaming property —
-feed the next stage incrementally.
+via `TurnScope`. Stays. Lesson: don't waste streaming — feed the next
+stage incrementally.
 
 ## Sentence streaming
 
@@ -211,8 +211,8 @@ perceived-latency win Pipecat's `SentenceAggregator` ships.
 
 Splitter is abbreviation-aware: `Mr.` / `Dr.` / `etc.` /
 single-letter initials (`J. K. Rowling`) don't trip a boundary. A
-trailing partial that never reaches a terminator (model omits the
-final period) is drained on stream end via `flush()` and spoken last.
+trailing partial without a terminator (model omits the final period)
+is drained on stream end via `flush()` and spoken last.
 
 **Silent sentinel.** `SilentDetector` runs ahead of the splitter on
 every delta. Sentences finalised before the gate decides are buffered;
@@ -222,9 +222,8 @@ flush and the streamer feeds TTS as new sentences arrive.
 **Cancellation.** Each `await self._tts.speak(sentence, scope=...)` is
 awaited serially. Barge-in cancels the current `TurnScope`;
 `DiscordVoicePlayer`'s poll loop cuts the in-flight sentence within
-~20 ms and the responder bails before queueing the next sentence.
-The assistant turn records only if the full reply played without
-cancellation.
+~20 ms and the responder bails before queueing the next. The
+assistant turn records only if the full reply played uncancelled.
 
 ## TTS
 
@@ -240,16 +239,16 @@ Already a Protocol seam. Adding a backend is one new class.
 `CartesiaTTSClient` exposes a second method,
 `synthesize_stream(text) → AsyncIterator[bytes]`, yielding raw mono
 `pcm_s16le` chunks as the WebSocket delivers them. When the configured
-TTS client implements this method, `DiscordVoicePlayer` takes the
-streaming path:
+TTS client implements this, `DiscordVoicePlayer` takes the streaming
+path:
 
 1. Open Cartesia stream (~140 ms TTFB).
 2. Pre-buffer the first chunk into a `StreamingPCMSource` (a
    thread-safe `discord.AudioSource` with `feed` / `close_input`).
 3. `vc.play(source)` — pycord's audio thread drains 20 ms frames.
-4. A producer task feeds the rest of the stream into the source as
-   chunks arrive. `close_input()` on stream end lets the reader return
-   `b""` and pycord stop the player cleanly.
+4. A producer task feeds the rest into the source as chunks arrive.
+   `close_input()` on stream end lets the reader return `b""` and
+   pycord stop the player cleanly.
 
 That cuts `voice.tts_to_playback` from full-sentence synthesis time
 (1.5–3 s for a long sentence on `cartesia-sonic-3` at ~270 ms/word)
@@ -259,7 +258,7 @@ the next `feed` and `close_input` releases any blocked reader.
 
 Azure and Gemini stay on the buffered `synthesize` path (their SDKs
 return one big result), so `DiscordVoicePlayer.speak` falls through
-to the prior synthesize-then-play behaviour for those clients.
+to the prior synthesize-then-play behaviour.
 
 **Mimi-codec lineage.** Mimi (Kyutai, 12.5 Hz frames) is becoming the
 open audio-token standard — Sesame CSM, Hibiki, Moshi all use it.
@@ -295,8 +294,7 @@ byte-level Cartesia streaming both shipped — see
 `familiar_connect.diagnostics.voice_budget.VoiceBudgetRecorder` (a
 process singleton like `SpanCollector`) stamps four phase markers
 keyed by `turn_id` and emits one span per adjacent gap into the shared
-collector, so `/diagnostics` shows the breakdown in its existing
-summary table.
+collector, so `/diagnostics` shows the breakdown in its summary table.
 
 | Phase | Stamp site |
 |---|---|
@@ -317,8 +315,8 @@ summary table.
 `vad_end` only stamps when local turn detection (TEN-VAD + Smart Turn)
 is wired in. With Deepgram-only endpointing, VAD-end and final fuse
 into one `is_final` result and the funnel starts at `stt_final`.
-`voice.total` keeps its `stt_final` start unchanged so historical
-numbers stay comparable.
+`voice.total` keeps its `stt_final` start so historical numbers stay
+comparable.
 
 Recorder is best-effort: the voice path never blocks on it, and
 exceptions inside `record(...)` are swallowed so instrumentation can't
@@ -326,10 +324,10 @@ take the bot down.
 
 ### Prompt cache friendliness
 
-OpenAI's prompt caching matches the longest stable prefix of a
-request (1024-token minimum, 128-token granularity). Any change to a
-mid-prompt layer invalidates everything after it, so
-`_default_assembler` builds layers in **stability descending** order:
+OpenAI's prompt caching matches the longest stable prefix (1024-token
+minimum, 128-token granularity). A change to any mid-prompt layer
+invalidates everything after it, so `_default_assembler` builds layers
+in **stability descending** order:
 
 | Position | Layer | Refresh trigger |
 |---|---|---|
@@ -403,7 +401,7 @@ that drain, a barge-in followed by an immediate next-speaker turn
 would race: the next `speak()` acquires the lock the instant the prior
 call returns, but pycord still has `is_playing() == True` for one tick
 — and `vc.play()` raises `ClientException('Already playing audio.')`.
-Reproduced (and pinned) in
+Pinned by
 `tests/test_discord_voice_player.py::TestConcurrentSpeak::test_cancel_then_immediate_speak_does_not_collide`.
 
 ## Per-channel tuning

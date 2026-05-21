@@ -23,8 +23,8 @@ class AssemblyContext:
     """Inputs the assembler passes to every layer.
 
     :param viewer_mode: ``"voice"`` or ``"text"`` — selects
-        :class:`OperatingModeLayer` output and may affect layer order.
-    :param guild_id: Discord guild scoping per-guild nicknames; pass
+        :class:`OperatingModeLayer` output; may affect layer order.
+    :param guild_id: Discord guild scoping per-guild nicknames;
         ``None`` for DMs or non-Discord platforms.
     """
 
@@ -45,10 +45,10 @@ class AssembledPrompt:
 class Assembler:
     """Layer composer with per-layer memoization.
 
-    Layer order is preserved from construction. ``invalidation_key``
-    per layer controls cache reuse — two assemble calls with the same
-    context and unchanged layer keys return the same text without
-    re-running :meth:`Layer.build`.
+    Layer order preserved from construction. Per-layer
+    ``invalidation_key`` controls cache reuse — two assemble calls
+    with the same context and unchanged layer keys return the same
+    text without re-running :meth:`Layer.build`.
     """
 
     def __init__(
@@ -65,8 +65,8 @@ class Assembler:
     def set_rag_cue(self, cue: str) -> None:
         """Forward *cue* to the first :class:`RagContextLayer`, if any.
 
-        Lets the responder set the retrieval query without taking a
-        direct handle on the layer object.
+        Lets the responder set the retrieval query without a direct
+        handle on the layer object.
         """
         for layer in self._layers:
             if isinstance(layer, RagContextLayer):

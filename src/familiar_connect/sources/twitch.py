@@ -1,12 +1,12 @@
 """Twitch event queue → bus event.
 
-Consumes the ``asyncio.Queue`` produced by
+Consumes ``asyncio.Queue`` produced by
 :class:`familiar_connect.twitch_watcher.TwitchWatcher`, wraps each
-event in an envelope, and publishes on
+event in envelope, publishes on
 :data:`familiar_connect.bus.topics.TOPIC_TWITCH_EVENT`.
 
-Unbounded topic policy per plan § Design.1 — Twitch volume is low and
-dropping a cheer is costly.
+Unbounded topic policy per plan § Design.1 — Twitch volume low,
+dropping a cheer costly.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 class TwitchSource:
-    """Drains a Twitch queue into the bus."""
+    """Drains Twitch queue into bus."""
 
     name: str = "twitch"
 
@@ -42,7 +42,7 @@ class TwitchSource:
         self._seq = 0
 
     async def run(self) -> None:
-        """Forever loop: drain queue, publish. Cancel to stop."""
+        """Forever loop: drain queue, publish. Cancel stops."""
         while True:
             twitch_event = await self._queue.get()
             await self._publish(twitch_event)

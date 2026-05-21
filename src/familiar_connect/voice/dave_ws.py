@@ -305,8 +305,8 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         """Send ``[op: uint8][payload...]``.
 
         Outbound frames omit the 2-byte seq prefix that *received*
-        frames carry. Adding it shifts the opcode and triggers
-        close code 4005.
+        frames carry. Adding it shifts the opcode and triggers close
+        code 4005.
         """
         frame = bytes([op]) + payload
         await self.ws.send_bytes(frame)

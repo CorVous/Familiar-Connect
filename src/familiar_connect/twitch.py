@@ -1,4 +1,4 @@
-"""Twitch channel event watcher — event types, formatters, and builders."""
+"""Twitch channel event watcher — event types, formatters, builders."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class TwitchEvent:
-    """A single Twitch channel event ready to feed into the LLM message batch."""
+    """Single Twitch channel event ready for LLM message batch."""
 
     channel: str
     text: str
@@ -30,11 +30,11 @@ class TwitchEvent:
     viewer: Author | None = None
 
     def to_message(self: Self) -> Message:
-        """Convert to an LLM Message.
+        """Convert to LLM Message.
 
-        Content is prefixed with '[Twitch] ' so the model can identify the
-        source. The message name is the viewer's ``openai_name`` when one
-        is associated with the event, otherwise 'Twitch'.
+        Content prefixed with ``[Twitch] `` so model identifies source.
+        Message name is viewer's ``openai_name`` when present, else
+        ``Twitch``.
         """
         return Message(
             role="user",

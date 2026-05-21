@@ -1,17 +1,17 @@
 """Typing-event policy: interruption + bot-pingpong backoff.
 
 Discord ``on_typing`` fires when any user (or bot) starts typing in a
-channel. :class:`TypingInterruptHandler` translates those events into:
+channel. :class:`TypingInterruptHandler` translates events into:
 
-* immediate :class:`TurnRouter` cancellation when a real user is typing
-  (``[discord.text].respond_to_typing`` ON; default), so the bot stops
-  generating instead of speaking over the user;
-* exponential backoff when *another bot* is typing — protects against
+* immediate :class:`TurnRouter` cancellation when real user typing
+  (``[discord.text].respond_to_typing`` ON; default), so bot stops
+  generating instead of speaking over user;
+* exponential backoff when *another bot* typing — protects against
   pingpong with another familiar-connect instance whose typing
   indicator we'd otherwise mirror by replying.
 
-Wired by :mod:`familiar_connect.bot` (``on_typing``) and queried by
-:class:`TextResponder` before assembling a reply.
+Wired by :mod:`familiar_connect.bot` (``on_typing``); queried by
+:class:`TextResponder` before assembling reply.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class TypingInterruptHandler:
     """Per-channel typing-event policy.
 
     Stateless across processes — backoff state lives in memory, reset
-    on user activity. Safe to share across the asyncio event loop.
+    on user activity. Safe to share across asyncio event loop.
     """
 
     def __init__(
@@ -51,15 +51,14 @@ class TypingInterruptHandler:
         self._router = router
         self._is_subscribed = is_subscribed
         self._bot_user_id = bot_user_id_provider
-        # per-channel backoff ladder. ``_next_backoff_s`` is the value
-        # to apply on the *next* bot-typing event; doubles after each.
-        # ``_deadline`` is the monotonic clock time the channel is
-        # parked until.
+        # per-channel backoff ladder. ``_next_backoff_s`` is value to
+        # apply on *next* bot-typing event; doubles after each.
+        # ``_deadline`` is monotonic clock time channel parked until.
         self._next_backoff_s: dict[int, float] = {}
         self._deadline: dict[int, float] = {}
 
     def notify_typing(self, *, channel_id: int, user_id: int, is_bot: bool) -> None:
-        """Translate a Discord ``on_typing`` event into policy actions."""
+        """Translate Discord ``on_typing`` event into policy actions."""
         if not self._config.respond_to_typing:
             return
         if not self._is_subscribed(channel_id):
@@ -73,17 +72,17 @@ class TypingInterruptHandler:
         self._cancel_active_turn(channel_id, user_id)
 
     def notify_user_message(self, *, channel_id: int) -> None:
-        """Reset backoff ladder; a real user message means the lane is live."""
+        """Reset backoff ladder; real user message means lane is live."""
         self._next_backoff_s.pop(channel_id, None)
         self._deadline.pop(channel_id, None)
 
     def backoff_deadline(self, channel_id: int) -> float | None:
-        """Monotonic deadline if currently parked; ``None`` when free."""
+        """Monotonic deadline when parked; ``None`` when free."""
         deadline = self._deadline.get(channel_id)
         if deadline is None:
             return None
         if deadline <= time.monotonic():
-            # expired — clean up so the next call sees a free lane
+            # expired — clean up so next call sees a free lane
             self._deadline.pop(channel_id, None)
             return None
         return deadline
@@ -91,12 +90,12 @@ class TypingInterruptHandler:
     def current_backoff_s(self, channel_id: int) -> float:
         """Backoff window most recently applied to *channel_id*.
 
-        Test seam — production callers should use :meth:`wait_for_backoff`.
+        Test seam — production callers use :meth:`wait_for_backoff`.
         """
         return self._current_applied_s.get(channel_id, 0.0)
 
     async def wait_for_backoff(self, channel_id: int) -> None:
-        """Sleep until the channel's backoff deadline (no-op when idle)."""
+        """Sleep until channel's backoff deadline (no-op when idle)."""
         deadline = self.backoff_deadline(channel_id)
         if deadline is None:
             return
