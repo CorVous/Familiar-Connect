@@ -1,4 +1,4 @@
-"""LLM client for generating AI responses via OpenRouter."""
+"""LLM client — chat completions via OpenRouter."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ _NAME_ALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def sanitize_name(name: str) -> str | None:
-    """Sanitize for OpenAI ``name`` field; ``None`` if empty after cleanup.
+    """Sanitize for OpenAI ``name`` field; ``None`` when empty after cleanup.
 
     Pattern ``^[a-zA-Z0-9_-]{1,64}$``; unsupported chars → underscore.
     """
@@ -52,9 +52,9 @@ _request_semaphore: asyncio.Semaphore | None = None
 def get_request_semaphore(
     max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
 ) -> asyncio.Semaphore:
-    """Module-level semaphore, lazy-init.
+    """Module-level semaphore; lazy-init.
 
-    Shared across all :class:`LLMClient` instances — bottleneck is the
+    Shared across all :class:`LLMClient` instances — bottleneck is
     OpenRouter API key's rate limit, not any single client.
     """
     global _request_semaphore  # noqa: PLW0603

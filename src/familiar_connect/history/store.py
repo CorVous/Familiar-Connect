@@ -6,15 +6,15 @@ One database per familiar. Two core tables:
   monotonic PK, role, optional :class:`Author`, content, optional
   guild_id, UTC ts
 - ``summaries`` — at most one rolling summary per (familiar, channel)
-  with a ``last_summarised_id`` watermark for cache freshness.
+  with ``last_summarised_id`` watermark for cache freshness.
   See ``docs/architecture/context-pipeline.md`` for rationale.
 
 Relational storage uses Turso (SQLite-compatible Rust rewrite); FTS
-lives in a sibling tantivy index under ``fts/turns/`` and ``fts/facts/``
-because pyturso wheels don't ship the FTS module.
+lives in a sibling tantivy index under ``fts/turns/`` +
+``fts/facts/`` since pyturso wheels don't ship FTS.
 
 ``familiar_id`` is explicit (not implicit) so tests can exercise
-multiple familiars against one store. Synchronous API; the
+multiple familiars against one store. Sync API;
 :class:`AsyncHistoryStore` wrapper dispatches calls to a thread pool
 that funnels every Turso call onto one dedicated OS thread inside
 :class:`TursoConnection`.
@@ -38,8 +38,8 @@ from familiar_connect.identity import Author
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-# Result rows come back as ``turso.Row``; spell as ``Any`` to keep the
-# private ``_row_to_*`` helpers free of a third-party type alias.
+# result rows come back as ``turso.Row``; spell as ``Any`` to keep
+# private ``_row_to_*`` helpers free of a third-party type alias
 Row = Any
 
 PathLike = str | Path
@@ -49,14 +49,14 @@ PathLike = str | Path
 class HistoryTurn:
     """Single persisted conversational turn.
 
-    :param platform_message_id: native id from the platform of origin
+    :param platform_message_id: native id from platform of origin
         (Discord snowflake, etc.). ``None`` for legacy rows or
         platform-less inputs.
     :param reply_to_message_id: parent ``platform_message_id`` when
         this turn is a reply (e.g. ``message.reference`` on Discord).
-    :param guild_id: Discord guild scoping per-guild nicknames for
-        rendering. ``None`` for DMs / non-Discord platforms / legacy
-        rows where the column wasn't populated.
+    :param guild_id: Discord guild scoping per-guild nicknames.
+        ``None`` for DMs / non-Discord / legacy rows where column
+        wasn't populated.
     """
 
     id: int
@@ -100,7 +100,7 @@ class CrossContextEntry:
 
 @dataclass(frozen=True)
 class WatermarkEntry:
-    """Tracks the last turn id written to long-term memory by the memory writer."""
+    """Last turn id written to long-term memory by the memory writer."""
 
     last_written_id: int
     created_at: datetime
@@ -110,9 +110,10 @@ class WatermarkEntry:
 class AccountProfile:
     """Read-side projection of ``accounts`` profile metadata.
 
-    Populated on Discord ingestion via :meth:`HistoryStore.upsert_account`;
-    consumed by :class:`PeopleDossierLayer` to surface basic identity
-    (username, pronouns, bio) on the prompt header.
+    Populated on Discord ingestion via
+    :meth:`HistoryStore.upsert_account`; consumed by
+    :class:`PeopleDossierLayer` to surface basic identity (username,
+    pronouns, bio) on the prompt header.
     """
 
     canonical_key: str

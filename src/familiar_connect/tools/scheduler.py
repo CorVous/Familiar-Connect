@@ -1,9 +1,9 @@
 """Alarm scheduler.
 
-Owns one ``asyncio.Task`` per pending alarm. Tasks sleep until the
-target time, then mark the row fired and publish
-:data:`TOPIC_ALARM_FIRED` on the bus. On startup, reloads any rows
-left pending from a previous process; past-due rows fire immediately.
+One ``asyncio.Task`` per pending alarm. Tasks sleep until target
+time, mark row fired, publish :data:`TOPIC_ALARM_FIRED` on bus. On
+startup reloads rows left pending from a previous process; past-due
+rows fire immediately.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class AlarmScheduler:
         self._started = False
 
     async def start(self) -> None:
-        """Load any pending alarms and schedule each."""
+        """Load pending alarms and schedule each."""
         if self._started:
             return
         self._started = True
@@ -58,7 +58,7 @@ class AlarmScheduler:
         )
 
     async def shutdown(self) -> None:
-        """Cancel all in-flight sleep tasks. Does not modify the DB."""
+        """Cancel all in-flight sleep tasks. Doesn't modify DB."""
         tasks = list(self._tasks.values())
         for t in tasks:
             t.cancel()
@@ -76,7 +76,7 @@ class AlarmScheduler:
         reason: str,
         originating_turn_id: str | None = None,
     ) -> str:
-        """Insert + schedule a new alarm. Returns the alarm id."""
+        """Insert + schedule a new alarm. Returns alarm id."""
         alarm_id = await self._history.insert_alarm(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
@@ -97,7 +97,7 @@ class AlarmScheduler:
         return alarm_id
 
     async def cancel(self, *, alarm_id: str) -> bool:
-        """Stop the in-flight sleep and mark the row cancelled."""
+        """Stop in-flight sleep, mark row cancelled."""
         task = self._tasks.pop(alarm_id, None)
         if task is not None:
             task.cancel()
@@ -124,7 +124,7 @@ class AlarmScheduler:
                 fired_at=fired_at.isoformat(),
             )
             if not updated:
-                # already fired or cancelled by another path — skip publish.
+                # already fired or cancelled by another path — skip publish
                 return
             payload = {
                 "alarm_id": row["id"],

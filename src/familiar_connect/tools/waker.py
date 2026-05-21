@@ -1,17 +1,17 @@
 """Alarm waker processor.
 
-Listens on :data:`TOPIC_ALARM_FIRED` and republishes a synthetic
-``discord.text``-shaped event so the existing :class:`TextResponder`
+Listens on :data:`TOPIC_ALARM_FIRED`, republishes a synthetic
+``discord.text``-shaped event so existing :class:`TextResponder`
 picks it up and produces a follow-up reply.
 
 MVP behavior:
 
-* text-origin alarms → publish a synthetic ``discord.text`` event with
-  ``content = "[alarm fired: {reason}]"`` and ``author=None``.
-* voice-origin alarms → fall back to text by publishing the same shape
-  using the alarm's recorded ``channel_id``. Real Discord voice
-  channels and text channels have distinct ids, so production wiring
-  needs a per-channel mapping (out of scope for this MVP).
+* text-origin alarms → publish synthetic ``discord.text`` event with
+  ``content = "[alarm fired: {reason}]"``, ``author=None``.
+* voice-origin alarms → fall back to text by publishing same shape
+  using the alarm's recorded ``channel_id``. Real Discord voice and
+  text channels have distinct ids — production wiring needs a
+  per-channel mapping (out of scope for MVP).
 """
 
 from __future__ import annotations

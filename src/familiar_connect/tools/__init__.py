@@ -1,6 +1,6 @@
 """Tool calling subsystem.
 
-In-process tool registry + agentic loop. Lets the familiar invoke
+In-process tool registry + agentic loop. Lets familiar invoke
 functions during a turn and resume with results.
 """
 

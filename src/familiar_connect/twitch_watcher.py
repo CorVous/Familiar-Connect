@@ -2,7 +2,7 @@
 
 Connects to Twitch EventSub WebSocket (via twitchAPI), registers
 listeners for events enabled in TwitchWatcherConfig, forwards
-resulting TwitchEvent objects to an asyncio.Queue.
+resulting TwitchEvent objects to asyncio.Queue.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _tier(tier_str: str) -> int:
 
 
 class TwitchWatcher:
-    """Converts twitchAPI EventSub callbacks into TwitchEvent objects."""
+    """Convert twitchAPI EventSub callbacks into TwitchEvent objects."""
 
     def __init__(
         self,
@@ -89,7 +89,7 @@ class TwitchWatcher:
         )
 
     def handle_subscription(self, data: ChannelSubscribeData) -> TwitchEvent | None:
-        """Subscription event; gift subs arrive via handle_gift_subscription."""
+        """Subscription event; gift subs arrive via :meth:`handle_gift_subscription`."""
         if data.is_gift:
             return None
         return build_subscription_event(
@@ -120,8 +120,8 @@ class TwitchWatcher:
     ) -> TwitchEvent | None:
         """Resub event.
 
-        cumulative_months Optional on Twitch side; falls back to
-        duration_months (always present).
+        ``cumulative_months`` Optional on Twitch side; falls back to
+        ``duration_months`` (always present).
         """
         months = (
             data.cumulative_months
@@ -178,9 +178,9 @@ class TwitchWatcher:
     ) -> None:
         """Register EventSub callbacks on ``eventsub`` for all enabled event types.
 
-        send: asyncio.Queue callbacks forward events to. Always provided
-        from :meth:`run`; optional for standalone test calls that only
-        check which ``listen_*`` methods are invoked.
+        send: queue callbacks forward events to. Always provided from
+        :meth:`run`; optional for standalone test calls that only
+        check which ``listen_*`` methods invoked.
         """
         if self.config.follows_enabled:
             await eventsub.listen_channel_follow_v2(
@@ -222,8 +222,8 @@ class TwitchWatcher:
             )
 
     # ------------------------------------------------------------------
-    # Typed callback factories — one per event type so ty can verify the
-    # callback signatures match what each listen_* method expects.
+    # Typed callback factories — one per event type so ty verifies
+    # callback signatures match each listen_* method.
     # ------------------------------------------------------------------
 
     def _follow_callback(
@@ -293,15 +293,15 @@ class TwitchWatcher:
         send: asyncio.Queue[TwitchEvent],
         eventsub: EventSubWebsocket,
     ) -> None:
-        """Run the watcher as an asyncio task.
+        """Run watcher as asyncio task.
 
-        Registers all listeners, starts the EventSub connection, then
-        sleeps until cancelled — at which point it stops the connection.
+        Registers all listeners, starts EventSub connection, sleeps
+        until cancelled — then stops connection.
         """
         await self.register_listeners(eventsub, send)
         try:
             await eventsub.start()
-            # Sleep forever; cancellation from the parent TaskGroup ends this.
+            # sleep forever; cancellation from parent TaskGroup ends this
             await asyncio.Event().wait()
         finally:
             await eventsub.stop()
@@ -311,7 +311,7 @@ async def _send_if_present(
     event: TwitchEvent | None,
     send: asyncio.Queue[TwitchEvent] | None,
 ) -> None:
-    """Send *event* to *send* if both are non-None."""
+    """Send *event* to *send* when both non-None."""
     if event is not None and send is not None:
         await send.put(event)
 
@@ -321,11 +321,11 @@ def _build_author(
     user_login: str | None,
     user_name: str | None,
 ) -> Author:
-    """Build an Author from raw twitchAPI identity fields.
+    """Build :class:`Author` from raw twitchAPI identity fields.
 
-    :class:`Author` is immutably keyed on ``user_id`` so repeat viewers
-    resolve to the same ``people/twitch-<id>.md`` file regardless of
-    display-name changes. Optional-typed fields are coerced to empty
+    :class:`Author` immutably keyed on ``user_id`` so repeat viewers
+    resolve to same ``people/twitch-<id>.md`` regardless of
+    display-name changes. Optional-typed fields coerced to empty
     strings; callers in anonymous-capable flows must guard first.
     """
     return Author.from_twitch(

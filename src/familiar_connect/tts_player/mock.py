@@ -1,9 +1,9 @@
 """In-process mock TTS player for tests.
 
-Simulates playback by sleeping a fraction of a word duration per
-tick; checks :class:`TurnScope.is_cancelled` between ticks so
-barge-in tests can measure how promptly cancellation cuts speech
-short. Records the played duration for assertions.
+Simulates playback by sleeping a fraction of word duration per tick;
+checks :class:`TurnScope.is_cancelled` between ticks so barge-in
+tests can measure how promptly cancellation cuts speech short.
+Records played duration for assertions.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class MockTTSPlayer:
         played_ms = 0
         cancelled_or_stopped = False
 
-        # Reset the per-call stop gate on re-entry.
+        # reset per-call stop gate on re-entry
         self._stop_event = asyncio.Event()
 
         while played_ms < budget_ms:
@@ -47,7 +47,7 @@ class MockTTSPlayer:
             except TimeoutError:
                 played_ms += step
                 continue
-            # stop_event fired during the wait
+            # stop_event fired during wait
             cancelled_or_stopped = True
             break
 

@@ -23,10 +23,10 @@ class TranscriptionResult:
     """Single streaming transcription result.
 
     user_id: Discord user id when known; stamped by per-user fan-in
-    in :func:`bot._start_voice_intake`. Per-SSRC audio gives attribution
-    for free, no provider diarization needed.
-    speaker: provider-side diarization label (when enabled); unused by
-    Discord pipeline.
+    in :func:`bot._start_voice_intake`. Per-SSRC audio gives
+    attribution for free, no provider diarization needed.
+    speaker: provider-side diarization label (when enabled); unused
+    by Discord pipeline.
     """
 
     text: str
@@ -40,8 +40,8 @@ class TranscriptionResult:
     def to_message(self: Self, speaker_names: dict[int, str] | None = None) -> Message:
         """Convert to LLM Message; prefix content with ``[Voice]``.
 
-        ``speaker_names`` may key by ``user_id`` (Discord) or by provider
-        ``speaker`` label — ``user_id`` wins.
+        ``speaker_names`` may key by ``user_id`` (Discord) or by
+        provider ``speaker`` label — ``user_id`` wins.
         """
         name = "Voice"
         if speaker_names is not None:
@@ -65,9 +65,9 @@ class Transcriber(Protocol):
     Implementations: :class:`stt.deepgram.DeepgramTranscriber` (today);
     Parakeet / FasterWhisper backends in later V3 phases.
 
-    Lifecycle: ``clone()`` per user/channel, ``await start(queue)`` once,
-    ``await send_audio(pcm)`` per chunk, ``await finalize()`` to flush
-    pending segment, ``await stop()`` to tear down.
+    Lifecycle: ``clone()`` per user/channel, ``await start(queue)``
+    once, ``await send_audio(pcm)`` per chunk, ``await finalize()`` to
+    flush pending segment, ``await stop()`` to tear down.
     """
 
     def clone(self: Self) -> Transcriber:
@@ -75,7 +75,7 @@ class Transcriber(Protocol):
         ...
 
     async def start(self: Self, output: asyncio.Queue[TranscriptionEvent]) -> None:
-        """Begin transcription, pushing :class:`TranscriptionResult`s onto *output*."""
+        """Begin transcription, push :class:`TranscriptionResult`s onto *output*."""
         ...
 
     async def send_audio(self: Self, data: bytes) -> None:
@@ -83,10 +83,11 @@ class Transcriber(Protocol):
         ...
 
     async def finalize(self: Self) -> None:
-        """Force the impl to flush any pending segment as a final.
+        """Force impl to flush pending segment as final.
 
-        No-op when nothing to flush. Local endpointer (V1) calls this on
-        turn-complete verdict to short-circuit Deepgram's silence wait.
+        No-op when nothing to flush. Local endpointer (V1) calls this
+        on turn-complete verdict to short-circuit Deepgram's silence
+        wait.
         """
         ...
 

@@ -1,10 +1,10 @@
 """``set_alarm`` / ``cancel_alarm`` tools.
 
-The tools schedule a future wake by inserting an alarm row and
+Tools schedule a future wake by inserting an alarm row and
 registering an in-process ``asyncio`` sleep task. When the timer
-fires, the scheduler publishes :data:`TOPIC_ALARM_FIRED`; the
-:class:`AlarmWaker` processor turns that into a synthetic system turn
-in the originating channel.
+fires, scheduler publishes :data:`TOPIC_ALARM_FIRED`;
+:class:`AlarmWaker` turns that into a synthetic system turn in the
+originating channel.
 
 Both tools route the wake to the channel the user spoke in
 (``ctx.channel_id`` / ``ctx.channel_kind``).
@@ -26,12 +26,12 @@ if TYPE_CHECKING:
 _MAX_REASON_LEN = 200
 _MIN_DELAY_S = 1
 _MAX_DELAY_S = 60 * 60 * 24 * 365  # one year cap — defensive
-# allow tiny past-skew so an immediate ``now`` doesn't bounce.
+# allow tiny past-skew so an immediate ``now`` doesn't bounce
 _PAST_SKEW_S = 5
 
 
 def _resolve_when(args: dict[str, Any]) -> datetime | str:
-    """Return target ``datetime`` or an error string."""
+    """Return target ``datetime`` or error string."""
     when_str = args.get("when")
     delay = args.get("delay_seconds")
 
@@ -116,9 +116,9 @@ async def _cancel_alarm_handler(
 def build_alarm_tool(scheduler: AlarmScheduler) -> Tool:  # noqa: ARG001 — accepted for symmetry
     """Build the ``set_alarm`` tool.
 
-    ``scheduler`` is reserved for future binding; the live scheduler
-    is reached via ``ctx.scheduler`` to keep the registry decoupled
-    from concrete instances.
+    ``scheduler`` reserved for future binding; live scheduler reached
+    via ``ctx.scheduler`` to keep the registry decoupled from concrete
+    instances.
     """
     return Tool(
         name="set_alarm",

@@ -50,7 +50,7 @@ class TwitchEvent:
 
 @dataclass
 class TwitchWatcherConfig:
-    """Per-watcher configuration for which Twitch events produce messages."""
+    """Per-watcher config — which Twitch events produce messages."""
 
     subscriptions_enabled: bool = True
     cheers_enabled: bool = True
@@ -70,7 +70,6 @@ def format_channel_point_redemption(
     redemption_name: str,
     user_input: str | None = None,
 ) -> str:
-    """Format a channel point redemption event as plain text."""
     base = f"{viewer} has redeemed {redemption_name}"
     if user_input:
         return f"{base} and says: {user_input}"
@@ -78,19 +77,17 @@ def format_channel_point_redemption(
 
 
 def format_subscription(viewer: str, tier: int) -> str:
-    """Format a new (first-time) subscription event as plain text."""
+    """First-time subscription text."""
     return f"{viewer} has subscribed at tier {tier}"
 
 
 def format_gift_subscription(gifter: str | None, count: int, tier: int) -> str:
-    """Format a gift subscription event as plain text."""
     name = gifter if gifter is not None else "An anonymous gifter"
     noun = "subscription" if count == 1 else "subscriptions"
     return f"{name} has gifted {count} tier {tier} {noun}"
 
 
 def format_resubscription(viewer: str, months: int, tier: int, message: str) -> str:
-    """Format a resubscription event as plain text."""
     return (
         f"{viewer} has subscribed for {months} months at tier {tier}"
         f" and says: {message}"
@@ -98,23 +95,19 @@ def format_resubscription(viewer: str, months: int, tier: int, message: str) -> 
 
 
 def format_cheer(viewer: str | None, bits: int, message: str) -> str:
-    """Format a cheer (bits) event as plain text."""
     name = viewer if viewer is not None else "An anonymous cheerer"
     return f"{name} has cheered with {bits} bits and says: {message}"
 
 
 def format_follow(viewer: str) -> str:
-    """Format a follow event as plain text."""
     return f"{viewer} has followed the channel"
 
 
 def format_ad_start() -> str:
-    """Format an ad break start event as plain text."""
     return "An ad has begun on the channel"
 
 
 def format_ad_end() -> str:
-    """Format an ad break end event as plain text."""
     return "Ads have ended"
 
 
@@ -135,7 +128,7 @@ def build_channel_point_event(
     redemption_name: str,
     user_input: str | None = None,
 ) -> TwitchEvent | None:
-    """Build a channel point redemption event, or None if not in the allow-list."""
+    """Channel point redemption event; ``None`` if not in allow-list."""
     if redemption_name not in config.redemption_names:
         return None
     return TwitchEvent(
@@ -154,7 +147,7 @@ def build_subscription_event(
     viewer: Author,
     tier: int,
 ) -> TwitchEvent | None:
-    """Build a new subscription event, or None if subscriptions are disabled."""
+    """Build new subscription event; ``None`` if subscriptions disabled."""
     if not config.subscriptions_enabled:
         return None
     return TwitchEvent(
@@ -174,7 +167,7 @@ def build_gift_subscription_event(
     count: int,
     tier: int,
 ) -> TwitchEvent | None:
-    """Build a gift subscription event, or None if subscriptions are disabled."""
+    """Gift subscription event; ``None`` if subscriptions disabled."""
     if not config.subscriptions_enabled:
         return None
     return TwitchEvent(
@@ -197,7 +190,7 @@ def build_resubscription_event(
     tier: int,
     message: str,
 ) -> TwitchEvent | None:
-    """Build a resubscription event, or None if subscriptions are disabled."""
+    """Resubscription event; ``None`` if subscriptions disabled."""
     if not config.subscriptions_enabled:
         return None
     return TwitchEvent(
@@ -217,7 +210,7 @@ def build_cheer_event(
     bits: int,
     message: str,
 ) -> TwitchEvent | None:
-    """Build a cheer (bits) event, or None if cheers are disabled."""
+    """Cheer (bits) event; ``None`` if cheers disabled."""
     if not config.cheers_enabled:
         return None
     return TwitchEvent(
@@ -235,7 +228,7 @@ def build_follow_event(
     channel: str,
     viewer: Author,
 ) -> TwitchEvent | None:
-    """Build a follow event, or None if follows are disabled."""
+    """Follow event; ``None`` if follows disabled."""
     if not config.follows_enabled:
         return None
     return TwitchEvent(
@@ -252,7 +245,7 @@ def build_ad_start_event(
     config: TwitchWatcherConfig,
     channel: str,
 ) -> TwitchEvent | None:
-    """Build an ad break start event, or None if ads are disabled."""
+    """Ad break start event; ``None`` if ads disabled."""
     if not config.ads_enabled:
         return None
     return TwitchEvent(
@@ -269,7 +262,7 @@ def build_ad_end_event(
     config: TwitchWatcherConfig,
     channel: str,
 ) -> TwitchEvent | None:
-    """Build an ad break end event, or None if ads are disabled."""
+    """Ad break end event; ``None`` if ads disabled."""
     if not config.ads_enabled:
         return None
     return TwitchEvent(
