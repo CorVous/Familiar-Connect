@@ -1,14 +1,13 @@
 """Watermark-driven fact extractor.
 
-Distils atomic facts from new turns using a cheap LLM pass, and
-stores them in ``facts`` with ``source_turn_ids`` pointing back to
-the originating rows in ``turns``. Advances the
-``memory_writer_watermark`` once processed — even on malformed LLM
-output — so the worker never loops forever on the same batch.
+Distils atomic facts from new turns via cheap LLM pass; stores in
+``facts`` with ``source_turn_ids`` pointing back to ``turns`` rows.
+Advances ``memory_writer_watermark`` once processed — even on
+malformed LLM output — so worker never loops forever on same batch.
 
-Phase-4 scope: the extraction prompt asks for a JSON array of
-``{text, source_turn_ids}`` objects. A permissive JSON parser wraps
-fences and extraneous prose common in chat-tuned models.
+Phase-4 scope: extraction prompt asks for JSON array of
+``{text, source_turn_ids}`` objects. Permissive JSON parser
+unwraps fences + extraneous prose common in chat-tuned models.
 """
 
 from __future__ import annotations
@@ -36,11 +35,11 @@ _logger = logging.getLogger("familiar_connect.processors.fact_extractor")
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
-# Patterns that mark a "fact" as actually a self-capability statement
-# (e.g., "I cannot remember names"). These belong in the system prompt
-# or runtime config — not the facts store, where they'd silently expire
-# the moment the underlying capability changes. Belt-and-braces post-
-# filter; the extractor prompt also asks the model to skip them.
+# patterns marking "facts" that are really self-capability statements
+# (e.g., "I cannot remember names"). belong in system prompt or
+# runtime config — not facts store, where they'd silently expire the
+# moment capability changes. belt-and-braces post-filter; extractor
+# prompt also asks model to skip them.
 _SELF_CAPABILITY_RE = re.compile(
     r"""^\s*
         (?:
@@ -61,7 +60,7 @@ def _is_self_capability(text: str) -> bool:
 
 
 class FactExtractor:
-    """Distils facts from new turns; forever loop with ``run()``."""
+    """Distils facts from new turns; forever loop via ``run()``."""
 
     name: str = "fact-extractor"
 
@@ -84,7 +83,7 @@ class FactExtractor:
         self._participants_max = max(1, participants_max)
 
     async def run(self) -> None:
-        """Forever loop — tick on an interval. Cancel to stop."""
+        """Forever loop; tick on interval. Cancel to stop."""
         while True:
             try:
                 await self.tick()
@@ -99,7 +98,7 @@ class FactExtractor:
 
     @span("facts.tick")
     async def tick(self) -> None:
-        """Process one batch of unprocessed turns, if enough accumulated."""
+        """Process one batch of unprocessed turns if enough accumulated."""
         new_turns = await self._store.turns_since_watermark(
             familiar_id=self._familiar_id,
             limit=self._batch_size,
@@ -129,9 +128,9 @@ class FactExtractor:
                     int(i) for i in raw_sources if isinstance(i, int) and i in valid_ids
                 ]
             if not source_ids:
-                # fall back to the whole batch rather than dropping the fact
+                # fall back to whole batch rather than dropping fact
                 source_ids = list(valid_ids)
-            # Prefer the channel of the first source turn for scoping.
+            # prefer channel of first source turn for scoping
             channel_id = channel_ids.get(source_ids[0])
             text = str(fact.get("text", "")).strip()
             if not text:
@@ -160,18 +159,18 @@ class FactExtractor:
                 valid_to=valid_to,
                 importance=importance,
             )
-            # Mirror resolved subjects into ``turn_mentions``. Bridges
-            # bare-text references like "what about Aria?" into the
-            # same mention index that Discord ``@`` pings populate, so
-            # ``PeopleDossierLayer`` can pick them up at the next
-            # assemble — no separate read path, no fact-table join in
-            # the hot path. Idempotent (PK-deduped on the store side).
+            # mirror resolved subjects into ``turn_mentions``. bridges
+            # bare-text references like "what about Aria?" into same
+            # mention index Discord ``@`` pings populate, so
+            # ``PeopleDossierLayer`` picks them up at next assemble —
+            # no separate read path, no fact-table join in hot path.
+            # idempotent (PK-deduped on store side).
             if subjects:
                 keys = [s.canonical_key for s in subjects]
                 for tid in source_ids:
                     await self._store.record_mentions(turn_id=tid, canonical_keys=keys)
 
-        # Always advance watermark, even on empty/bad output, to prevent loops.
+        # always advance watermark, even on empty/bad output, to prevent loops
         last_id = new_turns[-1].id
         await self._store.put_writer_watermark(
             familiar_id=self._familiar_id, last_written_id=last_id

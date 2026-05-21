@@ -1,14 +1,14 @@
 """Example subcommand template.
 
-This file demonstrates the pattern for creating new subcommands.
-To add a new subcommand:
+Pattern for new subcommands:
 
-1. Copy this file to a new name (e.g., fetch_data.py)
-2. Update the command name in add_parser()
-3. Implement your logic in run()
-4. Import and register in cli.py's create_parser()
+1. Copy to new name (e.g., fetch_data.py)
+2. Update command name in ``add_parser()``
+3. Implement ``run()``
+4. Import + register in ``cli.py``'s ``create_parser()``
 
-Example registration in cli.py:
+Example registration in cli.py::
+
     from python_template.commands import example
     example.add_parser(subparsers, common_parser)
 """
@@ -25,12 +25,6 @@ def add_parser(
     subparsers: argparse._SubParsersAction,
     common_parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
-    """Register the example subcommand.
-
-    :param subparsers: Subparser action from main parser
-    :param common_parser: Parent parser with common arguments
-    :return: The created subparser
-    """
     parser = subparsers.add_parser(
         "example",  # Change this to your command name
         parents=[common_parser],
@@ -38,7 +32,7 @@ def add_parser(
         description="Detailed description of what this command does",
     )
 
-    # Add command-specific arguments
+    # command-specific arguments
     parser.add_argument(
         "name",
         help="Example positional argument",
@@ -54,11 +48,6 @@ def add_parser(
 
 
 def run(args: argparse.Namespace) -> int:
-    """Execute the example command.
-
-    :param args: Parsed command-line arguments
-    :return: Exit code (0 for success, non-zero for error)
-    """
     _logger.debug("Greeting: %s", args.greeting)
 
     print(  # noqa: T201

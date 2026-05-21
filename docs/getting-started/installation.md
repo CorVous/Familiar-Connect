@@ -14,10 +14,10 @@
 
 ## Environment variables
 
-Create a `.env` in the repo root (loaded automatically on startup).
-Only install-wide secrets and the active-familiar selector live here;
-everything tunable about the familiar — LLM model, TTS voice — lives
-in `data/familiars/<id>/character.toml`.
+Create a `.env` in the repo root (loaded on startup). Only install-wide
+secrets and the active-familiar selector live here; everything tunable
+about the familiar — LLM model, TTS voice — lives in
+`data/familiars/<id>/character.toml`.
 
 ```bash
 # required
@@ -45,18 +45,16 @@ DEEPGRAM_API_KEY=<deepgram key>
 
 ### Per-familiar model choice
 
-LLM model selection is per-call-site and lives in the familiar's
-`character.toml` under `[llm.<slot>]` tables. Three tiered slots
-ship today: `fast` (voice), `prose` (text replies), and `background`
-(summaries / fact extraction / dossiers). See
-[Tuning — LLM slots](../architecture/tuning.md#llm-slots) for the
-schema.
+LLM model selection is per-call-site, in the familiar's `character.toml`
+under `[llm.<slot>]` tables. Three tiered slots ship today: `fast`
+(voice), `prose` (text replies), and `background` (summaries / fact
+extraction / dossiers). See [Tuning — LLM
+slots](../architecture/tuning.md#llm-slots) for the schema.
 
-The checked-in reference profile at
-`data/familiars/_default/character.toml` fills in the slot with a
-sensible default. A user's own `character.toml` only needs to
-override the fields it wants to change. Copy the default to start a
-new familiar:
+The reference profile at `data/familiars/_default/character.toml`
+fills each slot with a sensible default. A user's own `character.toml`
+only overrides the fields it wants to change. Copy the default to
+start a new familiar:
 
 ```bash
 cp -r data/familiars/_default data/familiars/my-familiar
@@ -72,19 +70,18 @@ uv run familiar-connect run --familiar aria
 uv run familiar-connect -vv run --familiar aria
 ```
 
-The `run` subcommand resolves the active familiar via `--familiar`
-first, then `FAMILIAR_ID`. `-v` / `-vv` / `-vvv` tune logging
-verbosity.
+`run` resolves the active familiar via `--familiar` first, then
+`FAMILIAR_ID`. `-v` / `-vv` / `-vvv` tune logging verbosity.
 
 ## CLI reference
 
-The help text below is generated at build time from the argparse
-parser in `src/familiar_connect/cli.py`. Run `uv run familiar-connect
---help` locally to get the same output.
+Help text below is generated at build time from the argparse parser in
+`src/familiar_connect/cli.py`. Run `uv run familiar-connect --help`
+locally for the same output.
 
 <!-- @cli-help: familiar-connect -->
 
 <!-- @cli-help: familiar-connect run -->
 
-Once the bot is online, see [Slash commands](slash-commands.md) for
-the subscription surface.
+Once the bot is online, see [Slash commands](slash-commands.md) for the
+subscription surface.

@@ -2,10 +2,10 @@
 
 Owns:
 
-- Discord client construction (``py-cord`` + DAVE voice)
+- Discord client (``py-cord`` + DAVE voice)
 - Subscribe / unsubscribe slash commands (text + voice)
 - ``on_message`` / ``on_voice_state_update`` handlers
-- :func:`ingest_event` — text + voice events publish to bus via
+- :func:`ingest_event` — publishes text + voice events to bus via
   :class:`DiscordTextSource`. Twitch has its own source.
 - :class:`BotHandle` — adapter for bus-only processors (e.g.
   :class:`TextResponder`) to post back to Discord without holding
@@ -47,24 +47,22 @@ if TYPE_CHECKING:
     from familiar_connect.stt import Transcriber, TranscriptionResult
     from familiar_connect.voice.turn_detection import UtteranceEndpointer
 
-    # outbound text callback. returns posted-message id (str) for
-    # reply-chain tracking, or None on send failure.
-    # ``reply_to_message_id`` threads via Discord ``MessageReference``;
-    # ``mention_user_ids`` → ``AllowedMentions(users=...)`` so only
-    # resolved targets ping.
+    # outbound text callback. returns posted-message id for reply-chain
+    # tracking, None on send failure. ``reply_to_message_id`` threads
+    # via ``MessageReference``; ``mention_user_ids`` →
+    # ``AllowedMentions(users=...)`` so only resolved targets ping.
     SendText = Callable[
         [int, str, str | None, tuple[int, ...]],
         Awaitable[str | None],
     ]
 
-    # py-cord ``Bot is typing…`` indicator hook. Returns a fresh async
-    # context manager that wraps the bot's response generation so the
-    # client shows the indicator for the duration. Implemented in
-    # ``create_bot`` via ``channel.typing()``.
+    # py-cord ``Bot is typing…`` indicator hook. Returns fresh async
+    # context manager wrapping response generation so indicator stays
+    # for duration. Implemented in ``create_bot`` via ``channel.typing()``.
     TriggerTyping = Callable[[int], AsyncContextManager[None]]
 
-    # resolves Discord member identity for voice turns so they carry
-    # the same author attribution as text turns.
+    # resolves Discord member for voice turns so they carry same
+    # author attribution as text turns.
     ResolveMember = Callable[[int, int], "Author | None"]
 
 _logger = logging.getLogger(__name__)
@@ -78,12 +76,12 @@ class VoiceRuntime:
     clean ``/unsubscribe-voice`` teardown.
 
     ``transcribers`` / ``fanin_tasks`` / ``user_pump_tasks`` keyed by
-    Discord user_id — the shared ``pump_task`` only demuxes the sink
-    queue to per-user pumps. Per-user pumps own ``send_audio`` +
-    ``feed_audio`` so one slow speaker (network blip, slow VAD, GC
-    pause) can't stall the others' audio path. Per-SSRC audio gives
-    natural isolation; one fan-in task per user forwards results onto
-    the shared ``result_queue`` tagged with originating user_id.
+    Discord user_id — shared ``pump_task`` only demuxes sink queue to
+    per-user pumps. Per-user pumps own ``send_audio`` + ``feed_audio``
+    so one slow speaker (network blip, slow VAD, GC pause) can't stall
+    others' audio path. Per-SSRC audio gives natural isolation; one
+    fan-in task per user forwards results to shared ``result_queue``
+    tagged with originating user_id.
     """
 
     voice_client: discord.VoiceClient
@@ -95,13 +93,13 @@ class VoiceRuntime:
     source_task: asyncio.Task[None]
     transcribers: dict[int, Transcriber] = field(default_factory=dict)
     fanin_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
-    # per-user audio drain tasks — one ``await send_audio`` + one
-    # ``await feed_audio`` cycle per chunk for that user, in parallel
-    # across users. populated lazily on first audio per user_id.
+    # per-user audio drain tasks — one ``send_audio`` + one
+    # ``feed_audio`` per chunk per user, parallel across users.
+    # populated lazily on first audio per user_id.
     user_pump_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
-    # idle watchdog closes per-user streams after extended silence so
-    # Deepgram doesn't tear them down server-side mid-utterance.
-    # reopened lazily on next audio chunk for that user.
+    # closes per-user streams after extended silence so Deepgram
+    # doesn't tear them down server-side mid-utterance. reopened
+    # lazily on next audio chunk for that user.
     idle_watchdog_task: asyncio.Task[None] | None = None
     # V1 phase 2: per-user local turn-endpointer (TEN-VAD + Smart Turn).
     # empty when ``familiar.local_turn_detector`` unset.
@@ -113,19 +111,19 @@ class BotHandle:
     """Bot + outbound seams for bus processors.
 
     send_text: seam :class:`TextResponder` injects to post replies
-    without depending on pycord. Returns posted-message id (``str``)
-    for future reply lookups; ``None`` on send failure.
+    without depending on pycord. Returns posted-message id for future
+    reply lookups; ``None`` on send failure.
     voice_runtime: keyed by voice-channel id; populated by
-    ``/subscribe-voice``, read by active TTS player to find the live
-    voice client.
+    ``/subscribe-voice``, read by active TTS player to find live voice
+    client.
     resolve_member: ``(channel_id, user_id) → Author``; consumed by
-    :class:`VoiceResponder` so voice user turns get the same
+    :class:`VoiceResponder` so voice user turns get same
     speaker-attributed prefixes as text turns.
-    voice_members: side cache for voice-only members. Without the
+    voice_members: side cache for voice-only members. Without
     privileged ``members`` intent, ``guild.get_member()`` only knows
     users seen via other events (text, voice-state changes); voice-only
     joiners stay invisible. Populated by voice-state events + background
-    ``guild.fetch_member()`` triggered on first audio per user_id.
+    ``guild.fetch_member()`` on first audio per user_id.
     """
 
     bot: discord.Bot
@@ -135,15 +133,15 @@ class BotHandle:
     voice_members: dict[int, Author] = field(default_factory=dict)
     trigger_typing: TriggerTyping | None = None
     typing_interrupt: TypingInterruptHandler | None = None
-    """Policy seam for ``on_typing`` events; consumed by ``TextResponder``."""
+    """Seam for ``on_typing`` events; consumed by ``TextResponder``."""
 
 
 async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noqa: RUF029 — pycord requires coroutine fn even when there's nothing to await
     """py-cord ``start_recording`` callback. No-op — sink writes via queue.
 
-    Must be ``async def`` — pycord schedules the return value with
-    ``asyncio.run_coroutine_threadsafe`` (voice_client.py:915), which
-    requires a coroutine.
+    Must be ``async def`` — pycord schedules return via
+    ``asyncio.run_coroutine_threadsafe`` (voice_client.py:915), needs
+    coroutine.
     """
     del sink, args
 
@@ -154,8 +152,8 @@ async def _prefetch_voice_member(
     """Populate ``handle.voice_members[user_id]``; safe to fire repeatedly.
 
     Order: cache → ``guild.get_member`` → ``guild.fetch_member`` (REST).
-    Each step bails on hit. Errors are swallowed — a missing voice
-    name is recoverable; a crashing prefetch task isn't.
+    Each step bails on hit. Errors swallowed — missing voice name
+    recoverable; crashing prefetch task isn't.
     """
     if user_id in handle.voice_members:
         return
@@ -187,15 +185,15 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
 ) -> VoiceRuntime | None:
     """Bring up sink + per-user transcribers + voice source for *channel_id*.
 
-    Returns ``None`` when no transcriber is configured — the bot can
-    still join for TTS playback only. Idempotent: a second call for
-    the same channel returns the existing runtime.
+    Returns ``None`` when no transcriber configured — bot can still
+    join for TTS playback only. Idempotent: second call for same
+    channel returns existing runtime.
 
-    ``familiar.transcriber`` is treated as a *template*: a fresh
-    Deepgram WS is cloned for each Discord user_id the first time
-    audio arrives from that user. Per-user streams kill mixed-stream
-    endpointing (one speaker's pause finalizing another's mid-sentence)
-    and inherit attribution from Discord's per-SSRC delivery.
+    ``familiar.transcriber`` treated as *template*: fresh Deepgram WS
+    cloned for each Discord user_id on first audio from that user.
+    Per-user streams kill mixed-stream endpointing (one speaker's pause
+    finalizing another's mid-sentence) and inherit attribution from
+    Discord's per-SSRC delivery.
     """
     if familiar.transcriber is None:
         return None
@@ -223,16 +221,16 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     fanin_tasks: dict[int, asyncio.Task[None]] = {}
     endpointers: dict[int, UtteranceEndpointer] = {}
     # per-user audio drain tasks + their inbound queues. router below
-    # demuxes the shared ``audio_queue`` into these so one slow user's
+    # demuxes shared ``audio_queue`` into these so one slow user's
     # ``send_audio``/``feed_audio`` can't head-of-line-block the rest.
     user_pump_tasks: dict[int, asyncio.Task[None]] = {}
     user_audio_queues: dict[int, asyncio.Queue[bytes]] = {}
-    # last audio-chunk arrival per user (monotonic seconds). drives the
-    # idle watchdog below; entries removed when the stream is closed.
+    # last audio-chunk arrival per user (monotonic seconds). drives
+    # idle watchdog below; entries removed when stream closed.
     last_audio_time: dict[int, float] = {}
 
     async def _fanin(user_id: int, q: asyncio.Queue[TranscriptionResult]) -> None:
-        """Tag each result with ``user_id`` and forward to shared queue."""
+        """Tag each result with ``user_id``, forward to shared queue."""
         while True:
             result = await q.get()
             result.user_id = user_id
@@ -245,11 +243,11 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         last_audio_time[user_id] = time.monotonic()
         clone = template.clone()
         # V1 phase 2: when local turn detection owns endpointing, drive
-        # Deepgram with a near-zero hosted endpointer so it relies on
-        # ``Finalize`` from the local chain. Backend-specific knob —
-        # not on the Transcriber Protocol; setattr keeps the typing
-        # honest while still no-oping for backends that lack the field
-        # (V3 phase 2/3, plus mocked clones in tests).
+        # Deepgram with near-zero hosted endpointer so it relies on
+        # ``Finalize`` from local chain. Backend-specific knob — not on
+        # Transcriber Protocol; setattr keeps typing honest while
+        # no-oping for backends lacking field (V3 phase 2/3, plus
+        # mocked clones in tests).
         if detector is not None and hasattr(clone, "endpointing_ms"):
             setattr(clone, "endpointing_ms", 10)  # noqa: B010
         per_user_q: asyncio.Queue[TranscriptionResult] = asyncio.Queue()
@@ -258,8 +256,8 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         if detector is not None:
 
             async def _on_complete(_audio: bytes, uid: int = user_id) -> None:
-                # Park vad_end ahead of finalize so the buffered timestamp
-                # reaches VoiceSource before the resulting stt_final.
+                # park vad_end ahead of finalize so buffered timestamp
+                # reaches VoiceSource before resulting stt_final.
                 source.record_vad_end(user_id=uid)
                 target = transcribers.get(uid)
                 if target is None:

@@ -1,6 +1,6 @@
 # Familiar-Connect
 
-An AI "familiar" that joins Discord voice channels, listens to users, understands speech, and talks back using real AI voices.
+An AI "familiar" that joins Discord voice channels, listens, understands speech, and talks back with real AI voices.
 
 **Full documentation lives at [`docs/`](./docs/index.md)** — or browse the rendered site via `uv run mkdocs serve`.
 

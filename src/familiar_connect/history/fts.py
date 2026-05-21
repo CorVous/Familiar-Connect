@@ -1,20 +1,20 @@
 """Tantivy-backed full-text index for turns and facts.
 
-Lives outside Turso so we get FTS today (pyturso 0.5.1 wheels don't
-ship the FTS module) and so FTS reads don't queue behind SQL writes.
-One :class:`FtsIndex` instance per indexed table; on-disk index dir
-under ``data/familiars/<id>/fts/<name>/``, or in-memory when ``path``
-is ``None`` (tests).
+Outside Turso — pyturso 0.5.1 wheels lack FTS, and keeping FTS
+external means reads don't queue behind SQL writes. One
+:class:`FtsIndex` per indexed table; on-disk under
+``data/familiars/<id>/fts/<name>/``, in-memory when ``path`` is
+``None`` (tests).
 
-Analyzer matches the previous SQLite FTS5 ``unicode61
-remove_diacritics 2`` plus the Python-side stopword pass:
+Analyzer matches prior SQLite FTS5 ``unicode61 remove_diacritics 2``
+plus Python-side stopword pass:
 
 * simple tokenizer (whitespace + punctuation split)
 * lowercase
 * ascii_fold (combining marks → base char; ``café`` ⇒ ``cafe``)
 * custom_stopword(_FTS_STOPWORDS) — small high-confidence English list
 
-Searcher returns ``[(row_id, bm25_score)]``; caller joins back to the
+Searcher returns ``[(row_id, bm25_score)]``; caller joins back to
 relational table.
 """
 
@@ -29,10 +29,10 @@ import tantivy
 PathLike = str | Path
 
 
-# Drop common English stopwords before FTS matching. Without this,
+# drop common English stopwords before FTS matching. without this,
 # casual chat cues like "hey do you know about X" dilute BM25 scoring
-# and produce noisy hits on conversational filler. Same list as the
-# pre-Turso FTS5 path used; kept small and high-confidence.
+# and produce noisy hits on conversational filler. same list as
+# pre-Turso FTS5 path; small + high-confidence.
 _FTS_STOPWORDS: tuple[str, ...] = (
     "a",
     "about",
@@ -128,10 +128,9 @@ _ANALYZER_NAME = "familiar_en"
 
 def _build_analyzer() -> tantivy.TextAnalyzer:
     # stemmer covers the old `fox*` prefix-match trick for plurals
-    # (fox/foxes, bear/bears, etc.) without dragging in unrelated
-    # prefixes (foxhound). remove_long caps token length so URLs and
-    # garbage tokens can't bloat the index — matches the spirit of
-    # unicode61's 64-char default.
+    # (fox/foxes, bear/bears) without dragging in unrelated prefixes
+    # (foxhound). remove_long caps token length so URLs + garbage
+    # tokens can't bloat the index — matches unicode61's 64-char default.
     return (
         tantivy
         .TextAnalyzerBuilder(tantivy.Tokenizer.simple())
@@ -154,9 +153,9 @@ def _build_schema() -> tantivy.Schema:
 class FtsIndex:
     """Tantivy index over (row_id, content) for one relational table.
 
-    Thread-safe — tantivy's writer/searcher are thread-safe, plus a
-    short critical section guards the writer handle. Use one instance
-    per indexed entity (``turns``, ``facts``).
+    Thread-safe — tantivy writer/searcher are thread-safe, plus a
+    short critical section guards the writer handle. One instance per
+    indexed entity (``turns``, ``facts``).
 
     ``path=None`` → in-memory (tests with :memory: store).
     """
@@ -172,23 +171,23 @@ class FtsIndex:
             self._index = tantivy.Index(schema, path=str(self._path), reuse=True)
         self._index.register_tokenizer(_ANALYZER_NAME, _build_analyzer())
         self._lock = RLock()
-        # one persistent writer per index — cheaper than open/close per write
+        # one persistent writer per index — cheaper than open/close per write.
         self._writer = self._index.writer(heap_size=15_000_000, num_threads=1)
 
     def add(self, row_id: int, content: str) -> None:
-        """Index one document. Commits immediately so reads see it."""
+        """Index one document; commits immediately so reads see it."""
         with self._lock:
             doc = tantivy.Document()
             doc.add_integer("row_id", int(row_id))
             doc.add_text("content", content)
-            # treat add as upsert — delete any prior doc with same row_id
+            # add as upsert — delete any prior doc with same row_id.
             self._writer.delete_documents("row_id", int(row_id))
             self._writer.add_document(doc)
             self._writer.commit()
         self._index.reload()
 
     def add_many(self, rows: list[tuple[int, str]]) -> None:
-        """Bulk-index. One commit for the batch; cheaper for migrations."""
+        """Bulk-index; one commit for the batch — cheaper for migrations."""
         if not rows:
             return
         with self._lock:

@@ -7,8 +7,8 @@ import threading
 
 import discord
 
-# Discord requires 48kHz, 16-bit signed, stereo PCM in 20ms frames.
-# 48000 samples/s x 2 channels x 2 bytes/sample x 0.020 s = 3840 bytes/frame.
+# Discord requires 48kHz s16le stereo PCM in 20ms frames.
+# 48000 * 2ch * 2B * 0.020s = 3840 bytes/frame.
 DISCORD_FRAME_SIZE = 3840
 
 
@@ -20,17 +20,16 @@ class Resampler48to16:
     """Streaming 48 kHz → 16 kHz int16 PCM resampler.
 
     Stateful: holds up to two int16 samples between calls so callers
-    can feed arbitrary chunk lengths. Each output sample is the
-    integer mean of three consecutive input samples (boxcar pre-filter
-    + 3:1 decimation). TEN-VAD is forgiving of the residual high-
-    frequency aliasing above the 8 kHz Nyquist.
+    can feed arbitrary chunk lengths. Each output sample = integer
+    mean of three consecutive inputs (boxcar pre-filter + 3:1
+    decimation). TEN-VAD tolerates residual aliasing above 8 kHz Nyquist.
 
-    Use :meth:`close` to flush a partial triplet (zero-padded) at
-    end-of-stream; :meth:`reset` drops held state without emitting.
+    :meth:`close` flushes a partial triplet (zero-padded) at EOS;
+    :meth:`reset` drops held state without emitting.
     """
 
     def __init__(self) -> None:
-        # held int samples carried into the next feed call (0, 1, or 2)
+        # held int samples carried into next feed (0, 1, or 2)
         self._carry: list[int] = []
 
     def reset(self) -> None:
@@ -38,7 +37,7 @@ class Resampler48to16:
         self._carry = []
 
     def feed(self, pcm_48k: bytes) -> bytes:
-        """Resample arbitrary-length 48 kHz int16 PCM; return 16 kHz int16 PCM.
+        """Resample arbitrary-length 48 kHz int16 PCM → 16 kHz int16 PCM.
 
         :raises ValueError: If *pcm_48k* has odd length (not int16-aligned).
         """

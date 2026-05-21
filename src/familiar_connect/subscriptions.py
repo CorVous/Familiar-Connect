@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class SubscriptionKind(Enum):
-    """Text or voice — distinct rows even when a channel hosts both."""
+    """Text or voice — distinct rows even when channel hosts both."""
 
     text = "text"
     voice = "voice"
@@ -35,8 +35,8 @@ class Subscription:
 class SubscriptionRegistry:
     """In-memory set backed by TOML sidecar.
 
-    Loads on construction; mutations rewrite the whole file (tens of
-    rows at most).
+    Loads on construction; mutations rewrite whole file (tens of rows
+    at most).
     """
 
     def __init__(self, path: Path) -> None:

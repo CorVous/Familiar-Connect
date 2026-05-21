@@ -1,9 +1,9 @@
 """Styled console log primitives.
 
-Each call site composes its own log string from these primitives —
-emoji, label, and colour choices live next to the log they describe.
+Each call site composes its own log string — emoji, label, colour
+choices live next to the log they describe.
 
-Call ``init()`` once at startup (done inside ``setup_logging``).
+Call ``init()`` once at startup (handled by ``setup_logging``).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from colorama import init as _colorama_init
 
 
 def init(strip: bool = False) -> None:  # noqa: FBT001, FBT002
-    """Initialize colorama — call once at process start."""
+    """Init colorama; call once at process start."""
     _colorama_init(strip=strip, autoreset=False)
 
 
@@ -25,8 +25,9 @@ def init(strip: bool = False) -> None:  # noqa: FBT001, FBT002
 # Public colour constants
 # ---------------------------------------------------------------------------
 
-# colorama Fore.X are class-level ints that the AnsiCodes constructor rewrites
-# into ANSI escape strings at instantiation; cast so static checkers see str.
+# colorama Fore.X are class-level ints; AnsiCodes constructor rewrites
+# them to ANSI escape strings at instantiation. cast so static checkers
+# see str.
 W = cast("str", Fore.WHITE)
 C = cast("str", Fore.CYAN)
 G = cast("str", Fore.GREEN)
@@ -49,12 +50,12 @@ RS = cast("str", Style.RESET_ALL)
 
 
 def tag(text: str, color: str) -> str:
-    """Bracketed label. Brackets always white; inner text takes ``color``."""
+    """Bracketed label; brackets white, inner text ``color``."""
     return f"{W}[{color}{text}{W}]{RS}"
 
 
 def kv(key: str, val: str, *, kc: str = W, vc: str = W) -> str:
-    """``key=value`` chunk with separate colours for key and value."""
+    """``key=value`` chunk; separate colours for key, value."""
     return f"{kc}{key}={RS}{vc}{val}{RS}"
 
 
@@ -64,7 +65,7 @@ def word(text: str, color: str) -> str:
 
 
 def trunc(text: str, limit: int = 200) -> str:
-    """Truncate with ``…`` ellipsis if longer than *limit*."""
+    """Truncate with ``…`` if longer than *limit*."""
     return f"{text[:limit]}{'…' if len(text) > limit else ''}"
 
 
@@ -78,10 +79,10 @@ _TAG_RE = re.compile(r"^\x1b\[\d+m\[\x1b\[\d+m([^\x1b]+)\x1b\[\d+m\]\x1b\[0m")
 
 
 class StyledFormatter(logging.Formatter):
-    """Repaint leading tag + append level label for WARNING/ERROR; DEBUG prefix kept.
+    """Repaint leading tag + append level label for WARNING/ERROR; keep DEBUG prefix.
 
-    Preserves stdlib behavior of appending exception/stack traces — without
-    this, `_logger.exception(...)` would silently drop the traceback.
+    Preserves stdlib append of exception/stack traces — without this,
+    ``_logger.exception(...)`` silently drops the traceback.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -100,7 +101,7 @@ class StyledFormatter(logging.Formatter):
             out = f"{LW}DEBUG{RS}: {msg}"
         else:
             out = msg
-        # mirror logging.Formatter: append exc_info / stack_info if present
+        # mirror logging.Formatter: append exc_info / stack_info when present
         if record.exc_info and not record.exc_text:
             record.exc_text = self.formatException(record.exc_info)
         if record.exc_text:

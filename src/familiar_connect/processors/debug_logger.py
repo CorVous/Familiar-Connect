@@ -1,8 +1,7 @@
-"""Debug processor: one log line per event on subscribed topics.
+"""One log line per event on subscribed topics.
 
-Phase-1 "is the bus alive?" signal. Colourised via
-:mod:`familiar_connect.log_style`. Matches the Phase-1 deliverable in
-the rollout plan — no user-visible behaviour beyond logs.
+Phase-1 "is bus alive?" signal. Colourised via
+:mod:`familiar_connect.log_style`.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ _logger = logging.getLogger("familiar_connect.processors.debug_logger")
 
 
 class DebugLoggerProcessor:
-    """Log one line per event. Does not republish."""
+    """Logs one line per event; does not republish."""
 
     name: str = "debug-logger"
 

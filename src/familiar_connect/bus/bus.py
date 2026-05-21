@@ -1,9 +1,9 @@
-"""In-process event bus with per-topic backpressure policies.
+"""In-process event bus, per-topic backpressure policies.
 
-Topic-keyed fan-out. Every :meth:`InProcessEventBus.subscribe` call
-creates an isolated bounded/unbounded queue; per-subscription
-:class:`BackpressurePolicy` decides what happens when the queue is
-full. See plan § Design.1.
+Topic-keyed fan-out. Each :meth:`InProcessEventBus.subscribe` creates
+isolated bounded/unbounded queue; per-subscription
+:class:`BackpressurePolicy` governs full-queue behaviour. See plan
+§ Design.1.
 """
 
 from __future__ import annotations
@@ -33,7 +33,8 @@ _DEFAULT_MAXSIZE: dict[BackpressurePolicy, int] = {
 
 
 class Lifecycle(Enum):
-    """Bus lifecycle states. See plan § Design.1 *Bus lifecycle*."""
+    """Bus lifecycle states. See plan § Design.1 *Bus lifecycle*."""  # noqa: D203
+
 
     STARTING = "starting"
     RUNNING = "running"
@@ -82,11 +83,11 @@ class _Subscription:
         self._closed.set()
 
     async def iterator(self) -> AsyncIterator[Event]:
-        """Drain queued events until the subscription is closed.
+        """Drain queued events until subscription closed.
 
         Yields:
             Event: next queued event; raises :class:`StopAsyncIteration`
-            once the subscription is closed and the queue is drained.
+            once closed and drained.
 
         """
         while True:
@@ -126,9 +127,8 @@ class _Subscription:
 class InProcessEventBus:
     """Topic-keyed pub/sub, in-process only.
 
-    Kept behind :class:`familiar_connect.bus.protocols.EventBus`
-    Protocol so a future process-spanning impl can replace it without
-    touching processors.
+    Hidden behind :class:`familiar_connect.bus.protocols.EventBus` so a
+    future process-spanning impl swaps in without touching processors.
     """
 
     def __init__(self) -> None:
