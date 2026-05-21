@@ -22,7 +22,7 @@ from familiar_connect.bus.envelope import Event
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.context import (
     Assembler,
-    CoreInstructionsLayer,
+    CharacterCardLayer,
     RecentHistoryLayer,
 )
 from familiar_connect.history.async_store import AsyncHistoryStore
@@ -128,12 +128,12 @@ def _make_responder(
     registry: ToolRegistry,
     tool_context_factory,  # noqa: ANN001 — closure type fine for tests
 ) -> tuple[TextResponder, TurnRouter, HistoryStore]:
-    core = tmp_path / "core.md"
-    core.write_text("You are a familiar.\n")
+    card = tmp_path / "character.md"
+    card.write_text("You are a familiar.\n")
     store = HistoryStore(":memory:")
     assembler = Assembler(
         layers=[
-            CoreInstructionsLayer(path=core),
+            CharacterCardLayer(card_path=card),
             RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20),
         ]
     )

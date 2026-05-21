@@ -31,9 +31,9 @@ details for what already ships live in
 
 4. **Hand-authored, rule-activated character context**
    (RisuAI / SillyTavern lorebooks). Keyword-activated entries.
-   `core_instructions.md` + `character.md` ship as the always-on
-   degenerate case; M4 added a real keyword-activated lorebook
-   alongside them — see [Lorebook](#lorebook-m4).
+   `character.md` ships as the always-on degenerate case (persona
+   plus operational essentials); M4 added a real keyword-activated
+   lorebook alongside it — see [Lorebook](#lorebook-m4).
 
 ## What's wired today
 

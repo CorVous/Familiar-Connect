@@ -33,7 +33,6 @@ from familiar_connect.context import (
     Assembler,
     CharacterCardLayer,
     ConversationSummaryLayer,
-    CoreInstructionsLayer,
     CrossChannelContextLayer,
     LorebookLayer,
     OperatingModeLayer,
@@ -185,14 +184,12 @@ def _default_assembler(
     :class:`Budgeter`'s token caps usually bite first.
     """
     root = familiar.root
-    core_path = root.parent / "_default" / "core_instructions.md"
     card_path = root / "character.md"
     lorebook_path = root / "lorebook.toml"
     store = familiar.history_store
     retrieval = familiar.config.memory_retrieval
     return Assembler(
         layers=[
-            CoreInstructionsLayer(path=core_path),
             CharacterCardLayer(card_path=card_path),
             OperatingModeLayer(
                 modes={

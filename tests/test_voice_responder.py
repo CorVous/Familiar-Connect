@@ -26,7 +26,7 @@ from familiar_connect.bus.topics import (
 )
 from familiar_connect.context import (
     Assembler,
-    CoreInstructionsLayer,
+    CharacterCardLayer,
     RecentHistoryLayer,
 )
 from familiar_connect.diagnostics.collector import (
@@ -120,12 +120,12 @@ def _make_responder(
     store: HistoryStore | None = None,
     member_resolver: Callable[[int, int], Author | None] | None = None,
 ) -> tuple[VoiceResponder, TurnRouter, HistoryStore]:
-    core = tmp_path / "core.md"
-    core.write_text("You are a familiar.\n")
+    card = tmp_path / "character.md"
+    card.write_text("You are a familiar.\n")
     store = store or HistoryStore(":memory:")
     assembler = Assembler(
         layers=[
-            CoreInstructionsLayer(path=core),
+            CharacterCardLayer(card_path=card),
             RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20),
         ]
     )

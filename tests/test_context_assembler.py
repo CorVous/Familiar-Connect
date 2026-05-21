@@ -13,7 +13,6 @@ from familiar_connect.context import (
     Assembler,
     AssemblyContext,
     CharacterCardLayer,
-    CoreInstructionsLayer,
     OperatingModeLayer,
     RecentHistoryLayer,
 )
@@ -40,31 +39,6 @@ def _ctx(
     )
 
 
-class TestCoreInstructionsLayer:
-    @pytest.mark.asyncio
-    async def test_reads_from_file(self, tmp_path: Path) -> None:
-        p = tmp_path / "core.md"
-        p.write_text("You are a helpful familiar.\nBe concise.\n")
-        layer = CoreInstructionsLayer(path=p)
-        out = await layer.build(_ctx())
-        assert "helpful familiar" in out
-        assert "Be concise" in out
-
-    @pytest.mark.asyncio
-    async def test_returns_empty_when_missing(self, tmp_path: Path) -> None:
-        layer = CoreInstructionsLayer(path=tmp_path / "missing.md")
-        assert not await layer.build(_ctx())
-
-    def test_invalidation_key_changes_on_edit(self, tmp_path: Path) -> None:
-        p = tmp_path / "core.md"
-        p.write_text("v1")
-        layer = CoreInstructionsLayer(path=p)
-        key_1 = layer.invalidation_key(_ctx())
-        p.write_text("v2")
-        key_2 = layer.invalidation_key(_ctx())
-        assert key_1 != key_2
-
-
 class TestCharacterCardLayer:
     @pytest.mark.asyncio
     async def test_reads_card_from_sidecar(self, tmp_path: Path) -> None:
@@ -78,6 +52,15 @@ class TestCharacterCardLayer:
     async def test_empty_when_no_sidecar(self, tmp_path: Path) -> None:
         layer = CharacterCardLayer(card_path=tmp_path / "no-card.md")
         assert not await layer.build(_ctx())
+
+    def test_invalidation_key_changes_on_edit(self, tmp_path: Path) -> None:
+        card = tmp_path / "character.md"
+        card.write_text("v1")
+        layer = CharacterCardLayer(card_path=card)
+        key_1 = layer.invalidation_key(_ctx())
+        card.write_text("v2")
+        key_2 = layer.invalidation_key(_ctx())
+        assert key_1 != key_2
 
 
 class TestOperatingModeLayer:
@@ -762,26 +745,22 @@ class TestRecentHistoryMentionRewriting:
 class TestAssembler:
     @pytest.mark.asyncio
     async def test_composes_non_empty_layers_in_order(self, tmp_path: Path) -> None:
-        core = tmp_path / "core.md"
-        core.write_text("CORE\n")
         card = tmp_path / "card.md"
         card.write_text("CARD\n")
 
         asm = Assembler(
             layers=[
-                CoreInstructionsLayer(path=core),
                 CharacterCardLayer(card_path=card),
                 OperatingModeLayer(modes={"voice": "BE_TERSE"}),
             ],
         )
         prompt = await asm.assemble(_ctx(viewer_mode="voice"))
-        assert "CORE" in prompt.system_prompt
         assert "CARD" in prompt.system_prompt
         assert "BE_TERSE" in prompt.system_prompt
         # Empty layers are dropped
         asm2 = Assembler(
             layers=[
-                CoreInstructionsLayer(path=tmp_path / "missing.md"),
+                CharacterCardLayer(card_path=tmp_path / "missing.md"),
                 CharacterCardLayer(card_path=card),
             ],
         )
