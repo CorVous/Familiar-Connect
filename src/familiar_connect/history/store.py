@@ -23,6 +23,7 @@ that funnels every Turso call onto one dedicated OS thread inside
 from __future__ import annotations
 
 import json
+import logging
 import struct
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -31,9 +32,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from familiar_connect import log_style as ls
 from familiar_connect.history.fts import FtsIndex
 from familiar_connect.history.turso_compat import TursoConnection
 from familiar_connect.identity import Author
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -504,6 +508,30 @@ class HistoryStore:
         self._fts_facts = FtsIndex(fts_facts_path)
 
     # ------------------------------------------------------------------
+    # FTS write helper
+    # ------------------------------------------------------------------
+
+    def _safe_fts_add(
+        self, index: FtsIndex, row_id: int, content: str, *, kind: str
+    ) -> None:
+        """Index ``content`` under ``row_id``; never raise.
+
+        Tantivy retries transient Windows AV file locks internally; any
+        error reaching here is either persistent or non-lock-shaped.
+        SQL row already committed — losing one FTS doc is recoverable
+        via :meth:`rebuild_fts`. Crashing the bot is not.
+        """
+        try:
+            index.add(row_id, content)
+        except ValueError as exc:
+            _logger.warning(
+                f"{ls.tag('FTS', ls.Y)} "
+                f"{ls.kv('skip', kind, vc=ls.LY)} "
+                f"{ls.kv('row_id', str(row_id), vc=ls.LY)} "
+                f"{ls.kv('err', ls.trunc(str(exc), 160), vc=ls.LY)}"
+            )
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -583,7 +611,7 @@ class HistoryStore:
         )
         self._conn.commit()
         turn_id = int(cur.lastrowid or 0)
-        self._fts_turns.add(turn_id, content)
+        self._safe_fts_add(self._fts_turns, turn_id, content, kind="turn")
         return HistoryTurn(
             id=turn_id,
             timestamp=timestamp,
@@ -648,7 +676,9 @@ class HistoryStore:
         )
         self._conn.commit()
         for row in rows:
-            self._fts_turns.add(int(row["id"]), content)
+            self._safe_fts_add(
+                self._fts_turns, int(row["id"]), content, kind="turn_edit"
+            )
 
     def turns_by_ids(
         self,
@@ -1846,7 +1876,7 @@ class HistoryStore:
         )
         self._conn.commit()
         fact_id = int(cur.lastrowid or 0)
-        self._fts_facts.add(fact_id, text)
+        self._safe_fts_add(self._fts_facts, fact_id, text, kind="fact")
         return Fact(
             id=fact_id,
             familiar_id=familiar_id,

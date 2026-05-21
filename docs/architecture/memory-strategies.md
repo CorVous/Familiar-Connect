@@ -53,6 +53,13 @@ Every writer is watermark-driven and idempotent; deleting a
 side-index table rebuilds it from `turns`. See
 [Context pipeline](context-pipeline.md) for watermark semantics.
 
+Tantivy commits on Windows occasionally race with antivirus
+segment-scans (`PermissionDenied` on a fresh `.term` file).
+`FtsIndex._commit` retries those transient locks with short backoff;
+if the commit still can't land, `HistoryStore` logs a warning and
+keeps going so one FTS write can't tear down the bot. The SQL row
+remains canonical and `rebuild_fts` will pick up any skipped doc.
+
 Reads are multi-signal: BM25, recent-window exclusion, a 1-10
 importance hint per fact (M2), and cosine similarity to the cue
 embedding (M6, opt-in).
