@@ -1,7 +1,7 @@
 """``familiar-connect diagnose`` — aggregate span timings from log files.
 
 Reads ``span=<name> ms=<int>`` markers, groups by span, prints
-p50/p95 histogram. Logs are the durable record; the in-process
+p50/p95 histogram. Logs are durable record; in-process
 :class:`SpanCollector` powers ``/diagnostics`` and resets on restart.
 
 Usage::

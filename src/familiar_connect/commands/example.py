@@ -2,7 +2,7 @@
 
 Pattern for new subcommands:
 
-1. Copy to new name (e.g., fetch_data.py)
+1. Copy to new name (e.g. fetch_data.py)
 2. Update command name in ``add_parser()``
 3. Implement ``run()``
 4. Import + register in ``cli.py``'s ``create_parser()``
@@ -26,13 +26,13 @@ def add_parser(
     common_parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(
-        "example",  # Change this to your command name
+        "example",  # change to your command name
         parents=[common_parser],
         help="Example subcommand (replace with your description)",
         description="Detailed description of what this command does",
     )
 
-    # command-specific arguments
+    # command-specific args
     parser.add_argument(
         "name",
         help="Example positional argument",

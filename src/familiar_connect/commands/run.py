@@ -80,9 +80,9 @@ def add_parser(
 ) -> argparse.ArgumentParser:
     """Register the run subcommand.
 
-    :param subparsers: Subparser action from main parser
-    :param common_parser: Parent parser with common arguments
-    :return: The created subparser
+    :param subparsers: subparser action from main parser
+    :param common_parser: parent parser with common arguments
+    :return: created subparser
     """
     parser = subparsers.add_parser(
         "run",
@@ -104,11 +104,11 @@ def add_parser(
 
 
 def _resolve_familiar_root(args: argparse.Namespace) -> Path:
-    """Return the root directory of the active familiar.
+    """Return root directory of active familiar.
 
-    Resolution order: ``--familiar`` CLI flag → ``FAMILIAR_ID``
-    environment variable. Raises :class:`ValueError` if neither is
-    set or the resulting directory is missing.
+    Resolution order: ``--familiar`` CLI flag → ``FAMILIAR_ID`` env.
+    Raises :class:`ValueError` if neither is set or resulting
+    directory is missing.
     """
     familiar_id = args.familiar or os.environ.get("FAMILIAR_ID")
     if not familiar_id:
@@ -134,10 +134,10 @@ _DEBUG_TOPICS: tuple[str, ...] = (
 
 
 async def _run_debug_processor(familiar: Familiar) -> None:
-    """Drain subscribed topics into the debug logger.
+    """Drain subscribed topics into debug logger.
 
-    Proves the bus is carrying traffic. Responders handle their own
-    topics below; the debug logger is a passive observer.
+    Proves bus is carrying traffic. Responders handle their own
+    topics below; debug logger is a passive observer.
     """
     proc = DebugLoggerProcessor(topics=_DEBUG_TOPICS)
     async for event in familiar.bus.subscribe(proc.topics):
@@ -153,35 +153,35 @@ def _default_assembler(
     silence_gap_fold_seconds: float = 0.0,
     embedder: Embedder | None = None,
 ) -> Assembler:
-    """Build the full layer stack with token-aware per-section caps.
+    """Build full layer stack with token-aware per-section caps.
 
-    Order is **stability descending** so OpenAI's prompt cache keeps the
-    longest matching prefix across consecutive turns. Static layers
-    (file/mode-keyed) come first; dynamic layers come next, ordered by
-    refresh rate (slowest first):
+    Order is **stability descending** so OpenAI's prompt cache keeps
+    the longest matching prefix across consecutive turns. Static
+    layers (file/mode-keyed) come first; dynamic layers next, ordered
+    by refresh rate (slowest first):
 
-    * ``LorebookLayer`` — file-sourced authored canon, keyword-activated
-      against the recent window. Flips when topic shifts cross an
-      activation key; otherwise stable.
+    * ``LorebookLayer`` — file-sourced authored canon, keyword-
+      activated against recent window. Flips when topic shifts cross
+      an activation key; otherwise stable.
     * ``ConversationSummaryLayer`` — every ``turns_threshold`` turns
-      (default 10), the slowest of the dynamic block.
-    * ``CrossChannelContextLayer`` — when *any* other channel's summary
-      is rewritten; per-channel rate is bounded by the same threshold,
-      but multiple sources fan in.
+      (default 10), slowest of the dynamic block.
+    * ``CrossChannelContextLayer`` — when *any* other channel's
+      summary is rewritten; per-channel rate bounded by same
+      threshold, but multiple sources fan in.
     * ``ReflectionLayer`` — when :class:`ReflectionWorker` writes a
       new reflection (default every ~20 turns); slower than dossiers,
       faster than rolling summaries.
-    * ``PeopleDossierLayer`` — when any active-channel subject's facts
-      tick the watermark; effectively per-fact write.
-    * ``RagContextLayer`` — every turn (cue is the inbound user text).
+    * ``PeopleDossierLayer`` — when any active-channel subject's
+      facts tick the watermark; effectively per-fact write.
+    * ``RagContextLayer`` — every turn (cue is inbound user text).
 
-    A change in any layer cache-invalidates everything *after* it in
+    Change in any layer cache-invalidates everything *after* it in
     the system message, so reordering gives the prefix the longest
     stable run before the per-turn ``RagContextLayer`` flips. See
     [Voice pipeline § Prompt cache friendliness](
     ../../docs/architecture/voice-pipeline.md#prompt-cache-friendliness).
 
-    ``window_size`` is the hard upper bound on history turns; the
+    ``window_size`` is hard upper bound on history turns;
     :class:`Budgeter`'s token caps usually bite first.
     """
     root = familiar.root
@@ -238,8 +238,8 @@ def _default_assembler(
                 store=store,
                 max_results=budget.max_rag_turns,
                 max_facts=budget.max_rag_facts,
-                # Match RecentHistoryLayer's window so RAG only surfaces
-                # turns *older* than what's already shown verbatim.
+                # match RecentHistoryLayer's window so RAG only surfaces
+                # turns *older* than what's already shown verbatim
                 recent_window_size=window_size,
                 max_tokens=budget.rag_tokens,
                 bm25_weight=retrieval.bm25_weight,
@@ -263,29 +263,29 @@ def _default_assembler(
 
 
 async def _run_voice_responder(familiar: Familiar, responder: VoiceResponder) -> None:
-    """Drain voice-topic events into the :class:`VoiceResponder`."""
+    """Drain voice-topic events into :class:`VoiceResponder`."""
     async for event in familiar.bus.subscribe(responder.topics):
         await responder.handle(event, familiar.bus)
 
 
 async def _run_text_responder(familiar: Familiar, responder: TextResponder) -> None:
-    """Drain ``discord.text`` events into the :class:`TextResponder`."""
+    """Drain ``discord.text`` events into :class:`TextResponder`."""
     async for event in familiar.bus.subscribe(responder.topics):
         await responder.handle(event, familiar.bus)
 
 
 async def _run_alarm_waker(familiar: Familiar, waker: AlarmWaker) -> None:
-    """Drain ``alarm.fired`` events into the :class:`AlarmWaker`."""
+    """Drain ``alarm.fired`` events into :class:`AlarmWaker`."""
     async for event in familiar.bus.subscribe(waker.topics):
         await waker.handle(event, familiar.bus)
 
 
 def _first_voice_client(handle: BotHandle) -> discord.VoiceClient | None:
-    """Pick any active voice client from the runtime map.
+    """Pick any active voice client from runtime map.
 
     v1 supports one voice channel at a time, so the first runtime
     entry is unambiguous. Returns ``None`` if no voice subscription
-    is active.
+    active.
     """
     for rt in handle.voice_runtime.values():
         return rt.voice_client
@@ -296,7 +296,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     """Asyncio entry point: bring up bus, responders, bot.
 
     :param token: Discord bot token.
-    :param familiar: The loaded :class:`Familiar` bundle.
+    :param familiar: loaded :class:`Familiar` bundle.
     """
     handle = create_bot(familiar)
     await familiar.bus.start()
@@ -331,11 +331,11 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     else:
         tts_player = LoggingTTSPlayer()
 
-    # Tool-calling: scheduler + registry + per-turn context factory.
-    # Wired into both responders so set_alarm/cancel_alarm are available
-    # when the per-slot ``tool_calling`` flag is set. The familiar's
+    # tool-calling: scheduler + registry + per-turn context factory.
+    # wired into both responders so set_alarm/cancel_alarm are available
+    # when the per-slot ``tool_calling`` flag is set. familiar's
     # ``llm_clients`` already carry ``tool_calling_enabled`` (see
-    # :func:`create_llm_clients`); the responders check that flag before
+    # :func:`create_llm_clients`); responders check that flag before
     # entering the agentic loop, so wiring is always safe.
     alarm_scheduler = AlarmScheduler(
         history=familiar.history_store,
@@ -396,8 +396,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         context=projector_context,
     )
 
-    # Load any pending alarms now so they start counting down before
-    # the bot accepts new traffic.
+    # load pending alarms now so they start counting down before
+    # bot accepts new traffic
     await alarm_scheduler.start()
 
     try:
@@ -420,7 +420,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
             tg.create_task(handle.bot.start(token), name="discord-bot")
     finally:
         # close py-cord first so its aiohttp ClientSession doesn't leak
-        # past loop shutdown; suppress so a close error can't mask the
+        # past loop shutdown; suppress so close error can't mask the
         # original exception that triggered the finally
         with contextlib.suppress(Exception):
             await handle.bot.close()
@@ -437,15 +437,15 @@ async def _async_main(token: str, familiar: Familiar) -> None:
 
 _OPUS_FALLBACK_PATHS = [
     # macOS — Homebrew
-    "/opt/homebrew/lib/libopus.dylib",  # Apple Silicon
-    "/usr/local/lib/libopus.dylib",  # Intel
+    "/opt/homebrew/lib/libopus.dylib",  # apple silicon
+    "/usr/local/lib/libopus.dylib",  # intel
     # macOS — MacPorts
     "/opt/local/lib/libopus.dylib",
     # Linux — common distro paths
-    "/usr/lib/x86_64-linux-gnu/libopus.so.0",  # Debian/Ubuntu amd64
-    "/usr/lib/aarch64-linux-gnu/libopus.so.0",  # Debian/Ubuntu arm64
-    "/usr/lib64/libopus.so.0",  # Fedora/RHEL/CentOS
-    "/usr/lib/libopus.so.0",  # Arch/Alpine
+    "/usr/lib/x86_64-linux-gnu/libopus.so.0",  # debian/ubuntu amd64
+    "/usr/lib/aarch64-linux-gnu/libopus.so.0",  # debian/ubuntu arm64
+    "/usr/lib64/libopus.so.0",  # fedora/RHEL/centos
+    "/usr/lib/libopus.so.0",  # arch/alpine
     "/usr/lib/libopus.so",
     # Windows — common install locations
     "C:\\Windows\\System32\\opus.dll",
@@ -454,7 +454,7 @@ _OPUS_FALLBACK_PATHS = [
 
 
 def load_opus() -> None:
-    """Load the system Opus shared library for Discord voice."""
+    """Load system Opus shared library for Discord voice."""
     if discord.opus.is_loaded():
         return
     lib = ctypes.util.find_library("opus")
@@ -478,13 +478,12 @@ def load_opus() -> None:
 def run(args: argparse.Namespace) -> int:
     """Start the Discord bot.
 
-    Reads the bot token from the DISCORD_BOT environment variable,
-    selects the active familiar via ``--familiar`` / ``FAMILIAR_ID``,
-    builds the :class:`Familiar` bundle, then launches the bot under
-    asyncio.
+    Reads bot token from ``DISCORD_BOT`` env, selects active familiar
+    via ``--familiar`` / ``FAMILIAR_ID``, builds :class:`Familiar`
+    bundle, then launches the bot under asyncio.
 
-    :param args: Parsed command-line arguments.
-    :return: Exit code (0 for success, 1 for missing token or config).
+    :param args: parsed command-line arguments.
+    :return: exit code (0 success, 1 missing token or config).
     """
     token = os.environ.get("DISCORD_BOT")
     if not token:
@@ -497,9 +496,9 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("%s", exc)
         return 1
 
-    # Load the merged character config first so both the LLM client
-    # factory and the TTS client factory have access to per-slot
-    # model selections and the [tts] voice id / model.
+    # load merged character config first so both LLM client and TTS
+    # client factories have access to per-slot model selections and
+    # [tts] voice id/model
     defaults_path = familiar_root.parent / "_default" / "character.toml"
     try:
         character_config = load_character_config(
@@ -538,7 +537,7 @@ def run(args: argparse.Namespace) -> int:
         tts_client = None
 
     # ``ValueError`` on missing API key or unknown backend → degrade
-    # gracefully (text path still works).
+    # gracefully (text path still works)
     try:
         transcriber = create_transcriber(character_config.stt)
     except ValueError as exc:

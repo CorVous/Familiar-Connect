@@ -179,7 +179,7 @@ class FasterWhisperTranscriber:
 def create_faster_whisper_transcriber(
     config: FasterWhisperSTTConfig | None = None,
 ) -> FasterWhisperTranscriber:
-    """Build :class:`FasterWhisperTranscriber` from typed *config*."""
+    """Build from typed *config*."""
     cfg = config or FasterWhisperSTTConfig()
     t = FasterWhisperTranscriber(
         model_size=cfg.model_size,

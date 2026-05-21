@@ -1,6 +1,6 @@
 """Plain-text renderers for span summaries.
 
-Shared by :meth:`/diagnostics` slash command and the
+Shared by :meth:`/diagnostics` slash command and
 ``familiar-connect diagnose`` CLI — both consume
 :class:`SpanCollector.summary` output or log-file aggregates, and
 both want the same terse, Discord-friendly table.
@@ -10,10 +10,10 @@ from __future__ import annotations
 
 
 def render_summary_table(summary: dict[str, dict[str, float]]) -> str:
-    """Render ``{name: {count, p50, p95, last_ms}}`` as a code-fenced table.
+    """Render ``{name: {count, p50, p95, last_ms}}`` as code-fenced table.
 
-    Discord renders triple-backtick blocks as monospace, which lines
-    up columns reliably across web / desktop / mobile clients.
+    Discord renders triple-backtick blocks as monospace, lining up
+    columns reliably across web/desktop/mobile clients.
     """
     if not summary:
         return "```\nno spans recorded yet\n```"

@@ -1,15 +1,15 @@
 """Hash-based embedder — deterministic, no-deps fallback (M6).
 
-A locality-hashing baseline: tokenise on word boundaries, project each
-token onto a stable bucket via BLAKE2b, accumulate into a fixed-dim
-float vector, then L2-normalise. Cosine similarity over these vectors
-correlates with token overlap — a weak signal compared to a real
-neural embedder, but it's deterministic, has no install cost, and
-gives the storage + retrieval seams something to validate against.
+Locality-hashing baseline: tokenise on word boundaries, project each
+token onto stable bucket via BLAKE2b, accumulate into fixed-dim float
+vector, L2-normalise. Cosine similarity over these vectors correlates
+with token overlap — weak signal compared to real neural embedder,
+but deterministic, no install cost, gives storage + retrieval seams
+something to validate against.
 
 Production deployments should swap in :class:`FastEmbedEmbedder` (or
-another real backend) via ``[providers.embedding].backend``. The
-``hash`` backend stays useful as an offline fixture / smoke test.
+another real backend) via ``[providers.embedding].backend``. ``hash``
+backend stays useful as offline fixture / smoke test.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import hashlib
 import math
 import re
 
-# Word-boundary tokenisation matches FTS5's ``unicode61`` shape closely
-# enough for "is the BM25 hit also similar by embedding?" sanity checks.
-# Drop diacritics + casefold so paraphrase variation in the cue still
-# hashes onto the same buckets ("Café" / "cafe" / "CAFE").
+# word-boundary tokenisation matches FTS5's ``unicode61`` shape
+# closely enough for "is the BM25 hit also similar by embedding?"
+# sanity checks. drop diacritics + casefold so paraphrase variation
+# in the cue still hashes onto same buckets ("Café" / "cafe" / "CAFE").
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
@@ -32,8 +32,8 @@ def _tokens(text: str) -> list[str]:
 class HashEmbedder:
     """Deterministic locality-hashing baseline.
 
-    Stable across processes / runs given the same ``dim`` — BLAKE2b is
-    seedless and the projection is purely arithmetic.
+    Stable across processes / runs given same ``dim`` — BLAKE2b is
+    seedless and projection is purely arithmetic.
     """
 
     name: str = "hash-v1"

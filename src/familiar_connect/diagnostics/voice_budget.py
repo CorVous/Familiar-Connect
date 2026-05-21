@@ -1,20 +1,20 @@
 """Per-turn voice latency budget recorder.
 
-Stamps phase markers across the voice path (``vad_end`` → ``stt_final``
+Stamps phase markers across voice path (``vad_end`` → ``stt_final``
 → ``llm_first_token`` → ``tts_first_audio`` → ``playback_start``)
-keyed by ``turn_id``; emits one span per adjacent gap into the shared
-:class:`SpanCollector`, plus a cumulative ``voice.total`` when the
-funnel completes. ``/diagnostics`` picks them up via the existing
-summary table — no new UI plumbing needed.
+keyed by ``turn_id``; emits one span per adjacent gap into shared
+:class:`SpanCollector`, plus cumulative ``voice.total`` when funnel
+completes. ``/diagnostics`` picks them up via existing summary table
+— no new UI plumbing needed.
 
-``vad_end`` is optional: only stamped when local turn detection
-(TEN-VAD + Smart Turn) is wired in. Without it, the funnel starts at
+``vad_end`` optional: only stamped when local turn detection
+(TEN-VAD + Smart Turn) is wired in. Without it, funnel starts at
 ``stt_final`` like before — Deepgram's hosted endpointer fuses
 VAD-end and final into one signal.
 
 First record per (turn, phase) wins: sentence streaming records
-``tts_first_audio`` ahead of every sentence flush, but only the first
-counts as time-to-first-audio.
+``tts_first_audio`` ahead of every sentence flush, but only the
+first counts as time-to-first-audio.
 
 Implementation: small in-memory ring (``max_turns`` recent turns) so
 late phase events on a long-defunct turn don't grow unbounded.
@@ -40,7 +40,7 @@ PHASE_LLM_FIRST_TOKEN: Final = "llm_first_token"  # noqa: S105 — phase label, 
 PHASE_TTS_FIRST_AUDIO: Final = "tts_first_audio"
 PHASE_PLAYBACK_START: Final = "playback_start"
 
-# Adjacent-phase gaps. ``(prev, curr, span_name)``; emitted when
+# adjacent-phase gaps. ``(prev, curr, span_name)``; emitted when
 # ``curr`` is recorded and ``prev`` was already present.
 _GAPS: Final[tuple[tuple[str, str, str], ...]] = (
     (PHASE_VAD_END, PHASE_STT_FINAL, "voice.vad_to_stt"),
@@ -60,10 +60,10 @@ class VoiceBudgetRecorder:
         self._lock = Lock()
 
     def record(self, *, turn_id: str, phase: str, t: float | None = None) -> None:
-        """Stamp ``phase`` for ``turn_id``; emit any newly-reachable gap span.
+        """Stamp ``phase`` for ``turn_id``; emit newly-reachable gap span.
 
         ``t`` defaults to :func:`time.perf_counter`. First record per
-        (turn, phase) wins — duplicates are dropped.
+        (turn, phase) wins — duplicates dropped.
         """
         if t is None:
             t = time.perf_counter()
@@ -82,7 +82,7 @@ class VoiceBudgetRecorder:
             self._emit_gaps(turn_id, phases, phase)
 
     def discard(self, turn_id: str) -> None:
-        """Drop a turn's phase state. No-op if unknown."""
+        """Drop a turn's phase state; no-op if unknown."""
         with self._lock:
             self._turns.pop(turn_id, None)
 
@@ -96,8 +96,8 @@ class VoiceBudgetRecorder:
                 continue
             ms = max(0, round((phases[curr] - phases[prev]) * 1000))
             self._emit(turn_id, name, ms)
-        # cumulative total fires once on terminal phase if the funnel
-        # started cleanly. Useful as the user-perceived latency signal.
+        # cumulative total fires once on terminal phase if funnel
+        # started cleanly. useful as user-perceived latency signal.
         if current == PHASE_PLAYBACK_START and PHASE_STT_FINAL in phases:
             ms = max(
                 0,
@@ -113,20 +113,20 @@ class VoiceBudgetRecorder:
             f"{ls.kv('span', name, vc=ls.LM)} "
             f"{ls.kv('ms', str(ms), vc=ls.LC)}"
         )
-        # Span recording must never raise into the voice path.
+        # span recording must never raise into the voice path
         with contextlib.suppress(Exception):
             get_span_collector().record(name=name, ms=ms, status="ok")
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton — mirrors :func:`get_span_collector`.
+# module-level singleton — mirrors :func:`get_span_collector`
 # ---------------------------------------------------------------------------
 
 _recorder: VoiceBudgetRecorder | None = None
 
 
 def get_voice_budget_recorder() -> VoiceBudgetRecorder:
-    """Return the process-wide recorder, creating on first use."""
+    """Return process-wide recorder, creating on first use."""
     global _recorder  # noqa: PLW0603
     if _recorder is None:
         _recorder = VoiceBudgetRecorder()
@@ -134,6 +134,6 @@ def get_voice_budget_recorder() -> VoiceBudgetRecorder:
 
 
 def reset_voice_budget_recorder() -> None:
-    """Reset the singleton — for tests only."""
+    """Reset singleton — tests only."""
     global _recorder  # noqa: PLW0603
     _recorder = None

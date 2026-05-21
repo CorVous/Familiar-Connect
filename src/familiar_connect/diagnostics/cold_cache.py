@@ -1,23 +1,22 @@
 """Cold-cache signals — research-phase instrumentation.
 
-The plan treats "is our retrieval stale?" as an open question with
-multiple candidate signals. Phase 3 ships these as *spans* only —
-they log when they fire, but do not drive cache invalidation. After
-collecting enough data to correlate signals with "had to redo work"
-outcomes, the most-useful ones will get wired into the layer
-invalidation logic.
+Plan treats "is our retrieval stale?" as open question with multiple
+candidate signals. Phase 3 ships these as *spans* only — they log
+when they fire, but don't drive cache invalidation. After collecting
+data correlating signals with "had to redo work" outcomes, the
+most-useful ones get wired into layer invalidation.
 
 Signals shipped:
 
 - :func:`detect_topic_shift` — tiny shared-vocabulary test between
-  the inbound turn and the current summary.
-- :func:`detect_unknown_proper_noun` — a capitalized token in the
-  inbound turn absent from the prior context.
+  inbound turn and current summary.
+- :func:`detect_unknown_proper_noun` — capitalized token in inbound
+  turn absent from prior context.
 - :func:`detect_silence_gap` — wall-clock gap between turns above a
   threshold.
 
-``log_signals`` wraps all three and emits one span per firing
-signal, tagged with the inbound turn's channel id for traceability.
+``log_signals`` wraps all three, emits one span per firing signal,
+tagged with inbound turn's channel id for traceability.
 """
 
 from __future__ import annotations
@@ -36,10 +35,10 @@ _logger = logging.getLogger("familiar_connect.diagnostics.cold_cache")
 _WORD_RE = re.compile(r"[\w']{3,}", re.UNICODE)
 _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]{2,})\b")
 
-# Capitalized discourse markers / sentence-starters that the regex
+# capitalized discourse markers / sentence-starters that the regex
 # above would otherwise flag on every short voice fragment ("But.",
-# "Okay.", "Which means…"). Stored lowercase; matched case-insensitively.
-# Incomplete by design — additions are cheap, full NER is out of scope.
+# "Okay.", "Which means…"). stored lowercase; matched case-insensitively.
+# incomplete by design — additions are cheap, full NER out of scope.
 _SENTENCE_STARTER_STOPWORDS: frozenset[str] = frozenset({
     "actually",
     "also",
@@ -100,15 +99,14 @@ def detect_topic_shift(
 ) -> bool:
     """Detect when ``new_text`` shares too few content words with prior.
 
-    Jaccard overlap below ``min_overlap`` is treated as a shift. The
-    default 0.15 is intentionally permissive — we want the signal to
-    fire often so we can see how it correlates with retrieval
-    failures.
+    Jaccard overlap below ``min_overlap`` treated as a shift. Default
+    0.15 intentionally permissive — want the signal to fire often so
+    we can see how it correlates with retrieval failures.
 
     Voice fragments often reduce to 0-1 content tokens after the 3+
-    char filter, which guarantees near-zero Jaccard regardless of
-    actual topic continuity. ``min_tokens`` floors the input length;
-    below it we return ``False`` rather than emit noise.
+    char filter, guaranteeing near-zero Jaccard regardless of actual
+    topic continuity. ``min_tokens`` floors input length; below it
+    we return ``False`` rather than emit noise.
     """
     new_tokens = _tokens(new_text)
     old_tokens = _tokens(prior_context)
@@ -129,9 +127,9 @@ def detect_unknown_proper_noun(
     """Return proper nouns in ``new_text`` absent from ``prior_context``.
 
     Proper noun here = capitalized word of 3+ letters. Sentence-start
-    capitalisation inevitably leaks in (``"Which"``, ``"But"``); the
-    ``stopwords`` set filters the most common offenders. Tradeoff:
-    real names that match a stopword (rare) get suppressed.
+    capitalisation inevitably leaks in (``"Which"``, ``"But"``);
+    ``stopwords`` set filters most common offenders. Tradeoff: real
+    names matching a stopword (rare) get suppressed.
     """
     prior_lower = prior_context.lower()
     unknowns: list[str] = []
@@ -154,10 +152,9 @@ def detect_silence_gap(
     current_turn_at: datetime,
     threshold_seconds: float = 300.0,
 ) -> float | None:
-    """Return the gap in seconds if it exceeds ``threshold_seconds``.
+    """Return gap in seconds if it exceeds ``threshold_seconds``.
 
-    Returns ``None`` if no prior turn exists or the gap is below the
-    threshold.
+    Returns ``None`` if no prior turn exists or gap is below threshold.
     """
     if prev_turn_at is None:
         return None
@@ -186,7 +183,7 @@ def log_signals(
 ) -> dict[str, object]:
     """Run all detectors; emit one span per firing signal.
 
-    Returns a dict describing which signals fired. Callers that
+    Returns dict describing which signals fired. Callers that
     eventually wire signals into cache invalidation can inspect the
     return value; today it's informational only.
     """
