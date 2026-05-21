@@ -1696,24 +1696,24 @@ class HistoryStore:
         channel_id: int | None = None,
         max_id: int | None = None,
     ) -> list[HistoryTurn]:
-        """Return turns whose content matches the FTS *query*.
+        """Search ``turns.content`` via FTS *query*.
 
-        Empty/whitespace *query* and queries that reduce to only
+        Empty/whitespace *query* and queries reducing to only
         stopwords return ``[]``. Tantivy's English analyzer
-        (lowercase + ascii_fold + stopwords + english stemmer) handles
-        tokenisation; the default disjunctive parse ORs the substantive
-        terms together so chat-style cues still rank by BM25 on the
+        (lowercase + ascii_fold + stopwords + english stemmer)
+        handles tokenisation; default disjunctive parse ORs
+        substantive terms so chat-style cues still rank by BM25 on
         nouns that hit.
 
-        :param max_id: if set, only turns with ``id <= max_id`` are
+        :param max_id: if set, only turns with ``id <= max_id``
             considered. Used by :class:`RagContextLayer` to keep RAG
             from re-surfacing turns already covered by
             :class:`RecentHistoryLayer`.
         """
         if limit <= 0:
             return []
-        # Overfetch from FTS so post-filter (familiar/channel/max_id)
-        # doesn't starve the result. Cap at 10x to bound work.
+        # overfetch from FTS so post-filter (familiar/channel/max_id)
+        # doesn't starve the result. cap at 10x to bound work
         fts_limit = max(limit * 4, limit)
         hits = self._fts_turns.search(query, limit=fts_limit)
         if not hits:
@@ -1741,16 +1741,16 @@ class HistoryStore:
             params,
         ).fetchall()
         turns = [_row_to_turn(r) for r in rows]
-        # Re-rank by BM25 desc (higher = better in tantivy), tie-break by
-        # newer-first to match the old ``ORDER BY ..., t.id DESC``.
+        # re-rank by BM25 desc (higher = better in tantivy), tie-break
+        # newer-first to match old ``ORDER BY ..., t.id DESC``
         turns.sort(key=lambda t: (-score_by_id.get(t.id, 0.0), -t.id))
         return turns[:limit]
 
     def rebuild_fts(self) -> None:
-        """Drop and repopulate the tantivy turns index from ``turns``.
+        """Drop and repopulate tantivy turns index from ``turns``.
 
         Cheap relative to re-running every LLM call; cheap enough to
-        run at startup if the index ever gets out of sync.
+        run at startup if index ever gets out of sync.
         """
         self._fts_turns.clear()
         rows = self._conn.execute(
@@ -1759,12 +1759,12 @@ class HistoryStore:
         self._fts_turns.add_many([(int(r["id"]), str(r["content"])) for r in rows])
 
     def latest_fts_id(self, *, familiar_id: str) -> int:
-        """Return the highest turn id currently indexed for ``familiar_id``.
+        """Highest turn id currently indexed for ``familiar_id``.
 
-        The tantivy index is updated synchronously with each
-        :meth:`append_turn`, so the highest indexed id equals the
-        highest ``turns.id`` for the familiar. Cheap MAX query rather
-        than a tantivy round trip.
+        Tantivy index updates synchronously with each
+        :meth:`append_turn`, so highest indexed id equals highest
+        ``turns.id`` for the familiar. Cheap MAX query rather than a
+        tantivy round trip.
         """
         row = self._conn.execute(
             "SELECT MAX(id) AS max_id FROM turns WHERE familiar_id = ?",
@@ -1789,21 +1789,21 @@ class HistoryStore:
         valid_to: datetime | None = None,
         importance: int | None = None,
     ) -> Fact:
-        """Persist one fact. ``source_turn_ids`` and ``subjects`` stored as JSON.
+        """Persist one fact. ``source_turn_ids`` + ``subjects`` stored as JSON.
 
-        ``subjects`` is the extractor's best-effort link to canonical
+        ``subjects`` is extractor's best-effort link to canonical
         identities — see :class:`FactSubject`.
 
-        ``valid_from`` / ``valid_to`` are world-time (when the fact
-        applied in the world). When ``valid_from`` is omitted it
-        defaults to ``created_at``; callers (e.g. ``FactExtractor``)
-        pass the source turn's timestamp explicitly. ``valid_to``
-        defaults to ``None`` — fact still applies.
+        ``valid_from`` / ``valid_to`` are world-time (when fact
+        applied in the world). When ``valid_from`` omitted, defaults
+        to ``created_at``; callers (e.g. ``FactExtractor``) pass the
+        source turn's timestamp explicitly. ``valid_to`` defaults to
+        ``None`` — fact still applies.
 
-        ``importance`` is the extractor's 1-10 ranking hint (M2).
-        Out-of-range values clamp to ``[1, 10]`` so a stray LLM number
-        can't poison rank-time math. ``None`` is preserved verbatim —
-        downstream consumers treat it as a neutral midpoint.
+        ``importance`` is extractor's 1-10 ranking hint (M2).
+        Out-of-range values clamp to ``[1, 10]`` so a stray LLM
+        number can't poison rank-time math. ``None`` preserved
+        verbatim — downstream consumers treat as neutral midpoint.
         """
         ids = [int(i) for i in source_turn_ids]
         subjects_tuple = tuple(subjects)
@@ -1868,14 +1868,14 @@ class HistoryStore:
         include_superseded: bool = False,
         as_of: datetime | None = None,
     ) -> list[Fact]:
-        """Return the ``limit`` most recent facts, newest first.
+        """``limit`` most recent facts, newest first.
 
         Default ("current truth"): excludes superseded facts and any
         whose world-time ``valid_to`` is in the past.
 
-        ``as_of`` switches to a bi-temporal world-time slice — returns
-        facts whose ``valid_from <= as_of`` and (``valid_to`` is NULL
-        or > ``as_of``). Includes superseded rows so audit queries can
+        ``as_of`` switches to bi-temporal world-time slice — facts
+        whose ``valid_from <= as_of`` and (``valid_to`` IS NULL or >
+        ``as_of``). Includes superseded rows so audit queries can
         recover prior beliefs (overrides ``include_superseded``).
         """
         if limit <= 0:
@@ -1910,14 +1910,14 @@ class HistoryStore:
     ) -> list[tuple[Fact, float]]:
         """Shared FTS lookup for fact search methods.
 
-        Runs the tantivy query, joins back to ``facts`` with the
-        validity filter, and re-ranks by BM25 desc then id desc.
-        Returns ``[(fact, score)]`` truncated to *limit*.
+        Runs tantivy query, joins back to ``facts`` with validity
+        filter, re-ranks by BM25 desc then id desc. Returns
+        ``[(fact, score)]`` truncated to *limit*.
         """
         if limit <= 0:
             return []
-        # Overfetch from FTS so validity/familiar filters don't starve
-        # the result. 4x is enough in practice (validity is cheap).
+        # overfetch from FTS so validity/familiar filters don't
+        # starve the result. 4x is enough in practice (validity cheap)
         fts_limit = max(limit * 4, limit)
         hits = self._fts_facts.search(query, limit=fts_limit)
         if not hits:
@@ -1983,12 +1983,11 @@ class HistoryStore:
     ) -> list[tuple[Fact, float]]:
         """Like :meth:`search_facts`, but pairs each row with its BM25 score.
 
-        Tantivy's BM25 is positive (higher = better). Callers fusing
-        with other signals (importance, recency, embedding similarity)
-        should treat the score as a non-negative weight; the prior
-        SQLite FTS5 ``bm25()`` returned negative numbers (lower =
-        better), so consumers may have an inverted-sign assumption to
-        revisit.
+        Tantivy BM25 is positive (higher = better). Callers fusing
+        with other signals (importance, recency, embedding sim)
+        should treat score as a non-negative weight; prior SQLite
+        FTS5 ``bm25()`` returned negative numbers (lower = better),
+        so consumers may have inverted-sign assumptions to revisit.
         """
         return self._fact_candidates_by_fts(
             familiar_id=familiar_id,
@@ -1999,11 +1998,11 @@ class HistoryStore:
         )
 
     def latest_fact_id(self, *, familiar_id: str) -> int:
-        """Return highest ``facts.id`` for ``familiar_id``; 0 if none.
+        """Highest ``facts.id`` for ``familiar_id``; 0 if none.
 
-        Counts superseded rows too — the cache invalidation key only
+        Counts superseded rows too — cache invalidation key only
         needs to change on writes, and supersession-by-replacement
-        already adds a new row so the id ticks up naturally.
+        already adds a new row so id ticks up naturally.
         """
         row = self._conn.execute(
             "SELECT MAX(id) AS max_id FROM facts WHERE familiar_id = ?",
@@ -2021,12 +2020,11 @@ class HistoryStore:
     ) -> None:
         """Mark ``old_id`` as superseded by ``new_id``.
 
-        Both ids must belong to ``familiar_id``. The old row keeps its
+        Both ids must belong to ``familiar_id``. Old row keeps its
         text and provenance; only ``superseded_at`` (now, UTC) and
-        ``superseded_by`` are written. Re-superseding a row that's
-        already superseded raises ``ValueError`` — that signals an
-        upstream bug (double-write) rather than something to silently
-        absorb.
+        ``superseded_by`` are written. Re-superseding an already-
+        superseded row raises ``ValueError`` — signals upstream bug
+        (double-write) rather than something to silently absorb.
         """
         row = self._conn.execute(
             "SELECT superseded_at FROM facts WHERE id = ? AND familiar_id = ?",
@@ -2062,8 +2060,8 @@ class HistoryStore:
     ) -> None:
         """Persist *vector* for ``(fact_id, model)``; upsert.
 
-        Stored as packed little-endian float32. ``model`` is the
-        embedder's :attr:`Embedder.name`; pairing it with ``fact_id``
+        Stored as packed little-endian float32. ``model`` is
+        embedder's :attr:`Embedder.name`; pairing with ``fact_id``
         lets a model swap accumulate new rows beside the old without
         destroying audit history.
         """
@@ -2093,11 +2091,11 @@ class HistoryStore:
         fact_ids: Iterable[int],
         model: str,
     ) -> dict[int, list[float]]:
-        """Return ``{fact_id: vector}`` for the requested ids + model.
+        """``{fact_id: vector}`` for requested ids + model.
 
-        Missing rows are simply absent from the result — the caller
-        treats them as "not yet embedded" and skips the embedding
-        signal for that candidate.
+        Missing rows simply absent from result — caller treats as
+        "not yet embedded" and skips embedding signal for that
+        candidate.
         """
         ids = [int(i) for i in fact_ids]
         if not ids:
@@ -2125,11 +2123,11 @@ class HistoryStore:
         model: str,
         limit: int,
     ) -> list[Fact]:
-        """Return current facts lacking an embedding row for ``model``.
+        """List current facts lacking an embedding row for ``model``.
 
         "Current" matches :meth:`recent_facts` defaults — superseded
-        rows are excluded. The projector embeds in id order so an
-        interrupted run resumes deterministically.
+        rows excluded. Projector embeds in id order so interrupted
+        run resumes deterministically.
         """
         if limit <= 0:
             return []
@@ -2188,8 +2186,8 @@ class HistoryStore:
     ) -> Reflection:
         """Insert a new reflection row.
 
-        ``last_turn_id`` / ``last_fact_id`` snapshot the worker's view
-        at write time — also serve as the next tick's watermark.
+        ``last_turn_id`` / ``last_fact_id`` snapshot worker's view at
+        write time — also serve as next tick's watermark.
         """
         turn_ids = [int(i) for i in cited_turn_ids]
         fact_ids = [int(i) for i in cited_fact_ids]
@@ -2233,10 +2231,11 @@ class HistoryStore:
         channel_id: int | None = None,
         limit: int,
     ) -> list[Reflection]:
-        """Return ``limit`` most recent reflections, newest first.
+        """``limit`` most recent reflections, newest first.
 
-        ``channel_id`` scopes to one channel; ``None`` returns reflections
-        regardless of channel scope (including channel-agnostic rows).
+        ``channel_id`` scopes to one channel; ``None`` returns
+        reflections regardless of channel scope (including
+        channel-agnostic rows).
         """
         if limit <= 0:
             return []
@@ -2254,8 +2253,8 @@ class HistoryStore:
                 (familiar_id, limit),
             ).fetchall()
         else:
-            # Include channel-agnostic rows (channel_id IS NULL) so a
-            # global reflection still surfaces in any channel.
+            # include channel-agnostic rows (channel_id IS NULL) so a
+            # global reflection still surfaces in any channel
             rows = self._conn.execute(
                 """
                 SELECT id, familiar_id, channel_id, text,
@@ -2276,13 +2275,12 @@ class HistoryStore:
         *,
         familiar_id: str,
     ) -> tuple[int, int]:
-        """Return (last_turn_id, last_fact_id) the worker last processed.
+        """(last_turn_id, last_fact_id) the worker last processed.
 
-        Prefers the explicit ``reflection_watermark`` row — advanced on
-        every tick, including no-op ticks — and falls back to the
-        newest reflection row for back-compat with databases written
-        before the watermark table existed. ``(0, 0)`` if neither
-        exists.
+        Prefers explicit ``reflection_watermark`` row — advanced
+        every tick, including no-op ticks. Falls back to newest
+        reflection row for back-compat with databases written before
+        the watermark table existed. ``(0, 0)`` if neither exists.
         """
         wm = self._conn.execute(
             """
@@ -2315,12 +2313,12 @@ class HistoryStore:
         last_turn_id: int,
         last_fact_id: int,
     ) -> None:
-        """Upsert the reflection watermark for *familiar_id*.
+        """Upsert reflection watermark for *familiar_id*.
 
-        Called by :class:`ReflectionWorker` at the end of every tick —
+        Called by :class:`ReflectionWorker` at end of every tick —
         regardless of whether a reflection row was written — so a
-        no-substance LLM reply can't pin the worker to an ever-growing
-        turn window.
+        no-substance LLM reply can't pin the worker to an
+        ever-growing turn window.
         """
         ts = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
@@ -2344,7 +2342,7 @@ class HistoryStore:
         familiar_id: str,
         fact_ids: Iterable[int],
     ) -> set[int]:
-        """Return the subset of ``fact_ids`` that are superseded.
+        """Subset of ``fact_ids`` that are superseded.
 
         Used by :class:`ReflectionLayer` to flag stale citations on
         read. Empty input returns ``set()`` without a query.
@@ -2381,8 +2379,8 @@ class HistoryStore:
     ) -> str:
         """Insert a new alarm row; return its id.
 
-        ``scheduled_at`` is an ISO-8601 UTC timestamp. ``channel_kind``
-        must be ``"text"`` or ``"voice"`` (enforced by CHECK constraint).
+        ``scheduled_at`` is ISO-8601 UTC timestamp. ``channel_kind``
+        must be ``"text"`` or ``"voice"`` (enforced by CHECK).
         """
         alarm_id = uuid.uuid4().hex
         created_at = datetime.now(tz=UTC).isoformat()
@@ -2408,7 +2406,7 @@ class HistoryStore:
         return alarm_id
 
     def list_pending_alarms(self, *, familiar_id: str) -> list[dict[str, Any]]:
-        """Return pending alarms (not fired, not cancelled) for ``familiar_id``.
+        """Pending alarms (not fired, not cancelled) for ``familiar_id``.
 
         Rows are dicts; ordered by ``scheduled_at`` ascending.
         """
@@ -2558,7 +2556,7 @@ def _row_to_fact(row: Row) -> Fact:
 
 
 def _row_to_turn(row: Row) -> HistoryTurn:
-    """Rebuild a HistoryTurn from a SELECT row. Author is reconstructed.
+    """Rebuild a HistoryTurn from a SELECT row. Author reconstructed.
 
     channel_id missing from older SELECTs that don't need it; fall
     back to 0 so those callers keep working. Writer-facing SELECTs
