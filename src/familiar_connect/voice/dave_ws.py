@@ -3,12 +3,12 @@
 Subclasses py-cord's ``DiscordVoiceWebSocket`` to add:
 
 * ``max_dave_protocol_version`` in IDENTIFY payloads
-* Binary WebSocket frame handling (py-cord silently drops them)
+* Binary WS frame handling (py-cord silently drops them)
 * Dispatch for DAVE voice gateway opcodes 21-31
-* MLS handshake driven by ``davey.DaveSession`` state on the voice client
+* MLS handshake driven by ``davey.DaveSession`` state on voice client
 
-See the DAVE protocol whitepaper at https://daveprotocol.com/ and the
-davey library usage guide at https://github.com/Snazzah/davey/blob/master/docs/USAGE.md.
+See DAVE protocol whitepaper at https://daveprotocol.com/ and davey
+usage guide at https://github.com/Snazzah/davey/blob/master/docs/USAGE.md.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
     async def identify(self) -> None:
         """Send IDENTIFY with ``max_dave_protocol_version``.
 
-        Without it Discord's voice gateway closes with 4017 (no E2EE).
+        Without it Discord voice gateway closes with 4017 (no E2EE).
         """
         state = self._connection
         payload = {
@@ -84,7 +84,7 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
     async def poll_event(self) -> None:
         """Receive next WS frame, dispatching binary and text.
 
-        py-cord only handles TEXT; without this override DAVE binary
+        py-cord handles only TEXT; without this override DAVE binary
         opcodes are silently dropped.
         """
         msg = await asyncio.wait_for(self.ws.receive(), timeout=30.0)
@@ -106,8 +106,8 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
     async def _dispatch_binary_frame(self, raw: bytes) -> None:
         """Parse DAVE binary frame, update ``seq_ack``, dispatch.
 
-        seq_ack must track binary frames or the gateway desyncs and
-        closes the connection (reconnect storm).
+        seq_ack must track binary frames or gateway desyncs and closes
+        connection (reconnect storm).
         """
         if len(raw) < _BINARY_HEADER_STRUCT.size:
             _logger.warning("Voice binary frame too short: %d bytes", len(raw))
@@ -126,8 +126,8 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         """
         op = msg.get("op")
         if op == self.SESSION_DESCRIPTION:
-            # read dave_protocol_version before super() so _reinit_dave_session()
-            # can run before binary MLS messages arrive
+            # read dave_protocol_version before super() so
+            # _reinit_dave_session() runs before binary MLS arrives
             data = msg.get("d") or {}
             version = int(data.get("dave_protocol_version", 0))
             self._connection.dave_protocol_version = version
@@ -178,8 +178,8 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
     async def _handle_prepare_epoch(self, data: Mapping[str, Any]) -> None:
         """Op 24: reinit DaveSession at epoch 1 if none exists.
 
-        No-op when SESSION_DESCRIPTION already initialized — a second
-        MLS_KEY_PACKAGE would desync and close the connection.
+        No-op when SESSION_DESCRIPTION already initialized — second
+        MLS_KEY_PACKAGE would desync and close connection.
         """
         epoch = int(data.get("epoch", 0))
         protocol_version = int(data.get("protocol_version", 0))

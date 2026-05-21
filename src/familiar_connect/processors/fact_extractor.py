@@ -202,28 +202,27 @@ def _build_participants(
 
     1. **Batch authors** — every turn whose author is set, keyed by
        canonical_key with per-turn ``guild_id`` for label resolution.
-       Guarantees the active speakers are always represented even if
-       the wider widen step would otherwise drop them.
+       Guarantees active speakers are always represented even if the
+       widen step would otherwise drop them.
     2. **Recent channel participants** — for each channel touched by
        the batch, ``recent_distinct_authors(limit=max_total)`` adds
-       speakers from the recent past, capped at ``max_total`` total.
+       speakers from recent past, capped at ``max_total`` total.
        Closes the bare-text reference gap: a batch where only Cass
        speaks can still link "Aria" in turn content to her canonical
        key when Aria spoke earlier in the channel.
 
-    Resolution goes through :meth:`HistoryStore.resolve_label` so the
-    manifest matches what the read path renders (per-guild nick wins
-    over the snapshot label baked into each turn). Used both to
-    inject the LLM-facing manifest and to validate ``subject_keys``
-    coming back in the response — keys outside the manifest are
-    dropped silently (the LLM may hallucinate).
+    Resolution via :meth:`HistoryStore.resolve_label` so manifest
+    matches what read path renders (per-guild nick wins over snapshot
+    label baked into each turn). Used to inject LLM-facing manifest
+    and to validate ``subject_keys`` in response — keys outside
+    manifest dropped silently (LLM may hallucinate).
     """
     out: dict[str, str] = {}
-    # Batch authors first, with per-turn guild_id.
+    # batch authors first, with per-turn guild_id
     channel_guilds: dict[int, int | None] = {}
     for t in turns:
         if t.channel_id is not None:
-            # Last guild_id wins per channel; usually consistent within a batch.
+            # last guild_id wins per channel; usually consistent within batch
             channel_guilds[t.channel_id] = t.guild_id
         if t.author is None:
             continue
@@ -232,7 +231,7 @@ def _build_participants(
             guild_id=t.guild_id,
             familiar_id=familiar_id,
         )
-    # Widen with recent channel participants, capped at max_total.
+    # widen with recent channel participants, capped at max_total
     for channel_id, guild_id in channel_guilds.items():
         if len(out) >= max_total:
             break
@@ -259,10 +258,9 @@ def _resolve_subjects(
 ) -> list[FactSubject]:
     """Validate LLM-emitted ``subject_keys`` against the manifest.
 
-    Soft validation: unknown keys are dropped silently rather than
-    invalidating the fact. The display_at_write is taken from the
-    manifest (the LLM's view at extraction time), not from anything
-    the LLM might have echoed.
+    Soft validation: unknown keys dropped silently rather than
+    invalidating fact. ``display_at_write`` taken from manifest
+    (LLM's view at extraction time), not from anything LLM echoed.
     """
     if not isinstance(raw, list):
         return []
@@ -335,13 +333,13 @@ def _build_extract_prompt(
 def _parse_facts(reply: str) -> list[dict[str, object]]:
     """Permissive JSON-array parser.
 
-    Strips code fences, extracts the first balanced ``[...]`` blob,
-    and coerces it via :func:`json.loads`. Malformed input returns
-    ``[]`` rather than raising.
+    Strips code fences, extracts first balanced ``[...]`` blob,
+    coerces via :func:`json.loads`. Malformed input returns ``[]``
+    rather than raising.
     """
     if not reply or not reply.strip():
         return []
-    # Strip common code-fence prelude like ``` or ```json
+    # strip common code-fence prelude like ``` or ```json
     cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
     match = _JSON_ARRAY_RE.search(cleaned)
     blob = match.group(0) if match else cleaned
@@ -355,7 +353,7 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
     for item in parsed:
         if not isinstance(item, dict):
             continue
-        # Coerce source_turn_ids to ints
+        # coerce source_turn_ids to ints
         raw_ids = item.get("source_turn_ids", [])
         ids: list[int] = []
         if isinstance(raw_ids, list):
@@ -380,12 +378,12 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
 
 
 def _parse_importance(raw: object) -> int | None:
-    """Coerce LLM-emitted importance to an int; ``None`` for missing / non-numeric.
+    """Coerce LLM-emitted importance to int; ``None`` for missing / non-numeric.
 
-    Out-of-range values are passed through verbatim — :meth:`HistoryStore.append_fact`
+    Out-of-range values passed through verbatim — :meth:`HistoryStore.append_fact`
     clamps to ``[1, 10]``. Non-integer / non-numeric input degrades to
-    ``None`` rather than 0; the store treats ``None`` as the neutral
-    midpoint at rank time.
+    ``None`` rather than 0; store treats ``None`` as neutral midpoint
+    at rank time.
     """
     if raw is None:
         return None
@@ -412,10 +410,9 @@ def _parse_importance(raw: object) -> int | None:
 def _parse_iso_dt(raw: object) -> datetime | None:
     """Permissive ISO-8601 → ``datetime`` parse; ``None`` for bad input.
 
-    The LLM may emit a date-only string (``2024-01-15``) or a full
-    timestamp; ``datetime.fromisoformat`` accepts both. Anything else
-    silently degrades to ``None`` so the caller falls back to the
-    source turn's timestamp.
+    LLM may emit date-only (``2024-01-15``) or full timestamp;
+    ``datetime.fromisoformat`` accepts both. Anything else degrades
+    to ``None`` so caller falls back to source turn's timestamp.
     """
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -423,7 +420,7 @@ def _parse_iso_dt(raw: object) -> datetime | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    # date-only strings parse to naive datetimes; assume UTC for consistency.
+    # date-only strings parse to naive datetimes; assume UTC for consistency
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed

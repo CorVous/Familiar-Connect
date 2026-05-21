@@ -44,7 +44,7 @@ class Author:
 
     canonical_key: storage-stable id.
     label: human-readable string for prompts.
-    aliases + on-disk index map many display names / nicknames → one Author.
+    aliases + on-disk index: map many display names / nicknames → one Author.
     """
 
     platform: str
@@ -88,9 +88,9 @@ class Author:
     def openai_name(self) -> str | None:
         """OpenAI-style ``Message.name``; scrubbed per API rules.
 
-        Falls back to sanitized ``user_id`` if label scrubs empty (e.g.
-        display name all punctuation). ``None`` only if id also scrubs
-        empty — not expected.
+        Falls back to sanitized ``user_id`` when label scrubs empty
+        (e.g. display name all punctuation). ``None`` only if id also
+        scrubs empty — not expected.
         """
         return sanitize_name(self.label) or sanitize_name(self.user_id)
 
@@ -116,8 +116,8 @@ class Author:
         ``display_name`` is py-cord's resolved view (``nick → global_name
         → name``). ``global_name`` / ``nick`` via ``getattr`` so DM
         ``User`` (no guild → no ``.nick``) and older py-cord still build.
-        ``pronouns`` / ``bio`` are profile-only fields; bot tokens
-        rarely populate them, so getattr defaults to ``None``.
+        ``pronouns`` / ``bio`` are profile-only; bot tokens rarely
+        populate them, so getattr defaults to ``None``.
         """
         return cls(
             platform="discord",
@@ -154,7 +154,7 @@ class Author:
 def format_turn_for_transcript(role: str, author: Author | None, content: str) -> str:
     """Render one turn as ``role (label): content`` / ``role: content``.
 
-    Shared between history-summary provider and memory writer to keep
+    Shared between history-summary provider and memory writer; keeps
     transcript format in sync. User turns include author label;
     assistant/system turns use role only.
     """

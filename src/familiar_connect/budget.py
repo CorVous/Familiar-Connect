@@ -1,17 +1,17 @@
 """Per-tier prompt assembly budget.
 
-Token caps for the prompt assembler. Each cap is a hard number — no
-proportional derivation, no "auto-fill from total". The operator
-sets each value (or accepts the shipped default from
-``data/familiars/_default/character.toml``); the Budgeter and
-layers consume the values directly.
+Token caps for prompt assembler. Each cap is a hard number — no
+proportional derivation, no "auto-fill from total". Operator sets
+each value (or accepts shipped default from
+``data/familiars/_default/character.toml``); Budgeter and layers
+consume values directly.
 
-Token accounting uses a fast ``len(text)/4`` heuristic — no real
-tokenizer on the hot path. Slightly over-counts (safer for budgets);
+Token accounting uses fast ``len(text)/4`` heuristic — no real
+tokenizer on hot path. Slightly over-counts (safer for budgets);
 adds ~ns per call.
 
-Lives at the package root (not under ``context/``) so
-:mod:`familiar_connect.config` can import it without dragging in the
+Lives at package root (not under ``context/``) so
+:mod:`familiar_connect.config` can import without dragging in the
 context package — that would trip a circular import through
 :mod:`familiar_connect.llm`.
 """

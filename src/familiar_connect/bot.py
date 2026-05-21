@@ -190,8 +190,8 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     channel returns existing runtime.
 
     ``familiar.transcriber`` treated as *template*: fresh Deepgram WS
-    cloned for each Discord user_id on first audio from that user.
-    Per-user streams kill mixed-stream endpointing (one speaker's pause
+    cloned per Discord user_id on first audio from that user. Per-user
+    streams kill mixed-stream endpointing (one speaker's pause
     finalizing another's mid-sentence) and inherit attribution from
     Discord's per-SSRC delivery.
     """
@@ -220,7 +220,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     transcribers: dict[int, Transcriber] = {}
     fanin_tasks: dict[int, asyncio.Task[None]] = {}
     endpointers: dict[int, UtteranceEndpointer] = {}
-    # per-user audio drain tasks + their inbound queues. router below
+    # per-user audio drain tasks + inbound queues. router below
     # demuxes shared ``audio_queue`` into these so one slow user's
     # ``send_audio``/``feed_audio`` can't head-of-line-block the rest.
     user_pump_tasks: dict[int, asyncio.Task[None]] = {}
@@ -230,7 +230,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     last_audio_time: dict[int, float] = {}
 
     async def _fanin(user_id: int, q: asyncio.Queue[TranscriptionResult]) -> None:
-        """Tag each result with ``user_id``, forward to shared queue."""
+        """Tag result with ``user_id``, forward to shared queue."""
         while True:
             result = await q.get()
             result.user_id = user_id
@@ -272,11 +272,11 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             _fanin(user_id, per_user_q),
             name=f"voice-fanin-{channel_id}-{user_id}",
         )
-        # Warm the voice-member cache. Voice-only users who haven't sent
+        # warm voice-member cache. voice-only users who haven't sent
         # text aren't in ``guild._members`` (no privileged ``members``
-        # intent), so the resolver would miss them and the bot would
-        # log voice turns anonymously. Fire-and-forget — fetch races
-        # with the user's first utterance and almost always wins.
+        # intent), so resolver would miss them and bot would log
+        # voice turns anonymously. fire-and-forget — fetch races with
+        # user's first utterance and almost always wins.
         asyncio.create_task(  # noqa: RUF006 — best-effort cache warm
             _prefetch_voice_member(
                 handle=handle, channel_id=channel_id, user_id=user_id
@@ -291,7 +291,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         return clone
 
     async def _close_user_stream(user_id: int, *, reason: str) -> None:
-        """Tear down a per-user transcriber; reopened lazily on next audio."""
+        """Tear down per-user transcriber; reopened lazily on next audio."""
         clone = transcribers.pop(user_id, None)
         fanin = fanin_tasks.pop(user_id, None)
         pump = user_pump_tasks.pop(user_id, None)
@@ -320,14 +320,14 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
 
         Per-user streams that go quiet still send KeepAlive every few
         seconds, but Deepgram closes them anyway after extended silence
-        (observed: clean 1000 close after the user's last real audio,
-        regardless of KeepAlive flow). Closing proactively avoids the
-        reconnect + replay cycle and keeps logs quiet. Stream is
-        reopened on the user's next audio chunk via ``_ensure_transcriber``.
+        (observed: clean 1000 close after user's last real audio,
+        regardless of KeepAlive flow). Closing proactively avoids
+        reconnect + replay cycle, keeps logs quiet. Stream reopened
+        on user's next audio chunk via ``_ensure_transcriber``.
         """
-        # quarter the idle window so a stale stream is closed within
-        # ~25 % of the threshold; floor keeps CPU negligible without
-        # forcing slow tests to wait a full second per scan.
+        # quarter idle window so stale stream closed within ~25 % of
+        # threshold; floor keeps CPU negligible without forcing slow
+        # tests to wait a full second per scan.
         interval = max(idle_close_s / 4.0, 0.01)
         while True:
             await asyncio.sleep(interval)
@@ -343,12 +343,11 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     async def _user_pump(user_id: int, q: asyncio.Queue[bytes]) -> None:
         """Drain one user's audio: ``send_audio`` + ``feed_audio`` in FIFO.
 
-        Owns the per-user ``_ensure_transcriber`` await so a slow
-        websocket connect for user A doesn't stall router demux for
-        users B, C, …. Exceptions on the inner awaits are swallowed
-        (matching prior behaviour for ``feed_audio``); a broken
-        transcriber is recovered by the idle watchdog reopening the
-        stream after silence.
+        Owns per-user ``_ensure_transcriber`` await so slow websocket
+        connect for user A doesn't stall router demux for B, C, ….
+        Exceptions on inner awaits swallowed (matching prior
+        ``feed_audio`` behaviour); broken transcriber recovered by
+        idle watchdog reopening stream after silence.
         """
         try:
             clone = await _ensure_transcriber(user_id)
@@ -371,7 +370,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
                     await ep.feed_audio(pcm)
 
     async def _route_audio() -> None:
-        """Demux sink → per-user pumps. Does no per-chunk awaits past dispatch."""
+        """Demux sink → per-user pumps. No per-chunk awaits past dispatch."""
         while True:
             user_id, pcm = await audio_queue.get()
             last_audio_time[user_id] = time.monotonic()
@@ -449,9 +448,9 @@ async def _stop_voice_intake(
         await asyncio.gather(*rt.user_pump_tasks.values(), return_exceptions=True)
     if rt.fanin_tasks:
         await asyncio.gather(*rt.fanin_tasks.values(), return_exceptions=True)
-    # Per-user transcriber teardown in parallel — each WS close is
-    # independent. Sequential awaits would N-times the unsubscribe
-    # latency and run the slash-command handler past Discord's 3 s
+    # per-user transcriber teardown in parallel — each WS close is
+    # independent. sequential awaits would N-times unsubscribe
+    # latency and push slash-command handler past Discord's 3 s
     # interaction-token deadline.
     if rt.transcribers:
         await asyncio.gather(
@@ -482,13 +481,13 @@ async def ingest_event(
     reply_to_message_id: str | None = None,
     mentions: tuple[Author, ...] = (),
 ) -> None:
-    """Publish a text event onto the bus.
+    """Publish text event onto bus.
 
-    Kept as a named function so callers (currently only ``on_message``)
-    have a single seam to point at. Logging moves into the debug
-    processor; this function stays narrow.
+    Named function so callers (currently only ``on_message``) have
+    one seam to point at. Logging lives in debug processor; this
+    function stays narrow.
     """
-    del familiar  # unused — reserved for future per-familiar routing
+    del familiar  # reserved for future per-familiar routing
     await source.publish_text(
         channel_id=channel_id,
         guild_id=guild_id,
@@ -506,11 +505,11 @@ def compose_content_with_embeds(
 ) -> str:
     """Append rendered embed text to ``content``.
 
-    Mirrors what humans see in the client — the message body plus
-    Discord's URL unfurl below it. ``embeds`` may be empty (no
-    unfurl yet) or contain blank entries; both collapse to the
-    original ``content``. Empty body + non-empty embeds yields the
-    embed text alone (no leading blank line).
+    Mirrors what humans see in client — message body plus Discord's
+    URL unfurl below. ``embeds`` may be empty (no unfurl yet) or
+    contain blank entries; both collapse to original ``content``.
+    Empty body + non-empty embeds yields embed text alone (no
+    leading blank line).
     """
     embed_text = format_embeds(embeds)
     if not embed_text:
@@ -530,18 +529,18 @@ def apply_message_edit(
     content: str,
     embeds: Iterable[object],
 ) -> None:
-    """Refresh a stored turn's content when Discord adds an embed.
+    """Refresh stored turn's content when Discord adds an embed.
 
-    Pure dispatcher — separated from the gateway handler so it's
-    testable without spinning up a Discord bot. No-op when:
+    Pure dispatcher — separated from gateway handler so testable
+    without spinning up Discord bot. No-op when:
 
-    - the channel isn't text-subscribed (write nothing we can't read)
-    - the edit carries no embed (pure text edits aren't tracked)
+    - channel isn't text-subscribed (write nothing we can't read)
+    - edit carries no embed (pure text edits aren't tracked)
     - no stored turn matches ``message_id`` (bot came up late)
 
-    Embed text is merged into ``content`` via
-    :func:`compose_content_with_embeds`; the original ``message_id``
-    column lets the FTS update trigger reindex transparently.
+    Embed text merged into ``content`` via
+    :func:`compose_content_with_embeds`; original ``message_id``
+    column lets FTS update trigger reindex transparently.
     """
     if not is_subscribed(channel_id):
         return

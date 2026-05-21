@@ -62,7 +62,7 @@ class Resampler48to16:
         return bytes(out)
 
     def close(self) -> bytes:
-        """Flush any held remainder, zero-padding to a full triplet."""
+        """Flush held remainder, zero-padding to a full triplet."""
         if not self._carry:
             return b""
         samples = self._carry + [0] * (_RESAMPLE_RATIO - len(self._carry))
@@ -72,7 +72,7 @@ class Resampler48to16:
 
 
 def mono_to_stereo(data: bytes) -> bytes:
-    """Duplicate each 16-bit sample into L+R, producing 2x output.
+    """Duplicate each int16 sample into L+R; produces 2x output.
 
     :raises ValueError: If *data* has odd length.
     """
@@ -93,17 +93,16 @@ class StreamingPCMSource(discord.AudioSource):
     """Thread-safe streaming PCM source for ``vc.play``.
 
     Producer (asyncio task) calls :meth:`feed` with stereo s16le bytes
-    as they arrive from the TTS stream; pycord's ``AudioPlayer`` thread
-    drains 20 ms frames via :meth:`read`. :meth:`close_input` flips an
-    end-of-stream flag — once the buffer is empty after that, ``read``
-    returns ``b""`` and pycord stops the player.
+    from the TTS stream; pycord's ``AudioPlayer`` thread drains 20 ms
+    frames via :meth:`read`. :meth:`close_input` flips an EOS flag —
+    once buffer drains after that, ``read`` returns ``b""`` and pycord
+    stops the player.
 
-    Without the close flag, ``read`` blocks on the condition variable
-    until the producer feeds more data — pycord's player thread is the
-    one that blocks, which is fine: it pauses playback (no underrun
-    silence) until the next chunk arrives. With Cartesia's ~140 ms
-    TTFB, the first ``read`` returns within one or two of pycord's
-    20 ms ticks.
+    Without the close flag, ``read`` blocks on the condvar until the
+    producer feeds more — pycord's player thread blocks, pausing
+    playback (no underrun silence) until next chunk. With Cartesia's
+    ~140 ms TTFB, the first ``read`` returns within one or two of
+    pycord's 20 ms ticks.
     """
 
     def __init__(self) -> None:
@@ -113,7 +112,7 @@ class StreamingPCMSource(discord.AudioSource):
         self._closed = False
 
     def feed(self, data: bytes) -> None:
-        """Append ``data`` (stereo s16le) to the buffer; notify reader."""
+        """Append ``data`` (stereo s16le); notify reader."""
         if not data:
             return
         with self._cond:
@@ -121,7 +120,7 @@ class StreamingPCMSource(discord.AudioSource):
             self._cond.notify()
 
     def close_input(self) -> None:
-        """Signal end-of-stream; reader drains then returns empty bytes."""
+        """Signal EOS; reader drains then returns empty bytes."""
         with self._cond:
             self._closed = True
             self._cond.notify_all()
@@ -145,12 +144,12 @@ class StreamingPCMSource(discord.AudioSource):
         return False
 
     def cleanup(self) -> None:
-        # called by pycord when the player stops; release any blocked reader
+        # called by pycord on player stop; release any blocked reader
         self.close_input()
 
 
 def stereo_to_mono(data: bytes) -> bytes:
-    """Average L+R int16 samples into mono, producing 0.5x output.
+    """Average L+R int16 samples into mono; produces 0.5x output.
 
     :raises ValueError: If *data* length not divisible by 4.
     """

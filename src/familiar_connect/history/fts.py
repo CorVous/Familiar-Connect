@@ -30,9 +30,8 @@ PathLike = str | Path
 
 
 # drop common English stopwords before FTS matching. without this,
-# casual chat cues like "hey do you know about X" dilute BM25 scoring
-# and produce noisy hits on conversational filler. same list as
-# pre-Turso FTS5 path; small + high-confidence.
+# chat cues like "hey do you know about X" dilute BM25 and produce
+# noisy hits on filler. same list as pre-Turso FTS5 path.
 _FTS_STOPWORDS: tuple[str, ...] = (
     "a",
     "about",
@@ -127,10 +126,10 @@ _ANALYZER_NAME = "familiar_en"
 
 
 def _build_analyzer() -> tantivy.TextAnalyzer:
-    # stemmer covers the old `fox*` prefix-match trick for plurals
+    # stemmer covers old `fox*` prefix-match trick for plurals
     # (fox/foxes, bear/bears) without dragging in unrelated prefixes
     # (foxhound). remove_long caps token length so URLs + garbage
-    # tokens can't bloat the index — matches unicode61's 64-char default.
+    # can't bloat index — matches unicode61's 64-char default.
     return (
         tantivy
         .TextAnalyzerBuilder(tantivy.Tokenizer.simple())
@@ -153,8 +152,8 @@ def _build_schema() -> tantivy.Schema:
 class FtsIndex:
     """Tantivy index over (row_id, content) for one relational table.
 
-    Thread-safe — tantivy writer/searcher are thread-safe, plus a
-    short critical section guards the writer handle. One instance per
+    Thread-safe — tantivy writer/searcher are thread-safe; short
+    critical section guards the writer handle. One instance per
     indexed entity (``turns``, ``facts``).
 
     ``path=None`` → in-memory (tests with :memory: store).
@@ -180,7 +179,7 @@ class FtsIndex:
             doc = tantivy.Document()
             doc.add_integer("row_id", int(row_id))
             doc.add_text("content", content)
-            # add as upsert — delete any prior doc with same row_id.
+            # upsert — delete any prior doc with same row_id.
             self._writer.delete_documents("row_id", int(row_id))
             self._writer.add_document(doc)
             self._writer.commit()
@@ -216,11 +215,10 @@ class FtsIndex:
     def search(self, query: str, *, limit: int) -> list[tuple[int, float]]:
         """Return ``[(row_id, score)]`` for the query.
 
-        Empty / stopword-only query returns ``[]`` — tantivy's analyzer
-        strips stopwords, so the parsed query has zero terms in that
-        case. Operator semantics: disjunctive by default (OR), so
-        multi-token cues match on any substantive token (parity with
-        the old ``_build_fts_match`` behaviour).
+        Empty / stopword-only query returns ``[]`` — tantivy strips
+        stopwords, leaving zero parsed terms. Operator semantics:
+        disjunctive by default (OR), so multi-token cues match on any
+        substantive token (parity with old ``_build_fts_match``).
         """
         if limit <= 0 or not query or not query.strip():
             return []
@@ -239,9 +237,9 @@ class FtsIndex:
         return out
 
     def is_empty(self) -> bool:
-        """Cheap check — true when the index has zero documents.
+        """Return True when index has zero documents.
 
-        Used by :class:`HistoryStore` to detect first-run after the
+        :class:`HistoryStore` uses this to detect first-run after the
         SQLite→Turso migration and trigger a bulk reindex.
         """
         searcher = self._index.searcher()

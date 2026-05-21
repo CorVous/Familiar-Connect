@@ -2,7 +2,7 @@
 
 How a spoken utterance becomes audible bot speech, and where to swap
 stages. [Overview](overview.md) covers Discord plumbing;
-[Streaming bus](streaming-bus.md) covers the in-process event bus.
+[Streaming bus](streaming-bus.md) the in-process event bus.
 
 ## Cascaded vs full-duplex
 
@@ -66,11 +66,11 @@ biased by `endpointing_ms` and `utterance_end_ms`. See
 (Pipecat, LiveKit, TEN, Agora). Pure-VAD endpointing is an anti-pattern.
 
 - *Stage 1* — local VAD (TEN-VAD, native lib + bundled ONNX,
-  Apache 2.0). Fast, in-process. Local VAD beats remote by 150–200 ms.
+  Apache 2.0). Fast, in-process. Beats remote by 150–200 ms.
 - *Stage 2* — semantic turn classifier over buffered audio. Pipecat's
   Smart Turn v3 (BSD-2, ~12 ms, 360 MB) is the leanest open option;
-  trained on filler words STT drops, which is why it beats
-  transcription-based endpointing.
+  trained on filler words STT drops, so it beats transcription-based
+  endpointing.
 
 **Status:** V1 phase 2 — local endpointer behind a feature flag.
 Three classes plus a factory under
@@ -89,9 +89,9 @@ Three classes plus a factory under
   per-user state machine driving both above over a 48 kHz mono PCM
   stream. Feeds 16 ms VAD windows after 3:1 boxcar-decimation
   resample, tracks `IDLE → SPEAKING → silence-after-speech → classify`,
-  and awaits `on_turn_complete(audio)` on a `complete` Smart Turn
-  verdict. An `incomplete` verdict holds the callback until a fresh
-  speech burst followed by a fresh silence streak.
+  and awaits `on_turn_complete(audio)` on a `complete` verdict. An
+  `incomplete` verdict holds the callback until a fresh speech burst
+  followed by a fresh silence streak.
 - `LocalTurnDetector` (factory) + `create_local_turn_detector_from_env()`
   — bundles model paths and thresholds. Builds a fresh
   `UtteranceEndpointer` per Discord user (TenVAD's native handle is
@@ -121,8 +121,7 @@ endpointer alongside the per-user Deepgram clone. The shared sink-side
 pump demuxes audio onto a per-user queue; one drain task per user_id
 feeds every PCM chunk into both clone and endpointer. Per-user drain
 tasks isolate slow speakers (network blip, slow VAD, GC pause) so one
-stalled `send_audio`/`feed_audio` can't head-of-line-block the rest
-of the call:
+stalled `send_audio`/`feed_audio` can't head-of-line-block the call:
 
 ```
 Discord Opus → RecordingSink → per-user PCM
@@ -137,10 +136,9 @@ Discord Opus → RecordingSink → per-user PCM
                                         clone.finalize() ──► Deepgram flush
 ```
 
-`clone.endpointing_ms` drops to `10` for the Deepgram instance when
-local detection is active so Deepgram won't endpoint on its own — it
-relies on `Finalize` messages driven by the local chain. Strategy +
-tuning live in
+`clone.endpointing_ms` drops to `10` when local detection is active
+so Deepgram won't endpoint on its own — it relies on `Finalize`
+messages from the local chain. Strategy + tuning live in
 [`[providers.turn_detection]`](tuning.md#local-turn-detection-v1).
 
 Default is **off** (`strategy = "deepgram"`): the bot uses Deepgram's
@@ -368,13 +366,13 @@ OpenRouter routing-tax at a glance.
 | `llm.total.<slot>` | request initiation → stream end |
 
 The log line carries `slot`, `model`, `chars` (input payload size),
-`ttfb_ms` / `ttft_ms` / `total_ms`, and — when upstream returns
-them via OpenRouter's `usage: { include: true }` flag —
-`provider`, `in_tokens`, `out_tokens`, and `cached` (prompt-cache
-hit count, surfaced when the underlying provider supports it).
-`voice.stt_to_ttft` covers the full STT-to-LLM-first-token gap;
-`llm.ttft.<slot>` is the LLM-only slice plus headers. Comparing
-the two isolates assembler / network from raw model latency.
+`ttfb_ms` / `ttft_ms` / `total_ms`, and — when upstream returns them
+via OpenRouter's `usage: { include: true }` flag — `provider`,
+`in_tokens`, `out_tokens`, and `cached` (prompt-cache hit count,
+surfaced when the underlying provider supports it). `voice.stt_to_ttft`
+covers the full STT-to-LLM-first-token gap; `llm.ttft.<slot>` is the
+LLM-only slice plus headers. Comparing the two isolates assembler /
+network from raw model latency.
 
 ## Barge-in
 
@@ -385,9 +383,8 @@ Already implemented. New `voice.activity.start` cancels prior
    cancel isn't starved).
 2. Calls `TTSPlayer.stop()` to flush in-flight audio.
 
-Verified sub-200 ms by
-`tests/test_voice_responder.py::TestBargeIn`. See
-[Voice reply loop](overview.md#voice-reply-loop).
+Verified sub-200 ms by `tests/test_voice_responder.py::TestBargeIn`.
+See [Voice reply loop](overview.md#voice-reply-loop).
 
 Every voice turn emits exactly one decision line for observability:
 
@@ -398,15 +395,15 @@ Every voice turn emits exactly one decision line for observability:
   produced a chain of `[LLM call] status=cancelled` with no way to
   tell which transcript was dropped.
 
-After `vc.stop()`, `DiscordVoicePlayer` polls `vc.is_playing()` for
-up to 200 ms before releasing the play lock. Pycord's audio thread
-checks the stop flag once per 20 ms tick, so the actual wait is one
-or two polls; the upper bound is a safety net for a wedged thread.
-Without that drain, a barge-in followed by an immediate next-speaker
-turn would race: the next `speak()` acquires the lock the instant
-the prior call returns, but pycord still has `is_playing() == True`
-for one tick — and `vc.play()` raises `ClientException('Already
-playing audio.')`. Reproduced (and pinned) in
+After `vc.stop()`, `DiscordVoicePlayer` polls `vc.is_playing()` for up
+to 200 ms before releasing the play lock. Pycord's audio thread checks
+the stop flag once per 20 ms tick, so the actual wait is one or two
+polls; the upper bound is a safety net for a wedged thread. Without
+that drain, a barge-in followed by an immediate next-speaker turn
+would race: the next `speak()` acquires the lock the instant the prior
+call returns, but pycord still has `is_playing() == True` for one tick
+— and `vc.play()` raises `ClientException('Already playing audio.')`.
+Reproduced (and pinned) in
 `tests/test_discord_voice_player.py::TestConcurrentSpeak::test_cancel_then_immediate_speak_does_not_collide`.
 
 ## Per-channel tuning

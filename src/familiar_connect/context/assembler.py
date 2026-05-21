@@ -1,7 +1,7 @@
 """Prompt assembler.
 
-Composes :class:`Layer` contributions into a system prompt + recent
-history messages, with per-layer in-process caching keyed on
+Composes :class:`Layer` contributions into system prompt + recent
+history messages. Per-layer in-process caching keyed on
 ``invalidation_key``. See plan § Design.4.
 """
 

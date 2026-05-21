@@ -33,8 +33,7 @@ _DEFAULT_MAXSIZE: dict[BackpressurePolicy, int] = {
 
 
 class Lifecycle(Enum):
-    """Bus lifecycle states. See plan § Design.1 *Bus lifecycle*."""  # noqa: D203
-
+    """Bus lifecycle states. See plan § Design.1 *Bus lifecycle*."""
 
     STARTING = "starting"
     RUNNING = "running"
@@ -86,13 +85,13 @@ class _Subscription:
         """Drain queued events until subscription closed.
 
         Yields:
-            Event: next queued event; raises :class:`StopAsyncIteration`
-            once closed and drained.
+            Next queued event; raises :class:`StopAsyncIteration` once
+            closed and drained.
 
         """
         while True:
             if self._closed.is_set():
-                # drain what's already queued, then exit
+                # drain already-queued, then exit
                 while True:
                     try:
                         yield self._queue.get_nowait()
@@ -127,7 +126,7 @@ class _Subscription:
 class InProcessEventBus:
     """Topic-keyed pub/sub, in-process only.
 
-    Hidden behind :class:`familiar_connect.bus.protocols.EventBus` so a
+    Hidden behind :class:`familiar_connect.bus.protocols.EventBus` so
     future process-spanning impl swaps in without touching processors.
     """
 
@@ -146,7 +145,7 @@ class InProcessEventBus:
         self.lifecycle = Lifecycle.DRAINING
         for sub in self._subscriptions:
             sub.close()
-        # give subscribers one loop tick to drain before declaring stopped
+        # one loop tick for subscribers to drain before stopped
         await asyncio.sleep(0)
         self.lifecycle = Lifecycle.STOPPED
 

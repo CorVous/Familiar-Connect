@@ -61,7 +61,7 @@ class SubscriptionRegistry:
         return self._rows.get((channel_id, kind))
 
     def voice_in_guild(self, guild_id: int) -> Subscription | None:
-        """Voice subscription in ``guild_id`` if any.
+        """Voice subscription in ``guild_id``, if any.
 
         At most one per guild (``discord.VoiceClient`` constraint).
         """
@@ -71,7 +71,7 @@ class SubscriptionRegistry:
         return None
 
     # ------------------------------------------------------------------
-    # Mutations (each one writes the whole file)
+    # Mutations (each writes whole file)
     # ------------------------------------------------------------------
 
     def add(
@@ -91,7 +91,7 @@ class SubscriptionRegistry:
         return sub
 
     def remove(self, *, channel_id: int, kind: SubscriptionKind) -> None:
-        """Remove subscription for ``(channel_id, kind)``; no-op if absent."""
+        """Remove ``(channel_id, kind)``; no-op if absent."""
         if self._rows.pop((channel_id, kind), None) is not None:
             self._save()
 

@@ -1,6 +1,6 @@
 """Single-writer history persistence processor.
 
-Consumes ``discord.text`` events and writes user turns to the
+Consumes ``discord.text`` events; writes user turns to
 :class:`HistoryStore`. Centralising writes here keeps the SQLite
 connection owned by one task and makes dedup-by-``event_id`` simple.
 
@@ -26,7 +26,7 @@ _logger = logging.getLogger("familiar_connect.processors.history_writer")
 
 
 class HistoryWriter:
-    """Persist turn-generating events into :class:`HistoryStore`."""
+    """Persists turn-generating events into :class:`HistoryStore`."""
 
     name: str = "history-writer"
     topics: tuple[str, ...] = (TOPIC_DISCORD_TEXT,)
@@ -34,8 +34,8 @@ class HistoryWriter:
     def __init__(self, *, store: AsyncHistoryStore, familiar_id: str) -> None:
         self._store = store
         self._familiar_id = familiar_id
-        # in-process dedup set; survives a single run. Acceptable because
-        # the bus itself doesn't republish on retry today.
+        # in-process dedup set; survives a single run. acceptable
+        # because bus doesn't republish on retry today
         self._seen: set[str] = set()
 
     async def handle(self, event: Event, bus: EventBus) -> None:  # noqa: ARG002
