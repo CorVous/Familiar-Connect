@@ -1,26 +1,25 @@
 """Dedicated-thread Turso connection wrapper.
 
-pyturso 0.5.1 declares ``threadsafety=1`` (connections must not be
-shared across threads). On Windows, even *serialised* cross-thread
-access surfaces internal schema-cache bugs: a worker thread's call
-into a connection opened on the main thread can fail with
-``Parse error: no such table: …`` after that table was just created
-and observed via ``sqlite_master`` on the opening thread. We treat
-this as evidence of pyturso state that's affine to the OS thread that
-first touched the connection.
+pyturso 0.5.1 declares ``threadsafety=1`` — connections must not be
+shared across threads. On Windows, even *serialised* cross-thread
+access surfaces schema-cache bugs: a worker thread's call into a
+connection opened on the main thread can fail with ``Parse error:
+no such table: …`` after that table was just created and observed
+via ``sqlite_master`` on the opening thread. Treated as pyturso
+state affine to the OS thread that first touched the connection.
 
-Sidestep the entire class of bugs by routing every turso call —
-``connect`` itself, ``execute`` family, cursor fetches, ``commit``,
-``close`` — through one dedicated ``ThreadPoolExecutor`` with
-``max_workers=1``. The connection is opened on that thread and never
-seen from any other. Callers from any thread can use the wrapper
-safely; calls are serialised onto the executor.
+Sidestep the whole class of bugs by routing every turso call —
+``connect``, ``execute`` family, cursor fetches, ``commit``,
+``close`` — through one ``ThreadPoolExecutor`` with
+``max_workers=1``. Connection opened on that thread, never seen
+from any other. Any-thread callers use the wrapper safely; calls
+serialise onto the executor.
 
-The wrapper keeps a ``sqlite3.Connection``-compatible API so
-:class:`HistoryStore` keeps its existing call sites
-(``self._conn.execute(...).fetchall()`` etc.). All connections use
-``conn.row_factory = turso.Row`` so columns are accessible by name
-(``row["fact_id"]``) — drop-in for the prior ``sqlite3.Row`` setup.
+Wrapper keeps a ``sqlite3.Connection``-compatible API —
+:class:`HistoryStore` keeps existing call sites
+(``self._conn.execute(...).fetchall()`` etc.). All connections set
+``conn.row_factory = turso.Row`` so columns accessible by name
+(``row["fact_id"]``) — drop-in for prior ``sqlite3.Row`` setup.
 """
 
 from __future__ import annotations
@@ -43,10 +42,10 @@ _EXPERIMENTAL_FEATURES = "index_method"
 class TursoConnection:
     """Single-thread Turso connection facade.
 
-    Every turso call lands on one dedicated OS thread, owned by an
+    Every turso call lands on one dedicated OS thread owned by an
     internal ``max_workers=1`` ``ThreadPoolExecutor``. Pass
-    ``":memory:"`` for an ephemeral DB or a file path for an
-    on-disk DB; behaviour is identical from the caller's side.
+    ``":memory:"`` for an ephemeral DB or a file path for on-disk;
+    caller-side behaviour identical.
     """
 
     def __init__(self, path: PathLike) -> None:
@@ -68,7 +67,7 @@ class TursoConnection:
         return self._executor.submit(fn, *args, **kwargs).result()
 
     def _conn(self) -> turso.Connection:
-        """Return the underlying ``turso.Connection`` (test/diagnostic only).
+        """Underlying ``turso.Connection`` (test/diagnostic only).
 
         Production callers should use the ``execute`` family — direct
         access bypasses the single-thread guarantee.
@@ -110,12 +109,12 @@ class TursoConnection:
         return _Cursor(self, self._shared.executescript(script))
 
     def set_trace_callback(self, callback: TraceCallback | None) -> None:
-        """Install a SQL trace hook for ``execute``/``executemany``/``executescript``.
+        """Install SQL trace hook for ``execute``/``executemany``/``executescript``.
 
-        The callback is invoked from the executor thread, just before
-        the underlying pyturso call. ``None`` disables. Mirrors
-        ``sqlite3.Connection.set_trace_callback`` enough to satisfy
-        existing query-count tests.
+        Callback invoked from executor thread, just before the
+        underlying pyturso call. ``None`` disables. Mirrors
+        ``sqlite3.Connection.set_trace_callback`` enough for existing
+        query-count tests.
         """
         self._trace_callback = callback
 

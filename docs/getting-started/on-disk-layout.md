@@ -1,8 +1,8 @@
 # On-disk layout
 
-The bot loads exactly one character per process, picked by `FAMILIAR_ID`
-(or `--familiar <id>`), from `data/familiars/<id>/`. The smallest
-layout that boots is:
+The bot loads one character per process, picked by `FAMILIAR_ID` (or
+`--familiar <id>`), from `data/familiars/<id>/`. Smallest layout that
+boots:
 
 ```
 data/familiars/aria/
@@ -10,10 +10,10 @@ data/familiars/aria/
 ```
 
 `history.db` (Turso, SQLite-compatible) and `subscriptions.toml` are
-created on first launch. The `fts/turns/` and `fts/facts/` tantivy
-index dirs are also created lazily, alongside the DB. Multiple
-character folders can sit side-by-side under `data/familiars/`;
-only the one you point `FAMILIAR_ID` at is loaded per process.
+created on first launch. `fts/turns/` and `fts/facts/` tantivy index
+dirs are created lazily alongside the DB. Multiple character folders
+can sit side-by-side under `data/familiars/`; only the one
+`FAMILIAR_ID` points at is loaded per process.
 
 ## Example `character.toml`
 

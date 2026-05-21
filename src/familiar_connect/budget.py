@@ -1,17 +1,17 @@
 """Per-tier prompt assembly budget.
 
-Token caps for the prompt assembler. Each cap is a hard number — no
-proportional derivation, no "auto-fill from total". The operator
-sets each value (or accepts the shipped default from
-``data/familiars/_default/character.toml``); the Budgeter and
-layers consume the values directly.
+Token caps for prompt assembler. Each cap is a hard number — no
+proportional derivation, no "auto-fill from total". Operator sets
+each value (or accepts shipped default from
+``data/familiars/_default/character.toml``); Budgeter and layers
+consume values directly.
 
-Token accounting uses a fast ``len(text)/4`` heuristic — no real
-tokenizer on the hot path. Slightly over-counts (safer for budgets);
+Token accounting uses fast ``len(text)/4`` heuristic — no real
+tokenizer on hot path. Slightly over-counts (safer for budgets);
 adds ~ns per call.
 
-Lives at the package root (not under ``context/``) so
-:mod:`familiar_connect.config` can import it without dragging in the
+Lives at package root (not under ``context/``) so
+:mod:`familiar_connect.config` can import without dragging in the
 context package — that would trip a circular import through
 :mod:`familiar_connect.llm`.
 """
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 _CHARS_PER_TOKEN = 4
-"""OpenAI's well-known English heuristic. Slightly over-counts."""
+"""OpenAI's well-known English heuristic; slightly over-counts."""
 
 _MESSAGE_OVERHEAD_TOKENS = 4
 """Per-message chat-format framing (role + delimiters)."""
@@ -52,7 +52,7 @@ def estimate_message_tokens(msg: Message) -> int:
 
 
 def estimate_messages_tokens(messages: list[Message]) -> int:
-    """Sum across a message list."""
+    """Sum across message list."""
     return sum(estimate_message_tokens(m) for m in messages)
 
 
@@ -61,15 +61,15 @@ class ModelBudgetCurve:
     """Per-section multipliers for a specific model.
 
     All fields default to 1.0 (identity — no change). Operators set
-    only the sections that differ from the tier default; unset fields
-    stay at the base value.
+    only sections differing from tier default; unset fields stay at
+    base value.
 
     Field names mirror :class:`TierBudget` exactly so config parsing
-    can validate keys against this class with a simple set comparison.
+    validates keys via simple set comparison.
 
-    Multipliers must be positive (> 0). Values are applied via
-    :meth:`TierBudget.apply_curve`; each int field is scaled and
-    rounded, with a floor of 1.
+    Multipliers must be positive (> 0). Applied via
+    :meth:`TierBudget.apply_curve`; each int field scaled + rounded,
+    floor of 1.
     """
 
     total_tokens: float = 1.0
@@ -96,30 +96,29 @@ def _scale(base: int, multiplier: float) -> int:
 class TierBudget:
     """Token budget for one assembly tier (voice / text / background).
 
-    Every cap is an explicit integer. The shipped per-tier defaults
-    live in ``data/familiars/_default/character.toml`` —
+    Every cap is explicit int. Shipped per-tier defaults live in
+    ``data/familiars/_default/character.toml`` —
     :mod:`familiar_connect.config` deep-merges per-familiar overrides
-    on top, so an operator can change one cap without restating the
-    rest.
+    on top, so operator can change one cap without restating rest.
 
-    The dataclass-level defaults below are a programmatic fallback
-    for code paths that construct ``CharacterConfig()`` without going
-    through TOML (mostly tests). They match the voice tier; tests
-    that need other tiers should construct an explicit instance.
+    Dataclass-level defaults below are programmatic fallback for code
+    paths constructing ``CharacterConfig()`` without TOML (mostly
+    tests). Match voice tier; tests needing other tiers construct
+    explicit instance.
 
     :param total_tokens: post-assembly trim cap (system prompt +
-        recent history). The :class:`Budgeter` drops oldest history
-        turns to stay under this.
-    :param recent_history_tokens: cap on the recent-history block
-        while it's being built.
-    :param rag_tokens: cap on the RAG-context block.
-    :param dossier_tokens: cap on the people-dossier block.
-    :param summary_tokens: cap on the conversation-summary block.
+        recent history). :class:`Budgeter` drops oldest history turns
+        to stay under.
+    :param recent_history_tokens: cap on recent-history block during
+        build.
+    :param rag_tokens: cap on RAG-context block.
+    :param dossier_tokens: cap on people-dossier block.
+    :param summary_tokens: cap on conversation-summary block.
     :param cross_channel_tokens: cap on cross-channel context.
-    :param reflection_tokens: cap on the reflections block (M3).
-    :param lorebook_tokens: cap on the lorebook block (M4).
+    :param reflection_tokens: cap on reflections block (M3).
+    :param lorebook_tokens: cap on lorebook block (M4).
     :param max_history_turns: hard upper bound on recent-history turns
-        (safety net before the token cap).
+        (safety net before token cap).
     :param max_rag_turns: hard cap on RAG turn results.
     :param max_rag_facts: hard cap on RAG fact results.
     :param max_dossier_people: hard cap on dossier rows.
@@ -143,7 +142,7 @@ class TierBudget:
     max_lorebook_entries: int = 6
 
     def apply_curve(self, curve: ModelBudgetCurve) -> TierBudget:
-        """Return a new budget with each field scaled by the curve multiplier."""
+        """Return new budget with each field scaled by curve multiplier."""
         return TierBudget(
             total_tokens=_scale(self.total_tokens, curve.total_tokens),
             recent_history_tokens=_scale(
@@ -173,15 +172,15 @@ class TierBudget:
 class Budgeter:
     """Total-cap enforcer applied after layer assembly.
 
-    Layers self-truncate to their per-section caps while building.
-    The Budgeter then trims oldest history turns until the combined
-    ``system_prompt + history`` fits under :attr:`TierBudget.total_tokens`.
+    Layers self-truncate to per-section caps while building. Budgeter
+    then trims oldest history turns until combined ``system_prompt +
+    history`` fits under :attr:`TierBudget.total_tokens`.
 
-    System prompt is *never* truncated here — the static layers (core
-    instructions, character card) carry the bot's identity; truncating
-    them silently would change behaviour. If they exceed the budget on
-    their own, that's an operator-visible misconfiguration; we still
-    return them and just let the LLM decide.
+    System prompt *never* truncated here — static layers (core
+    instructions, character card) carry bot identity; silent truncation
+    would change behaviour. When they exceed budget alone, that's
+    operator-visible misconfiguration; still return them and let LLM
+    decide.
     """
 
     def __init__(
@@ -197,7 +196,7 @@ class Budgeter:
         return self._budget
 
     def with_overrides(self, **overrides: object) -> Budgeter:
-        """Return a new Budgeter with select fields replaced (for tests)."""
+        """Return new Budgeter with select fields replaced (for tests)."""
         return Budgeter(replace(self._budget, **overrides))  # type: ignore[arg-type]
 
     def trim(
@@ -210,10 +209,10 @@ class Budgeter:
         """Drop oldest turns until total token count fits.
 
         Returns ``(system_prompt, trimmed_history)``. Newest turns
-        retained — they're the immediate conversational context the
-        model needs most. ``system_prompt`` is returned unchanged.
+        retained — immediate conversational context model needs most.
+        ``system_prompt`` returned unchanged.
 
-        Per-channel ``total_tokens`` overrides the tier cap when set.
+        Per-channel ``total_tokens`` overrides tier cap when set.
         """
         sys_tokens = estimate_tokens(system_prompt)
         cap = (

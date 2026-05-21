@@ -1,8 +1,7 @@
-"""CLI subcommands for familiar-connect.
+"""CLI subcommands.
 
-Each subcommand is defined in its own module and exports:
-- add_parser(subparsers, common_parser): Register the subcommand
-- run(args): Execute the subcommand logic
+Each submodule exports ``add_parser(subparsers, common_parser)`` to
+register and ``run(args)`` to execute.
 """
 
 from familiar_connect.commands import diagnose as diagnose_cmd

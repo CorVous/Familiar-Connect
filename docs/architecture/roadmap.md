@@ -1,8 +1,8 @@
 # Roadmap
 
 Forward-looking work, ordered by approximate priority. Each item names
-the lesson, the gap, and the change. Cross-references point at the
-architecture pages already covering the underlying machinery.
+the lesson, the gap, and the change. Cross-references point at
+architecture pages covering the underlying machinery.
 
 When an item ships, fold its description into the matching page and
 prune it here.
@@ -15,9 +15,9 @@ The 2026 self-hosted-AI-character survey distilled into:
   two-stage turn detection, sentence streaming, swap points.
 
 Existing instinct (event-sourced `turns`, regenerable side-indices,
-supersession over overwrite) already aligns with the rigorous end of
-the field. Roadmap is about widening seams for A/B testing strategies
-and closing the voice-latency gap to sub-1 s.
+supersession over overwrite) aligns with the rigorous end of the
+field. Roadmap widens seams for A/B testing strategies and closes
+voice-latency gap to sub-1 s.
 
 ## Memory
 
@@ -25,11 +25,10 @@ and closing the voice-latency gap to sub-1 s.
 
 `FactExtractor` emits a 1–10 importance hint per fact (prompt teaches
 the scale: 1 = throwaway, 5 = ordinary, 10 = identity-defining /
-safety-critical). Persisted on the `facts` table as a nullable
-`importance INTEGER`; legacy rows read back as `None` and rank as
-the neutral midpoint. `HistoryStore.search_facts_scored` exposes
-BM25 verbatim so `RagContextLayer` can fuse three signals at rank
-time:
+safety-critical). Persisted on `facts` as nullable `importance
+INTEGER`; legacy rows read back as `None` and rank at the neutral
+midpoint. `HistoryStore.search_facts_scored` exposes BM25 verbatim
+so `RagContextLayer` fuses three signals at rank time:
 
 ```toml
 [memory.retrieval]
@@ -39,9 +38,9 @@ importance_weight = 0.6
 embedding_weight  = 0.0   # M6 placeholder
 ```
 
-Defaults reproduce pre-M2 ordering when `importance_weight = 0`;
-the shipped default raises it to `0.6` so safety-critical facts
-beat equally-matched casual ones. See
+Defaults reproduce pre-M2 ordering at `importance_weight = 0`; shipped
+default raises it to `0.6` so safety-critical facts beat
+equally-matched casual ones. See
 [Memory strategies — retrieval ranking](memory-strategies.md#3-retrieval-ranking-ragcontextlayer)
 and [Tuning — retrieval ranking](tuning.md#retrieval-ranking-m2).
 
@@ -54,18 +53,18 @@ never edited, never trimmed.
 
 `ReflectionWorker` (`src/familiar_connect/processors/reflection_worker.py`)
 ticks every 60 s (slower than `PeopleDossierWorker`'s 20 s); fires
-when at least `turns_threshold` (default 20) new turns have arrived
+when at least `turns_threshold` (default 20) new turns arrive
 since the newest reflection. Asks the background-tier LLM "what
 high-level questions do recent events raise?" and persists each
-answer with at least one cited turn or fact id. Rows whose only
-citations the LLM hallucinates are dropped silently; rows where
-some ids are valid keep the valid subset.
+answer with at least one cited turn or fact id. Rows with only
+hallucinated citations drop silently; rows with a valid subset
+keep that subset.
 
-`ReflectionLayer` renders the most recent rows scoped to the active
+`ReflectionLayer` renders recent rows scoped to the active
 channel (channel-agnostic rows always surface) with citation
-breadcrumbs `[T#42, F#7]`. Reflections that cite at least one
+breadcrumbs `[T#42, F#7]`. Reflections citing at least one
 superseded fact are flagged `(stale)` on read — the row is never
-deleted, per the supersession-over-overwrite rule.
+deleted, per supersession-over-overwrite.
 
 Token + count caps live in `[budget.<tier>]` as `reflection_tokens`
 and `max_reflections`. See [Memory strategies — reflections](memory-strategies.md#reflections-m3).
@@ -73,17 +72,16 @@ and `max_reflections`. See [Memory strategies — reflections](memory-strategies
 ### M4 — Lorebook layer (shipped)
 
 `data/familiars/<id>/lorebook.toml` carries `[[entries]]` with
-`keys`, `content`, optional `priority` (default 0) and optional
+`keys`, `content`, optional `priority` (default 0), and optional
 `selective` (default `false`). `LorebookLayer` scans the active
 channel's last `recent_window` turns case-insensitively against
 each entry's keys; hits render newest-priority-first under a
-`## Lorebook` block. `selective = true` flips the per-entry match
+`## Lorebook` block. `selective = true` flips per-entry matching
 from any-key (OR) to all-keys (AND).
 
-No worker — the file is the sole source of truth. Cache key
-combines a BLAKE2b hash of the file with the matched entry indices,
-so the layer only flips when the file or the activation set
-changes.
+No worker — the file is sole source of truth. Cache key combines a
+BLAKE2b hash of the file with matched entry indices, so the
+layer only flips when the file or activation set changes.
 
 Token + count caps live in `[budget.<tier>]` as `lorebook_tokens`
 and `max_lorebook_entries`. See
@@ -104,10 +102,10 @@ projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
 Names map to a registry (`register_projector`); third-party
 projectors (Graphiti, Cognee) call `register_projector` at import
 time and the same selector picks them up. Unknown names raise at
-config load — a typo never silently drops a writer.
+config load — typos never silently drop a writer.
 
-Default keeps every shipped projector. Empty list disables all
-memory projection. See
+Default keeps every shipped projector. Empty list disables memory
+projection. See
 [Memory strategies — swap points](memory-strategies.md#swap-points).
 
 ### M6 — Embeddings for semantic recall (shipped)
@@ -123,17 +121,16 @@ Phase 1 — seam:
   swap accumulates new rows beside the old — no audit history
   destroyed. Vectors persisted as packed little-endian float32 in a
   `BLOB` column (no `sqlite-vec` dependency yet; brute-force cosine
-  over BM25-overfetched candidates is sufficient at per-host
-  volumes).
+  over BM25-overfetched candidates suffices at per-host volumes).
 * `FactEmbeddingWorker` projector (registered as
   `fact_embedding`) — watermark-driven over current facts, embeds
   new rows in batches of 32, idempotent across model swaps.
 * `RagContextLayer` accepts an :class:`Embedder` and fuses cosine
-  similarity with the existing BM25 / recency / importance
+  similarity with existing BM25 / recency / importance
   signals. Weight knob is the pre-existing `embedding_weight` in
   `[memory.retrieval]`. Unembedded candidates score the neutral
   midpoint (0.5) so a partially-populated side-index doesn't
-  poison the rank.
+  poison rank.
 
 Phase 2 — FastEmbed/ONNX backend:
 
@@ -148,7 +145,7 @@ Phase 2 — FastEmbed/ONNX backend:
 * Embedder `name` carries the model identifier
   (`fastembed:BAAI/bge-small-en-v1.5`) so a model upgrade
   accumulates new rows beside the old — same supersession-style
-  audit trail used everywhere else.
+  audit trail used elsewhere.
 * `[providers.embedding]` adds `fastembed_model` and
   `fastembed_cache_dir` knobs.
 
@@ -172,8 +169,8 @@ embedding_weight = 0.6
 Phase 3 — ANN at scale (deferred):
 
 * `sqlite-vec` extension once fact volumes outgrow brute-force
-  cosine over BM25 candidates. The `Embedder` seam doesn't change;
-  the storage path swaps a virtual table for the BLOB column.
+  cosine over BM25 candidates. The `Embedder` seam is unchanged;
+  storage swaps a virtual table for the BLOB column.
 
 See [Memory strategies — embeddings](memory-strategies.md#embeddings-m6).
 
@@ -187,8 +184,8 @@ telemetry (`voice.vad_to_stt`), TOML-driven strategy selector
 (`[providers.turn_detection] strategy = "ten+smart_turn"`), and
 audio-fixture integration coverage for complete-sentence / mid-thought /
 filler endpointing patterns
-(`tests/test_endpointer_audio_fixtures.py`) have all landed. Local VAD
-saves 150–200 ms over remote endpointing.
+(`tests/test_endpointer_audio_fixtures.py`) all landed. Local VAD
+saves 150–200 ms vs remote endpointing.
 
 See [Voice pipeline — turn detection](voice-pipeline.md#turn-detection),
 [Per-turn budget telemetry](voice-pipeline.md#per-turn-budget-telemetry),
@@ -212,23 +209,23 @@ Parakeet but lighter — no torch, ~150 MB for the `small` model.
 Selected via `backend = "faster_whisper"`; install the
 `local-stt-whisper` extra.
 
-Both local backends share the buffer-and-finalize seam: the local
-turn detector (V1) drives `finalize()`, so they require
+Both local backends share the buffer-and-finalize seam: local
+turn detector (V1) drives `finalize()`, so both require
 `[providers.turn_detection].strategy = "ten+smart_turn"`.
 
 ### V4 — Pluggable TTS backend & Mimi-codec readiness
 
-Already pluggable via `synthesize() → TTSResult`. Track here so the
-lesson isn't lost: Mimi (Kyutai) is becoming the open audio-token
-standard. When Sesame CSM stabilises, drop in a `SesameTTSClient`
-behind the existing surface. `PiperTTSClient` is a smaller
-intermediate step.
+Already pluggable via `synthesize() → TTSResult`. Tracked here so
+the lesson isn't lost: Mimi (Kyutai) is becoming the open
+audio-token standard. When Sesame CSM stabilises, drop in a
+`SesameTTSClient` behind the existing surface. `PiperTTSClient` is
+a smaller intermediate step.
 
 ### V5 — Full-duplex / S2S as a research branch
 
 Not adopting. Rejection captured in
 [Decisions](decisions.md#full-duplex-speech-to-speech-pipelines-moshi-sesame-csm).
-Revisit if a Mimi-based S2S model gains an external-LLM-brain seam.
+Revisit if a Mimi-based S2S model exposes an external-LLM-brain seam.
 
 ## Architecture / experimentation seams
 
@@ -236,21 +233,21 @@ Revisit if a Mimi-based S2S model gains an external-LLM-brain seam.
 
 `[providers.turn_detection]` selector shipped: `strategy = "deepgram"
 | "ten+smart_turn"` in `character.toml` selects the endpointer chain;
-its tuning lives in `[providers.turn_detection.local]`. See
+tuning lives in `[providers.turn_detection.local]`. See
 [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
 
 `[providers.stt].backend` selector wired in V3 phase 1; phases 2 and 3
 added `parakeet` and `faster_whisper`. V3 closed.
 
 Env vars are restricted to secrets and deployment identity (API keys,
-Discord token, `FAMILIAR_ID`); all behavior knobs live in TOML.
+Discord token, `FAMILIAR_ID`); behavior knobs live in TOML.
 
 `[providers.memory]` selector wired in M5; built-in names today are
 `rolling_summary`, `rich_note`, `people_dossier`, `reflection`.
 Third-party projectors register at import time; the selector picks
 them up by name.
 
-Remaining selector (not yet wired — implementation doesn't exist):
+Remaining selector (not yet wired — implementation absent):
 
 ```toml
 [providers.voice_pipeline]
@@ -279,7 +276,7 @@ What landed:
 - `[channels.<id>].history_window_size` continues to override the
   per-channel turn cap.
 
-A2 is now fully closed.
+A2 is fully closed.
 
 Shipped since initial A2:
 
@@ -287,11 +284,11 @@ Shipped since initial A2:
   (0 = disabled, default). When set, `RecentHistoryLayer` drops turns older than
   the last qualifying gap before rendering, so the verbatim history block starts
   at a stable fold point and the system prompt prefix survives across turns for
-  OpenAI/Anthropic prompt caching. The fold index advances only when a newer
+  OpenAI/Anthropic prompt caching. Fold index advances only when a newer
   qualifying gap appears inside the window.
 - Per-channel `total_tokens` overrides — `[channels.<id>].total_tokens`
   in `character.toml` overrides the tier's post-assembly trim cap for
-  that channel. `Budgeter.trim()` selects the channel cap when the
+  that channel. `Budgeter.trim()` selects the channel cap when
   `channel_id` matches; other channels use the tier default.
 - Model-specific per-section curves — `[budget.model_curves."<model-name>"]`
   blocks with float multipliers for every `TierBudget` field. Applied in
@@ -303,8 +300,8 @@ Shipped since initial A2:
 
 In-process tool registry + agentic loop, gated by the per-slot
 `tool_calling` flag. First tool: `set_alarm(when|delay_seconds, reason)`
-plus its companion `cancel_alarm(alarm_id)` — exercises the whole call
-shape (deferred execution, persistence across restarts, a bus-driven
+plus companion `cancel_alarm(alarm_id)` — exercises the whole call
+shape (deferred execution, persistence across restarts, bus-driven
 wake that re-enters the turn pipeline).
 
 What landed:
@@ -315,7 +312,7 @@ What landed:
   about tool plumbing.
 - `familiar_connect.tools/`: `ToolRegistry`, `agentic_loop`, the
   `set_alarm` / `cancel_alarm` tools, `AlarmScheduler` (DB-backed,
-  asyncio-driven), and the `AlarmWaker` processor that translates
+  asyncio-driven), and `AlarmWaker` processor that translates
   `alarm.fired` into a synthetic `discord.text` event.
 - `alarms` table in `data/familiars/<id>/history.db` and
   `tool_calls_json` / `tool_call_id` columns on the existing `turns`
@@ -327,7 +324,7 @@ What landed:
 
 See [Tool calling](overview.md#tool-calling).
 
-Future work (not landed): pre-tool eval suite that asserts the
+Future work (not landed): pre-tool eval suite asserting the
 configured model produces non-empty content alongside any tool_call,
 per supported model. Until then the filler backstop is the model-agnostic
 floor.

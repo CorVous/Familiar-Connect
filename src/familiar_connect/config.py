@@ -1,6 +1,6 @@
 """Per-character configuration from TOML.
 
-Loads ``character.toml`` once on startup, deep-merged over the
+Loads ``character.toml`` once on startup, deep-merged over
 ``_default/character.toml`` defaults.
 """
 
@@ -26,7 +26,7 @@ tier has its own :class:`TierBudget` envelope.
 
 
 class ConfigError(Exception):
-    """Raised when a config file is malformed or references an unknown value."""
+    """Malformed config file or unknown value reference."""
 
 
 LLM_SLOT_NAMES: frozenset[str] = frozenset({"fast", "prose", "background"})
@@ -45,13 +45,13 @@ REASONING_LEVELS: frozenset[str] = frozenset({"off", "low", "medium", "high"})
 
 * ``"off"`` — explicitly suppress (OpenRouter ``reasoning.exclude``).
 * ``"low"`` / ``"medium"`` / ``"high"`` — effort levels.
-* omitted (``None``) — defer to the model's default.
+* omitted (``None``) — defer to model's default.
 """
 
 
 @dataclass(frozen=True)
 class LLMSlotConfig:
-    """Per-call-site LLM config loaded from a ``[llm.<slot>]`` TOML section."""
+    """Per-call-site LLM config from ``[llm.<slot>]`` TOML section."""
 
     model: str
     temperature: float | None = None
@@ -77,12 +77,12 @@ class LocalTurnConfig:
     """V1 local-turn-detection knobs from ``[providers.turn_detection.local]``.
 
     Read only when ``[providers.turn_detection].strategy = "ten+smart_turn"``.
-    Defaults match the V1 field-tested values; rarely need tweaking.
+    Defaults match V1 field-tested values; rarely need tweaking.
 
-    Smart Turn weights are pulled from HuggingFace on first use (cached
-    under ``~/.cache/huggingface``). Default filename is the CPU ONNX
-    export — switch to ``smart-turn-v3.2-gpu.onnx`` if ``onnxruntime-gpu``
-    is installed.
+    Smart Turn weights pulled from HuggingFace on first use (cached
+    under ``~/.cache/huggingface``). Default filename is CPU ONNX
+    export — switch to ``smart-turn-v3.2-gpu.onnx`` if
+    ``onnxruntime-gpu`` installed.
     """
 
     smart_turn_repo_id: str = "pipecat-ai/smart-turn-v3"
@@ -110,7 +110,7 @@ _STT_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet", "faster_whisp
 class DeepgramSTTConfig:
     """Deepgram knobs from ``[providers.stt.deepgram]``.
 
-    Non-secret. ``DEEPGRAM_API_KEY`` is the only env input.
+    Non-secret. ``DEEPGRAM_API_KEY`` is only env input.
     """
 
     model: str = "nova-3"
@@ -146,8 +146,8 @@ class FasterWhisperSTTConfig:
     """FasterWhisper (CTranslate2) knobs from ``[providers.stt.faster_whisper]``.
 
     Local CTranslate2-backed Whisper. Same pairing requirement as
-    Parakeet — no internal silence detector, so ``finalize()`` is
-    driven by the local turn detector.
+    Parakeet — no internal silence detector, so ``finalize()`` driven
+    by local turn detector.
     """
 
     model_size: str = "small"  # "tiny" | "base" | "small" | "medium" | "large-v3"
@@ -180,7 +180,7 @@ DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 
 @dataclass(frozen=True)
 class TTSConfig:
-    """Text-to-speech config loaded from the ``[tts]`` TOML section."""
+    """Text-to-speech config from ``[tts]`` TOML section."""
 
     provider: str = "azure"
     cartesia_voice_id: str | None = None
@@ -202,13 +202,13 @@ class DiscordTextConfig:
     """``[discord.text]`` knobs — typing-indicator + interruption behavior.
 
     ``respond_to_typing``: treat other users' typing-start events as
-    interruptions of the bot's in-flight reply (cancels the active
+    interruptions of bot's in-flight reply (cancels active
     :class:`TurnScope`). Default ``True`` — respect users typing.
     ``typing_backoff_initial_s`` / ``typing_backoff_max_s``: when
     another bot (e.g. another familiar-connect instance) is typing in
-    the same channel, hold off responding for an exponentially
-    increasing window — initial doubles toward max — to avoid two
-    bots pingponging on each other's typing events.
+    same channel, hold off responding for exponentially increasing
+    window — initial doubles toward max — to avoid two bots
+    pingponging on each other's typing events.
     """
 
     respond_to_typing: bool = True
@@ -221,21 +221,21 @@ class MemoryRetrievalConfig:
     """Ranking weights for :class:`RagContextLayer` (M2).
 
     Default keeps pre-M2 ordering (BM25-only). Operators opt into
-    importance / recency by raising the matching weight in
+    importance / recency by raising matching weight in
     ``[memory.retrieval]``.
 
-    :param bm25_weight: ranking weight on BM25 quality (best=1.0,
-        worst=0.0 within the candidate batch).
-    :param recency_weight: ranking weight on fact-id rank within
-        the candidate batch (newest=1.0).
-    :param importance_weight: ranking weight on the extractor's 1-10
-        importance hint (``importance/10``). Legacy / unscored facts
-        get the neutral midpoint.
-    :param embedding_weight: ranking weight on cosine similarity to
-        the cue embedding (M6). Requires
-        ``[providers.embedding].backend != "off"``; without an
-        embedder the layer skips this signal even when the weight is
-        positive (warned once at startup).
+    :param bm25_weight: weight on BM25 quality (best=1.0, worst=0.0
+        within candidate batch).
+    :param recency_weight: weight on fact-id rank within candidate
+        batch (newest=1.0).
+    :param importance_weight: weight on extractor's 1-10 importance
+        hint (``importance/10``). Legacy / unscored facts get neutral
+        midpoint.
+    :param embedding_weight: weight on cosine similarity to cue
+        embedding (M6). Requires
+        ``[providers.embedding].backend != "off"``; without embedder,
+        layer skips this signal even when weight positive (warned
+        once at startup).
     """
 
     bm25_weight: float = 1.0
@@ -248,10 +248,10 @@ class MemoryRetrievalConfig:
 class MemoryProvidersConfig:
     """Memory-projector selector from ``[providers.memory]`` (M5).
 
-    Lifts the existing writers (`SummaryWorker`, `FactExtractor`,
-    `PeopleDossierWorker`, `ReflectionWorker`) behind a
-    :class:`MemoryProjector` Protocol so operators swap the strategy
-    via TOML. Default keeps every shipped projector.
+    Lifts existing writers (`SummaryWorker`, `FactExtractor`,
+    `PeopleDossierWorker`, `ReflectionWorker`) behind
+    :class:`MemoryProjector` Protocol so operators swap strategy via
+    TOML. Default keeps every shipped projector.
 
     :param projectors: ordered tuple of projector names. Each must be
         registered in
@@ -272,18 +272,18 @@ class MemoryProvidersConfig:
 class EmbeddingConfig:
     """Embedder backend selector from ``[providers.embedding]`` (M6).
 
-    Picks the text → vector backend used by the ``fact_embedding``
-    projector and (when ``[memory.retrieval].embedding_weight > 0``)
-    by :class:`RagContextLayer` at rerank time.
+    Picks text → vector backend used by ``fact_embedding`` projector
+    and (when ``[memory.retrieval].embedding_weight > 0``) by
+    :class:`RagContextLayer` at rerank time.
 
     :param backend: name registered in
         :mod:`familiar_connect.embedding.factory`. ``"off"`` (default)
-        disables the seam end to end — projector raises if listed,
-        RAG layer skips embedding signal.
+        disables seam end to end — projector raises if listed, RAG
+        layer skips embedding signal.
     :param dim: dimensionality hint for backends that accept one
-        (``hash``). Real backends with a fixed model dim ignore this.
-    :param fastembed_model: model name for the ``fastembed`` backend.
-        Default is BGE-small (384 dim, ~130 MB cached). Swap to
+        (``hash``). Real backends with fixed model dim ignore this.
+    :param fastembed_model: model name for ``fastembed`` backend.
+        Default BGE-small (384 dim, ~130 MB cached). Swap to
         ``BAAI/bge-base-en-v1.5`` for higher quality at ~2x cost.
     :param fastembed_cache_dir: override for fastembed's model cache.
         ``None`` = ``~/.cache/fastembed``.
@@ -302,7 +302,7 @@ class ChannelOverrides:
     Layered over global defaults — test channels tunable independently.
     See plan § Design.4 *Channel-aware composition order*.
 
-    history_window_size: overrides the tier default
+    history_window_size: overrides tier default
     (:attr:`CharacterConfig.voice_window_size` /
     :attr:`CharacterConfig.text_window_size`).
     prompt_layers: ordered layer names; ``None`` inherits default order.
@@ -320,11 +320,10 @@ class ChannelOverrides:
 def _default_budgets() -> dict[str, TierBudget]:
     """Programmatic fallback for ``CharacterConfig()`` without TOML.
 
-    The shipped per-tier values live in
+    Shipped per-tier values live in
     ``data/familiars/_default/character.toml`` and overlay these at
-    load time. Tests that bypass TOML loading get the dataclass
-    defaults — voice-tier sized; pass an explicit ``TierBudget`` if
-    you need other shapes.
+    load time. Tests bypassing TOML loading get dataclass defaults —
+    voice-tier sized; pass explicit ``TierBudget`` for other shapes.
     """
     return {tier: TierBudget() for tier in BUDGET_TIER_NAMES}
 
@@ -333,16 +332,16 @@ def _default_budgets() -> dict[str, TierBudget]:
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``."""
 
-    # Hard cap on history turns. The token-aware budget below usually
-    # bites first; keep this as a safety net (and a way to force the
-    # absolute upper bound on prompt size).
+    # hard cap on history turns. token-aware budget below usually
+    # bites first; keep this as safety net (and way to force absolute
+    # upper bound on prompt size).
     voice_window_size: int = 100
     text_window_size: int = 200
-    # Consecutive same-speaker voice fragments within this gap (seconds)
+    # consecutive same-speaker voice fragments within this gap (seconds)
     # collapse into one rendered history message. 0 disables.
     recent_history_coalesce_max_gap_seconds: float = 45.0
-    # Fold text-channel turns before the last silence gap >= this value
-    # into the rolling summary (0 = disabled).
+    # fold text-channel turns before last silence gap >= this value
+    # into rolling summary (0 = disabled).
     text_silence_gap_fold_seconds: float = 0.0
     display_tz: str = "UTC"
     aliases: list[str] = field(default_factory=list)
@@ -351,15 +350,15 @@ class CharacterConfig:
     channels: dict[int, ChannelOverrides] = field(default_factory=dict)
     turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
     stt: STTConfig = field(default_factory=STTConfig)
-    # Per-tier token envelopes for the Budgeter. Operators tune
+    # per-tier token envelopes for Budgeter. operators tune
     # ``total_tokens`` per tier; sub-caps derive from it unless
     # explicitly overridden.
     budgets: dict[str, TierBudget] = field(default_factory=_default_budgets)
-    # Per-model multipliers keyed by model name (e.g. "claude-opus-4-7").
-    # Applied in :meth:`budget_for` when the tier's LLM slot uses that model.
+    # per-model multipliers keyed by model name (e.g. "claude-opus-4-7").
+    # applied in :meth:`budget_for` when tier's LLM slot uses that model.
     budget_curves: dict[str, ModelBudgetCurve] = field(default_factory=dict)
     discord_text: DiscordTextConfig = field(default_factory=DiscordTextConfig)
-    # Retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
+    # retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
     memory_retrieval: MemoryRetrievalConfig = field(
         default_factory=MemoryRetrievalConfig
     )
@@ -371,7 +370,7 @@ class CharacterConfig:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
-        """Return overrides for ``channel_id``; empty overrides if none."""
+        """Return overrides for ``channel_id``; empty if none."""
         if channel_id is None:
             return ChannelOverrides()
         return self.channels.get(channel_id, ChannelOverrides())
@@ -390,10 +389,10 @@ class CharacterConfig:
         """Effective budget: model curve scaled, then channel total_tokens applied.
 
         Resolution order:
-        1. Start from the tier's base :class:`TierBudget`.
-        2. Apply :class:`ModelBudgetCurve` for the tier's active model if one
-           is registered under ``budget_curves``.
-        3. Override ``total_tokens`` with the per-channel value if set.
+        1. Start from tier's base :class:`TierBudget`.
+        2. Apply :class:`ModelBudgetCurve` for tier's active model if
+           registered under ``budget_curves``.
+        3. Override ``total_tokens`` with per-channel value if set.
         """
         base = self.budgets[tier]
         slot = _TIER_TO_SLOT.get(tier)
@@ -409,7 +408,7 @@ class CharacterConfig:
         return base
 
 
-# Tier → LLM slot mapping (mirrors run.py responder wiring).
+# tier → LLM slot mapping (mirrors run.py responder wiring).
 _TIER_TO_SLOT: dict[str, str] = {
     "voice": "fast",
     "text": "prose",
@@ -429,7 +428,7 @@ def load_character_config(
 ) -> CharacterConfig:
     """Load :class:`CharacterConfig` from *path*, merged over *defaults_path*.
 
-    :raises ConfigError: if default profile missing, invalid TOML,
+    :raises ConfigError: default profile missing, invalid TOML,
         unknown ``[llm.<slot>]``, or validation failure.
     """
     defaults_data = _read_toml(defaults_path)
@@ -516,7 +515,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(budget_raw, dict):
         msg = f"[budget] must be a table, got {type(budget_raw).__name__}"
         raise ConfigError(msg)
-    # Strip model_curves before tier parsing — _parse_budgets rejects unknown keys.
+    # strip model_curves before tier parsing — _parse_budgets rejects unknown keys.
     budget_curves_raw = budget_raw.get("model_curves", {})
     if not isinstance(budget_curves_raw, dict):
         msg = "[budget.model_curves] must be a table"
@@ -576,7 +575,7 @@ _DISCORD_TEXT_FIELDS: frozenset[str] = frozenset({
 
 
 def _parse_discord_text_config(raw: dict) -> DiscordTextConfig:
-    """Parse and validate ``[discord.text]``."""
+    """Validate ``[discord.text]``."""
     unknown = set(raw) - _DISCORD_TEXT_FIELDS
     if unknown:
         bad = ", ".join(sorted(unknown))
@@ -653,11 +652,11 @@ _BUDGET_FIELDS: tuple[str, ...] = (
 
 
 def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudget:
-    """Validate and merge ``[budget.<tier>]`` over the default envelope.
+    """Validate and merge ``[budget.<tier>]`` over default envelope.
 
-    Each field is a hard positive int. Keys present in ``raw`` win;
-    keys absent inherit ``default`` (which itself comes from the
-    deep-merged ``_default/character.toml``).
+    Each field is hard positive int. Keys present in ``raw`` win;
+    absent keys inherit ``default`` (itself from deep-merged
+    ``_default/character.toml``).
     """
     unknown = set(raw) - set(_BUDGET_FIELDS)
     if unknown:
@@ -685,7 +684,7 @@ def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudg
     })
 
 
-# Same names as _BUDGET_FIELDS; used to validate [budget.model_curves] sections.
+# same names as _BUDGET_FIELDS; used to validate [budget.model_curves] sections.
 _CURVE_FIELDS: frozenset[str] = frozenset(_BUDGET_FIELDS)
 
 
@@ -768,9 +767,9 @@ _MEMORY_PROVIDERS_FIELDS: frozenset[str] = frozenset({"projectors"})
 def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
     """Validate ``[providers.memory]``; reject unknown projector names.
 
-    Names are checked against
+    Names checked against
     :func:`familiar_connect.processors.projectors.known_projectors` so
-    a typo fails loudly at config load rather than silently dropping a
+    typo fails loudly at config load rather than silently dropping a
     writer.
     """
     unknown = set(raw) - _MEMORY_PROVIDERS_FIELDS
@@ -786,8 +785,8 @@ def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
     ):
         msg = "[providers.memory].projectors must be a list of strings"
         raise ConfigError(msg)
-    # Deferred to avoid pulling the registry into module import time —
-    # config.py is loaded by lots of test helpers.
+    # deferred to avoid pulling registry into module import time —
+    # config.py loaded by lots of test helpers.
     from familiar_connect.processors.projectors import known_projectors  # noqa: PLC0415
 
     valid_names = known_projectors()
@@ -813,12 +812,12 @@ _EMBEDDING_FIELDS: frozenset[str] = frozenset({
 def _parse_embedding_config(raw: dict) -> EmbeddingConfig:
     """Validate ``[providers.embedding]``.
 
-    ``backend`` is checked against
-    :func:`familiar_connect.embedding.factory.known_embedders` so a
-    typo fails loudly at config load. ``dim`` must be a positive int.
+    ``backend`` checked against
+    :func:`familiar_connect.embedding.factory.known_embedders` so
+    typo fails loudly at config load. ``dim`` must be positive int.
     Backend-specific keys (``fastembed_model``, ``fastembed_cache_dir``)
-    are accepted regardless of the active backend so operators can
-    flip ``backend`` without re-typing the rest of the table.
+    accepted regardless of active backend so operators can flip
+    ``backend`` without re-typing rest of table.
     """
     unknown = set(raw) - _EMBEDDING_FIELDS
     if unknown:
@@ -833,8 +832,8 @@ def _parse_embedding_config(raw: dict) -> EmbeddingConfig:
             f"got {type(backend).__name__}"
         )
         raise ConfigError(msg)
-    # Deferred to keep config.py importable without the embedding
-    # registry — same shape as the projector validator.
+    # deferred to keep config.py importable without embedding
+    # registry — same shape as projector validator.
     from familiar_connect.embedding.factory import known_embedders  # noqa: PLC0415
 
     valid = known_embedders()
@@ -890,7 +889,7 @@ _VALID_MESSAGE_RENDERING: frozenset[str] = frozenset({"prefixed", "name_only"})
 def _parse_channel_overrides(raw: dict) -> dict[int, ChannelOverrides]:
     """Parse ``[channels.<id>]`` TOML blocks into typed overrides.
 
-    Channel keys are TOML strings (TOML table keys are strings); we
+    Channel keys are TOML strings (TOML table keys are strings);
     coerce to ``int`` here since Discord channel IDs are snowflakes.
     """
     out: dict[int, ChannelOverrides] = {}
@@ -995,7 +994,7 @@ def _read_toml(path: Path) -> dict | None:
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Deep-merge *override* on top of *base*; neither input mutated."""
+    """Deep-merge *override* over *base*; neither input mutated."""
     result: dict = {}
     for key, base_value in base.items():
         if key in override:
@@ -1011,7 +1010,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
-    """Parse and validate the ``[llm.*]`` section into typed slot configs."""
+    """Validate ``[llm.*]`` into typed slot configs."""
     slots: dict[str, LLMSlotConfig] = {}
     for name, section in raw.items():
         if name not in LLM_SLOT_NAMES:
@@ -1089,7 +1088,7 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
 
 
 def _parse_provider_order(slot_name: str, raw: object) -> tuple[str, ...] | None:
-    """Validate ``[llm.<slot>].provider_order`` as a list of non-empty strings."""
+    """Validate ``[llm.<slot>].provider_order`` as list of non-empty strings."""
     if raw is None:
         return None
     if not isinstance(raw, list):
@@ -1111,7 +1110,7 @@ def _parse_provider_order(slot_name: str, raw: object) -> tuple[str, ...] | None
 
 
 def _parse_history_windows(raw: dict) -> tuple[int, int]:
-    """Parse split history-window keys; reject the retired ``window_size``."""
+    """Parse split history-window keys; reject retired ``window_size``."""
     if "window_size" in raw:
         msg = (
             "[providers.history].window_size has been split into "
@@ -1172,7 +1171,7 @@ def _parse_text_silence_gap_fold(raw: dict) -> float:
 
 
 def _parse_turn_detection_config(raw: dict) -> TurnDetectionConfig:
-    """Parse and validate the ``[providers.turn_detection]`` section."""
+    """Validate ``[providers.turn_detection]``."""
     strategy_raw = raw.get("strategy", "deepgram")
     if not isinstance(strategy_raw, str):
         msg = (
@@ -1244,7 +1243,7 @@ def _parse_local_turn_config(raw: dict) -> LocalTurnConfig:
 
 
 def _parse_stt_config(raw: dict) -> STTConfig:
-    """Parse and validate the ``[providers.stt]`` section."""
+    """Validate ``[providers.stt]``."""
     backend_raw = raw.get("backend", "deepgram")
     if not isinstance(backend_raw, str):
         msg = (
@@ -1419,7 +1418,7 @@ def _parse_faster_whisper_stt_config(raw: dict) -> FasterWhisperSTTConfig:
 
 
 def _parse_tts_config(raw: dict) -> TTSConfig:
-    """Parse and validate the ``[tts]`` section into a typed config."""
+    """Validate ``[tts]`` into typed config."""
     provider_raw = raw.get("provider", "azure")
     if not isinstance(provider_raw, str):
         msg = f"[tts].provider must be a string, got {type(provider_raw).__name__}"

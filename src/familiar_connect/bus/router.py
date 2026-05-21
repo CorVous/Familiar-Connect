@@ -1,9 +1,8 @@
 """Per-session turn routing + cancel-prior-scope semantics.
 
-Owns ``active_turn_by_session``. On :meth:`begin_turn` for a session
-that has an active scope, the prior scope is cancelled before the new
-one is registered. See plan § Design.3 *Turn identity and
-interruption*.
+Owns ``active_turn_by_session``. :meth:`begin_turn` cancels any prior
+scope in same session before registering. See plan § Design.3
+*Turn identity and interruption*.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ class TurnRouter:
         self._active: dict[str, TurnScope] = {}
 
     def begin_turn(self, *, session_id: str, turn_id: str) -> TurnScope:
-        """Cancel any active turn in ``session_id``; register a new one."""
+        """Cancel any active turn in ``session_id``; register new."""
         prior = self._active.get(session_id)
         if prior is not None:
             prior.cancel()
@@ -46,8 +45,8 @@ class TurnRouter:
     def shutdown(self) -> None:
         """Cancel every active turn.
 
-        Does not clear the map — caller inspects post-shutdown state
-        for diagnostics.
+        Map not cleared — caller inspects post-shutdown state for
+        diagnostics.
         """
         for scope in self._active.values():
             scope.cancel()

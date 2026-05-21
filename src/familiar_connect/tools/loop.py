@@ -2,8 +2,8 @@
 
 Drives :meth:`LLMClient.stream_completion` through one or more
 iterations: stream deltas, accumulate ``content`` + ``tool_calls``,
-execute tools, append results, re-call. Terminates when the model
-returns no tool calls or ``max_iterations`` is reached.
+execute tools, append results, re-call. Terminates when model returns
+no tool calls or ``max_iterations`` is reached.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _accumulate_tool_calls(
     pending: dict[int, dict[str, Any]],
     fragments: list[dict[str, Any]],
 ) -> None:
-    """Merge streaming tool-call fragments into the pending dict by index."""
+    """Merge streaming tool-call fragments into ``pending`` by index."""
     for frag in fragments:
         idx = frag.get("index", 0)
         if not isinstance(idx, int):
@@ -71,7 +71,7 @@ def _accumulate_tool_calls(
 
 
 def _finalize_tool_calls(pending: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Order pending tool calls by index and strip empty ones."""
+    """Order pending tool calls by index; strip empty ones."""
     return [pending[i] for i in sorted(pending) if pending[i].get("id")]
 
 
@@ -80,7 +80,7 @@ async def _execute_tool(
     args: dict[str, Any],
     ctx: ToolContext,
 ) -> str:
-    """Run ``tool.handler`` with a timeout; convert exceptions to error JSON."""
+    """Run ``tool.handler`` with timeout; convert exceptions to error JSON."""
     try:
         return await asyncio.wait_for(tool.handler(args, ctx), timeout=tool.timeout_s)
     except TimeoutError:
@@ -94,7 +94,7 @@ async def _run_tool_call(
     registry: ToolRegistry,
     ctx: ToolContext,
 ) -> Message:
-    """Resolve + execute one tool call; return the ``role=tool`` message."""
+    """Resolve + execute one tool call; return ``role=tool`` message."""
     call_id = tc.get("id") or ""
     fn = tc.get("function") or {}
     name = fn.get("name") or ""
@@ -131,28 +131,28 @@ async def agentic_loop(
     on_iteration_end: Callable[[Message, list[Message]], Awaitable[None]] | None = None,
     max_iterations: int = _DEFAULT_MAX_ITERATIONS,
 ) -> AgenticResult:
-    """Run streaming + tool execution until the model stops calling tools.
+    """Run streaming + tool execution until model stops calling tools.
 
     Args:
         llm: client whose ``stream_completion`` drives each iteration.
-        messages: starting transcript; mutated in place with assistant +
-            tool turns.
-        registry: tools the model may call. Empty registry → ``tools=None``
-            on every call (no agentic loop; first iteration is terminal).
+        messages: starting transcript; mutated in place with assistant
+            + tool turns.
+        registry: tools the model may call. Empty → ``tools=None`` on
+            every call (no agentic loop; first iteration terminal).
         ctx: per-turn context handed to handlers.
-        on_delta: awaited per ``LLMDelta`` so callers can stream content
-            to TTS / Discord / etc.
-        on_before_tools: awaited *after* the assistant message is built
-            but *before* tool handlers run. Voice mode uses this to
-            inject a filler phrase when content was empty and tools
-            are about to consume time.
+        on_delta: awaited per ``LLMDelta`` so callers stream content to
+            TTS/Discord/etc.
+        on_before_tools: awaited *after* assistant message built but
+            *before* tool handlers run. Voice mode uses this to inject
+            a filler phrase when content empty and tools about to
+            consume time.
         on_iteration_end: awaited once per iteration with the assistant
-            message produced and the tool-result messages just appended.
+            message produced and tool-result messages just appended.
             Used by responders to persist intermediate turns.
         max_iterations: hard cap; protects against runaway tool loops.
 
     Returns:
-        :class:`AgenticResult` with the final assistant text + counters.
+        :class:`AgenticResult` with final assistant text + counters.
 
     """
     tools_payload = registry.as_openai_tools() if any(registry.tools()) else None

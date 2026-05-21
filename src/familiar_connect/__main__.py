@@ -1,4 +1,4 @@
-"""Allow running familiar-connect as a module: python -m familiar_connect."""
+"""Entrypoint: ``python -m familiar_connect``."""
 
 import sys
 

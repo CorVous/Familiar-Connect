@@ -5,15 +5,15 @@ Publishes four topics per utterance:
 - ``voice.activity.start`` — first sign of speech; drives
   :class:`TurnRouter` cancel-prior-scope (plan § Design.3).
 - ``voice.transcript.partial`` — interim Deepgram results.
-- ``voice.transcript.final`` — final transcript; triggers the
+- ``voice.transcript.final`` — final transcript; triggers
   :class:`VoiceResponder` to assemble + reply.
 - ``voice.activity.end`` — utterance closed; responder can commit.
 
-All four events in one utterance share ``turn_id``. The next
-utterance gets a fresh ``turn_id``. Drop-oldest at the audio boundary
-is owned by the recording-sink/transcriber upstream — this source
-only sees post-transcription text and publishes with ``BLOCK`` policy
-via the bus default.
+All four events in one utterance share ``turn_id``. Next utterance
+gets fresh ``turn_id``. Drop-oldest at audio boundary owned by
+recording-sink/transcriber upstream — this source only sees
+post-transcription text and publishes with ``BLOCK`` policy via bus
+default.
 """
 
 from __future__ import annotations
@@ -44,13 +44,13 @@ if TYPE_CHECKING:
 
 
 class VoiceSource:
-    """Drains a Deepgram transcription queue onto the bus.
+    """Drains Deepgram transcription queue onto bus.
 
-    Discord delivers per-SSRC audio so each user_id has an independent
-    transcript stream. State machine is keyed by user_id (with ``None``
-    as the legacy single-stream key for unattributed results) so two
-    speakers talking concurrently get distinct turn_ids — a single
-    state slot would drop the second speaker's ``activity.start``.
+    Discord delivers per-SSRC audio so each user_id has independent
+    transcript stream. State machine keyed by user_id (``None`` is
+    legacy single-stream key for unattributed results) so two
+    speakers talking concurrently get distinct turn_ids — single
+    state slot would drop second speaker's ``activity.start``.
     """
 
     name: str = "voice"
@@ -69,28 +69,28 @@ class VoiceSource:
         self._queue = queue
         self._seq = 0
         # per-user state machine: user_id → current_turn_id (None when idle).
-        # ``None`` user_id is the legacy unattributed slot — kept so older
+        # ``None`` user_id is legacy unattributed slot — kept so older
         # mixed-stream paths still work.
         self._turn_ids: dict[int | None, str] = {}
-        # Local-endpointer ``on_turn_complete`` perf-counter timestamps
-        # awaiting a turn_id. Drained on the next transcript event for
-        # the same user_id; latest fire wins if multiple stack up.
+        # local-endpointer ``on_turn_complete`` perf-counter timestamps
+        # awaiting turn_id. drained on next transcript event for same
+        # user_id; latest fire wins if multiple stack up.
         self._pending_vad_end: dict[int, float] = {}
 
     def record_vad_end(self, *, user_id: int, t: float | None = None) -> None:
-        """Park a local-endpointer ``on_turn_complete`` mark for ``user_id``.
+        """Park local-endpointer ``on_turn_complete`` mark for ``user_id``.
 
-        The endpointer fires before Deepgram emits its final, so the
-        turn_id may not exist yet. Buffer the perf-counter; the next
-        transcription result for ``user_id`` stamps it on the recorder.
-        Latest fire wins if multiple arrive before a result.
+        Endpointer fires before Deepgram emits final, so turn_id may
+        not exist yet. Buffer perf-counter; next transcription result
+        for ``user_id`` stamps it on recorder. Latest fire wins if
+        multiple arrive before a result.
         """
         if t is None:
             t = time.perf_counter()
         self._pending_vad_end[user_id] = t
 
     async def run(self) -> None:
-        """Forever loop: drain queue, publish. Cancel to stop."""
+        """Forever loop: drain queue, publish. Cancel stops."""
         while True:
             result = await self._queue.get()
             await self._handle(result)
@@ -107,8 +107,8 @@ class VoiceSource:
                 payload={"user_id": user_id},
             )
 
-        # Drain pending vad_end ahead of any other phase so the gap to
-        # ``stt_final`` emits in order. ``user_id is None`` is the legacy
+        # drain pending vad_end ahead of any other phase so gap to
+        # ``stt_final`` emits in order. ``user_id is None`` is legacy
         # unattributed slot — never carries a buffered mark.
         if user_id is not None:
             pending_t = self._pending_vad_end.pop(user_id, None)
@@ -118,8 +118,8 @@ class VoiceSource:
                 )
 
         if result.is_final:
-            # Stamp before publish so the recorder sees stt_final ahead of
-            # the responder's llm_first_token mark — preserves gap order.
+            # stamp before publish so recorder sees stt_final ahead of
+            # responder's llm_first_token mark — preserves gap order.
             get_voice_budget_recorder().record(turn_id=turn_id, phase=PHASE_STT_FINAL)
             await self._publish(
                 TOPIC_VOICE_TRANSCRIPT_FINAL,

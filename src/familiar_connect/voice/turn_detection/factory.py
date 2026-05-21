@@ -1,20 +1,19 @@
-"""Factory for the V1 phase 2 local turn-detection chain.
+"""Factory for V1 phase 2 local turn-detection chain.
 
-Bundles SmartTurn ONNX path + thresholds. ``make_endpointer`` is called
-once per Discord user (the TenVAD instance is per-user because its
-native handle accumulates state across frames; the SmartTurn classifier
-is stateless and can be shared).
+Bundles SmartTurn ONNX path + thresholds. ``make_endpointer`` called
+once per Discord user (TenVAD is per-user — its native handle
+accumulates state across frames; SmartTurn classifier is stateless
+and shareable).
 
 TEN-VAD ships its ONNX model inside the ``ten-vad`` Python package;
-SmartTurn weights are fetched from HuggingFace on first use via
-``hf_hub_download``. The Hub cache (``~/.cache/huggingface``) makes
-subsequent runs filesystem-only, and ``HF_HUB_OFFLINE=1`` forces
-cache-only mode for air-gapped deployments.
+SmartTurn weights fetched from HuggingFace on first use via
+``hf_hub_download``. Hub cache (``~/.cache/huggingface``) makes
+subsequent runs filesystem-only; ``HF_HUB_OFFLINE=1`` forces
+cache-only for air-gapped deployments.
 
-All knobs come from ``[providers.turn_detection.local]`` in
-``character.toml``. Returns ``None`` (rather than raising) when the
-SmartTurn weights can't be resolved — the bot falls back to
-Deepgram-only endpointing.
+Knobs come from ``[providers.turn_detection.local]`` in
+``character.toml``. Returns ``None`` (not raises) when SmartTurn
+weights can't be resolved — bot falls back to Deepgram-only endpointing.
 """
 
 from __future__ import annotations
@@ -41,10 +40,10 @@ _logger = logging.getLogger(__name__)
 class LocalTurnDetector:
     """Per-process bundle: shared SmartTurn + per-user TenVAD factory.
 
-    TenVAD's native handle is per-user; SmartTurn is stateless beyond
+    TenVAD native handle is per-user; SmartTurn is stateless beyond
     the loaded ONNX session. Lazy-load SmartTurn on first
     ``make_endpointer`` so import-time cost stays free for processes
-    without a voice subscription.
+    without voice subscription.
     """
 
     smart_turn_path: Path
@@ -60,10 +59,10 @@ class LocalTurnDetector:
         *,
         on_turn_complete: Callable[[bytes], Awaitable[None]],
     ) -> UtteranceEndpointer:
-        """Build a fresh per-user endpointer.
+        """Build fresh per-user endpointer.
 
-        TenVAD is constructed fresh per call (stateful native handle);
-        SmartTurn is loaded once and shared.
+        TenVAD constructed fresh per call (stateful native handle);
+        SmartTurn loaded once, shared.
         """
         if self._smart_turn is None:
             self._smart_turn = SmartTurnDetector(
@@ -82,11 +81,11 @@ class LocalTurnDetector:
 def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | None:
     """Build :class:`LocalTurnDetector` from typed *config*.
 
-    Pulls the SmartTurn ONNX weights from HuggingFace
+    Pulls SmartTurn ONNX weights from HuggingFace
     (``config.smart_turn_repo_id`` / ``config.smart_turn_filename``);
-    the Hub cache covers offline reruns. Returns ``None`` (with a
-    warning) on any download or filesystem error — the bot falls back
-    to Deepgram-only endpointing rather than crashing.
+    Hub cache covers offline reruns. Returns ``None`` (with warning)
+    on any download/FS error — bot falls back to Deepgram-only
+    endpointing rather than crashing.
     """
     # lazy: huggingface_hub is the `local-turn` extra, not always installed
     try:

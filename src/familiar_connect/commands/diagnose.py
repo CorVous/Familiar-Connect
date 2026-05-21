@@ -1,16 +1,14 @@
 """``familiar-connect diagnose`` — aggregate span timings from log files.
 
-Reads one or more log files for ``span=<name> ms=<int>`` markers,
-groups by span name, and prints a p50/p95 histogram. Logs are the
-durable record of span timings (the in-process
-:class:`SpanCollector` is for the live ``/diagnostics`` slash command
-only and gets wiped on restart).
+Reads ``span=<name> ms=<int>`` markers, groups by span, prints
+p50/p95 histogram. Logs are durable record; in-process
+:class:`SpanCollector` powers ``/diagnostics`` and resets on restart.
 
 Usage::
 
     familiar-connect diagnose path/to/bot.log
 
-Multiple files combine into one aggregate. ``-`` reads from stdin.
+Multiple files combine; ``-`` reads stdin.
 """
 
 from __future__ import annotations
@@ -29,8 +27,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Matches log lines carrying ``span=<name>`` and ``ms=<int>`` KV pairs,
-# tolerating intervening ANSI codes and other tokens.
+# matches ``span=<name>`` + ``ms=<int>`` KV pairs, tolerates ANSI codes
+# and other intervening tokens
 _ANSI = r"(?:\x1b\[\d+m)*"
 _SPAN_RE = re.compile(
     rf"span={_ANSI}(?P<name>[\w.-]+)"
@@ -43,7 +41,7 @@ _SPAN_RE = re.compile(
 
 
 def _aggregate(lines: Iterable[str]) -> dict[str, dict[str, float]]:
-    """Return the same summary shape as :meth:`SpanCollector.summary`."""
+    """Build summary in same shape as :meth:`SpanCollector.summary`."""
     buckets: dict[str, list[int]] = {}
     last_ms: dict[str, int] = {}
     for line in lines:
@@ -94,7 +92,6 @@ def add_parser(
     subparsers: argparse._SubParsersAction,
     common_parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
-    """Register the ``diagnose`` subcommand."""
     parser = subparsers.add_parser(
         "diagnose",
         parents=[common_parser],
@@ -115,7 +112,6 @@ def add_parser(
 
 
 def diagnose(args: argparse.Namespace) -> int:
-    """Print the aggregate span summary for ``args.paths``."""
     summary = _aggregate(_iter_lines(list(args.paths)))
     sys.stdout.write(render_summary_table(summary) + "\n")
     return 0

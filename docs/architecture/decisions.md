@@ -4,34 +4,34 @@ Ideas seriously considered during planning and deliberately turned down. Recorde
 
 ## Bridging to a running SillyTavern instance
 
-**The idea:** Run SillyTavern as a side-car process and route Familiar-Connect's context assembly and/or generation through it. SillyTavern has a large, mature extension ecosystem and reusing it directly would short-circuit a great deal of work.
+**The idea:** Run SillyTavern as a side-car and route Familiar-Connect's context assembly or generation through it. SillyTavern's large extension ecosystem would short-circuit a lot of work.
 
-**Why it's rejected:**
+**Why rejected:**
 
-- **SillyTavern is a single-user local web app, not a library.** Its extensions are browser-side JavaScript hooked into the chat UI's event bus (`eventSource`, `getContext()`, generation interceptors). None of that is reachable from an external process.
+- **SillyTavern is a single-user local web app, not a library.** Extensions are browser-side JavaScript hooked into the chat UI's event bus (`eventSource`, `getContext()`, generation interceptors). None of it is reachable from an external process.
 - **SillyTavern's HTTP server is a thin LLM proxy.** It exists so the browser can dodge CORS for the upstream model API. It does not run the extension pipeline.
-- **Running SillyTavern extensions outside SillyTavern requires a headless browser** driving a real ST tab (Playwright / CDP), intercepting `generate` calls, and marshaling chat state in and out. High-latency, fragile across ST versions, and painful to test alongside `asyncio.TaskGroup`-scoped concurrency.
-- **SillyTavern's architecture assumes one user, one active chat.** Familiar-Connect is multi-guild and concurrent. Forcing every guild through a single ST session serialises the bot; spawning one ST instance per guild is a deployment nightmare.
+- **Running SillyTavern extensions outside SillyTavern requires a headless browser** driving a real ST tab (Playwright / CDP), intercepting `generate` calls, marshaling chat state in and out. High-latency, fragile across ST versions, painful to test alongside `asyncio.TaskGroup`-scoped concurrency.
+- **SillyTavern's architecture assumes one user, one active chat.** Familiar-Connect is multi-guild and concurrent. Forcing every guild through one ST session serialises the bot; one ST instance per guild is a deployment nightmare.
 
 ## Embedding a SillyTavern extension runtime via headless browser
 
-**The idea:** A more aggressive variant of the bridge — actually load each SillyTavern extension we want by spinning up a headless Chromium with ST inside it, intercept the LLM call, and pass results back over CDP.
+**The idea:** A more aggressive variant — spin up a headless Chromium with ST inside it, intercept the LLM call, pass results back over CDP.
 
-**Why it's rejected:** It still falls to all the latency, fragility, multi-guild, and concurrency-fit problems above, *and* it adds Chromium to the runtime. The cost of maintaining the glue layer would dwarf the cost of porting the two or three extensions we actually want.
+**Why rejected:** Hits all the latency, fragility, multi-guild, and concurrency-fit problems above, *and* adds Chromium to the runtime. Maintaining the glue layer would dwarf porting the two or three extensions we actually want.
 
 ## Adopting a large LLM orchestration framework as runtime
 
 (LangChain, LlamaIndex, Haystack, etc.)
 
-**The idea:** Build context management *inside* an existing framework's abstractions — register our providers as its components, let its runtime drive the bot's event loop, use its memory / retriever / agent classes as our primary building blocks.
+**The idea:** Build context management *inside* an existing framework's abstractions — register our providers as its components, let its runtime drive the event loop, use its memory / retriever / agent classes as primary building blocks.
 
-**Why it's rejected as a runtime:**
+**Why rejected as a runtime:**
 
-- **These frameworks assume a synchronous request/response chat app and bury the prompt-assembly step we specifically want to be visible and testable.** Adopting one would mean either fighting its opinions or shoehorning our pipeline inside it.
-- **LangChain's abstractions in particular have been rewritten repeatedly.** Production users commonly end up wrapping their own pipelines on top rather than depending on the framework's own memory/agent layers.
-- **Each of them wants to own the event loop and the request lifecycle.** Familiar-Connect already has opinions about both (single-process, structured concurrency under `asyncio.TaskGroup`, multi-modality). The framework would be working against us at the layer we care about most.
+- **These frameworks assume a synchronous request/response chat app and bury the prompt-assembly step we specifically want visible and testable.** Adopting one would mean either fighting its opinions or shoehorning our pipeline inside it.
+- **LangChain's abstractions in particular have been rewritten repeatedly.** Production users commonly wrap their own pipelines on top rather than depending on the framework's memory/agent layers.
+- **Each wants to own the event loop and request lifecycle.** Familiar-Connect already has opinions about both (single-process, structured concurrency under `asyncio.TaskGroup`, multi-modality). The framework would be fighting us at the layer we care about most.
 
-**What we do allow:** importing a *specific utility* from one of these libraries when it's a net simplification. Rule of thumb: if the import gives you a single function you call once (e.g. a text splitter, a document loader, a tokenizer helper), it's a utility — fine. If it wants to own your event loop, your prompt structure, or your retrieval flow, it's a runtime — not fine.
+**What we do allow:** importing a *specific utility* from one of these libraries when it's a net simplification. Rule of thumb: a single function you call once (text splitter, document loader, tokenizer helper) is a utility — fine. Anything wanting to own the event loop, prompt structure, or retrieval flow is a runtime — not fine.
 
 ## Third-party managed memory services
 
@@ -39,9 +39,9 @@ Ideas seriously considered during planning and deliberately turned down. Recorde
 
 **The idea:** Outsource long-term memory and user-fact tracking to a managed or self-hosted memory service.
 
-**Why it's rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that principle, and the scale Familiar-Connect targets (one bot, N guilds, a single host) does not justify the operational or privacy cost.
+**Why rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that, and the scale Familiar-Connect targets (one bot, N guilds, one host) doesn't justify the operational or privacy cost.
 
-This rejection also applies to **running a memory MCP server we own as a sidecar** for the bot's own internal use. MCP is useful when multiple separate agents need to share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle to manage).
+This also rejects **running a memory MCP server as a sidecar** for the bot's own internal use. MCP is useful when separate agents share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle).
 
 The *open-source library* underneath Zep — Graphiti — is a different proposition. Graphiti is a Python package with pluggable graph backends; embedding it (or porting its bi-temporal edge logic onto our SQLite store) keeps every byte of state local. M5 [shipped](roadmap.md#m5-pluggable-memory-store-backend-shipped) the projector swap point Graphiti would plug into.
 
@@ -49,7 +49,7 @@ The *open-source library* underneath Zep — Graphiti — is a different proposi
 
 **The idea:** Adopt Letta (the maintained MemGPT continuation). Give the LLM tools like `core_memory_replace`, `archival_memory_insert`; let it manage its context as virtual memory.
 
-**Why it's rejected:**
+**Why rejected:**
 
 - **`core_memory_replace` is destructive by design.** The LLM mutates source-of-truth in-place. Familiar-Connect commits to the opposite: append-only, supersession over overwrite, bi-temporal records.
 - **Recursive summarization compounds the destruction.** Older context becomes a lossy sketch of itself with no "true at t1, superseded at t2" handle. Breaks audit / contradiction-inspection.
@@ -61,9 +61,9 @@ The *open-source library* underneath Zep — Graphiti — is a different proposi
 
 **The idea:** Replace cascaded STT → LLM → TTS with a full-duplex S2S model (Moshi, Sesame CSM, Ultravox). ~200 ms theoretical voice-to-voice; native overlap-talk and barge-in.
 
-**Why it's rejected (today):**
+**Why rejected (today):**
 
-- **LLM brain is bundled.** Moshi pins you to Helium 7B; Sesame CSM ships its own LLaMA backbone. We route persona through OpenRouter — that's the most operator-impactful knob in the system.
+- **LLM brain is bundled.** Moshi pins you to Helium 7B; Sesame CSM ships its own LLaMA backbone. We route persona through OpenRouter — the most operator-impactful knob in the system.
 - **Tool-calling and prompt knobs degrade.** S2S models don't yet match frontier text LLMs on tool use or prompt engineering.
 - **Cascaded latency can mostly be closed.** Two-stage turn detection (TEN-VAD + Smart Turn) plus sentence-streaming TTS lands cascaded at ~700–900 ms — comfortably inside "feels natural".
 - **Discord audio is constrained.** A 48 kHz Opus stream we don't fully control suits cascaded; S2S stacks expect to own the transport.
@@ -74,35 +74,17 @@ The *open-source library* underneath Zep — Graphiti — is a different proposi
 
 **The idea:** Replace silence-based endpointing with a fine-tuned 7B LLM (TEN Turn Detection's Qwen 2.5-7B) classifying transcript chunks `finished` / `unfinished` / `wait`.
 
-**Why it's rejected:** wildly overkill for "did the user finish saying 'uh, hold on'". Pipecat's Smart Turn v3 (~360 MB ONNX, ~12 ms, BSD-2) does the same job on filler-word-aware audio for a fraction of the cost. TEN's approach fits enterprise SLAs and rare-language coverage; for a Discord familiar the cheaper classifier wins. Tracked in [roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
+**Why rejected:** Wildly overkill for "did the user finish saying 'uh, hold on'". Pipecat's Smart Turn v3 (~360 MB ONNX, ~12 ms, BSD-2) does the same job on filler-word-aware audio for a fraction of the cost. TEN's approach fits enterprise SLAs and rare-language coverage; for a Discord familiar the cheaper classifier wins. Tracked in [roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
 
-**Note:** this rejects the TEN *Turn Detection* 7B model only.
-Stage-1 VAD does use TEN-framework's separate **TEN-VAD** (small native lib + bundled ONNX, Apache 2.0) — see [Voice pipeline — turn detection](voice-pipeline.md#turn-detection).
+This rejects the TEN *Turn Detection* 7B model only. Stage-1 VAD does use TEN-framework's separate **TEN-VAD** (small native lib + bundled ONNX, Apache 2.0) — see [Voice pipeline — turn detection](voice-pipeline.md#turn-detection).
 
 ## Two-phase tool calling for voice (speak, then tools)
 
-**The idea:** When voice tool calling is enabled, issue two LLM round-trips per
-turn — first without tools to produce the spoken reply, then with tools to
-decide on a tool call. Mechanical ordering of "speak before tool" with no
-reliance on prompt instructions.
+**The idea:** When voice tool calling is enabled, issue two LLM round-trips per turn — first without tools for the spoken reply, then with tools to decide on a tool call. Mechanical "speak before tool" ordering with no reliance on prompt instructions.
 
-**Why it's rejected:**
+**Why rejected:**
 
-- **Doubles the LLM round-trip cost** on every voice turn that doesn't end
-  up calling a tool — i.e. almost all of them. Time-to-first-token already
-  dominates the voice latency budget.
-- **Single streaming call already orders content before tool_calls** for the
-  models we route (OpenAI / Anthropic via OpenRouter). The streaming SSE
-  itself emits content deltas first, then `tool_calls` deltas, then a
-  `finish_reason`. Buffering the tool_call deltas until the stream closes
-  is the same effect with zero added latency.
+- **Doubles the LLM round-trip cost** on every voice turn that doesn't end up calling a tool — i.e. almost all of them. Time-to-first-token already dominates the voice latency budget.
+- **Single streaming call already orders content before tool_calls** for the models we route (OpenAI / Anthropic via OpenRouter). Streaming SSE emits content deltas first, then `tool_calls` deltas, then a `finish_reason`. Buffering the tool_call deltas until the stream closes is the same effect with zero added latency.
 
-**What we ship instead** (see [Tool calling](overview.md#tool-calling)):
-three defenses in depth. (1) Mechanical: the agentic loop is a single
-streaming call per iteration with tool_call deltas buffered to end-of-stream.
-(2) Sharpened, end-placed prompt nudging the model to speak before invoking
-tools — targeting the *empty-content tool_call* failure mode specifically.
-(3) A filler-phrase backstop that the voice responder injects into TTS
-when an iteration closes with a tool call and no spoken content. Layers
-2 and 3 cover the model-compliance variance across slot configurations
-without paying the round-trip tax of layer (A).
+**What we ship instead** (see [Tool calling](overview.md#tool-calling)): three defenses in depth. (1) Mechanical: the agentic loop is a single streaming call per iteration with tool_call deltas buffered to end-of-stream. (2) Sharpened, end-placed prompt nudging the model to speak before invoking tools — targeting the *empty-content tool_call* failure mode specifically. (3) A filler-phrase backstop that the voice responder injects into TTS when an iteration closes with a tool call and no spoken content. Layers 2 and 3 cover model-compliance variance across slot configurations without paying the round-trip tax of layer (A).

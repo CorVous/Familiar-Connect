@@ -1,16 +1,17 @@
 """Parakeet-TDT 0.6B v3 transcriber backend.
 
-NeMo `EncDecRNNTBPEModel` running locally. Buffer-and-finalize semantics:
-``send_audio`` appends 48 kHz Discord PCM (resampled to 16 kHz mono) to a
-per-instance bytearray; ``finalize`` runs inference on the buffered audio
-and emits a single ``TranscriptionResult`` with ``is_final=True``.
+NeMo `EncDecRNNTBPEModel` running locally. Buffer-and-finalize
+semantics: ``send_audio`` appends 48 kHz Discord PCM (resampled to
+16 kHz mono) to per-instance bytearray; ``finalize`` runs inference
+on buffered audio, emits single ``TranscriptionResult`` with
+``is_final=True``.
 
 Pair with ``[providers.turn_detection].strategy = "ten+smart_turn"`` —
-Parakeet has no internal endpointer. Without a local turn detector, the
+Parakeet has no internal endpointer. Without local turn detector,
 buffer never gets flushed and no transcripts surface.
 
-Numpy is required at import time (matches ``smart_turn`` pattern); NeMo
-itself is loaded lazily on first ``start()``.
+Numpy required at import time (matches ``smart_turn`` pattern); NeMo
+itself loaded lazily on first ``start()``.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ class ParakeetTranscriber:
     """Local Parakeet-TDT transcriber."""
 
     # bot-side per-user idle window. read by ``bot._start_voice_intake`` to
-    # spawn the idle watchdog. parity with ``DeepgramTranscriber._IDLE_CLOSE_S``.
+    # spawn idle watchdog. parity with ``DeepgramTranscriber._IDLE_CLOSE_S``.
     _IDLE_CLOSE_S: float = 30.0
 
     def __init__(
@@ -62,7 +63,7 @@ class ParakeetTranscriber:
         self.device = device
         self.sample_rate = sample_rate
         self.channels = channels
-        # NeMo ASRModel handle — opaque ``Any`` so the module imports
+        # NeMo ASRModel handle — opaque ``Any`` so module imports
         # without nemo installed (lazy-loaded in ``start()``).
         self._model: Any = None
         self._resampler = Resampler48to16()
@@ -72,20 +73,20 @@ class ParakeetTranscriber:
         self._finalize_lock = asyncio.Lock()
 
     def clone(self: Self) -> ParakeetTranscriber:
-        """Fresh per-user instance; loaded model handle is shared."""
+        """Fresh per-user instance; loaded model handle shared."""
         c = ParakeetTranscriber(
             model_name=self.model_name,
             device=self.device,
             sample_rate=self.sample_rate,
             channels=self.channels,
         )
-        # share the heavy model — load once per process
+        # share heavy model — load once per process
         c._model = self._model
         c._IDLE_CLOSE_S = self._IDLE_CLOSE_S
         return c
 
     def _load_model(self: Self) -> Any:  # noqa: ANN401 — opaque NeMo handle
-        """Import NeMo and load the ASR model. Blocking — call in a thread."""
+        """Import NeMo, load ASR model. Blocking — call in thread."""
         try:
             import nemo.collections.asr as nemo_asr  # ty: ignore[unresolved-import]  # noqa: PLC0415
         except ImportError as exc:
@@ -106,10 +107,10 @@ class ParakeetTranscriber:
         return model
 
     async def start(self: Self, output: asyncio.Queue[TranscriptionEvent]) -> None:
-        """Stash output queue; lazy-load the model on first call.
+        """Stash output queue; lazy-load model on first call.
 
-        Subsequent ``start`` calls (per-user clones share the model) are
-        cheap — model handle is already populated by ``clone()``.
+        Subsequent ``start`` calls (per-user clones share model) are
+        cheap — model handle already populated by ``clone()``.
         """
         self._output = output
         if self._model is None:
@@ -120,17 +121,17 @@ class ParakeetTranscriber:
             )
 
     async def send_audio(self: Self, data: bytes) -> None:
-        """Resample 48 kHz → 16 kHz int16 PCM and append to the buffer."""
+        """Resample 48 kHz → 16 kHz int16 PCM; append to buffer."""
         pcm16 = self._resampler.feed(data)
         if pcm16:
             self._buffer.extend(pcm16)
 
     async def finalize(self: Self) -> None:
-        """Run inference on buffered audio and emit one final transcript.
+        """Run inference on buffered audio; emit one final transcript.
 
-        No-op when the buffer is empty (idle watchdog, double-finalize
-        from overlapping endpointer + reconnect, etc.). Lock guards
-        against concurrent calls draining the same buffer twice.
+        No-op when buffer empty (idle watchdog, double-finalize from
+        overlapping endpointer + reconnect, etc.). Lock guards against
+        concurrent calls draining same buffer twice.
         """
         async with self._finalize_lock:
             if not self._buffer or self._output is None or self._model is None:
@@ -155,7 +156,7 @@ class ParakeetTranscriber:
             )
 
     def _transcribe(self: Self, audio: Any) -> str:  # noqa: ANN401 — np.ndarray
-        """Run NeMo inference on a single utterance; return stripped text."""
+        """Run NeMo inference on single utterance; return stripped text."""
         if self._model is None:
             return ""
         result = self._model.transcribe([audio])
@@ -181,7 +182,7 @@ class ParakeetTranscriber:
 def create_parakeet_transcriber(
     config: ParakeetSTTConfig | None = None,
 ) -> ParakeetTranscriber:
-    """Build :class:`ParakeetTranscriber` from typed *config*."""
+    """Build from typed *config*."""
     cfg = config or ParakeetSTTConfig()
     t = ParakeetTranscriber(model_name=cfg.model_name, device=cfg.device)
     t._IDLE_CLOSE_S = cfg.idle_close_s  # noqa: SLF001

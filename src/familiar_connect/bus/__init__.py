@@ -1,7 +1,7 @@
-"""Event bus for streaming-first architecture.
+"""Event bus — streaming-first architecture.
 
-Topic-keyed in-process fan-out. Sources publish events; processors
-subscribe to topics. See ``docs/architecture/overview.md``.
+Topic-keyed in-process fan-out. Sources publish; processors subscribe.
+See ``docs/architecture/overview.md``.
 """
 
 from __future__ import annotations

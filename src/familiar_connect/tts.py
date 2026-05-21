@@ -93,7 +93,7 @@ class CartesiaTTSClient:
         self.sample_rate = sample_rate
 
     def build_ws_url(self: Self) -> str:
-        """Cartesia WebSocket URL with auth in query string."""
+        """WebSocket URL with auth in query string."""
         query = urlencode(
             {
                 "api_key": self.api_key,
@@ -103,7 +103,7 @@ class CartesiaTTSClient:
         return f"{self.ws_url}?{query}"
 
     def build_headers(self: Self) -> dict[str, str]:
-        """REST headers (for non-WS call sites / tests)."""
+        """REST headers (non-WS call sites / tests)."""
         return {
             "X-API-Key": self.api_key,
             "Cartesia-Version": CARTESIA_API_VERSION,
@@ -111,7 +111,7 @@ class CartesiaTTSClient:
         }
 
     def build_payload(self: Self, text: str, *, context_id: str) -> dict[str, Any]:
-        """JSON payload for one-shot TTS synthesis."""
+        """JSON payload for one-shot synthesis."""
         return {
             "context_id": context_id,
             "model_id": self.model,
@@ -135,7 +135,7 @@ class CartesiaTTSClient:
         session: aiohttp.ClientSession,
         url: str,
     ) -> aiohttp.ClientWebSocketResponse:
-        """Open WebSocket. Extracted for testability."""
+        """Open WebSocket; extracted for testability."""
         return await session.ws_connect(url)
 
     async def synthesize(self: Self, text: str) -> TTSResult:
@@ -189,7 +189,7 @@ class CartesiaTTSClient:
         audio_parts: list[bytes],
         timestamps: list[WordTimestamp],
     ) -> bool:
-        """Dispatch a single parsed Cartesia event. Returns True when done."""
+        """Dispatch one parsed Cartesia event; ``True`` when done."""
         event_type = event.get("type")
         if event_type == "chunk":
             data = event.get("data")
@@ -211,13 +211,12 @@ class CartesiaTTSClient:
         """Yield raw mono PCM chunks as Cartesia produces them.
 
         Lower-latency variant of :meth:`synthesize`: callers can start
-        playback on the first chunk instead of waiting for the full
-        utterance. ``timestamps`` events are dropped — chunk consumers
-        get audio only. Errors and unexpected closes raise just like
-        :meth:`synthesize`.
+        playback on first chunk instead of waiting for full utterance.
+        ``timestamps`` events dropped — chunk consumers get audio only.
+        Errors and unexpected closes raise just like :meth:`synthesize`.
 
         Yields:
-            bytes: raw mono ``pcm_s16le`` chunks at the configured sample rate.
+            bytes: raw mono ``pcm_s16le`` chunks at configured sample rate.
 
         """
         context_id = uuid.uuid4().hex
@@ -280,8 +279,8 @@ def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:
     """Convert Cartesia's parallel-array word_timestamps into objects.
 
     Cartesia emits ``{"words": [...], "start": [...], "end": [...]}``
-    with times in seconds. We flatten to a list and convert to ms so
-    all interruption math uses a single unit.
+    with times in seconds. Flatten to list, convert to ms so all
+    interruption math uses single unit.
     """
     words = raw.get("words") or []
     starts = raw.get("start") or []
@@ -301,15 +300,16 @@ def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:
 # Greeting cache (shared across all TTS providers)
 # ---------------------------------------------------------------------------
 
-# File-based greeting audio cache: stored in `data/cache/greetings/` keyed by
-# hash of (provider, voice_id, greeting). Shared across all TTS clients.
+# file-based greeting audio cache; stored in `data/cache/greetings/`
+# keyed by hash of (provider, voice_id, greeting). shared across all
+# TTS clients.
 
 _GREETING_CACHE_DIR = Path("data/cache/greetings")
 
 
 def _get_greeting_cache_path(provider: str, voice_id: str, greeting: str) -> Path:
-    """Return filesystem path for cached greeting audio."""
-    # Create a stable hash of the key parts.
+    """Filesystem path for cached greeting audio."""
+    # stable hash of key parts
     key = f"{provider}:{voice_id}:{greeting}"
     hash_hex = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return _GREETING_CACHE_DIR / f"{hash_hex}.bin"
@@ -321,25 +321,24 @@ async def get_cached_greeting_audio(
     greeting: str,
     client: CartesiaTTSClient | AzureTTSClient | GeminiTTSClient,
 ) -> TTSResult:
-    """Return TTS audio for *greeting*.
+    """TTS audio for *greeting*.
 
-    Uses a file-based cache keyed by (provider, voice_id, greeting).
-    On cache miss, synthesizes and stores the audio bytes to disk.
-    Subsequent calls for the same (provider, voice_id, greeting) read
-    from the file.
+    File-based cache keyed by (provider, voice_id, greeting). On miss,
+    synthesize and store bytes to disk; subsequent calls read from
+    file.
     """
-    # Ensure cache directory exists (blocking I/O off the event loop).
+    # ensure cache directory exists (blocking I/O off event loop)
     await asyncio.to_thread(_GREETING_CACHE_DIR.mkdir, parents=True, exist_ok=True)
 
     cache_path = _get_greeting_cache_path(provider, voice_id, greeting)
     if cache_path.is_file():
-        # Cache hit: read audio bytes from file.
+        # cache hit: read audio bytes from file
         audio_bytes = await asyncio.to_thread(cache_path.read_bytes)
         return TTSResult(audio=audio_bytes, timestamps=[])
 
-    # Cache miss: synthesize via TTS client.
+    # cache miss: synthesize via TTS client
     tts_result = await client.synthesize(greeting)
-    # Write audio bytes to cache file.
+    # write audio bytes to cache file
     await asyncio.to_thread(cache_path.write_bytes, tts_result.audio)
     return TTSResult(audio=tts_result.audio, timestamps=[])
 
@@ -352,9 +351,9 @@ async def get_cached_greeting_audio(
 class AzureTTSClient:
     """Azure Cognitive Services TTS client.
 
-    Runs the blocking Speech SDK call in a thread-pool executor so the
-    asyncio event loop stays free. Word-boundary events are collected on
-    the same executor thread — no locking needed.
+    Runs blocking Speech SDK call in thread-pool executor so asyncio
+    event loop stays free. Word-boundary events collected on same
+    executor thread — no locking needed.
     """
 
     def __init__(
@@ -371,7 +370,7 @@ class AzureTTSClient:
         self.sample_rate = sample_rate
 
     def _make_synthesizer(self: Self) -> tuple[Any, Any]:
-        """Return ``(speechsdk_module, SpeechSynthesizer)``; extracted for tests."""
+        """``(speechsdk_module, SpeechSynthesizer)``; extracted for tests."""
         import azure.cognitiveservices.speech as speechsdk  # noqa: PLC0415
 
         speech_config = speechsdk.SpeechConfig(
@@ -389,9 +388,9 @@ class AzureTTSClient:
         return speechsdk, synthesizer
 
     def _synthesize_sync(self: Self, text: str) -> TTSResult:
-        """Blocking synthesis; collect word boundaries, return TTSResult.
+        """Blocking synthesis; collect word boundaries.
 
-        :raises RuntimeError: if Azure synthesis fails or is cancelled.
+        :raises RuntimeError: when Azure synthesis fails or cancelled.
         """
         speechsdk, synthesizer = self._make_synthesizer()
 
@@ -431,7 +430,7 @@ class AzureTTSClient:
         raise RuntimeError(msg)
 
     async def synthesize(self: Self, text: str) -> TTSResult:
-        """Synthesize *text* in a thread executor; return audio + word timestamps."""
+        """Synthesize *text* in thread executor; return audio + word timestamps."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._synthesize_sync, text)
 
@@ -444,8 +443,8 @@ class AzureTTSClient:
 def _upsample_s16le_2x(audio: bytes) -> bytes:
     """Upsample 16-bit signed LE mono PCM by 2x via linear interpolation.
 
-    Each original sample pair (a, b) produces (a, (a+b)//2). The last
-    sample is doubled. Input length must be a multiple of 2 bytes.
+    Each original sample pair (a, b) produces (a, (a+b)//2). Last
+    sample doubled. Input length must be multiple of 2 bytes.
     """
     if not audio:
         return b""
@@ -460,9 +459,9 @@ def _upsample_s16le_2x(audio: bytes) -> bytes:
 
 
 def _estimate_word_timestamps(text: str, total_ms: float) -> list[WordTimestamp]:
-    """Distribute *total_ms* uniformly across whitespace-split words in *text*.
+    """Distribute *total_ms* uniformly across whitespace-split words.
 
-    Returns an empty list when *text* has no words or *total_ms* is zero.
+    Empty list when *text* has no words or *total_ms* is zero.
     """
     words = text.split()
     if not words or total_ms <= 0:
@@ -477,8 +476,8 @@ def _estimate_word_timestamps(text: str, total_ms: float) -> list[WordTimestamp]
 def _compose_gemini_style_prompt(cfg: TTSConfig) -> str | None:
     """Compose Gemini style prompt from structured ``[tts]`` fields.
 
-    Returns ``None`` when all six style fields are unset. Output follows
-    Audio Profile / Scene / Director's Notes structure.
+    ``None`` when all six style fields unset. Output follows Audio
+    Profile / Scene / Director's Notes structure.
     """
     parts: list[str] = []
     if cfg.gemini_audio_profile:
@@ -503,9 +502,9 @@ def _compose_gemini_style_prompt(cfg: TTSConfig) -> str | None:
 class GeminiTTSClient:
     """Google Gemini Flash TTS client.
 
-    Uses the ``google-genai`` SDK (blocking call run in a thread executor).
-    Gemini returns 24 kHz mono PCM; we upsample 2x to 48 kHz to match the
-    Discord pipeline. Word timestamps are estimated uniformly from total
+    Uses ``google-genai`` SDK (blocking call run in thread executor).
+    Gemini returns 24 kHz mono PCM; upsample 2x to 48 kHz to match
+    Discord pipeline. Word timestamps estimated uniformly from total
     audio duration — Gemini does not expose per-word timing.
     """
 
@@ -525,13 +524,13 @@ class GeminiTTSClient:
         self.sample_rate = sample_rate
 
     def _make_client(self: Self) -> _GenaiClient:
-        """Return a ``google.genai.Client``; extracted for testability."""
+        """``google.genai.Client``; extracted for testability."""
         from google import genai  # noqa: PLC0415
 
         return genai.Client(api_key=self.api_key)
 
     def _synthesize_sync(self: Self, text: str) -> TTSResult:
-        """Blocking synthesis call; returns :class:`TTSResult`.
+        """Blocking synthesis call.
 
         :raises RuntimeError: when Gemini returns no audio part.
         """
@@ -568,7 +567,7 @@ class GeminiTTSClient:
         pcm_24k: bytes = pcm_24k_or_none
         audio = _upsample_s16le_2x(pcm_24k)
 
-        # duration of the 48 kHz audio in ms (16-bit = 2 bytes/sample)
+        # duration of 48 kHz audio in ms (16-bit = 2 bytes/sample)
         total_ms = len(audio) / 2 / self.sample_rate * 1000.0
         timestamps = _estimate_word_timestamps(text, total_ms)
 
@@ -582,7 +581,7 @@ class GeminiTTSClient:
         return TTSResult(audio=audio, timestamps=timestamps)
 
     async def synthesize(self: Self, text: str) -> TTSResult:
-        """Synthesize *text* in a thread executor; return audio + timestamps."""
+        """Synthesize *text* in thread executor; return audio + timestamps."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._synthesize_sync, text)
 
@@ -595,14 +594,12 @@ class GeminiTTSClient:
 def create_tts_client(
     tts_config: TTSConfig,
 ) -> CartesiaTTSClient | AzureTTSClient | GeminiTTSClient:
-    """Instantiate the TTS client for the active provider.
+    """Instantiate TTS client for active provider.
 
-    Provider is taken from ``[tts].provider`` in ``character.toml``.
-    Default provider is ``"azure"``.
+    Provider from ``[tts].provider`` in ``character.toml``. Default
+    ``"azure"``.
 
-    Reads credentials from environment variables; raises :class:`ValueError`
-    if required variables are absent, config values are empty, or the
-    provider name is unrecognised.
+    Reads credentials from environment variables.
 
     :raises ValueError: unknown provider, missing env var, or empty field.
     """

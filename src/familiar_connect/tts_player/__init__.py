@@ -4,7 +4,7 @@
 :class:`familiar_connect.processors.voice_responder.VoiceResponder`.
 Production wraps Cartesia/Azure/Gemini + Discord voice playback via
 :class:`DiscordVoicePlayer`. Tests use :class:`MockTTSPlayer`, which
-records audio duration played before cancellation.
+records duration played before cancellation.
 """
 
 from __future__ import annotations

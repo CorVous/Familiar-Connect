@@ -3,14 +3,14 @@
 Supported macros (deliberate subset — unknown macros pass through unchanged):
   {{char}}         — character name
   {{user}}         — user name (default: "User")
-  {{trim}}         — strip leading/trailing whitespace from the whole string
+  {{trim}}         — strip whitespace from whole string
   {{scenario}}     — character scenario
   {{personality}}  — character personality
-  {{description}}  — character description
+  {{description}} — character description
   {{// ... }}      — comment, removed entirely
 
 Unsupported macros ({{getvar::...}}, {{random:...}}, conditionals, etc.)
-are left as-is so callers can see they were not resolved.
+left as-is so callers see unresolved tokens.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 @dataclass
 class MacroContext:
-    """Values to substitute into macro placeholders."""
+    """Values substituted into macro placeholders."""
 
     char: str = ""
     user: str = "User"
@@ -30,25 +30,25 @@ class MacroContext:
     description: str = ""
 
 
-# Matches {{// any comment text }}
+# matches {{// any comment text }}
 _COMMENT_RE = re.compile(r"\{\{//[^}]*\}\}")
 
-# Matches any {{macro}} or {{macro::arg}} token
+# matches any {{macro}} or {{macro::arg}} token
 _MACRO_RE = re.compile(r"\{\{([^}]+)\}\}")
 
 _SIMPLE: dict[str, str] = {}  # populated per-call from context
 
 
 def substitute(text: str, ctx: MacroContext) -> str:
-    """Resolve macros in *text* using the values in *ctx*.
+    """Resolve macros in *text* using *ctx*.
 
-    Processing order:
-    1. Remove comments (``{{// ... }}``)
-    2. Replace known simple macros
-    3. Handle ``{{trim}}`` — strip the whole string
-    4. Leave unknown macros untouched
+    Order:
+    1. strip comments (``{{// ... }}``)
+    2. replace known simple macros
+    3. handle ``{{trim}}`` — strip whole string
+    4. leave unknown macros untouched
     """
-    # 1. Strip comments
+    # 1. strip comments
     text = _COMMENT_RE.sub("", text)
 
     simple = {
@@ -69,13 +69,13 @@ def substitute(text: str, ctx: MacroContext) -> str:
             return ""
         if key in simple:
             return simple[key]
-        # Unknown macro — pass through
+        # unknown macro — pass through
         return m.group(0)
 
-    # 2 & 3. Replace all macros in one pass
+    # 2 & 3. replace all macros in one pass
     text = _MACRO_RE.sub(_replace, text)
 
-    # 4. Apply trim if requested
+    # 4. apply trim if requested
     if trim_requested:
         text = text.strip()
 

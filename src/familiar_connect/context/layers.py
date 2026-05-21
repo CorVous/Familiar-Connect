@@ -40,17 +40,17 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-# Discord mention syntax: <@USER_ID>, optionally with ! for nick form.
+# discord mention syntax: <@USER_ID>, ! variant for nick form
 _DISCORD_MENTION_RE = re.compile(r"<@!?(\d+)>")
 
-# Soft-cap on a parent reply's full content when inlined into a child's prefix.
+# soft cap on parent reply's full content inlined into child's prefix
 _REPLY_PARENT_FULL_CAP = 400
-# Snippet cap when the parent is already in the recent window.
+# snippet cap when parent is already in recent window
 _REPLY_PARENT_SNIPPET_CAP = 80
 
 
 class Layer(Protocol):
-    """Protocol for a single prompt layer.
+    """Single prompt layer protocol.
 
     ``build`` returns the layer's text contribution to the system
     prompt (empty string opts out). ``invalidation_key`` is a short
@@ -70,10 +70,10 @@ class Layer(Protocol):
 
 
 def _content_hash(path: Path) -> str:
-    """Short content hash, used as an invalidation key for file layers.
+    """Short content hash; invalidation key for file layers.
 
-    Content hash (not mtime) so sub-second edits are caught —
-    filesystem mtime resolution is sometimes coarser than test timing.
+    Content hash (not mtime) so sub-second edits are caught — fs
+    mtime resolution is sometimes coarser than test timing.
     """
     if not path.exists():
         return "missing"
@@ -117,9 +117,9 @@ class CharacterCardLayer:
 class OperatingModeLayer:
     """Per-viewer-mode directive block.
 
-    Voice channels want terse replies; text channels allow markdown.
-    The ``modes`` mapping is keyed by :attr:`AssemblyContext.viewer_mode`.
-    Unknown modes yield ``""`` (layer opts out).
+    Voice channels want terse replies; text allows markdown.
+    ``modes`` keyed by :attr:`AssemblyContext.viewer_mode`. Unknown
+    modes yield ``""`` (layer opts out).
     """
 
     name: str = "operating_mode"
@@ -142,9 +142,9 @@ class OperatingModeLayer:
 class RecentHistoryLayer:
     """Verbatim tail of ``turns`` for the active channel.
 
-    Unlike the other layers, this contributes to the ``recent_history``
-    message list rather than the system prompt. :meth:`build` returns
-    ``""`` so the assembler's system-prompt composition skips it.
+    Unlike other layers, contributes to ``recent_history`` message
+    list rather than system prompt. :meth:`build` returns ``""`` so
+    assembler's system-prompt composition skips it.
     """
 
     name: str = "recent_history"
@@ -182,30 +182,29 @@ class RecentHistoryLayer:
         """Last ``window_size`` turns as LLM messages.
 
         User turns get a ``name`` (platform:user_id) + ``[HH:MM
-        display_name]`` content prefix — needed for multi-user channels
-        to distinguish speakers and gauge rhythm.
+        display_name]`` content prefix — multi-user channels need
+        speaker disambiguation and rhythm cues.
 
-        Reply marker. Turns whose ``reply_to_message_id`` resolves to a
-        known parent get a ``↩`` prefix carrying parent's author + text.
-        Depth adapts: in-window parents contribute a short snippet (full
-        text rendering imminent); out-of-window parents contribute full
-        content (capped) so the reply stays intelligible.
+        Reply marker. Turns whose ``reply_to_message_id`` resolves to
+        a known parent get a ``↩`` prefix carrying parent's author +
+        text. Depth-adaptive: in-window parents contribute a short
+        snippet (full text rendering imminent); out-of-window parents
+        contribute full content (capped) so reply stays intelligible.
 
         Mention rewriting. Discord ``<@USER_ID>`` / ``<@!USER_ID>``
         become ``[@DisplayName]`` via :meth:`HistoryStore.resolve_label`
-        — symmetric with the LLM's expected output form.
+        — symmetric with LLM's expected output form.
 
-        Reactions. Each turn's ``platform_message_id`` is looked up in
-        ``message_reactions`` (single batch query for the whole window)
-        and rendered as a trailing ``[reactions: 👍 x3 ❤️ x1]`` suffix.
+        Reactions. Each turn's ``platform_message_id`` looked up in
+        ``message_reactions`` (single batch query for whole window),
+        rendered as trailing ``[reactions: 👍 x3 ❤️ x1]`` suffix.
 
-        Voice-fragment coalescing. Deepgram emits one ``user`` turn per
-        segment-final, so a long monologue arrives as several
-        consecutive same-speaker rows. Merge them into one rendered
-        message — earliest timestamp, content joined by single space —
+        Voice-fragment coalescing. Deepgram emits one ``user`` turn
+        per segment-final, so a long monologue arrives as several
+        consecutive same-speaker rows. Merged into one rendered
+        message (earliest timestamp, content joined by single space)
         when neither side carries a platform message id or reply
-        marker, and the gap between them is within
-        ``coalesce_max_gap_seconds``.
+        marker and gap between them ≤ ``coalesce_max_gap_seconds``.
         """
         turns = await self._store.recent(
             familiar_id=ctx.familiar_id,
@@ -246,16 +245,16 @@ class RecentHistoryLayer:
 
 
 def _silence_fold_index(turns: list[HistoryTurn], *, min_gap_seconds: float) -> int:
-    """Return index of first turn to keep after the last qualifying gap.
+    """Index of first turn to keep after the last qualifying gap.
 
-    Scans *turns* (oldest-first) and returns the index of the turn
-    immediately following the last gap >= *min_gap_seconds*. Returns 0
-    when no qualifying gap exists (keep all) or when disabled (≤ 0).
+    Scans *turns* oldest-first; returns index of turn immediately
+    following the last gap >= *min_gap_seconds*. 0 when no qualifying
+    gap exists (keep all) or when disabled (≤ 0).
 
-    Using the *last* qualifying gap means the fold point advances as
-    the channel fills with new bursts, which keeps the retained window
-    stable: once a gap is no longer the last one, earlier turns were
-    already summarised by the rolling summary worker.
+    Using the *last* qualifying gap means fold point advances as
+    channel fills with new bursts, keeping the retained window
+    stable: once a gap is no longer last, earlier turns were already
+    summarised by rolling summary worker.
     """
     if min_gap_seconds <= 0 or len(turns) < 2:
         return 0
@@ -274,12 +273,13 @@ def _coalesce_voice_fragments(
 
     Merges turns where:
     - same ``role`` and same ``author.canonical_key``
-    - both sides lack ``platform_message_id`` and ``reply_to_message_id``
-      (Discord text turns and explicit replies are out of scope)
+    - both sides lack ``platform_message_id`` and
+      ``reply_to_message_id`` (Discord text turns + explicit replies
+      out of scope)
     - timestamp gap ≤ ``max_gap_seconds``
 
-    Merged turn keeps the earliest timestamp and joins content with a
-    single space. ``max_gap_seconds <= 0`` disables coalescing.
+    Merged turn keeps earliest timestamp; joins content with single
+    space. ``max_gap_seconds <= 0`` disables coalescing.
     """
     if max_gap_seconds <= 0 or not turns:
         return turns
@@ -333,15 +333,16 @@ def _render_fact_line(
     """Render fact text with optional rename annotations.
 
     Original text preserved verbatim — that's what was observed. For
-    each subject whose current display name differs from the baked-in
-    one, append a soft hint: ``(Cass is now known as peeks)``.
-    Unchanged names / unresolvable canonical keys add nothing.
+    each subject whose current display name differs from the
+    baked-in one, append a soft hint: ``(Cass is now known as
+    peeks)``. Unchanged names / unresolvable canonical keys add
+    nothing.
 
     Subject → canonical_key is the extractor's best guess, not
-    authoritative — mic-sharing and relays break 1:1 mapping. Render is
-    intentionally additive (not substituted) to preserve the original.
+    authoritative — mic-sharing and relays break 1:1 mapping. Render
+    is additive (not substituted) to preserve the original.
     Resolution via :meth:`HistoryStore.resolve_label` so active-guild
-    nicknames beat the snapshot name.
+    nicknames beat snapshot name.
     """
     if not fact.subjects:
         return fact.text
@@ -356,7 +357,7 @@ def _render_fact_line(
             guild_id=guild_id,
             familiar_id=familiar_id,
         )
-        # No row + snapshot ⇒ resolve_label returned the raw user_id;
+        # no row + snapshot ⇒ resolve_label returned raw user_id;
         # nothing meaningful to annotate against.
         if current_display == subject.canonical_key.partition(":")[2]:
             continue
@@ -377,7 +378,7 @@ def _display_for(author: Author | None, role: str) -> str:
 def _resolve_turn_label(
     store: HistoryStore, ctx: AssemblyContext, turn: HistoryTurn
 ) -> str:
-    """Resolve a turn's speaker label using the per-guild preference order."""
+    """Speaker label using per-guild preference order."""
     if turn.author is None:
         return turn.role
     return store.resolve_label(
@@ -396,9 +397,9 @@ def _rewrite_mentions(
 ) -> str:
     """Rewrite ``<@USER_ID>`` and ``<@!USER_ID>`` to ``[@DisplayName]``.
 
-    Resolution goes through :meth:`HistoryStore.resolve_label` so the
-    same per-guild preference order applies as for speaker names.
-    Unknown ids fall back to the bare ``user_id`` — never raises.
+    Resolution via :meth:`HistoryStore.resolve_label` — same
+    per-guild preference order as speaker names. Unknown ids fall
+    back to bare ``user_id``; never raises.
     """
 
     def _sub(match: re.Match[str]) -> str:
@@ -414,19 +415,19 @@ def _rewrite_mentions(
 
 
 def _truncate(text: str, *, limit: int) -> str:
-    """Hard cap on a string with an ellipsis suffix when truncated."""
+    """Hard cap on string; ellipsis suffix when truncated."""
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)] + "…"
 
 
-# Bio cap for the prompt header — long bios bloat the context budget;
-# the dossier carries the substance so 240 chars of free text is plenty.
+# bio cap for prompt header — long bios bloat context budget;
+# dossier carries the substance, so 240 chars of free text suffices
 _BIO_CHAR_CAP = 240
 
 
 def _format_profile_header(display: str, profile: AccountProfile | None) -> str:
-    """Render the per-person header block.
+    """Per-person header block.
 
     Layout:
 
@@ -436,12 +437,11 @@ def _format_profile_header(display: str, profile: AccountProfile | None) -> str:
     Bio: <bio>
     ```
 
-    Each metadata line is omitted when its source is missing or empty.
-    The username row collapses to ``@<username>`` alone, or
-    ``<pronouns>`` alone, when only one of the two is set. ``display``
-    is :meth:`HistoryStore.resolve_label`'s output — guild nick wins
-    over global name, so this stays consistent with the rest of the
-    read path.
+    Each metadata line omitted when source missing or empty. Username
+    row collapses to ``@<username>`` alone, or ``<pronouns>`` alone,
+    when only one is set. ``display`` is
+    :meth:`HistoryStore.resolve_label`'s output — guild nick wins
+    over global name, consistent with rest of read path.
     """
     lines: list[str] = [f"### {display}"]
     if profile is not None:
@@ -461,10 +461,10 @@ def _format_profile_header(display: str, profile: AccountProfile | None) -> str:
 
 
 def _truncate_to_tokens(text: str, *, max_tokens: int) -> str:
-    """Truncate ``text`` so its estimated token count fits ``max_tokens``.
+    """Truncate so estimated token count fits ``max_tokens``.
 
-    Uses the same char/4 heuristic as the budgeter — works on the
-    char length proxy so this stays cheap.
+    Same char/4 heuristic as budgeter — works on char-length proxy;
+    cheap.
     """
     if max_tokens <= 0:
         return ""
@@ -482,9 +482,9 @@ def _trim_rag_lines_to_tokens(
 ) -> tuple[list[str], list[str]]:
     """Cap RAG fact + turn lines together; facts win ties.
 
-    Adds lines in order (facts first, then turns) until the next would
-    cross the cap. Headers aren't counted — they're a flat ~10 tokens
-    of overhead the budgeter can absorb.
+    Adds lines in order (facts first, then turns) until next would
+    cross cap. Headers aren't counted — flat ~10 tokens of overhead
+    budgeter absorbs.
     """
     used = 0
     kept_facts: list[str] = []
@@ -507,8 +507,8 @@ def _trim_rag_lines_to_tokens(
 def _cosine(a: list[float], b: list[float]) -> float:
     """Cosine similarity over equal-length float vectors.
 
-    Returns 0.0 on length mismatch or zero norm — caller treats that
-    as the neutral midpoint after normalisation.
+    Returns 0.0 on length mismatch or zero norm — caller treats as
+    neutral midpoint after normalisation.
     """
     if not a or not b or len(a) != len(b):
         return 0.0
@@ -534,24 +534,24 @@ def _rerank_fact_candidates(
     embedding_weight: float = 0.0,
     embedding_similarities: dict[int, float] | None = None,
 ) -> list[Fact]:
-    """Fuse BM25 / recency / importance / embedding into a single rank.
+    """Fuse BM25 / recency / importance / embedding into one rank.
 
     All four signals map to ``[0, 1]`` quality before weighting:
 
-    * **BM25** — FTS5 returns negative numbers (lower = better). The
-      best score in the batch maps to 1.0, the worst to 0.0; ties map
-      to 0.5. Single-result batches always get 1.0.
-    * **Recency** — fact id rank within the batch. Newest = 1.0.
-    * **Importance** — ``importance / 10``. ``None`` → neutral 0.5 so
-      legacy / unscored rows aren't penalised relative to a 5/10.
-    * **Embedding** — cosine similarity to the cue, mapped from
-      ``[-1, 1]`` to ``[0, 1]`` via ``(cos + 1) / 2``. Facts missing
-      a vector get the neutral midpoint (0.5) so an unembedded
-      candidate isn't penalised relative to an average match — same
-      legacy-friendly shape as importance.
+    * **BM25** — FTS5 returns negative numbers (lower = better).
+      Best score in batch maps to 1.0, worst to 0.0; ties map to
+      0.5. Single-result batches always get 1.0.
+    * **Recency** — fact id rank within batch. Newest = 1.0.
+    * **Importance** — ``importance / 10``. ``None`` → neutral 0.5
+      so legacy / unscored rows aren't penalised relative to 5/10.
+    * **Embedding** — cosine sim to cue, mapped from ``[-1, 1]`` to
+      ``[0, 1]`` via ``(cos + 1) / 2``. Facts missing a vector get
+      neutral midpoint (0.5) so unembedded candidates aren't
+      penalised relative to average match — same legacy-friendly
+      shape as importance.
 
-    Sort is stable on equal scores; ties fall back to BM25 order
-    (the candidate list itself is BM25-ordered when handed in).
+    Sort stable on equal scores; ties fall back to BM25 order
+    (candidate list itself is BM25-ordered on input).
     """
     if not scored:
         return []
@@ -572,7 +572,7 @@ def _rerank_fact_candidates(
 
     ranked: list[tuple[float, int, Fact]] = []
     for idx, (fact, bm25) in enumerate(scored):
-        # tantivy bm25 is positive; max = best. Normalise so best = 1, worst = 0.
+        # tantivy bm25 positive; max = best. normalise so best=1, worst=0
         bm25_q = (bm25 - bm25_min) / bm25_span if bm25_span > 0 else 1.0
         recency_q = recency_rank[fact.id]
         importance_q = (fact.importance / 10.0) if fact.importance is not None else 0.5
@@ -584,20 +584,20 @@ def _rerank_fact_candidates(
             + importance_weight * importance_q
             + embedding_weight * embedding_q
         )
-        # idx is the candidate position from the SQL BM25 sort; used as
-        # a stable tiebreak so equal-scored facts keep deterministic order.
+        # idx = candidate position from SQL BM25 sort; stable tiebreak
+        # so equal-scored facts keep deterministic order
         ranked.append((score, -idx, fact))
     ranked.sort(key=operator.itemgetter(0, 1), reverse=True)
     return [f for _, _, f in ranked[:limit]]
 
 
 def _format_clock_12h(ts: datetime) -> str:
-    """Render UTC time as ``2:29PM`` (no leading zero on hour)."""
+    """UTC time as ``2:29PM`` (no leading zero on hour)."""
     return ts.astimezone(UTC).strftime("%I:%M%p").lstrip("0")
 
 
 def _format_date_iso(ts: datetime) -> str:
-    """Render UTC date as ``YYYY-MM-DD``."""
+    """UTC date as ``YYYY-MM-DD``."""
     return ts.astimezone(UTC).strftime("%Y-%m-%d")
 
 
@@ -606,8 +606,8 @@ def _trim_messages_to_token_cap(
 ) -> list[Message]:
     """Drop oldest messages until total estimated tokens fit.
 
-    Always keeps the newest message even if it alone exceeds the cap —
-    the most recent turn is the model's primary cue.
+    Always keeps the newest message even if it alone exceeds cap —
+    most recent turn is the model's primary cue.
     """
     if not messages:
         return messages
@@ -630,11 +630,11 @@ def _reply_prefix(
     familiar_id: str,
     guild_id: int | None,
 ) -> str:
-    """Build the ``[↩ Bob (HH:MM): …]`` prefix for a child reply turn.
+    """``[↩ Bob (HH:MM): …]`` prefix for a child reply turn.
 
-    The parent's author label is resolved with the same
-    ``resolve_label`` callsite as the speaker name, so a per-guild
-    nick wins over the snapshot stored on the parent's ``Author``.
+    Parent's author label resolved via the same ``resolve_label``
+    callsite as the speaker name, so per-guild nick wins over
+    snapshot stored on parent's ``Author``.
     """
     if parent.author is not None:
         parent_label = store.resolve_label(
@@ -656,7 +656,7 @@ def _reply_prefix(
 
 
 def _format_reactions(reactions: tuple[tuple[str, int], ...]) -> str:
-    """Render ``[reactions: 👍 x3 ❤️ x1]``; empty input → empty string."""
+    """``[reactions: 👍 x3 ❤️ x1]``; empty input → empty string."""
     if not reactions:
         return ""
     parts = " ".join(f"{e} x{c}" for e, c in reactions)
@@ -672,17 +672,17 @@ def _turn_to_message_with_context(
     in_window_msg_ids: set[str],
     reactions: tuple[tuple[str, int], ...] = (),
 ) -> Message:
-    """Render a :class:`HistoryTurn` into an LLM :class:`Message`.
+    """Render :class:`HistoryTurn` into LLM :class:`Message`.
 
-    Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted —
-    the recent-history window is short. Reply markers and mention
-    rewriting are applied here so all enrichment lives in one place.
-    The ``platform_message_id`` for *user* turns (when present) is
-    surfaced as ``#<id>`` next to the speaker so the model can target
-    a specific message via ``[↩ <id>]``. Assistant turns deliberately
-    skip the id tag — otherwise the model sees its own past messages
-    prefixed with ``[#…]`` and starts emitting that prefix in fresh
-    replies (mimicry).
+    Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted
+    — recent-history window is short. Reply markers and mention
+    rewriting applied here so all enrichment lives in one place.
+    ``platform_message_id`` for *user* turns (when present) surfaces
+    as ``#<id>`` next to speaker so model can target a specific
+    message via ``[↩ <id>]``. Assistant turns deliberately skip the
+    id tag — otherwise model sees its own past messages prefixed
+    with ``[#…]`` and starts emitting that prefix in fresh replies
+    (mimicry).
 
     ``reactions`` (emoji, count) pairs append a ``[reactions: …]``
     suffix on either role.
@@ -705,7 +705,7 @@ def _turn_to_message_with_context(
     name = sanitize_name(author.canonical_key)
     ts = turn.timestamp.astimezone(UTC).strftime("%H:%M")
 
-    # Reply marker, depth-adaptive.
+    # reply marker, depth-adaptive
     reply_prefix = ""
     if turn.reply_to_message_id:
         parent = store.lookup_turn_by_platform_message_id(
@@ -741,7 +741,7 @@ def _turn_to_message(
     author: Author | None,
     timestamp: datetime | None = None,
 ) -> Message:
-    """Legacy renderer kept for non-history-store callers (e.g. voice intake).
+    """Legacy renderer for non-history-store callers (e.g. voice intake).
 
     Lacks reply-marker / mention-rewriting context — those need a
     store handle and a window. New code should prefer
@@ -768,8 +768,8 @@ class ConversationSummaryLayer:
     """Read-only layer over :class:`HistoryStore` summaries.
 
     Produced by :class:`SummaryWorker`. Invalidation key keys on
-    ``last_summarised_id`` so the assembler cache rebuilds only when
-    the summary actually changes.
+    ``last_summarised_id`` so assembler cache rebuilds only when
+    summary actually changes.
     """
 
     name: str = "conversation_summary"
@@ -807,13 +807,12 @@ class ConversationSummaryLayer:
 
 
 class CrossChannelContextLayer:
-    """Other-channel summary block rendered into the viewer's prompt.
+    """Other-channel summary block rendered into viewer's prompt.
 
     ``viewer_map`` maps viewer channel id → list of source channel
     ids whose cross-context summary should appear. Summaries older
-    than ``ttl_seconds`` are suppressed (the layer opts out) — they
-    are still present in SQLite; the next :class:`SummaryWorker` tick
-    will replace them.
+    than ``ttl_seconds`` suppressed (layer opts out); still present
+    in SQLite — next :class:`SummaryWorker` tick replaces them.
     """
 
     name: str = "cross_channel_context"
@@ -842,9 +841,9 @@ class CrossChannelContextLayer:
 
         now = datetime.now(tz=UTC)
         sections: list[str] = []
-        # Token budget for the whole block; sections are added until
-        # the next would push us over. Newest source first so the most
-        # recently active channel always lands.
+        # token budget for whole block; sections added until next
+        # would push us over. newest source first so most recently
+        # active channel always lands.
         remaining = self._max_tokens
         for source_id in sources:
             entry = await self._store.get_cross_context(
@@ -890,18 +889,19 @@ class CrossChannelContextLayer:
 class PeopleDossierLayer:
     """Per-person dossier block for people active in this channel.
 
-    Reads ``people_dossiers`` (maintained by :class:`PeopleDossierWorker`)
-    for canonical keys that show up as authors *or* mentions in the
-    last ``window_size`` turns of the active channel. Candidates are
-    de-duped most-recent-first and capped at ``max_people`` — same
-    hard-count budgeting style as :class:`RecentHistoryLayer`'s
-    ``window_size``. Subjects without a stored dossier are skipped
-    silently; the worker fills them in within one tick.
+    Reads ``people_dossiers`` (maintained by
+    :class:`PeopleDossierWorker`) for canonical keys that show up as
+    authors *or* mentions in last ``window_size`` turns of the
+    active channel. Candidates de-duped most-recent-first, capped at
+    ``max_people`` — same hard-count budgeting style as
+    :class:`RecentHistoryLayer`'s ``window_size``. Subjects without
+    a stored dossier skipped silently; worker fills them in within
+    one tick.
 
-    Invalidation: ``(latest_turn_id, max_people, [key:f<wm>, …])`` —
-    any new channel turn flips ``latest_turn_id`` (changing the
-    candidate set), and each kept candidate's ``last_fact_id`` flips
-    when the worker refreshes its dossier.
+    Invalidation: ``(latest_turn_id, max_people, [key:f<wm>, …])``
+    — any new channel turn flips ``latest_turn_id`` (changing
+    candidate set); each kept candidate's ``last_fact_id`` flips
+    when worker refreshes its dossier.
     """
 
     name: str = "people_dossier"
@@ -923,9 +923,9 @@ class PeopleDossierLayer:
     def _candidate_keys(self, ctx: AssemblyContext) -> list[str]:
         """Ordered, deduped canonical keys for the active channel.
 
-        Newest turn first. Per turn, the author's key comes before
-        the turn's mentions — a person speaking *now* outranks a
-        person being talked about. Capped at ``max_people``.
+        Newest turn first. Per turn, author's key comes before
+        turn's mentions — a person speaking *now* outranks one being
+        talked about. Capped at ``max_people``.
         """
         if ctx.channel_id is None:
             return []
@@ -1005,41 +1005,38 @@ class PeopleDossierLayer:
 class RagContextLayer:
     """FTS-backed retrieval of relevant historical turns *and* facts.
 
-    :meth:`set_current_cue` is called by the responder with the query
-    derived from the inbound user turn. When unset (or empty), the
-    layer opts out.
+    :meth:`set_current_cue` called by responder with query derived
+    from inbound user turn. When unset / empty, layer opts out.
 
     Invalidation: ``(cue, latest_fts_id, latest_fact_id)``. Both
-    watermarks move when new turns or facts are written, so the
-    cache flips automatically. Phase 4 adds facts alongside turns;
-    Phase 3 only surfaced turns.
+    watermarks move when new turns or facts are written; cache flips
+    automatically. Phase 4 adds facts alongside turns; Phase 3 only
+    surfaced turns.
 
-    :param recent_window_size: when >0, exclude turns from the
-        current channel whose id falls within the last
-        ``recent_window_size`` rows — those are already shown by
-        :class:`RecentHistoryLayer` verbatim. Default 0 preserves
-        the unfiltered behaviour for tests / callers that don't opt
-        in.
+    :param recent_window_size: when >0, exclude turns from current
+        channel whose id falls within last ``recent_window_size``
+        rows — already shown by :class:`RecentHistoryLayer`
+        verbatim. Default 0 preserves unfiltered behaviour for tests
+        / callers that don't opt in.
 
     :param context_window: per FTS hit, expand to ``hit.id ±
         context_window`` so each retrieved turn keeps a small
         surrounding context. ``0`` = hit alone (legacy behaviour).
 
-    :param bm25_weight: ranking weight on the BM25 quality of a fact
-        match. Default 1.0 reproduces pre-M2 ordering.
-    :param recency_weight: ranking weight on fact id rank (newer =
-        higher score). 0 disables.
-    :param importance_weight: ranking weight on the extractor's 1-10
+    :param bm25_weight: rank weight on BM25 quality of a fact match.
+        Default 1.0 reproduces pre-M2 ordering.
+    :param recency_weight: rank weight on fact id rank (newer =
+        higher). 0 disables.
+    :param importance_weight: rank weight on extractor's 1-10
         importance hint. 0 disables (default — opt in via TOML).
-        ``None`` importance is treated as the neutral midpoint (5/10).
-    :param embedding_weight: ranking weight on cosine similarity to
-        the cue embedding (M6). 0 disables. When >0, requires
-        *embedder* — without one, the layer logs once and falls back
-        to BM25-only.
+        ``None`` importance treated as neutral midpoint (5/10).
+    :param embedding_weight: rank weight on cosine sim to cue
+        embedding (M6). 0 disables. When >0, requires *embedder* —
+        without one, layer logs once and falls back to BM25-only.
     :param embedder: text → vector backend used at rerank time.
-        ``None`` matches the M5 default
-        ``[providers.embedding].backend = "off"`` and is the safe
-        no-op even with ``embedding_weight > 0``.
+        ``None`` matches M5 default
+        ``[providers.embedding].backend = "off"``; safe no-op even
+        with ``embedding_weight > 0``.
     :param fact_overfetch: when any non-default rank weight is set,
         over-fetch this many BM25 candidates before reranking. Hard
         cap on extra DB work — never exceeds 4x ``max_facts``.
@@ -1081,7 +1078,7 @@ class RagContextLayer:
 
     @property
     def _rerank_facts(self) -> bool:
-        """True when any non-BM25 weight is set; opts the rerank path on."""
+        """True when any non-BM25 weight is set; opts rerank path on."""
         return (
             self._recency_weight > 0.0
             or self._importance_weight > 0.0
@@ -1099,10 +1096,10 @@ class RagContextLayer:
     ) -> dict[int, float]:
         """Cosine sim of cue vs each candidate fact's stored vector.
 
-        Returns ``{}`` when the embedding signal is disabled, the
-        embedder is missing, or no candidate has a stored vector.
-        Only computes the cue embedding when at least one candidate
-        has a vector — saves the embed call on a cold side-index.
+        Returns ``{}`` when embedding signal disabled, embedder
+        missing, or no candidate has a stored vector. Only computes
+        cue embedding when at least one candidate has a vector —
+        saves the embed call on a cold side-index.
         """
         if self._embedder is None or self._embedding_weight <= 0.0 or not scored:
             return {}
@@ -1134,8 +1131,8 @@ class RagContextLayer:
                 self._embedding_weight,
             )
             self._embedder_warned = True
-        # Window cutoff for the current channel: anything newer than
-        # this id is already in RecentHistoryLayer's output.
+        # window cutoff for current channel: anything newer than this
+        # id is already in RecentHistoryLayer's output
         max_id: int | None = None
         if self._recent_window_size > 0 and ctx.channel_id is not None:
             latest = await self._store.latest_id(
@@ -1178,9 +1175,9 @@ class RagContextLayer:
         if not turn_results and not fact_results:
             return ""
 
-        # Build candidate item lines first so we can apply a token cap
-        # uniformly across facts + turns. Facts come first — usually
-        # higher signal per token than retrieved turns.
+        # build candidate item lines first so token cap applies
+        # uniformly across facts + turns. facts come first — usually
+        # higher signal per token than retrieved turns
         fact_lines = [
             f"- {_render_fact_line(self._sync, ctx.familiar_id, f, guild_id=ctx.guild_id)}"  # noqa: E501
             for f in fact_results
@@ -1213,13 +1210,13 @@ class RagContextLayer:
         """Group hits + neighbour context by date, render blockquote lines.
 
         For each FTS hit, expand to ``id ± context_window`` and
-        de-duplicate, then bucket by UTC date. Each bucket emits a
-        ``YYYY-MM-DD:`` header followed by ``> [H:MMpm Author]: text``
-        lines so the model sees a hit with its surrounding chatter.
+        de-dupe, then bucket by UTC date. Each bucket emits a
+        ``YYYY-MM-DD:`` header followed by ``> [H:MMpm Author]:
+        text`` lines so model sees a hit with surrounding chatter.
 
-        ``max_id`` mirrors the FTS exclusion: neighbour turns from the
-        active channel that fall inside the recent-history window are
-        dropped — :class:`RecentHistoryLayer` already shows them.
+        ``max_id`` mirrors FTS exclusion: neighbour turns from active
+        channel that fall inside recent-history window are dropped —
+        :class:`RecentHistoryLayer` already shows them.
         """
         if not hits:
             return []
@@ -1262,7 +1259,7 @@ class RagContextLayer:
                 content_lines = rewritten.split("\n")
                 lines.append(f"> [{clock} {label}]: {content_lines[0]}")
                 # keep blockquote intact across newlines; bare `>` for
-                # blank lines so spacing inside the quote is preserved.
+                # blank lines so spacing inside the quote is preserved
                 lines.extend(f"> {cont}" if cont else ">" for cont in content_lines[1:])
             lines.append("")  # blank line between date groups
         if lines and not lines[-1]:
@@ -1279,18 +1276,19 @@ class RagContextLayer:
 class ReflectionLayer:
     """Recent reflections block — higher-order syntheses with citations (M3).
 
-    Reads ``reflections`` (maintained by :class:`ReflectionWorker`) and
-    renders the most recent ``max_reflections`` rows scoped to the
-    active channel (channel-agnostic rows always surface). Citations
-    render as breadcrumbs ``[T#42, F#7]`` so the reader (the LLM) can
-    map a synthesis back to its provenance. Reflections that cite at
-    least one superseded fact are flagged ``(stale)`` — never deleted,
-    per the supersession-over-overwrite rule.
+    Reads ``reflections`` (maintained by
+    :class:`ReflectionWorker`), renders the most recent
+    ``max_reflections`` rows scoped to the active channel
+    (channel-agnostic rows always surface). Citations render as
+    breadcrumbs ``[T#42, F#7]`` so the reader (LLM) can map a
+    synthesis back to provenance. Reflections that cite at least one
+    superseded fact flagged ``(stale)`` — never deleted, per
+    supersession-over-overwrite rule.
 
-    Invalidation: ``(latest_reflection_id, channel_id, max_reflections)``.
-    A new reflection write or a fact supersession is detected by
-    :class:`Assembler` cache walks already keyed on ``latest_*_id``;
-    here we just key on the newest reflection's id.
+    Invalidation: ``(latest_reflection_id, channel_id,
+    max_reflections)``. New reflection write or fact supersession
+    detected by :class:`Assembler` cache walks already keyed on
+    ``latest_*_id``; here we just key on newest reflection's id.
     """
 
     name: str = "reflection"
@@ -1317,7 +1315,7 @@ class ReflectionLayer:
         )
         if not rows:
             return ""
-        # Single batched query for stale citations across every row.
+        # single batched query for stale citations across every row
         all_cited_facts: list[int] = []
         for r in rows:
             all_cited_facts.extend(r.cited_fact_ids)
@@ -1367,10 +1365,10 @@ class LorebookEntry:
     """One ``[[entries]]`` row from ``lorebook.toml``.
 
     :param keys: substrings that activate this entry; matched
-        case-insensitively against the recent-history scan window.
-    :param content: text inserted into the system prompt on hit.
+        case-insensitively against recent-history scan window.
+    :param content: text inserted into system prompt on hit.
     :param priority: higher renders first; ties keep file order.
-    :param selective: when ``True``, *all* keys must match (AND); the
+    :param selective: ``True`` → *all* keys must match (AND);
         default ``False`` matches if any key matches (OR).
     """
 
@@ -1385,14 +1383,14 @@ class LorebookLayer:
 
     Source of truth: ``data/familiars/<id>/lorebook.toml``. Each
     ``[[entries]]`` row carries ``keys`` / ``content`` / ``priority``
-    and an optional ``selective`` flag. ``build`` scans the active
+    and an optional ``selective`` flag. ``build`` scans active
     channel's last ``recent_window`` turns, fires entries whose
-    keys hit, and renders the surviving content sorted by descending
-    priority — file order breaks ties. No worker; the file is the
-    sole source of truth.
+    keys hit, renders surviving content sorted by descending
+    priority — file order breaks ties. No worker; file is the sole
+    source of truth.
 
-    Cache key combines the file's content hash with the matched
-    entry indices, so the layer flips when either changes.
+    Cache key combines file's content hash with matched entry
+    indices — layer flips when either changes.
     """
 
     name: str = "lorebook"
@@ -1488,7 +1486,7 @@ class LorebookLayer:
         idxs = self._matched_indices(entries, scan)
         if not idxs:
             return ""
-        # Sort by priority desc; ties keep file order via the index.
+        # sort by priority desc; ties keep file order via index
         idxs.sort(key=lambda i: (-entries[i].priority, i))
         idxs = idxs[: self._max_entries]
 

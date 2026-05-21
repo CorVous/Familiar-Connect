@@ -1,8 +1,8 @@
 """``@span`` decorator — structured timing logs.
 
-Logs one line per wrapped call via a dedicated logger. Format uses
-the project's :mod:`log_style` KV pairs; ``grep span=<name>`` is the
-Phase-1 aggregator.
+One line per wrapped call via dedicated logger. Format uses project's
+:mod:`log_style` KV pairs; ``grep span=<name>`` is the Phase-1
+aggregator.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def span(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Wrap a function; log ``span=<name> ms=<elapsed>`` on return.
 
     Works on both sync and async callables. Emits one INFO line per
-    wrapped call via the ``familiar_connect.diagnostics`` logger.
+    wrapped call via ``familiar_connect.diagnostics`` logger.
     """
 
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -72,6 +72,6 @@ def _emit(name: str, t0: float, status: str) -> None:
         f"{ls.kv('ms', str(elapsed_ms), vc=ls.LC)} "
         f"{ls.kv('status', status, vc=ls.LG if status == 'ok' else ls.R)}"
     )
-    # Span recording must never raise. Suppress broadly.
+    # span recording must never raise; suppress broadly
     with contextlib.suppress(Exception):
         get_span_collector().record(name=name, ms=elapsed_ms, status=status)

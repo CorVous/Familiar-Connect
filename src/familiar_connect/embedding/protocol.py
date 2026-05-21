@@ -3,12 +3,12 @@
 Three method-level guarantees the seam relies on:
 
 * :attr:`Embedder.name` — backend label persisted alongside each
-  vector. Lets the projector detect a model swap and rebuild without
+  vector. Lets projector detect model swap and rebuild without
   destroying audit history.
 * :attr:`Embedder.dim` — vector dimensionality. Must be stable across
-  calls; the storage layer assumes a single ``(fact_id, model)`` row
-  has one fixed-size vector.
-* :meth:`Embedder.embed` — batch interface. Backends are free to
+  calls; storage layer assumes single ``(fact_id, model)`` row has
+  one fixed-size vector.
+* :meth:`Embedder.embed` — batch interface. Backends free to
   vectorise internally; tests exercise both single-shot and batched
   call shapes.
 """
@@ -24,9 +24,9 @@ class Embedder(Protocol):
     Backends:
 
     * :class:`HashEmbedder` — built-in deterministic baseline.
-    * ``fastembed`` — optional, opts in via the ``local-embed`` extra.
+    * ``fastembed`` — optional, opts in via ``local-embed`` extra.
 
-    Implementations must be safe to call from a background asyncio
+    Implementations must be safe to call from background asyncio
     task; CPU-bound work belongs inside ``asyncio.to_thread``.
     """
 
@@ -34,10 +34,10 @@ class Embedder(Protocol):
     dim: int
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Return one float vector per input text. Order matches input.
+        """One float vector per input text. Order matches input.
 
-        Empty input returns an empty list. Backends should preserve
-        list length even for empty / blank strings (project blank text
-        to the zero vector or a stable sentinel; never raise).
+        Empty input → empty list. Backends should preserve list
+        length even for empty / blank strings (project blank text to
+        zero vector or stable sentinel; never raise).
         """
         ...

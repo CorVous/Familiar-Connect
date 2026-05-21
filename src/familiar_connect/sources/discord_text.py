@@ -1,8 +1,8 @@
 """Discord text message → bus event.
 
-Not a pull-loop source; ``py-cord`` owns the event loop. Bot
+Not a pull-loop source; ``py-cord`` owns event loop. Bot
 ``on_message`` hands off to :meth:`DiscordTextSource.publish_text`
-which constructs the envelope and publishes. See plan § Design.2.
+which builds envelope and publishes. See plan § Design.2.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 class DiscordTextSource:
-    """Publishes ``discord.text`` events for messages the bot observes."""
+    """Publishes ``discord.text`` events for messages bot observes."""
 
     name: str = "discord-text"
 
@@ -40,14 +40,13 @@ class DiscordTextSource:
         reply_to_message_id: str | None = None,
         mentions: tuple[Author, ...] = (),
     ) -> Event:
-        """Construct and publish a text event; return the envelope.
+        """Construct + publish text event; return envelope.
 
-        ``message_id`` is the platform-native message id (Discord
-        snowflake as string). ``reply_to_message_id`` is set when
-        ``discord.Message.reference`` carried a parent message.
-        ``mentions`` is the tuple of users the message pinged
-        (already converted to :class:`Author`); empty when the
-        message contained no user mentions.
+        ``message_id`` — platform-native message id (Discord snowflake
+        as string). ``reply_to_message_id`` set when
+        ``discord.Message.reference`` carried parent message.
+        ``mentions`` — users the message pinged (already converted to
+        :class:`Author`); empty when no user mentions.
         """
         self._seq += 1
         event_id = f"discord-text-{uuid4().hex[:12]}"

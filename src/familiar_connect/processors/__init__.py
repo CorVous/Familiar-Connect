@@ -1,4 +1,4 @@
-"""Event processors. Phase 1 ships the debug processor only.
+"""Event processors. Phase 1 ships debug processor only.
 
 See plan § Design.2, plan § Rollout Phase 1.
 """

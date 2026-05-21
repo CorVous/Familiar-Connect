@@ -20,8 +20,8 @@ class ToolContext:
     """Per-call context handed to tool handlers.
 
     Handlers reach the rest of the system through this — no globals.
-    ``scheduler`` is optional so registries that don't ship the alarm
-    tool can omit it.
+    ``scheduler`` optional so registries without the alarm tool can
+    omit it.
     """
 
     familiar_id: str
@@ -68,7 +68,7 @@ class ToolRegistry:
     def as_openai_tools(self) -> list[dict[str, Any]]:
         """Serialize to OpenAI ``tools`` array shape.
 
-        Each entry is ``{"type": "function", "function": {name,
+        Each entry: ``{"type": "function", "function": {name,
         description, parameters}}``. Empty registry returns ``[]``.
         """
         return [
@@ -84,6 +84,6 @@ class ToolRegistry:
         ]
 
 
-# Forward reference plumbing — keeps `field` import live for future
-# default-factory fields without ruff yelling.
+# forward reference plumbing — keeps `field` import live for future
+# default-factory fields without ruff yelling
 _ = field

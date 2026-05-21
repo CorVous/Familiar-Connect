@@ -12,14 +12,14 @@ class TTSPlayer(Protocol):
     """Synthesize text and play it. Cancellable mid-speech."""
 
     async def speak(self, text: str, *, scope: TurnScope) -> None:
-        """Speak ``text`` until complete or ``scope`` is cancelled.
+        """Speak ``text`` until complete or ``scope`` cancelled.
 
-        Implementations should check ``scope.is_cancelled()`` at the
-        finest granularity their API permits (per word-timestamp
-        ideally; per audio-chunk at worst).
+        Implementations check ``scope.is_cancelled()`` at the finest
+        granularity their API permits (per word-timestamp ideally;
+        per audio-chunk at worst).
         """
         ...
 
     async def stop(self) -> None:
-        """Flush any in-flight audio immediately."""
+        """Flush in-flight audio immediately."""
         ...

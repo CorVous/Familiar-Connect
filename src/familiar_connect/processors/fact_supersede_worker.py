@@ -1,14 +1,14 @@
 """Watermark-driven fact supersession worker.
 
-For each newly-appended fact, asks the background LLM whether it
-retires any prior current facts about the same subject — and if so,
+For each newly-appended fact, asks background LLM whether it
+retires any prior current facts about the same subject — if so,
 calls :meth:`HistoryStore.supersede_fact` to mark them.
 
-This is the system-time bookkeeping half of the fact lifecycle.
-``valid_to`` (world-time) is left to the extractor and to the speaker
-who anchors a real-world end. Supersession runs slower than the
-extractor (60 s default) — fact churn is bounded by conversation
-pace, and missing a tick of LLM-assisted retirement is harmless.
+System-time bookkeeping half of the fact lifecycle. ``valid_to``
+(world-time) is left to extractor and to speaker who anchors a
+real-world end. Supersession runs slower than extractor (60 s
+default) — fact churn bounded by conversation pace, missing a tick
+of LLM-assisted retirement is harmless.
 """
 
 from __future__ import annotations
@@ -36,14 +36,14 @@ _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 class FactSupersedeWorker:
     """Retires prior facts replaced by newer ones about the same subject.
 
-    :param batch_size: max new facts evaluated per tick. Each gets one
-        LLM call, batched per subject.
-    :param tick_interval_s: idle interval. 60 s by default — much
-        slower than the 15 s extractor since supersession isn't
-        latency-critical and adds an LLM call per new fact.
-    :param priors_max: cap on the number of prior facts shown to the
-        LLM per subject. Prevents prompt bloat for long-running
-        familiars with many priors per person.
+    :param batch_size: max new facts per tick. Each gets one LLM
+        call, batched per subject.
+    :param tick_interval_s: idle interval. 60 s default — slower
+        than 15 s extractor since supersession isn't latency-critical
+        and adds an LLM call per new fact.
+    :param priors_max: cap on prior facts shown to LLM per subject.
+        Prevents prompt bloat for long-running familiars with many
+        priors per person.
     """
 
     name: str = "fact-supersede-worker"
@@ -67,19 +67,18 @@ class FactSupersedeWorker:
         self._last_seen_fact_id: int = 0
 
     def prime_watermark(self) -> None:
-        """Skip the historical backlog — start from the latest current id.
+        """Skip historical backlog; start from latest current id.
 
-        Called by the projector factory at process start so a fresh
-        deploy doesn't burn LLM calls re-evaluating every old fact in
-        the store on the first tick. Tests may call this directly to
-        assert the no-new-facts path.
+        Called by projector factory at process start so fresh deploy
+        doesn't burn LLM calls re-evaluating every old fact on first
+        tick. Tests may call directly to assert no-new-facts path.
         """
         self._last_seen_fact_id = self._store.sync.latest_fact_id(
             familiar_id=self._familiar_id
         )
 
     async def run(self) -> None:
-        """Forever loop — tick on an interval. Cancel to stop."""
+        """Forever loop; tick on interval. Cancel to stop."""
         self.prime_watermark()
         while True:
             try:
@@ -95,7 +94,7 @@ class FactSupersedeWorker:
 
     @span("fact_supersede.tick")
     async def tick(self) -> int:
-        """Evaluate up to ``batch_size`` new current facts. Return supersedes."""
+        """Evaluate up to ``batch_size`` new current facts; return supersedes."""
         candidates = await self._store.recent_facts(
             familiar_id=self._familiar_id,
             limit=self._batch_size,
@@ -111,9 +110,9 @@ class FactSupersedeWorker:
         for f_new in new:
             retired += await self._evaluate(f_new)
 
-        # advance watermark to the highest id seen this tick (even on bad
-        # llm output) — prevents loops on a fact whose prompt the model
-        # consistently fails to parse.
+        # advance watermark to highest id seen this tick (even on bad
+        # llm output) — prevents loops on a fact whose prompt model
+        # consistently fails to parse
         if candidates:
             self._last_seen_fact_id = max(f.id for f in candidates)
 
@@ -127,7 +126,7 @@ class FactSupersedeWorker:
         return retired
 
     async def _evaluate(self, f_new: Fact) -> int:
-        """Ask LLM which priors `f_new` retires; supersede them. Return count."""
+        """Ask LLM which priors `f_new` retires; supersede them; return count."""
         if not f_new.subjects:
             return 0
         retired = 0
@@ -160,7 +159,7 @@ class FactSupersedeWorker:
                         new_id=f_new.id,
                     )
                 except ValueError:
-                    # already retired by an earlier subject in this fact
+                    # already retired by earlier subject in this fact
                     continue
                 retired += 1
         return retired
@@ -194,8 +193,8 @@ def _build_supersede_prompt(*, f_new: Fact, priors: list[Fact]) -> list[Message]
 def _parse_superseded_ids(reply: str, *, valid: set[int]) -> list[int]:
     """Extract ``superseded_ids`` from LLM reply; filter to *valid*.
 
-    Permissive: bad JSON, missing key, non-list value, and non-int
-    items all degrade to ``[]`` rather than raising.
+    Permissive: bad JSON, missing key, non-list value, non-int items
+    all degrade to ``[]`` rather than raising.
     """
     if not reply or not reply.strip():
         return []

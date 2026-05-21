@@ -1,4 +1,4 @@
-"""LLM client for generating AI responses via OpenRouter."""
+"""LLM client — chat completions via OpenRouter."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ _NAME_ALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def sanitize_name(name: str) -> str | None:
-    """Sanitize for OpenAI ``name`` field; ``None`` if empty after cleanup.
+    """Sanitize for OpenAI ``name`` field; ``None`` when empty after cleanup.
 
     Pattern ``^[a-zA-Z0-9_-]{1,64}$``; unsupported chars → underscore.
     """
@@ -52,9 +52,9 @@ _request_semaphore: asyncio.Semaphore | None = None
 def get_request_semaphore(
     max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
 ) -> asyncio.Semaphore:
-    """Module-level semaphore, lazy-init.
+    """Module-level semaphore; lazy-init.
 
-    Shared across all :class:`LLMClient` instances — bottleneck is the
+    Shared across all :class:`LLMClient` instances — bottleneck is
     OpenRouter API key's rate limit, not any single client.
     """
     global _request_semaphore  # noqa: PLW0603
@@ -73,7 +73,7 @@ class Message:
     # assistant turns invoking tools — list of OpenAI ``tool_calls`` dicts
     # ``{"id", "type":"function", "function":{"name","arguments"}}``.
     tool_calls: list[dict[str, Any]] | None = None
-    # tool-role turns reference the call they answered.
+    # tool-role turns reference the call they answered
     tool_call_id: str | None = None
 
     def to_dict(self: Self) -> dict[str, Any]:
@@ -99,7 +99,7 @@ class LLMDelta:
 
 @dataclass
 class SystemPromptLayers:
-    """Layers composing the system prompt.
+    """Layers composing system prompt.
 
     ``recent_history`` stays as separate messages, not in system prompt.
     """
@@ -112,7 +112,7 @@ class SystemPromptLayers:
 
 
 def build_system_prompt(layers: SystemPromptLayers) -> str:
-    """Assemble system prompt from non-empty layers in priority order."""
+    """Assemble from non-empty layers in priority order."""
     sections: list[str] = []
 
     if layers.core_instructions:
@@ -150,15 +150,15 @@ class LLMClient:
         # call-site label — surfaces in span names + per-call log.
         # ``None`` keeps backward-compat for tests / one-off clients.
         self.slot = slot
-        # OpenRouter routing override. ``None`` = default. See
+        # OpenRouter routing override; ``None`` = default. See
         # LLMSlotConfig for rationale + sunset note.
         self.provider_order = provider_order
         self.provider_allow_fallbacks = provider_allow_fallbacks
-        # OpenRouter reasoning effort. ``None`` = model default;
+        # OpenRouter reasoning effort; ``None`` = model default;
         # ``"off"`` → ``exclude=True``; ``"low"|"medium"|"high"`` → ``effort=…``.
         self.reasoning = reasoning
-        # gate for the agentic-loop / tool-registry plumbing. responders
-        # read this to decide whether to install tools on a call.
+        # gate for agentic-loop / tool-registry plumbing. responders
+        # read to decide whether to install tools on a call.
         self.tool_calling_enabled = tool_calling
         self._http: httpx.AsyncClient | None = None
 
@@ -189,7 +189,7 @@ class LLMClient:
         """
         slot_suffix = f".{self.slot}" if self.slot else ""
         # mock response objects in tests may return non-string ``.text``;
-        # coerce so logging never crashes the request path.
+        # coerce so logging never crashes request path.
         body_str = body if isinstance(body, str) else ""
         _logger.warning(
             f"{ls.tag('LLM', ls.R)} "
@@ -240,7 +240,7 @@ class LLMClient:
             if response.status_code != 429:
                 return response
 
-            # last attempt — don't sleep, just return the 429
+            # last attempt — don't sleep, just return 429
             if attempt == _MAX_RETRIES:
                 break
 
@@ -262,7 +262,7 @@ class LLMClient:
             )
             await asyncio.sleep(delay)
 
-        # all retries exhausted — caller's raise_for_status() will handle it
+        # all retries exhausted — caller's raise_for_status() handles it
         assert response is not None  # noqa: S101 — loop always runs at least once
         return response
 
@@ -270,10 +270,10 @@ class LLMClient:
         self: Self,
         messages: list[Message],
     ) -> Message:
-        """Send messages to OpenRouter; return assistant reply.
+        """Send messages; return assistant reply.
 
-        If the model elects to call tools, the returned :class:`Message`
-        has ``tool_calls`` populated and ``content`` may be empty.
+        When model elects to call tools, returned :class:`Message` has
+        ``tool_calls`` populated; ``content`` may be empty.
         """
         url = f"{self.base_url}/chat/completions"
         headers = self.build_headers()
@@ -291,8 +291,8 @@ class LLMClient:
             raise ValueError(msg)
 
         reply = choices[0]["message"]
-        # ``content`` may be ``None`` when the model only emitted tool_calls.
-        # Normalize to empty string so callers can treat content uniformly.
+        # ``content`` may be ``None`` when model only emitted tool_calls.
+        # normalize to empty string so callers treat content uniformly.
         content = reply.get("content") or ""
         tc = reply.get("tool_calls")
         tc_list: list[dict[str, Any]] | None = None
@@ -308,21 +308,21 @@ class LLMClient:
     ) -> AsyncIterator[LLMDelta]:
         """Stream assistant deltas.
 
-        Barge-in remains supported via generator close / cancel — no
-        retry loop holds the rate-limit slot through sleeps.
+        Barge-in supported via generator close / cancel — no retry loop
+        holds rate-limit slot through sleeps.
 
         Yields:
-            one :class:`LLMDelta` per parsed SSE chunk that carries
-            content text, tool-call fragments, or a finish reason.
+            one :class:`LLMDelta` per parsed SSE chunk carrying content
+            text, tool-call fragments, or finish reason.
 
         """
         url = f"{self.base_url}/chat/completions"
         headers = self.build_headers()
         payload = self.build_payload(messages, tools=tools)
         payload["stream"] = True
-        # ask OpenRouter for a trailing chunk carrying token usage +
-        # the provider that served the call. costs one extra SSE chunk
-        # for per-call cache/route visibility.
+        # ask OpenRouter for trailing chunk carrying token usage +
+        # provider that served call. costs one extra SSE chunk for
+        # per-call cache/route visibility.
         payload["usage"] = {"include": True}
 
         http = self._get_http()
@@ -379,9 +379,9 @@ class LLMClient:
                     finish_reason=finish,
                 )
         except (GeneratorExit, asyncio.CancelledError):
-            # caller closed the generator (barge-in / silent gate /
-            # scope cancel). distinct status so /diagnostics shows
-            # real provider errors clearly.
+            # caller closed generator (barge-in / silent gate / scope
+            # cancel). distinct status so /diagnostics shows real
+            # provider errors clearly.
             metrics.status = "cancelled"
             raise
         except Exception:
@@ -399,9 +399,9 @@ class LLMClient:
     ) -> AsyncIterator[str]:
         """Stream assistant content deltas as strings.
 
-        Thin wrapper over :meth:`stream_completion` that projects to
-        content only. Explicitly closes the inner generator on caller
-        ``aclose`` so the inner ``finally`` (metrics emit, semaphore
+        Thin wrapper over :meth:`stream_completion`; projects to
+        content only. Explicitly closes inner generator on caller
+        ``aclose`` so inner ``finally`` (metrics emit, semaphore
         release, body close) actually runs.
 
         Yields:
@@ -414,10 +414,10 @@ class LLMClient:
                 if delta.content:
                     yield delta.content
         finally:
-            # ``stream_completion`` is concretely an async generator;
-            # ``AsyncIterator`` doesn't promise ``aclose`` but the
-            # runtime object does. Suppress so any non-generator
-            # iterator passed in via a test mock doesn't crash cleanup.
+            # ``stream_completion`` concretely an async generator;
+            # ``AsyncIterator`` doesn't promise ``aclose`` but runtime
+            # object does. suppress so any non-generator iterator
+            # passed via test mock doesn't crash cleanup.
             aclose = getattr(inner, "aclose", None)
             if aclose is not None:
                 with contextlib.suppress(Exception):
@@ -425,11 +425,11 @@ class LLMClient:
 
 
 def _parse_sse_event(line: str) -> dict[str, Any] | None:
-    """Decode one SSE ``data:`` line into a JSON object.
+    """Decode one SSE ``data:`` line into JSON object.
 
-    Returns ``None`` for blanks, comments, ``[DONE]``, or unparseable
-    payloads. Surfaces server-side ``error`` frames as a warning log
-    and returns ``None`` so the caller treats them as a non-event.
+    ``None`` for blanks, comments, ``[DONE]``, or unparseable payloads.
+    Surfaces server-side ``error`` frames as warning log; returns
+    ``None`` so caller treats them as non-event.
     """
     line = line.strip()
     if not line or not line.startswith("data:"):
@@ -457,7 +457,7 @@ def _parse_sse_event(line: str) -> dict[str, Any] | None:
 
 
 def _content_deltas(event: dict[str, Any]) -> list[str]:
-    """Extract assistant content deltas from a parsed SSE chunk."""
+    """Extract assistant content deltas from parsed SSE chunk."""
     out: list[str] = []
     for choice in event.get("choices") or []:
         delta = (choice.get("delta") or {}).get("content")
@@ -467,11 +467,11 @@ def _content_deltas(event: dict[str, Any]) -> list[str]:
 
 
 def _tool_call_deltas(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract tool-call delta fragments from a parsed SSE chunk.
+    """Extract tool-call delta fragments from parsed SSE chunk.
 
-    OpenAI/OpenRouter streams emit tool_calls as a list with an
-    ``index`` per call; callers must accumulate ``function.arguments``
-    string fragments by index until the stream closes.
+    OpenAI/OpenRouter streams emit tool_calls as list with ``index``
+    per call; callers must accumulate ``function.arguments`` string
+    fragments by index until stream closes.
     """
     out: list[dict[str, Any]] = []
     for choice in event.get("choices") or []:
@@ -482,7 +482,7 @@ def _tool_call_deltas(event: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _finish_reason(event: dict[str, Any]) -> str | None:
-    """Pull ``finish_reason`` off the first choice if present."""
+    """Pull ``finish_reason`` off first choice when present."""
     for choice in event.get("choices") or []:
         fr = choice.get("finish_reason")
         if isinstance(fr, str):
@@ -491,14 +491,14 @@ def _finish_reason(event: dict[str, Any]) -> str | None:
 
 
 def _parse_sse_deltas(line: str) -> list[str]:
-    """Backward-compat helper — parse a line and return content deltas only."""
+    """Backward-compat helper — parse line, return content deltas only."""
     event = _parse_sse_event(line)
     return [] if event is None else _content_deltas(event)
 
 
 @dataclass
 class _CallMetrics:
-    """Per-call timing + token signals for an OpenRouter request."""
+    """Per-call timing + token signals for OpenRouter request."""
 
     slot: str | None
     model: str
@@ -514,7 +514,7 @@ class _CallMetrics:
     cached_tokens: int | None = None
 
     def absorb(self, event: dict[str, Any]) -> None:
-        """Pull provider + usage off any chunk that carries them."""
+        """Pull provider + usage off any chunk carrying them."""
         provider = event.get("provider")
         if isinstance(provider, str):
             self.provider = provider
@@ -533,7 +533,7 @@ class _CallMetrics:
                     self.cached_tokens = cached
 
     def emit(self) -> None:
-        """One structured log line + per-phase spans into the collector."""
+        """One structured log line + per-phase spans into collector."""
         suffix = f".{self.slot}" if self.slot else ""
         ttfb_ms: int | None = None
         ttft_ms: int | None = None
@@ -581,10 +581,10 @@ def create_llm_clients(
     api_key: str,
     character_config: CharacterConfig,
 ) -> dict[str, LLMClient]:
-    """Build one :class:`LLMClient` per call-site slot.
+    """One :class:`LLMClient` per call-site slot.
 
-    All clients share one API key and the process-wide rate-limit
-    semaphore in :func:`get_request_semaphore`.
+    All clients share one API key + process-wide rate-limit semaphore
+    in :func:`get_request_semaphore`.
     """
     clients: dict[str, LLMClient] = {}
     for slot_name in LLM_SLOT_NAMES:
