@@ -1,14 +1,13 @@
 """Watermark-driven fact extractor.
 
-Distils atomic facts from new turns using a cheap LLM pass, and
-stores them in ``facts`` with ``source_turn_ids`` pointing back to
-the originating rows in ``turns``. Advances the
-``memory_writer_watermark`` once processed — even on malformed LLM
-output — so the worker never loops forever on the same batch.
+Distils atomic facts from new turns via cheap LLM pass; stores in
+``facts`` with ``source_turn_ids`` pointing back to ``turns`` rows.
+Advances ``memory_writer_watermark`` once processed — even on
+malformed LLM output — so worker never loops forever on same batch.
 
-Phase-4 scope: the extraction prompt asks for a JSON array of
-``{text, source_turn_ids}`` objects. A permissive JSON parser wraps
-fences and extraneous prose common in chat-tuned models.
+Phase-4 scope: extraction prompt asks for JSON array of
+``{text, source_turn_ids}`` objects. Permissive JSON parser
+unwraps fences + extraneous prose common in chat-tuned models.
 """
 
 from __future__ import annotations
@@ -36,11 +35,11 @@ _logger = logging.getLogger("familiar_connect.processors.fact_extractor")
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
-# Patterns that mark a "fact" as actually a self-capability statement
-# (e.g., "I cannot remember names"). These belong in the system prompt
-# or runtime config — not the facts store, where they'd silently expire
-# the moment the underlying capability changes. Belt-and-braces post-
-# filter; the extractor prompt also asks the model to skip them.
+# patterns marking "facts" that are really self-capability statements
+# (e.g., "I cannot remember names"). belong in system prompt or
+# runtime config — not facts store, where they'd silently expire the
+# moment capability changes. belt-and-braces post-filter; extractor
+# prompt also asks model to skip them.
 _SELF_CAPABILITY_RE = re.compile(
     r"""^\s*
         (?:
@@ -61,7 +60,7 @@ def _is_self_capability(text: str) -> bool:
 
 
 class FactExtractor:
-    """Distils facts from new turns; forever loop with ``run()``."""
+    """Distils facts from new turns; forever loop via ``run()``."""
 
     name: str = "fact-extractor"
 
@@ -84,7 +83,7 @@ class FactExtractor:
         self._participants_max = max(1, participants_max)
 
     async def run(self) -> None:
-        """Forever loop — tick on an interval. Cancel to stop."""
+        """Forever loop; tick on interval. Cancel to stop."""
         while True:
             try:
                 await self.tick()
@@ -99,7 +98,7 @@ class FactExtractor:
 
     @span("facts.tick")
     async def tick(self) -> None:
-        """Process one batch of unprocessed turns, if enough accumulated."""
+        """Process one batch of unprocessed turns if enough accumulated."""
         new_turns = await self._store.turns_since_watermark(
             familiar_id=self._familiar_id,
             limit=self._batch_size,
@@ -129,9 +128,9 @@ class FactExtractor:
                     int(i) for i in raw_sources if isinstance(i, int) and i in valid_ids
                 ]
             if not source_ids:
-                # fall back to the whole batch rather than dropping the fact
+                # fall back to whole batch rather than dropping fact
                 source_ids = list(valid_ids)
-            # Prefer the channel of the first source turn for scoping.
+            # prefer channel of first source turn for scoping
             channel_id = channel_ids.get(source_ids[0])
             text = str(fact.get("text", "")).strip()
             if not text:
@@ -160,18 +159,18 @@ class FactExtractor:
                 valid_to=valid_to,
                 importance=importance,
             )
-            # Mirror resolved subjects into ``turn_mentions``. Bridges
-            # bare-text references like "what about Aria?" into the
-            # same mention index that Discord ``@`` pings populate, so
-            # ``PeopleDossierLayer`` can pick them up at the next
-            # assemble — no separate read path, no fact-table join in
-            # the hot path. Idempotent (PK-deduped on the store side).
+            # mirror resolved subjects into ``turn_mentions``. bridges
+            # bare-text references like "what about Aria?" into same
+            # mention index Discord ``@`` pings populate, so
+            # ``PeopleDossierLayer`` picks them up at next assemble —
+            # no separate read path, no fact-table join in hot path.
+            # idempotent (PK-deduped on store side).
             if subjects:
                 keys = [s.canonical_key for s in subjects]
                 for tid in source_ids:
                     await self._store.record_mentions(turn_id=tid, canonical_keys=keys)
 
-        # Always advance watermark, even on empty/bad output, to prevent loops.
+        # always advance watermark, even on empty/bad output, to prevent loops
         last_id = new_turns[-1].id
         await self._store.put_writer_watermark(
             familiar_id=self._familiar_id, last_written_id=last_id
@@ -203,28 +202,27 @@ def _build_participants(
 
     1. **Batch authors** — every turn whose author is set, keyed by
        canonical_key with per-turn ``guild_id`` for label resolution.
-       Guarantees the active speakers are always represented even if
-       the wider widen step would otherwise drop them.
+       Guarantees active speakers are always represented even if the
+       widen step would otherwise drop them.
     2. **Recent channel participants** — for each channel touched by
        the batch, ``recent_distinct_authors(limit=max_total)`` adds
-       speakers from the recent past, capped at ``max_total`` total.
+       speakers from recent past, capped at ``max_total`` total.
        Closes the bare-text reference gap: a batch where only Cass
        speaks can still link "Aria" in turn content to her canonical
        key when Aria spoke earlier in the channel.
 
-    Resolution goes through :meth:`HistoryStore.resolve_label` so the
-    manifest matches what the read path renders (per-guild nick wins
-    over the snapshot label baked into each turn). Used both to
-    inject the LLM-facing manifest and to validate ``subject_keys``
-    coming back in the response — keys outside the manifest are
-    dropped silently (the LLM may hallucinate).
+    Resolution via :meth:`HistoryStore.resolve_label` so manifest
+    matches what read path renders (per-guild nick wins over snapshot
+    label baked into each turn). Used to inject LLM-facing manifest
+    and to validate ``subject_keys`` in response — keys outside
+    manifest dropped silently (LLM may hallucinate).
     """
     out: dict[str, str] = {}
-    # Batch authors first, with per-turn guild_id.
+    # batch authors first, with per-turn guild_id
     channel_guilds: dict[int, int | None] = {}
     for t in turns:
         if t.channel_id is not None:
-            # Last guild_id wins per channel; usually consistent within a batch.
+            # last guild_id wins per channel; usually consistent within batch
             channel_guilds[t.channel_id] = t.guild_id
         if t.author is None:
             continue
@@ -233,7 +231,7 @@ def _build_participants(
             guild_id=t.guild_id,
             familiar_id=familiar_id,
         )
-    # Widen with recent channel participants, capped at max_total.
+    # widen with recent channel participants, capped at max_total
     for channel_id, guild_id in channel_guilds.items():
         if len(out) >= max_total:
             break
@@ -260,10 +258,9 @@ def _resolve_subjects(
 ) -> list[FactSubject]:
     """Validate LLM-emitted ``subject_keys`` against the manifest.
 
-    Soft validation: unknown keys are dropped silently rather than
-    invalidating the fact. The display_at_write is taken from the
-    manifest (the LLM's view at extraction time), not from anything
-    the LLM might have echoed.
+    Soft validation: unknown keys dropped silently rather than
+    invalidating fact. ``display_at_write`` taken from manifest
+    (LLM's view at extraction time), not from anything LLM echoed.
     """
     if not isinstance(raw, list):
         return []
@@ -336,13 +333,13 @@ def _build_extract_prompt(
 def _parse_facts(reply: str) -> list[dict[str, object]]:
     """Permissive JSON-array parser.
 
-    Strips code fences, extracts the first balanced ``[...]`` blob,
-    and coerces it via :func:`json.loads`. Malformed input returns
-    ``[]`` rather than raising.
+    Strips code fences, extracts first balanced ``[...]`` blob,
+    coerces via :func:`json.loads`. Malformed input returns ``[]``
+    rather than raising.
     """
     if not reply or not reply.strip():
         return []
-    # Strip common code-fence prelude like ``` or ```json
+    # strip common code-fence prelude like ``` or ```json
     cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
     match = _JSON_ARRAY_RE.search(cleaned)
     blob = match.group(0) if match else cleaned
@@ -356,7 +353,7 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
     for item in parsed:
         if not isinstance(item, dict):
             continue
-        # Coerce source_turn_ids to ints
+        # coerce source_turn_ids to ints
         raw_ids = item.get("source_turn_ids", [])
         ids: list[int] = []
         if isinstance(raw_ids, list):
@@ -381,12 +378,12 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
 
 
 def _parse_importance(raw: object) -> int | None:
-    """Coerce LLM-emitted importance to an int; ``None`` for missing / non-numeric.
+    """Coerce LLM-emitted importance to int; ``None`` for missing / non-numeric.
 
-    Out-of-range values are passed through verbatim — :meth:`HistoryStore.append_fact`
+    Out-of-range values passed through verbatim — :meth:`HistoryStore.append_fact`
     clamps to ``[1, 10]``. Non-integer / non-numeric input degrades to
-    ``None`` rather than 0; the store treats ``None`` as the neutral
-    midpoint at rank time.
+    ``None`` rather than 0; store treats ``None`` as neutral midpoint
+    at rank time.
     """
     if raw is None:
         return None
@@ -413,10 +410,9 @@ def _parse_importance(raw: object) -> int | None:
 def _parse_iso_dt(raw: object) -> datetime | None:
     """Permissive ISO-8601 → ``datetime`` parse; ``None`` for bad input.
 
-    The LLM may emit a date-only string (``2024-01-15``) or a full
-    timestamp; ``datetime.fromisoformat`` accepts both. Anything else
-    silently degrades to ``None`` so the caller falls back to the
-    source turn's timestamp.
+    LLM may emit date-only (``2024-01-15``) or full timestamp;
+    ``datetime.fromisoformat`` accepts both. Anything else degrades
+    to ``None`` so caller falls back to source turn's timestamp.
     """
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -424,7 +420,7 @@ def _parse_iso_dt(raw: object) -> datetime | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    # date-only strings parse to naive datetimes; assume UTC for consistency.
+    # date-only strings parse to naive datetimes; assume UTC for consistency
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed

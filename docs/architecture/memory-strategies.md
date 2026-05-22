@@ -1,12 +1,12 @@
 # Memory strategies
 
 The rule: **`turns` is source of truth; everything else is a
-projection that can be dropped and rebuilt.** This page maps the
-strategies that fit inside that rule, says which one ships today,
-and names the seams alternatives plug into.
+projection that can be dropped and rebuilt.** This page maps
+strategies fitting that rule, says which ships today, and names
+the seams alternatives plug into.
 
-Forward-looking work lives in [Roadmap](roadmap.md). Implementation
-details for what already ships live in
+Forward-looking work lives in [Roadmap](roadmap.md).
+Implementation details for what ships live in
 [Context pipeline](context-pipeline.md).
 
 ## The four families
@@ -32,7 +32,7 @@ details for what already ships live in
 4. **Hand-authored, rule-activated character context**
    (RisuAI / SillyTavern lorebooks). Keyword-activated entries.
    `character.md` ships as the always-on degenerate case (persona
-   plus operational essentials); M4 added a real keyword-activated
+   plus operational essentials); M4 added a keyword-activated
    lorebook alongside it — see [Lorebook](#lorebook-m4).
 
 ## What's wired today
@@ -53,8 +53,8 @@ Every writer is watermark-driven and idempotent; deleting a
 side-index table rebuilds it from `turns`. See
 [Context pipeline](context-pipeline.md) for watermark semantics.
 
-Reads are multi-signal: BM25 + recent-window exclusion + a 1-10
-importance hint per fact (M2) + cosine similarity to the cue
+Reads are multi-signal: BM25, recent-window exclusion, a 1-10
+importance hint per fact (M2), and cosine similarity to the cue
 embedding (M6, opt-in).
 
 ## Swap points
@@ -66,9 +66,9 @@ disables layers per Discord channel. New layer = one class
 implementing `build(ctx)` + `invalidation_key(ctx)`, registered in
 `commands/run.py::_default_assembler`.
 
-This is how M3 (`ReflectionLayer`) and M4 (`LorebookLayer`) plug
-in. It's also how a candidate replacement layer can run
-side-by-side: register both, switch via TOML on a test channel.
+M3 (`ReflectionLayer`) and M4 (`LorebookLayer`) plug in this way.
+A candidate replacement layer can also run side-by-side: register
+both, switch via TOML on a test channel.
 
 ### 2. Projection writer (`MemoryProjector` Protocol)
 
@@ -106,8 +106,8 @@ an embedder backend). Drop a name to disable that writer. Add a
 third-party projector (Graphiti, Cognee, …) by calling
 `register_projector("graphiti", factory)` at import time and listing
 it here. Unknown names fail loudly at config load — a typo never
-silently drops a writer. Empty list disables all projection (the
-side-indices stop refreshing; reads still work against whatever
+silently drops a writer. Empty list disables all projection
+(side-indices stop refreshing; reads still work against whatever
 exists).
 
 ### 3. Retrieval ranking (`RagContextLayer`)
@@ -130,10 +130,10 @@ keeps the top N by weighted sum:
 - **Recency** — newest fact id in the batch = 1.0.
 - **Importance** — `importance/10`. Legacy / unscored rows
   (`importance IS NULL`) get the neutral midpoint, never zero.
-- **Embedding** — cosine similarity to the cue mapped from
+- **Embedding** — cosine similarity to the cue, mapped from
   `[-1, 1]` to `[0, 1]` via `(cos + 1) / 2`. Candidates lacking a
   stored vector get the neutral midpoint (0.5) — same shape as
-  importance. The cue embedding is only computed when at least one
+  importance. The cue embedding is computed only when at least one
   candidate has a stored vector, so a cold side-index pays no
   embed cost.
 
@@ -149,7 +149,7 @@ into the existing BM25 + importance rerank.
 `fact_embeddings` carries `(fact_id, model, dim, vector, created_at)`
 keyed on `(fact_id, model)`. Vectors are packed little-endian
 float32 in a `BLOB` column — no `sqlite-vec` dependency yet; brute
-cosine over BM25-overfetched candidates is fine at per-host
+cosine over BM25-overfetched candidates suffices at per-host
 volumes. Pairing the row key with `model` (the embedder's
 `Embedder.name`) means a backend swap accumulates new rows beside
 the old; reads filter on the active model so prior runs stay
@@ -157,7 +157,7 @@ queryable for audit but don't leak into ranking.
 
 `FactEmbeddingWorker` is the projector: every 15 s, pulls up to 32
 current facts (`superseded_at IS NULL`) lacking a row for the active
-model, runs the embedder, persists each vector. Watermark is
+model, runs the embedder, persists each vector. The watermark is
 implicit — the `LEFT JOIN fact_embeddings` filter is the watermark.
 A model swap, a deleted side-index, or an extension of the active
 embedder all converge on the same idempotent backfill.
@@ -169,8 +169,7 @@ fuses cosine similarity. Missing vectors map to the neutral 0.5 so
 an unembedded candidate isn't penalised relative to a 5/10 — same
 legacy-friendly shape as importance.
 
-The seam is intentionally split across three knobs so each can move
-independently:
+The seam splits across three knobs so each can move independently:
 
 - `[providers.embedding].backend` — picks the backend. `off`
   (default), `hash` (no-deps baseline), or `fastembed`
@@ -183,13 +182,13 @@ independently:
 
 To enable, flip all three; to disable, drop `embedding_weight`
 back to 0 (reads quiet) or drop `fact_embedding` from the projector
-list (writes quiet). The side-index can be deleted at any time —
-the next worker tick rebuilds it from `facts`.
+list (writes quiet). The side-index can be deleted anytime — the
+next worker tick rebuilds it from `facts`.
 
 `FastEmbedEmbedder` carries the model identifier in its `name`
 (`fastembed:BAAI/bge-small-en-v1.5`); since the storage row key is
 `(fact_id, model)`, a model upgrade accumulates new vectors beside
-the old. Old rows stay queryable for audit but don't leak into the
+the old. Old rows stay queryable for audit but don't leak into
 active rank — reads filter on the live embedder's `name`. To
 reclaim space, delete superseded rows after switching:
 
@@ -220,17 +219,17 @@ priority  = 50
 the `Assembler`'s invalidation key), scans the active channel's
 last `recent_window` turns case-insensitively against each entry's
 keys, and renders the matching subset newest-priority-first under a
-`## Lorebook` block. `selective = true` flips the per-entry match
-from any-key (OR) to all-keys (AND) — useful when a generic key
-("dragon") shouldn't fire on its own without a disambiguator
-("dragon" + "Cassidy").
+`## Lorebook` block. `selective = true` flips per-entry match from
+any-key (OR) to all-keys (AND) — useful when a generic key
+("dragon") shouldn't fire alone without a disambiguator ("dragon"
++ "Cassidy").
 
 No worker; the file is the sole source of truth. Operators edit it
 in place, no migration. The cache key combines a content hash of
-the file with the matched entry indices, so the layer only flips
-when the file or the activation set actually changes.
+the file with matched entry indices, so the layer only flips when
+the file or activation set actually changes.
 
-The relevant knobs live in `[budget.<tier>]`:
+Relevant knobs live in `[budget.<tier>]`:
 
 ```toml
 [budget.text]
@@ -254,33 +253,33 @@ row carries:
   reading model can map a synthesis back to its source.
 - `last_turn_id` / `last_fact_id` — snapshot of the worker's view at
   write time. Citations render against this snapshot; the worker's
-  own watermark lives in a separate `reflection_watermark` table.
+  watermark lives in a separate `reflection_watermark` table.
 
 `ReflectionWorker` ticks every 60 s; fires when at least
 `turns_threshold` (default 20) new turns have arrived since the last
 watermark. It builds a prompt over the new turns (capped at
 `max_turns_per_tick`, default 50, taking the most-recent tail) plus
 the 20 most recent facts, asks for at most 3 reflections per tick,
-and persists each answer that cites at least one valid turn or fact
-id. Uncited answers are dropped — a free-floating opinion isn't a
+and persists each answer citing at least one valid turn or fact id.
+Uncited answers are dropped — a free-floating opinion isn't a
 synthesis.
 
 The watermark advances to `latest_turn` at the end of every tick,
-even when the LLM returns `[]` or every item is filtered. Without
-that, a no-substance reply would pin the worker to a growing
-unprocessed window, and the next tick would re-send the same
-(plus-more) turns — the prompt would balloon into 100k+ tokens
-every 60 s. Capping `max_turns_per_tick` is the second guardrail:
-even on a fresh worker against a long-lived database, one tick
-can't ship hundreds of turns at the LLM.
+even when the LLM returns `[]` or every item is filtered. Otherwise
+a no-substance reply would pin the worker to a growing unprocessed
+window, and the next tick would re-send the same (plus-more) turns
+— the prompt would balloon into 100k+ tokens every 60 s. Capping
+`max_turns_per_tick` is the second guardrail: even a fresh worker
+against a long-lived database can't ship hundreds of turns at the
+LLM in one tick.
 
 `ReflectionLayer` reads the most recent rows scoped to the active
 channel (channel-agnostic rows surface in every channel), renders
-citation breadcrumbs, and flags `(stale)` on rows that cite at
-least one superseded fact. Stale rows are never deleted; the audit
-trail is the point.
+citation breadcrumbs, and flags `(stale)` on rows citing at least
+one superseded fact. Stale rows are never deleted; the audit trail
+is the point.
 
-The relevant knobs live in `[budget.<tier>]`:
+Relevant knobs live in `[budget.<tier>]`:
 
 ```toml
 [budget.text]
@@ -298,7 +297,7 @@ Each row in `facts` carries two independent time axes:
 - **World-time** (`valid_from`, `valid_to`) — when the fact was
   observed to *apply in the world*. `valid_from` defaults to the
   source turn's timestamp; the LLM may override with an explicit
-  ISO-8601 string when it spots an "as of …" phrase ("Aria moved to
+  ISO-8601 string on spotting an "as of …" phrase ("Aria moved to
   Berlin in early 2024"). `valid_to` is `NULL` while the fact still
   applies.
 
@@ -312,8 +311,7 @@ prior beliefs remain reconstructable.
 Legacy rows (pre-M1) carry `valid_from = valid_to = NULL` and read
 as "always valid"; no backfill — the feature is forward-only.
 
-The two axes are populated by different writers and must not be
-conflated:
+Different writers populate the two axes; do not conflate them:
 
 - **`valid_to` is for world-time only** — set when the speaker
   explicitly anchors the end of a fact in real time ("until last
@@ -324,15 +322,15 @@ conflated:
   bookkeeping** — set by `FactSupersedeWorker`, which evaluates
   each newly-arrived fact against prior current facts about the
   same subject and asks the background LLM which (if any) to
-  retire. The strict `HistoryStore.supersede_fact()` raises on
+  retire. Strict `HistoryStore.supersede_fact()` raises on
   re-supersession so a double-write surfaces as a bug rather than
   silently rewiring the chain.
 
 A fact can be retired (system-time) while its world-time validity
-is still open: e.g., the extractor re-renders the same belief with
+stays open: e.g., the extractor re-renders the same belief with
 sharper wording — the older row is superseded but its `valid_to`
-stays `NULL`. Conversely, a fact whose `valid_to` is in the past is
-*not* superseded; it just no longer applies in the world. Read
+stays `NULL`. Conversely, a fact whose `valid_to` lies in the past
+is *not* superseded; it just no longer applies in the world. Read
 helpers filter on both columns, so either condition hides a row
 from "current truth" reads.
 
@@ -358,7 +356,7 @@ projector, not a replacement.
   evolves every interaction.
 
 Mixing them lets the agent rewrite its own character description.
-Keeping them split makes the trust boundary inspectable.
+Splitting them keeps the trust boundary inspectable.
 
 ## Operator playbook
 
@@ -377,8 +375,8 @@ SET dossier_text = '...', last_fact_id = 0
 WHERE canonical_key = 'discord:1234';
 ```
 
-`last_fact_id = 0` forces the worker to refold every prior fact
-on its next tick.
+`last_fact_id = 0` forces the worker to refold every prior fact on
+its next tick.
 
 ### A/B a layer on one channel
 

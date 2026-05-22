@@ -1,7 +1,7 @@
 """STT backend selector — dispatches on ``[providers.stt].backend``.
 
 Each per-backend factory takes its typed ``[providers.stt.<backend>]``
-sub-table; only secrets (e.g. ``DEEPGRAM_API_KEY``) come from env.
+sub-table; only secrets (e.g. ``DEEPGRAM_API_KEY``) from env.
 """
 
 from __future__ import annotations
@@ -22,11 +22,11 @@ _KNOWN_BACKENDS: frozenset[str] = frozenset({"deepgram", "parakeet", "faster_whi
 
 
 def create_transcriber(config: STTConfig) -> Transcriber:
-    """Build a :class:`Transcriber` from *config*.
+    """Build :class:`Transcriber` from *config*.
 
-    :raises ValueError: backend unknown, or the selected backend's
-        required secret (e.g. ``DEEPGRAM_API_KEY``) is missing, or its
-        optional extra is not installed. Caller is expected to log +
+    :raises ValueError: backend unknown, or selected backend's
+        required secret (e.g. ``DEEPGRAM_API_KEY``) missing, or its
+        optional extra not installed. Caller expected to log +
         degrade — see ``commands/run.py``.
     """
     backend = config.backend
@@ -55,14 +55,14 @@ def _create_deepgram(config: STTConfig) -> DeepgramTranscriber:
 
 
 def _create_parakeet(config: STTConfig) -> Transcriber:
-    """Lazy-import Parakeet so the heavy numpy/NeMo deps stay optional."""
+    """Lazy-import Parakeet so heavy numpy/NeMo deps stay optional."""
     try:
         from familiar_connect.stt.parakeet import (  # noqa: PLC0415
             create_parakeet_transcriber,
         )
     except RuntimeError as exc:
         # numpy missing → ``ParakeetTranscriber`` module raises on import.
-        # Re-raise as ValueError so ``run.py`` catches + warns uniformly.
+        # re-raise as ValueError so ``run.py`` catches + warns uniformly.
         raise ValueError(str(exc)) from exc
     return create_parakeet_transcriber(config.parakeet)
 

@@ -1,23 +1,15 @@
 # Familiar-Connect
 
-An AI "familiar" that joins Discord voice channels, listens to users,
-understands speech, and talks back using real AI voices.
+An AI "familiar" that joins Discord voice channels, listens, understands speech, and talks back with real AI voices.
 
 ## What's here
 
-A Discord bot that reads and speaks in Discord text and voice channels,
-backed by an event bus, layered context assembly, and a per-familiar
-memory store (Turso for relational data, tantivy for full-text search).
-Events flow through processors that assemble a prompt, call an LLM,
-and reply.
+A Discord bot that reads and speaks in text and voice channels, backed by an event bus, layered context assembly, and a per-familiar memory store (Turso for relational data, tantivy for full-text search). Events flow through processors that assemble a prompt, call an LLM, and reply.
 
-- CLI entry point: `familiar-connect run --familiar <id>`.
-- Discord text + voice subscriptions (`/subscribe-text`,
-  `/subscribe-voice`, plus their `unsubscribe-*` counterparts).
+- CLI entry: `familiar-connect run --familiar <id>`.
+- Discord text + voice subscriptions (`/subscribe-text`, `/subscribe-voice`, plus the `unsubscribe-*` counterparts).
 - Twitch EventSub client.
-- Turso history store (`data/familiars/<id>/history.db`) with facts,
-  summaries, dossiers, reflections, and tantivy FTS + embedding
-  retrieval.
+- Turso history store (`data/familiars/<id>/history.db`) with facts, summaries, dossiers, reflections, and tantivy FTS + embedding retrieval.
 - OpenRouter `LLMClient`, Deepgram STT, Azure / Cartesia / Gemini TTS.
 
 ## Where to look next

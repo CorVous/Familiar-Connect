@@ -1,15 +1,15 @@
 """Render Discord embeds as plain text.
 
-Discord delivers URL unfurls as ``Embed`` objects on a message. The
-bot only sees ``message.content`` by default — link previews vanish.
-This module flattens an ``Iterable[Embed]`` into a text block the
-caller appends to ``content`` before publishing onto the bus, so the
-LLM sees the same body humans see in the client.
+Discord delivers URL unfurls as ``Embed`` objects on a message. Bot
+only sees ``message.content`` by default — link previews vanish.
+Flattens ``Iterable[Embed]`` into text block caller appends to
+``content`` before publishing onto bus, so LLM sees same body humans
+see in client.
 
-Duck-typed: any object exposing the relevant attributes works
+Duck-typed: any object exposing relevant attributes works
 (``discord.Embed``, ``SimpleNamespace`` in tests, etc.). No hard
-dependency on ``discord.Embed`` here — keeps the formatter unit-
-testable without a Discord stub.
+dependency on ``discord.Embed`` — keeps formatter unit-testable
+without a Discord stub.
 """
 
 from __future__ import annotations
@@ -24,17 +24,17 @@ _EMBED_TAG = "[embed]"
 
 
 def format_embeds(embeds: Iterable[Any]) -> str:
-    """Flatten ``embeds`` into a plain-text block.
+    """Flatten ``embeds`` into plain-text block.
 
-    Empty input or all-blank embeds → ``""``. Multiple embeds are
-    separated by a blank line so the LLM can tell them apart.
+    Empty input or all-blank embeds → ``""``. Multiple embeds
+    separated by blank line so LLM can tell them apart.
     """
     blocks = [_format_one(e) for e in embeds]
     return "\n\n".join(b for b in blocks if b)
 
 
 def _format_one(embed: Any) -> str:  # noqa: ANN401 — duck-typed
-    """Render a single embed; ``""`` when there's nothing meaningful."""
+    """Render single embed; ``""`` when nothing meaningful."""
     provider_name = _attr_chain(embed, "provider", "name")
     author_name = _attr_chain(embed, "author", "name")
     title = _str(getattr(embed, "title", None))
@@ -47,8 +47,8 @@ def _format_one(embed: Any) -> str:  # noqa: ANN401 — duck-typed
         header_bits.append(f"({provider_name})")
     if author_name:
         header_bits.append(author_name)
-    # avoid echoing the same string twice when the embed's title
-    # mirrors the author handle (common on Tumblr / Bluesky cards).
+    # avoid echoing same string twice when embed's title mirrors
+    # author handle (common on Tumblr / Bluesky cards).
     if title and title != author_name:
         header_bits.append(title)
     header = " — ".join(header_bits)
@@ -71,9 +71,9 @@ def _format_one(embed: Any) -> str:  # noqa: ANN401 — duck-typed
         lines.append(f"— {footer_text}")
 
     if not lines:
-        # image-only embed: surface the link target so the LLM at
-        # least knows a media URL was attached. drop entirely when
-        # even the URL is missing — nothing to say.
+        # image-only embed: surface link target so LLM at least knows
+        # a media URL was attached. drop entirely when even url
+        # missing — nothing to say.
         if url:
             return f"{_EMBED_TAG}\n[link: {url}]"
         return ""
@@ -82,7 +82,7 @@ def _format_one(embed: Any) -> str:  # noqa: ANN401 — duck-typed
 
 
 def _attr_chain(obj: Any, *path: str) -> str:  # noqa: ANN401 — duck-typed
-    """Walk ``getattr`` chain; return ``""`` on any miss."""
+    """Walk ``getattr`` chain; ``""`` on any miss."""
     cur: Any = obj
     for name in path:
         cur = getattr(cur, name, None)

@@ -1,10 +1,10 @@
 """Voice reply orchestrator.
 
-Consumes ``voice.activity.start`` and ``voice.transcript.final`` from
-the bus; produces LLM output via :meth:`LLMClient.chat_stream` and
-speaks it through :class:`TTSPlayer`. Every step is scoped to the
-current :class:`TurnScope` — a new ``voice.activity.start`` cancels
-in-flight work.
+Consumes ``voice.activity.start`` and ``voice.transcript.final``
+from bus; produces LLM output via :meth:`LLMClient.chat_stream` and
+speaks it through :class:`TTSPlayer`. Every step scoped to current
+:class:`TurnScope` — new ``voice.activity.start`` cancels in-flight
+work.
 
 See plan § Design.3 (turn scope) and plan § Rollout Phase 2.
 """
@@ -46,16 +46,16 @@ if TYPE_CHECKING:
     from familiar_connect.tools.registry import ToolContext, ToolRegistry
     from familiar_connect.tts_player.protocol import TTSPlayer
 
-    # ``(channel_id, user_id) -> Author | None``. Wired from the bot to
-    # resolve Discord members live; ``None`` when the member can't be
-    # resolved (left guild, cache miss, etc.).
+    # ``(channel_id, user_id) -> Author | None``. wired from bot to
+    # resolve Discord members live; ``None`` when member can't be
+    # resolved (left guild, cache miss, etc.)
     MemberResolver = Callable[[int, int], "Author | None"]
 
 _logger = logging.getLogger("familiar_connect.processors.voice_responder")
 
 
 class VoiceResponder:
-    """Orchestrates the voice reply loop with turn-scoped cancellation."""
+    """Orchestrates voice reply loop with turn-scoped cancellation."""
 
     name: str = "voice-responder"
     topics: tuple[str, ...] = (
@@ -89,22 +89,22 @@ class VoiceResponder:
         self._router = router
         self._familiar_id = familiar_id
         self._member_resolver = member_resolver
-        # one in-flight final-handling task per (session, user); replaced
-        # when a newer final from the same speaker arrives. cross-user
-        # finals coexist — only the TTS player serializes playback.
+        # one in-flight final-handling task per (session, user);
+        # replaced when newer final from same speaker arrives.
+        # cross-user finals coexist — only TTS player serializes playback
         self._inflight: dict[str, asyncio.Task[None]] = {}
-        # agentic-loop wiring — see :meth:`_stream_and_speak_with_tools`.
+        # agentic-loop wiring — see :meth:`_stream_and_speak_with_tools`
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
-        # short stock phrases spoken before tool execution when the
-        # iteration produced no spoken content. rotated round-robin so
-        # repeat use doesn't always say the same word.
+        # short stock phrases spoken before tool execution when
+        # iteration produced no spoken content. rotated round-robin
+        # so repeat use doesn't always say same word
         self._tool_filler_phrases = tool_filler_phrases
         self._tool_filler_idx = 0
 
     @staticmethod
     def _user_id_from_event(event: Event) -> int | None:
-        """Extract Discord user_id from an event payload, if present."""
+        """Discord user_id from event payload; ``None`` if absent."""
         if not isinstance(event.payload, dict):
             return None
         raw = event.payload.get("user_id")
@@ -114,7 +114,7 @@ class VoiceResponder:
 
     @staticmethod
     def _scope_key(session_id: str, user_id: int | None) -> str:
-        """Per-(session, user) key. Falls back to channel-level for legacy events."""
+        """Per-(session, user) key; falls back to channel-level for legacy events."""
         if user_id is None:
             return session_id
         return f"{session_id}:user:{user_id}"
@@ -130,7 +130,7 @@ class VoiceResponder:
     async def wait_until_idle(self) -> None:
         """Await every in-flight final-handling task.
 
-        Used by tests and graceful shutdown — a no-op when nothing is
+        Used by tests and graceful shutdown — no-op when nothing
         in flight. Suppresses ``CancelledError`` from spawned tasks
         whose scope was cancelled mid-flight.
         """
@@ -145,13 +145,13 @@ class VoiceResponder:
     def _on_activity_start(self, event: Event) -> None:
         user_id = self._user_id_from_event(event)
         scope_key = self._scope_key(event.session_id, user_id)
-        # begin_turn cancels the prior scope for this (session, user).
-        # If the prior scope is the one currently being spoken, the
-        # player's poll loop catches ``scope.is_cancelled()`` and stops
-        # playback within one poll tick. A global ``tts.stop()`` here
-        # would also cut a *different* user's in-flight reply — Discord
-        # gives us one shared voice client, so any continuous speaker
-        # would barrage stop() against the bot's reply to someone else.
+        # begin_turn cancels prior scope for this (session, user).
+        # if prior scope is one currently being spoken, player's poll
+        # loop catches ``scope.is_cancelled()`` and stops playback
+        # within one poll tick. global ``tts.stop()`` here would also
+        # cut a *different* user's in-flight reply — Discord gives us
+        # one shared voice client, so any continuous speaker would
+        # barrage stop() against bot's reply to someone else
         self._router.begin_turn(session_id=scope_key, turn_id=event.turn_id)
 
     # ------------------------------------------------------------------
@@ -159,23 +159,23 @@ class VoiceResponder:
     # ------------------------------------------------------------------
 
     def _spawn_final(self, event: Event) -> None:
-        """Run ``_on_final`` as a per-(session, user) task.
+        """Run ``_on_final`` as per-(session, user) task.
 
-        Decouples ingestion from processing: the bus dispatcher returns
-        immediately after handing off, so a fresh ``activity.start``
-        can call ``prior.cancel()`` and ``tts.stop()`` while this task
-        is still parked at an LLM/TTS await point. Without this, the
-        soft scope-cancel never fires until the prior reply has fully
-        played, and the user hears it lag behind.
+        Decouples ingestion from processing: bus dispatcher returns
+        immediately after handing off, so fresh ``activity.start`` can
+        call ``prior.cancel()`` and ``tts.stop()`` while this task
+        still parked at LLM/TTS await point. Without this, soft
+        scope-cancel never fires until prior reply has fully played,
+        and user hears it lag behind.
         """
         user_id = self._user_id_from_event(event)
         scope_key = self._scope_key(event.session_id, user_id)
         prior_task = self._inflight.get(scope_key)
         if prior_task is not None and not prior_task.done():
-            # A newer final from the same speaker without an intervening
-            # activity.start is unusual but defendable: cancel the prior
-            # so we don't double-speak. Cross-user finals don't collide
-            # because they live under different scope keys.
+            # newer final from same speaker without intervening
+            # activity.start is unusual but defendable: cancel prior
+            # so we don't double-speak. cross-user finals don't
+            # collide because they live under different scope keys
             prior_task.cancel()
         task = asyncio.create_task(
             self._run_final(event),
@@ -185,8 +185,8 @@ class VoiceResponder:
         task.add_done_callback(lambda t, sid=scope_key: self._on_final_done(sid, t))
 
     def _on_final_done(self, scope_key: str, task: asyncio.Task[None]) -> None:
-        # Only clear the slot if we still own it — a newer turn may
-        # have already replaced our entry.
+        # only clear slot if we still own it — a newer turn may
+        # have already replaced our entry
         if self._inflight.get(scope_key) is task:
             self._inflight.pop(scope_key, None)
 
@@ -194,7 +194,7 @@ class VoiceResponder:
         try:
             await self._on_final(event)
         except asyncio.CancelledError:
-            # Expected on barge-in: a newer final hard-cancelled us.
+            # expected on barge-in: a newer final hard-cancelled us
             return
 
     # ------------------------------------------------------------------
@@ -206,7 +206,7 @@ class VoiceResponder:
         scope_key = self._scope_key(event.session_id, user_id)
         scope = self._router.active_scope(scope_key)
         if scope is None or scope.turn_id != event.turn_id:
-            # stale final — a newer utterance already started
+            # stale final — newer utterance already started
             return
         channel_id = _parse_voice_session(event.session_id)
         if channel_id is None:
@@ -222,14 +222,14 @@ class VoiceResponder:
 
         author = self._resolve_author(channel_id=channel_id, user_id=user_id)
 
-        # Cold-cache signals — instrumentation only (no action yet).
-        # Runs before the user turn is appended so ``prev_turn_at``
-        # reflects the real gap.
+        # cold-cache signals — instrumentation only (no action yet).
+        # runs before user turn appended so ``prev_turn_at`` reflects
+        # real gap
         self._emit_cold_cache_signals(
             channel_id=channel_id, turn_id=scope.turn_id, text=text
         )
 
-        # Record the user turn so RecentHistoryLayer picks it up next time.
+        # record user turn so RecentHistoryLayer picks it up next time
         await self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
@@ -238,18 +238,18 @@ class VoiceResponder:
             author=author,
         )
 
-        # Seed retrieval cue for RagContextLayer (if wired).
+        # seed retrieval cue for RagContextLayer (if wired)
         self._assembler.set_rag_cue(text)
 
         reply = await self._stream_and_speak(scope, channel_id)
         if reply is None or scope.is_cancelled():
             return
         # Cartesia rejects empty/whitespace ``transcript`` with HTTP 400.
-        # An empty reply usually means the LLM stream emitted no deltas —
-        # bad model name, content filter, or upstream error frame the
-        # parser silently dropped. Mirrors ``TextResponder``'s guard.
-        # _stream_and_speak gates TTS on this too, so we just skip the
-        # assistant-turn write here.
+        # empty reply usually means LLM stream emitted no deltas —
+        # bad model name, content filter, or upstream error frame
+        # parser silently dropped. mirrors ``TextResponder``'s guard.
+        # _stream_and_speak gates TTS on this too, so just skip
+        # assistant-turn write here
         if not reply.strip():
             _logger.warning(
                 f"{ls.tag('Voice', ls.Y)} "
@@ -284,7 +284,7 @@ class VoiceResponder:
         """Stream LLM output, speak sentence-by-sentence.
 
         Returns concatenated reply on speech, ``None`` on silent /
-        empty / cancelled / stream error. ``<silent>`` sentinel is
+        empty / cancelled / stream error. ``<silent>`` sentinel
         decided before any sentence reaches TTS — buffered sentences
         wait until :class:`SilentDetector` rules in/out.
         """
@@ -305,12 +305,11 @@ class VoiceResponder:
         if system:
             messages.append(Message(role="system", content=system))
         messages.extend(prompt.recent_history)
-        # Trailing reminder: same content + the per-mode operating
-        # directive ("You are speaking aloud…") so the format gate
-        # lives at the tail of the context, where recency-biased
-        # models are more likely to honor it. End-placed tool nudge
-        # piggybacks on the trailing copy so it lands closest to the
-        # next assistant turn.
+        # trailing reminder: same content + per-mode operating
+        # directive ("You are speaking aloud…") so format gate lives
+        # at tail of context, where recency-biased models are more
+        # likely to honor it. end-placed tool nudge piggybacks on
+        # trailing copy so it lands closest to next assistant turn
         trailing = build_final_reminder(
             viewer_mode="voice",
             include_mode_instruction=True,
@@ -326,14 +325,14 @@ class VoiceResponder:
         accumulated: list[str] = []
         streamer = SentenceStreamer()
         silent = SilentDetector()
-        # sentences buffered while the silent gate is still pending.
-        # drained in arrival order once gate opens; dropped on ``True``.
+        # sentences buffered while silent gate still pending.
+        # drained in arrival order once gate opens; dropped on ``True``
         pending: list[str] = []
         gate_open = False  # SilentDetector returned False — speak path live
         budget = get_voice_budget_recorder()
         first_delta_seen = False
         # exactly one decision line per turn — silent | respond | preempted.
-        # tracked so a cancel-mid-speak after gate_open doesn't double-log.
+        # tracked so cancel-mid-speak after gate_open doesn't double-log
         decision_logged = False
 
         try:
@@ -370,9 +369,10 @@ class VoiceResponder:
                             return None
                         await self._speak(pending.pop(0), scope=scope)
 
-            # Stream ended undecided (very short / whitespace-only reply).
-            # Treat non-empty content as speak path so _on_final's
-            # empty-reply guard runs symmetrically with the streaming case.
+            # stream ended undecided (very short / whitespace-only
+            # reply). treat non-empty content as speak path so
+            # _on_final's empty-reply guard runs symmetrically with
+            # streaming case
             if (
                 not gate_open
                 and silent.decided is None
@@ -410,11 +410,12 @@ class VoiceResponder:
     ) -> str | None:
         """Agentic-loop variant of :meth:`_stream_and_speak`.
 
-        Streams content to TTS as it arrives via ``on_delta``, executes
-        tools after each stream closes, and re-prompts until the model
-        stops calling tools. When an iteration closes with a tool_call
-        and no spoken content, a stock filler phrase is spoken before
-        the handler runs so the user never hears a long silent gap.
+        Streams content to TTS as it arrives via ``on_delta``,
+        executes tools after each stream closes, re-prompts until
+        model stops calling tools. When iteration closes with a
+        tool_call and no spoken content, a stock filler phrase is
+        spoken before handler runs so user never hears long silent
+        gap.
         """
         from familiar_connect.tools.loop import agentic_loop  # noqa: PLC0415
 
@@ -469,15 +470,15 @@ class VoiceResponder:
 
         async def _on_before_tools(assistant: Message) -> None:
             # flush any in-flight sentence boundary so we don't speak
-            # a half-formed clause after tool execution.
+            # a half-formed clause after tool execution
             if gate_open:
                 tail = streamer.flush()
                 if tail.strip():
                     pending.append(tail)
                 await _drain_pending()
             # filler backstop: empty content with imminent tools →
-            # speak a short stock phrase so the user hears acknowledgement
-            # before the silent tool window.
+            # speak short stock phrase so user hears acknowledgement
+            # before silent tool window
             if assistant.tool_calls and not (assistant.content or "").strip():
                 phrase = self._next_filler_phrase()
                 if phrase and not scope.is_cancelled():
@@ -487,9 +488,9 @@ class VoiceResponder:
             assistant: Message,
             tool_msgs: list[Message],
         ) -> None:
-            # only persist intermediate iterations — the terminal
-            # text-only iteration is handled by :meth:`_on_final`
-            # alongside the user turn.
+            # only persist intermediate iterations — terminal
+            # text-only iteration handled by :meth:`_on_final`
+            # alongside user turn
             if not assistant.tool_calls:
                 return
             import json as _json  # noqa: PLC0415 — keep top minimal
@@ -528,14 +529,14 @@ class VoiceResponder:
             )
             return None
 
-        # flush any trailing sentence from the terminal iteration
+        # flush any trailing sentence from terminal iteration
         if gate_open:
             tail = streamer.flush()
             if tail.strip():
                 pending.append(tail)
             await _drain_pending()
         # short / whitespace-only terminal content: still mark respond
-        # so the empty-reply log doesn't double-fire.
+        # so empty-reply log doesn't double-fire
         if not gate_open and silent.decided is None and "".join(accumulated).strip():
             self._log_respond(scope.turn_id)
             decision_logged = True
@@ -545,7 +546,7 @@ class VoiceResponder:
         return "".join(accumulated)
 
     def _next_filler_phrase(self) -> str:
-        """Round-robin select a filler from the configured list."""
+        """Round-robin select filler from configured list."""
         if not self._tool_filler_phrases:
             return ""
         phrase = self._tool_filler_phrases[
@@ -555,7 +556,7 @@ class VoiceResponder:
         return phrase
 
     def _log_respond(self, turn_id: str) -> None:
-        """One ``decision=respond`` line per turn, matching the silent log."""
+        """One ``decision=respond`` line per turn; matches silent log."""
         _logger.info(
             f"{ls.tag('Voice', ls.G)} "
             f"{ls.kv('decision', 'respond', vc=ls.LG)} "
@@ -565,8 +566,8 @@ class VoiceResponder:
     def _log_preempted(self, turn_id: str) -> None:
         """Cancel-before-decision marker.
 
-        Emitted when ``scope.is_cancelled()`` short-circuits the stream
-        loop before silent/respond latched. Without this line a
+        Emitted when ``scope.is_cancelled()`` short-circuits stream
+        loop before silent/respond latched. Without this line, a
         barge-in chain (continuous speaker) leaves a trail of
         ``[LLM call] status=cancelled`` with no way to tell which
         transcript was preempted.
@@ -581,8 +582,8 @@ class VoiceResponder:
         """Skip whitespace-only chunks; ``DiscordVoicePlayer`` would too."""
         if not text.strip():
             return
-        # First call per turn marks tts_first_audio. Recorder dedupes,
-        # so subsequent sentences don't overwrite.
+        # first call per turn marks tts_first_audio. recorder dedupes
+        # so subsequent sentences don't overwrite
         get_voice_budget_recorder().record(
             turn_id=scope.turn_id, phase=PHASE_TTS_FIRST_AUDIO
         )
@@ -597,14 +598,14 @@ class VoiceResponder:
     ) -> None:
         """Emit cold-cache spans; swallow errors.
 
-        Best-effort — instrumentation must never block the reply path.
+        Best-effort — instrumentation must never block reply path.
         """
         try:
             summary = self._sync_history.get_summary(
                 familiar_id=self._familiar_id, channel_id=channel_id
             )
             prior_context = summary.summary_text if summary is not None else ""
-            # Pull the most recent turn's timestamp for silence-gap.
+            # pull most recent turn's timestamp for silence-gap
             recent = self._sync_history.recent(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
@@ -627,7 +628,7 @@ class VoiceResponder:
 
 
 def _parse_voice_session(session_id: str) -> int | None:
-    """``voice:123`` -> ``123``. Returns ``None`` for non-voice sessions."""
+    """``voice:123`` → ``123``; ``None`` for non-voice sessions."""
     if not session_id.startswith("voice:"):
         return None
     try:

@@ -1,14 +1,13 @@
 """FastEmbed-backed Embedder (M6 phase 2).
 
-ONNX-compiled sentence-transformer wrapper. Replaces the ``hash``
-baseline's token-overlap proxy with real semantic similarity — the
+ONNX-compiled sentence-transformer wrapper. Replaces ``hash``
+baseline's token-overlap proxy with real semantic similarity —
 intended production backend for paraphrase-tolerant fact recall.
 
-Lazy load: ``fastembed.TextEmbedding`` is imported on first
-``embed()`` call so the seam stays import-safe without the
-``local-embed`` extra installed. The first call also pays the
-~130 MB BGE-small model download (cached under
-``~/.cache/fastembed`` after that).
+Lazy load: ``fastembed.TextEmbedding`` imported on first ``embed()``
+call so seam stays import-safe without ``local-embed`` extra
+installed. First call also pays ~130 MB BGE-small model download
+(cached under ``~/.cache/fastembed`` after that).
 """
 
 from __future__ import annotations
@@ -23,10 +22,10 @@ _logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
-# Known model dimensionalities. Pre-populated so we can advertise
-# ``dim`` before the first embed call lands; on a model not listed
-# here, ``dim`` stays 0 until the first embed call probes a real
-# vector. Worker logging falls back gracefully on either path.
+# known model dimensionalities. pre-populated so we can advertise
+# ``dim`` before first embed call lands; on a model not listed here,
+# ``dim`` stays 0 until first embed call probes a real vector. worker
+# logging falls back gracefully on either path.
 _KNOWN_DIMS: dict[str, int] = {
     "BAAI/bge-small-en-v1.5": 384,
     "BAAI/bge-base-en-v1.5": 768,
@@ -48,10 +47,10 @@ class FastEmbedEmbedder:
     ) -> None:
         self._model_name = model_name
         self._cache_dir = cache_dir
-        # ``name`` carries the model name so the (fact_id, model)
-        # storage key splits rows by backend version. Upgrading from
-        # BGE-small to BGE-base accumulates new rows without
-        # corrupting the old similarity space.
+        # ``name`` carries model name so (fact_id, model) storage key
+        # splits rows by backend version. upgrading from BGE-small to
+        # BGE-base accumulates new rows without corrupting old
+        # similarity space.
         self.name: str = f"fastembed:{model_name}"
         self.dim: int = _KNOWN_DIMS.get(model_name, 0)
         self._model: Any = None
@@ -61,20 +60,20 @@ class FastEmbedEmbedder:
         if not texts:
             return []
         await self._ensure_loaded()
-        # ``model.embed`` is synchronous + CPU-bound (or GPU when
-        # onnxruntime-gpu is installed). Push to a worker thread so
-        # the asyncio loop keeps draining.
+        # ``model.embed`` synchronous + CPU-bound (or GPU when
+        # onnxruntime-gpu installed). push to worker thread so asyncio
+        # loop keeps draining.
         vectors = await asyncio.to_thread(self._embed_sync, texts)
-        # Update ``dim`` opportunistically the first time we see a
-        # real vector — covers models not in ``_KNOWN_DIMS``.
+        # update ``dim`` opportunistically first time we see a real
+        # vector — covers models not in ``_KNOWN_DIMS``.
         if vectors and not self.dim:
             self.dim = len(vectors[0])
         return vectors
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
-        """Run the model synchronously. Called from a worker thread."""
-        # ``model.embed`` yields numpy.ndarray; iterate to a list of
-        # floats without forcing a numpy import in the public surface.
+        """Run model synchronously. Called from worker thread."""
+        # ``model.embed`` yields numpy.ndarray; iterate to list of
+        # floats without forcing numpy import in public surface.
         return [[float(x) for x in vec] for vec in self._model.embed(texts)]
 
     async def _ensure_loaded(self) -> None:
@@ -86,7 +85,7 @@ class FastEmbedEmbedder:
             self._model = await asyncio.to_thread(self._load_model)
 
     def _load_model(self) -> Any:  # noqa: ANN401 — opaque TextEmbedding
-        """Import fastembed and load the model. Blocking."""
+        """Import fastembed, load model. Blocking."""
         try:
             from fastembed import (  # ty: ignore[unresolved-import]  # noqa: PLC0415
                 TextEmbedding,

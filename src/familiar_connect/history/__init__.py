@@ -1,13 +1,9 @@
-"""Persistent conversation history for the bot.
+"""Persistent conversation history.
 
-The :class:`HistoryStore` is the SQLite-backed record of every
-conversational turn the bot sees, plus a per-(guild, familiar,
-channel) cache of rolling summaries built from older turns by a
-cheap side-model. The bot's text-session and voice-session loops
-write turns into it; the context pipeline's
-:class:`HistoryProvider` reads from it.
+:class:`HistoryStore` — SQLite-backed turn log plus per-(guild,
+familiar, channel) rolling summary cache. Text/voice loops write;
+:class:`HistoryProvider` reads.
 
-:class:`AsyncHistoryStore` wraps :class:`HistoryStore` so that all
-SQLite calls run on a dedicated background thread rather than blocking
-the event loop.
+:class:`AsyncHistoryStore` dispatches SQLite calls to background
+thread; keeps event loop free.
 """

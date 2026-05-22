@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class SubscriptionKind(Enum):
-    """Text or voice — distinct rows even when a channel hosts both."""
+    """Text or voice — distinct rows even when channel hosts both."""
 
     text = "text"
     voice = "voice"
@@ -35,8 +35,8 @@ class Subscription:
 class SubscriptionRegistry:
     """In-memory set backed by TOML sidecar.
 
-    Loads on construction; mutations rewrite the whole file (tens of
-    rows at most).
+    Loads on construction; mutations rewrite whole file (tens of rows
+    at most).
     """
 
     def __init__(self, path: Path) -> None:
@@ -61,7 +61,7 @@ class SubscriptionRegistry:
         return self._rows.get((channel_id, kind))
 
     def voice_in_guild(self, guild_id: int) -> Subscription | None:
-        """Voice subscription in ``guild_id`` if any.
+        """Voice subscription in ``guild_id``, if any.
 
         At most one per guild (``discord.VoiceClient`` constraint).
         """
@@ -71,7 +71,7 @@ class SubscriptionRegistry:
         return None
 
     # ------------------------------------------------------------------
-    # Mutations (each one writes the whole file)
+    # Mutations (each writes whole file)
     # ------------------------------------------------------------------
 
     def add(
@@ -91,7 +91,7 @@ class SubscriptionRegistry:
         return sub
 
     def remove(self, *, channel_id: int, kind: SubscriptionKind) -> None:
-        """Remove subscription for ``(channel_id, kind)``; no-op if absent."""
+        """Remove ``(channel_id, kind)``; no-op if absent."""
         if self._rows.pop((channel_id, kind), None) is not None:
             self._save()
 

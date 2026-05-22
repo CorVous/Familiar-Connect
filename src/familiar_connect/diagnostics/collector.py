@@ -1,11 +1,10 @@
 """In-process span collector — ring buffer of recent ``@span`` calls.
 
-Feeds the :meth:`/diagnostics` slash command (Phase 5.2) with a
-breakdown of the last-turn's timings without needing to re-parse logs
-at runtime.
+Feeds :meth:`/diagnostics` slash command (Phase 5.2) with a
+breakdown of last-turn timings without re-parsing logs at runtime.
 
-Logs-first remains the durable record; the collector is a convenience
-for the live slash command and nothing more.
+Logs-first remains durable record; collector is a convenience for
+the live slash command, nothing more.
 """
 
 from __future__ import annotations
@@ -51,8 +50,8 @@ class SpanCollector:
     def summary(self) -> dict[str, dict[str, float]]:
         """Return ``{span_name: {count, p50, p95, last_ms}}``.
 
-        Percentiles computed from in-buffer records; if the buffer
-        has been cycling they reflect only the recent window.
+        Percentiles computed from in-buffer records; if buffer has
+        been cycling, they reflect only the recent window.
         """
         buckets = self.by_name()
         out: dict[str, dict[str, float]] = {}
@@ -85,14 +84,14 @@ def _percentile(sorted_values: list[int], pct: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# module-level singleton
 # ---------------------------------------------------------------------------
 
 _collector: SpanCollector | None = None
 
 
 def get_span_collector(maxlen: int = 2000) -> SpanCollector:
-    """Return the process-wide :class:`SpanCollector`, creating on first use."""
+    """Return process-wide :class:`SpanCollector`, creating on first use."""
     global _collector  # noqa: PLW0603
     if _collector is None:
         _collector = SpanCollector(maxlen=maxlen)
@@ -100,6 +99,6 @@ def get_span_collector(maxlen: int = 2000) -> SpanCollector:
 
 
 def reset_span_collector() -> None:
-    """Reset the singleton — for tests only."""
+    """Reset singleton — tests only."""
     global _collector  # noqa: PLW0603
     _collector = None

@@ -1,4 +1,4 @@
-"""Version subcommand - display package version."""
+"""``version`` subcommand — display package version."""
 
 import argparse
 import logging
@@ -13,12 +13,6 @@ def add_parser(
     subparsers: argparse._SubParsersAction,
     common_parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
-    """Register the version subcommand.
-
-    :param subparsers: Subparser action from main parser
-    :param common_parser: Parent parser with common arguments
-    :return: The created subparser
-    """
     parser = subparsers.add_parser(
         "version",
         parents=[common_parser],
@@ -30,11 +24,6 @@ def add_parser(
 
 
 def run(_args: argparse.Namespace) -> int:
-    """Execute the version command.
-
-    :param _args: Parsed command-line arguments (unused)
-    :return: Exit code (0 for success)
-    """
     print(  # noqa: T201
         f"{ls.tag('✨ Version', ls.C)} "
         f"{ls.word('familiar-connect', ls.W)} "

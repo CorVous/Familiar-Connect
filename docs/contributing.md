@@ -1,6 +1,6 @@
 # Contributing
 
-Dev workflow and expectations for Familiar-Connect.
+Dev workflow and expectations.
 
 ## Environment setup
 
@@ -10,7 +10,7 @@ Dependencies via [uv](https://docs.astral.sh/uv/). Update `uv` first:
 uv self update
 ```
 
-Install project + dev + docs groups, plus the `local-turn` extra (numpy + huggingface_hub are imported by the test suite):
+Install project + dev + docs groups plus the `local-turn` extra (numpy + huggingface_hub are imported by test collection):
 
 ```bash
 uv sync --dev --group docs --extra local-turn
@@ -40,7 +40,7 @@ uv run ty check               # type-check
 uv run pytest                 # run suite
 ```
 
-Cheap and fast on a clean tree. Local failures will fail CI the same way — fix root cause before pushing.
+Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing.
 
 Tests marked `@pytest.mark.integration` hit live services (e.g. OpenRouter) and skip by default. Run explicitly:
 
@@ -65,7 +65,7 @@ uv run mkdocs build --strict
 ## Commit style
 
 - Conventional prefix (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`) + imperative description.
-- Body explains *why*, not *what* — the diff shows the what.
+- Body explains *why*, not *what* — diff shows the what.
 - Keep commits focused. Bug fix shouldn't drag a refactor; refactor shouldn't drag a bug fix.
 
 ## Scope discipline

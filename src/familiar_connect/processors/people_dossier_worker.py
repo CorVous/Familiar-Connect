@@ -1,18 +1,18 @@
 """Watermark-driven people-dossier worker.
 
-For each ``canonical_key`` that appears as a subject on at least one
+For each ``canonical_key`` appearing as subject on at least one
 current fact, maintains a compounded summary in ``people_dossiers``.
-Refreshes when the subject's max ``facts.id`` exceeds the dossier's
+Refreshes when subject's max ``facts.id`` exceeds dossier's
 ``last_fact_id`` watermark — same compounding shape as
 :class:`SummaryWorker` so dossier cost stays bounded.
 
-Cadence is intentionally a quarter of :class:`SummaryWorker`'s tick
+Cadence intentionally a quarter of :class:`SummaryWorker`'s tick
 (20 s vs 5 s): people facts churn slower than turn-by-turn summaries,
-and dossiers are read off SQLite by :class:`PeopleDossierLayer`
-during prompt assembly — the read path doesn't wait on the worker.
+and dossiers read off SQLite by :class:`PeopleDossierLayer` during
+prompt assembly — read path doesn't wait on worker.
 
-All LLM traffic is ``chat`` (not ``chat_stream``) — the worker runs
-off the hot path.
+All LLM traffic is ``chat`` (not ``chat_stream``) — worker runs off
+hot path.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ _logger = logging.getLogger("familiar_connect.processors.people_dossier_worker")
 
 
 class PeopleDossierWorker:
-    """Rebuilds per-person dossiers off the facts watermark."""
+    """Rebuilds per-person dossiers off facts watermark."""
 
     name: str = "people-dossier-worker"
 
@@ -58,7 +58,7 @@ class PeopleDossierWorker:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Forever loop — tick on an interval. Cancel to stop."""
+        """Forever loop; tick on interval. Cancel to stop."""
         while True:
             try:
                 await self.tick()
@@ -113,7 +113,7 @@ class PeopleDossierWorker:
         reply = await self._llm.chat(prompt)
         text = reply.content.strip()
         if not text:
-            # Don't overwrite a real dossier with an empty reply.
+            # don't overwrite real dossier with empty reply
             return
         await self._store.put_people_dossier(
             familiar_id=self._familiar_id,

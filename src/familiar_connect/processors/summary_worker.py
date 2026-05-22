@@ -1,21 +1,21 @@
 """Watermark-driven summary worker.
 
-Regenerates two kinds of summaries from the raw ``turns`` table:
+Regenerates two kinds of summaries from raw ``turns`` table:
 
-- **Per-channel rolling summary** (stored in ``summaries``): when the
+- **Per-channel rolling summary** (stored in ``summaries``): when
   channel's ``latest_id - last_summarised_id`` exceeds
-  ``turns_threshold``, the worker produces a new summary by feeding
-  the prior summary plus the new turns to the LLM. Compounding
-  strategy keeps cost bounded; a periodic full recompute is a
-  future-phase addition (see plan § Design.4).
+  ``turns_threshold``, worker produces new summary by feeding prior
+  summary plus new turns to LLM. Compounding strategy keeps cost
+  bounded; periodic full recompute is future-phase addition (see
+  plan § Design.4).
 - **Cross-channel summary** (stored in ``cross_context_summaries``):
   per ``(viewer_channel, source_channel)`` pair listed in
-  ``cross_channel_map``, a summary is produced whenever the source
-  channel has gained ``cross_k`` new turns since the last cached
-  entry. Used by :class:`CrossChannelContextLayer`.
+  ``cross_channel_map``, summary produced whenever source channel
+  gains ``cross_k`` new turns since last cached entry. Used by
+  :class:`CrossChannelContextLayer`.
 
-All LLM traffic is ``chat`` (not ``chat_stream``) — the summary
-worker runs off the hot path.
+All LLM traffic is ``chat`` (not ``chat_stream``) — summary worker
+runs off hot path.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ class SummaryWorker:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Forever loop — tick on an interval. Cancel to stop."""
+        """Forever loop; tick on interval. Cancel to stop."""
         while True:
             try:
                 await self.tick()
@@ -82,7 +82,7 @@ class SummaryWorker:
 
     @span("summary.tick")
     async def tick(self) -> None:
-        """One pass: refresh any stale rolling + cross-channel summaries."""
+        """One pass; refresh any stale rolling + cross-channel summaries."""
         channels = await self._channels_with_turns()
         for channel_id in channels:
             await self._maybe_refresh_rolling(channel_id)
@@ -197,7 +197,7 @@ class SummaryWorker:
     # ------------------------------------------------------------------
 
     async def _channels_with_turns(self) -> set[int]:
-        """Return channels that have at least one turn for this familiar."""
+        """Channels with at least one turn for this familiar."""
         return await self._store.all_channel_ids(familiar_id=self._familiar_id)
 
     async def _turns_in_range(

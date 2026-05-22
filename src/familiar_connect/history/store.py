@@ -6,15 +6,15 @@ One database per familiar. Two core tables:
   monotonic PK, role, optional :class:`Author`, content, optional
   guild_id, UTC ts
 - ``summaries`` — at most one rolling summary per (familiar, channel)
-  with a ``last_summarised_id`` watermark for cache freshness.
+  with ``last_summarised_id`` watermark for cache freshness.
   See ``docs/architecture/context-pipeline.md`` for rationale.
 
 Relational storage uses Turso (SQLite-compatible Rust rewrite); FTS
-lives in a sibling tantivy index under ``fts/turns/`` and ``fts/facts/``
-because pyturso wheels don't ship the FTS module.
+lives in a sibling tantivy index under ``fts/turns/`` +
+``fts/facts/`` since pyturso wheels don't ship FTS.
 
 ``familiar_id`` is explicit (not implicit) so tests can exercise
-multiple familiars against one store. Synchronous API; the
+multiple familiars against one store. Sync API;
 :class:`AsyncHistoryStore` wrapper dispatches calls to a thread pool
 that funnels every Turso call onto one dedicated OS thread inside
 :class:`TursoConnection`.
@@ -38,8 +38,8 @@ from familiar_connect.identity import Author
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-# Result rows come back as ``turso.Row``; spell as ``Any`` to keep the
-# private ``_row_to_*`` helpers free of a third-party type alias.
+# result rows come back as ``turso.Row``; spell as ``Any`` to keep
+# private ``_row_to_*`` helpers free of a third-party type alias
 Row = Any
 
 PathLike = str | Path
@@ -49,14 +49,14 @@ PathLike = str | Path
 class HistoryTurn:
     """Single persisted conversational turn.
 
-    :param platform_message_id: native id from the platform of origin
+    :param platform_message_id: native id from platform of origin
         (Discord snowflake, etc.). ``None`` for legacy rows or
         platform-less inputs.
     :param reply_to_message_id: parent ``platform_message_id`` when
         this turn is a reply (e.g. ``message.reference`` on Discord).
-    :param guild_id: Discord guild scoping per-guild nicknames for
-        rendering. ``None`` for DMs / non-Discord platforms / legacy
-        rows where the column wasn't populated.
+    :param guild_id: Discord guild scoping per-guild nicknames.
+        ``None`` for DMs / non-Discord / legacy rows where column
+        wasn't populated.
     """
 
     id: int
@@ -100,7 +100,7 @@ class CrossContextEntry:
 
 @dataclass(frozen=True)
 class WatermarkEntry:
-    """Tracks the last turn id written to long-term memory by the memory writer."""
+    """Last turn id written to long-term memory by the memory writer."""
 
     last_written_id: int
     created_at: datetime
@@ -110,9 +110,10 @@ class WatermarkEntry:
 class AccountProfile:
     """Read-side projection of ``accounts`` profile metadata.
 
-    Populated on Discord ingestion via :meth:`HistoryStore.upsert_account`;
-    consumed by :class:`PeopleDossierLayer` to surface basic identity
-    (username, pronouns, bio) on the prompt header.
+    Populated on Discord ingestion via
+    :meth:`HistoryStore.upsert_account`; consumed by
+    :class:`PeopleDossierLayer` to surface basic identity (username,
+    pronouns, bio) on the prompt header.
     """
 
     canonical_key: str
@@ -126,7 +127,7 @@ class AccountProfile:
 class PeopleDossierEntry:
     """Cached per-person dossier compounded from facts mentioning ``canonical_key``.
 
-    ``last_fact_id`` is a watermark over ``facts.id`` — the worker
+    ``last_fact_id`` is a watermark over ``facts.id`` — worker
     refreshes when ``subjects_with_facts`` reports a higher id for
     this subject. Mirrors :class:`SummaryEntry`.
     """
@@ -141,16 +142,16 @@ class PeopleDossierEntry:
 class FactSubject:
     """Soft link from a fact to one canonical identity.
 
-    The extractor's best guess at *who* a fact is about. Provisional —
-    mic-sharing, relayed quotes, ambiguous mentions all break a clean
-    1:1 mapping. Stored to enable display-name resolution at read time
-    without claiming authoritative subject identification.
+    Extractor's best guess at *who* a fact is about. Provisional —
+    mic-sharing, relayed quotes, ambiguous mentions all break a
+    clean 1:1 mapping. Stored to enable display-name resolution at
+    read time without claiming authoritative subject identification.
 
     :param canonical_key: stable ``platform:user_id`` from
         :class:`~familiar_connect.identity.Author`.
-    :param display_at_write: display name as seen by the extractor
-        when the fact was authored. Used as a substring anchor at
-        read time when the current display name differs.
+    :param display_at_write: display name as seen by extractor when
+        fact was authored. Substring anchor at read time when
+        current display name differs.
     """
 
     canonical_key: str
@@ -161,17 +162,18 @@ class FactSubject:
 class Reflection:
     """Higher-order synthesis over recent turns + facts (M3).
 
-    Written by :class:`ReflectionWorker`; read by
+    Written by :class:`ReflectionWorker`, read by
     :class:`ReflectionLayer`. ``cited_turn_ids`` / ``cited_fact_ids``
-    are forever-provenance — never edited, never trimmed. A reflection
-    citing a superseded fact stays in the table; the read path flags
-    it stale rather than dropping it (audit trail beats silent loss).
+    are forever-provenance — never edited, never trimmed. A
+    reflection citing a superseded fact stays in the table; read
+    path flags it stale rather than dropping (audit trail beats
+    silent loss).
 
-    :param last_turn_id: highest ``turns.id`` visible to the worker at
-        write time. Doubles as the next tick's watermark — one row per
+    :param last_turn_id: highest ``turns.id`` visible to worker at
+        write time. Doubles as next tick's watermark — one row per
         write, not a separate table.
-    :param last_fact_id: highest ``facts.id`` visible to the worker at
-        write time. Same role as ``last_turn_id`` for the facts axis.
+    :param last_fact_id: highest ``facts.id`` visible to worker at
+        write time. Same role as ``last_turn_id`` for facts axis.
     """
 
     id: int
@@ -191,23 +193,23 @@ class Fact:
 
     :param source_turn_ids: ids in ``turns`` the fact was distilled
         from — forever provenance, per plan § Design.5.
-    :param superseded_at: system-time — when this fact was retired,
-        or ``None`` if still current. Supersession keeps the row (no
-        delete) so the prior state stays visible for audit.
-    :param superseded_by: id of the replacement fact, or ``None`` if
+    :param superseded_at: system-time — when fact was retired, or
+        ``None`` if still current. Supersession keeps the row (no
+        delete) so prior state stays visible for audit.
+    :param superseded_by: id of replacement fact, or ``None`` if
         still current.
     :param subjects: best-effort canonical-key annotations. Empty
-        tuple for legacy rows or when the extractor couldn't link a
-        name to any participant.
-    :param valid_from: world-time — when the fact began applying.
-        Default is the source turn's timestamp; LLM may override when
-        an explicit "as of …" phrase is detected. ``None`` only on
+        tuple for legacy rows or when extractor couldn't link a name
+        to any participant.
+    :param valid_from: world-time — when fact began applying.
+        Default = source turn's timestamp; LLM may override when an
+        explicit "as of …" phrase is detected. ``None`` only on
         legacy rows pre-M1.
-    :param valid_to: world-time — when the fact stopped applying;
+    :param valid_to: world-time — when fact stopped applying;
         ``None`` while still in effect.
     :param importance: 1-10 hint for retrieval ranking (M2). ``None``
-        on legacy rows or when the extractor declined to score.
-        Treated as the neutral midpoint by rank-time consumers.
+        on legacy rows or when extractor declined to score. Treated
+        as neutral midpoint by rank-time consumers.
     """
 
     id: int
@@ -446,13 +448,13 @@ def _facts_validity_where(
     as_of: datetime | None,
     alias: str = "",
 ) -> tuple[str, tuple[object, ...]]:
-    """Build SQL fragment + params for the ``facts`` validity filter.
+    """Build SQL fragment + params for ``facts`` validity filter.
 
     Default ("current truth"):
         ``superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now)``
 
     With ``as_of``:
-        bi-temporal slice — ``valid_from`` IS NULL or <= as_of, and
+        bi-temporal slice — ``valid_from`` IS NULL or <= as_of;
         ``valid_to`` IS NULL or > as_of. Includes superseded rows so
         audit queries can recover prior beliefs (overrides
         ``include_superseded``).
@@ -478,7 +480,7 @@ def _facts_validity_where(
 class HistoryStore:
     """Persistent SQLite store for turns + rolling summaries.
 
-    Pass ``":memory:"`` for an ephemeral in-process database (tests).
+    ``":memory:"`` for ephemeral in-process DB (tests).
     """
 
     def __init__(self, db_path: PathLike) -> None:
@@ -506,7 +508,7 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Shut down executor, FTS writers, and Turso connections."""
+        """Shut down executor, FTS writers, Turso connections."""
         self._executor.shutdown(wait=False)
         try:
             self._fts_turns.close()
@@ -535,15 +537,15 @@ class HistoryStore:
         tool_calls_json: str | None = None,
         tool_call_id: str | None = None,
     ) -> HistoryTurn:
-        """Append a single turn and return its persisted form.
+        """Append a single turn; return persisted form.
 
-        *mode* is a free-form string tag on the ``turns.mode`` column.
+        *mode* is a free-form string tag on ``turns.mode``.
         *platform_message_id* / *reply_to_message_id* are platform-
         native ids (Discord snowflakes, etc.) stored as TEXT so any
-        platform's id format fits.
-        *tool_calls_json* carries the assistant's invoked tool calls
-        (JSON-encoded list); *tool_call_id* references the call a
-        ``role=tool`` turn is answering.
+        platform's id format fits. *tool_calls_json* carries the
+        assistant's invoked tool calls (JSON-encoded list);
+        *tool_call_id* references the call a ``role=tool`` turn is
+        answering.
         """
         timestamp = datetime.now(tz=UTC)
         platform = author.platform if author is not None else None
@@ -597,11 +599,11 @@ class HistoryStore:
         familiar_id: str,
         platform_message_id: str,
     ) -> HistoryTurn | None:
-        """Find the turn carrying ``platform_message_id`` for ``familiar_id``.
+        """Find turn carrying ``platform_message_id`` for ``familiar_id``.
 
-        Returns ``None`` if no row matches — used by the read path to
-        resolve reply parents. The column index
-        ``idx_turns_platform_msg`` keeps this O(1) per familiar.
+        ``None`` if no row matches — used by read path to resolve
+        reply parents. Index ``idx_turns_platform_msg`` keeps this
+        O(1) per familiar.
         """
         row = self._conn.execute(
             f"""
@@ -629,8 +631,8 @@ class HistoryStore:
         Used when Discord delivers a URL unfurl after the original
         ``on_message`` (typical: ``message.embeds`` populates via a
         follow-up edit a second or two later). Silently no-ops when
-        no row matches — the bot may have come up after the message
-        landed. Refreshes the tantivy index for the affected row.
+        no row matches — bot may have come up after the message
+        landed. Refreshes tantivy index for the affected row.
         """
         rows = self._conn.execute(
             "SELECT id FROM turns WHERE familiar_id = ? AND platform_message_id = ?",
@@ -657,7 +659,7 @@ class HistoryStore:
         """Fetch turns by id, scoped to ``familiar_id``, oldest first.
 
         Used by RAG to expand each FTS hit into a small surrounding
-        window (hit ± neighbours) without a per-id round trip.
+        window (hit ± neighbours) without per-id round trips.
         """
         unique_ids = sorted({int(i) for i in ids})
         if not unique_ids:
@@ -685,11 +687,11 @@ class HistoryStore:
         turn_id: int,
         canonical_keys: Iterable[str],
     ) -> None:
-        """Record the canonical keys mentioned in ``turn_id``.
+        """Record canonical keys mentioned in ``turn_id``.
 
-        Idempotent — re-recording the same keys is a no-op thanks to
-        the (turn_id, canonical_key) primary key. Empty input is a
-        no-op too. Order is not preserved; reads come back sorted by
+        Idempotent — re-recording same keys is a no-op thanks to
+        (turn_id, canonical_key) primary key. Empty input is a no-op
+        too. Order not preserved; reads come back sorted by
         canonical_key for determinism.
         """
         seen: set[str] = set()
@@ -711,7 +713,7 @@ class HistoryStore:
         self._conn.commit()
 
     def mentions_for_turn(self, *, turn_id: int) -> tuple[str, ...]:
-        """Return the canonical keys mentioned in ``turn_id``, sorted."""
+        """Canonical keys mentioned in ``turn_id``, sorted."""
         rows = self._conn.execute(
             """
             SELECT canonical_key FROM turn_mentions
@@ -737,9 +739,9 @@ class HistoryStore:
         """Upsert reaction count for one ``(message, emoji)`` pair.
 
         ``count <= 0`` deletes the row — mirrors Discord semantics
-        where the last user removing a reaction collapses the entry.
+        where last user removing a reaction collapses the entry.
         Idempotent for repeated identical writes (gateway dedup is
-        cheap insurance here).
+        cheap insurance).
         """
         if count <= 0:
             self._conn.execute(
@@ -776,11 +778,11 @@ class HistoryStore:
     ) -> None:
         """Atomic ±delta on one ``(message, emoji)`` row.
 
-        Drives the gateway hot path —``on_raw_reaction_add`` /
+        Drives gateway hot path — ``on_raw_reaction_add`` /
         ``on_raw_reaction_remove`` deliver per-user toggles, never
-        absolute counts. Floors at zero (a stray remove without a
-        matching add — e.g. bot was offline when the reaction was
-        added — leaves no row rather than persisting a negative).
+        absolute counts. Floors at zero (stray remove without a
+        matching add — e.g. bot was offline when reaction was added
+        — leaves no row rather than persisting a negative).
         """
         if delta == 0:
             return
@@ -823,7 +825,7 @@ class HistoryStore:
         platform_message_id: str,
         emoji: str | None = None,
     ) -> None:
-        """Drop reactions on one message — all (``emoji=None``) or a single emoji.
+        """Drop reactions on one message — all (``emoji=None``) or single emoji.
 
         Mirrors ``on_raw_reaction_clear`` (no emoji) and
         ``on_raw_reaction_clear_emoji`` (single emoji wiped).
@@ -855,10 +857,10 @@ class HistoryStore:
         familiar_id: str,
         platform_message_ids: Iterable[str],
     ) -> dict[str, tuple[tuple[str, int], ...]]:
-        """Batch lookup reactions for many messages in one query.
+        """Batch reaction lookup for many messages in one query.
 
         Returns ``{platform_message_id: ((emoji, count), ...)}`` —
-        messages with no reactions are absent. Per-message tuples are
+        messages with no reactions are absent. Per-message tuples
         ordered by descending count, then emoji asc for stable ties.
         """
         ids = [str(m) for m in platform_message_ids if m]
@@ -891,7 +893,7 @@ class HistoryStore:
         limit: int,
         mode: str | None = None,
     ) -> list[HistoryTurn]:
-        """Return most recent turns in channel, oldest-first.
+        """Most recent turns in channel, oldest-first.
 
         Per-channel partitioning prevents bleed between conversations.
         When *mode* is set, only matching legacy-tag turns returned.
@@ -929,11 +931,11 @@ class HistoryStore:
         channel_id: int,
         limit: int,
     ) -> list[Author]:
-        """Return up to *limit* most-recently-seen distinct user authors.
+        """Up to *limit* most-recently-seen distinct user authors.
 
-        Most-recent-first ordering by canonical key (platform + user_id).
-        Skips turns without an author (assistant replies, system events).
-        Scoped to one channel — matches :meth:`recent`.
+        Most-recent-first by canonical key (platform + user_id).
+        Skips turns without an author (assistant replies, system
+        events). Scoped to one channel — matches :meth:`recent`.
         """
         if limit <= 0:
             return []
@@ -968,15 +970,16 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     def upsert_account(self, author: Author) -> None:
-        """Insert or refresh the canonical identity row for an Author.
+        """Insert or refresh canonical identity row for an Author.
 
-        Last-write wins on ``username`` / ``global_name`` / ``pronouns``
-        / ``bio``; ``last_seen_at`` always stamps now. ``canonical_key``
-        is the primary key, so re-upserting an existing user is cheap.
-        Profile fields (pronouns, bio) only overwrite when the new
-        value is non-NULL — bot tokens often can't read them, so a
-        later read shouldn't clobber a richer earlier observation.
-        Does not touch per-guild nicks — see :meth:`upsert_guild_nick`.
+        Last-write wins on ``username`` / ``global_name`` /
+        ``pronouns`` / ``bio``; ``last_seen_at`` always stamps now.
+        ``canonical_key`` is the primary key, so re-upserting an
+        existing user is cheap. Profile fields (pronouns, bio) only
+        overwrite when new value is non-NULL — bot tokens often
+        can't read them, so a later read shouldn't clobber a richer
+        earlier observation. Does not touch per-guild nicks — see
+        :meth:`upsert_guild_nick`.
         """
         ts = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
@@ -1008,9 +1011,9 @@ class HistoryStore:
     def get_account_profile(self, *, canonical_key: str) -> AccountProfile | None:
         """Return cached profile fields for ``canonical_key``.
 
-        Powers the per-person header in :class:`PeopleDossierLayer` —
-        cheap lookup against the ``accounts`` table. ``None`` when no
-        row exists; missing columns surface as ``None`` on the result.
+        Powers per-person header in :class:`PeopleDossierLayer` —
+        cheap lookup against ``accounts``. ``None`` when no row
+        exists; missing columns surface as ``None`` on the result.
         """
         row = self._conn.execute(
             """
@@ -1037,13 +1040,13 @@ class HistoryStore:
         guild_id: int,
         nick: str | None,
     ) -> None:
-        """Cache a per-guild nickname. ``nick=None`` records "no override".
+        """Cache per-guild nickname. ``nick=None`` records "no override".
 
-        Per-guild row is keyed by ``(canonical_key, guild_id)``, so a
+        Per-guild row keyed by ``(canonical_key, guild_id)`` — a
         user with distinct nicks per guild gets distinct rows. NULL
-        ``nick`` is meaningful: it says "we observed this user in
-        this guild and they had no nickname override" — distinct from
-        "we've never seen them in this guild" (no row at all).
+        ``nick`` is meaningful: "observed this user in this guild,
+        no nickname override" — distinct from "never seen them in
+        this guild" (no row at all).
         """
         ts = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
@@ -1066,19 +1069,19 @@ class HistoryStore:
         guild_id: int | None,
         familiar_id: str | None = None,
     ) -> str:
-        """Return the best display name for ``canonical_key`` in *guild_id*.
+        """Best display name for ``canonical_key`` in *guild_id*.
 
         Preference order:
         1. ``account_guild_nicks.nick`` for ``(canonical_key, guild_id)``
         2. ``accounts.global_name``
         3. ``accounts.username``
         4. ``latest_author_for(familiar_id, canonical_key).label`` —
-           snapshot from the most recent turn. Useful for legacy rows
+           snapshot from most recent turn. Useful for legacy rows
            where no ``accounts`` upsert has happened. Skipped when
-           *familiar_id* is omitted.
+           *familiar_id* omitted.
         5. bare ``user_id`` parsed from canonical_key
 
-        Always returns a non-empty string — unknown keys still produce
+        Always non-empty string — unknown keys still produce
         ``"<user_id>"`` so callers don't have to handle ``None``.
         """
         if guild_id is not None:
@@ -1103,17 +1106,17 @@ class HistoryStore:
                 return str(row["global_name"])
             if row["username"]:
                 return str(row["username"])
-        # Snapshot fallback: the latest turn carries an Author whose
-        # display_name was correct at the moment of writing. Cheaper
-        # than a join, and a sensible "last we saw them" answer for
-        # legacy rows that pre-date the accounts table.
+        # snapshot fallback: latest turn carries an Author whose
+        # display_name was correct at write time. cheaper than a
+        # join; sensible "last we saw them" answer for legacy rows
+        # pre-dating the accounts table.
         if familiar_id is not None:
             snapshot = self.latest_author_for(
                 familiar_id=familiar_id, canonical_key=canonical_key
             )
             if snapshot is not None:
                 return snapshot.label
-        # Fall back to the user_id portion of the canonical_key.
+        # fall back to user_id portion of canonical_key
         if ":" in canonical_key:
             return canonical_key.partition(":")[2] or canonical_key
         return canonical_key
@@ -1128,14 +1131,13 @@ class HistoryStore:
         familiar_id: str,
         canonical_key: str,
     ) -> Author | None:
-        """Return the :class:`Author` from the most recent turn with this key.
+        """:class:`Author` from most recent turn with this key.
 
-        Display names rotate (Discord/Twitch nicks); the latest turn
-        carries the freshest one. Returns ``None`` if no turn matches —
-        e.g. the user hasn't spoken in this familiar, or the
-        canonical_key isn't well-formed. Used by
-        :class:`RagContextLayer` to resolve stale fact-subject names
-        at read time.
+        Display names rotate (Discord/Twitch nicks); latest turn
+        carries the freshest one. ``None`` if no turn matches — e.g.
+        user hasn't spoken in this familiar, or canonical_key isn't
+        well-formed. Used by :class:`RagContextLayer` to resolve
+        stale fact-subject names at read time.
         """
         if ":" not in canonical_key:
             return None
@@ -1209,7 +1211,7 @@ class HistoryStore:
         familiar_id: str,
         channel_id: int | None = None,
     ) -> int | None:
-        """Return highest turn id (watermark for cache freshness).
+        """Highest turn id (watermark for cache freshness).
 
         *channel_id* scopes to one channel; omit for global max.
         """
@@ -1241,7 +1243,7 @@ class HistoryStore:
         familiar_id: str,
         channel_id: int | None = None,
     ) -> int:
-        """Return number of stored turns. *channel_id* scopes to one channel."""
+        """Count stored turns. *channel_id* scopes to one channel."""
         if channel_id is None:
             row = self._conn.execute(
                 """
@@ -1273,7 +1275,7 @@ class HistoryStore:
         familiar_id: str,
         channel_id: int = 0,
     ) -> SummaryEntry | None:
-        """Return the cached summary for the familiar + channel, or ``None``."""
+        """Fetch cached summary for familiar + channel, or ``None``."""
         row = self._conn.execute(
             """
             SELECT last_summarised_id, summary_text, created_at
@@ -1298,7 +1300,7 @@ class HistoryStore:
         summary_text: str,
         channel_id: int = 0,
     ) -> None:
-        """Insert or replace the summary for the familiar + channel."""
+        """Insert or replace summary for familiar + channel."""
         timestamp = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
             """
@@ -1332,9 +1334,9 @@ class HistoryStore:
         familiar_id: str,
         exclude_channel_id: int,
     ) -> list[OtherChannelInfo]:
-        """Return other channels with activity, most-recently-active first.
+        """Other channels with activity, most-recently-active first.
 
-        Each row carries latest mode, turn id, and timestamp.
+        Each row carries latest mode, turn id, timestamp.
         """
         rows = self._conn.execute(
             """
@@ -1358,7 +1360,7 @@ class HistoryStore:
         ]
 
     def all_channel_ids(self, *, familiar_id: str) -> set[int]:
-        """Return the set of all channel ids that have turns for *familiar_id*."""
+        """All channel ids with turns for *familiar_id*."""
         rows = self._conn.execute(
             "SELECT DISTINCT channel_id FROM turns WHERE familiar_id = ?",
             (familiar_id,),
@@ -1375,7 +1377,7 @@ class HistoryStore:
     ) -> list[HistoryTurn]:
         """Return turns whose id falls in ``(min_id_exclusive, max_id_inclusive]``.
 
-        When *channel_id* is given, restricts to that channel.
+        *channel_id* restricts to that channel when given.
         """
         if channel_id is not None:
             rows = self._conn.execute(
@@ -1405,7 +1407,7 @@ class HistoryStore:
         return [_row_to_turn(r) for r in rows]
 
     def all_fact_ids(self, *, familiar_id: str) -> set[int]:
-        """Return all fact ids for *familiar_id*, including superseded ones."""
+        """All fact ids for *familiar_id*, including superseded."""
         rows = self._conn.execute(
             "SELECT id FROM facts WHERE familiar_id = ?",
             (familiar_id,),
@@ -1419,7 +1421,7 @@ class HistoryStore:
         viewer_mode: str,
         source_channel_id: int,
     ) -> CrossContextEntry | None:
-        """Return the cached cross-context summary, or ``None``."""
+        """Fetch cached cross-context summary, or ``None``."""
         row = self._conn.execute(
             """
             SELECT source_last_id, summary_text, created_at
@@ -1481,7 +1483,7 @@ class HistoryStore:
         *,
         familiar_id: str,
     ) -> WatermarkEntry | None:
-        """Return the memory-writer watermark for *familiar_id*, or ``None``."""
+        """Memory-writer watermark for *familiar_id*, or ``None``."""
         row = self._conn.execute(
             """
             SELECT last_written_id, created_at
@@ -1503,7 +1505,7 @@ class HistoryStore:
         familiar_id: str,
         last_written_id: int,
     ) -> None:
-        """Insert or replace the memory-writer watermark for *familiar_id*."""
+        """Insert or replace memory-writer watermark for *familiar_id*."""
         timestamp = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
             """
@@ -1525,9 +1527,9 @@ class HistoryStore:
         familiar_id: str,
         limit: int = 10_000,
     ) -> list[HistoryTurn]:
-        """Return turns after the memory-writer watermark, oldest first.
+        """Return turns after memory-writer watermark, oldest first.
 
-        If no watermark has been set, returns all turns for the familiar.
+        Returns all turns for the familiar when no watermark set.
         """
         wm = self.get_writer_watermark(familiar_id=familiar_id)
         min_id = wm.last_written_id if wm is not None else 0
@@ -1554,7 +1556,7 @@ class HistoryStore:
         familiar_id: str,
         canonical_key: str,
     ) -> PeopleDossierEntry | None:
-        """Return the cached dossier for ``canonical_key``, or ``None``."""
+        """Fetch cached dossier for ``canonical_key``, or ``None``."""
         row = self._conn.execute(
             """
             SELECT canonical_key, last_fact_id, dossier_text, created_at
@@ -1580,7 +1582,7 @@ class HistoryStore:
         last_fact_id: int,
         dossier_text: str,
     ) -> None:
-        """Insert or replace the dossier for ``canonical_key``."""
+        """Insert or replace dossier for ``canonical_key``."""
         ts = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
             """
@@ -1601,11 +1603,11 @@ class HistoryStore:
     def subjects_with_facts(self, *, familiar_id: str) -> dict[str, int]:
         """Map ``canonical_key`` → ``max(facts.id)`` across current facts.
 
-        Excludes superseded facts — the dossier should track current
-        truth, and a subject whose only facts are stale shouldn't keep
-        showing up as a refresh candidate. Scans ``subjects_json`` in
-        Python; fine at expected per-familiar volumes (a SQLite virtual
-        index would be a later optimisation if profiling demands it).
+        Excludes superseded facts — dossier tracks current truth; a
+        subject whose only facts are stale shouldn't keep showing up
+        as refresh candidate. Scans ``subjects_json`` in Python;
+        fine at expected per-familiar volumes (a SQLite virtual
+        index would be a later optimisation if profiling demands).
         """
         rows = self._conn.execute(
             """
@@ -1633,7 +1635,7 @@ class HistoryStore:
                 key = item.get("canonical_key")
                 if not isinstance(key, str):
                     continue
-                # ORDER BY id ASC ⇒ later assignment wins ⇒ max id.
+                # ORDER BY id ASC ⇒ later assignment wins ⇒ max id
                 out[key] = fact_id
         return out
 
@@ -1646,12 +1648,12 @@ class HistoryStore:
         include_superseded: bool = False,
         as_of: datetime | None = None,
     ) -> list[Fact]:
-        """Return facts mentioning ``canonical_key``, ASC by id.
+        """Facts mentioning ``canonical_key``, ASC by id.
 
-        Pre-filters with ``subjects_json LIKE`` (cheap; the JSON form
+        Pre-filters with ``subjects_json LIKE`` — cheap; JSON form
         wraps each key in quotes so substring collisions like
-        ``discord:1`` vs ``discord:11`` don't false-positive). Final
-        membership check parses the JSON in Python. ``as_of`` mirrors
+        ``discord:1`` vs ``discord:11`` don't false-positive. Final
+        membership check parses JSON in Python. ``as_of`` mirrors
         :meth:`recent_facts` semantics.
         """
         where, params = _facts_validity_where(
@@ -1694,24 +1696,24 @@ class HistoryStore:
         channel_id: int | None = None,
         max_id: int | None = None,
     ) -> list[HistoryTurn]:
-        """Return turns whose content matches the FTS *query*.
+        """Search ``turns.content`` via FTS *query*.
 
-        Empty/whitespace *query* and queries that reduce to only
+        Empty/whitespace *query* and queries reducing to only
         stopwords return ``[]``. Tantivy's English analyzer
-        (lowercase + ascii_fold + stopwords + english stemmer) handles
-        tokenisation; the default disjunctive parse ORs the substantive
-        terms together so chat-style cues still rank by BM25 on the
+        (lowercase + ascii_fold + stopwords + english stemmer)
+        handles tokenisation; default disjunctive parse ORs
+        substantive terms so chat-style cues still rank by BM25 on
         nouns that hit.
 
-        :param max_id: if set, only turns with ``id <= max_id`` are
+        :param max_id: if set, only turns with ``id <= max_id``
             considered. Used by :class:`RagContextLayer` to keep RAG
             from re-surfacing turns already covered by
             :class:`RecentHistoryLayer`.
         """
         if limit <= 0:
             return []
-        # Overfetch from FTS so post-filter (familiar/channel/max_id)
-        # doesn't starve the result. Cap at 10x to bound work.
+        # overfetch from FTS so post-filter (familiar/channel/max_id)
+        # doesn't starve the result. cap at 10x to bound work
         fts_limit = max(limit * 4, limit)
         hits = self._fts_turns.search(query, limit=fts_limit)
         if not hits:
@@ -1739,16 +1741,16 @@ class HistoryStore:
             params,
         ).fetchall()
         turns = [_row_to_turn(r) for r in rows]
-        # Re-rank by BM25 desc (higher = better in tantivy), tie-break by
-        # newer-first to match the old ``ORDER BY ..., t.id DESC``.
+        # re-rank by BM25 desc (higher = better in tantivy), tie-break
+        # newer-first to match old ``ORDER BY ..., t.id DESC``
         turns.sort(key=lambda t: (-score_by_id.get(t.id, 0.0), -t.id))
         return turns[:limit]
 
     def rebuild_fts(self) -> None:
-        """Drop and repopulate the tantivy turns index from ``turns``.
+        """Drop and repopulate tantivy turns index from ``turns``.
 
         Cheap relative to re-running every LLM call; cheap enough to
-        run at startup if the index ever gets out of sync.
+        run at startup if index ever gets out of sync.
         """
         self._fts_turns.clear()
         rows = self._conn.execute(
@@ -1757,12 +1759,12 @@ class HistoryStore:
         self._fts_turns.add_many([(int(r["id"]), str(r["content"])) for r in rows])
 
     def latest_fts_id(self, *, familiar_id: str) -> int:
-        """Return the highest turn id currently indexed for ``familiar_id``.
+        """Highest turn id currently indexed for ``familiar_id``.
 
-        The tantivy index is updated synchronously with each
-        :meth:`append_turn`, so the highest indexed id equals the
-        highest ``turns.id`` for the familiar. Cheap MAX query rather
-        than a tantivy round trip.
+        Tantivy index updates synchronously with each
+        :meth:`append_turn`, so highest indexed id equals highest
+        ``turns.id`` for the familiar. Cheap MAX query rather than a
+        tantivy round trip.
         """
         row = self._conn.execute(
             "SELECT MAX(id) AS max_id FROM turns WHERE familiar_id = ?",
@@ -1787,21 +1789,21 @@ class HistoryStore:
         valid_to: datetime | None = None,
         importance: int | None = None,
     ) -> Fact:
-        """Persist one fact. ``source_turn_ids`` and ``subjects`` stored as JSON.
+        """Persist one fact. ``source_turn_ids`` + ``subjects`` stored as JSON.
 
-        ``subjects`` is the extractor's best-effort link to canonical
+        ``subjects`` is extractor's best-effort link to canonical
         identities — see :class:`FactSubject`.
 
-        ``valid_from`` / ``valid_to`` are world-time (when the fact
-        applied in the world). When ``valid_from`` is omitted it
-        defaults to ``created_at``; callers (e.g. ``FactExtractor``)
-        pass the source turn's timestamp explicitly. ``valid_to``
-        defaults to ``None`` — fact still applies.
+        ``valid_from`` / ``valid_to`` are world-time (when fact
+        applied in the world). When ``valid_from`` omitted, defaults
+        to ``created_at``; callers (e.g. ``FactExtractor``) pass the
+        source turn's timestamp explicitly. ``valid_to`` defaults to
+        ``None`` — fact still applies.
 
-        ``importance`` is the extractor's 1-10 ranking hint (M2).
-        Out-of-range values clamp to ``[1, 10]`` so a stray LLM number
-        can't poison rank-time math. ``None`` is preserved verbatim —
-        downstream consumers treat it as a neutral midpoint.
+        ``importance`` is extractor's 1-10 ranking hint (M2).
+        Out-of-range values clamp to ``[1, 10]`` so a stray LLM
+        number can't poison rank-time math. ``None`` preserved
+        verbatim — downstream consumers treat as neutral midpoint.
         """
         ids = [int(i) for i in source_turn_ids]
         subjects_tuple = tuple(subjects)
@@ -1866,14 +1868,14 @@ class HistoryStore:
         include_superseded: bool = False,
         as_of: datetime | None = None,
     ) -> list[Fact]:
-        """Return the ``limit`` most recent facts, newest first.
+        """``limit`` most recent facts, newest first.
 
         Default ("current truth"): excludes superseded facts and any
         whose world-time ``valid_to`` is in the past.
 
-        ``as_of`` switches to a bi-temporal world-time slice — returns
-        facts whose ``valid_from <= as_of`` and (``valid_to`` is NULL
-        or > ``as_of``). Includes superseded rows so audit queries can
+        ``as_of`` switches to bi-temporal world-time slice — facts
+        whose ``valid_from <= as_of`` and (``valid_to`` IS NULL or >
+        ``as_of``). Includes superseded rows so audit queries can
         recover prior beliefs (overrides ``include_superseded``).
         """
         if limit <= 0:
@@ -1908,14 +1910,14 @@ class HistoryStore:
     ) -> list[tuple[Fact, float]]:
         """Shared FTS lookup for fact search methods.
 
-        Runs the tantivy query, joins back to ``facts`` with the
-        validity filter, and re-ranks by BM25 desc then id desc.
-        Returns ``[(fact, score)]`` truncated to *limit*.
+        Runs tantivy query, joins back to ``facts`` with validity
+        filter, re-ranks by BM25 desc then id desc. Returns
+        ``[(fact, score)]`` truncated to *limit*.
         """
         if limit <= 0:
             return []
-        # Overfetch from FTS so validity/familiar filters don't starve
-        # the result. 4x is enough in practice (validity is cheap).
+        # overfetch from FTS so validity/familiar filters don't
+        # starve the result. 4x is enough in practice (validity cheap)
         fts_limit = max(limit * 4, limit)
         hits = self._fts_facts.search(query, limit=fts_limit)
         if not hits:
@@ -1981,12 +1983,11 @@ class HistoryStore:
     ) -> list[tuple[Fact, float]]:
         """Like :meth:`search_facts`, but pairs each row with its BM25 score.
 
-        Tantivy's BM25 is positive (higher = better). Callers fusing
-        with other signals (importance, recency, embedding similarity)
-        should treat the score as a non-negative weight; the prior
-        SQLite FTS5 ``bm25()`` returned negative numbers (lower =
-        better), so consumers may have an inverted-sign assumption to
-        revisit.
+        Tantivy BM25 is positive (higher = better). Callers fusing
+        with other signals (importance, recency, embedding sim)
+        should treat score as a non-negative weight; prior SQLite
+        FTS5 ``bm25()`` returned negative numbers (lower = better),
+        so consumers may have inverted-sign assumptions to revisit.
         """
         return self._fact_candidates_by_fts(
             familiar_id=familiar_id,
@@ -1997,11 +1998,11 @@ class HistoryStore:
         )
 
     def latest_fact_id(self, *, familiar_id: str) -> int:
-        """Return highest ``facts.id`` for ``familiar_id``; 0 if none.
+        """Highest ``facts.id`` for ``familiar_id``; 0 if none.
 
-        Counts superseded rows too — the cache invalidation key only
+        Counts superseded rows too — cache invalidation key only
         needs to change on writes, and supersession-by-replacement
-        already adds a new row so the id ticks up naturally.
+        already adds a new row so id ticks up naturally.
         """
         row = self._conn.execute(
             "SELECT MAX(id) AS max_id FROM facts WHERE familiar_id = ?",
@@ -2019,12 +2020,11 @@ class HistoryStore:
     ) -> None:
         """Mark ``old_id`` as superseded by ``new_id``.
 
-        Both ids must belong to ``familiar_id``. The old row keeps its
+        Both ids must belong to ``familiar_id``. Old row keeps its
         text and provenance; only ``superseded_at`` (now, UTC) and
-        ``superseded_by`` are written. Re-superseding a row that's
-        already superseded raises ``ValueError`` — that signals an
-        upstream bug (double-write) rather than something to silently
-        absorb.
+        ``superseded_by`` are written. Re-superseding an already-
+        superseded row raises ``ValueError`` — signals upstream bug
+        (double-write) rather than something to silently absorb.
         """
         row = self._conn.execute(
             "SELECT superseded_at FROM facts WHERE id = ? AND familiar_id = ?",
@@ -2060,8 +2060,8 @@ class HistoryStore:
     ) -> None:
         """Persist *vector* for ``(fact_id, model)``; upsert.
 
-        Stored as packed little-endian float32. ``model`` is the
-        embedder's :attr:`Embedder.name`; pairing it with ``fact_id``
+        Stored as packed little-endian float32. ``model`` is
+        embedder's :attr:`Embedder.name`; pairing with ``fact_id``
         lets a model swap accumulate new rows beside the old without
         destroying audit history.
         """
@@ -2091,11 +2091,11 @@ class HistoryStore:
         fact_ids: Iterable[int],
         model: str,
     ) -> dict[int, list[float]]:
-        """Return ``{fact_id: vector}`` for the requested ids + model.
+        """``{fact_id: vector}`` for requested ids + model.
 
-        Missing rows are simply absent from the result — the caller
-        treats them as "not yet embedded" and skips the embedding
-        signal for that candidate.
+        Missing rows simply absent from result — caller treats as
+        "not yet embedded" and skips embedding signal for that
+        candidate.
         """
         ids = [int(i) for i in fact_ids]
         if not ids:
@@ -2123,11 +2123,11 @@ class HistoryStore:
         model: str,
         limit: int,
     ) -> list[Fact]:
-        """Return current facts lacking an embedding row for ``model``.
+        """List current facts lacking an embedding row for ``model``.
 
         "Current" matches :meth:`recent_facts` defaults — superseded
-        rows are excluded. The projector embeds in id order so an
-        interrupted run resumes deterministically.
+        rows excluded. Projector embeds in id order so interrupted
+        run resumes deterministically.
         """
         if limit <= 0:
             return []
@@ -2186,8 +2186,8 @@ class HistoryStore:
     ) -> Reflection:
         """Insert a new reflection row.
 
-        ``last_turn_id`` / ``last_fact_id`` snapshot the worker's view
-        at write time — also serve as the next tick's watermark.
+        ``last_turn_id`` / ``last_fact_id`` snapshot worker's view at
+        write time — also serve as next tick's watermark.
         """
         turn_ids = [int(i) for i in cited_turn_ids]
         fact_ids = [int(i) for i in cited_fact_ids]
@@ -2231,10 +2231,11 @@ class HistoryStore:
         channel_id: int | None = None,
         limit: int,
     ) -> list[Reflection]:
-        """Return ``limit`` most recent reflections, newest first.
+        """``limit`` most recent reflections, newest first.
 
-        ``channel_id`` scopes to one channel; ``None`` returns reflections
-        regardless of channel scope (including channel-agnostic rows).
+        ``channel_id`` scopes to one channel; ``None`` returns
+        reflections regardless of channel scope (including
+        channel-agnostic rows).
         """
         if limit <= 0:
             return []
@@ -2252,8 +2253,8 @@ class HistoryStore:
                 (familiar_id, limit),
             ).fetchall()
         else:
-            # Include channel-agnostic rows (channel_id IS NULL) so a
-            # global reflection still surfaces in any channel.
+            # include channel-agnostic rows (channel_id IS NULL) so a
+            # global reflection still surfaces in any channel
             rows = self._conn.execute(
                 """
                 SELECT id, familiar_id, channel_id, text,
@@ -2274,13 +2275,12 @@ class HistoryStore:
         *,
         familiar_id: str,
     ) -> tuple[int, int]:
-        """Return (last_turn_id, last_fact_id) the worker last processed.
+        """(last_turn_id, last_fact_id) the worker last processed.
 
-        Prefers the explicit ``reflection_watermark`` row — advanced on
-        every tick, including no-op ticks — and falls back to the
-        newest reflection row for back-compat with databases written
-        before the watermark table existed. ``(0, 0)`` if neither
-        exists.
+        Prefers explicit ``reflection_watermark`` row — advanced
+        every tick, including no-op ticks. Falls back to newest
+        reflection row for back-compat with databases written before
+        the watermark table existed. ``(0, 0)`` if neither exists.
         """
         wm = self._conn.execute(
             """
@@ -2313,12 +2313,12 @@ class HistoryStore:
         last_turn_id: int,
         last_fact_id: int,
     ) -> None:
-        """Upsert the reflection watermark for *familiar_id*.
+        """Upsert reflection watermark for *familiar_id*.
 
-        Called by :class:`ReflectionWorker` at the end of every tick —
+        Called by :class:`ReflectionWorker` at end of every tick —
         regardless of whether a reflection row was written — so a
-        no-substance LLM reply can't pin the worker to an ever-growing
-        turn window.
+        no-substance LLM reply can't pin the worker to an
+        ever-growing turn window.
         """
         ts = datetime.now(tz=UTC).isoformat()
         self._conn.execute(
@@ -2342,7 +2342,7 @@ class HistoryStore:
         familiar_id: str,
         fact_ids: Iterable[int],
     ) -> set[int]:
-        """Return the subset of ``fact_ids`` that are superseded.
+        """Subset of ``fact_ids`` that are superseded.
 
         Used by :class:`ReflectionLayer` to flag stale citations on
         read. Empty input returns ``set()`` without a query.
@@ -2379,8 +2379,8 @@ class HistoryStore:
     ) -> str:
         """Insert a new alarm row; return its id.
 
-        ``scheduled_at`` is an ISO-8601 UTC timestamp. ``channel_kind``
-        must be ``"text"`` or ``"voice"`` (enforced by CHECK constraint).
+        ``scheduled_at`` is ISO-8601 UTC timestamp. ``channel_kind``
+        must be ``"text"`` or ``"voice"`` (enforced by CHECK).
         """
         alarm_id = uuid.uuid4().hex
         created_at = datetime.now(tz=UTC).isoformat()
@@ -2406,7 +2406,7 @@ class HistoryStore:
         return alarm_id
 
     def list_pending_alarms(self, *, familiar_id: str) -> list[dict[str, Any]]:
-        """Return pending alarms (not fired, not cancelled) for ``familiar_id``.
+        """Pending alarms (not fired, not cancelled) for ``familiar_id``.
 
         Rows are dicts; ordered by ``scheduled_at`` ascending.
         """
@@ -2556,7 +2556,7 @@ def _row_to_fact(row: Row) -> Fact:
 
 
 def _row_to_turn(row: Row) -> HistoryTurn:
-    """Rebuild a HistoryTurn from a SELECT row. Author is reconstructed.
+    """Rebuild a HistoryTurn from a SELECT row. Author reconstructed.
 
     channel_id missing from older SELECTs that don't need it; fall
     back to 0 so those callers keep working. Writer-facing SELECTs

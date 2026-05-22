@@ -1,4 +1,4 @@
-"""CLI entry point and argument parsing. Subcommands live in ``commands/``."""
+"""CLI entry + argument parsing. Subcommands in ``commands/``."""
 
 import argparse
 import importlib.metadata
@@ -16,7 +16,7 @@ try:
     _PACKAGE_METADATA = importlib.metadata.metadata(__package__ or "familiar_connect")
     _CLI_NAME = _PACKAGE_METADATA["Name"]
 except (importlib.metadata.PackageNotFoundError, KeyError):
-    # fallback for editable-install issues
+    # fallback for editable-install
     _CLI_NAME = "familiar-connect"
 
 _logger = logging.getLogger(__name__)
@@ -25,9 +25,9 @@ _logger = logging.getLogger(__name__)
 def setup_logging(verbose: int = 0, level: str | None = None) -> None:
     """Configure logging.
 
-    verbose: count (0=WARNING, 1=INFO, 2+=DEBUG); ignored if ``level`` set.
+    verbose: 0=WARNING, 1=INFO, 2+=DEBUG; ignored when ``level`` set.
     level: explicit name (DEBUG/INFO/WARNING/ERROR/CRITICAL).
-    Raises ``ValueError`` if ``level`` unknown.
+    Raises ``ValueError`` on unknown ``level``.
     """
     if level is not None:
         numeric_level = getattr(logging, level.upper(), None)
@@ -48,7 +48,7 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
         force=True,  # reconfigure if already configured
     )
 
-    # keep our INFO visible even if root is WARNING; -vv still flips DEBUG
+    # keep INFO visible even if root is WARNING; -vv still flips DEBUG
     pkg_logger = logging.getLogger("familiar_connect")
     pkg_logger.setLevel(min(log_level, logging.INFO))
 
@@ -56,7 +56,7 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
 
 
 def create_parser() -> argparse.ArgumentParser:
-    """Build top-level parser with subcommands wired in."""
+    """Top-level parser; subcommands wired in."""
     parser = argparse.ArgumentParser(
         prog=_CLI_NAME,
         description=f"{_CLI_NAME} CLI tool",
@@ -91,7 +91,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """CLI entry point. Returns exit code (0 ok, non-zero error)."""
+    """Return exit code (0 ok, non-zero error)."""
     load_dotenv()
     parser = create_parser()
     args = parser.parse_args()

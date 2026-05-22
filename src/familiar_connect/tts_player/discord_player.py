@@ -1,20 +1,20 @@
-"""Discord-voice :class:`TTSPlayer` - synthesize and push PCM through pycord.
+"""Discord-voice :class:`TTSPlayer` — synthesize, push PCM through pycord.
 
-Wraps a TTS client (Cartesia / Azure / Gemini) and feeds Discord-format
+Wraps a TTS client (Cartesia/Azure/Gemini) and feeds Discord-format
 stereo s16le @ 48 kHz PCM through ``voice_client.play(...)``.
 
 Two synthesis paths:
 
-* **Streaming** - when the client exposes ``synthesize_stream(text)``,
-  bytes go into a :class:`StreamingPCMSource` as they arrive so
-  ``vc.play`` starts within ~one Cartesia TTFB instead of waiting for
-  the full utterance. Cuts ``voice.tts_to_playback`` from full-sentence
-  synthesis time (1.5-3 s for a long sentence) to ~150 ms.
-* **Buffered** - fallback for clients without a streaming method
-  (Azure, Gemini). Identical to the prior behaviour.
+* **Streaming** — when client exposes ``synthesize_stream(text)``,
+  bytes go into :class:`StreamingPCMSource` as they arrive so
+  ``vc.play`` starts within ~one Cartesia TTFB. Cuts
+  ``voice.tts_to_playback`` from full-sentence synthesis time
+  (1.5-3 s long sentence) to ~150 ms.
+* **Buffered** — fallback for clients without streaming method
+  (Azure, Gemini). Identical to prior behaviour.
 
 Polls ``vc.is_playing()`` so :meth:`TurnScope.is_cancelled` cuts
-playback within ~20 ms when a new turn arrives.
+playback within ~20 ms when new turn arrives.
 """
 
 from __future__ import annotations
@@ -43,14 +43,13 @@ if TYPE_CHECKING:
 _logger = logging.getLogger("familiar_connect.tts_player.discord")
 
 _POLL_S = 0.02
-# Max time we wait after ``vc.stop()`` for pycord's audio thread to
-# actually flip ``is_playing()`` to False before releasing the play
-# lock. Pycord's player thread checks the stop flag on each ~20 ms
-# tick so the real wait is one or two polls; the upper bound is just a
-# safety net for a wedged audio thread. Without this drain, a barge-in
-# can release the lock while the thread is mid-tick, the next speak()
-# acquires immediately, and ``vc.play()`` raises ``ClientException(
-# 'Already playing audio.')``.
+# max wait after ``vc.stop()`` for pycord's audio thread to flip
+# ``is_playing()`` to False before releasing play lock. Pycord checks
+# the stop flag on each ~20 ms tick so real wait is one or two polls;
+# upper bound is a safety net for a wedged audio thread. Without this
+# drain, a barge-in can release the lock mid-tick, next speak()
+# acquires immediately, and ``vc.play()`` raises
+# ``ClientException('Already playing audio.')``.
 _STOP_DRAIN_S = 0.2
 
 
@@ -63,8 +62,8 @@ class _TTSClient(Protocol):
 class _VoiceClientLike(Protocol):
     """Minimal surface used from pycord's ``VoiceClient``.
 
-    Kept narrow so tests can pass a :class:`unittest.mock.MagicMock`
-    without inheriting the full ``discord.VoiceClient`` API.
+    Kept narrow so tests can pass :class:`unittest.mock.MagicMock`
+    without inheriting full ``discord.VoiceClient`` API.
     """
 
     def is_connected(self) -> bool: ...
@@ -85,16 +84,16 @@ class DiscordVoicePlayer:
         self._tts = tts_client
         self._get_voice_client = get_voice_client
         # serialize playback. per-user scopes (voice_responder) let two
-        # speakers' replies coexist, but the ``VoiceClient`` is single-
-        # track — concurrent ``vc.play`` raises ``ClientException(
-        # 'Already playing audio.')``. this lock makes the second
-        # ``speak`` await the first's playback completion.
+        # speakers' replies coexist, but ``VoiceClient`` is single-track
+        # — concurrent ``vc.play`` raises
+        # ``ClientException('Already playing audio.')``. this lock makes
+        # second ``speak`` await the first's playback completion.
         self._play_lock = asyncio.Lock()
 
     async def speak(self, text: str, *, scope: TurnScope) -> None:
         if scope.is_cancelled():
             return
-        # defense-in-depth: Cartesia 400s on empty/whitespace transcript.
+        # defense-in-depth: Cartesia 400s on empty/whitespace transcript
         if not text.strip():
             _logger.warning(
                 f"{ls.tag('Player', ls.Y)} "
@@ -163,7 +162,7 @@ class DiscordVoicePlayer:
             try:
                 vc.play(source)
             except discord.ClientException as exc:
-                # belt-and-braces — should not happen with the lock held
+                # belt-and-braces — shouldn't happen with lock held
                 _logger.warning(
                     f"{ls.tag('Player', ls.R)} "
                     f"{ls.kv('play_error', repr(exc), vc=ls.R)}"
@@ -190,9 +189,9 @@ class DiscordVoicePlayer:
                         return
                     await asyncio.sleep(_POLL_S)
             finally:
-                # ensure the feeder unwinds — under cancellation pycord's
-                # cleanup already closed the source, but on natural drain
-                # the producer may still be appending tail bytes.
+                # ensure feeder unwinds — under cancellation pycord's
+                # cleanup already closed the source, but on natural
+                # drain the producer may still be appending tail bytes
                 source.close_input()
                 if feed_task is not None and not feed_task.done():
                     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -221,7 +220,7 @@ class DiscordVoicePlayer:
         return total
 
     # ------------------------------------------------------------------
-    # buffered path — Azure / Gemini today (no streaming surface)
+    # buffered path — Azure/Gemini today (no streaming surface)
     # ------------------------------------------------------------------
 
     async def _speak_buffered(self, text: str, *, scope: TurnScope) -> None:
@@ -285,8 +284,7 @@ class DiscordVoicePlayer:
         """Poll ``is_playing()`` until pycord's audio thread is idle.
 
         Bounded by :data:`_STOP_DRAIN_S` so a wedged player can't pin
-        the play lock forever. Caller must already have invoked
-        ``vc.stop()``.
+        play lock forever. Caller must already have invoked ``vc.stop()``.
         """
         deadline = asyncio.get_event_loop().time() + _STOP_DRAIN_S
         while asyncio.get_event_loop().time() < deadline:

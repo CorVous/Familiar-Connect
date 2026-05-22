@@ -1,28 +1,27 @@
 """Tail block appended to every system prompt.
 
-Restates the current time (so the model doesn't drift on long-lived
-caches) and enumerates the literal sentinels the responder honours:
-``<silent>``, ``[@DisplayName]``, and ``[↩ <message_id>]``. Voice
-channels only see ``<silent>`` — the others have no meaning without
+Restates current time (so model doesn't drift on long-lived caches)
+and enumerates literal sentinels the responder honours:
+``<silent>``, ``[@DisplayName]``, ``[↩ <message_id>]``. Voice
+channels only see ``<silent>`` — others have no meaning without
 text routing.
 
-Also rendered a *second time* by the responders as a trailing
+Rendered a *second time* by the responders as a trailing
 ``system`` message after recent history, with
 ``include_mode_instruction=True`` so the per-mode operating
-directive (e.g. "You are speaking aloud…") sits at the very tail
-of the context window — recency-biased models are less likely to
-ignore it there.
+directive (e.g. "You are speaking aloud…") sits at the tail of the
+context window — recency-biased models less likely to ignore it
+there.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-# Per-viewer-mode operating directive surfaced in the trailing
-# reminder. Intentionally duplicates the strings the
-# ``OperatingModeLayer`` is configured with in
-# ``commands/run.py``: the head copy primes the system prompt;
-# this tail copy combats recency bias on long contexts. Keep the
+# per-viewer-mode operating directive in the trailing reminder.
+# intentionally duplicates strings ``OperatingModeLayer`` is
+# configured with in ``commands/run.py``: head copy primes system
+# prompt; tail copy combats recency bias on long contexts. keep
 # wording in sync if you edit one.
 _MODE_INSTRUCTIONS: dict[str, str] = {
     "voice": (
@@ -36,7 +35,7 @@ _MODE_INSTRUCTIONS: dict[str, str] = {
 
 
 def _fmt_when(now: datetime) -> str:
-    """Render datetime as ``YYYY-MM-DD H:MMpm UTC`` (no leading zero)."""
+    """Render as ``YYYY-MM-DD H:MMpm UTC`` (no leading zero on hour)."""
     aware = now.astimezone(UTC)
     clock = aware.strftime("%I:%M%p").lstrip("0")
     return f"{aware.strftime('%Y-%m-%d')} {clock} UTC"
@@ -49,17 +48,16 @@ def build_final_reminder(
     include_mode_instruction: bool = False,
     tools_enabled: bool = False,
 ) -> str:
-    """Render the closing reminder block.
+    """Render closing reminder block.
 
-    Always lists ``<silent>``. Text channels add the ping + reply
+    Always lists ``<silent>``. Text channels add ping + reply
     sentinels — those rely on per-message routing the voice path
-    has no equivalent for. ``include_mode_instruction`` appends the
-    per-mode operating directive — used by the trailing-system-message
-    copy so the directive lands at the tail of the context window.
-    ``tools_enabled`` (voice only) appends a short instruction that
-    targets the empty-content tool_call failure mode — the model is
-    nudged to speak before invoking a tool so the user doesn't hear
-    silence mid-turn.
+    lacks. ``include_mode_instruction`` appends the per-mode
+    operating directive — used by trailing-system-message copy so
+    directive lands at tail of context window. ``tools_enabled``
+    (voice only) appends a short instruction targeting the
+    empty-content tool_call failure mode — nudges model to speak
+    before invoking a tool so user doesn't hear silence mid-turn.
     """
     when = _fmt_when(now or datetime.now(tz=UTC))
     lines = [

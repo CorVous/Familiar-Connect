@@ -1,8 +1,8 @@
 """Deepgram streaming transcription backend.
 
-Concrete :class:`Transcriber` over Deepgram's `/v1/listen` WebSocket. See
-:mod:`familiar_connect.stt.protocol` for the surface contract; this module
-holds the WS lifecycle, replay-on-reconnect buffer, and env-override
+Concrete :class:`Transcriber` over Deepgram's `/v1/listen` WebSocket.
+See :mod:`familiar_connect.stt.protocol` for surface contract; this
+module holds WS lifecycle, replay-on-reconnect buffer, env-override
 factory.
 """
 
@@ -37,12 +37,12 @@ DEFAULT_IDLE_FINALIZE_S: float = 0.5
 """Silence gap before forcing Deepgram ``Finalize``.
 
 Discord client-side VAD halts RTP during silence, so Deepgram's
-endpointer never sees in-stream silence and holds the final until
-next speech burst. After this many idle seconds, pump sends
+endpointer never sees in-stream silence and holds final until next
+speech burst. After this many idle seconds, pump sends
 ``{"type":"Finalize"}`` to flush.
 
 Also reused as post-replay cushion in ``_reconnect`` — same silence
-window the endpointer expects in normal flow.
+window endpointer expects in normal flow.
 """
 
 
@@ -91,13 +91,13 @@ class DeepgramTranscriber:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._receive_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
-        # set by ``stop()`` so the receive loop can distinguish
+        # set by ``stop()`` so receive loop can distinguish
         # self-initiated close from server/transport closes
         self._shutting_down: bool = False
-        # set when receive loop sees a server CLOSE frame; writers
-        # short-circuit so audio/KeepAlive don't race the closing
-        # transport (avoids `ClientConnectionResetError` and the resulting
-        # close_code=1006 misclassification of a clean 1000 close).
+        # set when receive loop sees server CLOSE frame; writers
+        # short-circuit so audio/KeepAlive don't race closing
+        # transport (avoids `ClientConnectionResetError` and resulting
+        # close_code=1006 misclassification of clean 1000 close).
         self._closing: bool = False
         # sliding window of recent PCM chunks; replayed to new WS on reconnect
         self._replay_buffer: collections.deque[bytes] = collections.deque()
@@ -109,10 +109,10 @@ class DeepgramTranscriber:
         """Deepgram WebSocket URL with query params.
 
         ``interim_results`` / ``utterance_end_ms`` only emitted when
-        interims enabled (Deepgram requires ``interim_results=true`` for
-        ``utterance_end_ms``). ``endpointing`` always emitted — silence
-        gap before finalizing a segment. ``keyterm`` repeated per term
-        to bias nova-3 toward jargon / proper nouns.
+        interims enabled (Deepgram requires ``interim_results=true``
+        for ``utterance_end_ms``). ``endpointing`` always emitted —
+        silence gap before finalizing segment. ``keyterm`` repeated
+        per term to bias nova-3 toward jargon / proper nouns.
         """
         params: list[tuple[str, str]] = [
             ("model", self.model),
@@ -140,7 +140,7 @@ class DeepgramTranscriber:
         return {"Authorization": f"Token {self.api_key}"}
 
     def clone(self: Self) -> DeepgramTranscriber:
-        """Create transcriber with same config, independent WS connection."""
+        """Transcriber with same config, independent WS connection."""
         c = DeepgramTranscriber(
             api_key=self.api_key,
             model=self.model,
@@ -165,7 +165,7 @@ class DeepgramTranscriber:
         return c
 
     def _parse_response(self: Self, data: dict[str, Any]) -> TranscriptionResult | None:
-        """Parse Deepgram response. Returns ``None`` for non-results or empty."""
+        """Parse Deepgram response. ``None`` for non-results or empty."""
         if data.get("type") != "Results":
             return None
 
@@ -179,7 +179,7 @@ class DeepgramTranscriber:
         if not transcript:
             return None
 
-        # extract speaker from first word if diarization is active
+        # extract speaker from first word when diarization active
         speaker: int | None = None
         words = best.get("words", [])
         if words and "speaker" in words[0]:
@@ -211,10 +211,11 @@ class DeepgramTranscriber:
         return await session.ws_connect(url, headers=headers)
 
     async def start(self: Self, output: asyncio.Queue[TranscriptionEvent]) -> None:
-        """Connect to Deepgram and begin receiving transcription events.
+        """Connect to Deepgram, begin receiving transcription events.
 
-        Output queue carries :class:`TranscriptionResult`s in wire order,
-        including interims (``is_final=False``) when ``interim_results=True``.
+        Output queue carries :class:`TranscriptionResult`s in wire
+        order, including interims (``is_final=False``) when
+        ``interim_results=True``.
         """
         url = self.build_ws_url()
         _logger.info(
@@ -237,7 +238,7 @@ class DeepgramTranscriber:
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
     def _buffer_chunk(self: Self, data: bytes) -> None:
-        """Append to sliding replay window, evicting oldest when over budget."""
+        """Append to sliding replay window, evict oldest over budget."""
         self._replay_buffer.append(data)
         self._replay_buffer_bytes += len(data)
         max_bytes = int(self.replay_buffer_s * self.sample_rate * self.channels * 2)
@@ -248,8 +249,9 @@ class DeepgramTranscriber:
     async def send_audio(self: Self, data: bytes) -> None:
         """Send PCM bytes; buffer for replay on reconnect.
 
-        Chunk lands in replay window before send — mid-send drops still
-        get buffered. Raises ``RuntimeError`` if called before :meth:`start`.
+        Chunk lands in replay window before send — mid-send drops
+        still get buffered. Raises ``RuntimeError`` if called before
+        :meth:`start`.
         """
         if self._ws is None:
             msg = "Transcriber is not connected — call start() first"
@@ -265,11 +267,11 @@ class DeepgramTranscriber:
                 await self._ws.send_bytes(data)
 
     async def finalize(self: Self) -> None:
-        """Force Deepgram to flush buffered segment as a final.
+        """Force Deepgram to flush buffered segment as final.
 
-        Sends ``{"type":"Finalize"}``. Discord client-side VAD drops RTP
-        during silence, so without explicit flush the endpointer holds
-        the final until next speech burst. No-op if WS closed or never
+        Sends ``{"type":"Finalize"}``. Discord client-side VAD drops
+        RTP during silence, so without explicit flush endpointer holds
+        final until next speech burst. No-op if WS closed or never
         started — safe from idle-watchdog paths.
         """
         ws = self._ws
@@ -280,8 +282,8 @@ class DeepgramTranscriber:
 
     async def stop(self: Self) -> None:
         """Gracefully close Deepgram connection."""
-        # flip before CloseStream so a late close frame in the receive
-        # loop doesn't race into a reconnect
+        # flip before CloseStream so late close frame in receive loop
+        # doesn't race into reconnect
         self._shutting_down = True
         if self._keepalive_task is not None:
             self._keepalive_task.cancel()
@@ -311,12 +313,12 @@ class DeepgramTranscriber:
     _RECONNECT_BACKOFF_CAP: float = 16.0  # max backoff in seconds
     _KEEPALIVE_INTERVAL: float = 3.0
     # bot-side per-user idle window. read by ``bot._start_voice_intake`` to
-    # spawn the idle watchdog. 0 disables. lives on the transcriber so the
-    # env-var factory and ``clone()`` carry it without bot.py importing
-    # config plumbing of its own.
+    # spawn idle watchdog. 0 disables. lives on transcriber so env-var
+    # factory and ``clone()`` carry it without bot.py importing config
+    # plumbing of its own.
     _IDLE_CLOSE_S: float = 30.0
 
-    # close codes that indicate a permanent, non-recoverable condition
+    # close codes indicating permanent, non-recoverable condition
     # (auth, billing, policy). reconnecting would just fail identically.
     # 1008 = policy violation (RFC 6455). 4xxx = Deepgram application-level.
     _NO_RECONNECT_CLOSE_CODES: frozenset[int] = frozenset({1008})
@@ -333,7 +335,7 @@ class DeepgramTranscriber:
         return not (4000 <= close_code < 5000)
 
     async def _keepalive_loop(self: Self) -> None:
-        """Periodic KeepAlive to prevent Deepgram's ~10s idle timeout.
+        """Periodic KeepAlive — prevent Deepgram's ~10s idle timeout.
 
         Re-reads ``_ws`` each tick to follow reconnects transparently.
         """
@@ -346,7 +348,7 @@ class DeepgramTranscriber:
                 await ws.send_json({"type": "KeepAlive"})
 
     async def _reconnect(self: Self) -> None:
-        """Close old session, open fresh one; drain replay buffer to new WS."""
+        """Close old session, open fresh; drain replay buffer to new WS."""
         # tear down old connection
         if self._ws is not None and not self._ws.closed:
             with contextlib.suppress(Exception):
@@ -362,7 +364,7 @@ class DeepgramTranscriber:
             url,
             self.build_headers(),
         )
-        # fresh socket — clear the closing flag set by the prior CLOSE frame
+        # fresh socket — clear closing flag set by prior CLOSE frame
         self._closing = False
         _logger.info(
             f"{ls.tag('🔄 WebSocket', ls.Y)} "
@@ -371,7 +373,7 @@ class DeepgramTranscriber:
         )
 
         # replay buffered audio; hold send_lock so send_audio callers
-        # queue behind the drain rather than interleaving
+        # queue behind drain rather than interleaving
         async with self._send_lock:
             chunks_replayed = len(self._replay_buffer)
             replay_bytes = self._replay_buffer_bytes
@@ -382,14 +384,15 @@ class DeepgramTranscriber:
             self._replay_buffer_bytes = 0
 
         if chunks_replayed:
-            # wait ~replay duration before Finalize so Deepgram can process
-            # the burst. the replay arrives much faster than real-time, and
-            # Finalize emits "what's been transcribed so far" — firing it
-            # immediately produces a partial covering only the first few
-            # chunks the server had time to process. sleep is outside the
-            # send_lock so post-reconnect audio can flow through normally.
-            # DEFAULT_IDLE_FINALIZE_S cushion mirrors the silence window the
-            # endpointer sees in the normal idle-finalize path.
+            # wait ~replay duration before Finalize so Deepgram can
+            # process the burst. replay arrives much faster than
+            # real-time, and Finalize emits "what's been transcribed
+            # so far" — firing immediately produces partial covering
+            # only first few chunks server had time to process. sleep
+            # outside send_lock so post-reconnect audio flows through
+            # normally. DEFAULT_IDLE_FINALIZE_S cushion mirrors
+            # silence window endpointer sees in normal idle-finalize
+            # path.
             replay_s = replay_bytes / (self.sample_rate * self.channels * 2)
             await asyncio.sleep(replay_s + DEFAULT_IDLE_FINALIZE_S)
             async with self._send_lock:
@@ -406,19 +409,20 @@ class DeepgramTranscriber:
         self: Self,
         output: asyncio.Queue[TranscriptionEvent],
     ) -> None:
-        """Read messages from the WebSocket, reconnecting on drops."""
+        """Read messages from WebSocket; reconnect on drops."""
         consecutive_reconnects = 0
 
         while consecutive_reconnects <= self._MAX_RECONNECTS:
             if self._ws is None:
                 return
-            # explicit `receive()` instead of `async for` so we observe the
-            # CLOSE message itself — aiohttp's `__anext__` swallows CLOSE/
-            # CLOSING/CLOSED via `StopAsyncIteration` and only leaves
-            # `ws.close_code` behind. seeing CLOSE lets us flip `_closing`
-            # immediately so writers (audio pump, KeepAlive) stop racing
-            # the closing transport. it also exposes the close-frame reason
-            # string in `msg.extra`, which Deepgram occasionally populates.
+            # explicit `receive()` instead of `async for` so we observe
+            # CLOSE message itself — aiohttp's `__anext__` swallows
+            # CLOSE/CLOSING/CLOSED via `StopAsyncIteration` and only
+            # leaves `ws.close_code` behind. seeing CLOSE lets us flip
+            # `_closing` immediately so writers (audio pump, KeepAlive)
+            # stop racing the closing transport. also exposes close-frame
+            # reason string in `msg.extra`, which Deepgram occasionally
+            # populates.
             close_reason: str | None = None
             while True:
                 msg = await self._ws.receive()
@@ -434,8 +438,8 @@ class DeepgramTranscriber:
                     else:
                         # full payload — `Metadata` carries session-end stats
                         # (duration, models, model_info) needed to diagnose
-                        # per-user session closes; truncating hides
-                        # everything past request_id.
+                        # per-user session closes; truncating hides everything
+                        # past request_id.
                         _logger.info(
                             f"{ls.tag('Event', ls.C)} "
                             f"{ls.word('Deepgram', ls.C)} "
@@ -444,10 +448,10 @@ class DeepgramTranscriber:
                         )
                 elif msg.type == aiohttp.WSMsgType.CLOSE:
                     # server-initiated close frame; freeze writers so
-                    # they don't write to the closing transport while
-                    # aiohttp finishes the close handshake. CLOSED/ERROR
-                    # below are post-close states — `ws.closed` is already
-                    # True, so the existing send_audio check handles them.
+                    # they don't write to closing transport while
+                    # aiohttp finishes close handshake. CLOSED/ERROR
+                    # below are post-close states — `ws.closed` already
+                    # True, so existing send_audio check handles them.
                     self._closing = True
                     close_reason = msg.extra if isinstance(msg.extra, str) else None
                     break
@@ -494,8 +498,8 @@ class DeepgramTranscriber:
 
             outage_start = time.monotonic()
             consecutive_reconnects += 1
-            # exponential backoff: first attempt is immediate; subsequent
-            # failures back off as 1x, 2x, 4x... the base delay up to the cap
+            # exponential backoff: first attempt immediate; subsequent
+            # failures back off as 1x, 2x, 4x... base delay up to cap
             backoff = 0.0
             if consecutive_reconnects > 1:
                 exponent = consecutive_reconnects - 2  # attempt 2 → 2^0 = 1
@@ -548,10 +552,10 @@ def create_deepgram_transcriber(
 ) -> DeepgramTranscriber:
     """Build :class:`DeepgramTranscriber` from *config*.
 
-    All non-secret knobs come from ``[providers.stt.deepgram]``;
+    All non-secret knobs from ``[providers.stt.deepgram]``;
     ``DEEPGRAM_API_KEY`` is the only env input.
 
-    :raises ValueError: If ``DEEPGRAM_API_KEY`` not set.
+    :raises ValueError: ``DEEPGRAM_API_KEY`` not set.
     """
     cfg = config or DeepgramSTTConfig()
     api_key = os.environ.get("DEEPGRAM_API_KEY")

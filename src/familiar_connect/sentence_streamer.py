@@ -1,22 +1,22 @@
 """Sentence-boundary aggregator for streamed LLM output.
 
-Sits between :meth:`LLMClient.chat_stream` and the TTS player. Buffers
+Sits between :meth:`LLMClient.chat_stream` and TTS player. Buffers
 deltas, emits whole sentences as soon as a terminator
-(``.``/``!``/``?``) is followed by whitespace. Falls back to draining
-the partial buffer on :meth:`flush` when the stream ends without a
-final terminator. Drops time-to-first-audio from "after the LLM
-finishes" to "after the first sentence". See ``voice-pipeline.md``
-under ``docs/architecture/`` for the latency breakdown.
+(``.``/``!``/``?``) followed by whitespace. Falls back to draining
+partial buffer on :meth:`flush` when stream ends without final
+terminator. Drops time-to-first-audio from "after LLM finishes" to
+"after first sentence". See ``voice-pipeline.md`` under
+``docs/architecture/`` for latency breakdown.
 
 Abbreviation-aware: ``Mr.``/``Dr.``/``etc.``/initials don't trip a
-boundary. Decision is local — no language model lookahead.
+boundary. Decision local — no language model lookahead.
 """
 
 from __future__ import annotations
 
 # titles + low-risk Latin abbreviations. lowercase, no trailing dot.
-# kept tight: false negatives (one extra sentence) are cheaper than
-# false positives (mid-sentence flush of "Mr.").
+# kept tight: false negatives (one extra sentence) cheaper than false
+# positives (mid-sentence flush of "Mr.").
 _ABBREVIATIONS: frozenset[str] = frozenset({
     "mr",
     "mrs",
@@ -65,7 +65,7 @@ class SentenceStreamer:
         return out
 
     def flush(self) -> str:
-        """Drain remaining buffer verbatim. Resets internal state."""
+        """Drain remaining buffer verbatim; resets internal state."""
         out = self._buf
         self._buf = ""
         return out
@@ -98,7 +98,7 @@ class SentenceStreamer:
                 i = end
                 continue
             head = buf[:end]
-            # consume one separator char so the next sentence starts clean
+            # consume one separator char so next sentence starts clean
             rest_start = end
             while rest_start < len(buf) and buf[rest_start].isspace():
                 rest_start += 1
@@ -106,9 +106,9 @@ class SentenceStreamer:
         return None
 
     def _looks_like_abbreviation(self, dot_index: int) -> bool:
-        """``dot_index`` indexes a ``.`` in ``self._buf``. Walk back the token."""
+        """``dot_index`` indexes ``.`` in ``self._buf``; walk back the token."""
         buf = self._buf
-        # collect the token immediately preceding the dot, allowing inner
+        # collect token immediately preceding the dot, allowing inner
         # dots so "e.g" / "i.e" round-trip ("e.g." ends at second dot).
         j = dot_index - 1
         while j >= 0 and (buf[j].isalpha() or buf[j] == "."):

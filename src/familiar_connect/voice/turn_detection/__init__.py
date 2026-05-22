@@ -1,10 +1,10 @@
 """Local turn detection — TEN-VAD + Smart Turn v3 + endpointer state machine.
 
 Phase 1 landed the wrappers; phase 2 added :class:`UtteranceEndpointer`
-which composes them into a per-user state machine. The audio pump in
-``bot._start_voice_intake`` forks PCM into both the transcriber and the
+composing them into a per-user state machine. Audio pump in
+``bot._start_voice_intake`` forks PCM into both transcriber and
 endpointer when ``[providers.turn_detection].strategy = "ten+smart_turn"``;
-on a turn-complete verdict the endpointer calls ``transcriber.finalize()``.
+on turn-complete verdict, endpointer calls ``transcriber.finalize()``.
 See ``docs/architecture/voice-pipeline.md``.
 """
 

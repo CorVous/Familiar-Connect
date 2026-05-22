@@ -1,20 +1,20 @@
 """TEN-VAD wrapper — voice activity detection on 16 kHz mono PCM.
 
 Wraps Agora's TEN-VAD (Apache 2.0 + extras). Native shared library
-ships with the ``ten-vad`` Python package; the ONNX model is bundled
-inside the wheel, so callers don't supply a model path.
+ships with ``ten-vad`` Python package; ONNX model bundled inside
+wheel, so callers don't supply a model path.
 
 Feed 16 ms (256-sample) or 10 ms (160-sample) frames of 16 kHz mono
-int16 PCM; get back ``(probability, flag)``. The flag is the model's
-binary verdict at the configured threshold; we read the probability
-and re-threshold here so the same instance can be re-tuned without
-rebuilding the native handle.
+int16 PCM; get back ``(probability, flag)``. Flag is model's binary
+verdict at configured threshold; we read the probability and
+re-threshold here so same instance can be re-tuned without rebuilding
+the native handle.
 
-Stateful: the underlying C handle accumulates across :meth:`process`
+Stateful: underlying C handle accumulates across :meth:`process`
 calls. :meth:`reset` recreates it so per-utterance state doesn't leak.
 
-Lazy-imports ``ten_vad`` so projects without the ``local-turn`` extra
-never pay the runtime cost.
+Lazy-imports ``ten_vad`` so projects without ``local-turn`` extra
+never pay runtime cost.
 """
 
 from __future__ import annotations
@@ -71,9 +71,9 @@ class TenVAD:
         self._vad = _TenVadNative(hop_size=hop_size, threshold=threshold)
 
     def reset(self) -> None:
-        """Recreate the native handle — call between utterances.
+        """Recreate native handle — call between utterances.
 
-        TEN-VAD's C handle exposes no public reset; rebuild to drop
+        TEN-VAD C handle exposes no public reset; rebuild to drop
         accumulated state.
         """
         self._vad = _TenVadNative(hop_size=self.hop_size, threshold=self.threshold)

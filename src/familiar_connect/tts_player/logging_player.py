@@ -1,10 +1,9 @@
 """Logging-only TTS player.
 
-Phase-2 production default — logs what it *would* speak but does not
-produce audio. Discord voice-channel playback is a follow-up phase;
-until then the responder's output is visible in the log stream so the
-pipeline can be exercised end-to-end without hitting a Cartesia/Azure
-API.
+Phase-2 production default — logs what it *would* speak but produces
+no audio. Discord voice-channel playback is a follow-up phase; until
+then responder's output visible in the log stream so pipeline can be
+exercised end-to-end without hitting a Cartesia/Azure API.
 """
 
 from __future__ import annotations
@@ -24,8 +23,8 @@ _logger = logging.getLogger("familiar_connect.tts_player.logging")
 class LoggingTTSPlayer:
     """No-audio TTS stand-in.
 
-    Honours cancellation semantics so the barge-in loop behaves the
-    same as with a real player.
+    Honours cancellation so barge-in loop behaves the same as with a
+    real player.
     """
 
     def __init__(self, *, ms_per_word: int = 200, poll_ms: int = 20) -> None:

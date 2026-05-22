@@ -1,7 +1,7 @@
-"""Topic string constants for the event bus.
+"""Topic string constants for event bus.
 
-One file, grep-friendly. Every topic the system routes on lives here.
-Dotted namespaces group related topics; prefix is the subsystem.
+One file, grep-friendly. Every topic system routes on lives here.
+Dotted namespaces group related topics; prefix is subsystem.
 """
 
 from __future__ import annotations

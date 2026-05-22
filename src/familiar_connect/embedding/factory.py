@@ -1,18 +1,18 @@
 """Embedder backend selector (M6).
 
-Mirrors the projector / STT / turn-detection pattern: a thin registry
-keyed on the ``[providers.embedding].backend`` selector. Built-ins
-register at import time; third-party backends call
-:func:`register_embedder` with a factory.
+Mirrors projector / STT / turn-detection pattern: thin registry keyed
+on ``[providers.embedding].backend`` selector. Built-ins register at
+import time; third-party backends call :func:`register_embedder` with
+a factory.
 
 Built-ins:
 
-* ``off`` — returns ``None``. Disables the seam end to end.
+* ``off`` — returns ``None``. Disables seam end to end.
 * ``hash`` — :class:`HashEmbedder`. Deterministic, no extra deps.
 * ``fastembed`` — :class:`FastEmbedEmbedder`. ONNX-backed sentence
-  embedder. Constructed eagerly; the model itself loads lazily on
-  first ``embed()`` so missing the ``local-embed`` extra fails loudly
-  the first time a vector is needed (not at config parse).
+  embedder. Constructed eagerly; model itself loads lazily on first
+  ``embed()`` so missing ``local-embed`` extra fails loudly the first
+  time a vector is needed (not at config parse).
 """
 
 from __future__ import annotations
@@ -40,14 +40,14 @@ def register_embedder(name: str, factory: EmbedderFactory) -> None:
 
 
 def known_embedders() -> set[str]:
-    """Names registered today (built-ins + any third-party additions)."""
+    """Names registered today (built-ins + third-party additions)."""
     return set(_REGISTRY)
 
 
 def create_embedder(config: EmbeddingConfig) -> Embedder | None:
-    """Instantiate the embedder selected by ``config.backend``.
+    """Instantiate embedder selected by ``config.backend``.
 
-    :raises ValueError: when ``config.backend`` is not registered.
+    :raises ValueError: ``config.backend`` not registered.
     """
     factory = _REGISTRY.get(config.backend)
     if factory is None:

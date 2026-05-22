@@ -1,28 +1,28 @@
 """Watermark-driven reflection worker (M3).
 
 Compounds higher-order syntheses over recent turns + facts. Ticks
-slower than :class:`PeopleDossierWorker` (default 60 s vs 20 s) — the
+slower than :class:`PeopleDossierWorker` (default 60 s vs 20 s) —
 goal is one reflection-write per ~20-30 new turns, not per fact.
 
-The worker reads ``(last_turn_id, last_fact_id)`` from the
-``reflection_watermark`` table; when at least ``turns_threshold`` new
-turns have accumulated, it asks the LLM "what high-level questions do
-recent events raise?" and persists each answer as one ``reflections``
-row with ``cited_turn_ids`` / ``cited_fact_ids`` provenance. Rows
-whose only cited ids the LLM hallucinates are dropped silently; rows
-where some ids are valid keep the valid subset.
+Worker reads ``(last_turn_id, last_fact_id)`` from
+``reflection_watermark``; when at least ``turns_threshold`` new turns
+accumulate, asks LLM "what high-level questions do recent events
+raise?" and persists each answer as one ``reflections`` row with
+``cited_turn_ids`` / ``cited_fact_ids`` provenance. Rows whose only
+cited ids LLM hallucinates are dropped silently; rows where some ids
+are valid keep valid subset.
 
 Two guardrails prevent runaway token spend:
 
-* The window per tick is capped at ``max_turns_per_tick`` — even if
-  the watermark is far behind, only the most recent N turns enter the
-  prompt. Reflections are best-effort syntheses, not exhaustive.
-* The watermark advances at the end of every tick, even when the LLM
-  returns ``[]`` or every item is dropped. Without this, a no-op tick
-  re-sends the same growing window on the next tick.
+* Per-tick window capped at ``max_turns_per_tick`` — even if
+  watermark is far behind, only most recent N turns enter prompt.
+  Reflections best-effort syntheses, not exhaustive.
+* Watermark advances at end of every tick, even when LLM returns
+  ``[]`` or every item dropped. Without this, no-op tick re-sends
+  same growing window on next tick.
 
-All LLM traffic is ``chat`` (not ``chat_stream``) — the worker runs
-off the hot path.
+All LLM traffic is ``chat`` (not ``chat_stream``) — worker runs off
+hot path.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
 class ReflectionWorker:
-    """Writes higher-order reflections off the turns + facts watermark."""
+    """Writes higher-order reflections off turns + facts watermark."""
 
     name: str = "reflection-worker"
 
@@ -77,7 +77,7 @@ class ReflectionWorker:
         self._tick_interval_s = tick_interval_s
 
     async def run(self) -> None:
-        """Forever loop — tick on an interval. Cancel to stop."""
+        """Forever loop; tick on interval. Cancel to stop."""
         while True:
             try:
                 await self.tick()
@@ -92,7 +92,7 @@ class ReflectionWorker:
 
     @span("reflection.tick")
     async def tick(self) -> None:
-        """One pass: write reflections if enough new turns accumulated."""
+        """One pass; write reflections if enough new turns accumulated."""
         latest_turn = await self._store.latest_id(familiar_id=self._familiar_id)
         if latest_turn is None or latest_turn <= 0:
             return
@@ -103,10 +103,10 @@ class ReflectionWorker:
             return
 
         latest_fact = await self._store.latest_fact_id(familiar_id=self._familiar_id)
-        # Always advance the watermark to ``latest_turn`` regardless of
-        # how this tick lands — empty LLM reply, malformed JSON, all
-        # items filtered, all are no-ops on the reflections table but
-        # must not pin the worker to a growing window.
+        # always advance watermark to ``latest_turn`` regardless of
+        # how tick lands — empty LLM reply, malformed JSON, all items
+        # filtered are no-ops on reflections table but must not pin
+        # worker to a growing window
         try:
             await self._do_tick(
                 prior_turn_wm=prior_turn_wm,
@@ -133,10 +133,10 @@ class ReflectionWorker:
         )
         if not new_turns:
             return
-        # Cap the window — bursty chat or first run on a long-lived db
-        # can otherwise ship hundreds of turns per tick. Keep the tail
-        # (most recent) since that's what reflection actually cares
-        # about; older turns are skipped, not deferred.
+        # cap window — bursty chat or first run on long-lived db
+        # otherwise ships hundreds of turns per tick. keep tail (most
+        # recent) since that's what reflection cares about; older
+        # turns skipped, not deferred
         if len(new_turns) > self._max_turns_per_tick:
             new_turns = new_turns[-self._max_turns_per_tick :]
 
@@ -154,17 +154,17 @@ class ReflectionWorker:
 
         valid_turn_ids = {t.id for t in new_turns}
         valid_fact_ids = {f.id for f in recent_facts}
-        # Reflection may also legitimately cite older facts surfaced via
-        # the dossier; widen the valid set to all known facts so we
-        # don't drop those unnecessarily.
+        # reflection may legitimately cite older facts surfaced via
+        # dossier; widen valid set to all known facts so we don't
+        # drop those unnecessarily
         all_known_fact_ids = (
             set(valid_fact_ids)
             if not valid_fact_ids
             else await self._store.all_fact_ids(familiar_id=self._familiar_id)
         )
 
-        # Per-channel scoping: pick the most-frequent channel in the
-        # batch, fall back to None for cross-channel batches.
+        # per-channel scoping: pick most-frequent channel in batch,
+        # fall back to None for cross-channel batches
         channel_id = _dominant_channel(new_turns)
 
         written = 0
@@ -192,8 +192,8 @@ class ReflectionWorker:
                 if isinstance(raw_facts, list)
                 else []
             )
-            # Require at least one valid citation; an uncited reflection
-            # is a free-floating opinion, not a synthesis.
+            # require at least one valid citation; uncited reflection
+            # is free-floating opinion, not synthesis
             if not cited_turns and not cited_facts:
                 continue
             await self._store.append_reflection(
@@ -237,7 +237,7 @@ def _dominant_channel(turns: Iterable[HistoryTurn]) -> int | None:
         return next(iter(counts))
     if not counts:
         return None
-    # Mixed batch — caller decides; default to the most-frequent.
+    # mixed batch — caller decides; default to most-frequent
     return max(counts.items(), key=operator.itemgetter(1))[0]
 
 

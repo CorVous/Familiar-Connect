@@ -1,11 +1,10 @@
 """Async proxy for :class:`HistoryStore`.
 
-All method calls are dispatched to the store's executor so Turso/tantivy
-never run on the event-loop thread. The store uses ``max_workers=4`` —
-Turso supports concurrent connections (MVCC, one per worker thread via
-:class:`TursoConnection`) and tantivy is internally thread-safe, so
-queries can run in parallel instead of queueing behind whichever request
-just hit a slow FTS path.
+Calls dispatch to store's executor — Turso/tantivy never run on
+event-loop thread. ``max_workers=4``: Turso supports concurrent
+connections (MVCC, one per worker via :class:`TursoConnection`),
+tantivy is thread-safe, so queries run in parallel instead of
+queueing behind slow FTS.
 """
 
 from __future__ import annotations
@@ -21,10 +20,10 @@ if TYPE_CHECKING:
 class AsyncHistoryStore:
     """Async proxy for :class:`HistoryStore`.
 
-    Dispatches every call to the store's executor so DB IO never blocks
-    the event loop. The 4-worker pool plus Turso MVCC means concurrent
-    callers (live conversation + embedding/reflection workers) stop
-    queueing behind each other.
+    Dispatches every call to store's executor — DB IO never blocks
+    event loop. 4-worker pool + Turso MVCC lets concurrent callers
+    (live conversation + embedding/reflection workers) run without
+    queueing.
     """
 
     def __init__(self, store: HistoryStore) -> None:
@@ -32,7 +31,7 @@ class AsyncHistoryStore:
 
     @property
     def sync(self) -> HistoryStore:
-        """Raw synchronous store — for callers that cannot await."""
+        """Raw sync store — for callers that can't await."""
         return self._inner
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
