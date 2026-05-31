@@ -6,6 +6,9 @@ Side-index over ``turns.content``, rebuildable. Used by
 
 from __future__ import annotations
 
+import pytest
+
+from familiar_connect.history.fts import FtsIndex
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
 
@@ -134,6 +137,94 @@ class TestFtsSearch:
             familiar_id="fam", query="hi the a do you", limit=10
         )
         assert results == []
+
+    def test_add_retries_commit_on_transient_permission_denied(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows AV briefly locks new segment files; retry past it."""
+        idx = FtsIndex(None)
+        real_commit = idx._commit_writer
+        calls: list[int] = []
+        lock_err = (
+            "Failed to open file for write: 'IoError { io_error: Os { "
+            'code: 5, kind: PermissionDenied, message: "Access is denied." '
+            '}, filepath: "x.term" }\''
+        )
+
+        def flaky_commit() -> None:
+            calls.append(1)
+            if len(calls) < 3:
+                raise ValueError(lock_err)
+            real_commit()
+
+        monkeypatch.setattr(idx, "_commit_writer", flaky_commit)
+        # collapse sleeps so test runs fast
+        monkeypatch.setattr("familiar_connect.history.fts.time.sleep", lambda _s: None)
+        idx.add(42, "the quick brown fox")
+        assert len(calls) == 3
+        hits = idx.search("fox", limit=5)
+        assert any(row_id == 42 for row_id, _ in hits)
+
+    def test_add_reraises_after_retries_exhausted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Persistent failure still surfaces — caller decides how to react."""
+        idx = FtsIndex(None)
+        calls: list[int] = []
+        lock_err = "Failed to open file for write: PermissionDenied"
+
+        def always_fail() -> None:
+            calls.append(1)
+            raise ValueError(lock_err)
+
+        monkeypatch.setattr(idx, "_commit_writer", always_fail)
+        monkeypatch.setattr("familiar_connect.history.fts.time.sleep", lambda _s: None)
+        with pytest.raises(ValueError, match="PermissionDenied"):
+            idx.add(1, "hello")
+        assert len(calls) >= 3  # tried multiple times
+
+    def test_add_does_not_retry_on_unrelated_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only retry the Windows lock signature — other errors fail fast."""
+        idx = FtsIndex(None)
+        calls: list[int] = []
+
+        unrelated = "schema mismatch"
+
+        def fail_unrelated() -> None:
+            calls.append(1)
+            raise ValueError(unrelated)
+
+        monkeypatch.setattr(idx, "_commit_writer", fail_unrelated)
+        with pytest.raises(ValueError, match="schema mismatch"):
+            idx.add(1, "hello")
+        assert len(calls) == 1
+
+    def test_append_turn_survives_fts_commit_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SQL row persists even when FTS index can't commit."""
+        store = HistoryStore(":memory:")
+        lock_err = "Failed to open file for write: PermissionDenied"
+
+        def fail(*_args: object, **_kwargs: object) -> None:
+            raise ValueError(lock_err)
+
+        monkeypatch.setattr(store._fts_turns, "add", fail)
+        alice = Author(
+            platform="discord", user_id="1", username="alice", display_name="Alice"
+        )
+        turn = store.append_turn(
+            familiar_id="fam",
+            channel_id=100,
+            role="user",
+            content="this should still persist",
+            author=alice,
+        )
+        assert turn.id > 0
+        recent = store.recent(familiar_id="fam", channel_id=100, limit=10)
+        assert any(r.content == "this should still persist" for r in recent)
 
     def test_search_turns_respects_max_id(self) -> None:
         """``max_id`` excludes turns with id > max_id (inclusive bound).

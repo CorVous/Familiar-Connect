@@ -21,12 +21,38 @@ relational table.
 from __future__ import annotations
 
 import contextlib
+import logging
+import time
 from pathlib import Path
 from threading import RLock
 
 import tantivy
 
+from familiar_connect import log_style as ls
+
 PathLike = str | Path
+
+_logger = logging.getLogger(__name__)
+
+# tantivy `_writer.commit()` occasionally hits Windows file locks held
+# briefly by Defender/AV on freshly-written segment files; back off and
+# retry rather than letting one .term collision tear down the bot.
+# delays are seconds; total worst-case wait ≈ 0.75s before re-raise.
+_COMMIT_RETRY_DELAYS: tuple[float, ...] = (0.05, 0.2, 0.5)
+
+# tantivy raises a plain ValueError whose message wraps a Rust `IoError`
+# of `PermissionDenied`. match on the substring rather than the exact
+# format (Rust's Debug repr can drift between tantivy versions).
+_LOCK_SIGNATURES: tuple[str, ...] = (
+    "PermissionDenied",
+    "Access is denied",
+    "os error 5",
+)
+
+
+def _is_transient_lock_error(exc: ValueError) -> bool:
+    msg = str(exc)
+    return any(sig in msg for sig in _LOCK_SIGNATURES)
 
 
 # drop common English stopwords before FTS matching. without this,
@@ -173,6 +199,36 @@ class FtsIndex:
         # one persistent writer per index — cheaper than open/close per write.
         self._writer = self._index.writer(heap_size=15_000_000, num_threads=1)
 
+    def _commit_writer(self) -> None:
+        """Direct ``_writer.commit()`` — extracted so :meth:`_commit` can retry."""
+        self._writer.commit()
+
+    def _commit(self) -> None:
+        """Commit writer batch; retry transient Windows AV file locks.
+
+        Tantivy on Windows surfaces antivirus segment-scan races as
+        ``ValueError: ... PermissionDenied ...`` from
+        ``_writer.commit()``. Back off briefly and retry; only Lock-
+        shaped errors retry, everything else raises immediately.
+        """
+        for attempt, delay in enumerate(_COMMIT_RETRY_DELAYS):
+            try:
+                self._commit_writer()
+            except ValueError as exc:
+                if not _is_transient_lock_error(exc):
+                    raise
+                _logger.warning(
+                    f"{ls.tag('FTS', ls.Y)} "
+                    f"{ls.kv('commit_retry', str(attempt + 1), vc=ls.LY)} "
+                    f"{ls.kv('delay_s', f'{delay:.2f}', vc=ls.LY)} "
+                    f"{ls.kv('err', ls.trunc(str(exc), 120), vc=ls.LY)}"
+                )
+                time.sleep(delay)
+            else:
+                return
+        # final attempt — let any error propagate to caller.
+        self._commit_writer()
+
     def add(self, row_id: int, content: str) -> None:
         """Index one document; commits immediately so reads see it."""
         with self._lock:
@@ -182,7 +238,7 @@ class FtsIndex:
             # upsert — delete any prior doc with same row_id.
             self._writer.delete_documents("row_id", int(row_id))
             self._writer.add_document(doc)
-            self._writer.commit()
+            self._commit()
         self._index.reload()
 
     def add_many(self, rows: list[tuple[int, str]]) -> None:
@@ -196,20 +252,20 @@ class FtsIndex:
                 doc.add_integer("row_id", int(row_id))
                 doc.add_text("content", content)
                 self._writer.add_document(doc)
-            self._writer.commit()
+            self._commit()
         self._index.reload()
 
     def delete(self, row_id: int) -> None:
         with self._lock:
             self._writer.delete_documents("row_id", int(row_id))
-            self._writer.commit()
+            self._commit()
         self._index.reload()
 
     def clear(self) -> None:
         """Drop every document. Used by rebuild paths."""
         with self._lock:
             self._writer.delete_all_documents()
-            self._writer.commit()
+            self._commit()
         self._index.reload()
 
     def search(self, query: str, *, limit: int) -> list[tuple[int, float]]:
