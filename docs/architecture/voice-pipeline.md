@@ -331,18 +331,17 @@ in **stability descending** order:
 
 | Position | Layer | Refresh trigger |
 |---|---|---|
-| 1 | `CoreInstructionsLayer` | file content change |
-| 2 | `CharacterCardLayer` | file content change |
-| 3 | `OperatingModeLayer` | `viewer_mode` flip (constant per mode) |
-| 4 | `ConversationSummaryLayer` | `SummaryWorker` writes (every N turns) |
-| 5 | `CrossChannelContextLayer` | any source channel's summary writes |
-| 6 | `PeopleDossierLayer` | `PeopleDossierWorker` watermark advances |
-| 7 | `RagContextLayer` | per-turn cue (always changes) |
+| 1 | `CharacterCardLayer` | file content change |
+| 2 | `OperatingModeLayer` | `viewer_mode` flip (constant per mode) |
+| 3 | `ConversationSummaryLayer` | `SummaryWorker` writes (every N turns) |
+| 4 | `CrossChannelContextLayer` | any source channel's summary writes |
+| 5 | `PeopleDossierLayer` | `PeopleDossierWorker` watermark advances |
+| 6 | `RagContextLayer` | per-turn cue (always changes) |
 | — | `RecentHistoryLayer` | per-turn (contributes user/assistant messages, not system text) |
 
 `RagContextLayer` therefore sits at the tail of the system message,
 so its inevitable per-turn churn invalidates *only* itself — the
-prefix from `CoreInstructionsLayer` through `PeopleDossierLayer` stays
+prefix from `CharacterCardLayer` through `PeopleDossierLayer` stays
 cached when its constituent layers haven't moved.
 
 `tests/test_run_cmd.py::TestDefaultAssemblerLayerOrder` pins this

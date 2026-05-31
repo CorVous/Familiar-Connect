@@ -55,7 +55,7 @@ The *open-source library* underneath Zep — Graphiti — is a different proposi
 - **Recursive summarization compounds the destruction.** Older context becomes a lossy sketch of itself with no "true at t1, superseded at t2" handle. Breaks audit / contradiction-inspection.
 - **Letta is an agent runtime, not a memory layer.** It owns the loop, tool execution, persistence. Adopting it forks our architecture into theirs.
 
-**Kept from the design:** the two-tier framing — small always-in-context core block vs large on-demand recall layer. Familiar-Connect implements that split today via `core_instructions.md` + `character.md` + the recent-history layer on top of an append-only event log.
+**Kept from the design:** the two-tier framing — small always-in-context core block vs large on-demand recall layer. Familiar-Connect implements that split today via `character.md` (persona plus operational essentials) + the recent-history layer on top of an append-only event log.
 
 ## Full-duplex speech-to-speech pipelines (Moshi, Sesame CSM)
 

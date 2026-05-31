@@ -80,25 +80,13 @@ def _content_hash(path: Path) -> str:
     return hashlib.blake2b(path.read_bytes(), digest_size=8).hexdigest()
 
 
-class CoreInstructionsLayer:
-    """Baseline role + safety instructions from a checked-in markdown file."""
-
-    name: str = "core_instructions"
-
-    def __init__(self, *, path: Path) -> None:
-        self._path = path
-
-    async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
-        if not self._path.exists():
-            return ""
-        return self._path.read_text(encoding="utf-8").strip()
-
-    def invalidation_key(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
-        return _content_hash(self._path)
-
-
 class CharacterCardLayer:
-    """Per-familiar persona text from a ``character.md`` sidecar."""
+    """Per-familiar persona text from a ``character.md`` sidecar.
+
+    Doubles as the always-on baseline: operational essentials (silence
+    token, first-person, conciseness) live alongside persona in the
+    per-familiar file. Empty/missing file opts the layer out.
+    """
 
     name: str = "character_card"
 

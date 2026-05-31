@@ -40,7 +40,6 @@ flowchart TB
     facts -->|ReflectionWorker| reflections
 
     subgraph Assembler[Prompt assembly]
-        core[CoreInstructionsLayer]
         card[CharacterCardLayer]
         mode[OperatingModeLayer]
         lore[LorebookLayer]
@@ -83,8 +82,7 @@ context re-run `build` only for layers whose key changed.
 
 | Layer | Source | Invalidation |
 |---|---|---|
-| `CoreInstructionsLayer` | `data/familiars/_default/core_instructions.md` | BLAKE2b content hash — catches sub-second edits |
-| `CharacterCardLayer` | `data/familiars/<id>/character.md` (optional sidecar) | BLAKE2b content hash |
+| `CharacterCardLayer` | `data/familiars/<id>/character.md` (persona plus operational essentials — `<silent>` token, first-person, conciseness) | BLAKE2b content hash — catches sub-second edits |
 | `OperatingModeLayer` | in-memory `modes` dict, keyed on `viewer_mode` | `viewer_mode` |
 | `LorebookLayer` | `data/familiars/<id>/lorebook.toml` (optional) | file content hash + matched entry indices |
 
@@ -821,7 +819,7 @@ Voice transcript final on channel C (voice:C)
       appends user turn directly
       seeds RagContextLayer cue = text
       Assembler.assemble(ctx)
-        → cached CoreInstructions / CharacterCard / OperatingMode
+        → cached CharacterCard / OperatingMode
         → CrossChannelContextLayer: TTL-checked read from cross_context_summaries
         → ConversationSummaryLayer: read from summaries
         → PeopleDossierLayer: read from people_dossiers, capped at max_people

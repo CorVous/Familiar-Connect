@@ -4,10 +4,11 @@
 # familiar's `character.toml` omits a field, the loader falls back
 # to the value here.
 #
-# New familiars should copy this file as a starting template:
+# New familiars should copy this directory as a starting template:
 #
 #     cp -r data/familiars/_default data/familiars/my-familiar
-#     # then edit data/familiars/my-familiar/character.toml
+#     # then edit my-familiar/character.toml (config) and
+#     # my-familiar/character.md (persona + operational essentials).
 #
 # The leading underscore in the folder name is a convention: it marks
 # the directory as a reference, not a runnable familiar. Do not set

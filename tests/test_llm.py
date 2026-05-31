@@ -66,15 +66,13 @@ class TestMessage:
 
 class TestSystemPromptLayers:
     def test_layers_have_all_fields(self) -> None:
-        """SystemPromptLayers holds all five prompt layers from the plan."""
+        """SystemPromptLayers holds every system-prompt section."""
         layers = SystemPromptLayers(
-            core_instructions="Be helpful.",
             character_card="You are Merlin the wizard.",
             rag_context="User Alice likes cats.",
             conversation_summary="They discussed pets.",
             recent_history=[],
         )
-        assert layers.core_instructions == "Be helpful."
         assert layers.character_card == "You are Merlin the wizard."
         assert layers.rag_context == "User Alice likes cats."
         assert layers.conversation_summary == "They discussed pets."
@@ -83,32 +81,29 @@ class TestSystemPromptLayers:
     def test_build_system_prompt_ordering(self) -> None:
         """System prompt sections appear in the correct order."""
         layers = SystemPromptLayers(
-            core_instructions="CORE",
             character_card="CHARACTER",
             rag_context="RAG",
             conversation_summary="SUMMARY",
             recent_history=[],
         )
         prompt = build_system_prompt(layers)
-        core_pos = prompt.index("CORE")
         char_pos = prompt.index("CHARACTER")
         rag_pos = prompt.index("RAG")
         summary_pos = prompt.index("SUMMARY")
-        assert core_pos < char_pos < rag_pos < summary_pos
+        assert char_pos < rag_pos < summary_pos
 
     def test_build_system_prompt_omits_empty_sections(self) -> None:
         """Empty optional layers are excluded from the system prompt."""
         layers = SystemPromptLayers(
-            core_instructions="CORE",
-            character_card="",
+            character_card="CHARACTER",
             rag_context="",
             conversation_summary="",
             recent_history=[],
         )
         prompt = build_system_prompt(layers)
-        assert "CORE" in prompt
+        assert "CHARACTER" in prompt
         # Empty sections should not leave stray headers or blank blocks
-        assert "CHARACTER" not in prompt.upper() or prompt.count("\n\n\n") == 0
+        assert prompt.count("\n\n\n") == 0
 
 
 # --- Multi-user conversation formatting ---
@@ -529,7 +524,6 @@ class TestPromptAssembly:
     def test_full_prompt_assembly_with_multi_user(self) -> None:
         """Assemble a complete message list: system prompt + multi-user history."""
         layers = SystemPromptLayers(
-            core_instructions="You are a helpful AI familiar.",
             character_card="Personality: cheerful wizard's companion.",
             rag_context="Alice's favorite color is blue.",
             conversation_summary="The group was discussing hobbies.",
@@ -548,7 +542,6 @@ class TestPromptAssembly:
 
         # System message is first
         assert dicts[0]["role"] == "system"
-        assert "helpful AI familiar" in dicts[0]["content"]
         assert "cheerful wizard" in dicts[0]["content"]
         assert "favorite color is blue" in dicts[0]["content"]
         assert "discussing hobbies" in dicts[0]["content"]

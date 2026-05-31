@@ -104,7 +104,6 @@ class SystemPromptLayers:
     ``recent_history`` stays as separate messages, not in system prompt.
     """
 
-    core_instructions: str
     character_card: str = ""
     rag_context: str = ""
     conversation_summary: str = ""
@@ -115,8 +114,6 @@ def build_system_prompt(layers: SystemPromptLayers) -> str:
     """Assemble from non-empty layers in priority order."""
     sections: list[str] = []
 
-    if layers.core_instructions:
-        sections.append(layers.core_instructions)
     if layers.character_card:
         sections.append(layers.character_card)
     if layers.rag_context:

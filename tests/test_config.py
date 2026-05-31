@@ -567,13 +567,13 @@ class TestChannelOverrides:
             "[channels.12345]\n"
             "history_window_size = 8\n"
             'message_rendering = "name_only"\n'
-            'prompt_layers = ["core_instructions", "character_card"]\n'
+            'prompt_layers = ["character_card", "operating_mode"]\n'
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         over = cfg.channels[12345]
         assert over.history_window_size == 8
         assert over.message_rendering == "name_only"
-        assert over.prompt_layers == ("core_instructions", "character_card")
+        assert over.prompt_layers == ("character_card", "operating_mode")
 
     def test_voice_window_for_falls_back_to_default(
         self, tmp_path: Path, default_profile_path: Path
