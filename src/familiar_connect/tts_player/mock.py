@@ -24,8 +24,12 @@ class MockTTSPlayer:
         self.calls: list[tuple[str, bool]] = []  # (text, was_cancelled_or_stopped)
         self.total_played_ms: int = 0
         self._stop_event = asyncio.Event()
+        # set when playback begins; barge-in tests await this to interrupt
+        # mid-speech without racing a fixed sleep against pipeline startup
+        self.speak_started = asyncio.Event()
 
     async def speak(self, text: str, *, scope: TurnScope) -> None:
+        self.speak_started.set()
         words = text.split()
         budget_ms = len(words) * self._ms_per_word
         played_ms = 0
