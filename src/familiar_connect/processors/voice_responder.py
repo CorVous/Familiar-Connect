@@ -80,6 +80,7 @@ class VoiceResponder:
             "hold on...",
             "checking...",
         ),
+        post_history_instructions: str = "",
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -89,6 +90,9 @@ class VoiceResponder:
         self._router = router
         self._familiar_id = familiar_id
         self._member_resolver = member_resolver
+        # per-familiar etiquette appended to the trailing reminder
+        # (post-history). empty = omitted.
+        self._post_history_instructions = post_history_instructions
         # one in-flight final-handling task per (session, user);
         # replaced when newer final from same speaker arrives.
         # cross-user finals coexist — only TTS player serializes playback
@@ -314,6 +318,7 @@ class VoiceResponder:
             viewer_mode="voice",
             include_mode_instruction=True,
             tools_enabled=tool_mode,
+            post_history_instructions=self._post_history_instructions,
         )
         messages.append(Message(role="system", content=trailing))
 

@@ -369,6 +369,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         member_resolver=handle.resolve_member,
         tool_registry=tool_registry,
         tool_context_factory=_make_tool_context("voice"),
+        post_history_instructions=familiar.config.post_history_instructions,
     )
     text_responder = TextResponder(
         assembler=text_assembler,
@@ -381,6 +382,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         typing_handler=handle.typing_interrupt,
         tool_registry=tool_registry,
         tool_context_factory=_make_tool_context("text"),
+        post_history_instructions=familiar.config.post_history_instructions,
     )
     projector_context = ProjectorContext(
         store=familiar.history_store,

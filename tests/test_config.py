@@ -225,6 +225,53 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match=r"\[tts\]\.provider"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_post_history_instructions_default_from_profile(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """Shipped default profile carries the etiquette post-history block."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert "<silent>" in cfg.post_history_instructions
+        assert cfg.post_history_instructions.strip()
+
+    def test_post_history_instructions_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[prompt]\npost_history_instructions = "be terse"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.post_history_instructions == "be terse"
+
+    def test_post_history_instructions_absent_defaults_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """No [prompt] anywhere → empty (no Python-side default text)."""
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\n'
+            '[llm.prose]\nmodel = "x"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
+        cfg = load_character_config(tmp_path / "missing.toml", defaults_path=defaults)
+        assert not cfg.post_history_instructions
+
+    def test_post_history_instructions_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[prompt]\npost_history_instructions = 42\n")
+        with pytest.raises(ConfigError, match="post_history_instructions"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_prompt_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[prompt]\nmystery = "x"\n')
+        with pytest.raises(ConfigError, match=r"\[prompt\] has unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_history_window_split_parsed(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:

@@ -358,6 +358,11 @@ class CharacterConfig:
     # applied in :meth:`budget_for` when tier's LLM slot uses that model.
     budget_curves: dict[str, ModelBudgetCurve] = field(default_factory=dict)
     discord_text: DiscordTextConfig = field(default_factory=DiscordTextConfig)
+    # free-text block appended to the *trailing* reminder (after
+    # recent history), per familiar. empty = omitted. default text
+    # lives in ``_default/character.toml`` ``[prompt]`` — no Python
+    # default (default profile is the single source of truth).
+    post_history_instructions: str = ""
     # retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
     memory_retrieval: MemoryRetrievalConfig = field(
         default_factory=MemoryRetrievalConfig
@@ -534,6 +539,12 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     discord_text = _parse_discord_text_config(discord_text_raw)
 
+    prompt_raw = data.get("prompt", {})
+    if not isinstance(prompt_raw, dict):
+        msg = f"[prompt] must be a table, got {type(prompt_raw).__name__}"
+        raise ConfigError(msg)
+    post_history_instructions = _parse_prompt_config(prompt_raw)
+
     memory_raw = data.get("memory", {})
     if not isinstance(memory_raw, dict):
         msg = f"[memory] must be a table, got {type(memory_raw).__name__}"
@@ -561,6 +572,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         budgets=budgets,
         budget_curves=budget_curves,
         discord_text=discord_text,
+        post_history_instructions=post_history_instructions,
         memory_retrieval=memory_retrieval,
         memory_providers=memory_providers,
         embedding=embedding,
@@ -616,6 +628,31 @@ def _parse_discord_text_config(raw: dict) -> DiscordTextConfig:
         typing_backoff_initial_s=initial_s,
         typing_backoff_max_s=max_s,
     )
+
+
+_PROMPT_FIELDS: frozenset[str] = frozenset({"post_history_instructions"})
+
+
+def _parse_prompt_config(raw: dict) -> str:
+    """Validate ``[prompt]``; return post-history instructions text.
+
+    Empty / absent → ``""`` (block omitted). Default text shipped in
+    ``_default/character.toml`` so it deep-merges in unless the
+    familiar overrides it.
+    """
+    unknown = set(raw) - _PROMPT_FIELDS
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[prompt] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    v = raw.get("post_history_instructions", "")
+    if not isinstance(v, str):
+        msg = (
+            "[prompt].post_history_instructions must be a string, "
+            f"got {type(v).__name__}"
+        )
+        raise ConfigError(msg)
+    return v.strip()
 
 
 def _parse_budgets(raw: dict) -> dict[str, TierBudget]:

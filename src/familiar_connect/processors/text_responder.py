@@ -186,6 +186,7 @@ class TextResponder:
         typing_handler: TypingInterruptHandler | None = None,
         tool_registry: ToolRegistry | None = None,
         tool_context_factory: Callable[[int, str], ToolContext] | None = None,
+        post_history_instructions: str = "",
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -194,6 +195,9 @@ class TextResponder:
         self._sync_history = history_store.sync
         self._router = router
         self._familiar_id = familiar_id
+        # per-familiar etiquette appended to the trailing reminder
+        # (post-history). empty = omitted.
+        self._post_history_instructions = post_history_instructions
         # discord ``Bot is typing…`` indicator factory; ``None`` opts out
         self._trigger_typing = trigger_typing
         # typing-event policy — bot pingpong backoff + user-typing cancel.
@@ -447,7 +451,9 @@ class TextResponder:
         # trailing ``system`` message so they sit right before
         # assistant's next turn
         trailing = build_final_reminder(
-            viewer_mode="text", include_mode_instruction=True
+            viewer_mode="text",
+            include_mode_instruction=True,
+            post_history_instructions=self._post_history_instructions,
         )
         messages.append(Message(role="system", content=trailing))
 

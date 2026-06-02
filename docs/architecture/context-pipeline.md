@@ -633,6 +633,16 @@ contexts make models drift away from format gates buried at the top
 of the system prompt, and a final-position reminder is the cheapest
 fix.
 
+The trailing copy also carries the per-familiar **post-history
+instructions** (`[prompt].post_history_instructions`), appended *last*
+— the deepest position in the context, right before the model's next
+turn, where behavioral nudges land hardest. It is rendered verbatim
+(markdown fine) and only in the trailing copy, never the up-front one,
+so "post-history" stays literal. Empty string omits it. The shipped
+default is a short roleplay-etiquette note steering the familiar
+toward `<silent>` so it doesn't over-talk on voice. Source of the
+default: `data/familiars/_default/character.toml` `[prompt]`.
+
 There is **no per-channel enumeration** of pingable users. The LLM
 grounds on the names already visible in recent history (where
 `<@USER_ID>` markers were rewritten to `[@DisplayName]` on intake);

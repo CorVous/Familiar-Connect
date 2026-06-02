@@ -47,6 +47,7 @@ def build_final_reminder(
     now: datetime | None = None,
     include_mode_instruction: bool = False,
     tools_enabled: bool = False,
+    post_history_instructions: str | None = None,
 ) -> str:
     """Render closing reminder block.
 
@@ -58,6 +59,8 @@ def build_final_reminder(
     (voice only) appends a short instruction targeting the
     empty-content tool_call failure mode — nudges model to speak
     before invoking a tool so user doesn't hear silence mid-turn.
+    ``post_history_instructions`` (per-familiar etiquette) appended
+    last — deepest, most recency-biased slot. Blank/None omits it.
     """
     when = _fmt_when(now or datetime.now(tz=UTC))
     lines = [
@@ -87,4 +90,6 @@ def build_final_reminder(
                 "calling a tool. Never reply with a tool call alone."
             ),
         ])
+    if post_history_instructions and post_history_instructions.strip():
+        lines.extend(["", post_history_instructions.strip()])
     return "\n".join(lines)
