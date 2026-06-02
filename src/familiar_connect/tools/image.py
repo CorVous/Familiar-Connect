@@ -82,29 +82,27 @@ async def _view_image_handler(
         )
         return json.dumps({"error": f"fetch failed: {exc}"})
 
+    # describe at full quality — result persists; compress separately for prose model
+    if ctx.description_llm is None:
+        desc = "(no description model configured)"
+    else:
+        raw_b64 = base64.b64encode(raw).decode("ascii")
+        try:
+            desc = await describe_image(llm=ctx.description_llm, jpeg_base64=raw_b64)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                f"{ls.tag('Image', ls.Y)} "
+                f"{ls.kv('describe_error', repr(exc), vc=ls.LY)} "
+                f"{ls.kv('img_id', img_id, vc=ls.LC)}"
+            )
+            desc = "(description unavailable)"
+
     try:
         jpeg = compress_to_jpeg(raw)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"compression failed: {exc}"})
 
     b64 = base64.b64encode(jpeg).decode("ascii")
-
-    if ctx.description_llm is None:
-        return ImageResult(
-            description="(no description model configured)",
-            jpeg_base64=b64,
-        )
-
-    try:
-        desc = await describe_image(llm=ctx.description_llm, jpeg_base64=b64)
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning(
-            f"{ls.tag('Image', ls.Y)} "
-            f"{ls.kv('describe_error', repr(exc), vc=ls.LY)} "
-            f"{ls.kv('img_id', img_id, vc=ls.LC)}"
-        )
-        desc = "(description unavailable)"
-
     return ImageResult(description=desc, jpeg_base64=b64)
 
 
