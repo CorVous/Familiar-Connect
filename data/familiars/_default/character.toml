@@ -283,6 +283,23 @@ gemini_voice      = "Kore"
 gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
 
+# --- Prompt shaping --------------------------------------------------------
+#
+# post_history_instructions: free-text block appended to the trailing
+# reminder — the system message that sits *after* recent history, right
+# before the model's next turn. Deepest, most recency-biased slot, so
+# behavioral nudges land hardest here. Empty string omits the block.
+# Override per familiar; rendered verbatim (markdown fine).
+
+[prompt]
+post_history_instructions = """
+# Etiquette
+
+When roleplaying, do not speak much, use <silent> generously. Don't \
+interject too frequently, either. It's fine to send a message when the \
+character really wants to, of course, but prefer <silent> otherwise.
+"""
+
 # --- LLM slots -------------------------------------------------------------
 #
 # Tiered by latency / quality. Pick the slot that matches each call

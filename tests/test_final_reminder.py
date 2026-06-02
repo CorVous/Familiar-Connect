@@ -60,3 +60,36 @@ class TestBuildFinalReminder:
         )
         assert "You are speaking aloud" not in out
         assert "Markdown" not in out
+
+    def test_post_history_instructions_appended_when_provided(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="voice",
+            now=_at(2026, 5, 4, 14, 30),
+            post_history_instructions="# Etiquette\n\nUse <silent> generously.",
+        )
+        assert "# Etiquette" in out
+        assert "Use <silent> generously." in out
+
+    def test_post_history_instructions_land_at_tail(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="voice",
+            now=_at(2026, 5, 4, 14, 30),
+            include_mode_instruction=True,
+            post_history_instructions="ETIQUETTE_MARKER",
+        )
+        # deepest position — after the per-mode operating directive
+        assert out.rstrip().endswith("ETIQUETTE_MARKER")
+        assert out.index("You are speaking aloud") < out.index("ETIQUETTE_MARKER")
+
+    def test_post_history_instructions_omitted_by_default(self) -> None:
+        out = build_final_reminder(viewer_mode="voice", now=_at(2026, 5, 4, 14, 30))
+        assert "Etiquette" not in out
+
+    def test_blank_post_history_instructions_appends_nothing(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="voice",
+            now=_at(2026, 5, 4, 14, 30),
+            post_history_instructions="   ",
+        )
+        # whitespace-only must not leave a dangling separator
+        assert out.rstrip().endswith("`<silent>` - do nothing")

@@ -53,6 +53,14 @@ Surface today:
   and runs the agentic loop. See
   [Tool calling](overview.md#tool-calling).
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
+- `[prompt].post_history_instructions` — free-text block appended to
+  the *trailing* reminder, the system message that sits after recent
+  history (right before the model's next turn). The deepest,
+  most recency-biased slot, so behavioral nudges land hardest here.
+  Rendered verbatim (markdown fine); empty string omits the block.
+  The shipped default is a short roleplay-etiquette note nudging the
+  familiar to lean on `<silent>`. See
+  [Context pipeline — Final reminder](context-pipeline.md#final-reminder).
 
 ### Default profile
 

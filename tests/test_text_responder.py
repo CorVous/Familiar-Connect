@@ -151,6 +151,7 @@ def _make_responder(
     router: TurnRouter | None = None,
     store: HistoryStore | None = None,
     trigger_typing: Callable[[int], AbstractAsyncContextManager[None]] | None = None,
+    post_history_instructions: str = "",
 ) -> tuple[TextResponder, TurnRouter, HistoryStore]:
     card = tmp_path / "character.md"
     card.write_text("You are a familiar.\n")
@@ -170,6 +171,7 @@ def _make_responder(
         router=router,
         familiar_id="fam",
         trigger_typing=trigger_typing,
+        post_history_instructions=post_history_instructions,
     )
     return responder, router, store
 
@@ -998,6 +1000,49 @@ class TestTrailingReminder:
         assert "It is now" in msgs[-1].content
         # The trailing copy includes the text-mode ping/reply sentinels.
         assert "[@DisplayName]" in msgs[-1].content
+
+    @pytest.mark.asyncio
+    async def test_trailing_system_carries_post_history_instructions(
+        self, tmp_path: Path
+    ) -> None:
+        captured: list[list[Message]] = []
+
+        class _CapturingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:
+                captured.append(list(messages))
+                return Message(role="assistant", content="ok")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                captured.append(list(messages))
+                yield "ok"
+
+        llm = _CapturingLLM()
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=llm,
+            send=send,
+            tmp_path=tmp_path,
+            post_history_instructions="# Etiquette\n\nPrefer <silent>.",
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        trailing = captured[0][-1]
+        assert trailing.role == "system"
+        assert "# Etiquette" in trailing.content
+        # post-history block lands deepest — after the mode directive
+        assert trailing.content.index("chatting in a text channel") < (
+            trailing.content.index("# Etiquette")
+        )
 
 
 class TestStripLeakedMetadataPrefix:
