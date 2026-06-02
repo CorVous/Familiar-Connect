@@ -844,7 +844,7 @@ class TestTwitchEventToMessage:
         names = [m.name for m in messages]
         assert names == ["Alice", "Bob", "Carol"]
         # Every content line is prefixed to identify the Twitch source
-        contents = [m.content for m in messages]
+        contents = [m.content_str for m in messages]
         assert all(c.startswith("[Twitch] ") for c in contents)
         assert any("Alice" in c for c in contents)
         assert any("Bob" in c for c in contents)

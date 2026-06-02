@@ -39,6 +39,7 @@ class DiscordTextSource:
         message_id: str | None = None,
         reply_to_message_id: str | None = None,
         mentions: tuple[Author, ...] = (),
+        images: dict[str, str] | None = None,
     ) -> Event:
         """Construct + publish text event; return envelope.
 
@@ -47,6 +48,8 @@ class DiscordTextSource:
         ``discord.Message.reference`` carried parent message.
         ``mentions`` — users the message pinged (already converted to
         :class:`Author`); empty when no user mentions.
+        ``images`` — img_id → URL map for view_image tool; empty when
+        no images detected in message.
         """
         self._seq += 1
         event_id = f"discord-text-{uuid4().hex[:12]}"
@@ -67,6 +70,7 @@ class DiscordTextSource:
                 "message_id": message_id,
                 "reply_to_message_id": reply_to_message_id,
                 "mentions": mentions,
+                "images": images or {},
             },
         )
         await self._bus.publish(ev)

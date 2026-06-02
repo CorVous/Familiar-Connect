@@ -10,9 +10,22 @@ if TYPE_CHECKING:
 
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.history.async_store import AsyncHistoryStore
+    from familiar_connect.llm import LLMClient
 
 
-ToolHandler = "Callable[[dict[str, Any], ToolContext], Awaitable[str]]"
+ToolHandler = "Callable[[dict[str, Any], ToolContext], Awaitable[str | ImageResult]]"
+
+
+@dataclass
+class ImageResult:
+    """Tool result carrying a JPEG (base64) + text description.
+
+    Always carries both. Loop serialises per slot's ``multimodal`` flag.
+    """
+
+    description: str
+    jpeg_base64: str
+    media_type: str = "image/jpeg"
 
 
 @dataclass
@@ -31,6 +44,8 @@ class ToolContext:
     history: AsyncHistoryStore
     bus: EventBus
     scheduler: Any | None = None  # AlarmScheduler — avoids import cycle
+    images: dict[str, str] = field(default_factory=dict)  # img_id → URL
+    description_llm: LLMClient | None = None  # vision model client
 
 
 @dataclass
@@ -40,7 +55,7 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema
-    handler: Callable[[dict[str, Any], ToolContext], Awaitable[str]]
+    handler: Callable[[dict[str, Any], ToolContext], Awaitable[str | ImageResult]]
     timeout_s: float = 10.0
 
 
@@ -82,8 +97,3 @@ class ToolRegistry:
             }
             for t in self._tools.values()
         ]
-
-
-# forward reference plumbing — keeps `field` import live for future
-# default-factory fields without ruff yelling
-_ = field

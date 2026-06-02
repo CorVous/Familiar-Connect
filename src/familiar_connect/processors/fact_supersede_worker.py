@@ -148,7 +148,7 @@ class FactSupersedeWorker:
             prompt = _build_supersede_prompt(f_new=f_new, priors=unique)
             reply = await self._llm.chat(prompt)
             ids = _parse_superseded_ids(
-                reply.content,
+                reply.content_str,
                 valid={p.id for p in unique},
             )
             for old_id in ids:

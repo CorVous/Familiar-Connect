@@ -245,9 +245,9 @@ class TestFinalReply:
         assert captured, "LLM was never invoked"
         trailing = captured[0][-1]
         assert trailing.role == "system"
-        assert "# Etiquette" in trailing.content
-        assert trailing.content.index("You are speaking aloud") < (
-            trailing.content.index("# Etiquette")
+        assert "# Etiquette" in trailing.content_str
+        assert trailing.content_str.index("You are speaking aloud") < (
+            trailing.content_str.index("# Etiquette")
         )
 
     @pytest.mark.asyncio

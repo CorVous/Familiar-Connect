@@ -1047,3 +1047,52 @@ class TestDiscordTextConfig:
         )
         with pytest.raises(ConfigError, match="typing_backoff_max_s"):
             load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestImageToolConfig:
+    def test_llm_slot_parses_image_tools_and_multimodal(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.prose]\nmodel = "x/y"\nimage_tools = true\nmultimodal = true\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        slot = cfg.llm["prose"]
+        assert slot.image_tools is True
+        assert slot.multimodal is True
+
+    def test_image_tools_defaults_false(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "x/y"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm["prose"].image_tools is False
+        assert cfg.llm["prose"].multimodal is False
+
+    def test_image_description_model_parsed_at_llm_level(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm]\nimage_description_model = "openai/gpt-4o"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.image_description_model == "openai/gpt-4o"
+
+    def test_image_description_model_not_treated_as_slot(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """image_description_model at [llm] level must not trigger unknown-slot."""
+        path = tmp_path / "character.toml"
+        path.write_text('[llm]\nimage_description_model = "openai/gpt-4o"\n')
+        # should not raise
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.image_description_model == "openai/gpt-4o"
+
+    def test_image_description_model_defaults_empty(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert not cfg.image_description_model

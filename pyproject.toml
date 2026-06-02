@@ -21,6 +21,7 @@ dependencies = [
     "tomli-w >= 1.2, < 2",
     "pyturso>=0.5.1",
     "tantivy>=0.26.0",
+    "pillow >= 11, < 12",
 ]
 
 [project.scripts]

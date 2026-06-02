@@ -477,6 +477,9 @@ unknown slots fail loudly at config load. See
 ### Schema
 
 ```toml
+[llm]
+image_description_model  = ""              # shared; empty = disabled
+
 [llm.<slot>]
 model                    = "z-ai/glm-5.1"   # required
 temperature              = 0.7              # optional, [0, 2]
@@ -484,6 +487,8 @@ provider_order           = ["z-ai"]         # optional, OpenRouter pin
 provider_allow_fallbacks = true             # optional, default true
 reasoning                = "medium"         # "off"|"low"|"medium"|"high"|omit
 tool_calling             = false            # optional, default false
+image_tools              = false            # optional, default false
+multimodal               = false            # optional, default false
 ```
 
 ### `reasoning`
@@ -498,9 +503,21 @@ Maps to OpenRouter's `reasoning` parameter:
 
 ### `tool_calling`
 
-Surface-only flag today — call sites haven't been wired to register
-tools yet. Configuring it now means future tool wiring won't
-require a config schema change.
+Gates alarm and cancel tools on the slot's agentic loop.
+
+### `image_tools`
+
+When `true`, registers the `view_image` tool in the text tool registry
+for this slot. The agentic loop runs when either `tool_calling` or
+`image_tools` is set. `view_image` is never registered in the voice
+registry. Requires `[llm].image_description_model` for descriptions.
+
+### `multimodal`
+
+When `true`, `ImageResult` tool-result messages include JPEG
+`image_url` content blocks so vision-capable models can see the image.
+When `false` (default), only the text description is sent.
+Set this only for slots backed by vision-capable models.
 
 ## Prompt assembly budget
 

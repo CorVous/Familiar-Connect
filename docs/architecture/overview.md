@@ -176,6 +176,27 @@ and `role=tool` results still persist to history for audit and
 prompt-rebuild on later turns; `RecentHistoryLayer` surfaces them as a
 compact `→ name(args)` / `(tool→) ...` summary in the rebuilt prompt.
 
+### Image viewing
+
+`view_image` — selectively fetch and inspect images posted in Discord. The familiar calls it only when it wants to look; images don't enter context automatically.
+
+**Flow:**
+1. `on_message` scans `message.attachments`, `embed.image.url`, and regex-detected image URLs in message text.
+2. For each image found, `collect_images` assigns `img_0`, `img_1`, … and injects `[image: img_N (filename)]` placeholders into the message content.
+3. The `img_id → URL` map travels through the bus payload (`images` key) to `TextResponder`.
+4. `TextResponder.handle` passes the map to the per-turn `ToolContext.images`.
+5. The model calls `view_image(image_id="img_0")`. The handler fetches bytes, compresses to JPEG (1024 px longest edge, quality 85, 1 MB ceiling; iterates quality down by 5 until it fits), and calls the description model to get text.
+6. `ImageResult` carries both the JPEG (base64) and the text description. The agentic loop serialises it per the slot's `multimodal` flag: `multimodal=true` sends an `image_url` content block in the tool-result message; `multimodal=false` sends the text description only.
+
+**Configuration:**
+- `[llm].image_description_model` — model name for vision-based description; empty = feature disabled.
+- `[llm.<slot>].image_tools = true` — registers `view_image` in the text tool registry for that slot (independent of `tool_calling`).
+- `[llm.<slot>].multimodal = true` — sends JPEG content blocks instead of text-only descriptions.
+
+**Voice exclusion:** `view_image` is never registered in the voice tool registry.
+
+**History persistence:** multimodal tool-result messages (list content) are projected to plain text before writing to history, so no raw image bytes enter the turn store.
+
 ### Alarm flow
 
 ```

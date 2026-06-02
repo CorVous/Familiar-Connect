@@ -65,16 +65,33 @@ def get_request_semaphore(
 
 @dataclass
 class Message:
-    """Chat message — content + optional speaker name + tool fields."""
+    """Chat message — content + optional speaker name + tool fields.
+
+    ``content`` may be a list of content blocks for multimodal/tool-result
+    messages (e.g. vision image_url blocks). str for all other cases.
+    """
 
     role: str
-    content: str
+    content: str | list[dict[str, Any]]
     name: str | None = None
     # assistant turns invoking tools — list of OpenAI ``tool_calls`` dicts
     # ``{"id", "type":"function", "function":{"name","arguments"}}``.
     tool_calls: list[dict[str, Any]] | None = None
     # tool-role turns reference the call they answered
     tool_call_id: str | None = None
+
+    @property
+    def content_str(self: Self) -> str:
+        """Return content as plain text; joins text blocks from multimodal lists."""
+        if isinstance(self.content, str):
+            return self.content
+        parts: list[str] = []
+        for block in self.content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
 
     def to_dict(self: Self) -> dict[str, Any]:
         """Serialize to OpenAI-compatible message dict."""
@@ -139,6 +156,8 @@ class LLMClient:
         provider_allow_fallbacks: bool = True,
         reasoning: str | None = None,
         tool_calling: bool = False,
+        image_tools: bool = False,
+        multimodal: bool = False,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -157,6 +176,10 @@ class LLMClient:
         # gate for agentic-loop / tool-registry plumbing. responders
         # read to decide whether to install tools on a call.
         self.tool_calling_enabled = tool_calling
+        # gate for view_image registration (independent of tool_calling)
+        self.image_tools_enabled = image_tools
+        # whether to send image content blocks in tool-result messages
+        self.multimodal = multimodal
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
@@ -324,7 +347,9 @@ class LLMClient:
 
         http = self._get_http()
         metrics = _CallMetrics(slot=self.slot, model=self.model)
-        metrics.input_chars = sum(len(m.content) for m in messages)
+        metrics.input_chars = sum(
+            len(m.content) if isinstance(m.content, str) else 0 for m in messages
+        )
         metrics.t_start = time.perf_counter()
         stream_cm = http.stream("POST", url, headers=headers, json=payload)
         semaphore = get_request_semaphore()
@@ -581,7 +606,9 @@ def create_llm_clients(
     """One :class:`LLMClient` per call-site slot.
 
     All clients share one API key + process-wide rate-limit semaphore
-    in :func:`get_request_semaphore`.
+    in :func:`get_request_semaphore`. Reserved key
+    ``"__image_description__"`` holds the vision model client when
+    ``[llm].image_description_model`` is set.
     """
     clients: dict[str, LLMClient] = {}
     for slot_name in LLM_SLOT_NAMES:
@@ -595,6 +622,8 @@ def create_llm_clients(
             provider_allow_fallbacks=slot.provider_allow_fallbacks,
             reasoning=slot.reasoning,
             tool_calling=slot.tool_calling,
+            image_tools=slot.image_tools,
+            multimodal=slot.multimodal,
         )
         temp = slot.temperature if slot.temperature is not None else "default"
         log_parts = [
@@ -611,5 +640,22 @@ def create_llm_clients(
             log_parts.append(ls.kv("reasoning", slot.reasoning, vc=ls.LM))
         if slot.tool_calling:
             log_parts.append(ls.kv("tools", "on", vc=ls.LM))
+        if slot.image_tools:
+            log_parts.append(ls.kv("image_tools", "on", vc=ls.LM))
+        if slot.multimodal:
+            log_parts.append(ls.kv("multimodal", "on", vc=ls.LM))
         _logger.info(" ".join(log_parts))
+
+    # vision description client — reserved slot, built when configured
+    if character_config.image_description_model:
+        clients["__image_description__"] = LLMClient(
+            api_key=api_key,
+            model=character_config.image_description_model,
+            slot="image_description",
+        )
+        _logger.info(
+            f"{ls.tag('Config', ls.W)} "
+            f"{ls.kv('slot', 'image_description')} "
+            f"{ls.kv('model', character_config.image_description_model)}"
+        )
     return clients

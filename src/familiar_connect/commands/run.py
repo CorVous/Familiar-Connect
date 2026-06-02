@@ -56,6 +56,7 @@ from familiar_connect.processors.projectors import (
 )
 from familiar_connect.stt import create_transcriber
 from familiar_connect.tools.alarm import build_alarm_tool, build_cancel_alarm_tool
+from familiar_connect.tools.image import build_view_image_tool
 from familiar_connect.tools.registry import ToolContext, ToolRegistry
 from familiar_connect.tools.scheduler import AlarmScheduler
 from familiar_connect.tools.waker import AlarmWaker
@@ -393,10 +394,10 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     else:
         tts_player = LoggingTTSPlayer()
 
-    # tool-calling: scheduler + registry + per-turn context factory.
-    # wired into both responders so set_alarm/cancel_alarm are available
-    # when the per-slot ``tool_calling`` flag is set. familiar's
-    # ``llm_clients`` already carry ``tool_calling_enabled`` (see
+    # tool-calling: scheduler + split registries + per-turn context factory.
+    # voice registry: alarm + cancel only (view_image NEVER in voice).
+    # text registry: alarm + cancel + view_image (when image_tools enabled).
+    # familiar's ``llm_clients`` already carry ``tool_calling_enabled`` (see
     # :func:`create_llm_clients`); responders check that flag before
     # entering the agentic loop, so wiring is always safe.
     alarm_scheduler = AlarmScheduler(
@@ -404,12 +405,29 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         bus=familiar.bus,
         familiar_id=familiar.id,
     )
-    tool_registry = ToolRegistry()
-    tool_registry.register(build_alarm_tool(alarm_scheduler))
-    tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
+    voice_tool_registry = ToolRegistry()
+    voice_tool_registry.register(build_alarm_tool(alarm_scheduler))
+    voice_tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
 
-    def _make_tool_context(channel_kind: str) -> Callable[[int, str], ToolContext]:
-        def _build(channel_id: int, turn_id: str) -> ToolContext:
+    text_tool_registry = ToolRegistry()
+    text_tool_registry.register(build_alarm_tool(alarm_scheduler))
+    text_tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
+
+    prose_slot = familiar.config.llm.get("prose")
+    if prose_slot is not None and prose_slot.image_tools:
+        text_tool_registry.register(build_view_image_tool())
+
+    # description client: used by view_image handler via ToolContext
+    description_llm = familiar.llm_clients.get("__image_description__")
+
+    def _make_tool_context(
+        channel_kind: str,
+    ) -> Callable[[int, str, dict[str, str]], ToolContext]:
+        def _build(
+            channel_id: int,
+            turn_id: str,
+            images: dict[str, str] | None = None,
+        ) -> ToolContext:
             return ToolContext(
                 familiar_id=familiar.id,
                 channel_id=channel_id,
@@ -418,6 +436,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 history=familiar.history_store,
                 bus=familiar.bus,
                 scheduler=alarm_scheduler,
+                images=images or {},
+                description_llm=description_llm if channel_kind == "text" else None,
             )
 
         return _build
@@ -432,7 +452,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         router=familiar.router,
         familiar_id=familiar.id,
         member_resolver=handle.resolve_member,
-        tool_registry=tool_registry,
+        tool_registry=voice_tool_registry,
         tool_context_factory=_make_tool_context("voice"),
         post_history_instructions=familiar.config.post_history_instructions,
     )
@@ -445,7 +465,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         familiar_id=familiar.id,
         trigger_typing=handle.trigger_typing,
         typing_handler=handle.typing_interrupt,
-        tool_registry=tool_registry,
+        tool_registry=text_tool_registry,
         tool_context_factory=_make_tool_context("text"),
         post_history_instructions=familiar.config.post_history_instructions,
     )

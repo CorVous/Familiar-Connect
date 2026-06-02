@@ -166,8 +166,8 @@ class TestRecentHistoryLayer:
         layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=10))
         user_msg = next(m for m in messages if m.role == "user")
-        assert re.match(r"^\[\d{2}:\d{2} Alice\] hey$", user_msg.content), (
-            user_msg.content
+        assert re.match(r"^\[\d{2}:\d{2} Alice\] hey$", user_msg.content_str), (
+            user_msg.content_str
         )
 
     @pytest.mark.asyncio
@@ -247,8 +247,8 @@ class TestRecentHistoryCoalesceFragments:
         assert re.match(
             r"^\[01:35 Cassidy\] I okay\. So, Tam, here's the etiquette\."
             r" Big Discord calls like this\. Right\? You can jump in$",
-            user_msgs[0].content,
-        ), user_msgs[0].content
+            user_msgs[0].content_str,
+        ), user_msgs[0].content_str
 
     @pytest.mark.asyncio
     async def test_different_speakers_do_not_merge(self) -> None:
@@ -787,7 +787,7 @@ class TestAssembler:
         prompt = await asm.assemble(_ctx(channel_id=1))
         assert not prompt.system_prompt
         assert len(prompt.recent_history) == 1
-        assert prompt.recent_history[0].content.endswith("hey")
+        assert prompt.recent_history[0].content_str.endswith("hey")
 
     @pytest.mark.asyncio
     async def test_cache_reuses_layer_output_on_same_key(self) -> None:
@@ -827,7 +827,7 @@ class TestAssembler:
         )
         prompt = await asm.assemble(_ctx(channel_id=1))
         # Newest survives.
-        assert prompt.recent_history[-1].content.endswith("19 blah blah")
+        assert prompt.recent_history[-1].content_str.endswith("19 blah blah")
         # Aggressively trimmed.
         assert len(prompt.recent_history) < 20
 
@@ -896,7 +896,7 @@ class TestAssembler:
         )
         prompt = await asm.assemble(_ctx(channel_id=1))
         # Newest survives; most dropped due to tight channel cap.
-        assert prompt.recent_history[-1].content.endswith("09 blah blah")
+        assert prompt.recent_history[-1].content_str.endswith("09 blah blah")
         assert len(prompt.recent_history) < 10
 
     @pytest.mark.asyncio

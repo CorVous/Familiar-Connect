@@ -111,7 +111,7 @@ class PeopleDossierWorker:
             new_facts=new_facts,
         )
         reply = await self._llm.chat(prompt)
-        text = reply.content.strip()
+        text = reply.content_str.strip()
         if not text:
             # don't overwrite real dossier with empty reply
             return

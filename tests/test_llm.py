@@ -516,6 +516,47 @@ class TestCreateLLMClients:
         instances = list(clients.values())
         assert len({id(c) for c in instances}) == len(instances)
 
+    def test_builds_description_client_when_configured(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """``image_description_model`` at [llm] level produces reserved client."""
+        path = tmp_path / "character.toml"
+        path.write_text('[llm]\nimage_description_model = "openai/gpt-4o"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        assert "__image_description__" in clients
+        assert clients["__image_description__"].model == "openai/gpt-4o"
+
+    def test_no_description_client_when_not_configured(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Without ``image_description_model``, reserved key absent."""
+        cfg = load_character_config(
+            tmp_path / "missing.toml",
+            defaults_path=default_profile_path,
+        )
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        assert "__image_description__" not in clients
+
+    def test_image_tools_multimodal_threaded_through(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """image_tools + multimodal slot flags land on LLMClient."""
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.prose]\nmodel = "x/y"\nimage_tools = true\nmultimodal = true\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        assert clients["prose"].image_tools_enabled is True
+        assert clients["prose"].multimodal is True
+
 
 # --- Integration-style test with full prompt assembly ---
 

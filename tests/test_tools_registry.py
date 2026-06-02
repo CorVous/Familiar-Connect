@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from familiar_connect.tools.registry import Tool, ToolRegistry
+from familiar_connect.tools.registry import ImageResult, Tool, ToolContext, ToolRegistry
 
 if TYPE_CHECKING:
-    from familiar_connect.tools.registry import ToolContext
+    from familiar_connect.bus.protocols import EventBus
+    from familiar_connect.history.async_store import AsyncHistoryStore
 
 
 async def _noop_handler(_args: dict, _ctx: ToolContext) -> str:
@@ -92,3 +93,31 @@ def test_tools_iteration_returns_all_registered() -> None:
 def test_default_timeout_is_set() -> None:
     tool = _make_tool()
     assert tool.timeout_s > 0
+
+
+def _make_ctx() -> ToolContext:
+    return ToolContext(
+        familiar_id="fam-1",
+        channel_id=42,
+        channel_kind="text",
+        turn_id="turn-1",
+        history=cast("AsyncHistoryStore", None),
+        bus=cast("EventBus", None),
+    )
+
+
+def test_image_result_carries_both() -> None:
+    result = ImageResult(description="a cat", jpeg_base64="abc123")
+    assert result.description == "a cat"
+    assert result.jpeg_base64 == "abc123"
+    assert result.media_type == "image/jpeg"
+
+
+def test_tool_context_images_defaults_empty() -> None:
+    ctx = _make_ctx()
+    assert ctx.images == {}
+
+
+def test_tool_context_description_llm_defaults_none() -> None:
+    ctx = _make_ctx()
+    assert ctx.description_llm is None

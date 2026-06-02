@@ -180,7 +180,9 @@ async def test_text_responder_runs_agentic_loop(tmp_path: Path) -> None:
     llm = _ScriptedToolLLM(scripts)
     send = _CapturingSend()
 
-    def _ctx_factory(channel_id: int, turn_id: str) -> ToolContext:
+    def _ctx_factory(
+        channel_id: int, turn_id: str, images: dict | None = None
+    ) -> ToolContext:
         return ToolContext(
             familiar_id="fam",
             channel_id=channel_id,
@@ -188,6 +190,7 @@ async def test_text_responder_runs_agentic_loop(tmp_path: Path) -> None:
             turn_id=turn_id,
             history=AsyncHistoryStore(HistoryStore(":memory:")),
             bus=InProcessEventBus(),
+            images=images or {},
         )
 
     responder, _, store = _make_responder(
@@ -228,3 +231,134 @@ async def test_text_responder_runs_agentic_loop(tmp_path: Path) -> None:
     # final assistant content
     assert rows[3]["content"] == "Alarm set."
     assert rows[3]["tool_calls_json"] is None
+
+
+# ---------------------------------------------------------------------------
+# Images threading test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_images_threaded_into_tool_context(tmp_path: Path) -> None:
+    """ToolContext.images must receive the images from the bus payload."""
+    captured_images: list[dict] = []
+
+    async def _probe_handler(_args: dict, ctx: ToolContext) -> str:  # noqa: RUF029
+        captured_images.append(dict(ctx.images))
+        return '{"ok": true}'
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(name="set_alarm", description="", parameters={}, handler=_probe_handler)
+    )
+
+    scripts = [
+        [
+            _tc_delta("c1", "set_alarm", {"reason": "ping", "delay_seconds": 10}),
+            LLMDelta(finish_reason="tool_calls"),
+        ],
+        [LLMDelta(content="Done."), LLMDelta(finish_reason="stop")],
+    ]
+    llm = _ScriptedToolLLM(scripts)
+    send = _CapturingSend()
+    test_images = {"img_0": "http://cdn.example.com/cat.png"}
+
+    def _ctx_factory(
+        channel_id: int, turn_id: str, images: dict | None = None
+    ) -> ToolContext:
+        return ToolContext(
+            familiar_id="fam",
+            channel_id=channel_id,
+            channel_kind="text",
+            turn_id=turn_id,
+            history=AsyncHistoryStore(HistoryStore(":memory:")),
+            bus=InProcessEventBus(),
+            images=images or {},
+        )
+
+    responder, _, _ = _make_responder(
+        llm=llm,
+        send=send,
+        tmp_path=tmp_path,
+        registry=registry,
+        tool_context_factory=_ctx_factory,
+    )
+
+    # inject images into the event payload
+    ev = _discord_text_event()
+    ev.payload["images"] = test_images
+
+    bus = InProcessEventBus()
+    await bus.start()
+    try:
+        await responder.handle(ev, bus)
+    finally:
+        await bus.shutdown()
+
+    assert len(captured_images) == 1
+    assert captured_images[0] == test_images
+
+
+@pytest.mark.asyncio
+async def test_image_tools_only_enters_loop(tmp_path: Path) -> None:
+    """image_tools_enabled alone (no tool_calling) should enter the agentic loop."""
+    handler_seen: list[dict] = []
+
+    async def _h(args: dict, _ctx: ToolContext) -> str:  # noqa: RUF029
+        handler_seen.append(args)
+        return '{"ok": true}'
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(name="view_image", description="", parameters={}, handler=_h)
+    )
+
+    scripts = [
+        [
+            _tc_delta("c1", "view_image", {"image_id": "img_0"}),
+            LLMDelta(finish_reason="tool_calls"),
+        ],
+        [LLMDelta(content="Looks like a cat."), LLMDelta(finish_reason="stop")],
+    ]
+    # image_tools=True, tool_calling=False
+    llm = _ScriptedToolLLM.__new__(_ScriptedToolLLM)
+    LLMClient.__init__(
+        llm, api_key="k", model="m", image_tools=True, tool_calling=False
+    )
+    llm._scripts = list(scripts)
+    llm.calls = []
+    llm.tool_payloads = []
+
+    send = _CapturingSend()
+
+    def _ctx_factory(
+        channel_id: int, turn_id: str, images: dict | None = None
+    ) -> ToolContext:
+        return ToolContext(
+            familiar_id="fam",
+            channel_id=channel_id,
+            channel_kind="text",
+            turn_id=turn_id,
+            history=AsyncHistoryStore(HistoryStore(":memory:")),
+            bus=InProcessEventBus(),
+            images=images or {},
+        )
+
+    responder, _, _ = _make_responder(
+        llm=llm,
+        send=send,
+        tmp_path=tmp_path,
+        registry=registry,
+        tool_context_factory=_ctx_factory,
+    )
+
+    bus = InProcessEventBus()
+    await bus.start()
+    try:
+        await responder.handle(_discord_text_event(content="look at img_0"), bus)
+    finally:
+        await bus.shutdown()
+
+    # handler ran — loop entered despite tool_calling=False
+    assert len(handler_seen) == 1
+    assert send.calls[0][1] == "Looks like a cat."

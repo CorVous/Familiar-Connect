@@ -1038,10 +1038,10 @@ class TestTrailingReminder:
         assert captured, "LLM was never invoked"
         trailing = captured[0][-1]
         assert trailing.role == "system"
-        assert "# Etiquette" in trailing.content
+        assert "# Etiquette" in trailing.content_str
         # post-history block lands deepest — after the mode directive
-        assert trailing.content.index("chatting in a text channel") < (
-            trailing.content.index("# Etiquette")
+        assert trailing.content_str.index("chatting in a text channel") < (
+            trailing.content_str.index("# Etiquette")
         )
 
 

@@ -37,7 +37,7 @@ class _ScriptedLLM(LLMClient):
         self, messages: list[Message]
     ) -> AsyncIterator[str]:
         reply = await self.chat(messages)
-        yield reply.content
+        yield reply.content_str
 
 
 def _seed_turns(store: HistoryStore, count: int, channel_id: int = 1) -> None:
@@ -116,7 +116,7 @@ class TestRollingSummary:
         assert "Round 2" in summary.summary_text
         # Second call passes the prior summary in the prompt
         second_call = llm.calls[1]
-        joined = "\n".join(m.content for m in second_call)
+        joined = "\n".join(m.content_str for m in second_call)
         assert "Round 1 summary" in joined
 
     @pytest.mark.asyncio

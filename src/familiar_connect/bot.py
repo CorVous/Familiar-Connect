@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -480,6 +481,7 @@ async def ingest_event(
     message_id: str | None = None,
     reply_to_message_id: str | None = None,
     mentions: tuple[Author, ...] = (),
+    images: dict[str, str] | None = None,
 ) -> None:
     """Publish text event onto bus.
 
@@ -496,6 +498,7 @@ async def ingest_event(
         message_id=message_id,
         reply_to_message_id=reply_to_message_id,
         mentions=mentions,
+        images=images or {},
     )
 
 
@@ -517,6 +520,92 @@ def compose_content_with_embeds(
     if not content:
         return embed_text
     return f"{content}\n\n{embed_text}"
+
+
+# regex for inline image URLs not already captured as attachments/embeds.
+# matches http(s) URLs ending with common image extensions (with optional query string)
+_IMAGE_URL_RE = re.compile(
+    r"https?://\S+\.(?:png|jpe?g|gif|webp|bmp|tiff?)(?:\?\S+)?",
+    re.IGNORECASE,
+)
+
+_IMAGE_CONTENT_TYPE_PREFIXES = ("image/",)
+_IMAGE_EXTENSIONS = frozenset({
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff",
+})
+
+
+def _is_image_attachment(attachment: object) -> bool:
+    """Return True when attachment is an image by content-type or extension."""
+    ct = getattr(attachment, "content_type", None) or ""
+    if isinstance(ct, str) and ct.lower().startswith(_IMAGE_CONTENT_TYPE_PREFIXES):
+        return True
+    filename = getattr(attachment, "filename", None) or ""
+    if isinstance(filename, str):
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        return ext in _IMAGE_EXTENSIONS
+    return False
+
+
+def collect_images(
+    *,
+    content: str,
+    attachments: Iterable[object],
+    embeds: Iterable[object],
+) -> tuple[str, dict[str, str]]:
+    """Return ``(content_with_placeholders, img_id -> url)``.
+
+    Sources in order: attachments, embed.image.url, inline image URLs in
+    content. Assigns img_0, img_1 … ; appends ``[image: img_N (filename)]``
+    markers to content. Dedupes by URL — same URL only gets one id.
+    """
+    images: dict[str, str] = {}  # img_id → url
+    seen_urls: dict[str, str] = {}  # url → img_id
+    markers: list[str] = []
+
+    def _add(url: str, filename: str) -> None:
+        if url in seen_urls:
+            return
+        img_id = f"img_{len(images)}"
+        images[img_id] = url
+        seen_urls[url] = img_id
+        markers.append(f"[image: {img_id} ({filename})]")
+
+    for att in attachments:
+        if not _is_image_attachment(att):
+            continue
+        url = getattr(att, "url", None) or ""
+        filename = getattr(att, "filename", None) or url.rsplit("/", 1)[-1] or "image"
+        if url:
+            _add(url, filename)
+
+    for embed in embeds:
+        img = getattr(embed, "image", None)
+        if img is None:
+            continue
+        url = getattr(img, "url", None) or ""
+        if not url:
+            continue
+        filename = url.rsplit("/", 1)[-1].split("?")[0] or "embed-image"
+        _add(url, filename)
+
+    for match in _IMAGE_URL_RE.finditer(content):
+        url = match.group(0)
+        filename = url.rsplit("/", 1)[-1].split("?")[0] or "image"
+        _add(url, filename)
+
+    if not markers:
+        return content, images
+    marker_text = "\n".join(markers)
+    new_content = f"{content}\n{marker_text}" if content else marker_text
+    return new_content, images
 
 
 def apply_message_edit(
@@ -958,6 +1047,11 @@ def _register_events(
         # filtered above) do arrive populated, so merge whatever is
         # on inbound message and let edit handler patch the rest.
         text = compose_content_with_embeds(message.content, message.embeds or ())
+        text, images = collect_images(
+            content=text,
+            attachments=message.attachments or (),
+            embeds=message.embeds or (),
+        )
         await ingest_event(
             source=text_source,
             familiar=familiar,
@@ -968,6 +1062,7 @@ def _register_events(
             message_id=str(message.id),
             reply_to_message_id=reply_to,
             mentions=mention_authors,
+            images=images,
         )
 
     @bot.event

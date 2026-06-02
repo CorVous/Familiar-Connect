@@ -36,7 +36,7 @@ class _ScriptedLLM(LLMClient):
         self, messages: list[Message]
     ) -> AsyncIterator[str]:
         reply = await self.chat(messages)
-        yield reply.content
+        yield reply.content_str
 
 
 def _facts_json(items: list[dict[str, object]]) -> str:
@@ -231,9 +231,9 @@ class TestFactExtractorTick:
         await extractor.tick()
 
         system_msg = next(m for m in llm.calls[0] if m.role == "system")
-        assert "self-capability" in system_msg.content.lower() or (
-            "your own" in system_msg.content.lower()
-        ), system_msg.content
+        assert "self-capability" in system_msg.content_str.lower() or (
+            "your own" in system_msg.content_str.lower()
+        ), system_msg.content_str
 
 
 class TestFactExtractorSubjects:
@@ -275,7 +275,7 @@ class TestFactExtractorSubjects:
         )
         await extractor.tick()
 
-        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        prompt_text = "\n".join(m.content_str for m in llm.calls[0])
         # The manifest must list canonical_key → display_name
         assert "discord:111" in prompt_text
         assert "Cass" in prompt_text
@@ -452,7 +452,7 @@ class TestFactExtractorParticipantsWidening:
         )
         await extractor.tick()
 
-        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        prompt_text = "\n".join(m.content_str for m in llm.calls[0])
         # Both speakers must be in the manifest, despite Aria being outside the batch.
         assert "discord:111" in prompt_text  # Cass (batch author)
         assert "discord:222" in prompt_text  # Aria (recent prior author)
@@ -558,7 +558,7 @@ class TestFactExtractorParticipantsWidening:
         )
         await extractor.tick()
 
-        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        prompt_text = "\n".join(m.content_str for m in llm.calls[0])
         # Manifest lines look like ``- canonical_key — display``; count them.
         manifest_count = sum(
             1
@@ -608,7 +608,7 @@ class TestFactExtractorParticipantsWidening:
         )
         await extractor.tick()
 
-        prompt_text = "\n".join(m.content for m in llm.calls[0])
+        prompt_text = "\n".join(m.content_str for m in llm.calls[0])
         assert "discord:111" in prompt_text  # Cass present
         assert "discord:222" not in prompt_text  # Aria isolated to her channel
 
@@ -851,9 +851,9 @@ class TestFactExtractorBiTemporal:
         await extractor.tick()
 
         system_msg = next(m for m in llm.calls[0] if m.role == "system")
-        content_lower = system_msg.content.lower()
+        content_lower = system_msg.content_str.lower()
         # Must mention valid_to is bounded to a known end (world-time).
-        assert "valid_to" in system_msg.content
+        assert "valid_to" in system_msg.content_str
         # And must explicitly warn off retirement / replacement use.
         assert "outdated" in content_lower or "replaced" in content_lower
         assert "supersed" in content_lower
@@ -984,4 +984,4 @@ def _turn_count_in_prompt(messages: list[Message]) -> int:
     user_msg = next((m for m in messages if m.role == "user"), None)
     if user_msg is None:
         return 0
-    return sum(1 for line in user_msg.content.splitlines() if line.startswith("- "))
+    return sum(1 for line in user_msg.content_str.splitlines() if line.startswith("- "))
