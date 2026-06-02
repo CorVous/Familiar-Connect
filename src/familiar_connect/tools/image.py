@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING
 import httpx
 
 from familiar_connect import log_style as ls
-from familiar_connect.tools.image_compress import compress_to_jpeg
+from familiar_connect.tools.image_compress import (
+    compress_for_description,
+    compress_to_jpeg,
+)
 from familiar_connect.tools.image_describe import describe_image
 from familiar_connect.tools.registry import ImageResult, Tool
 
@@ -82,13 +85,15 @@ async def _view_image_handler(
         )
         return json.dumps({"error": f"fetch failed: {exc}"})
 
-    # describe at full quality — result persists; compress separately for prose model
+    # describe at high quality (JPEG 95, 4MB) — result persists
+    # compress separately at lower ceiling for prose model payload
     if ctx.description_llm is None:
         desc = "(no description model configured)"
     else:
-        raw_b64 = base64.b64encode(raw).decode("ascii")
         try:
-            desc = await describe_image(llm=ctx.description_llm, jpeg_base64=raw_b64)
+            desc_jpeg = compress_for_description(raw)
+            desc_b64 = base64.b64encode(desc_jpeg).decode("ascii")
+            desc = await describe_image(llm=ctx.description_llm, jpeg_base64=desc_b64)
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 f"{ls.tag('Image', ls.Y)} "

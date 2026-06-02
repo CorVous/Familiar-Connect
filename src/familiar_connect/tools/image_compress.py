@@ -9,9 +9,11 @@ from PIL import Image
 
 _MAX_EDGE = 1024
 _START_QUALITY = 85
+_START_QUALITY_DESCRIBE = 95
 _MIN_QUALITY = 20
 _QUALITY_STEP = 5
 _SIZE_CEILING = 1_000_000
+_SIZE_CEILING_DESCRIBE = 4_000_000
 
 
 class ImageTooLargeError(Exception):
@@ -43,6 +45,29 @@ def compress_to_jpeg(raw: bytes, *, ceiling: int = _SIZE_CEILING) -> bytes:
             return data
 
     msg = f"image cannot be compressed under {ceiling} bytes"
+    raise ImageTooLargeError(msg)
+
+
+def compress_for_description(raw: bytes) -> bytes:
+    """High-quality JPEG for vision model description; 4MB ceiling.
+
+    Same 1024px resize, but starts at quality 95 to preserve detail that
+    matters for accurate descriptions. Description is stored permanently;
+    prose payload uses the tighter :func:`compress_to_jpeg` instead.
+    """
+    img = Image.open(io.BytesIO(raw))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.thumbnail((_MAX_EDGE, _MAX_EDGE))
+
+    for quality in range(_START_QUALITY_DESCRIBE, _MIN_QUALITY - 1, -_QUALITY_STEP):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= _SIZE_CEILING_DESCRIBE:
+            return data
+
+    msg = f"image cannot be compressed under {_SIZE_CEILING_DESCRIBE} bytes"
     raise ImageTooLargeError(msg)
 
 
