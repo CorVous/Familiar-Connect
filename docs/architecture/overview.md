@@ -124,6 +124,16 @@ would also cut a *different* user's in-flight reply (Discord exposes one
 shared voice client per channel), so cancellation only flows through the
 scope.
 
+Per-user scoping means two speakers spawn independent, non-cancelling
+reply pipelines. A per-channel `asyncio.Lock` (`VoiceResponder._gate_for`)
+serializes reply *generation* — `set_rag_cue` → assemble → stream →
+assistant-turn commit run under it — so the second speaker's pipeline
+assembles after the first commits, sees that reply in context, and can
+resolve `<silent>` instead of producing a near-duplicate. The user turn
+is appended outside the lock (observation never gated). Playback is
+already serial on the shared voice client, so the wait adds no perceived
+latency. See [Cross-speaker reply gate](voice-pipeline.md#cross-speaker-reply-gate).
+
 Voice user turns are appended to history with the speaker's `Author`
 resolved through `BotHandle.resolve_member(channel_id, user_id)`. The
 resolver consults a voice-member side cache populated by two sources:

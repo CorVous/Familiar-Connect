@@ -403,6 +403,40 @@ call returns, but pycord still has `is_playing() == True` for one tick
 Pinned by
 `tests/test_discord_voice_player.py::TestConcurrentSpeak::test_cancel_then_immediate_speak_does_not_collide`.
 
+## Cross-speaker reply gate
+
+Turn scopes are keyed per `(channel, user_id)`, so barge-in only ever
+cancels within one speaker — a deliberate choice, since the shared
+voice client means a global `TTSPlayer.stop()` would cut a *different*
+user's in-flight reply. The side effect: when two people talk in one
+window, each utterance spawns an independent reply pipeline, and the
+two never cancel each other. Without serialization both assemble
+before either commits an assistant turn, so both answer the same
+moment — the back-to-back near-duplicate replies seen in production
+("Fair enough. I'll reserve judgment…" / "Fair enough. I'll form my
+opinion later…").
+
+A per-channel `asyncio.Lock` (`VoiceResponder._gate_for`) serializes
+reply *generation*: `set_rag_cue` → assemble → stream → assistant-turn
+commit run under the lock. The waiting pipeline therefore assembles
+only after the prior reply lands in history, sees it in context, and
+can resolve `<silent>` instead of duplicating. Two further points:
+
+- **No perceived latency.** Playback is already serial on the shared
+  voice client, so the second reply can't be *heard* until the first
+  finishes anyway. Gating generation behind the same order spends time
+  that was already going to be spent.
+- **The user turn stays outside the lock.** Observation is never gated
+  by a busy channel — every speaker's turn is recorded even while the
+  bot replies to someone else. `set_rag_cue` moves *inside* the lock,
+  which also closes a shared-state race where a concurrent pipeline
+  could clobber the retrieval cue mid-assemble.
+
+Barge-in composes cleanly: the lock releases on return or cancellation
+(`async with` unwind), and same-speaker self-barge still cancels via
+the scope. Pinned by
+`tests/test_voice_responder.py::TestCrossUserReplyGate`.
+
 ## Per-channel tuning
 
 `[channels.<id>]` already covers voice-relevant knobs:
