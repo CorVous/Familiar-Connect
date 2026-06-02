@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
+import sys
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,7 +16,10 @@ from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
     _async_main,
     _default_assembler,
+    _GracefulShutdown,
+    _install_shutdown_handlers,
     _resolve_familiar_root,
+    _wait_for_shutdown,
     load_opus,
     run,
 )
@@ -686,6 +691,10 @@ class TestAsyncMainCleanup:
                 return_value=[proj],
             ),
             patch("familiar_connect.commands.run.create_embedder", return_value=None),
+            patch(
+                "familiar_connect.commands.run._install_shutdown_handlers",
+                return_value=lambda: None,
+            ),
             pytest.raises(BaseExceptionGroup),  # TaskGroup wraps the inner raise
         ):
             await _async_main("fake-token", familiar)
@@ -747,11 +756,190 @@ class TestAsyncMainCleanup:
                 return_value=[proj],
             ),
             patch("familiar_connect.commands.run.create_embedder", return_value=None),
+            patch(
+                "familiar_connect.commands.run._install_shutdown_handlers",
+                return_value=lambda: None,
+            ),
             pytest.raises(BaseExceptionGroup),
         ):
             await _async_main("fake-token", familiar)
 
         bot.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Graceful SIGINT / SIGTERM shutdown
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForShutdown:
+    """``_wait_for_shutdown`` blocks until the event fires, then unwinds."""
+
+    @pytest.mark.asyncio
+    async def test_blocks_until_event_then_raises(self) -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(_wait_for_shutdown(stop))
+        await asyncio.sleep(0)
+        assert not task.done()  # still parked on the event
+
+        stop.set()
+        with pytest.raises(_GracefulShutdown):
+            await task
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="add_signal_handler unsupported on Windows ProactorEventLoop",
+)
+class TestInstallShutdownHandlers:
+    """POSIX signal handlers translate SIGINT/SIGTERM into the stop event."""
+
+    @pytest.mark.asyncio
+    async def test_sigint_sets_stop_event(self) -> None:
+        stop = asyncio.Event()
+        remove = _install_shutdown_handlers(stop)
+        try:
+            signal.raise_signal(signal.SIGINT)
+            await asyncio.sleep(0.05)  # let the loop run the callback
+            assert stop.is_set()
+        finally:
+            remove()
+
+    @pytest.mark.asyncio
+    async def test_remove_restores_handlers(self) -> None:
+        stop = asyncio.Event()
+        remove = _install_shutdown_handlers(stop)
+        remove()  # idempotent + must not leave loop handlers behind
+        remove()
+        # after removal a fresh event is untouched by a new signal handler
+        assert not stop.is_set()
+
+
+class TestGracefulShutdown:
+    """A signal during the run loop drains the TaskGroup and runs cleanup."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine '_hang' was never awaited:RuntimeWarning"
+    )
+    async def test_signal_runs_cleanup_without_raising(self) -> None:
+        """Stop event set → orderly teardown, no exception bubbles out."""
+        familiar = _fake_familiar_for_async_main()
+        familiar.transcriber = None
+
+        async def _hang_args(*_a: object, **_kw: object) -> None:
+            await asyncio.sleep(60)  # bot.start(token) passes one positional arg
+
+        bot = MagicMock(name="bot")
+        bot.start = AsyncMock(side_effect=_hang_args)  # hangs until cancelled
+        bot.close = AsyncMock()
+        handle = MagicMock(bot=bot)
+
+        proj = MagicMock(name="projector")
+        proj.run = AsyncMock(side_effect=_hang)
+        proj.name = "stub-projector"
+
+        scheduler_mock = MagicMock(name="alarm_scheduler")
+        scheduler_mock.start = AsyncMock()
+        scheduler_mock.shutdown = AsyncMock()
+
+        def _fire_shutdown(stop: asyncio.Event):
+            # mimic a SIGINT landing just after the group spins up
+            asyncio.get_running_loop().call_soon(stop.set)
+            return lambda: None
+
+        with (
+            patch("familiar_connect.commands.run.create_bot", return_value=handle),
+            patch("familiar_connect.commands.run._default_assembler"),
+            patch(
+                "familiar_connect.commands.run._run_debug_processor",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_voice_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_text_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_alarm_waker",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch("familiar_connect.commands.run.VoiceResponder"),
+            patch("familiar_connect.commands.run.TextResponder"),
+            patch(
+                "familiar_connect.commands.run.AlarmScheduler",
+                return_value=scheduler_mock,
+            ),
+            patch("familiar_connect.commands.run.AlarmWaker"),
+            patch(
+                "familiar_connect.commands.run.create_projectors",
+                return_value=[proj],
+            ),
+            patch("familiar_connect.commands.run.create_embedder", return_value=None),
+            patch(
+                "familiar_connect.commands.run._install_shutdown_handlers",
+                _fire_shutdown,
+            ),
+        ):
+            # must return cleanly — no KeyboardInterrupt, no ExceptionGroup
+            await _async_main("fake-token", familiar)
+
+        bot.close.assert_awaited_once()
+        familiar.bus.shutdown.assert_awaited_once()
+        scheduler_mock.shutdown.assert_awaited_once()
+        familiar.router.shutdown.assert_called_once()
+
+
+class TestRunKeyboardInterruptFallback:
+    """KeyboardInterrupt escaping asyncio.run is swallowed, not surfaced."""
+
+    def test_keyboard_interrupt_returns_quietly(self, tmp_path: Path) -> None:
+        (tmp_path / "aria").mkdir()
+        args = argparse.Namespace(familiar="aria")
+        env = {"DISCORD_BOT": "fake-token", "OPENROUTER_API_KEY": "sk-test"}
+
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("familiar_connect.commands.run._DEFAULT_FAMILIARS_ROOT", tmp_path),
+            patch(
+                "familiar_connect.commands.run.load_character_config",
+                return_value=_fake_character_config(),
+            ),
+            patch(
+                "familiar_connect.commands.run.create_llm_clients",
+                return_value={
+                    "fast": MagicMock(),
+                    "prose": MagicMock(),
+                    "background": MagicMock(),
+                },
+            ),
+            patch("familiar_connect.commands.run.create_tts_client", return_value=None),
+            patch(
+                "familiar_connect.commands.run.create_transcriber",
+                return_value=None,
+            ),
+            patch(
+                "familiar_connect.commands.run.Familiar.load_from_disk",
+                return_value=MagicMock(id="aria", config=MagicMock()),
+            ),
+            patch("familiar_connect.commands.run.load_opus"),
+            patch(
+                "familiar_connect.commands.run._async_main",
+                new_callable=MagicMock,
+                return_value=MagicMock(name="coroutine"),
+            ),
+            patch(
+                "familiar_connect.commands.run.asyncio.run",
+                side_effect=KeyboardInterrupt,
+            ),
+        ):
+            # no traceback escapes — run() returns an int exit code
+            result = run(args)
+
+        assert result == 0
 
 
 class TestDefaultAssemblerLayerOrder:

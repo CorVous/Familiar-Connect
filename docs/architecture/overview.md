@@ -45,7 +45,7 @@ flowchart LR
 
 ## Components
 
-- **CLI** — `familiar-connect run --familiar <id>` (argparse, subcommand dispatch).
+- **CLI** — `familiar-connect run --familiar <id>` (argparse, subcommand dispatch). The run loop installs cooperative `SIGINT`/`SIGTERM` handlers: the first signal drains the asyncio `TaskGroup` and runs orderly teardown (close py-cord, stop the transcriber, shut the bus down), a second forces exit. Where `add_signal_handler` is unavailable (Windows), a `KeyboardInterrupt` fallback runs the same cleanup. Either way, Ctrl-C exits quietly with no traceback.
 - **Configuration** — TOML with deep-merge over `data/familiars/_default/character.toml`. Per-channel overrides live under `[channels.<id>]`. See [Configuration model](configuration-model.md).
 - **Event bus** — in-process, topic-keyed fan-out. `InProcessEventBus` implements the `EventBus` Protocol. Per-topic `BackpressurePolicy` (`BLOCK`, `DROP_OLDEST`, `DROP_NEWEST`, `UNBOUNDED`). Lifecycle: `starting → running → draining → stopped`.
 - **Turn router** — `TurnRouter.begin_turn(session_id, turn_id)` cancels any prior `TurnScope` in the same session before registering the new one; different sessions stay independent.

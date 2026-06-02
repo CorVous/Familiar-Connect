@@ -640,23 +640,18 @@ class TestBargeIn:
         await bus.start()
         await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
 
-        async def bargein_mid_speech() -> float:
-            # LLM stream is instant; playback starts immediately. Cancel 100ms in.
-            await asyncio.sleep(0.1)
-            loop = asyncio.get_running_loop()
-            cancel_time = loop.time()
-            await responder.handle(_mk_activity_start(turn_id="t-2"), bus)
-            return cancel_time
-
         loop = asyncio.get_running_loop()
         task_reply = asyncio.create_task(
             responder.handle(_mk_final("go ahead", turn_id="t-1"), bus)
         )
-        task_barge = asyncio.create_task(bargein_mid_speech())
-        cancel_time = await task_barge
+        # barge in only once playback is genuinely in progress — avoids the
+        # race where a loaded runner preempts t-1 before speak() is ever called
+        await asyncio.wait_for(player.speak_started.wait(), timeout=5)
+        cancel_time = loop.time()
+        await responder.handle(_mk_activity_start(turn_id="t-2"), bus)
         await task_reply
-        # handle() now spawns _on_final as a task — wait for the in-flight
-        # speak to actually finish (i.e. observe cancellation) before timing.
+        # handle() spawns _on_final as a task — wait for the in-flight speak
+        # to observe cancellation before timing.
         await responder.wait_until_idle()
         t_reply_done = loop.time()
 

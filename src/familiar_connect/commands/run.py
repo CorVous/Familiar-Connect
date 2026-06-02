@@ -8,6 +8,7 @@ import ctypes.util
 import logging
 import os
 import pathlib
+import signal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -289,6 +290,70 @@ def _first_voice_client(handle: BotHandle) -> discord.VoiceClient | None:
     return None
 
 
+class _GracefulShutdown(Exception):  # noqa: N818
+    """Sentinel raised inside the TaskGroup to unwind on SIGINT/SIGTERM."""
+
+
+# SIGINT (Ctrl-C, frequent in dev) + SIGTERM (container/systemd stop)
+_SHUTDOWN_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM)
+
+
+async def _wait_for_shutdown(stop: asyncio.Event) -> None:
+    """Park until *stop* set, then raise to unwind the run-loop TaskGroup."""
+    await stop.wait()
+    raise _GracefulShutdown
+
+
+def _install_shutdown_handlers(stop: asyncio.Event) -> Callable[[], None]:
+    """Route SIGINT/SIGTERM into a cooperative shutdown.
+
+    First signal sets *stop*; the supervisor task then raises
+    :class:`_GracefulShutdown`, so the TaskGroup cancels its siblings
+    and the ``finally`` teardown runs in normal (non-cancelling) task
+    state — no re-raised ``KeyboardInterrupt`` traceback, no half-closed
+    aiohttp session. A second signal restores the OS default handler so
+    a wedged shutdown stays force-killable.
+
+    No-op where ``add_signal_handler`` is unsupported (Windows Proactor
+    loop, non-main thread); :func:`run` keeps a ``KeyboardInterrupt``
+    fallback for those.
+
+    :return: callable removing the installed handlers.
+    """
+    loop = asyncio.get_running_loop()
+    installed: list[signal.Signals] = []
+
+    def _remove() -> None:
+        for sig in installed:
+            with contextlib.suppress(NotImplementedError, ValueError):
+                loop.remove_signal_handler(sig)
+        installed.clear()
+
+    def _on_signal(signame: str) -> None:
+        if not stop.is_set():
+            _logger.info(
+                f"{ls.tag('Shutdown', ls.Y)} "
+                f"{ls.kv('signal', signame, vc=ls.LY)} "
+                f"draining — {ls.word('signal again to force', ls.LY)}"
+            )
+            stop.set()
+        else:
+            _logger.warning(
+                f"{ls.tag('Shutdown', ls.Y)} forced — OS default handler restored"
+            )
+            _remove()
+
+    for sig in _SHUTDOWN_SIGNALS:
+        try:
+            loop.add_signal_handler(sig, _on_signal, sig.name)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # no asyncio signal support here — KeyboardInterrupt covers it
+            _logger.debug("signal handler unavailable for %s", sig.name)
+        else:
+            installed.append(sig)
+    return _remove
+
+
 async def _async_main(token: str, familiar: Familiar) -> None:
     """Asyncio entry point: bring up bus, responders, bot.
 
@@ -399,8 +464,15 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     # bot accepts new traffic
     await alarm_scheduler.start()
 
+    # cooperative shutdown: SIGINT/SIGTERM set the event, the supervisor
+    # task unwinds the group, and the finally below tears down in order
+    # (see _install_shutdown_handlers)
+    stop = asyncio.Event()
+    remove_signal_handlers = _install_shutdown_handlers(stop)
+
     try:
         async with asyncio.TaskGroup() as tg:
+            tg.create_task(_wait_for_shutdown(stop), name="shutdown-supervisor")
             tg.create_task(_run_debug_processor(familiar), name="debug-logger")
             tg.create_task(
                 _run_voice_responder(familiar, voice_responder),
@@ -417,7 +489,12 @@ async def _async_main(token: str, familiar: Familiar) -> None:
             for proj in projectors:
                 tg.create_task(proj.run(), name=proj.name)
             tg.create_task(handle.bot.start(token), name="discord-bot")
+    except* _GracefulShutdown:
+        # signal-initiated: siblings already cancelled by the group;
+        # fall through to finally for orderly teardown
+        _logger.info(f"{ls.tag('Shutdown', ls.G)} {ls.word('clean', ls.LG)}")
     finally:
+        remove_signal_handlers()
         # close py-cord first so its aiohttp ClientSession doesn't leak
         # past loop shutdown; suppress so close error can't mask the
         # original exception that triggered the finally
@@ -575,9 +652,18 @@ def run(args: argparse.Namespace) -> int:
     load_opus()
     login_failed = False
     try:
-        asyncio.run(_async_main(token, familiar))
-    except* discord.errors.LoginFailure:
-        login_failed = True
+        try:
+            asyncio.run(_async_main(token, familiar))
+        except* discord.errors.LoginFailure:
+            login_failed = True
+    except KeyboardInterrupt:
+        # SIGINT landed before the asyncio signal handler armed, or on a
+        # platform without add_signal_handler. asyncio.run already
+        # cancelled tasks and ran cleanup — exit quietly, no traceback.
+        _logger.info(
+            f"{ls.tag('Shutdown', ls.G)} interrupted — {ls.word('bye', ls.LG)}"
+        )
+        return 0
     if login_failed:
         _logger.error(
             "Discord login failed — DISCORD_BOT token is invalid or expired. "
