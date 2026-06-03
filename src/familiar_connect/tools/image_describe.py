@@ -11,7 +11,10 @@ if TYPE_CHECKING:
 
 _DESCRIBE_PROMPT = (
     "Describe this image concisely for a chat assistant. "
-    "Focus on the main subject and any notable details."
+    "Focus on the main subject and any notable details. "
+    "Describe what you actually see — colors, shapes, composition, text. "
+    "Do not name specific characters, people, franchises, brands, or other "
+    "proper nouns; describe appearance instead."
 )
 
 
