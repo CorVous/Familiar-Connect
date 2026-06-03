@@ -53,7 +53,7 @@ def _open_as_rgb(raw: bytes) -> Image.Image:
     for f in frames:
         if f.height != h:
             scale = h / f.height
-            parts.append(f.resize((int(f.width * scale), h), Image.LANCZOS))
+            parts.append(f.resize((int(f.width * scale), h), Image.Resampling.LANCZOS))
         else:
             parts.append(f)
 
