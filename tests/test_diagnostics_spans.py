@@ -27,14 +27,18 @@ class TestSpan:
             await asyncio.sleep(0.005)
             return 42
 
-        with caplog.at_level(logging.INFO, logger="familiar_connect.diagnostics"):
+        with caplog.at_level(logging.DEBUG, logger="familiar_connect.diagnostics"):
             result = await work()
         assert result == 42
-        messages = [_strip_ansi(r.getMessage()) for r in caplog.records]
-        records = [m for m in messages if "span=" in m]
-        assert records, "no span log emitted"
-        assert "span=demo" in records[-1]
-        assert re.search(r"ms=\d+", records[-1])
+        span_records = [
+            r for r in caplog.records if "span=" in _strip_ansi(r.getMessage())
+        ]
+        assert span_records, "no span log emitted"
+        last = _strip_ansi(span_records[-1].getMessage())
+        assert "span=demo" in last
+        assert re.search(r"ms=\d+", last)
+        # spans are DEBUG-level — shown at -vv, not -v
+        assert span_records[-1].levelno == logging.DEBUG
 
     def test_emits_ms_log_on_sync_function(
         self, caplog: pytest.LogCaptureFixture
@@ -43,7 +47,7 @@ class TestSpan:
         def work() -> str:
             return "ok"
 
-        with caplog.at_level(logging.INFO, logger="familiar_connect.diagnostics"):
+        with caplog.at_level(logging.DEBUG, logger="familiar_connect.diagnostics"):
             assert work() == "ok"
         messages = [_strip_ansi(r.getMessage()) for r in caplog.records]
         records = [m for m in messages if "span=" in m]
@@ -60,7 +64,7 @@ class TestSpan:
             raise RuntimeError("boom")
 
         with (
-            caplog.at_level(logging.INFO, logger="familiar_connect.diagnostics"),
+            caplog.at_level(logging.DEBUG, logger="familiar_connect.diagnostics"),
             pytest.raises(RuntimeError),
         ):
             await work()
