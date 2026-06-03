@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.bus.router import TurnRouter
     from familiar_connect.context.assembler import Assembler
+    from familiar_connect.focus import FocusManager
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.llm import LLMClient
     from familiar_connect.tools.registry import ToolContext, ToolRegistry
@@ -189,6 +190,7 @@ class TextResponder:
             Callable[[int, str, dict[str, str]], ToolContext] | None
         ) = None,
         post_history_instructions: str = "",
+        focus_manager: FocusManager | None = None,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -210,6 +212,8 @@ class TextResponder:
         # responder runs ``agentic_loop`` instead of bare ``chat_stream``
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
+        # attentional focus controller; None = backward-compat (no focus gating)
+        self._focus_manager = focus_manager
         # in-process dedup; bus doesn't republish today, cheap insurance
         self._seen: set[str] = set()
 
@@ -275,6 +279,12 @@ class TextResponder:
                     nick=m.guild_nick,
                 )
 
+        # focus-aware staging: when a focus_manager is wired and
+        # channel is not focused, persist as staged turn and return —
+        # no LLM call, no reply. unread digest surfaces it next turn
+        focused = self._focus_manager is None or self._focus_manager.is_focused(
+            channel_id
+        )
         # persist user turn *before* streaming so RecentHistoryLayer
         # in same task sees it. mirrors VoiceResponder
         user_turn = await self._history.append_turn(
@@ -286,12 +296,23 @@ class TextResponder:
             guild_id=guild_id,
             platform_message_id=message_id,
             reply_to_message_id=reply_to_message_id,
+            consumed=focused,  # staged when not focused
         )
         if mentions:
             await self._history.record_mentions(
                 turn_id=user_turn.id,
                 canonical_keys=[m.canonical_key for m in mentions],
             )
+        if not focused:
+            author_label = author.display_name if author else "unknown"
+            _logger.info(
+                f"{ls.tag('📥 Staged', ls.Y)} "
+                f"{ls.kv('ch', str(channel_id), vc=ls.LW)} "
+                f"{ls.kv('from', author_label, vc=ls.LW)} "
+                f"{ls.kv('text', content, vc=ls.LW)}"
+            )
+            return
+
         # seed retrieval before assembly so RagContextLayer sees the cue
         self._assembler.set_rag_cue(content)
 
@@ -385,6 +406,8 @@ class TextResponder:
             reply_to_message_id=thread_target,
         )
         self._router.end_turn(scope)
+        if self._focus_manager is not None:
+            await self._focus_manager.end_turn()
 
     def _build_ping_resolver(
         self,
@@ -441,12 +464,27 @@ class TextResponder:
             guild_id=guild_id,
         )
         prompt = await self._assembler.assemble(ctx)
+        # focus context for unread digest + focus directive
+        focus_ch = (
+            self._focus_manager.get_focus("text") if self._focus_manager else None
+        )
+        unread_digest: dict[int, int] | None = None
+        if self._focus_manager is not None:
+            unread_digest = await self._history.staged_channels(
+                familiar_id=self._familiar_id
+            )
         # always append short output-controls instruction so model
         # knows ``[@X]`` and ``[↩]`` are routable. costs ~5 lines of
         # context, no per-channel enumeration. final reminder
         # restates current time + special inputs so model doesn't
         # drift on long-lived caches
-        reminder = build_final_reminder(viewer_mode="text")
+        ch_names = self._focus_manager.channel_names if self._focus_manager else {}
+        reminder = build_final_reminder(
+            viewer_mode="text",
+            focus_channel_id=focus_ch,
+            unread_digest=unread_digest,
+            channel_names=ch_names,
+        )
         system = "\n\n".join(
             s for s in (prompt.system_prompt, _BOT_OUTPUT_INSTRUCTIONS, reminder) if s
         )
@@ -460,6 +498,9 @@ class TextResponder:
             viewer_mode="text",
             include_mode_instruction=True,
             post_history_instructions=self._post_history_instructions,
+            focus_channel_id=focus_ch,
+            unread_digest=unread_digest,
+            channel_names=ch_names,
         )
         messages.append(Message(role="system", content=trailing))
 
@@ -630,7 +671,7 @@ class TextResponder:
                 )
                 return None
 
-        if bail_silent:
+        if bail_silent or result.is_silent:
             _logger.info(
                 f"{ls.tag('💤 Text', ls.B)} "
                 f"{ls.kv('decision', 'silent', vc=ls.LB)} "

@@ -117,6 +117,82 @@ def _delta_finish(reason: str) -> LLMDelta:
 # ---------------------------------------------------------------------------
 
 
+class TestAgenticLoopLeakedToolCallGuard:
+    """Model sometimes emits a tool-call as *text* instead of invoking it.
+
+    Such leaked ``<invoke …>`` XML must never reach the user or history
+    (and seeds a mimicry cascade if stored). Strip it; a leaked
+    ``silent`` call is honoured as silence.
+    """
+
+    _SILENT_LEAK = (
+        '<invoke name="silent">\n'
+        '<parameter name="reasoning">she stays quiet</parameter>\n'
+        "</invoke>"
+    )
+
+    @pytest.mark.asyncio
+    async def test_leaked_silent_call_becomes_silent(self) -> None:
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(self._SILENT_LEAK), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is True
+        assert result.final_content == ""
+
+    @pytest.mark.asyncio
+    async def test_leaked_namespaced_invoke_is_stripped(self) -> None:
+        # some models prefix the tag with a namespace
+        leak = "<ns:invoke name=" + '"silent"' + ">x</ns:invoke>"
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(leak), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is True
+        assert result.final_content == ""
+
+    @pytest.mark.asyncio
+    async def test_leaked_nonsilent_call_stripped_not_silent(self) -> None:
+        leak = "<invoke name=" + '"view_image"' + ">x</invoke>"
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(leak), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is False
+        assert result.final_content == ""
+
+    @pytest.mark.asyncio
+    async def test_normal_reply_with_word_invoke_untouched(self) -> None:
+        # stray mention mid-prose is content, not a leaked call
+        text = "Let me invoke my legendary wit."
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(text), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is False
+        assert result.final_content == text
+
+
 class TestAgenticLoopTermination:
     @pytest.mark.asyncio
     async def test_terminates_when_no_tool_calls(self) -> None:

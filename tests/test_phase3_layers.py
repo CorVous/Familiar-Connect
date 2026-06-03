@@ -6,7 +6,7 @@ Covers :class:`ConversationSummaryLayer`,
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
@@ -69,8 +69,15 @@ class TestConversationSummaryLayer:
 
 
 class TestCrossChannelContextLayer:
+    """CrossChannelContextLayer is retired — build() always returns "".
+
+    The class remains importable for backward compat (run.py wires it
+    in) but the attentional stream supersedes per-channel summaries.
+    """
+
     @pytest.mark.asyncio
-    async def test_renders_configured_sources(self) -> None:
+    async def test_build_always_returns_empty(self) -> None:
+        """Retired layer opts out unconditionally."""
         store = HistoryStore(":memory:")
         store.put_cross_context(
             familiar_id="fam",
@@ -83,50 +90,11 @@ class TestCrossChannelContextLayer:
             store=AsyncHistoryStore(store), viewer_map={1: [100]}, ttl_seconds=300
         )
         out = await layer.build(_ctx(channel_id=1, viewer_mode="voice"))
-        assert "pumpkins" in out
-
-    @pytest.mark.asyncio
-    async def test_suppresses_stale_summaries_past_ttl(self) -> None:
-        store = HistoryStore(":memory:")
-        store.put_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-            source_last_id=5,
-            summary_text="Stale content.",
-        )
-        # Manually backdate created_at.
-        old_ts = (datetime.now(tz=UTC) - timedelta(minutes=30)).isoformat()
-        store._conn.execute(
-            "UPDATE cross_context_summaries SET created_at = ?",
-            (old_ts,),
-        )
-        store._conn.commit()
-
-        layer = CrossChannelContextLayer(
-            store=AsyncHistoryStore(store), viewer_map={1: [100]}, ttl_seconds=60
-        )
-        out = await layer.build(_ctx(channel_id=1, viewer_mode="voice"))
-        # Stale content should not be rendered; layer opts out.
         assert not out
 
     @pytest.mark.asyncio
-    async def test_no_config_for_viewer_returns_empty(self) -> None:
-        store = HistoryStore(":memory:")
-        store.put_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-            source_last_id=5,
-            summary_text="Something.",
-        )
-        layer = CrossChannelContextLayer(
-            store=AsyncHistoryStore(store), viewer_map={}, ttl_seconds=300
-        )
-        assert not await layer.build(_ctx(channel_id=1))
-
-    @pytest.mark.asyncio
-    async def test_multiple_sources_concatenated(self) -> None:
+    async def test_build_empty_regardless_of_config(self) -> None:
+        """Empty even when viewer_map is populated and data exists."""
         store = HistoryStore(":memory:")
         store.put_cross_context(
             familiar_id="fam",
@@ -146,8 +114,7 @@ class TestCrossChannelContextLayer:
             store=AsyncHistoryStore(store), viewer_map={1: [100, 200]}, ttl_seconds=300
         )
         out = await layer.build(_ctx(channel_id=1))
-        assert "apples" in out
-        assert "service restart" in out
+        assert not out
 
 
 class TestRagContextLayer:
@@ -525,3 +492,26 @@ class TestRecentHistoryToolTurns:
         assert any("A red fox spirit." in (m.content or "") for m in msgs)
         # no message carries an unpaired tool_call_id either
         assert all(getattr(m, "tool_call_id", None) is None for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_tool_result_replays_as_user_not_assistant(self) -> None:
+        # mimicry guard: replaying tool results as ``assistant`` teaches
+        # the model to open fresh replies with ``[tool result] …`` (and
+        # even fabricate results). render as non-assistant narration so
+        # the model never sees it as its own reply pattern.
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="tool",
+            content="# Image Description\n\nA red fox spirit.",
+            author=None,
+            tool_call_id="call_1",
+        )
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+
+        leaked = [m for m in msgs if "A red fox spirit." in (m.content or "")]
+        assert leaked, "tool-result content must survive in context"
+        assert all(m.role != "assistant" for m in leaked)
+        assert all(m.role == "user" for m in leaked)

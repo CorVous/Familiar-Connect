@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
     from familiar_connect.familiar import Familiar
+    from familiar_connect.focus import FocusManager
     from familiar_connect.history.store import HistoryStore
     from familiar_connect.stt import Transcriber, TranscriptionResult
     from familiar_connect.voice.turn_detection import UtteranceEndpointer
@@ -67,6 +68,39 @@ if TYPE_CHECKING:
     ResolveMember = Callable[[int, int], "Author | None"]
 
 _logger = logging.getLogger(__name__)
+
+
+async def _defer_interaction(ctx: discord.ApplicationContext) -> bool:
+    """ACK interaction ASAP to claim Discord's 3s response window.
+
+    Slash handlers that don't defer race the 3s deadline and fail with
+    ``NotFound (10062)`` under loop pressure or gateway lag. Returns
+    ``False`` when the interaction is already gone.
+    """
+    try:
+        await ctx.defer(ephemeral=True)
+    except discord.NotFound:
+        name = ctx.command.name if ctx.command else "?"
+        _logger.warning(
+            f"{ls.tag('Discord', ls.Y)} {ls.kv('stale_interaction', name, vc=ls.LY)}"
+        )
+        return False
+    return True
+
+
+async def _reply(ctx: discord.ApplicationContext, message: str) -> None:
+    """Ephemeral followup reply; swallow ``NotFound`` from a dead interaction.
+
+    Pairs with :func:`_defer_interaction` — the action already ran, so a
+    gone interaction just means the confirmation can't be delivered.
+    """
+    try:
+        await ctx.followup.send(message, ephemeral=True)
+    except discord.NotFound:
+        _logger.warning(
+            f"{ls.tag('Discord', ls.Y)} "
+            f"{ls.kv('reply_dropped', 'interaction_gone', vc=ls.LY)}"
+        )
 
 
 @dataclass
@@ -135,6 +169,8 @@ class BotHandle:
     trigger_typing: TriggerTyping | None = None
     typing_interrupt: TypingInterruptHandler | None = None
     """Seam for ``on_typing`` events; consumed by ``TextResponder``."""
+    focus_manager: FocusManager | None = None
+    """Attentional focus controller; wired in when available."""
 
 
 async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noqa: RUF029 — pycord requires coroutine fn even when there's nothing to await
@@ -715,7 +751,11 @@ def apply_reaction_clear(
 # ---------------------------------------------------------------------------
 
 
-def create_bot(familiar: Familiar) -> BotHandle:
+def create_bot(
+    familiar: Familiar,
+    *,
+    focus_manager: FocusManager | None = None,
+) -> BotHandle:
     """Construct Discord client, register slash commands + events.
 
     Returns :class:`BotHandle` carrying bot plus ``send_text``
@@ -838,6 +878,7 @@ def create_bot(familiar: Familiar) -> BotHandle:
         send_text=send_text,
         trigger_typing=trigger_typing,
         typing_interrupt=typing_interrupt,
+        focus_manager=focus_manager,
     )
 
     def resolve_member(channel_id: int, user_id: int) -> Author | None:
@@ -885,39 +926,42 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
         description="Listen for text messages in this channel.",
     )
     async def subscribe_text(ctx: discord.ApplicationContext) -> None:
+        await _defer_interaction(ctx)
         if ctx.channel_id is None:
-            await ctx.respond("No channel in context.", ephemeral=True)
+            await _reply(ctx, "No channel in context.")
             return
         familiar.subscriptions.add(
             channel_id=ctx.channel_id,
             kind=SubscriptionKind.text,
             guild_id=ctx.guild_id,
         )
-        await ctx.respond("Listening in this channel.", ephemeral=True)
+        await _reply(ctx, "Listening in this channel.")
 
     @bot.slash_command(
         name="unsubscribe-text",
         description="Stop listening for text messages in this channel.",
     )
     async def unsubscribe_text(ctx: discord.ApplicationContext) -> None:
+        await _defer_interaction(ctx)
         if ctx.channel_id is None:
-            await ctx.respond("No channel in context.", ephemeral=True)
+            await _reply(ctx, "No channel in context.")
             return
         familiar.subscriptions.remove(
             channel_id=ctx.channel_id,
             kind=SubscriptionKind.text,
         )
-        await ctx.respond("No longer listening here.", ephemeral=True)
+        await _reply(ctx, "No longer listening here.")
 
     @bot.slash_command(
         name="subscribe-voice",
         description="Join your voice channel and listen.",
     )
     async def subscribe_voice(ctx: discord.ApplicationContext) -> None:
+        await _defer_interaction(ctx)
         member = ctx.author
         voice_state = getattr(member, "voice", None)
         if voice_state is None or voice_state.channel is None:
-            await ctx.respond("You must be in a voice channel.", ephemeral=True)
+            await _reply(ctx, "You must be in a voice channel.")
             return
 
         channel = voice_state.channel
@@ -925,7 +969,7 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             voice_client = await channel.connect(cls=DaveVoiceClient)
         except discord.DiscordException as exc:
             _logger.warning("voice connect failed: %s", exc)
-            await ctx.respond("Could not join voice.", ephemeral=True)
+            await _reply(ctx, "Could not join voice.")
             return
 
         # bring up sink + transcriber + voice source. returns None if
@@ -943,16 +987,36 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             guild_id=ctx.guild_id,
         )
         suffix = "" if rt is not None else " (playback only — no transcriber)"
-        await ctx.respond(f"Joined {channel.name}.{suffix}", ephemeral=True)
+        await _reply(ctx, f"Joined {channel.name}.{suffix}")
 
     @bot.slash_command(
         name="diagnostics",
         description="Show span timings (last p50/p95 per span).",
     )
     async def diagnostics(ctx: discord.ApplicationContext) -> None:
+        await _defer_interaction(ctx)
         summary = get_span_collector().summary()
         text = render_summary_table(summary)
-        await ctx.respond(text, ephemeral=True)
+
+        # focus + unread summary
+        fm = handle.focus_manager
+        if fm is not None:
+            text_focus = fm.get_focus("text")
+            voice_focus = fm.get_focus("voice")
+            tf_str = f"#{text_focus}" if text_focus is not None else "unset"
+            vf_str = f"#{voice_focus}" if voice_focus is not None else "unset"
+            focus_line = f"\nFocus: text={tf_str} voice={vf_str}"
+            staged = await familiar.history_store.staged_channels(
+                familiar_id=familiar.id
+            )
+            if staged:
+                unreads = ", ".join(
+                    f"#{ch_id} ({count})" for ch_id, count in sorted(staged.items())
+                )
+                focus_line += f"\nUnreads: {unreads}"
+            text += focus_line
+
+        await _reply(ctx, text)
 
     @bot.slash_command(
         name="unsubscribe-voice",
@@ -1011,11 +1075,26 @@ def _register_events(
         user = bot.user
         if user is not None:
             familiar.bot_user_id = user.id
+        # populate channel name cache so focus logs show names
+        fm = handle.focus_manager
+        if fm is not None:
+            fm.channel_names.update({
+                ch.id: ch.name
+                for guild in bot.guilds
+                for ch in guild.channels
+                if hasattr(ch, "name")
+            })
         _logger.info(
             f"{ls.tag('🤖 Ready', ls.G)} "
             f"{ls.kv('user', str(user), vc=ls.LC)} "
             f"{ls.kv('guilds', str(len(bot.guilds)), vc=ls.LC)}"
         )
+        if fm is not None:
+            _logger.info(
+                f"{ls.tag('👁️ Focus', ls.LC)} "
+                f"{ls.kv('text', fm._ch(fm.get_focus('text')), vc=ls.LW)} "
+                f"{ls.kv('voice', fm._ch(fm.get_focus('voice')), vc=ls.LW)}"
+            )
 
     @bot.event
     async def on_message(message: discord.Message) -> None:

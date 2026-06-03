@@ -102,12 +102,18 @@ It populates `AssembledPrompt.recent_history`, which the responder
 appends as `Message` objects.
 
 Past `tool` turns (e.g. `view_image` results) are **folded into
-assistant-side narration text**, not replayed as protocol `tool`
+user-side narration text**, not replayed as protocol `tool`
 messages. Recent-history replay carries no tool-call linkage, so a bare
 `role=tool` message would orphan — no preceding matching `tool_use` —
 which upstream providers (Anthropic) reject with HTTP 500. Rendering as
 `[tool result] …` text preserves the context without the invalid
 protocol shape.
+
+The narration uses `role=user`, **not** `role=assistant`: an
+assistant-side replay teaches the model to open fresh replies with the
+`[tool result] …` prefix (and even fabricate tool results inline) by
+mimicking its own apparent past output — the same mimicry trap the
+`[#id]` message-id tag avoids by being dropped from assistant turns.
 
 ## Watermark-driven workers
 

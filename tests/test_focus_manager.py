@@ -1,0 +1,319 @@
+"""Tests for FocusManager and SubscriptionRegistry.kind_for.
+
+TDD red-first: covers all specified behaviors before implementation.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from familiar_connect.subscriptions import (
+    SubscriptionKind,
+    SubscriptionRegistry,
+)
+
+if TYPE_CHECKING:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# SubscriptionRegistry.kind_for
+# ---------------------------------------------------------------------------
+
+
+class TestKindFor:
+    def test_returns_none_when_not_subscribed(self, tmp_path: Path) -> None:
+        reg = SubscriptionRegistry(tmp_path / "subs.toml")
+        assert reg.kind_for(channel_id=99) is None
+
+    def test_returns_text_kind(self, tmp_path: Path) -> None:
+        reg = SubscriptionRegistry(tmp_path / "subs.toml")
+        reg.add(channel_id=42, kind=SubscriptionKind.text, guild_id=None)
+        assert reg.kind_for(channel_id=42) is SubscriptionKind.text
+
+    def test_returns_voice_kind(self, tmp_path: Path) -> None:
+        reg = SubscriptionRegistry(tmp_path / "subs.toml")
+        reg.add(channel_id=7, kind=SubscriptionKind.voice, guild_id=1)
+        assert reg.kind_for(channel_id=7) is SubscriptionKind.voice
+
+    def test_prefers_first_kind_when_both_present(self, tmp_path: Path) -> None:
+        """Channel with both text and voice: returns a valid SubscriptionKind."""
+        reg = SubscriptionRegistry(tmp_path / "subs.toml")
+        reg.add(channel_id=5, kind=SubscriptionKind.text, guild_id=None)
+        reg.add(channel_id=5, kind=SubscriptionKind.voice, guild_id=1)
+        result = reg.kind_for(channel_id=5)
+        assert result in (SubscriptionKind.text, SubscriptionKind.voice)
+
+    def test_unrelated_channel_unaffected(self, tmp_path: Path) -> None:
+        reg = SubscriptionRegistry(tmp_path / "subs.toml")
+        reg.add(channel_id=10, kind=SubscriptionKind.text, guild_id=None)
+        assert reg.kind_for(channel_id=20) is None
+
+
+# ---------------------------------------------------------------------------
+# FocusManager helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_store(
+    *,
+    text_channel_id: int | None = None,
+    voice_channel_id: int | None = None,
+    promote_count: int = 0,
+) -> MagicMock:
+    """Mock AsyncHistoryStore with configurable return values."""
+    from familiar_connect.history.store import FocusPointers
+    from datetime import UTC, datetime
+
+    store = MagicMock()
+    if text_channel_id is not None or voice_channel_id is not None:
+        fp = FocusPointers(
+            text_channel_id=text_channel_id,
+            voice_channel_id=voice_channel_id,
+            updated_at=datetime.now(UTC),
+        )
+    else:
+        fp = None
+    store.get_focus_pointers = AsyncMock(return_value=fp)
+    store.set_focus_pointers = AsyncMock(return_value=None)
+    store.promote_staged_turns = AsyncMock(return_value=promote_count)
+    return store
+
+
+def _make_registry(
+    tmp_path: Path,
+    *,
+    channel_kind: dict[int, SubscriptionKind] | None = None,
+) -> SubscriptionRegistry:
+    reg = SubscriptionRegistry(tmp_path / "subs.toml")
+    if channel_kind:
+        for ch, kind in channel_kind.items():
+            guild = 1 if kind is SubscriptionKind.voice else None
+            reg.add(channel_id=ch, kind=kind, guild_id=guild)
+    return reg
+
+
+# ---------------------------------------------------------------------------
+# FocusManager.initialize
+# ---------------------------------------------------------------------------
+
+
+class TestFocusManagerInitialize:
+    @pytest.mark.asyncio
+    async def test_initialize_loads_focus_pointers(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(text_channel_id=10, voice_channel_id=20)
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.get_focus("text") == 10
+        assert fm.get_focus("voice") == 20
+
+    @pytest.mark.asyncio
+    async def test_initialize_with_no_db_entry_stays_none(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()  # get_focus_pointers returns None
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.get_focus("text") is None
+        assert fm.get_focus("voice") is None
+
+
+# ---------------------------------------------------------------------------
+# FocusManager.is_focused
+# ---------------------------------------------------------------------------
+
+
+class TestFocusManagerIsFocused:
+    @pytest.mark.asyncio
+    async def test_is_focused_true_for_text_channel(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(text_channel_id=42)
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.is_focused(42) is True
+
+    @pytest.mark.asyncio
+    async def test_is_focused_true_for_voice_channel(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(voice_channel_id=77)
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.is_focused(77) is True
+
+    @pytest.mark.asyncio
+    async def test_is_focused_false_for_unfocused_channel(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(text_channel_id=1)
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.is_focused(99) is False
+
+    @pytest.mark.asyncio
+    async def test_is_focused_false_when_no_focus(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.is_focused(1) is False
+
+
+# ---------------------------------------------------------------------------
+# FocusManager.defer_shift + end_turn
+# ---------------------------------------------------------------------------
+
+
+class TestFocusManagerDeferShiftEndTurn:
+    @pytest.mark.asyncio
+    async def test_defer_shift_text_promotes_staged_turns(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(promote_count=3)
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        store.promote_staged_turns.assert_awaited_once_with(familiar_id="fam", channel_id=5)
+
+    @pytest.mark.asyncio
+    async def test_defer_shift_text_updates_text_focus(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(promote_count=0)
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        assert fm.get_focus("text") == 5
+
+    @pytest.mark.asyncio
+    async def test_defer_shift_voice_updates_voice_focus(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=8)
+        await fm.end_turn()
+        assert fm.get_focus("voice") == 8
+
+    @pytest.mark.asyncio
+    async def test_defer_shift_voice_does_not_promote(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=8)
+        await fm.end_turn()
+        store.promote_staged_turns.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_end_turn_persists_pointers(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        store.set_focus_pointers.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_end_turn_clears_pending_shift(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        # second end_turn should not call promote again
+        store.promote_staged_turns.reset_mock()
+        await fm.end_turn()
+        store.promote_staged_turns.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_end_turn_noop_when_no_pending(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.end_turn()
+        store.promote_staged_turns.assert_not_awaited()
+        store.set_focus_pointers.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Two modalities stay independent
+# ---------------------------------------------------------------------------
+
+
+class TestModalitiesIndependent:
+    @pytest.mark.asyncio
+    async def test_text_shift_does_not_affect_voice(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(voice_channel_id=99)
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        # voice should be unchanged
+        assert fm.get_focus("voice") == 99
+        assert fm.get_focus("text") == 5
+
+    @pytest.mark.asyncio
+    async def test_voice_shift_does_not_affect_text(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store(text_channel_id=11)
+        reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        fm.defer_shift(channel_id=8)
+        await fm.end_turn()
+        assert fm.get_focus("text") == 11
+        assert fm.get_focus("voice") == 8
+
+
+# ---------------------------------------------------------------------------
+# set_focus_immediately
+# ---------------------------------------------------------------------------
+
+
+class TestSetFocusImmediately:
+    def test_sets_text_focus(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.set_focus_immediately(channel_id=3, modality="text")
+        assert fm.get_focus("text") == 3
+
+    def test_sets_voice_focus(self, tmp_path: Path) -> None:
+        from familiar_connect.focus import FocusManager
+
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.set_focus_immediately(channel_id=4, modality="voice")
+        assert fm.get_focus("voice") == 4

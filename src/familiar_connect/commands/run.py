@@ -44,6 +44,7 @@ from familiar_connect.context import (
 )
 from familiar_connect.embedding import create_embedder
 from familiar_connect.familiar import Familiar
+from familiar_connect.focus import FocusManager
 from familiar_connect.llm import create_llm_clients
 from familiar_connect.processors import (
     DebugLoggerProcessor,
@@ -55,10 +56,14 @@ from familiar_connect.processors.projectors import (
     create_projectors,
 )
 from familiar_connect.stt import create_transcriber
+from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.tools.alarm import build_alarm_tool, build_cancel_alarm_tool
 from familiar_connect.tools.image import build_view_image_tool
+from familiar_connect.tools.read_channel import build_read_channel_tool
 from familiar_connect.tools.registry import ToolContext, ToolRegistry
 from familiar_connect.tools.scheduler import AlarmScheduler
+from familiar_connect.tools.shift_focus import build_shift_focus_tool
+from familiar_connect.tools.silent import build_silent_tool
 from familiar_connect.tools.waker import AlarmWaker
 from familiar_connect.tts import create_tts_client
 from familiar_connect.tts_player import (
@@ -361,8 +366,30 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     :param token: Discord bot token.
     :param familiar: loaded :class:`Familiar` bundle.
     """
-    handle = create_bot(familiar)
     await familiar.bus.start()
+
+    focus_manager = FocusManager(
+        familiar_id=familiar.id,
+        store=familiar.history_store,
+        subscriptions=familiar.subscriptions,
+    )
+    await focus_manager.initialize()
+
+    # startup default: if no focus pointer persisted, use first subscribed
+    # channel per modality so attentional stream is always live.
+    for sub in familiar.subscriptions.all():
+        if (
+            sub.kind == SubscriptionKind.text
+            and focus_manager.get_focus("text") is None
+        ):
+            focus_manager.set_focus_immediately(sub.channel_id, "text")
+        if (
+            sub.kind == SubscriptionKind.voice
+            and focus_manager.get_focus("voice") is None
+        ):
+            focus_manager.set_focus_immediately(sub.channel_id, "voice")
+
+    handle = create_bot(familiar, focus_manager=focus_manager)
 
     embedder = create_embedder(familiar.config.embedding)
     channel_total_tokens: dict[int, int] = {
@@ -408,10 +435,15 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     voice_tool_registry = ToolRegistry()
     voice_tool_registry.register(build_alarm_tool(alarm_scheduler))
     voice_tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
+    voice_tool_registry.register(build_silent_tool())
+    voice_tool_registry.register(build_shift_focus_tool())
 
     text_tool_registry = ToolRegistry()
     text_tool_registry.register(build_alarm_tool(alarm_scheduler))
     text_tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
+    text_tool_registry.register(build_silent_tool())
+    text_tool_registry.register(build_shift_focus_tool())
+    text_tool_registry.register(build_read_channel_tool())
 
     prose_slot = familiar.config.llm.get("prose")
     if prose_slot is not None and prose_slot.image_tools:
@@ -438,6 +470,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 scheduler=alarm_scheduler,
                 images=images or {},
                 description_llm=description_llm if channel_kind == "text" else None,
+                focus_manager=focus_manager,
+                store=familiar.history_store,
             )
 
         return _build
@@ -455,6 +489,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         tool_registry=voice_tool_registry,
         tool_context_factory=_make_tool_context("voice"),
         post_history_instructions=familiar.config.post_history_instructions,
+        focus_manager=focus_manager,
     )
     text_responder = TextResponder(
         assembler=text_assembler,
@@ -468,6 +503,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         tool_registry=text_tool_registry,
         tool_context_factory=_make_tool_context("text"),
         post_history_instructions=familiar.config.post_history_instructions,
+        focus_manager=focus_manager,
     )
     projector_context = ProjectorContext(
         store=familiar.history_store,

@@ -60,6 +60,14 @@ class SubscriptionRegistry:
     ) -> Subscription | None:
         return self._rows.get((channel_id, kind))
 
+    def kind_for(self, channel_id: int) -> SubscriptionKind | None:
+        """Return subscription kind for channel_id, or None if not subscribed."""
+        for kind in SubscriptionKind:
+            sub = self.get(channel_id=channel_id, kind=kind)
+            if sub is not None:
+                return kind
+        return None
+
     def voice_in_guild(self, guild_id: int) -> Subscription | None:
         """Voice subscription in ``guild_id``, if any.
 
