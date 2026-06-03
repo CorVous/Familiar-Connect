@@ -681,6 +681,12 @@ def _turn_to_message_with_context(
         turn.content, store=store, familiar_id=familiar_id, guild_id=guild_id
     )
     reactions_suffix = _format_reactions(reactions)
+    if role == "tool":
+        # past tool results replay as narration, never protocol ``tool``
+        # messages. recent-history drops tool-call linkage, so a bare
+        # ``role=tool`` turn orphans (no matching ``tool_use``) and
+        # upstream (Anthropic) 500s. fold into assistant-side text.
+        return Message(role="assistant", content=f"[tool result] {content}")
     if role == "assistant" or author is None:
         body = f"{content} {reactions_suffix}" if reactions_suffix else content
         return Message(role=role, content=body)

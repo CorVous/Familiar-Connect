@@ -101,6 +101,14 @@ The `recent_history` layer does not contribute to the system prompt.
 It populates `AssembledPrompt.recent_history`, which the responder
 appends as `Message` objects.
 
+Past `tool` turns (e.g. `view_image` results) are **folded into
+assistant-side narration text**, not replayed as protocol `tool`
+messages. Recent-history replay carries no tool-call linkage, so a bare
+`role=tool` message would orphan — no preceding matching `tool_use` —
+which upstream providers (Anthropic) reject with HTTP 500. Rendering as
+`[tool result] …` text preserves the context without the invalid
+protocol shape.
+
 ## Watermark-driven workers
 
 ### `SummaryWorker`
