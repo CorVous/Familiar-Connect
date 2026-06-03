@@ -511,6 +511,10 @@ When `true`, registers the `view_image` tool in the text tool registry
 for this slot. The agentic loop runs when either `tool_calling` or
 `image_tools` is set. `view_image` is never registered in the voice
 registry. Requires `[llm].image_description_model` for descriptions.
+Descriptions are appearance-based (colors, shapes, composition, text);
+the prompt forbids naming specific characters, people, franchises,
+brands, or other proper nouns, so familiars don't gain modern
+pop-culture knowledge that would break immersion.
 
 ### `multimodal`
 

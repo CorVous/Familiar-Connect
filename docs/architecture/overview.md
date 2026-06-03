@@ -195,11 +195,11 @@ compact `→ name(args)` / `(tool→) ...` summary in the rebuilt prompt.
 2. For each image found, `collect_images` assigns `img_0`, `img_1`, … and injects `[image: img_N (filename)]` placeholders into the message content.
 3. The `img_id → URL` map travels through the bus payload (`images` key) to `TextResponder`.
 4. `TextResponder.handle` passes the map to the per-turn `ToolContext.images`.
-5. The model calls `view_image(image_id="img_0")`. The handler fetches bytes, compresses to JPEG (1024 px longest edge, quality 85, 1 MB ceiling; iterates quality down by 5 until it fits), and calls the description model to get text.
+5. The model calls `view_image(image_id="img_0")`. The handler fetches bytes, compresses to JPEG (1024 px longest edge, quality 85, 1 MB ceiling; iterates quality down by 5 until it fits), and calls the description model to get text. The prompt asks the model to describe appearance — colors, shapes, composition, text — and **not** name specific characters, people, franchises, brands, or other proper nouns. This keeps familiars from acquiring modern pop-culture knowledge (e.g. naming a specific Pokémon) that would break immersion.
 6. `ImageResult` carries both the JPEG (base64) and the text description. The agentic loop serialises it per the slot's `multimodal` flag: `multimodal=true` sends an `image_url` content block in the tool-result message; `multimodal=false` sends the text description only.
 
 **Configuration:**
-- `[llm].image_description_model` — model name for vision-based description; empty = feature disabled.
+- `[llm].image_description_model` — model name for vision-based description; empty = feature disabled. Descriptions are appearance-based (colors, shapes, composition, text), never naming specific entities or proper nouns.
 - `[llm.<slot>].image_tools = true` — registers `view_image` in the text tool registry for that slot (independent of `tool_calling`).
 - `[llm.<slot>].multimodal = true` — sends JPEG content blocks instead of text-only descriptions.
 
