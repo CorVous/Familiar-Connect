@@ -590,7 +590,9 @@ def collect_images(
         img = getattr(embed, "image", None)
         if img is None:
             continue
-        url = getattr(img, "url", None) or ""
+        # prefer proxy_url — Discord's re-hosted copy is more reliably fetchable
+        # than the original source URL, which may be unsigned or externally hosted
+        url = getattr(img, "proxy_url", None) or getattr(img, "url", None) or ""
         if not url:
             continue
         filename = url.rsplit("/", 1)[-1].split("?")[0] or "embed-image"
