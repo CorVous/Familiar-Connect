@@ -808,6 +808,114 @@ class TestPerUserBargeIn:
         assert spoken == "hello "
 
 
+class TestCrossUserReplyGate:
+    """Per-channel reply gate serializes cross-user replies.
+
+    Two speakers talking in one window each spawn an independent
+    reply pipeline. Without serialization both assemble before
+    either commits an assistant turn, so both answer the same
+    moment — the production double-response. A per-channel lock
+    orders generation behind the already-serial TTS playback: the
+    second pipeline assembles only after the first commits, sees
+    the reply in context, and can resolve ``<silent>``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cross_user_finals_serialize_to_one_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """Two speakers, one window → streams never overlap, one reply.
+
+        The LLM stand-in both detects overlap (max concurrent streams)
+        and mimics the model: it answers when no assistant turn is in
+        context yet, and emits ``<silent>`` once it sees the bot has
+        already replied. Without the gate both pipelines assemble
+        before either commits, so both stream concurrently and both
+        answer. The generous in-stream delay makes that interleaving
+        deterministic rather than racy.
+        """
+
+        class _BarrierLLM(LLMClient):
+            """Forces overlap if the pipeline allows it.
+
+            First stream to enter parks on a barrier waiting for a
+            second; a second entrant releases it. Without the gate the
+            second pipeline enters and ``max_active`` reaches 2. With
+            the gate it can't enter until the first exits, so the
+            barrier times out and ``max_active`` stays 1 — deterministic
+            either way, no reliance on scheduler luck.
+            """
+
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+                self.active = 0
+                self.max_active = 0
+                self._entered = 0
+                self._second = asyncio.Event()
+
+            async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
+                return Message(role="assistant", content="x")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                already = any(m.role == "assistant" for m in messages)
+                self.active += 1
+                self._entered += 1
+                self.max_active = max(self.max_active, self.active)
+                try:
+                    if self._entered >= 2:
+                        self._second.set()
+                    else:
+                        # give a concurrent pipeline a chance to join;
+                        # the gate prevents it, so this times out
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(self._second.wait(), timeout=0.3)
+                    yield "<silent>" if already else "Sure thing."
+                finally:
+                    self.active -= 1
+
+        llm = _BarrierLLM()
+        player = MockTTSPlayer(ms_per_word=1)
+        responder, _router, store = _make_responder(
+            llm=llm, player=player, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+
+        # Alice and Bob both speak in the same window.
+        await responder.handle(_mk_activity_start(turn_id="t-alice", user_id=101), bus)
+        await responder.handle(_mk_activity_start(turn_id="t-bob", user_id=202), bus)
+        await responder.handle(
+            _mk_final("did you watch it", turn_id="t-alice", user_id=101), bus
+        )
+        await responder.handle(
+            _mk_final("what did you think", turn_id="t-bob", user_id=202), bus
+        )
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        # Core contract: reply generation never overlaps per channel.
+        assert llm.max_active == 1, (
+            f"reply streams overlapped (max_active={llm.max_active}); "
+            "per-channel gate did not serialize cross-user replies"
+        )
+        # Behavioral outcome: exactly one reply; the loser went silent.
+        assert len(player.calls) == 1
+        assert player.calls[0][0] == "Sure thing."
+        turns = store.recent(familiar_id="fam", channel_id=1, limit=20)
+        assistants = [t for t in turns if t.role == "assistant"]
+        assert len(assistants) == 1, (
+            f"expected one assistant turn, got {len(assistants)}: "
+            f"{[t.content for t in assistants]}"
+        )
+        # Both speakers' user turns still recorded — observation isn't gated.
+        users = [t.content for t in turns if t.role == "user"]
+        assert any("did you watch it" in c for c in users)
+        assert any("what did you think" in c for c in users)
+
+
 class TestVoiceAuthorResolution:
     """Voice user turns must resolve user_id → Author for prompt attribution.
 

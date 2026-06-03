@@ -97,8 +97,15 @@ class VoiceResponder:
         self._post_history_instructions = post_history_instructions
         # one in-flight final-handling task per (session, user);
         # replaced when newer final from same speaker arrives.
-        # cross-user finals coexist — only TTS player serializes playback
+        # cross-user tasks coexist; their reply-generation critical
+        # section serializes on the per-channel reply gate below.
         self._inflight: dict[str, asyncio.Task[None]] = {}
+        # per-channel reply gate: one reply generated at a time per
+        # voice channel. cross-speaker pipelines serialize here so the
+        # later one assembles after the earlier commits and can resolve
+        # <silent>. playback is already serial on the shared voice
+        # client, so the wait adds no perceived latency.
+        self._reply_locks: dict[int, asyncio.Lock] = {}
         # agentic-loop wiring — see :meth:`_stream_and_speak_with_tools`
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
@@ -235,7 +242,10 @@ class VoiceResponder:
             channel_id=channel_id, turn_id=scope.turn_id, text=text
         )
 
-        # record user turn so RecentHistoryLayer picks it up next time
+        # record user turn so RecentHistoryLayer picks it up next time.
+        # appended outside the reply gate — observation never gated by
+        # a busy channel, so every speaker's turn lands even when the
+        # bot is mid-reply to someone else
         await self._history.append_turn(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
@@ -244,34 +254,54 @@ class VoiceResponder:
             author=author,
         )
 
-        # seed retrieval cue for RagContextLayer (if wired)
-        self._assembler.set_rag_cue(text)
+        # per-channel reply gate. set_rag_cue + assemble + stream +
+        # assistant-turn commit run under the lock: a second speaker's
+        # pipeline assembles only after this one commits, so it sees the
+        # reply in context (and can go <silent>). set_rag_cue lives
+        # inside too — it mutates shared assembler state a concurrent
+        # pipeline would otherwise clobber mid-assemble
+        async with self._gate_for(channel_id):
+            # seed retrieval cue for RagContextLayer (if wired)
+            self._assembler.set_rag_cue(text)
 
-        reply = await self._stream_and_speak(scope, channel_id)
-        if reply is None or scope.is_cancelled():
-            return
-        # Cartesia rejects empty/whitespace ``transcript`` with HTTP 400.
-        # empty reply usually means LLM stream emitted no deltas —
-        # bad model name, content filter, or upstream error frame
-        # parser silently dropped. mirrors ``TextResponder``'s guard.
-        # _stream_and_speak gates TTS on this too, so just skip
-        # assistant-turn write here
-        if not reply.strip():
-            _logger.warning(
-                f"{ls.tag('Voice', ls.Y)} "
-                f"{ls.kv('skip', 'empty_reply', vc=ls.LY)} "
-                f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+            reply = await self._stream_and_speak(scope, channel_id)
+            if reply is None or scope.is_cancelled():
+                return
+            # Cartesia rejects empty/whitespace ``transcript`` with HTTP 400.
+            # empty reply usually means LLM stream emitted no deltas —
+            # bad model name, content filter, or upstream error frame
+            # parser silently dropped. mirrors ``TextResponder``'s guard.
+            # _stream_and_speak gates TTS on this too, so just skip
+            # assistant-turn write here
+            if not reply.strip():
+                _logger.warning(
+                    f"{ls.tag('Voice', ls.Y)} "
+                    f"{ls.kv('skip', 'empty_reply', vc=ls.LY)} "
+                    f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                )
+                return
+
+            await self._history.append_turn(
+                familiar_id=self._familiar_id,
+                channel_id=channel_id,
+                role="assistant",
+                content=reply,
+                author=None,
             )
-            return
+            self._router.end_turn(scope)
 
-        await self._history.append_turn(
-            familiar_id=self._familiar_id,
-            channel_id=channel_id,
-            role="assistant",
-            content=reply,
-            author=None,
-        )
-        self._router.end_turn(scope)
+    def _gate_for(self, channel_id: int) -> asyncio.Lock:
+        """Per-channel reply lock; lazily created.
+
+        Lazy-create is race-free under asyncio — no await between
+        ``get`` and the install, so two tasks can't both miss and
+        register rival locks.
+        """
+        lock = self._reply_locks.get(channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._reply_locks[channel_id] = lock
+        return lock
 
     def _resolve_author(self, *, channel_id: int, user_id: int | None) -> Author | None:
         """Look up Discord member; swallow resolver errors as anon turn."""
