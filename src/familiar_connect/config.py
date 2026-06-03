@@ -65,6 +65,10 @@ class LLMSlotConfig:
     reasoning: str | None = None
     # surface-only flag for now — call sites haven't wired tools yet.
     tool_calling: bool = False
+    # gate for view_image registration (independent of tool_calling)
+    image_tools: bool = False
+    # send image content blocks in tool-result messages (vision-capable models)
+    multimodal: bool = False
 
 
 _TTS_PROVIDERS: frozenset[str] = frozenset({"azure", "cartesia", "gemini"})
@@ -373,6 +377,9 @@ class CharacterConfig:
     )
     # M6 — embedder backend selection from [providers.embedding].
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    # model name for vision-based image descriptions (shared [llm] level).
+    # empty string = feature disabled.
+    image_description_model: str = ""
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty if none."""
@@ -470,7 +477,14 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(llm_raw, dict):
         msg = f"[llm] must be a table, got {type(llm_raw).__name__}"
         raise ConfigError(msg)
-    llm = _parse_llm_slots(llm_raw)
+    # split shared scalar before slot parsing (parser rejects non-slot keys)
+    idm_raw = llm_raw.get("image_description_model", "")
+    if not isinstance(idm_raw, str):
+        msg = "[llm].image_description_model must be a string"
+        raise ConfigError(msg)
+    image_description_model = idm_raw
+    llm_slots_raw = {k: v for k, v in llm_raw.items() if k != "image_description_model"}
+    llm = _parse_llm_slots(llm_slots_raw)
 
     tts_raw = data.get("tts", {})
     if not isinstance(tts_raw, dict):
@@ -576,6 +590,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         memory_retrieval=memory_retrieval,
         memory_providers=memory_providers,
         embedding=embedding,
+        image_description_model=image_description_model,
     )
 
 
@@ -1113,6 +1128,20 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
                 f"got {type(tool_calling_raw).__name__}"
             )
             raise ConfigError(msg)
+        image_tools_raw = section.get("image_tools", False)
+        if not isinstance(image_tools_raw, bool):
+            msg = (
+                f"[llm.{name}].image_tools must be a bool, "
+                f"got {type(image_tools_raw).__name__}"
+            )
+            raise ConfigError(msg)
+        multimodal_raw = section.get("multimodal", False)
+        if not isinstance(multimodal_raw, bool):
+            msg = (
+                f"[llm.{name}].multimodal must be a bool, "
+                f"got {type(multimodal_raw).__name__}"
+            )
+            raise ConfigError(msg)
         slots[name] = LLMSlotConfig(
             model=model,
             temperature=temperature,
@@ -1120,6 +1149,8 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
             provider_allow_fallbacks=allow_fallbacks_raw,
             reasoning=reasoning,
             tool_calling=tool_calling_raw,
+            image_tools=image_tools_raw,
+            multimodal=multimodal_raw,
         )
     return slots
 

@@ -210,7 +210,7 @@ class TestAgenticLoopToolExecution:
         tool_msgs = [m for m in second_call_msgs if m.role == "tool"]
         assert len(tool_msgs) == 1
         assert tool_msgs[0].tool_call_id == "c1"
-        assert json.loads(tool_msgs[0].content) == {"ok": True}
+        assert json.loads(tool_msgs[0].content_str) == {"ok": True}
 
     @pytest.mark.asyncio
     async def test_handler_exception_surfaced_as_tool_error(self) -> None:
@@ -241,7 +241,7 @@ class TestAgenticLoopToolExecution:
         )
         assert result.final_content == "Tool failed, sorry."
         tool_msgs = [m for m in llm.calls[1] if m.role == "tool"]
-        body = json.loads(tool_msgs[0].content)
+        body = json.loads(tool_msgs[0].content_str)
         assert "error" in body
         assert "boom" in body["error"]
 
@@ -266,7 +266,7 @@ class TestAgenticLoopToolExecution:
         )
         assert result.iterations == 2
         tool_msgs = [m for m in llm.calls[1] if m.role == "tool"]
-        body = json.loads(tool_msgs[0].content)
+        body = json.loads(tool_msgs[0].content_str)
         assert "error" in body
         assert "ghost" in body["error"]
 
@@ -306,7 +306,7 @@ class TestAgenticLoopToolExecution:
         )
         assert result.iterations == 2
         tool_msgs = [m for m in llm.calls[1] if m.role == "tool"]
-        body = json.loads(tool_msgs[0].content)
+        body = json.loads(tool_msgs[0].content_str)
         assert "error" in body
 
 
@@ -370,7 +370,7 @@ class TestAgenticLoopGuards:
             ctx=_make_ctx(),
         )
         tool_msgs = [m for m in llm.calls[1] if m.role == "tool"]
-        body = json.loads(tool_msgs[0].content)
+        body = json.loads(tool_msgs[0].content_str)
         assert "error" in body
         assert "timeout" in body["error"].lower()
         assert result.iterations == 2

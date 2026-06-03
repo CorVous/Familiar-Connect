@@ -44,14 +44,23 @@ Surface today:
   selector + per-backend knobs (`endpointing_ms`, `keyterms`, …). Only
   `deepgram` today; V3 widens. Per-knob env override available. See
   [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
+- `[llm].image_description_model` — model name for vision-based image
+  descriptions (e.g. `"openai/gpt-4o"`). Shared across all slots; empty
+  string (default) disables the description step. When set, `create_llm_clients`
+  builds a reserved `"__image_description__"` client.
 - `[llm.fast]` / `[llm.prose]` / `[llm.background]` — tiered LLM slots
   (model, temperature, optional `provider_order`, `reasoning`,
-  `tool_calling`). Schema and call-site → slot mapping at
-  [Tuning — LLM slots](tuning.md#llm-slots). `tool_calling` is wired
-  end-to-end: when `true`, the responder for that slot installs the
-  in-process `ToolRegistry` (today: `set_alarm` and `cancel_alarm`)
-  and runs the agentic loop. See
-  [Tool calling](overview.md#tool-calling).
+  `tool_calling`, `image_tools`, `multimodal`). Schema and call-site →
+  slot mapping at [Tuning — LLM slots](tuning.md#llm-slots).
+  `tool_calling` is wired end-to-end: when `true`, the responder for
+  that slot installs the in-process `ToolRegistry` (today: `set_alarm`,
+  `cancel_alarm`, and optionally `view_image`) and runs the agentic loop.
+  `image_tools` (default `false`) independently gates `view_image`
+  registration — the loop runs when either flag is set. `multimodal`
+  (default `false`) controls whether `ImageResult` tool-result messages
+  include JPEG content blocks (`true`) or text description only (`false`).
+  See [Tool calling](overview.md#tool-calling) and
+  [Image viewing](overview.md#image-viewing).
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
 - `[prompt].post_history_instructions` — free-text block appended to
   the *trailing* reminder, the system message that sits after recent

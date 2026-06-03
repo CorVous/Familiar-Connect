@@ -114,7 +114,7 @@ class FactExtractor:
         )
         prompt = _build_extract_prompt(new_turns, participants)
         reply = await self._llm.chat(prompt)
-        facts = _parse_facts(reply.content)
+        facts = _parse_facts(reply.content_str)
         valid_ids = {t.id for t in new_turns}
         channel_ids: dict[int, int] = {t.id: t.channel_id for t in new_turns}
         ts_by_id: dict[int, datetime] = {t.id: t.timestamp for t in new_turns}

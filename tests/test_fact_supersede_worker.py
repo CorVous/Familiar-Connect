@@ -34,7 +34,7 @@ class _ScriptedLLM(LLMClient):
         self, messages: list[Message]
     ) -> AsyncIterator[str]:
         reply = await self.chat(messages)
-        yield reply.content
+        yield reply.content_str
 
 
 def _seed_subject_facts(

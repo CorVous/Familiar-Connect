@@ -15,6 +15,7 @@ from familiar_connect.context.layers import (
     ConversationSummaryLayer,
     CrossChannelContextLayer,
     RagContextLayer,
+    RecentHistoryLayer,
 )
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
@@ -466,3 +467,61 @@ class TestRagContextLayer:
         layer.set_current_cue("strawberry")
         out = await layer.build(_ctx(channel_id=1))
         assert "strawberry observation" in out
+
+
+class TestRecentHistoryToolTurns:
+    """Past tool turns must replay as plain text, never orphaned ``tool`` msgs.
+
+    Anthropic rejects a ``role=tool`` result with no preceding matching
+    ``tool_use`` (HTTP 500). Recent-history replay drops tool-call
+    linkage, so any ``tool`` turn in the window would orphan. Render
+    such turns as narration text instead.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_turn_rendered_as_text_not_tool_role(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="look at this",
+            author=Author(
+                platform="discord",
+                user_id="111",
+                username="cor",
+                display_name="Cor",
+            ),
+        )
+        # assistant turn that invoked view_image (empty prose, tool call)
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content="",
+            author=None,
+            tool_calls_json=(
+                '[{"id": "call_1", "type": "function", '
+                '"function": {"name": "view_image", '
+                '"arguments": "{\\"image_id\\":\\"img_0\\"}"}}]'
+            ),
+        )
+        # tool result answering that call — the orphan-prone turn
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="tool",
+            content="# Image Description\n\nA red fox spirit.",
+            author=None,
+            tool_call_id="call_1",
+        )
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+
+        # no replayed message may carry the bare ``tool`` role — that's
+        # the orphan Anthropic 500s on
+        assert all(m.role != "tool" for m in msgs)
+        # description content survives as context somewhere
+        assert any("A red fox spirit." in (m.content or "") for m in msgs)
+        # no message carries an unpaired tool_call_id either
+        assert all(getattr(m, "tool_call_id", None) is None for m in msgs)

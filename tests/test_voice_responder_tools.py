@@ -16,6 +16,7 @@ import json
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -34,6 +35,7 @@ from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.llm import LLMClient, LLMDelta, Message
 from familiar_connect.processors.voice_responder import VoiceResponder
+from familiar_connect.tools.builtins import build_text_registry, build_voice_registry
 from familiar_connect.tools.registry import Tool, ToolContext, ToolRegistry
 from familiar_connect.tts_player import MockTTSPlayer
 
@@ -169,7 +171,9 @@ async def test_speak_completes_before_tool_runs(tmp_path: Path) -> None:
     llm = _ScriptedToolLLM(scripts)
     player = MockTTSPlayer(ms_per_word=2)
 
-    def _ctx_factory(channel_id: int, turn_id: str) -> ToolContext:
+    def _ctx_factory(
+        channel_id: int, turn_id: str, _images: dict | None = None
+    ) -> ToolContext:
         return ToolContext(
             familiar_id="fam",
             channel_id=channel_id,
@@ -238,7 +242,9 @@ async def test_filler_spoken_when_tool_call_has_empty_content(tmp_path: Path) ->
 
     player = _RecordingPlayer(ms_per_word=2)
 
-    def _ctx_factory(channel_id: int, turn_id: str) -> ToolContext:
+    def _ctx_factory(
+        channel_id: int, turn_id: str, _images: dict | None = None
+    ) -> ToolContext:
         return ToolContext(
             familiar_id="fam",
             channel_id=channel_id,
@@ -272,3 +278,30 @@ async def test_filler_spoken_when_tool_call_has_empty_content(tmp_path: Path) ->
     assert any("hang on" in s for s in pre_tool_spoken), (
         f"filler not spoken before tool: {pre_tool_spoken}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Registry separation tests
+# ---------------------------------------------------------------------------
+
+
+def test_voice_registry_excludes_view_image() -> None:
+    """Voice registry must never contain view_image."""
+    sched = MagicMock()
+    registry = build_voice_registry(sched)
+    names = [t.name for t in registry.tools()]
+    assert "view_image" not in names
+
+
+def test_text_registry_excludes_view_image_when_disabled() -> None:
+    sched = MagicMock()
+    registry = build_text_registry(sched, image_tools=False)
+    names = [t.name for t in registry.tools()]
+    assert "view_image" not in names
+
+
+def test_text_registry_includes_view_image_when_enabled() -> None:
+    sched = MagicMock()
+    registry = build_text_registry(sched, image_tools=True)
+    names = [t.name for t in registry.tools()]
+    assert "view_image" in names

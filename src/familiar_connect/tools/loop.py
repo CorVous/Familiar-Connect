@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from familiar_connect import log_style as ls
 from familiar_connect.llm import LLMDelta, Message
+from familiar_connect.tools.registry import ImageResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -75,11 +76,50 @@ def _finalize_tool_calls(pending: dict[int, dict[str, Any]]) -> list[dict[str, A
     return [pending[i] for i in sorted(pending) if pending[i].get("id")]
 
 
+def serialize_image_result(
+    res: ImageResult,
+    *,
+    multimodal: bool,
+) -> str | list[dict[str, Any]]:
+    """Serialise ``ImageResult`` per slot's multimodal capability.
+
+    ``multimodal=False`` → description string only (text-safe).
+    ``multimodal=True`` → list with text + image_url content blocks.
+    """
+    if not multimodal:
+        return res.description
+    return [
+        {"type": "text", "text": res.description},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{res.media_type};base64,{res.jpeg_base64}",
+            },
+        },
+    ]
+
+
+def tool_content_as_text(content: str | list[dict[str, Any]]) -> str:
+    """Project tool-message content to plain text for history persistence.
+
+    Extracts text blocks from multimodal list; returns str unchanged.
+    """
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts)
+
+
 async def _execute_tool(
     tool: Tool,
     args: dict[str, Any],
     ctx: ToolContext,
-) -> str:
+) -> str | ImageResult:
     """Run ``tool.handler`` with timeout; convert exceptions to error JSON."""
     try:
         return await asyncio.wait_for(tool.handler(args, ctx), timeout=tool.timeout_s)
@@ -93,6 +133,8 @@ async def _run_tool_call(
     tc: dict[str, Any],
     registry: ToolRegistry,
     ctx: ToolContext,
+    *,
+    multimodal: bool = False,
 ) -> Message:
     """Resolve + execute one tool call; return ``role=tool`` message."""
     call_id = tc.get("id") or ""
@@ -116,8 +158,11 @@ async def _run_tool_call(
         content = json.dumps({"error": f"unknown tool: {name}"})
         return Message(role="tool", content=content, tool_call_id=call_id)
 
-    content = await _execute_tool(tool, args, ctx)
-    return Message(role="tool", content=content, tool_call_id=call_id)
+    result = await _execute_tool(tool, args, ctx)
+    if isinstance(result, ImageResult):
+        serialised = serialize_image_result(result, multimodal=multimodal)
+        return Message(role="tool", content=serialised, tool_call_id=call_id)
+    return Message(role="tool", content=result, tool_call_id=call_id)
 
 
 async def agentic_loop(
@@ -186,9 +231,10 @@ async def agentic_loop(
             await on_before_tools(assistant_msg)
 
         tool_msgs: list[Message] = []
+        multimodal = getattr(llm, "multimodal", False)
         for tc in tool_calls:
             tool_calls_made += 1
-            tool_msg = await _run_tool_call(tc, registry, ctx)
+            tool_msg = await _run_tool_call(tc, registry, ctx, multimodal=multimodal)
             messages.append(tool_msg)
             tool_msgs.append(tool_msg)
 

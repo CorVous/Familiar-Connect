@@ -185,7 +185,9 @@ class TextResponder:
         trigger_typing: TriggerTyping | None = None,
         typing_handler: TypingInterruptHandler | None = None,
         tool_registry: ToolRegistry | None = None,
-        tool_context_factory: Callable[[int, str], ToolContext] | None = None,
+        tool_context_factory: (
+            Callable[[int, str, dict[str, str]], ToolContext] | None
+        ) = None,
         post_history_instructions: str = "",
     ) -> None:
         self._assembler = assembler
@@ -239,6 +241,8 @@ class TextResponder:
             if isinstance(raw_mentions, (tuple, list))
             else ()
         )
+        raw_images = payload.get("images")
+        images: dict[str, str] = raw_images if isinstance(raw_images, dict) else {}
 
         self._seen.add(event.event_id)
         # honor any active pingpong-backoff (another bot has been
@@ -307,6 +311,7 @@ class TextResponder:
             scope,
             channel_id=channel_id,
             guild_id=guild_id,
+            images=images,
         )
         if reply is None or scope.is_cancelled():
             return
@@ -427,6 +432,7 @@ class TextResponder:
         *,
         channel_id: int,
         guild_id: int | None = None,
+        images: dict[str, str] | None = None,
     ) -> str | None:
         ctx = AssemblyContext(
             familiar_id=self._familiar_id,
@@ -460,7 +466,10 @@ class TextResponder:
         tool_mode = (
             self._tool_registry is not None
             and self._tool_context_factory is not None
-            and self._llm.tool_calling_enabled
+            and (
+                self._llm.tool_calling_enabled
+                or getattr(self._llm, "image_tools_enabled", False)
+            )
         )
         if tool_mode:
             return await self._stream_reply_with_tools(
@@ -468,6 +477,7 @@ class TextResponder:
                 channel_id=channel_id,
                 guild_id=guild_id,
                 messages=messages,
+                images=images or {},
             )
 
         accumulated: list[str] = []
@@ -520,6 +530,7 @@ class TextResponder:
         channel_id: int,
         guild_id: int | None,
         messages: list[Message],
+        images: dict[str, str] | None = None,
     ) -> str | None:
         """Agentic-loop variant of :meth:`_stream_reply`.
 
@@ -537,7 +548,7 @@ class TextResponder:
         registry = self._tool_registry
         if ctx_factory is None or registry is None:  # pragma: no cover — guard
             return None
-        ctx = ctx_factory(channel_id, scope.turn_id)
+        ctx = ctx_factory(channel_id, scope.turn_id, images or {})
 
         # ``agentic_loop`` returns terminal assistant content.
         # responder's ``handle`` persists it + posts via send_text
@@ -580,17 +591,21 @@ class TextResponder:
                     familiar_id=self._familiar_id,
                     channel_id=channel_id,
                     role="assistant",
-                    content=assistant.content or "",
+                    content=assistant.content_str,
                     author=None,
                     guild_id=guild_id,
                     tool_calls_json=_json.dumps(assistant.tool_calls),
                 )
                 for tm in tool_msgs:
+                    from familiar_connect.tools.loop import (  # noqa: PLC0415
+                        tool_content_as_text,
+                    )
+
                     await self._history.append_turn(
                         familiar_id=self._familiar_id,
                         channel_id=channel_id,
                         role="tool",
-                        content=tm.content,
+                        content=tool_content_as_text(tm.content),
                         tool_call_id=tm.tool_call_id,
                         guild_id=guild_id,
                     )

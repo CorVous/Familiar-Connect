@@ -44,7 +44,7 @@ class _ScriptedLLM(LLMClient):
         self, messages: list[Message]
     ) -> AsyncIterator[str]:
         reply = await self.chat(messages)
-        yield reply.content
+        yield reply.content_str
 
 
 def _seed_subject_fact(
@@ -142,7 +142,7 @@ class TestPeopleDossierWorker:
 
         # Prior dossier was fed into the prompt.
         assert len(llm.calls) == 1
-        joined = "\n".join(m.content for m in llm.calls[0])
+        joined = "\n".join(m.content_str for m in llm.calls[0])
         assert "Cass likes pho." in joined  # the prior dossier
         assert "Toronto" in joined  # the new fact
 

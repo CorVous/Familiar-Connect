@@ -150,7 +150,7 @@ class ReflectionWorker:
             max_reflections=self._max_per_tick,
         )
         reply = await self._llm.chat(prompt)
-        items = _parse_reflections(reply.content)
+        items = _parse_reflections(reply.content_str)
 
         valid_turn_ids = {t.id for t in new_turns}
         valid_fact_ids = {f.id for f in recent_facts}

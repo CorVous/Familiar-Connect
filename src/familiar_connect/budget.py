@@ -45,7 +45,7 @@ def estimate_tokens(text: str) -> int:
 
 def estimate_message_tokens(msg: Message) -> int:
     """Chat-format estimate including role/name framing."""
-    n = estimate_tokens(msg.content) + _MESSAGE_OVERHEAD_TOKENS
+    n = estimate_tokens(msg.content_str) + _MESSAGE_OVERHEAD_TOKENS
     if msg.name:
         n += estimate_tokens(msg.name)
     return n

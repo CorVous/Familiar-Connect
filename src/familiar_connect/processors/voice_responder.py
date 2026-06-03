@@ -74,7 +74,9 @@ class VoiceResponder:
         familiar_id: str,
         member_resolver: MemberResolver | None = None,
         tool_registry: ToolRegistry | None = None,
-        tool_context_factory: Callable[[int, str], ToolContext] | None = None,
+        tool_context_factory: (
+            Callable[[int, str, dict[str, str]], ToolContext] | None
+        ) = None,
         tool_filler_phrases: tuple[str, ...] = (
             "one sec...",
             "hold on...",
@@ -428,7 +430,7 @@ class VoiceResponder:
         registry = self._tool_registry
         if ctx_factory is None or registry is None:  # pragma: no cover — guard
             return None
-        tool_ctx = ctx_factory(channel_id, scope.turn_id)
+        tool_ctx = ctx_factory(channel_id, scope.turn_id, {})
 
         accumulated: list[str] = []
         streamer = SentenceStreamer()
@@ -484,7 +486,7 @@ class VoiceResponder:
             # filler backstop: empty content with imminent tools →
             # speak short stock phrase so user hears acknowledgement
             # before silent tool window
-            if assistant.tool_calls and not (assistant.content or "").strip():
+            if assistant.tool_calls and not assistant.content_str.strip():
                 phrase = self._next_filler_phrase()
                 if phrase and not scope.is_cancelled():
                     await self._speak(phrase, scope=scope)
@@ -504,16 +506,20 @@ class VoiceResponder:
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
                 role="assistant",
-                content=assistant.content or "",
+                content=assistant.content_str,
                 author=None,
                 tool_calls_json=_json.dumps(assistant.tool_calls),
             )
             for tm in tool_msgs:
+                from familiar_connect.tools.loop import (  # noqa: PLC0415
+                    tool_content_as_text,
+                )
+
                 await self._history.append_turn(
                     familiar_id=self._familiar_id,
                     channel_id=channel_id,
                     role="tool",
-                    content=tm.content,
+                    content=tool_content_as_text(tm.content),
                     tool_call_id=tm.tool_call_id,
                 )
 

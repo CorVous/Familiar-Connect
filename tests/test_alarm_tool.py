@@ -48,6 +48,7 @@ async def test_set_alarm_with_delay_seconds_inserts_row(tmp_path: Path) -> None:
         ctx.scheduler = scheduler
         tool = build_alarm_tool(scheduler)
         result = await tool.handler({"reason": "ping", "delay_seconds": 30}, ctx)
+        assert isinstance(result, str)
         body = json.loads(result)
         assert "alarm_id" in body
         assert "scheduled_at" in body
@@ -76,6 +77,7 @@ async def test_set_alarm_with_iso_when_inserts_row(tmp_path: Path) -> None:
         future = (datetime.now(tz=UTC) + timedelta(minutes=1)).isoformat()
         tool = build_alarm_tool(scheduler)
         result = await tool.handler({"reason": "later", "when": future}, ctx)
+        assert isinstance(result, str)
         body = json.loads(result)
         assert body["scheduled_at"] == future
         await scheduler.cancel(alarm_id=body["alarm_id"])
@@ -97,6 +99,7 @@ async def test_set_alarm_rejects_past_timestamp(tmp_path: Path) -> None:
         past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
         tool = build_alarm_tool(scheduler)
         result = await tool.handler({"reason": "rip", "when": past}, ctx)
+        assert isinstance(result, str)
         body = json.loads(result)
         assert "error" in body
         assert "past" in body["error"].lower()
@@ -117,6 +120,7 @@ async def test_set_alarm_rejects_missing_reason(tmp_path: Path) -> None:
         ctx.scheduler = scheduler
         tool = build_alarm_tool(scheduler)
         result = await tool.handler({"delay_seconds": 10}, ctx)
+        assert isinstance(result, str)
         body = json.loads(result)
         assert "error" in body
         assert "reason" in body["error"].lower()
@@ -145,6 +149,7 @@ async def test_set_alarm_uses_caller_channel_from_ctx(tmp_path: Path) -> None:
         )
         tool = build_alarm_tool(scheduler)
         result = await tool.handler({"reason": "echo", "delay_seconds": 60}, ctx)
+        assert isinstance(result, str)
         body = json.loads(result)
 
         pending = store.sync.list_pending_alarms(familiar_id=_FAMILIAR)
@@ -169,16 +174,16 @@ async def test_cancel_alarm_tool_cancels_pending(tmp_path: Path) -> None:
 
         # First, set
         set_tool = build_alarm_tool(scheduler)
-        set_result = json.loads(
-            await set_tool.handler({"reason": "x", "delay_seconds": 60}, ctx)
-        )
+        set_raw = await set_tool.handler({"reason": "x", "delay_seconds": 60}, ctx)
+        assert isinstance(set_raw, str)
+        set_result = json.loads(set_raw)
         alarm_id = set_result["alarm_id"]
 
         # Then cancel
         cancel_tool = build_cancel_alarm_tool(scheduler)
-        cancel_result = json.loads(
-            await cancel_tool.handler({"alarm_id": alarm_id}, ctx)
-        )
+        cancel_raw = await cancel_tool.handler({"alarm_id": alarm_id}, ctx)
+        assert isinstance(cancel_raw, str)
+        cancel_result = json.loads(cancel_raw)
         assert cancel_result["ack"] == "ok"
         assert store.sync.list_pending_alarms(familiar_id=_FAMILIAR) == []
     finally:
@@ -197,7 +202,9 @@ async def test_cancel_unknown_returns_error(tmp_path: Path) -> None:
         ctx = _ctx(store, bus)
         ctx.scheduler = scheduler
         tool = build_cancel_alarm_tool(scheduler)
-        result = json.loads(await tool.handler({"alarm_id": "no-such"}, ctx))
+        raw = await tool.handler({"alarm_id": "no-such"}, ctx)
+        assert isinstance(raw, str)
+        result = json.loads(raw)
         assert "error" in result
     finally:
         await scheduler.shutdown()

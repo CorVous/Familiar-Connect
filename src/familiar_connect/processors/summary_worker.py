@@ -121,7 +121,7 @@ class SummaryWorker:
             new_turns=new_turns,
         )
         reply = await self._llm.chat(prompt)
-        text = reply.content.strip()
+        text = reply.content_str.strip()
         if not text:
             return
         await self._store.put_summary(
@@ -175,7 +175,7 @@ class SummaryWorker:
             new_turns=turns,
         )
         reply = await self._llm.chat(prompt)
-        text = reply.content.strip()
+        text = reply.content_str.strip()
         if not text:
             return
         await self._store.put_cross_context(

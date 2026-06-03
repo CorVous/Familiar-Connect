@@ -273,7 +273,7 @@ class TestRecentHistoryReactions:
         )
         layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         msgs = await layer.recent_messages(_ctx(channel_id=1))
-        assert "reactions" not in msgs[0].content.lower()
+        assert "reactions" not in msgs[0].content_str.lower()
 
 
 class TestEmojiRepr:

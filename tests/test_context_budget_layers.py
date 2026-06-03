@@ -55,9 +55,9 @@ class TestRecentHistoryLayerMaxTokens:
         )
         msgs = await layer.recent_messages(_ctx())
         # Newest survived; cap honoured.
-        assert msgs[-1].content.endswith("09 blah")
+        assert msgs[-1].content_str.endswith("09 blah")
         # Token usage stays under cap (allow 1-msg overflow safety).
-        total = sum(estimate_tokens(m.content) for m in msgs)
+        total = sum(estimate_tokens(m.content_str) for m in msgs)
         assert total <= 60
 
     @pytest.mark.asyncio

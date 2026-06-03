@@ -39,7 +39,7 @@ class _ScriptedLLM(LLMClient):
         self, messages: list[Message]
     ) -> AsyncIterator[str]:
         reply = await self.chat(messages)
-        yield reply.content
+        yield reply.content_str
 
 
 def _seed_turns(store: HistoryStore, count: int, channel_id: int = 1) -> list[int]:
@@ -291,7 +291,7 @@ class TestReflectionWorker:
         await worker.tick()
 
         assert len(llm.calls) == 1
-        user_prompt = llm.calls[0][1].content
+        user_prompt = llm.calls[0][1].content_str
         # Count "id=" markers — one per turn included.
         included = user_prompt.count("- id=")
         assert included == 50
