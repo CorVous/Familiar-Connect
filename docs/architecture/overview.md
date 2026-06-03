@@ -70,7 +70,7 @@ flowchart LR
 - **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through pycord's voice client. Without a configured TTS client, `LoggingTTSPlayer` is used.
 - **OpenRouter LLM client** — one `LLMClient` per call-site slot. The slot config's `tool_calling` flag plumbs into `LLMClient.tool_calling_enabled`; responders gate on it before installing the tool registry and running the agentic loop. `stream_completion(messages, tools=...)` yields `LLMDelta` chunks (content + accumulated tool-call fragments + finish reason) and drives the agentic loop's streaming primitive.
 - **Tool subsystem** — `familiar_connect.tools/`. `ToolRegistry` indexes `Tool` definitions (JSON-Schema parameters + async handler). `agentic_loop(...)` runs streaming → tool execution → re-call until the model stops calling tools (capped at 5 iterations, 10s per handler). `AlarmScheduler` owns one `asyncio.Task` per pending alarm sleeping until `scheduled_at`, then marks the row fired and publishes `alarm.fired`. On startup it reloads any rows left pending from the previous process; past-due rows fire immediately. Tools shipped: `set_alarm(when|delay_seconds, reason)`, `cancel_alarm(alarm_id)`, `view_image(image_id)` (text only), `shift_focus(channel_id)` (defers focus shift to end of turn, both modalities), `silent(reasoning)` (suppress reply for current turn, both modalities), `read_channel(limit?)` (read-only peek into focused text channel history, text only). See [Tool calling](#tool-calling).
-- **Turso history store** — `data/familiars/<id>/history.db` (Turso, SQLite-compatible Rust rewrite). Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, `people_dossiers`, `facts`, `fact_embeddings`, `reflections`, and `reflection_watermark` are watermarked side-indices. Full-text search lives outside the DB in tantivy indexes under `data/familiars/<id>/fts/turns/` and `fts/facts/` — pyturso wheels don't ship the FTS module, and tantivy queries don't queue behind SQL writes, which fixed the original "FTS5 query blocks the Discord heartbeat for 10s" bug. `AsyncHistoryStore` (`history/async_store.py`) wraps `HistoryStore` in an async facade, dispatching every call to a 4-worker `ThreadPoolExecutor`. Each call hits `TursoConnection` (`history/turso_compat.py`), which funnels every pyturso call onto one dedicated OS thread it owns — pyturso 0.5.1 declares `threadsafety=1` and has surfaced thread-affine internal state, so a single owning thread is the safe contract.
+- **Turso history store** — `data/familiars/<id>/history.db` (Turso, SQLite-compatible Rust rewrite). Raw `turns` table is the source of truth; `summaries`, `cross_context_summaries`, `people_dossiers`, `facts`, `fact_embeddings`, `reflections`, and `reflection_watermark` are watermarked side-indices. The attentional stream adds two `turns` columns — `arrived_at` (immutable ingest time) and `consumed_at` (`NULL` while staged) — plus two small per-familiar tables: `focus_pointers` (text/voice focus channels) and `unread_digest_watermark`. An idempotent migration backfills legacy rows (`arrived_at = consumed_at = timestamp`) and adds the `idx_turns_consumed` index. See [Attentional stream](context-pipeline.md#attentional-stream). Full-text search lives outside the DB in tantivy indexes under `data/familiars/<id>/fts/turns/` and `fts/facts/` — pyturso wheels don't ship the FTS module, and tantivy queries don't queue behind SQL writes, which fixed the original "FTS5 query blocks the Discord heartbeat for 10s" bug. `AsyncHistoryStore` (`history/async_store.py`) wraps `HistoryStore` in an async facade, dispatching every call to a 4-worker `ThreadPoolExecutor`. Each call hits `TursoConnection` (`history/turso_compat.py`), which funnels every pyturso call onto one dedicated OS thread it owns — pyturso 0.5.1 declares `threadsafety=1` and has surfaced thread-affine internal state, so a single owning thread is the safe contract.
 - **Subscription registry** — `data/familiars/<id>/subscriptions.toml`, written by the subscribe/unsubscribe slash commands.
 - **Twitch EventSub** — client code present; its queue is drained by `TwitchSource` onto the bus.
 
@@ -106,6 +106,7 @@ voice.transcript.final → if scope.turn_id == event.turn_id:
                            TTSPlayer.speak(reply, scope=scope)
                            history.append(assistant turn)
                            router.end_turn(scope)
+                           focus.end_turn()  (apply deferred shifts; promote staged)
 ```
 
 `voice.transcript.final` is spawned as a per-(session, user) `asyncio.Task`,
@@ -160,6 +161,10 @@ tools. Toggled per LLM slot via `[llm.<slot>].tool_calling = true`; shipped
 slot defaults leave voice and text off and only `background` on, so
 deployments opt in deliberately. When enabled, responders install the
 global `ToolRegistry` and run `agentic_loop` instead of bare `chat_stream`.
+The attentional-stream tools (`shift_focus`, `silent`, `read_channel`)
+ride this same gate: with `tool_calling` off on the voice/text slot,
+focus stays on its startup default and only the `<silent>` text
+sentinel is available.
 
 Voice has a hard ordering constraint: long silent gaps mid-utterance are
 unacceptable. Three layers of defense ensure speech reaches TTS before a

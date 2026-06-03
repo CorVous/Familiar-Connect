@@ -91,15 +91,26 @@ context re-run `build` only for layers whose key changed.
 | Layer | Source | Invalidation |
 |---|---|---|
 | `ConversationSummaryLayer` | `summaries` table | `ch<id>:wm<last_summarised_id>` |
-| `CrossChannelContextLayer` | `cross_context_summaries` table, per-viewer map | `<source>:wm<source_last_id>` concatenated |
+| `CrossChannelContextLayer` | **retired** — `build` always returns `""` (attentional stream replaced it; see [below](#attentional-stream)) | unchanged (still keyed; never rendered) |
 | `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions` | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
 | `RagContextLayer` | `fts/turns/` + `fts/facts/` tantivy search | `(current_cue, latest_fts_id, latest_fact_id)` |
-| `RecentHistoryLayer` | `turns.recent(channel_id, window_size)` | not cached — it *is* the query |
+| `RecentHistoryLayer` | `turns.recent_cross_channel(window_size)` — all **consumed** turns across all channels, ordered by `arrived_at, id` | not cached — it *is* the query |
 
 The `recent_history` layer does not contribute to the system prompt.
 It populates `AssembledPrompt.recent_history`, which the responder
 appends as `Message` objects.
+
+`recent_messages` calls `recent_cross_channel(familiar_id,
+window_size)` — the last `window_size` **consumed** turns across
+*every* channel, ordered by `arrived_at, id`. This is the read half
+of the attentional stream (see [below](#attentional-stream)): a focus
+shift consumes the target channel's staged backlog, so its messages
+interleave into one cross-channel transcript instead of living in a
+separate per-channel summary. Each user turn renders with a
+`[HH:MM speaker #channel_id]` prefix — the `#channel_id` disambiguates
+which channel a line came from once multiple channels share the
+window.
 
 Past `tool` turns (e.g. `view_image` results) are **folded into
 user-side narration text**, not replayed as protocol `tool`
@@ -636,6 +647,20 @@ Voice channels see only `<silent>`; text channels also list
 `[@DisplayName]` and `[↩ <message_id>]`. Source:
 `src/familiar_connect/context/final_reminder.py`.
 
+When a `FocusManager` is wired, the block also carries a prose
+**focus + unread digest** line built from `focus_channel_id`,
+`unread_digest` (`{channel_id: staged_count}`, counts > 0 only), and
+`channel_names`:
+
+> Your attention is currently on #general. There is a new message in
+> #other-channel — use shift_focus if it pulls your attention.
+
+The focus clause names the active channel; the unread clause lists
+channels with staged (unconsumed) turns and nudges toward the
+`shift_focus` tool. Counts > 1 render as `#channel (N)`. Both clauses
+omit when their source is empty. This is the model-facing surface of
+the attentional stream (see [below](#attentional-stream)).
+
 Both responders also append a *second* copy of the same block as a
 trailing `system` message, after recent history, with
 `include_mode_instruction=True`. This appends the per-mode operating
@@ -743,19 +768,27 @@ Open work the current retrieval doesn't address:
 
 ## Expiry semantics for cross-channel summaries
 
-Cross-channel summaries can go stale in two ways:
+> **Retired.** The [attentional stream](#attentional-stream) replaced
+> cross-channel summaries — `CrossChannelContextLayer.build` always
+> returns `""`, so nothing reaches the prompt regardless of TTL.
+> `SummaryWorker` still writes `cross_context_summaries` (the index
+> stays regenerable and the layer's invalidation key still reads it),
+> but the read path is dead. The mechanics below describe the prior
+> design; kept for context on the side-index that still exists.
+
+Cross-channel summaries could go stale in two ways:
 
 1. **Turn-count watermark** — source channel has gained `cross_k`
    turns since the last cached summary. `SummaryWorker` regenerates.
 2. **Wall-clock TTL** — summary is older than `ttl_seconds`
    (default 600 s) at assembly time. `CrossChannelContextLayer`
-   **suppresses** the stale summary in its `build` output (layer opts
+   suppressed the stale summary in its `build` output (layer opts
    out); the row stays in SQLite and is replaced on the next worker
    tick.
 
-TTL is enforced on the *read* path so a long-idle familiar doesn't
+TTL was enforced on the *read* path so a long-idle familiar didn't
 leak stale cross-channel content into a fresh prompt while the worker
-hasn't ticked. The watermark is enforced on the *write* path so the
+hadn't ticked. The watermark is enforced on the *write* path so the
 worker doesn't wake up and rebuild summaries that haven't meaningfully
 changed.
 
@@ -805,9 +838,11 @@ other, not just to the bot. Two pieces collaborate to handle "is this
 turn for me?" without a separate gating LLM call:
 
 1. **Message format carries speaker + time.** `RecentHistoryLayer`
-   renders user turns as `[HH:MM Display Name] content` (UTC).
-   Different speakers get different prefixes; the rhythm of timestamps
-   tells the model whether a conversation is flowing between humans.
+   renders user turns as `[HH:MM Display Name #channel_id] content`
+   (UTC). Different speakers get different prefixes; the rhythm of
+   timestamps tells the model whether a conversation is flowing
+   between humans. The `#channel_id` disambiguates source once the
+   cross-channel window mixes multiple channels.
 2. **Silent sentinel in the reply.** The system prompt instructs the
    model to emit the literal token `<silent>` as its *entire* reply
    when the latest message isn't for it. `SilentDetector`
@@ -822,19 +857,108 @@ system-prompt instruction. A stray `<silent>` mid-reply is treated as
 content (prefix-only match); the decision latches once made and
 subsequent deltas don't re-open it.
 
+Under tool calling the same decision is also reachable as a tool: the
+`silent(reasoning)` tool returns a sentinel that makes `agentic_loop`
+return `AgenticResult(is_silent=True)` without re-prompting, and the
+responder bails exactly as it does on the `<silent>` text token. The
+two coexist — `<silent>` gates the bare streaming path, `silent()`
+gates the agentic path.
+
+## Attentional stream
+
+Earlier designs gave each channel its own recent-history window and
+stitched *other* channels in through `CrossChannelContextLayer`
+summaries. The attentional stream replaces that with a single
+**focus** model: the familiar attends to one text channel and one
+voice channel at a time, and only the focused channel's traffic flows
+through the normal reply loop. Everything else is **staged** — stored
+but not yet consumed — until the model deliberately shifts focus.
+
+### Turn lifecycle (staged → consumed)
+
+Two `turns` columns drive it:
+
+- `arrived_at` — immutable ingest timestamp.
+- `consumed_at` — `NULL` while staged; set when the turn enters the
+  familiar's attention. `recent_cross_channel` returns consumed turns
+  only, ordered by `arrived_at, id`.
+
+`TextResponder` checks `FocusManager.is_focused(channel_id)` per
+inbound message:
+
+- **Focused channel** — the user turn is appended with
+  `consumed=True`, the normal reply loop runs (assemble → stream →
+  post), and `FocusManager.end_turn()` fires afterward.
+- **Unfocused channel** — the user turn is appended with
+  `consumed=False` (staged), a `[📥 Staged]` line is logged, and the
+  responder returns early: **no assembly, no LLM call, no reply.** The
+  message surfaces only as an unread digest entry on the next focused
+  turn.
+
+`VoiceResponder` calls `end_turn()` after each completed voice turn
+too, so deferred voice-focus shifts apply on the same cadence.
+
+### FocusManager
+
+`familiar_connect.focus.FocusManager` holds two independent pointers
+(`text_focus`, `voice_focus`), each guarded by its own
+`asyncio.Lock`. Shifts are **model-decided and deferred**:
+
+1. The `shift_focus(channel_id)` tool calls `defer_shift` — modality
+   (text/voice) is inferred from the `SubscriptionRegistry`. The
+   intent is queued, not applied mid-turn.
+2. `end_turn()` (called by the responder after the reply commits)
+   drains pending shifts under the per-modality lock. For a text
+   shift it calls `promote_staged_turns(channel_id)` — flipping that
+   channel's staged turns to consumed (`consumed_at = now`) so the
+   backlog interleaves into the next cross-channel window — then moves
+   the pointer and persists both pointers via `set_focus_pointers`.
+
+Pointers persist in the `focus_pointers` table
+(`familiar_id PK, text_channel_id, voice_channel_id, updated_at`); on
+startup `initialize()` loads them, falling back to the first text and
+first voice subscription as defaults (`set_focus_immediately`). The
+`channel_names` map (channel_id → display name) is populated from
+Discord on `on_ready` purely for readable logs and the unread digest.
+
+Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N`
+on a text shift, `[👁️ Focus]` once names are known on ready.
+
+### Unread digest
+
+`staged_channels(familiar_id)` returns `{channel_id: staged_count}`
+for channels with unconsumed turns. The text responder passes it to
+the [final reminder](#final-reminder) as `unread_digest`, so the
+model sees a prose nudge naming channels with pending messages and the
+`shift_focus` tool. `/diagnostics` renders the same counts
+(`Unreads: #<id> (<count>), …`) alongside the live focus pointers
+(`Focus: text=#<id> voice=#<id>`).
+
+### read_channel tool
+
+`read_channel(limit?, before_id?)` is a read-only peek into the
+focused **text** channel's history (capped at 50 turns). It does
+*not* touch `consumed_at` — the familiar can inspect a channel's
+recent traffic without committing to a focus shift. Voice focus isn't
+supported. Logs `[📖 read_channel]`.
+
 ## Data flow per user turn
 
 ```
 Discord text on channel C
   → DiscordTextSource publishes discord.text
   → TextResponder:
-      appends user turn to `turns` (fts_turns trigger fires; row indexed)
+      focused = FocusManager.is_focused(C)  (True when no FocusManager)
+      appends user turn to `turns` with consumed=focused
+        (fts_turns trigger fires; row indexed)
+      if not focused: log [📥 Staged]; return  (no assembly, no LLM, no reply)
       seeds RagContextLayer cue = content
       Assembler.assemble(ctx, viewer_mode="text")
       LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
       if `<silent>` detected: bail (no send, no assistant turn)
       else: BotHandle.send_text(channel_id, reply); append assistant turn
       router.end_turn(scope)
+      FocusManager.end_turn()  (apply deferred shifts; promote staged)
 
 Voice transcript final on channel C (voice:C)
   → VoiceSource publishes voice.transcript.final
@@ -844,14 +968,15 @@ Voice transcript final on channel C (voice:C)
       seeds RagContextLayer cue = text
       Assembler.assemble(ctx)
         → cached CharacterCard / OperatingMode
-        → CrossChannelContextLayer: TTL-checked read from cross_context_summaries
+        → CrossChannelContextLayer: retired — emits nothing
         → ConversationSummaryLayer: read from summaries
         → PeopleDossierLayer: read from people_dossiers, capped at max_people
         → RagContextLayer: FTS search on cue
-        → RecentHistoryLayer: last N turns for channel C
+        → RecentHistoryLayer: last N consumed turns across all channels
       LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
       if `<silent>` detected: bail (no TTS, no assistant turn)
       else: TTSPlayer.speak; append assistant turn
+      router.end_turn(scope); FocusManager.end_turn()
 
 Background: SummaryWorker tick (every 5 s)
   → for each channel: maybe regenerate rolling summary
@@ -883,9 +1008,11 @@ Per-channel overrides in `character.toml` (`[channels.<id>]`):
 - `cross_channel_map: dict[int, list[int]]` — per-viewer source list.
 - `tick_interval_s` (default 5) — seconds between ticks.
 
-`CrossChannelContextLayer` honours:
+`CrossChannelContextLayer` (retired — `build` emits nothing) still
+accepts:
 
-- `ttl_seconds` (default 600) — read-side staleness threshold.
+- `ttl_seconds` (default 600) — read-side staleness threshold (unused
+  now the layer never renders).
 - `viewer_map` — mirrors `cross_channel_map` on the worker side.
 
 `PeopleDossierWorker` honours:
