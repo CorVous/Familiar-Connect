@@ -5,20 +5,21 @@ TDD red-first: covers all specified behaviors before implementation.
 
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from familiar_connect.focus import FocusManager
+from familiar_connect.history.store import FocusPointers
 from familiar_connect.subscriptions import (
     SubscriptionKind,
     SubscriptionRegistry,
 )
 
 if TYPE_CHECKING:
-    pass
-
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # SubscriptionRegistry.kind_for
@@ -46,7 +47,7 @@ class TestKindFor:
         reg.add(channel_id=5, kind=SubscriptionKind.text, guild_id=None)
         reg.add(channel_id=5, kind=SubscriptionKind.voice, guild_id=1)
         result = reg.kind_for(channel_id=5)
-        assert result in (SubscriptionKind.text, SubscriptionKind.voice)
+        assert result in {SubscriptionKind.text, SubscriptionKind.voice}
 
     def test_unrelated_channel_unaffected(self, tmp_path: Path) -> None:
         reg = SubscriptionRegistry(tmp_path / "subs.toml")
@@ -66,9 +67,6 @@ def _make_store(
     promote_count: int = 0,
 ) -> MagicMock:
     """Mock AsyncHistoryStore with configurable return values."""
-    from familiar_connect.history.store import FocusPointers
-    from datetime import UTC, datetime
-
     store = MagicMock()
     if text_channel_id is not None or voice_channel_id is not None:
         fp = FocusPointers(
@@ -105,7 +103,6 @@ def _make_registry(
 class TestFocusManagerInitialize:
     @pytest.mark.asyncio
     async def test_initialize_loads_focus_pointers(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(text_channel_id=10, voice_channel_id=20)
         reg = _make_registry(tmp_path)
@@ -116,7 +113,6 @@ class TestFocusManagerInitialize:
 
     @pytest.mark.asyncio
     async def test_initialize_with_no_db_entry_stays_none(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()  # get_focus_pointers returns None
         reg = _make_registry(tmp_path)
@@ -134,7 +130,6 @@ class TestFocusManagerInitialize:
 class TestFocusManagerIsFocused:
     @pytest.mark.asyncio
     async def test_is_focused_true_for_text_channel(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(text_channel_id=42)
         reg = _make_registry(tmp_path)
@@ -144,7 +139,6 @@ class TestFocusManagerIsFocused:
 
     @pytest.mark.asyncio
     async def test_is_focused_true_for_voice_channel(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(voice_channel_id=77)
         reg = _make_registry(tmp_path)
@@ -154,7 +148,6 @@ class TestFocusManagerIsFocused:
 
     @pytest.mark.asyncio
     async def test_is_focused_false_for_unfocused_channel(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(text_channel_id=1)
         reg = _make_registry(tmp_path)
@@ -164,7 +157,6 @@ class TestFocusManagerIsFocused:
 
     @pytest.mark.asyncio
     async def test_is_focused_false_when_no_focus(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path)
@@ -181,7 +173,6 @@ class TestFocusManagerIsFocused:
 class TestFocusManagerDeferShiftEndTurn:
     @pytest.mark.asyncio
     async def test_defer_shift_text_promotes_staged_turns(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(promote_count=3)
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
@@ -194,7 +185,6 @@ class TestFocusManagerDeferShiftEndTurn:
 
     @pytest.mark.asyncio
     async def test_defer_shift_text_updates_text_focus(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(promote_count=0)
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
@@ -205,7 +195,6 @@ class TestFocusManagerDeferShiftEndTurn:
 
     @pytest.mark.asyncio
     async def test_defer_shift_voice_updates_voice_focus(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
@@ -216,7 +205,6 @@ class TestFocusManagerDeferShiftEndTurn:
 
     @pytest.mark.asyncio
     async def test_defer_shift_voice_does_not_promote(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
@@ -227,7 +215,6 @@ class TestFocusManagerDeferShiftEndTurn:
 
     @pytest.mark.asyncio
     async def test_end_turn_persists_pointers(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
@@ -238,7 +225,6 @@ class TestFocusManagerDeferShiftEndTurn:
 
     @pytest.mark.asyncio
     async def test_end_turn_clears_pending_shift(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
@@ -252,7 +238,6 @@ class TestFocusManagerDeferShiftEndTurn:
 
     @pytest.mark.asyncio
     async def test_end_turn_noop_when_no_pending(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path)
@@ -270,7 +255,6 @@ class TestFocusManagerDeferShiftEndTurn:
 class TestModalitiesIndependent:
     @pytest.mark.asyncio
     async def test_text_shift_does_not_affect_voice(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(voice_channel_id=99)
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
@@ -284,7 +268,6 @@ class TestModalitiesIndependent:
 
     @pytest.mark.asyncio
     async def test_voice_shift_does_not_affect_text(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store(text_channel_id=11)
         reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
@@ -303,7 +286,6 @@ class TestModalitiesIndependent:
 
 class TestSetFocusImmediately:
     def test_sets_text_focus(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path)
@@ -312,7 +294,6 @@ class TestSetFocusImmediately:
         assert fm.get_focus("text") == 3
 
     def test_sets_voice_focus(self, tmp_path: Path) -> None:
-        from familiar_connect.focus import FocusManager
 
         store = _make_store()
         reg = _make_registry(tmp_path)

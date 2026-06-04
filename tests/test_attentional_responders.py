@@ -10,7 +10,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -55,7 +54,7 @@ class _ScriptedLLM(LLMClient):
         self._reply = reply
         self.call_count = 0
 
-    async def chat(self, messages: list[Message]) -> Message:
+    async def chat(self, messages: list[Message]) -> Message:  # noqa: ARG002
         self.call_count += 1
         return Message(role="assistant", content=self._reply)
 
@@ -161,7 +160,7 @@ def _final(
 
 def _make_text_responder(
     *,
-    tmp_path: "Path",
+    tmp_path: Path,
     llm: LLMClient | None = None,
     send: _CapturingSend | None = None,
     focus_manager: object = None,
@@ -191,7 +190,7 @@ def _make_text_responder(
 
 def _make_voice_responder(
     *,
-    tmp_path: "Path",
+    tmp_path: Path,
     llm: LLMClient | None = None,
     player: MockTTSPlayer | None = None,
     focus_manager: object = None,
@@ -250,7 +249,7 @@ def _unfocused_focus_manager() -> MagicMock:
 
 class TestTextResponderFocusAware:
     @pytest.mark.asyncio
-    async def test_unfocused_message_is_staged_no_reply(self, tmp_path: "Path") -> None:
+    async def test_unfocused_message_is_staged_no_reply(self, tmp_path: Path) -> None:
         """Unfocused channel: turn staged (consumed=False), no reply generated."""
         llm = _ScriptedLLM("should not be called")
         send = _CapturingSend()
@@ -282,7 +281,7 @@ class TestTextResponderFocusAware:
 
     @pytest.mark.asyncio
     async def test_focused_message_generates_reply_and_calls_end_turn(
-        self, tmp_path: "Path"
+        self, tmp_path: Path
     ) -> None:
         """Focused channel: reply generated, end_turn called on focus_manager."""
         llm = _ScriptedLLM("hi there")
@@ -307,7 +306,7 @@ class TestTextResponderFocusAware:
 
     @pytest.mark.asyncio
     async def test_focused_passes_focus_context_to_final_reminder(
-        self, tmp_path: "Path"
+        self, tmp_path: Path
     ) -> None:
         """Focus context (channel_id, digest) passed to build_final_reminder."""
         llm = _ScriptedLLM("ok")
@@ -348,11 +347,12 @@ class TestTextResponderFocusAware:
         # at least one call should have focus_channel_id set
         focus_calls = [c for c in captured_calls if c.get("focus_channel_id") == 100]
         assert focus_calls, (
-            f"No build_final_reminder call with focus_channel_id=100; calls={captured_calls}"
+            "No build_final_reminder call with focus_channel_id=100; "
+            f"calls={captured_calls}"
         )
 
     @pytest.mark.asyncio
-    async def test_no_focus_manager_backward_compat(self, tmp_path: "Path") -> None:
+    async def test_no_focus_manager_backward_compat(self, tmp_path: Path) -> None:
         """Without focus_manager: behaves exactly as before (reply generated)."""
         llm = _ScriptedLLM("compat reply")
         send = _CapturingSend()
@@ -372,7 +372,7 @@ class TestTextResponderFocusAware:
         assert send.calls[0][1] == "compat reply"
 
     @pytest.mark.asyncio
-    async def test_unfocused_does_not_call_end_turn(self, tmp_path: "Path") -> None:
+    async def test_unfocused_does_not_call_end_turn(self, tmp_path: Path) -> None:
         """end_turn not called for unfocused (staged) turns."""
         fm = _unfocused_focus_manager()
         responder, _ = _make_text_responder(tmp_path=tmp_path, focus_manager=fm)
@@ -394,7 +394,7 @@ class TestTextResponderFocusAware:
 class TestVoiceResponderFocusAware:
     @pytest.mark.asyncio
     async def test_voice_turn_calls_end_turn_when_focus_manager_set(
-        self, tmp_path: "Path"
+        self, tmp_path: Path
     ) -> None:
         """After a completed voice turn, end_turn is called on focus_manager."""
         llm = _ScriptedLLM("sure")
@@ -416,14 +416,12 @@ class TestVoiceResponderFocusAware:
         fm.end_turn.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_voice_no_focus_manager_backward_compat(
-        self, tmp_path: "Path"
-    ) -> None:
+    async def test_voice_no_focus_manager_backward_compat(self, tmp_path: Path) -> None:
         """Without focus_manager: voice turn proceeds exactly as before."""
         llm = _ScriptedLLM("hello there")
         player = MockTTSPlayer(ms_per_word=1)
 
-        responder, store = _make_voice_responder(
+        responder, _store = _make_voice_responder(
             tmp_path=tmp_path, llm=llm, player=player, focus_manager=None
         )
         bus = InProcessEventBus()
@@ -441,8 +439,8 @@ class TestVoiceResponderFocusAware:
         assert cancelled is False
 
     @pytest.mark.asyncio
-    async def test_voice_end_turn_not_called_on_silent(self, tmp_path: "Path") -> None:
-        """When voice reply is silent, end_turn should not be called (no actual turn)."""
+    async def test_voice_end_turn_not_called_on_silent(self, tmp_path: Path) -> None:
+        """Voice reply is silent: end_turn not called (no actual turn)."""
         llm = _ScriptedLLM("<silent>")
         player = MockTTSPlayer(ms_per_word=1)
         fm = _focused_focus_manager(channel_id=200)

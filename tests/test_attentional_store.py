@@ -15,12 +15,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import (
-    FocusPointers,
     HistoryStore,
     HistoryTurn,
 )
-
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -397,8 +396,6 @@ class TestMigration:
 class TestRowToTurnFallback:
     def test_history_turn_arrived_at_defaults_to_none(self) -> None:
         """HistoryTurn.arrived_at and consumed_at have None defaults."""
-        from familiar_connect.history.store import HistoryTurn
-
         t = HistoryTurn(
             id=1,
             timestamp=datetime(2025, 1, 1, tzinfo=UTC),
@@ -418,7 +415,6 @@ class TestRowToTurnFallback:
 class TestAsyncStoreWrappers:
     @pytest.mark.asyncio
     async def test_stage_turn_async(self) -> None:
-        from familiar_connect.history.async_store import AsyncHistoryStore
 
         store = AsyncHistoryStore(HistoryStore(":memory:"))
         turn = await store.stage_turn(
@@ -432,7 +428,6 @@ class TestAsyncStoreWrappers:
 
     @pytest.mark.asyncio
     async def test_promote_staged_turns_async(self) -> None:
-        from familiar_connect.history.async_store import AsyncHistoryStore
 
         store = AsyncHistoryStore(HistoryStore(":memory:"))
         await store.stage_turn(
@@ -447,7 +442,6 @@ class TestAsyncStoreWrappers:
 
     @pytest.mark.asyncio
     async def test_get_set_focus_pointers_async(self) -> None:
-        from familiar_connect.history.async_store import AsyncHistoryStore
 
         store = AsyncHistoryStore(HistoryStore(":memory:"))
         await store.set_focus_pointers("fam", text_channel_id=5, voice_channel_id=6)
@@ -458,7 +452,6 @@ class TestAsyncStoreWrappers:
 
     @pytest.mark.asyncio
     async def test_get_set_digest_watermark_async(self) -> None:
-        from familiar_connect.history.async_store import AsyncHistoryStore
 
         ts = datetime(2025, 4, 1, tzinfo=UTC)
         store = AsyncHistoryStore(HistoryStore(":memory:"))
@@ -470,7 +463,6 @@ class TestAsyncStoreWrappers:
 
     @pytest.mark.asyncio
     async def test_recent_cross_channel_async(self) -> None:
-        from familiar_connect.history.async_store import AsyncHistoryStore
 
         inner = HistoryStore(":memory:")
         store = AsyncHistoryStore(inner)
