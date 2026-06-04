@@ -248,6 +248,120 @@ class TestFocusManagerDeferShiftEndTurn:
 
 
 # ---------------------------------------------------------------------------
+# Idle-drift wake
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """Mutable monotonic clock for deterministic idle tests."""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+class TestFocusManagerIdleWake:
+    def _fm(
+        self,
+        tmp_path: Path,
+        *,
+        clock: _FakeClock,
+        idle_wake_seconds: float = 60.0,
+        text_focus: int = 1,
+    ) -> FocusManager:
+        store = _make_store(text_channel_id=text_focus)
+        reg = _make_registry(tmp_path, channel_kind={text_focus: SubscriptionKind.text})
+        return FocusManager(
+            familiar_id="fam",
+            store=store,
+            subscriptions=reg,
+            clock=clock,
+            idle_wake_seconds=idle_wake_seconds,
+        )
+
+    @pytest.mark.asyncio
+    async def test_should_wake_false_before_threshold(self, tmp_path: Path) -> None:
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock)
+        await fm.initialize()
+        clock.advance(30.0)  # < 60s threshold
+        assert fm.should_wake(99) is False
+
+    @pytest.mark.asyncio
+    async def test_should_wake_true_after_threshold(self, tmp_path: Path) -> None:
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock)
+        await fm.initialize()
+        clock.advance(90.0)  # >= 60s threshold
+        assert fm.should_wake(99) is True
+
+    @pytest.mark.asyncio
+    async def test_should_wake_false_for_focused_channel(self, tmp_path: Path) -> None:
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock, text_focus=1)
+        await fm.initialize()
+        clock.advance(90.0)
+        # focused channel never wakes itself
+        assert fm.should_wake(1) is False
+
+    @pytest.mark.asyncio
+    async def test_should_wake_false_when_disabled(self, tmp_path: Path) -> None:
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock, idle_wake_seconds=0.0)
+        await fm.initialize()
+        clock.advance(10_000.0)
+        assert fm.should_wake(99) is False
+
+    @pytest.mark.asyncio
+    async def test_end_turn_refreshes_last_active(self, tmp_path: Path) -> None:
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock)
+        await fm.initialize()
+        clock.advance(90.0)
+        assert fm.should_wake(99) is True
+        await fm.end_turn()  # focused turn completed → resets idle clock
+        assert fm.should_wake(99) is False
+
+    @pytest.mark.asyncio
+    async def test_should_wake_false_when_nudge_pending(self, tmp_path: Path) -> None:
+        # nudge is model-driven: a single pending nudge suppresses further
+        # ones until the turn it triggers completes (dedupes bursts)
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock)
+        await fm.initialize()
+        clock.advance(90.0)
+        assert fm.should_wake(99) is True
+        fm.mark_nudge_pending()
+        assert fm.should_wake(99) is False
+
+    @pytest.mark.asyncio
+    async def test_end_turn_clears_nudge_pending(self, tmp_path: Path) -> None:
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock)
+        await fm.initialize()
+        clock.advance(90.0)
+        fm.mark_nudge_pending()
+        await fm.end_turn()  # nudge turn completed
+        clock.advance(90.0)  # idle again
+        assert fm.should_wake(99) is True
+
+    @pytest.mark.asyncio
+    async def test_wake_does_not_move_focus(self, tmp_path: Path) -> None:
+        # nudge must NOT auto-shift; focus only moves when the model decides
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock, text_focus=1)
+        await fm.initialize()
+        clock.advance(90.0)
+        fm.mark_nudge_pending()
+        assert fm.get_focus("text") == 1
+
+
+# ---------------------------------------------------------------------------
 # Two modalities stay independent
 # ---------------------------------------------------------------------------
 

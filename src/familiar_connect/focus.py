@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.subscriptions import SubscriptionKind
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.subscriptions import SubscriptionRegistry
 
 _logger = logging.getLogger(__name__)
+
+# default focused-channel silence before a non-focused arrival nudges the
+# model. 0 disables. module constant for now; promote to config if tuned.
+_DEFAULT_IDLE_WAKE_S = 120.0
 
 
 class FocusManager:
@@ -22,6 +29,12 @@ class FocusManager:
     Two independent focus pointers (text, voice). Focus shifts are
     model-decided (via shift_focus tool), deferred to end_turn,
     then applied atomically under per-modality lock.
+
+    Idle nudge: when the focused channel falls silent for
+    ``idle_wake_seconds`` and a non-focused channel gets traffic,
+    ``should_wake`` flags that the model deserves a turn (the responder
+    fires a synthetic wake). The nudge never moves focus — only the
+    model's shift_focus does. ``_nudge_pending`` dedupes arrival bursts.
     """
 
     def __init__(
@@ -30,6 +43,8 @@ class FocusManager:
         familiar_id: str,
         store: AsyncHistoryStore,
         subscriptions: SubscriptionRegistry,
+        clock: Callable[[], float] = time.monotonic,
+        idle_wake_seconds: float = _DEFAULT_IDLE_WAKE_S,
     ) -> None:
         self._familiar_id = familiar_id
         self._store = store
@@ -39,9 +54,11 @@ class FocusManager:
         self._pending_shift: dict[str, int] = {}  # modality -> channel_id
         self._text_lock = asyncio.Lock()
         self._voice_lock = asyncio.Lock()
-        # idle gate: held while a turn is active; non-focused arrivals
-        # contend for it to detect idle and trigger wake
-        self._idle_gate = asyncio.Lock()
+        # idle-nudge state: last focused-turn time + dedupe flag
+        self._clock = clock
+        self._idle_wake_seconds = idle_wake_seconds
+        self._last_active = clock()
+        self._nudge_pending = False
         # channel_id → display name; populated by bot on_ready
         self.channel_names: dict[int, str] = {}
 
@@ -72,8 +89,27 @@ class FocusManager:
         self._pending_shift[modality] = channel_id
         _logger.debug("defer shift channel=%d modality=%s", channel_id, modality)
 
+    def should_wake(self, channel_id: int) -> bool:
+        """Whether a non-focused arrival warrants an idle nudge.
+
+        True when nudges enabled, channel unfocused, focused channel
+        silent ≥ threshold, and no nudge already pending.
+        """
+        if self._idle_wake_seconds <= 0 or self._nudge_pending:
+            return False
+        if self.is_focused(channel_id):
+            return False
+        return (self._clock() - self._last_active) >= self._idle_wake_seconds
+
+    def mark_nudge_pending(self) -> None:
+        """Flag that a nudge turn is in flight; cleared at end_turn."""
+        self._nudge_pending = True
+
     async def end_turn(self) -> None:
         """Apply pending focus shifts; called after each turn completes."""
+        # focused turn happened → reset idle clock + release nudge dedupe
+        self._last_active = self._clock()
+        self._nudge_pending = False
         for modality, channel_id in list(self._pending_shift.items()):
             lock = self._voice_lock if modality == "voice" else self._text_lock
             async with lock:
