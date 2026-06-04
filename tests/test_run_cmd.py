@@ -660,7 +660,15 @@ class TestAsyncMainCleanup:
         scheduler_mock.start = AsyncMock()
         scheduler_mock.shutdown = AsyncMock()
 
+        fm_mock = MagicMock(name="focus_manager")
+        fm_mock.initialize = AsyncMock()
+        fm_mock.get_focus = MagicMock(return_value=None)
+
         with (
+            patch(
+                "familiar_connect.commands.run.FocusManager",
+                return_value=fm_mock,
+            ),
             patch("familiar_connect.commands.run.create_bot", return_value=handle),
             patch("familiar_connect.commands.run._default_assembler"),
             patch(
@@ -725,7 +733,15 @@ class TestAsyncMainCleanup:
         scheduler_mock.start = AsyncMock()
         scheduler_mock.shutdown = AsyncMock()
 
+        fm_mock = MagicMock(name="focus_manager")
+        fm_mock.initialize = AsyncMock()
+        fm_mock.get_focus = MagicMock(return_value=None)
+
         with (
+            patch(
+                "familiar_connect.commands.run.FocusManager",
+                return_value=fm_mock,
+            ),
             patch("familiar_connect.commands.run.create_bot", return_value=handle),
             patch("familiar_connect.commands.run._default_assembler"),
             patch(
@@ -843,12 +859,20 @@ class TestGracefulShutdown:
         scheduler_mock.start = AsyncMock()
         scheduler_mock.shutdown = AsyncMock()
 
+        fm_mock = MagicMock(name="focus_manager")
+        fm_mock.initialize = AsyncMock()
+        fm_mock.get_focus = MagicMock(return_value=None)
+
         def _fire_shutdown(stop: asyncio.Event):
             # mimic a SIGINT landing just after the group spins up
             asyncio.get_running_loop().call_soon(stop.set)
             return lambda: None
 
         with (
+            patch(
+                "familiar_connect.commands.run.FocusManager",
+                return_value=fm_mock,
+            ),
             patch("familiar_connect.commands.run.create_bot", return_value=handle),
             patch("familiar_connect.commands.run._default_assembler"),
             patch(

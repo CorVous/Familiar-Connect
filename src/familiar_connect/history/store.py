@@ -72,6 +72,8 @@ class HistoryTurn:
     platform_message_id: str | None = None
     reply_to_message_id: str | None = None
     guild_id: int | None = None
+    arrived_at: datetime | None = None  # immutable ingest time; None on legacy rows
+    consumed_at: datetime | None = None  # None = staged
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,15 @@ class WatermarkEntry:
 
     last_written_id: int
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class FocusPointers:
+    """Current text/voice channel focus for a familiar."""
+
+    text_channel_id: int | None
+    voice_channel_id: int | None
+    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -437,12 +448,29 @@ CREATE TABLE IF NOT EXISTS alarms (
 
 CREATE INDEX IF NOT EXISTS idx_alarms_pending
     ON alarms (familiar_id, fired_at, cancelled_at, scheduled_at);
+
+-- Attentional stream. Current text/voice focus for each familiar.
+CREATE TABLE IF NOT EXISTS focus_pointers (
+    familiar_id      TEXT PRIMARY KEY,
+    text_channel_id  INTEGER,
+    voice_channel_id INTEGER,
+    updated_at       TEXT NOT NULL
+);
+
+-- Unread digest high-water mark. max(arrived_at) of last-delivered digest.
+CREATE TABLE IF NOT EXISTS unread_digest_watermark (
+    familiar_id    TEXT PRIMARY KEY,
+    watermark_at   TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
 """
 
 _TURN_COLS = (
     "id, timestamp, role, author_platform, author_user_id, "
     "author_username, author_display_name, content, channel_id, "
-    "platform_message_id, reply_to_message_id, guild_id"
+    "platform_message_id, reply_to_message_id, guild_id, "
+    "arrived_at, consumed_at"
 )
 
 
@@ -504,8 +532,39 @@ class HistoryStore:
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._migrate()
         self._fts_turns = FtsIndex(fts_turns_path)
         self._fts_facts = FtsIndex(fts_facts_path)
+
+    # ------------------------------------------------------------------
+    # Schema migration
+    # ------------------------------------------------------------------
+
+    def _migrate(self) -> None:
+        """Add arrived_at / consumed_at to turns if missing; backfill."""
+        for col in ("arrived_at", "consumed_at"):
+            try:
+                self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")  # noqa: S608,RUF100
+                self._conn.commit()
+            except Exception:  # noqa: BLE001, S110  # column already exists
+                pass
+        # backfill: existing rows treat timestamp as arrived_at
+        self._conn.execute(
+            "UPDATE turns SET arrived_at = timestamp WHERE arrived_at IS NULL"
+        )
+        # backfill: existing rows are considered already consumed
+        self._conn.execute(
+            "UPDATE turns SET consumed_at = timestamp WHERE consumed_at IS NULL"
+        )
+        self._conn.commit()
+        # create cross-channel ordering index after columns exist
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_turns_consumed
+                ON turns (familiar_id, consumed_at, arrived_at, id)
+            """
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # FTS write helper
@@ -564,6 +623,8 @@ class HistoryStore:
         reply_to_message_id: str | None = None,
         tool_calls_json: str | None = None,
         tool_call_id: str | None = None,
+        arrived_at: datetime | None = None,
+        consumed: bool = True,
     ) -> HistoryTurn:
         """Append a single turn; return persisted form.
 
@@ -573,9 +634,13 @@ class HistoryStore:
         platform's id format fits. *tool_calls_json* carries the
         assistant's invoked tool calls (JSON-encoded list);
         *tool_call_id* references the call a ``role=tool`` turn is
-        answering.
+        answering. *arrived_at* defaults to now (UTC) when omitted.
+        *consumed* = ``True`` sets ``consumed_at = arrived_at``; when
+        ``False`` the turn is staged (``consumed_at`` remains NULL).
         """
         timestamp = datetime.now(tz=UTC)
+        arrived_at_eff = arrived_at if arrived_at is not None else timestamp
+        consumed_at_eff = arrived_at_eff if consumed else None
         platform = author.platform if author is not None else None
         user_id = author.user_id if author is not None else None
         username = author.username if author is not None else None
@@ -588,8 +653,9 @@ class HistoryStore:
                  author_username, author_display_name,
                  content, timestamp, mode,
                  platform_message_id, reply_to_message_id,
-                 tool_calls_json, tool_call_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tool_calls_json, tool_call_id,
+                 arrived_at, consumed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -607,6 +673,8 @@ class HistoryStore:
                 reply_to_message_id,
                 tool_calls_json,
                 tool_call_id,
+                arrived_at_eff.isoformat(),
+                consumed_at_eff.isoformat() if consumed_at_eff is not None else None,
             ),
         )
         self._conn.commit()
@@ -619,6 +687,8 @@ class HistoryStore:
             author=author,
             content=content,
             channel_id=channel_id,
+            arrived_at=arrived_at_eff,
+            consumed_at=consumed_at_eff,
         )
 
     def lookup_turn_by_platform_message_id(
@@ -2485,6 +2555,205 @@ class HistoryStore:
         self._conn.commit()
         return (cur.rowcount or 0) > 0
 
+    # ------------------------------------------------------------------
+    # Attentional stream — staging, promotion, cross-channel recall
+    # ------------------------------------------------------------------
+
+    def stage_turn(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int,
+        role: str,
+        content: str,
+        author: Author | None = None,
+        guild_id: int | None = None,
+        mode: str | None = None,
+        platform_message_id: str | None = None,
+        reply_to_message_id: str | None = None,
+        tool_calls_json: str | None = None,
+        tool_call_id: str | None = None,
+        arrived_at: datetime | None = None,
+    ) -> HistoryTurn:
+        """Wrap append_turn with consumed=False."""
+        return self.append_turn(
+            familiar_id=familiar_id,
+            channel_id=channel_id,
+            role=role,
+            content=content,
+            author=author,
+            guild_id=guild_id,
+            mode=mode,
+            platform_message_id=platform_message_id,
+            reply_to_message_id=reply_to_message_id,
+            tool_calls_json=tool_calls_json,
+            tool_call_id=tool_call_id,
+            arrived_at=arrived_at,
+            consumed=False,
+        )
+
+    def promote_staged_turns(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int,
+    ) -> int:
+        """Set consumed_at = NOW() for all staged turns in channel.
+
+        Returns count of promoted rows.
+        """
+        now = datetime.now(tz=UTC).isoformat()
+        cur = self._conn.execute(
+            """
+            UPDATE turns SET consumed_at = ?
+             WHERE familiar_id = ? AND channel_id = ? AND consumed_at IS NULL
+            """,
+            (now, familiar_id, channel_id),
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
+    def count_staged(self, *, familiar_id: str, channel_id: int) -> int:
+        """Count turns with consumed_at IS NULL for familiar + channel."""
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n
+              FROM turns
+             WHERE familiar_id = ? AND channel_id = ? AND consumed_at IS NULL
+            """,
+            (familiar_id, channel_id),
+        ).fetchone()
+        return int(row["n"])
+
+    def staged_channels(self, *, familiar_id: str) -> dict[int, int]:
+        """Map channel_id → staged_count for all channels with staged turns."""
+        rows = self._conn.execute(
+            """
+            SELECT channel_id, COUNT(*) AS n
+              FROM turns
+             WHERE familiar_id = ? AND consumed_at IS NULL
+             GROUP BY channel_id
+            """,
+            (familiar_id,),
+        ).fetchall()
+        return {int(r["channel_id"]): int(r["n"]) for r in rows}
+
+    def recent_cross_channel(
+        self,
+        *,
+        familiar_id: str,
+        limit: int,
+    ) -> list[HistoryTurn]:
+        """Last *limit* consumed turns across all channels, oldest-first.
+
+        Fetches DESC then reverses so callers get temporal order
+        without a subquery.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ? AND consumed_at IS NOT NULL
+             ORDER BY arrived_at DESC, id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            (familiar_id, limit),
+        ).fetchall()
+        return [_row_to_turn(r) for r in reversed(rows)]
+
+    # ------------------------------------------------------------------
+    # Focus pointers
+    # ------------------------------------------------------------------
+
+    def get_focus_pointers(self, familiar_id: str) -> FocusPointers | None:
+        """Return current focus pointers for familiar, or None."""
+        row = self._conn.execute(
+            """
+            SELECT text_channel_id, voice_channel_id, updated_at
+              FROM focus_pointers
+             WHERE familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return FocusPointers(
+            text_channel_id=(
+                int(row["text_channel_id"])
+                if row["text_channel_id"] is not None
+                else None
+            ),
+            voice_channel_id=(
+                int(row["voice_channel_id"])
+                if row["voice_channel_id"] is not None
+                else None
+            ),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def set_focus_pointers(
+        self,
+        familiar_id: str,
+        *,
+        text_channel_id: int | None,
+        voice_channel_id: int | None,
+    ) -> None:
+        """Upsert focus pointers for familiar."""
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO focus_pointers
+                (familiar_id, text_channel_id, voice_channel_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (familiar_id) DO UPDATE SET
+                text_channel_id  = excluded.text_channel_id,
+                voice_channel_id = excluded.voice_channel_id,
+                updated_at       = excluded.updated_at
+            """,
+            (familiar_id, text_channel_id, voice_channel_id, ts),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Unread digest watermark
+    # ------------------------------------------------------------------
+
+    def get_digest_watermark(self, familiar_id: str) -> datetime | None:
+        """Return max(arrived_at) of last-delivered digest, or None."""
+        row = self._conn.execute(
+            """
+            SELECT watermark_at
+              FROM unread_digest_watermark
+             WHERE familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return datetime.fromisoformat(row["watermark_at"])
+
+    def set_digest_watermark(
+        self,
+        familiar_id: str,
+        watermark_at: datetime,
+    ) -> None:
+        """Upsert digest watermark for familiar."""
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO unread_digest_watermark
+                (familiar_id, watermark_at, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT (familiar_id) DO UPDATE SET
+                watermark_at = excluded.watermark_at,
+                updated_at   = excluded.updated_at
+            """,
+            (familiar_id, watermark_at.isoformat(), ts),
+        )
+        self._conn.commit()
+
 
 def _row_to_reflection(row: Row) -> Reflection:
     try:
@@ -2621,6 +2890,14 @@ def _row_to_turn(row: Row) -> HistoryTurn:
         guild_id_raw = row["guild_id"]
     except (IndexError, KeyError):
         guild_id_raw = None
+    try:
+        arrived_at_raw = row["arrived_at"]
+    except (IndexError, KeyError):
+        arrived_at_raw = None
+    try:
+        consumed_at_raw = row["consumed_at"]
+    except (IndexError, KeyError):
+        consumed_at_raw = None
     return HistoryTurn(
         id=int(row["id"]),
         timestamp=datetime.fromisoformat(row["timestamp"]),
@@ -2635,4 +2912,14 @@ def _row_to_turn(row: Row) -> HistoryTurn:
             str(reply_to_message_id) if reply_to_message_id is not None else None
         ),
         guild_id=int(guild_id_raw) if guild_id_raw is not None else None,
+        arrived_at=(
+            datetime.fromisoformat(arrived_at_raw)
+            if arrived_at_raw is not None
+            else None
+        ),
+        consumed_at=(
+            datetime.fromisoformat(consumed_at_raw)
+            if consumed_at_raw is not None
+            else None
+        ),
     )

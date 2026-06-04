@@ -42,7 +42,7 @@ Implementation details for what ships live in
 | `fts/turns/` (tantivy) | sync write from `append_turn` | `RagContextLayer` |
 | `fts/facts/` (tantivy) | sync write from `append_fact` | `RagContextLayer` |
 | `summaries` | `SummaryWorker` | `ConversationSummaryLayer` |
-| `cross_context_summaries` | `SummaryWorker` | `CrossChannelContextLayer` |
+| `cross_context_summaries` | `SummaryWorker` | `CrossChannelContextLayer` (retired — see [attentional stream](context-pipeline.md#attentional-stream)) |
 | `facts` | `FactExtractor` | `RagContextLayer` (via FTS) |
 | `facts.superseded_*` | `FactSupersedeWorker` | every fact reader (filters retired) |
 | `people_dossiers` | `PeopleDossierWorker` | `PeopleDossierLayer` |

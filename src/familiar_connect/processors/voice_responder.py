@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.bus.router import TurnRouter
     from familiar_connect.context.assembler import Assembler
+    from familiar_connect.focus import FocusManager
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.identity import Author
     from familiar_connect.llm import LLMClient
@@ -83,6 +84,7 @@ class VoiceResponder:
             "checking...",
         ),
         post_history_instructions: str = "",
+        focus_manager: FocusManager | None = None,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -114,6 +116,8 @@ class VoiceResponder:
         # so repeat use doesn't always say same word
         self._tool_filler_phrases = tool_filler_phrases
         self._tool_filler_idx = 0
+        # attentional focus controller; None = backward-compat (no focus gating)
+        self._focus_manager = focus_manager
 
     @staticmethod
     def _user_id_from_event(event: Event) -> int | None:
@@ -289,6 +293,8 @@ class VoiceResponder:
                 author=None,
             )
             self._router.end_turn(scope)
+            if self._focus_manager is not None:
+                await self._focus_manager.end_turn()
 
     def _gate_for(self, channel_id: int) -> asyncio.Lock:
         """Per-channel reply lock; lazily created.

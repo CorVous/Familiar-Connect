@@ -141,16 +141,16 @@ class TestRecentHistoryLayer:
         assert user_msg.name is not None
         # content is prefixed with display name so the model sees the
         # attribution even if it drops `name`
-        assert "Alice]" in user_msg.content
+        assert "Alice #" in user_msg.content
         assert "hey" in user_msg.content
 
     @pytest.mark.asyncio
     async def test_user_messages_include_utc_timestamp_in_prefix(self) -> None:
-        """Format ``[HH:MM Display] content``.
+        """Format ``[HH:MM Display #channel_id] content``.
 
         Gives the model a sense of message rhythm so a rapid
         back-and-forth between two humans doesn't read as a question
-        into the void.
+        into the void. Channel id label added by attentional stream.
         """
         store = HistoryStore(":memory:")
         alice = Author(
@@ -166,7 +166,7 @@ class TestRecentHistoryLayer:
         layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         messages = await layer.recent_messages(_ctx(channel_id=10))
         user_msg = next(m for m in messages if m.role == "user")
-        assert re.match(r"^\[\d{2}:\d{2} Alice\] hey$", user_msg.content_str), (
+        assert re.match(r"^\[\d{2}:\d{2} Alice #10\] hey$", user_msg.content_str), (
             user_msg.content_str
         )
 
@@ -245,7 +245,7 @@ class TestRecentHistoryCoalesceFragments:
         assert len(user_msgs) == 1
         # earliest timestamp wins; fragments joined with a single space
         assert re.match(
-            r"^\[01:35 Cassidy\] I okay\. So, Tam, here's the etiquette\."
+            r"^\[01:35 Cassidy #10\] I okay\. So, Tam, here's the etiquette\."
             r" Big Discord calls like this\. Right\? You can jump in$",
             user_msgs[0].content_str,
         ), user_msgs[0].content_str
