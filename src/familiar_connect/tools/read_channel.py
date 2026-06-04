@@ -58,7 +58,7 @@ async def _read_channel_handler(args: dict[str, Any], ctx: ToolContext) -> str:
         })
     _logger.info(
         f"{ls.tag('📖 read_channel', ls.LM)} "
-        f"{ls.kv('channel', fm._ch(channel_id), vc=ls.LW)} "
+        f"{ls.kv('channel', fm.channel_label(channel_id), vc=ls.LW)} "
         f"{ls.kv('turns', str(len(result)), vc=ls.LW)}"
     )
     return json.dumps(result)

@@ -32,7 +32,7 @@ async def _shift_focus_handler(args: dict[str, Any], ctx: ToolContext) -> str:  
     fm.defer_shift(channel_id)
     _logger.info(
         f"{ls.tag('🔀 shift_focus', ls.LC)} "
-        f"{ls.kv('channel', fm._ch(channel_id), vc=ls.LW)}"
+        f"{ls.kv('channel', fm.channel_label(channel_id), vc=ls.LW)}"
     )
     return json.dumps({"ok": True, "channel_id": channel_id})
 

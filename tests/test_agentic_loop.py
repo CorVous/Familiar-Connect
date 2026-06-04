@@ -143,7 +143,7 @@ class TestAgenticLoopLeakedToolCallGuard:
             ctx=_make_ctx(),
         )
         assert result.is_silent is True
-        assert result.final_content == ""
+        assert not result.final_content
 
     @pytest.mark.asyncio
     async def test_leaked_namespaced_invoke_is_stripped(self) -> None:
@@ -159,7 +159,7 @@ class TestAgenticLoopLeakedToolCallGuard:
             ctx=_make_ctx(),
         )
         assert result.is_silent is True
-        assert result.final_content == ""
+        assert not result.final_content
 
     @pytest.mark.asyncio
     async def test_leaked_nonsilent_call_stripped_not_silent(self) -> None:
@@ -174,7 +174,7 @@ class TestAgenticLoopLeakedToolCallGuard:
             ctx=_make_ctx(),
         )
         assert result.is_silent is False
-        assert result.final_content == ""
+        assert not result.final_content
 
     @pytest.mark.asyncio
     async def test_normal_reply_with_word_invoke_untouched(self) -> None:

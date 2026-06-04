@@ -1092,8 +1092,8 @@ def _register_events(
         if fm is not None:
             _logger.info(
                 f"{ls.tag('👁️ Focus', ls.LC)} "
-                f"{ls.kv('text', fm._ch(fm.get_focus('text')), vc=ls.LW)} "
-                f"{ls.kv('voice', fm._ch(fm.get_focus('voice')), vc=ls.LW)}"
+                f"{ls.kv('text', fm.channel_label(fm.get_focus('text')), vc=ls.LW)} "
+                f"{ls.kv('voice', fm.channel_label(fm.get_focus('voice')), vc=ls.LW)}"
             )
 
     @bot.event

@@ -53,8 +53,8 @@ class FocusManager:
             self._voice_focus = ptrs.voice_channel_id
             _logger.info(
                 f"{ls.tag('Focus', ls.LC)} loaded "
-                f"{ls.kv('text', self._ch(self._text_focus), vc=ls.LW)} "
-                f"{ls.kv('voice', self._ch(self._voice_focus), vc=ls.LW)}"
+                f"{ls.kv('text', self.channel_label(self._text_focus), vc=ls.LW)} "
+                f"{ls.kv('voice', self.channel_label(self._voice_focus), vc=ls.LW)}"
             )
 
     def get_focus(self, modality: str) -> int | None:
@@ -85,14 +85,14 @@ class FocusManager:
                     self._text_focus = channel_id
                     _logger.info(
                         f"{ls.tag('🔀 Focus', ls.LC)} "
-                        f"{ls.kv('text', self._ch(channel_id), vc=ls.LW)} "
+                        f"{ls.kv('text', self.channel_label(channel_id), vc=ls.LW)} "
                         f"{ls.kv('promoted', str(count), vc=ls.LG)}"
                     )
                 else:
                     self._voice_focus = channel_id
                     _logger.info(
                         f"{ls.tag('🔀 Focus', ls.LC)} "
-                        f"{ls.kv('voice', self._ch(channel_id), vc=ls.LW)}"
+                        f"{ls.kv('voice', self.channel_label(channel_id), vc=ls.LW)}"
                     )
                 await self._store.set_focus_pointers(
                     self._familiar_id,
@@ -100,7 +100,7 @@ class FocusManager:
                     voice_channel_id=self._voice_focus,
                 )
 
-    def _ch(self, channel_id: int | None) -> str:
+    def channel_label(self, channel_id: int | None) -> str:
         """Format channel_id as '#name(id)' or '#id' when name unknown."""
         if channel_id is None:
             return "none"
@@ -115,5 +115,5 @@ class FocusManager:
             self._voice_focus = channel_id
         _logger.info(
             f"{ls.tag('Focus', ls.LC)} default "
-            f"{ls.kv(modality, self._ch(channel_id), vc=ls.LW)}"
+            f"{ls.kv(modality, self.channel_label(channel_id), vc=ls.LW)}"
         )
