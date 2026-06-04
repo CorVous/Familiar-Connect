@@ -906,7 +906,13 @@ too, so deferred voice-focus shifts apply on the same cadence.
 
 1. The `shift_focus(channel_id)` tool calls `defer_shift` — modality
    (text/voice) is inferred from the `SubscriptionRegistry`. The
-   intent is queued, not applied mid-turn.
+   intent is queued, not applied mid-turn. The tool also eagerly
+   fetches the target channel's recent turns (≤20) and returns them in
+   the tool result, so the agentic loop feeds the channel's content
+   back into the same turn — the model sees the channel before it
+   responds rather than narrating one it can't see. Voice/empty
+   channels yield an empty list. The reply still posts to the channel
+   being answered; only attention moves.
 2. `end_turn()` (called by the responder after the reply commits)
    drains pending shifts under the per-modality lock. For a text
    shift it calls `promote_staged_turns(channel_id)` — flipping that
@@ -923,6 +929,24 @@ Discord on `on_ready` purely for readable logs and the unread digest.
 
 Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N`
 on a text shift, `[👁️ Focus]` once names are known on ready.
+
+#### Idle nudge
+
+Staging assumes a *next* focused turn will surface the unread digest —
+but if the focused channel goes silent while a backgrounded channel
+stays active, no turn ever fires and the staged messages starve.
+`FocusManager` closes that gap: it stamps `_last_active` on every
+focused `end_turn` and exposes `should_wake(channel_id)` — true when
+the arriving channel is unfocused, the focused channel has been silent
+for `idle_wake_seconds` (default 120s; 0 disables), and no nudge is
+already pending. When a staged arrival trips `should_wake`, the text
+responder publishes a synthetic `discord.text` wake event
+(`wake: True`) routed at the *focused* channel. That event earns the
+model one focused turn — it sees the unread digest and can choose to
+`shift_focus` — but the nudge **never moves focus itself**; only the
+model's `shift_focus` does. Wake events skip the user-turn persist (no
+transcript pollution) and `mark_nudge_pending()` dedupes arrival
+bursts until the nudge turn's `end_turn` clears it. Logs `[⏰ Nudge]`.
 
 ### Unread digest
 
