@@ -119,6 +119,12 @@ ruff = "2d"
 ty = "1d"
 davey = "1d"
 
+[tool.ty.src]
+# Eval + smoke harnesses are one-shot dev scripts (see ruff per-file-ignores
+# below): they pass None for unused deps, list-vs-tuple, etc. Not shipped code
+# and not collected by pytest — keep ty focused on src/ + tests/.
+exclude = ["eval_*.py", "smoke_test_*.py", "evals/**"]
+
 [tool.ruff]
 extend-exclude = ["src/familiar_connect/_version.py"]
 
@@ -224,6 +230,45 @@ ignore = [
     "T201", # print is the CLI's output channel
     "PLC0415", # late import keeps script invocable without optional deps
     "SLF001", # migration tooling needs the store's internal connection
+]
+# Eval + smoke harnesses: one-shot dev scripts, not shipped code. Same
+# spirit as scripts/** — print is the output channel, prompts run long,
+# and the harness pokes internals / catches broadly. Real correctness
+# rules (F-codes, EXE) stay on.
+"{eval_*,smoke_test_*}.py" = [
+    "INP001", # root-level scripts, not packages
+    "T20", # print is the harness output channel
+    "E501", # eval prompts + reports run long
+    "RUF001", # ambiguous unicode (×, –) appears in prose/prompts
+    "BLE001", # harness catches broadly to keep evals running
+    "PLW1514", # encoding not critical for local eval IO
+    "PERF401", "PERF203", # micro-perf irrelevant in eval loops
+    "FLY002", # join style nit
+    "TRY003", "TRY300", "TRY301", # exception ergonomics not critical
+    "PLC0415", # late import keeps script invocable without optional deps
+    "SLF001", # smoke tests poke familiar internals
+    "ARG001", "ARG002", # eval stubs accept unused args
+    "FBT001", "FBT003", # boolean flags fine in dev scripts
+    "S108", "S110", # /tmp scratch + try/except/pass acceptable in evals
+    "RUF059", # unpacked-but-unused tuples in eval loops
+    "E731", # lambda assignment fine
+    "B905", "B023", "B007", # zip/loop-var nits in eval loops
+    "ASYNC230", # blocking IO acceptable in eval harness
+    "PLW0603", # module-global counters in eval scripts
+    "PLR6201", # set-literal membership nit
+    "FURB148", # enumerate nit
+    "E741", # short eval-loop variable names
+    "D", # eval scripts don't need full docstring coverage
+]
+"evals/**/*.py" = [
+    "INP001",
+    "T20", "E501", "RUF001", "BLE001", "PLW1514",
+    "PERF401", "PERF203", "FLY002",
+    "TRY003", "TRY300", "TRY301",
+    "PLC0415", "SLF001", "ARG001", "ARG002",
+    "FBT001", "FBT003", "S108", "S110", "RUF059",
+    "E731", "B905", "B023", "B007", "ASYNC230",
+    "PLW0603", "PLR6201", "FURB148", "E741", "D",
 ]
 
 [tool.ruff.format]

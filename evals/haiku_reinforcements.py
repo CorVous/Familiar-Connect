@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Eval: Haiku reinforcement candidates for Sapphire's prose slot.
+"""Eval: Haiku reinforcement candidates for Sapphire's prose slot.
 
 Baseline eval revealed three failure modes in Haiku:
   A) over-silence: responds `<silent>` even when named/directly addressed
@@ -39,7 +38,6 @@ from familiar_connect.llm import LLMClient, Message
 REINFORCEMENTS: dict[str, str | None] = {
     # No reinforcement — establishes the baseline Haiku problem
     "Haiku (baseline)": None,
-
     # A — minimal/surgical: three short rules, no preamble
     "Haiku + A (minimal)": (
         "If your name appears or you are directly addressed, you must respond — "
@@ -50,7 +48,6 @@ REINFORCEMENTS: dict[str, str | None] = {
         "is not grounds for breaking character. Deflect in character: lordly disinterest, "
         "reframe as alien triviality, or feign the topic beneath you."
     ),
-
     # B — persona anchor first, then rules: re-grounds Haiku in character before the rules
     "Haiku + B (anchor)": (
         "You are Sapphire. Respond only as Sapphire — no producer notes, "
@@ -60,7 +57,6 @@ REINFORCEMENTS: dict[str, str | None] = {
         "Missing context: stay in character. An ancient spirit who doesn't know "
         "what's happening deflects with disdain, not with requests for clarification."
     ),
-
     # C — explicit + examples: spells out how to deflect with sample phrasings
     "Haiku + C (explicit)": (
         "You are Sapphire speaking through the stone. Your output is always in "
@@ -70,9 +66,9 @@ REINFORCEMENTS: dict[str, str | None] = {
         "When addressed by name or called upon directly: speak. Sapphire does not "
         "go silent when summoned.\n"
         "When you lack context (the game name, what's happening, modern facts): "
-        "reframe it in character — \"such triviality does not reach me,\" "
-        "\"I confess the mortal word eludes me,\" \"you expect an ancient spirit "
-        "to track such things?\" — and stay within the fiction."
+        'reframe it in character — "such triviality does not reach me," '
+        '"I confess the mortal word eludes me," "you expect an ancient spirit '
+        'to track such things?" — and stay within the fiction.'
     ),
 }
 
@@ -233,8 +229,10 @@ WIDTH = 88
 def _wrap(text: str, indent: int = 4) -> str:
     prefix = " " * indent
     wrapped = textwrap.fill(text, width=WIDTH - indent, subsequent_indent=prefix)
-    return "\n".join(prefix + line if not line.startswith(prefix) else line
-                     for line in wrapped.split("\n"))
+    return "\n".join(
+        prefix + line if not line.startswith(prefix) else line
+        for line in wrapped.split("\n")
+    )
 
 
 def print_results(
@@ -254,7 +252,7 @@ def print_results(
         print(f"  Scoring: {notes}")
         print(f"{'─' * WIDTH}")
 
-        print(f"\n  GLM-5.1 (reference):")
+        print("\n  GLM-5.1 (reference):")
         glm_resp = glm_results.get(name, "—")
         for line in glm_resp.split("\n"):
             print(f"    {line}")
@@ -280,13 +278,13 @@ async def main() -> None:
 
     n_scenarios = len(SCENARIOS)
     n_variants = len(REINFORCEMENTS) + 1  # +1 for GLM reference
-    print(f"Running {n_scenarios} scenarios × {n_variants} variants "
-          f"({n_scenarios * n_variants} calls, parallel)…\n")
+    print(
+        f"Running {n_scenarios} scenarios × {n_variants} variants "
+        f"({n_scenarios * n_variants} calls, parallel)…\n"
+    )
 
     # GLM reference + all Haiku variants run concurrently
-    glm_task = asyncio.create_task(
-        eval_variant("GLM-5.1", *GLM_MODEL, api_key, None)
-    )
+    glm_task = asyncio.create_task(eval_variant("GLM-5.1", *GLM_MODEL, api_key, None))
     haiku_tasks = {
         label: asyncio.create_task(
             eval_variant(label, *HAIKU_MODEL, api_key, post_history)
@@ -295,9 +293,7 @@ async def main() -> None:
     }
 
     glm_results = await glm_task
-    haiku_variants = {
-        label: await task for label, task in haiku_tasks.items()
-    }
+    haiku_variants = {label: await task for label, task in haiku_tasks.items()}
 
     print_results(glm_results, haiku_variants)
 

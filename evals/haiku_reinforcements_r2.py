@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Eval round 2: research-informed reinforcement candidates for Sapphire/Haiku.
+"""Eval round 2: research-informed reinforcement candidates for Sapphire/Haiku.
 
 Round 1 found three failure modes:
   A) Over-silence: `<silent>` even when named/directly addressed
@@ -308,7 +307,7 @@ def print_results(
         print(f"  {notes}")
         print(f"{'─' * WIDTH}")
 
-        print(f"\n  GLM-5.1 (reference):")
+        print("\n  GLM-5.1 (reference):")
         for line in glm.get(name, "—").split("\n"):
             print(f"{INDENT}{line}")
 
@@ -331,12 +330,12 @@ async def main() -> None:
         raise SystemExit("OPENROUTER_API_KEY not set")
 
     n = len(SCENARIOS) * (1 + len(REINFORCEMENTS))
-    print(f"Running {len(SCENARIOS)} scenarios × {1 + len(REINFORCEMENTS)} variants "
-          f"({n} calls, parallel)…\n")
-
-    glm_task = asyncio.create_task(
-        eval_variant("GLM-5.1", *GLM_MODEL, api_key, None)
+    print(
+        f"Running {len(SCENARIOS)} scenarios × {1 + len(REINFORCEMENTS)} variants "
+        f"({n} calls, parallel)…\n"
     )
+
+    glm_task = asyncio.create_task(eval_variant("GLM-5.1", *GLM_MODEL, api_key, None))
     haiku_tasks = {
         label: asyncio.create_task(
             eval_variant(label, *HAIKU_MODEL, api_key, post_history)

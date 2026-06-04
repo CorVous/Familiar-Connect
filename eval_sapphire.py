@@ -6,6 +6,7 @@ For each sampled scenario:
   3. Have a judge model score on: voice, timing, length, knowledge, naturalness
   4. Write HTML report to ~/html/sapphire-naturalness-eval.html
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,33 +14,33 @@ import json
 import os
 import sys
 import time
-import textwrap
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from familiar_connect.llm import LLMClient, Message
-from familiar_connect.tools.silent import build_silent_tool
-from familiar_connect.tools.shift_focus import build_shift_focus_tool
-from familiar_connect.tools.read_channel import build_read_channel_tool
-from familiar_connect.tools.registry import ToolRegistry, ToolContext
-from familiar_connect.tools.loop import agentic_loop
 from familiar_connect.context.final_reminder import build_final_reminder
-from familiar_connect.history.store import HistoryStore
-from familiar_connect.history.async_store import AsyncHistoryStore
-from familiar_connect.subscriptions import SubscriptionRegistry
 from familiar_connect.focus import FocusManager
+from familiar_connect.history.async_store import AsyncHistoryStore
+from familiar_connect.history.store import HistoryStore
+from familiar_connect.llm import LLMClient, Message
+from familiar_connect.subscriptions import SubscriptionRegistry
+from familiar_connect.tools.loop import agentic_loop
+from familiar_connect.tools.read_channel import build_read_channel_tool
+from familiar_connect.tools.registry import ToolContext, ToolRegistry
+from familiar_connect.tools.shift_focus import build_shift_focus_tool
+from familiar_connect.tools.silent import build_silent_tool
 
-ROOT     = Path("data/familiars/sapphire")
+ROOT = Path("data/familiars/sapphire")
 FAMILIAR = "sapphire"
-MAIN_CH  = 324917760578682880
-GEN_MODEL   = "anthropic/claude-haiku-4-5"
+MAIN_CH = 324917760578682880
+GEN_MODEL = "anthropic/claude-haiku-4-5"
 JUDGE_MODEL = "openai/gpt-4o-mini"
 
 
 # ── prompt helpers ────────────────────────────────────────────────────────────
+
 
 def load_post_instructions() -> str:
     with (ROOT / "character.toml").open("rb") as f:
@@ -63,17 +64,21 @@ def build_messages(case: dict, post_inst: str) -> list[Message]:
         if c["role"] == "assistant":
             history.append(Message(role="assistant", content=c["content"]))
         else:
-            history.append(Message(
-                role="user",
-                content=f"[{c['ts'][11:16]} {c['label']} #{MAIN_CH}] {c['content']}",
-            ))
+            history.append(
+                Message(
+                    role="user",
+                    content=f"[{c['ts'][11:16]} {c['label']} #{MAIN_CH}] {c['content']}",
+                )
+            )
 
     # the trigger message
     now_str = datetime.now(tz=UTC).strftime("%H:%M")
-    history.append(Message(
-        role="user",
-        content=f"[{now_str} {case['user_label']} #{MAIN_CH}] {case['user_msg']}",
-    ))
+    history.append(
+        Message(
+            role="user",
+            content=f"[{now_str} {case['user_label']} #{MAIN_CH}] {case['user_msg']}",
+        )
+    )
 
     trailing = build_final_reminder(
         viewer_mode="text",
@@ -90,9 +95,14 @@ def build_messages(case: dict, post_inst: str) -> list[Message]:
     ]
 
 
-async def generate(llm: LLMClient, case: dict, post_inst: str,
-                   store: HistoryStore, astore: AsyncHistoryStore,
-                   fm: FocusManager) -> tuple[str | None, bool, float]:
+async def generate(
+    llm: LLMClient,
+    case: dict,
+    post_inst: str,
+    store: HistoryStore,
+    astore: AsyncHistoryStore,
+    fm: FocusManager,
+) -> tuple[str | None, bool, float]:
     """Run model; return (reply, is_silent, elapsed)."""
     messages = build_messages(case, post_inst)
     registry = ToolRegistry()
@@ -100,13 +110,21 @@ async def generate(llm: LLMClient, case: dict, post_inst: str,
     registry.register(build_shift_focus_tool())
     registry.register(build_read_channel_tool())
     ctx = ToolContext(
-        familiar_id=FAMILIAR, channel_id=MAIN_CH, channel_kind="text",
-        turn_id="eval", history=astore, bus=None, scheduler=None,
-        focus_manager=fm, store=astore,
+        familiar_id=FAMILIAR,
+        channel_id=MAIN_CH,
+        channel_kind="text",
+        turn_id="eval",
+        history=astore,
+        bus=None,
+        scheduler=None,
+        focus_manager=fm,
+        store=astore,
     )
     t0 = time.perf_counter()
     try:
-        result = await agentic_loop(llm=llm, messages=messages, registry=registry, ctx=ctx)
+        result = await agentic_loop(
+            llm=llm, messages=messages, registry=registry, ctx=ctx
+        )
         elapsed = time.perf_counter() - t0
         if result.is_silent:
             return None, True, elapsed
@@ -120,15 +138,26 @@ async def generate(llm: LLMClient, case: dict, post_inst: str,
 JUDGE_SCHEMA = {
     "type": "object",
     "properties": {
-        "voice":        {"type": "integer", "minimum": 1, "maximum": 5},
-        "timing":       {"type": "integer", "minimum": 1, "maximum": 5},
-        "length":       {"type": "integer", "minimum": 1, "maximum": 5},
-        "knowledge":    {"type": "integer", "minimum": 1, "maximum": 5},
-        "naturalness":  {"type": "integer", "minimum": 1, "maximum": 5},
-        "verdict":      {"type": "string", "enum": ["excellent", "good", "acceptable", "weak", "off"]},
-        "notes":        {"type": "string"},
+        "voice": {"type": "integer", "minimum": 1, "maximum": 5},
+        "timing": {"type": "integer", "minimum": 1, "maximum": 5},
+        "length": {"type": "integer", "minimum": 1, "maximum": 5},
+        "knowledge": {"type": "integer", "minimum": 1, "maximum": 5},
+        "naturalness": {"type": "integer", "minimum": 1, "maximum": 5},
+        "verdict": {
+            "type": "string",
+            "enum": ["excellent", "good", "acceptable", "weak", "off"],
+        },
+        "notes": {"type": "string"},
     },
-    "required": ["voice", "timing", "length", "knowledge", "naturalness", "verdict", "notes"],
+    "required": [
+        "voice",
+        "timing",
+        "length",
+        "knowledge",
+        "naturalness",
+        "verdict",
+        "notes",
+    ],
 }
 
 JUDGE_SYSTEM = """\
@@ -178,10 +207,10 @@ async def judge(
 Category: {category}
 
 Conversation context:
-{ctx_lines if ctx_lines else "  (no prior context)"}
+{ctx_lines or "  (no prior context)"}
 
 Trigger message:
-  [{case['user_label']}]: {case['user_msg'][:300]}
+  [{case["user_label"]}]: {case["user_msg"][:300]}
 
 Original response (what Sapphire actually said in real history):
 {original[:400]}
@@ -207,23 +236,44 @@ Return JSON."""
         end = raw.rfind("}") + 1
         if start >= 0 and end > start:
             return json.loads(raw[start:end])
-    except Exception as exc:
-        pass
-    return {"voice": 3, "timing": 3, "length": 3, "knowledge": 3,
-            "naturalness": 3, "verdict": "acceptable", "notes": f"judge error: {exc}"}
+    except Exception as exc:  # eval fallback, surface judge error in notes
+        judge_err = str(exc)
+        return {
+            "voice": 3,
+            "timing": 3,
+            "length": 3,
+            "knowledge": 3,
+            "naturalness": 3,
+            "verdict": "acceptable",
+            "notes": f"judge error: {judge_err}",
+        }
+    return {
+        "voice": 3,
+        "timing": 3,
+        "length": 3,
+        "knowledge": 3,
+        "naturalness": 3,
+        "verdict": "acceptable",
+        "notes": "judge error: no JSON object in response",
+    }
 
 
 # ── main eval loop ────────────────────────────────────────────────────────────
 
+
 async def run_evals() -> list[dict]:
     api_key = os.environ["OPENROUTER_API_KEY"]
     gen_llm = LLMClient(
-        api_key=api_key, model=GEN_MODEL,
-        base_url="https://openrouter.ai/api/v1", tool_calling=True,
+        api_key=api_key,
+        model=GEN_MODEL,
+        base_url="https://openrouter.ai/api/v1",
+        tool_calling=True,
     )
     judge_llm = LLMClient(
-        api_key=api_key, model=JUDGE_MODEL,
-        base_url="https://openrouter.ai/api/v1", tool_calling=False,
+        api_key=api_key,
+        model=JUDGE_MODEL,
+        base_url="https://openrouter.ai/api/v1",
+        tool_calling=False,
     )
 
     post_inst = load_post_instructions()
@@ -231,15 +281,16 @@ async def run_evals() -> list[dict]:
     astore = AsyncHistoryStore(store)
 
     import tempfile
+
     with tempfile.TemporaryDirectory() as tmp:
         sp = Path(tmp) / "s.toml"
-        sp.write_text(f"[[subscription]]\nchannel_id={MAIN_CH}\nkind=\"text\"\n")
+        sp.write_text(f'[[subscription]]\nchannel_id={MAIN_CH}\nkind="text"\n')
         subs = SubscriptionRegistry(sp)
         fm = FocusManager(familiar_id=FAMILIAR, store=astore, subscriptions=subs)
         await fm.initialize()
         fm.set_focus_immediately(MAIN_CH, "text")
 
-        with open("/tmp/sapphire_evals.json") as f:
+        with Path("/tmp/sapphire_evals.json").open() as f:
             cases_by_cat = json.load(f)
 
         all_results: list[dict] = []
@@ -290,10 +341,10 @@ async def run_evals() -> list[dict]:
 
 VERDICT_COLOR = {
     "excellent": "#3fb950",
-    "good":      "#58a6ff",
+    "good": "#58a6ff",
     "acceptable": "#d29922",
-    "weak":      "#e3b341",
-    "off":       "#f85149",
+    "weak": "#e3b341",
+    "off": "#f85149",
 }
 SCORE_COLOR = {5: "#3fb950", 4: "#58a6ff", 3: "#d29922", 2: "#e3b341", 1: "#f85149"}
 
@@ -305,10 +356,16 @@ def score_cell(v: int) -> str:
 
 def write_report(results: list[dict], path: Path) -> None:
     # aggregate
-    verdicts = [r["score"].get("verdict","?") for r in results]
-    verdict_counts = {k: verdicts.count(k) for k in ["excellent","good","acceptable","weak","off"]}
-    avg = lambda dim: round(sum(r["score"].get(dim,0) for r in results) / len(results), 2)
-    avgs = {d: avg(d) for d in ["voice","timing","length","knowledge","naturalness"]}
+    verdicts = [r["score"].get("verdict", "?") for r in results]
+    verdict_counts = {
+        k: verdicts.count(k) for k in ["excellent", "good", "acceptable", "weak", "off"]
+    }
+    avg = lambda dim: round(
+        sum(r["score"].get(dim, 0) for r in results) / len(results), 2
+    )
+    avgs = {
+        d: avg(d) for d in ["voice", "timing", "length", "knowledge", "naturalness"]
+    }
     overall_avg = round(sum(avgs.values()) / len(avgs), 2)
 
     # per-category breakdown
@@ -319,42 +376,46 @@ def write_report(results: list[dict], path: Path) -> None:
     rows_html = ""
     for r in results:
         s = r["score"]
-        verdict = s.get("verdict","?")
+        verdict = s.get("verdict", "?")
         vc = VERDICT_COLOR.get(verdict, "#888")
-        silence_tag = '<span style="color:#8b949e;font-size:0.8rem">(silent)</span>' if r["is_silent"] else ""
+        silence_tag = (
+            '<span style="color:#8b949e;font-size:0.8rem">(silent)</span>'
+            if r["is_silent"]
+            else ""
+        )
         new_text = (r["new_reply"] or "")[:300]
         orig_text = (r["original"] or "(was silent)")[:300]
         rows_html += f"""
 <tr>
-  <td style="color:#8b949e;font-size:0.8rem">{r['category']}</td>
+  <td style="color:#8b949e;font-size:0.8rem">{r["category"]}</td>
   <td>
-    <div style="color:#8b949e;font-size:0.78rem;margin-bottom:2px">{r['user_label']}</div>
-    <div style="font-size:0.88rem">{r['user_msg'][:120]}</div>
+    <div style="color:#8b949e;font-size:0.78rem;margin-bottom:2px">{r["user_label"]}</div>
+    <div style="font-size:0.88rem">{r["user_msg"][:120]}</div>
   </td>
   <td style="font-size:0.82rem;color:#8b949e">{orig_text[:180]}</td>
   <td style="font-size:0.82rem">{new_text[:180]} {silence_tag}</td>
-  {score_cell(s.get('voice',0))}
-  {score_cell(s.get('timing',0))}
-  {score_cell(s.get('length',0))}
-  {score_cell(s.get('knowledge',0))}
-  {score_cell(s.get('naturalness',0))}
+  {score_cell(s.get("voice", 0))}
+  {score_cell(s.get("timing", 0))}
+  {score_cell(s.get("length", 0))}
+  {score_cell(s.get("knowledge", 0))}
+  {score_cell(s.get("naturalness", 0))}
   <td><span style="background:rgba(255,255,255,0.06);border:1px solid {vc};color:{vc};border-radius:4px;padding:2px 6px;font-size:0.78rem">{verdict}</span></td>
-  <td style="font-size:0.78rem;color:#8b949e;max-width:200px">{s.get('notes','')[:120]}</td>
+  <td style="font-size:0.78rem;color:#8b949e;max-width:200px">{s.get("notes", "")[:120]}</td>
 </tr>"""
 
     cat_rows = ""
     for cat, rs in cats.items():
-        cat_avg = lambda d: round(sum(r["score"].get(d,0) for r in rs)/len(rs),1)
-        verdicts_here = [r["score"].get("verdict","?") for r in rs]
+        cat_avg = lambda d: round(sum(r["score"].get(d, 0) for r in rs) / len(rs), 1)
+        verdicts_here = [r["score"].get("verdict", "?") for r in rs]
         best = max(set(verdicts_here), key=verdicts_here.count)
-        vc = VERDICT_COLOR.get(best,"#888")
+        vc = VERDICT_COLOR.get(best, "#888")
         cat_rows += f"""
 <tr>
   <td>{cat}</td>
   <td style="text-align:center">{len(rs)}</td>
-  <td style="text-align:center">{cat_avg('voice')}</td>
-  <td style="text-align:center">{cat_avg('timing')}</td>
-  <td style="text-align:center">{cat_avg('naturalness')}</td>
+  <td style="text-align:center">{cat_avg("voice")}</td>
+  <td style="text-align:center">{cat_avg("timing")}</td>
+  <td style="text-align:center">{cat_avg("naturalness")}</td>
   <td><span style="color:{vc}">{best}</span></td>
 </tr>"""
 
@@ -398,21 +459,42 @@ def write_report(results: list[dict], path: Path) -> None:
 </head>
 <body>
 <h1>Sapphire — Naturalness Evals</h1>
-<p class="sub">Judge: <code>{JUDGE_MODEL}</code> &nbsp;·&nbsp; Generator: <code>{GEN_MODEL}</code> &nbsp;·&nbsp; {len(results)} cases &nbsp;·&nbsp; {datetime.now(tz=UTC).strftime('%Y-%m-%d')}</p>
+<p class="sub">Judge: <code>{JUDGE_MODEL}</code> &nbsp;·&nbsp; Generator: <code>{
+        GEN_MODEL
+    }</code> &nbsp;·&nbsp; {len(results)} cases &nbsp;·&nbsp; {
+        datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    }</p>
 
 <div class="grid">
-  <div class="card"><div class="num">{overall_avg}</div><div class="lbl">Overall avg (1–5)</div></div>
-  <div class="card b"><div class="num">{avgs['voice']}</div><div class="lbl">Voice authenticity</div></div>
-  <div class="card b"><div class="num">{avgs['timing']}</div><div class="lbl">Speak/silence timing</div></div>
-  <div class="card b"><div class="num">{avgs['naturalness']}</div><div class="lbl">Naturalness</div></div>
-  <div class="card y"><div class="num">{verdict_counts.get('excellent',0)+verdict_counts.get('good',0)}</div><div class="lbl">Excellent + Good</div></div>
-  <div class="card y"><div class="num">{verdict_counts.get('weak',0)+verdict_counts.get('off',0)}</div><div class="lbl">Weak / Off</div></div>
+  <div class="card"><div class="num">{
+        overall_avg
+    }</div><div class="lbl">Overall avg (1–5)</div></div>
+  <div class="card b"><div class="num">{
+        avgs["voice"]
+    }</div><div class="lbl">Voice authenticity</div></div>
+  <div class="card b"><div class="num">{
+        avgs["timing"]
+    }</div><div class="lbl">Speak/silence timing</div></div>
+  <div class="card b"><div class="num">{
+        avgs["naturalness"]
+    }</div><div class="lbl">Naturalness</div></div>
+  <div class="card y"><div class="num">{
+        verdict_counts.get("excellent", 0) + verdict_counts.get("good", 0)
+    }</div><div class="lbl">Excellent + Good</div></div>
+  <div class="card y"><div class="num">{
+        verdict_counts.get("weak", 0) + verdict_counts.get("off", 0)
+    }</div><div class="lbl">Weak / Off</div></div>
 </div>
 
 <h2>Score breakdown</h2>
-{"".join(f'''<div class="bar-wrap"><span class="bar-label">{dim}</span>
-  <div class="bar" style="width:120px"><div class="bar-fill" style="width:{avgs[dim]/5*100:.0f}%;background:{'#3fb950' if avgs[dim]>=4 else '#58a6ff' if avgs[dim]>=3 else '#e3b341'}"></div></div>
-  <span class="bar-val">{avgs[dim]}</span></div>''' for dim in ["voice","timing","length","knowledge","naturalness"])}
+{
+        "".join(
+            f'''<div class="bar-wrap"><span class="bar-label">{dim}</span>
+  <div class="bar" style="width:120px"><div class="bar-fill" style="width:{avgs[dim] / 5 * 100:.0f}%;background:{"#3fb950" if avgs[dim] >= 4 else "#58a6ff" if avgs[dim] >= 3 else "#e3b341"}"></div></div>
+  <span class="bar-val">{avgs[dim]}</span></div>'''
+            for dim in ["voice", "timing", "length", "knowledge", "naturalness"]
+        )
+    }
 
 <h2>Per-category summary</h2>
 <table>
@@ -443,13 +525,18 @@ def write_report(results: list[dict], path: Path) -> None:
 <table>
   <thead><tr><th>Category</th><th>User message (truncated)</th><th>Decision</th><th>Timing score</th><th>Notes</th></tr></thead>
   <tbody>
-{"".join(f'''<tr>
+{
+        "".join(
+            f'''<tr>
   <td style="color:var(--muted);font-size:.78rem">{r["category"]}</td>
   <td style="font-size:.82rem">{r["user_msg"][:100]}</td>
   <td>{"<span style='color:#8b949e'>🤫 silent</span>" if r["is_silent"] else "<span style='color:#3fb950'>💬 spoke</span>"}</td>
-  <td style="text-align:center">{score_cell(r["score"].get("timing",0)).replace("<td","<span").replace("</td>","</span>")}</td>
-  <td style="font-size:.78rem;color:var(--muted)">{r["score"].get("notes","")[:100]}</td>
-</tr>''' for r in results)}
+  <td style="text-align:center">{score_cell(r["score"].get("timing", 0)).replace("<td", "<span").replace("</td>", "</span>")}</td>
+  <td style="font-size:.78rem;color:var(--muted)">{r["score"].get("notes", "")[:100]}</td>
+</tr>'''
+            for r in results
+        )
+    }
   </tbody>
 </table>
 </body></html>"""
@@ -465,12 +552,14 @@ async def main() -> None:
     results = await run_evals()
 
     # save raw results
-    with open("/tmp/sapphire_eval_results.json", "w") as f:
+    with Path("/tmp/sapphire_eval_results.json").open("w") as f:
         json.dump(results, f, indent=2, default=str)
 
     write_report(results, Path("/home/coder/html/sapphire-naturalness-eval.html"))
 
-    passed = sum(1 for r in results if r["score"].get("verdict") in ("excellent","good"))
+    passed = sum(
+        1 for r in results if r["score"].get("verdict") in ("excellent", "good")
+    )
     total = len(results)
     print(f"\nExcellent/Good: {passed}/{total}")
 

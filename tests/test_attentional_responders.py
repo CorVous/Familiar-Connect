@@ -410,7 +410,7 @@ class TestTextResponderIdleNudge:
         async def _capture(event: Event) -> None:  # noqa: RUF029
             published.append(event)
 
-        bus.publish = _capture  # type: ignore[method-assign]
+        bus.publish = _capture  # ty: ignore[invalid-assignment]
         try:
             await responder.handle(_text_event(channel_id=100), bus)
         finally:
@@ -434,7 +434,7 @@ class TestTextResponderIdleNudge:
         async def _capture(event: Event) -> None:  # noqa: RUF029
             published.append(event)
 
-        bus.publish = _capture  # type: ignore[method-assign]
+        bus.publish = _capture  # ty: ignore[invalid-assignment]
         try:
             await responder.handle(_text_event(channel_id=100), bus)
         finally:

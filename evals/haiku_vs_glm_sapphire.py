@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Eval: GLM-5.1 vs Haiku-4.5 for Sapphire's prose slot.
+"""Eval: GLM-5.1 vs Haiku-4.5 for Sapphire's prose slot.
 
 Runs 8 scenarios covering the key failure modes we care about:
   - silence discipline (non-addressed chat)
@@ -243,7 +242,9 @@ async def main() -> None:
         raise SystemExit("OPENROUTER_API_KEY not set")
 
     system_prompt = build_system_prompt()
-    print(f"System prompt: {len(system_prompt)} chars, {len(system_prompt.split())} words")
+    print(
+        f"System prompt: {len(system_prompt)} chars, {len(system_prompt.split())} words"
+    )
     print(f"Running {len(SCENARIOS)} scenarios × {len(MODELS)} models…\n")
 
     tasks = {

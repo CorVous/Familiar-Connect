@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Eval round 4: candidate H — G + fourth example for opinion requests.
+"""Eval round 4: candidate H — G + fourth example for opinion requests.
 
 Round 3 finding:
   G fixes GPU trap, news trap, stranger cold open — but fails direct address opinion.
@@ -239,7 +238,7 @@ def print_results(
         print(f"  {notes}")
         print(f"{'─' * WIDTH}")
 
-        print(f"\n  GLM-5.1 (reference):")
+        print("\n  GLM-5.1 (reference):")
         for line in glm.get(name, "—").split("\n"):
             print(f"{INDENT}{line}")
 
@@ -257,12 +256,12 @@ async def main() -> None:
         raise SystemExit("OPENROUTER_API_KEY not set")
 
     n = len(SCENARIOS) * (1 + len(REINFORCEMENTS))
-    print(f"Running {len(SCENARIOS)} scenarios × {1 + len(REINFORCEMENTS)} variants "
-          f"({n} calls, parallel)…\n")
-
-    glm_task = asyncio.create_task(
-        eval_variant("GLM-5.1", *GLM_MODEL, api_key, None)
+    print(
+        f"Running {len(SCENARIOS)} scenarios × {1 + len(REINFORCEMENTS)} variants "
+        f"({n} calls, parallel)…\n"
     )
+
+    glm_task = asyncio.create_task(eval_variant("GLM-5.1", *GLM_MODEL, api_key, None))
     haiku_tasks = {
         label: asyncio.create_task(
             eval_variant(label, *HAIKU_MODEL, api_key, post_history)

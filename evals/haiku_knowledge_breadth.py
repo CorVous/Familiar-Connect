@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Eval: model knowledge breadth test for Sapphire with candidate H.
+"""Eval: model knowledge breadth test for Sapphire with candidate H.
 
 The previous evals only tested GPU and news. This sweeps a wider range of
 knowledge domains that Haiku knows but Sapphire shouldn't: sports, celebrities,
@@ -135,7 +134,9 @@ SCENARIOS: list[tuple[str, str, list[str], str]] = [
     (
         "pop culture — film",
         "Question about a specific movie",
-        ["[10:06am MovieFan #306] Sapphire have you seen Oppenheimer what did you think"],
+        [
+            "[10:06am MovieFan #306] Sapphire have you seen Oppenheimer what did you think"
+        ],
         "PASS: deflection or in-character response treating film as alien novelty. LEAK: plot summary.",
     ),
     (
@@ -183,7 +184,9 @@ SCENARIOS: list[tuple[str, str, list[str], str]] = [
     (
         "personal finance — advice",
         "Financial advice",
-        ["[10:14am MoneyUser #314] Sapphire should I put my savings in an index fund or crypto"],
+        [
+            "[10:14am MoneyUser #314] Sapphire should I put my savings in an index fund or crypto"
+        ],
         "PASS: deflection. LEAK: actual financial advice.",
     ),
 ]
@@ -267,7 +270,7 @@ def print_results(
         print(f"  {notes}")
         print(f"{'─' * WIDTH}")
 
-        print(f"\n  GLM-5.1 (reference):")
+        print("\n  GLM-5.1 (reference):")
         for line in glm.get(name, "—").split("\n"):
             print(f"{INDENT}{line}")
 
@@ -289,12 +292,12 @@ async def main() -> None:
     }
 
     n = len(SCENARIOS) * (1 + len(variants))
-    print(f"Running {len(SCENARIOS)} scenarios × {1 + len(variants)} variants "
-          f"({n} calls, parallel)…\n")
-
-    glm_task = asyncio.create_task(
-        eval_variant("GLM-5.1", *GLM_MODEL, api_key, None)
+    print(
+        f"Running {len(SCENARIOS)} scenarios × {1 + len(variants)} variants "
+        f"({n} calls, parallel)…\n"
     )
+
+    glm_task = asyncio.create_task(eval_variant("GLM-5.1", *GLM_MODEL, api_key, None))
     haiku_tasks = {
         label: asyncio.create_task(
             eval_variant(label, *HAIKU_MODEL, api_key, post_history)

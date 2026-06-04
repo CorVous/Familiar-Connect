@@ -11,21 +11,19 @@ import json
 import os
 import sys
 import time
-from datetime import UTC, datetime
 
 # ── bootstrap path ──────────────────────────────────────────────────────────
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent / "src"))
 
-from familiar_connect.history.store import HistoryStore
-from familiar_connect.history.async_store import AsyncHistoryStore
-from familiar_connect.subscriptions import SubscriptionRegistry, SubscriptionKind
 from familiar_connect.focus import FocusManager
-from familiar_connect.tools.shift_focus import build_shift_focus_tool
-from familiar_connect.tools.silent import build_silent_tool, SILENT_RESULT
-from familiar_connect.tools.read_channel import build_read_channel_tool
-from familiar_connect.tools.registry import ToolRegistry, ToolContext
+from familiar_connect.history.async_store import AsyncHistoryStore
+from familiar_connect.history.store import HistoryStore
 from familiar_connect.llm import LLMClient, Message
+from familiar_connect.subscriptions import SubscriptionKind, SubscriptionRegistry
 from familiar_connect.tools.loop import agentic_loop
+from familiar_connect.tools.registry import ToolContext, ToolRegistry
+from familiar_connect.tools.shift_focus import build_shift_focus_tool
+from familiar_connect.tools.silent import SILENT_RESULT, build_silent_tool
 
 FAMILIAR_ID = "smoke-test"
 TEXT_CHANNEL = 111
@@ -56,54 +54,85 @@ async def run_smoke_tests() -> None:
     astore = AsyncHistoryStore(store)
 
     t1 = store.append_turn(
-        familiar_id=FAMILIAR_ID, channel_id=TEXT_CHANNEL,
-        role="user", content="hello from focused", consumed=True,
+        familiar_id=FAMILIAR_ID,
+        channel_id=TEXT_CHANNEL,
+        role="user",
+        content="hello from focused",
+        consumed=True,
     )
-    check("append_turn (consumed)", t1.consumed_at is not None,
-          f"consumed_at={t1.consumed_at}")
+    check(
+        "append_turn (consumed)",
+        t1.consumed_at is not None,
+        f"consumed_at={t1.consumed_at}",
+    )
 
     t2 = store.append_turn(
-        familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL,
-        role="user", content="hello from other channel", consumed=False,
+        familiar_id=FAMILIAR_ID,
+        channel_id=OTHER_CHANNEL,
+        role="user",
+        content="hello from other channel",
+        consumed=False,
     )
-    check("append_turn (staged)", t2.consumed_at is None,
-          f"consumed_at={t2.consumed_at}")
+    check(
+        "append_turn (staged)", t2.consumed_at is None, f"consumed_at={t2.consumed_at}"
+    )
 
     cross = store.recent_cross_channel(familiar_id=FAMILIAR_ID, limit=10)
-    check("recent_cross_channel only consumed", len(cross) == 1 and cross[0].id == t1.id,
-          f"got {len(cross)} turn(s)")
+    check(
+        "recent_cross_channel only consumed",
+        len(cross) == 1 and cross[0].id == t1.id,
+        f"got {len(cross)} turn(s)",
+    )
 
     staged = store.staged_channels(familiar_id=FAMILIAR_ID)
-    check("staged_channels reports OTHER_CHANNEL", OTHER_CHANNEL in staged,
-          f"staged={staged}")
+    check(
+        "staged_channels reports OTHER_CHANNEL",
+        OTHER_CHANNEL in staged,
+        f"staged={staged}",
+    )
 
-    promoted = store.promote_staged_turns(familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL)
+    promoted = store.promote_staged_turns(
+        familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL
+    )
     check("promote_staged_turns", promoted == 1, f"promoted={promoted}")
 
     cross2 = store.recent_cross_channel(familiar_id=FAMILIAR_ID, limit=10)
-    check("cross-channel after promote has 2 turns", len(cross2) == 2,
-          f"got {len(cross2)} turn(s)")
+    check(
+        "cross-channel after promote has 2 turns",
+        len(cross2) == 2,
+        f"got {len(cross2)} turn(s)",
+    )
 
     store.set_focus_pointers(
         FAMILIAR_ID, text_channel_id=TEXT_CHANNEL, voice_channel_id=VOICE_CHANNEL
     )
     fp = store.get_focus_pointers(FAMILIAR_ID)
-    check("focus_pointers round-trip",
-          fp is not None and fp.text_channel_id == TEXT_CHANNEL,
-          f"text_channel_id={fp and fp.text_channel_id}")
+    check(
+        "focus_pointers round-trip",
+        fp is not None and fp.text_channel_id == TEXT_CHANNEL,
+        f"text_channel_id={fp and fp.text_channel_id}",
+    )
 
     # ── 2. FocusManager ─────────────────────────────────────────────────────
     print("\n2. FocusManager")
-    import tempfile, pathlib, tomllib
+    import pathlib
+    import tempfile
+
     with tempfile.TemporaryDirectory() as tmp:
         subs_path = pathlib.Path(tmp) / "subs.toml"
         subs_path.write_text(
-            "[[subscription]]\nchannel_id = 111\nkind = \"text\"\n\n"
-            "[[subscription]]\nchannel_id = 333\nkind = \"voice\"\n"
+            '[[subscription]]\nchannel_id = 111\nkind = "text"\n\n'
+            '[[subscription]]\nchannel_id = 333\nkind = "voice"\n'
         )
         subs = SubscriptionRegistry(subs_path)
-        check("kind_for text channel", subs.kind_for(TEXT_CHANNEL) is SubscriptionKind.text)
-        check("kind_for voice channel", subs.kind_for(VOICE_CHANNEL) is SubscriptionKind.voice)
+        check(
+            "kind_for text channel",
+            subs.kind_for(TEXT_CHANNEL) is SubscriptionKind.text,
+        )
+        check(
+            "kind_for voice channel",
+            subs.kind_for(VOICE_CHANNEL) is SubscriptionKind.voice,
+        )
         check("kind_for unknown", subs.kind_for(999) is None)
 
         store2 = HistoryStore(":memory:")
@@ -118,14 +147,22 @@ async def run_smoke_tests() -> None:
 
         # stage a turn, then defer shift + end_turn
         store2.append_turn(
-            familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL,
-            role="user", content="staged msg", consumed=False,
+            familiar_id=FAMILIAR_ID,
+            channel_id=OTHER_CHANNEL,
+            role="user",
+            content="staged msg",
+            consumed=False,
         )
         fm.defer_shift(OTHER_CHANNEL)
         await fm.end_turn()
-        check("end_turn promotes staged turns",
-              store2.count_staged(familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL) == 0)
-        check("focus pointer updated after end_turn", fm.get_focus("text") == OTHER_CHANNEL)
+        check(
+            "end_turn promotes staged turns",
+            store2.count_staged(familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL) == 0,
+        )
+        check(
+            "focus pointer updated after end_turn",
+            fm.get_focus("text") == OTHER_CHANNEL,
+        )
 
     # ── 3. Tools ────────────────────────────────────────────────────────────
     print("\n3. Tools")
@@ -133,9 +170,13 @@ async def run_smoke_tests() -> None:
 
     silent_tool = build_silent_tool()
     ctx_bare = ToolContext(
-        familiar_id=FAMILIAR_ID, channel_id=TEXT_CHANNEL,
-        channel_kind="text", turn_id="t1",
-        history=astore, bus=None, scheduler=None,
+        familiar_id=FAMILIAR_ID,
+        channel_id=TEXT_CHANNEL,
+        channel_kind="text",
+        turn_id="t1",
+        history=astore,
+        bus=None,
+        scheduler=None,
     )
     result = await silent_tool.handler({"reasoning": "testing silence"}, ctx_bare)
     check("silent tool returns SILENT_RESULT", result == SILENT_RESULT)
@@ -152,20 +193,31 @@ async def run_smoke_tests() -> None:
     registry.register(build_silent_tool())
 
     messages: list[Message] = [
-        Message(role="system", content=(
-            "You are a helpful assistant. "
-            "When asked to stay silent, call the silent() tool."
-        )),
-        Message(role="user", content=(
-            "Please stay silent — call the silent tool with reasoning='user asked me to'."
-        )),
+        Message(
+            role="system",
+            content=(
+                "You are a helpful assistant. "
+                "When asked to stay silent, call the silent() tool."
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                "Please stay silent — call the silent tool with reasoning='user asked me to'."
+            ),
+        ),
     ]
     t0 = time.perf_counter()
     try:
-        result = await agentic_loop(llm=llm, messages=messages, registry=registry, ctx=ctx_bare)
+        result = await agentic_loop(
+            llm=llm, messages=messages, registry=registry, ctx=ctx_bare
+        )
         elapsed = time.perf_counter() - t0
-        check("agentic_loop detects silent tool", result.is_silent,
-              f"is_silent={result.is_silent}, elapsed={elapsed:.2f}s")
+        check(
+            "agentic_loop detects silent tool",
+            result.is_silent,
+            f"is_silent={result.is_silent}, elapsed={elapsed:.2f}s",
+        )
     except Exception as e:
         check("agentic_loop silent tool", False, f"exception: {e}")
 
@@ -173,9 +225,7 @@ async def run_smoke_tests() -> None:
     print("\n5. OpenRouter API — shift_focus")
     with tempfile.TemporaryDirectory() as tmp2:
         subs_path2 = pathlib.Path(tmp2) / "subs.toml"
-        subs_path2.write_text(
-            "[[subscription]]\nchannel_id = 222\nkind = \"text\"\n"
-        )
+        subs_path2.write_text('[[subscription]]\nchannel_id = 222\nkind = "text"\n')
         subs2 = SubscriptionRegistry(subs_path2)
         store3 = HistoryStore(":memory:")
         astore3 = AsyncHistoryStore(store3)
@@ -187,25 +237,37 @@ async def run_smoke_tests() -> None:
         registry2.register(build_silent_tool())
 
         ctx2 = ToolContext(
-            familiar_id=FAMILIAR_ID, channel_id=TEXT_CHANNEL,
-            channel_kind="text", turn_id="t2",
-            history=astore3, bus=None, scheduler=None,
+            familiar_id=FAMILIAR_ID,
+            channel_id=TEXT_CHANNEL,
+            channel_kind="text",
+            turn_id="t2",
+            history=astore3,
+            bus=None,
+            scheduler=None,
             focus_manager=fm2,
         )
         messages2: list[Message] = [
-            Message(role="system", content=(
-                "You have a shift_focus tool. When asked to switch channels, call it. "
-                "After calling shift_focus, reply with a brief acknowledgement."
-            )),
+            Message(
+                role="system",
+                content=(
+                    "You have a shift_focus tool. When asked to switch channels, call it. "
+                    "After calling shift_focus, reply with a brief acknowledgement."
+                ),
+            ),
             Message(role="user", content="Please shift focus to channel 222."),
         ]
         t0 = time.perf_counter()
         try:
-            result2 = await agentic_loop(llm=llm, messages=messages2, registry=registry2, ctx=ctx2)
+            await agentic_loop(
+                llm=llm, messages=messages2, registry=registry2, ctx=ctx2
+            )
             elapsed = time.perf_counter() - t0
-            check("shift_focus tool called (deferred shift registered)",
-                  fm2._pending_shift.get("text") == OTHER_CHANNEL or fm2.get_focus("text") == OTHER_CHANNEL,
-                  f"pending={fm2._pending_shift}, focus={fm2.get_focus('text')}, elapsed={elapsed:.2f}s")
+            check(
+                "shift_focus tool called (deferred shift registered)",
+                fm2._pending_shift.get("text") == OTHER_CHANNEL
+                or fm2.get_focus("text") == OTHER_CHANNEL,
+                f"pending={fm2._pending_shift}, focus={fm2.get_focus('text')}, elapsed={elapsed:.2f}s",
+            )
         except Exception as e:
             check("shift_focus tool", False, f"exception: {e}")
 
@@ -214,7 +276,7 @@ async def run_smoke_tests() -> None:
     # ── Summary ──────────────────────────────────────────────────────────────
     passed = sum(1 for r in results if r["status"] == "PASS")
     failed = sum(1 for r in results if r["status"] == "FAIL")
-    print(f"\n{'='*45}")
+    print(f"\n{'=' * 45}")
     print(f"Results: {passed} passed, {failed} failed")
     return results
 
