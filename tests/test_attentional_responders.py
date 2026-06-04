@@ -231,6 +231,8 @@ def _focused_focus_manager(channel_id: int = 100) -> MagicMock:
     fm.is_focused = MagicMock(return_value=True)
     fm.get_focus = MagicMock(return_value=channel_id)
     fm.end_turn = AsyncMock()
+    fm.should_wake = MagicMock(return_value=False)
+    fm.mark_nudge_pending = MagicMock()
     # staged_channels returns empty dict (no staged turns)
     return fm
 
@@ -241,6 +243,8 @@ def _unfocused_focus_manager() -> MagicMock:
     fm.is_focused = MagicMock(return_value=False)
     fm.get_focus = MagicMock(return_value=999)  # some other channel
     fm.end_turn = AsyncMock()
+    fm.should_wake = MagicMock(return_value=False)
+    fm.mark_nudge_pending = MagicMock()
     return fm
 
 
@@ -386,6 +390,104 @@ class TestTextResponderFocusAware:
             await bus.shutdown()
 
         fm.end_turn.assert_not_awaited()
+
+
+class TestTextResponderIdleNudge:
+    @pytest.mark.asyncio
+    async def test_idle_unfocused_publishes_wake_to_focused_channel(
+        self, tmp_path: Path
+    ) -> None:
+        """should_wake → publish wake event routed at the focused channel."""
+        fm = _unfocused_focus_manager()
+        fm.should_wake = MagicMock(return_value=True)
+        fm.get_focus = MagicMock(return_value=555)  # focused text channel
+        responder, _ = _make_text_responder(tmp_path=tmp_path, focus_manager=fm)
+
+        bus = InProcessEventBus()
+        await bus.start()
+        published: list[Event] = []
+
+        async def _capture(event: Event) -> None:  # noqa: RUF029
+            published.append(event)
+
+        bus.publish = _capture  # type: ignore[method-assign]
+        try:
+            await responder.handle(_text_event(channel_id=100), bus)
+        finally:
+            await bus.shutdown()
+
+        fm.mark_nudge_pending.assert_called_once()
+        wakes = [e for e in published if e.payload.get("wake") is True]
+        assert len(wakes) == 1
+        assert wakes[0].payload["channel_id"] == 555
+
+    @pytest.mark.asyncio
+    async def test_not_idle_unfocused_publishes_nothing(self, tmp_path: Path) -> None:
+        """should_wake False → no nudge, plain staging."""
+        fm = _unfocused_focus_manager()  # should_wake defaults False
+        responder, _ = _make_text_responder(tmp_path=tmp_path, focus_manager=fm)
+
+        bus = InProcessEventBus()
+        await bus.start()
+        published: list[Event] = []
+
+        async def _capture(event: Event) -> None:  # noqa: RUF029
+            published.append(event)
+
+        bus.publish = _capture  # type: ignore[method-assign]
+        try:
+            await responder.handle(_text_event(channel_id=100), bus)
+        finally:
+            await bus.shutdown()
+
+        fm.mark_nudge_pending.assert_not_called()
+        assert [e for e in published if e.payload.get("wake")] == []
+
+    @pytest.mark.asyncio
+    async def test_wake_event_replies_without_persisting_user_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Wake event: focused turn runs, but no synthetic user turn stored."""
+        llm = _ScriptedLLM("checking in")
+        send = _CapturingSend()
+        fm = _focused_focus_manager(channel_id=555)
+        responder, store = _make_text_responder(
+            tmp_path=tmp_path, llm=llm, send=send, focus_manager=fm
+        )
+
+        wake = Event(
+            event_id="wake-1",
+            turn_id="wake-1",
+            session_id="discord:555",
+            parent_event_ids=(),
+            topic=TOPIC_DISCORD_TEXT,
+            timestamp=datetime.now(tz=UTC),
+            sequence_number=0,
+            payload={
+                "familiar_id": "fam",
+                "channel_id": 555,
+                "content": "[idle check]",
+                "author": None,
+                "wake": True,
+            },
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        try:
+            await responder.handle(wake, bus)
+        finally:
+            await bus.shutdown()
+
+        # reply generated + turn finalized
+        assert len(send.calls) == 1
+        fm.end_turn.assert_awaited_once()
+        # no synthetic user turn persisted (no transcript pollution)
+        user_turns = [
+            t
+            for t in store.recent(familiar_id="fam", channel_id=555, limit=10)
+            if t.role == "user"
+        ]
+        assert user_turns == []
 
 
 # ---------------------------------------------------------------------------
