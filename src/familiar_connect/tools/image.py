@@ -65,6 +65,7 @@ async def _fetch_image_bytes(url: str) -> bytes:
 async def _view_image_handler(
     args: dict,
     ctx: ToolContext,
+    describe_constraints: str = "",
 ) -> str | ImageResult:
     """Fetch and optionally describe an image referenced by placeholder."""
     img_id = args.get("image_id")
@@ -93,7 +94,11 @@ async def _view_image_handler(
         try:
             desc_jpeg = compress_for_description(raw)
             desc_b64 = base64.b64encode(desc_jpeg).decode("ascii")
-            desc = await describe_image(llm=ctx.description_llm, jpeg_base64=desc_b64)
+            desc = await describe_image(
+                llm=ctx.description_llm,
+                jpeg_base64=desc_b64,
+                constraints=describe_constraints,
+            )
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 f"{ls.tag('Image', ls.Y)} "
@@ -111,8 +116,20 @@ async def _view_image_handler(
     return ImageResult(description=desc, jpeg_base64=b64)
 
 
-def build_view_image_tool() -> Tool:
-    """Return the view_image :class:`Tool` descriptor."""
+def build_view_image_tool(describe_constraints: str = "") -> Tool:
+    """Return the view_image :class:`Tool` descriptor.
+
+    ``describe_constraints`` (per-familiar, from
+    ``[prompt].image_description_constraints``) bind into the handler at
+    construction — static for the familiar's lifetime, so closed over
+    here rather than carried on per-turn ``ToolContext``.
+    """
+
+    async def _handler(args: dict, ctx: ToolContext) -> str | ImageResult:
+        return await _view_image_handler(
+            args, ctx, describe_constraints=describe_constraints
+        )
+
     return Tool(
         name="view_image",
         description=(
@@ -130,6 +147,6 @@ def build_view_image_tool() -> Tool:
             },
             "required": ["image_id"],
         },
-        handler=_view_image_handler,
+        handler=_handler,
         timeout_s=_TOOL_TIMEOUT_S,
     )
