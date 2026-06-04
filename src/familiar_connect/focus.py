@@ -151,15 +151,18 @@ class FocusManager:
         name = self.channel_names.get(channel_id)
         return f"#{name}({channel_id})" if name else f"#{channel_id}"
 
+    def presence_guild(self) -> str | None:
+        """Guild name for current text focus channel; None when unset or unknown."""
+        if self._text_focus is None:
+            return None
+        return self.guild_names.get(self._text_focus)
+
     def presence_text(self) -> str | None:
-        """'GuildName / #channel-name' for current text focus; None when unset."""
+        """'#channel-name' for current text focus; None when unset."""
         channel_id = self._text_focus
         if channel_id is None:
             return None
         name = self.channel_names.get(channel_id, str(channel_id))
-        guild = self.guild_names.get(channel_id)
-        if guild:
-            return f"{guild} / #{name}"
         return f"#{name}"
 
     def set_focus_immediately(self, channel_id: int, modality: str) -> None:
