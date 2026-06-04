@@ -25,10 +25,7 @@ SILENT_RESULT = "__SILENT__"
 
 async def _silent_handler(args: dict[str, Any], ctx: ToolContext) -> str:  # noqa: ARG001, RUF029
     reasoning = args.get("reasoning", "")
-    _logger.info(
-        f"{ls.tag('💤 silent', ls.B)} "
-        f"{ls.kv('reason', reasoning, vc=ls.LB)}"
-    )
+    _logger.info(f"{ls.tag('💤 silent', ls.B)} {ls.kv('reason', reasoning, vc=ls.LB)}")
     return SILENT_RESULT
 
 

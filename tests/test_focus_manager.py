@@ -188,7 +188,9 @@ class TestFocusManagerDeferShiftEndTurn:
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         fm.defer_shift(channel_id=5)
         await fm.end_turn()
-        store.promote_staged_turns.assert_awaited_once_with(familiar_id="fam", channel_id=5)
+        store.promote_staged_turns.assert_awaited_once_with(
+            familiar_id="fam", channel_id=5
+        )
 
     @pytest.mark.asyncio
     async def test_defer_shift_text_updates_text_focus(self, tmp_path: Path) -> None:

@@ -115,8 +115,7 @@ def build_final_reminder(
         )
         if active:
             ch_list = ", ".join(
-                _ch(cid) + (f" ({cnt})" if cnt > 1 else "")
-                for cid, cnt in active
+                _ch(cid) + (f" ({cnt})" if cnt > 1 else "") for cid, cnt in active
             )
             total = sum(c for _, c in active)
             verb = "is" if total == 1 else "are"
