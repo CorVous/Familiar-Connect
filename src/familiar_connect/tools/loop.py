@@ -278,10 +278,9 @@ async def agentic_loop(
             messages.append(tool_msg)
             tool_msgs.append(tool_msg)
 
-        if on_iteration_end is not None:
-            await on_iteration_end(assistant_msg, tool_msgs)
-
-        # detect silent tool: any tool result matching the sentinel
+        # detect silent tool BEFORE on_iteration_end so the call +
+        # its reasoning aren't persisted to history (which would
+        # re-seed the model's rationale for silence next turn)
         silent_sentinel = _get_silent_result()
         if any(
             isinstance(m.content, str) and m.content == silent_sentinel
@@ -294,6 +293,9 @@ async def agentic_loop(
                 transcript=messages,
                 is_silent=True,
             )
+
+        if on_iteration_end is not None:
+            await on_iteration_end(assistant_msg, tool_msgs)
 
         last_content = content
         if not tool_calls:

@@ -356,6 +356,44 @@ class TestAgenticLoopSilentDetection:
         )
         assert result.is_silent is False
 
+    @pytest.mark.asyncio
+    async def test_silent_tool_does_not_call_on_iteration_end(self) -> None:
+        """on_iteration_end must not fire for silent iterations.
+
+        Silent call + its reasoning would be persisted to history,
+        re-seeding the model's rationale for silence on the next turn.
+        """
+        registry = ToolRegistry()
+        registry.register(_build_silent_tool_direct())
+
+        scripts = [
+            _Script(
+                deltas=[
+                    _delta_tool_call("c1", "silent", {"reasoning": "not relevant now"}),
+                    _delta_finish("tool_calls"),
+                ]
+            ),
+        ]
+        llm = _ScriptedStreamLLM(scripts)
+        ctx = _make_ctx()
+
+        iter_end_calls: list[tuple[Message, list[Message]]] = []
+
+        async def _on_end(  # noqa: RUF029
+            assistant: Message, tool_msgs: list[Message]
+        ) -> None:
+            iter_end_calls.append((assistant, tool_msgs))
+
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=registry,
+            ctx=ctx,
+            on_iteration_end=_on_end,
+        )
+        assert result.is_silent is True
+        assert iter_end_calls == []
+
 
 # ---------------------------------------------------------------------------
 # read_channel tool
