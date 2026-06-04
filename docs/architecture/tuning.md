@@ -535,6 +535,17 @@ When `true`, registers the `view_image` tool in the text tool registry
 for this slot. The agentic loop runs when either `tool_calling` or
 `image_tools` is set. `view_image` is never registered in the voice
 registry. Requires `[llm].image_description_model` for descriptions.
+The describe prompt is neutral by default; append per-familiar persona
+constraints with `[prompt].image_description_constraints` (see below).
+
+### `[prompt].image_description_constraints`
+
+Text appended to the neutral image-description base prompt. Per-familiar
+persona tuning: a character not set in the present can ban naming
+specific characters, people, franchises, or brands so it doesn't acquire
+modern pop-culture knowledge that would break immersion. Empty (default)
+= base prompt only. Bound into `view_image` at tool construction, so it
+is static for the familiar's lifetime — not carried per turn.
 
 ### `multimodal`
 

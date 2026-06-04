@@ -39,8 +39,10 @@ class _DescribeLLM(LLMClient):
     def __init__(self, reply: str = "a tiny dot") -> None:
         super().__init__(api_key="k", model="vision")
         self._reply = reply
+        self.captured: list[Message] = []
 
-    async def chat(self, messages: list[Message]) -> Message:  # type: ignore[override]  # noqa: ARG002
+    async def chat(self, messages: list[Message]) -> Message:  # type: ignore[override]
+        self.captured.extend(messages)
         return Message(role="assistant", content=self._reply)
 
 
@@ -120,6 +122,32 @@ async def test_view_image_returns_image_result() -> None:
 # ---------------------------------------------------------------------------
 # no description LLM → placeholder description, still has bytes
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_view_image_constraints_flow_into_description() -> None:
+    """Constraints bound at tool construction reach the describe prompt."""
+    png_bytes = _make_tiny_png()
+    llm = _DescribeLLM("a cat")
+    ctx = _make_ctx(
+        images={"img_0": "http://cdn.example.com/cat.png"},
+        description_llm=llm,
+    )
+    tool = build_view_image_tool(describe_constraints="Do not name characters.")
+    with patch(
+        "familiar_connect.tools.image._fetch_image_bytes",
+        new=AsyncMock(return_value=png_bytes),
+    ):
+        await tool.handler({"image_id": "img_0"}, ctx)
+
+    text_blocks = [
+        b
+        for m in llm.captured
+        if isinstance(m.content, list)
+        for b in m.content
+        if b.get("type") == "text"
+    ]
+    assert any("Do not name characters." in b["text"] for b in text_blocks)
 
 
 @pytest.mark.asyncio

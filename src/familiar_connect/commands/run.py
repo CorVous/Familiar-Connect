@@ -447,7 +447,11 @@ async def _async_main(token: str, familiar: Familiar) -> None:
 
     prose_slot = familiar.config.llm.get("prose")
     if prose_slot is not None and prose_slot.image_tools:
-        text_tool_registry.register(build_view_image_tool())
+        text_tool_registry.register(
+            build_view_image_tool(
+                describe_constraints=familiar.config.image_description_constraints
+            )
+        )
 
     # description client: used by view_image handler via ToolContext
     description_llm = familiar.llm_clients.get("__image_description__")

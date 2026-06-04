@@ -272,6 +272,31 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match=r"\[prompt\] has unknown keys"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_image_description_constraints_absent_defaults_empty(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """Shipped default profile leaves the constraint empty (neutral)."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert not cfg.image_description_constraints
+
+    def test_image_description_constraints_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[prompt]\nimage_description_constraints = "no brands"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.image_description_constraints == "no brands"
+
+    def test_image_description_constraints_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[prompt]\nimage_description_constraints = 42\n")
+        with pytest.raises(ConfigError, match="image_description_constraints"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_history_window_split_parsed(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:

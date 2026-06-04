@@ -290,6 +290,12 @@ greetings         = []
 # before the model's next turn. Deepest, most recency-biased slot, so
 # behavioral nudges land hardest here. Empty string omits the block.
 # Override per familiar; rendered verbatim (markdown fine).
+#
+# image_description_constraints: appended to the neutral image-description
+# base prompt (used by view_image). Per-familiar persona tuning — e.g. a
+# character not set in the present bans naming modern brands, franchises,
+# or celebrities so it doesn't acquire pop-culture knowledge that breaks
+# immersion. Empty (default) = neutral base only.
 
 [prompt]
 post_history_instructions = """
@@ -299,6 +305,7 @@ When roleplaying, do not speak much, use <silent> generously. Don't \
 interject too frequently, either. It's fine to send a message when the \
 character really wants to, of course, but prefer <silent> otherwise.
 """
+image_description_constraints = ""
 
 # --- LLM slots -------------------------------------------------------------
 #
