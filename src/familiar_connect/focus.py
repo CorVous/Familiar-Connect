@@ -18,9 +18,10 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# default focused-channel silence before a non-focused arrival nudges the
-# model. 0 disables. module constant for now; promote to config if tuned.
+# default focused-channel silence before a non-focused arrival nudges the model
 _DEFAULT_IDLE_WAKE_S = 120.0
+# debounce window: rapid arrivals within this window share one nudge
+_DEFAULT_NUDGE_DEBOUNCE_S = 30.0
 
 
 class FocusManager:
@@ -34,7 +35,8 @@ class FocusManager:
     ``idle_wake_seconds`` and a non-focused channel gets traffic,
     ``should_wake`` flags that the model deserves a turn (the responder
     fires a synthetic wake). The nudge never moves focus — only the
-    model's shift_focus does. ``_nudge_pending`` dedupes arrival bursts.
+    model's shift_focus does. Rapid arrivals within ``nudge_debounce_seconds``
+    are grouped into one nudge; the next unread after the window fires again.
     """
 
     def __init__(
@@ -45,6 +47,7 @@ class FocusManager:
         subscriptions: SubscriptionRegistry,
         clock: Callable[[], float] = time.monotonic,
         idle_wake_seconds: float = _DEFAULT_IDLE_WAKE_S,
+        nudge_debounce_seconds: float = _DEFAULT_NUDGE_DEBOUNCE_S,
     ) -> None:
         self._familiar_id = familiar_id
         self._store = store
@@ -54,11 +57,12 @@ class FocusManager:
         self._pending_shift: dict[str, int] = {}  # modality -> channel_id
         self._text_lock = asyncio.Lock()
         self._voice_lock = asyncio.Lock()
-        # idle-nudge state: last focused-turn time + dedupe flag
+        # idle-nudge state
         self._clock = clock
         self._idle_wake_seconds = idle_wake_seconds
+        self._nudge_debounce_seconds = nudge_debounce_seconds
         self._last_active = clock()
-        self._nudge_pending = False
+        self._last_nudge: float = float("-inf")  # never nudged initially
         # channel_id → display name; populated by bot on_ready
         self.channel_names: dict[int, str] = {}
         # channel_id → guild name; populated by bot on_ready
@@ -93,27 +97,32 @@ class FocusManager:
         self._pending_shift[modality] = channel_id
         _logger.debug("defer shift channel=%d modality=%s", channel_id, modality)
 
+    def pending_text_focus(self) -> int | None:
+        """Pending text shift channel_id if deferred; else None."""
+        return self._pending_shift.get("text")
+
     def should_wake(self, channel_id: int) -> bool:
         """Whether a non-focused arrival warrants an idle nudge.
 
         True when nudges enabled, channel unfocused, focused channel
-        silent ≥ threshold, and no nudge already pending.
+        silent ≥ threshold, and outside the debounce window.
         """
-        if self._idle_wake_seconds <= 0 or self._nudge_pending:
+        if self._idle_wake_seconds <= 0:
             return False
         if self.is_focused(channel_id):
             return False
-        return (self._clock() - self._last_active) >= self._idle_wake_seconds
+        now = self._clock()
+        if (now - self._last_nudge) < self._nudge_debounce_seconds:
+            return False
+        return (now - self._last_active) >= self._idle_wake_seconds
 
     def mark_nudge_pending(self) -> None:
-        """Flag that a nudge turn is in flight; cleared at end_turn."""
-        self._nudge_pending = True
+        """Record nudge timestamp to start debounce window."""
+        self._last_nudge = self._clock()
 
     async def end_turn(self) -> None:
         """Apply pending focus shifts; called after each turn completes."""
-        # focused turn happened → reset idle clock + release nudge dedupe
-        self._last_active = self._clock()
-        self._nudge_pending = False
+        self._last_active = self._clock()  # reset idle clock
         shifted = False
         for modality, channel_id in list(self._pending_shift.items()):
             lock = self._voice_lock if modality == "voice" else self._text_lock

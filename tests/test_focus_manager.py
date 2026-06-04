@@ -272,6 +272,7 @@ class TestFocusManagerIdleWake:
         *,
         clock: _FakeClock,
         idle_wake_seconds: float = 60.0,
+        nudge_debounce_seconds: float = 10.0,
         text_focus: int = 1,
     ) -> FocusManager:
         store = _make_store(text_channel_id=text_focus)
@@ -282,6 +283,7 @@ class TestFocusManagerIdleWake:
             subscriptions=reg,
             clock=clock,
             idle_wake_seconds=idle_wake_seconds,
+            nudge_debounce_seconds=nudge_debounce_seconds,
         )
 
     @pytest.mark.asyncio
@@ -328,26 +330,57 @@ class TestFocusManagerIdleWake:
         assert fm.should_wake(99) is False
 
     @pytest.mark.asyncio
-    async def test_should_wake_false_when_nudge_pending(self, tmp_path: Path) -> None:
-        # nudge is model-driven: a single pending nudge suppresses further
-        # ones until the turn it triggers completes (dedupes bursts)
+    async def test_should_wake_false_within_debounce(self, tmp_path: Path) -> None:
+        # rapid arrivals grouped: nudge suppressed within debounce window
         clock = _FakeClock()
-        fm = self._fm(tmp_path, clock=clock)
+        fm = self._fm(tmp_path, clock=clock)  # debounce=10s
         await fm.initialize()
         clock.advance(90.0)
         assert fm.should_wake(99) is True
         fm.mark_nudge_pending()
+        clock.advance(5.0)  # within 10s debounce
         assert fm.should_wake(99) is False
 
     @pytest.mark.asyncio
-    async def test_end_turn_clears_nudge_pending(self, tmp_path: Path) -> None:
+    async def test_should_wake_true_after_debounce_expires(
+        self, tmp_path: Path
+    ) -> None:
+        # nudge recovers after debounce window — no end_turn needed
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock)  # debounce=10s
+        await fm.initialize()
+        clock.advance(90.0)
+        fm.mark_nudge_pending()
+        clock.advance(15.0)  # past debounce, focused channel still idle
+        assert fm.should_wake(99) is True
+
+    @pytest.mark.asyncio
+    async def test_should_wake_repeats_after_each_debounce(
+        self, tmp_path: Path
+    ) -> None:
+        # each unread cycle after debounce fires another nudge
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock)  # debounce=10s
+        await fm.initialize()
+        clock.advance(90.0)
+        assert fm.should_wake(99) is True
+        fm.mark_nudge_pending()
+        clock.advance(15.0)
+        assert fm.should_wake(99) is True  # second nudge fires
+        fm.mark_nudge_pending()
+        clock.advance(5.0)  # within second debounce window
+        assert fm.should_wake(99) is False
+
+    @pytest.mark.asyncio
+    async def test_end_turn_still_refreshes_idle_clock(self, tmp_path: Path) -> None:
+        # end_turn resets idle clock so focused reply silences nudges
         clock = _FakeClock()
         fm = self._fm(tmp_path, clock=clock)
         await fm.initialize()
         clock.advance(90.0)
         fm.mark_nudge_pending()
-        await fm.end_turn()  # nudge turn completed
-        clock.advance(90.0)  # idle again
+        await fm.end_turn()
+        clock.advance(90.0)  # idle again after end_turn reset
         assert fm.should_wake(99) is True
 
     @pytest.mark.asyncio
@@ -391,6 +424,42 @@ class TestModalitiesIndependent:
         await fm.end_turn()
         assert fm.get_focus("text") == 11
         assert fm.get_focus("voice") == 8
+
+
+# ---------------------------------------------------------------------------
+# FocusManager.pending_text_focus
+# ---------------------------------------------------------------------------
+
+
+class TestPendingTextFocus:
+    def test_returns_none_with_no_pending(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        assert fm.pending_text_focus() is None
+
+    def test_returns_channel_after_text_defer(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        assert fm.pending_text_focus() == 5
+
+    def test_returns_none_for_voice_only_shift(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=8)
+        assert fm.pending_text_focus() is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_after_end_turn(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        assert fm.pending_text_focus() is None
 
 
 # ---------------------------------------------------------------------------

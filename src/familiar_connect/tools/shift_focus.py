@@ -64,10 +64,9 @@ def build_shift_focus_tool() -> Tool:
         description=(
             "Shift attentional focus to a different channel. Returns that "
             "channel's recent messages so you can see it before responding "
-            "(empty list = nothing there yet). The focus change itself is "
-            "deferred and applied at end of turn; your reply still posts to "
-            "the channel you're currently answering. Modality (text/voice) "
-            "inferred from channel subscription."
+            "(empty list = nothing there yet). Your reply will post to the "
+            "new channel. Modality (text/voice) inferred from channel "
+            "subscription."
         ),
         parameters={
             "type": "object",
