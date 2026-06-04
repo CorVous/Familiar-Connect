@@ -26,8 +26,8 @@ _logger = logging.getLogger("familiar_connect.diagnostics")
 def span(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Wrap a function; log ``span=<name> ms=<elapsed>`` on return.
 
-    Works on both sync and async callables. Emits one INFO line per
-    wrapped call via ``familiar_connect.diagnostics`` logger.
+    Works on both sync and async callables. Emits one DEBUG line per
+    wrapped call (``-vv``) via ``familiar_connect.diagnostics`` logger.
     """
 
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -66,7 +66,8 @@ def span(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
 
 def _emit(name: str, t0: float, status: str) -> None:
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    _logger.info(
+    # DEBUG, not INFO: routine per-call timing — show at -vv, not -v
+    _logger.debug(
         f"{ls.tag('span', ls.LM)} "
         f"{ls.kv('span', name, vc=ls.LM)} "
         f"{ls.kv('ms', str(elapsed_ms), vc=ls.LC)} "
