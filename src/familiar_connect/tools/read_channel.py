@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from familiar_connect import log_style as ls
+from familiar_connect.tools.channel_view import serialize_turns
 from familiar_connect.tools.registry import Tool
 
 if TYPE_CHECKING:
@@ -44,18 +45,7 @@ async def _read_channel_handler(args: dict[str, Any], ctx: ToolContext) -> str:
         limit=limit,
     )
 
-    result = []
-    for t in turns:
-        author_name: str | None = None
-        if t.author is not None:
-            author_name = t.author.display_name or t.author.username
-        result.append({
-            "id": t.id,
-            "role": t.role,
-            "author": author_name,
-            "content": t.content,
-            "timestamp": t.timestamp.isoformat(),
-        })
+    result = serialize_turns(turns)
     _logger.info(
         f"{ls.tag('📖 read_channel', ls.LM)} "
         f"{ls.kv('channel', fm.channel_label(channel_id), vc=ls.LW)} "

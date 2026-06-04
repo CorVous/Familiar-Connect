@@ -133,11 +133,52 @@ class TestShiftFocusTool:
 
     @pytest.mark.asyncio
     async def test_returns_ok_json(self) -> None:
+        # no store wired → degrades to bare ack (back-compat)
         fm = _make_focus_manager()
         ctx = _make_ctx(focus_manager=fm)
         result = await _shift_focus_handler({"channel_id": 55}, ctx)
         parsed = json.loads(result)
         assert parsed == {"ok": True, "channel_id": 55}
+
+    @pytest.mark.asyncio
+    async def test_returns_messages_from_target_channel(self) -> None:
+        # content-bearing shift: returns target channel's recent turns so
+        # model sees the channel in-turn rather than narrating blind
+        turns = [
+            _make_history_turn(1, "user", "first", 55),
+            _make_history_turn(2, "user", "second", 55),
+        ]
+        store = MagicMock()
+        store.recent = AsyncMock(return_value=turns)
+        fm = _make_focus_manager()
+        ctx = _make_ctx(focus_manager=fm, store=store)
+        result = await _shift_focus_handler({"channel_id": 55}, ctx)
+        parsed = json.loads(result)
+        assert parsed["ok"] is True
+        assert parsed["channel_id"] == 55
+        assert [m["content"] for m in parsed["messages"]] == ["first", "second"]
+
+    @pytest.mark.asyncio
+    async def test_fetches_target_channel_not_current_focus(self) -> None:
+        # unlike read_channel (current focus), shift reads the *target*
+        store = MagicMock()
+        store.recent = AsyncMock(return_value=[])
+        fm = _make_focus_manager()
+        fm.get_focus = MagicMock(return_value=99)  # current focus differs
+        ctx = _make_ctx(focus_manager=fm, store=store)
+        await _shift_focus_handler({"channel_id": 55}, ctx)
+        assert store.recent.call_args.kwargs.get("channel_id") == 55
+
+    @pytest.mark.asyncio
+    async def test_empty_channel_returns_empty_messages(self) -> None:
+        store = MagicMock()
+        store.recent = AsyncMock(return_value=[])
+        fm = _make_focus_manager()
+        ctx = _make_ctx(focus_manager=fm, store=store)
+        result = await _shift_focus_handler({"channel_id": 55}, ctx)
+        parsed = json.loads(result)
+        assert parsed["ok"] is True
+        assert parsed["messages"] == []
 
     @pytest.mark.asyncio
     async def test_returns_error_when_no_focus_manager(self) -> None:
