@@ -431,24 +431,38 @@ class TestPresenceText:
         fm = self._fm(tmp_path)
         assert fm.presence_text() is None
 
-    def test_returns_channel_name_no_guild(self, tmp_path: Path) -> None:
+    def test_returns_channel_name(self, tmp_path: Path) -> None:
         fm = self._fm(tmp_path)
         fm.channel_names[42] = "general"
         fm.set_focus_immediately(42, "text")
         assert fm.presence_text() == "#general"
 
-    def test_returns_guild_and_channel_name(self, tmp_path: Path) -> None:
-        fm = self._fm(tmp_path)
-        fm.channel_names[42] = "general"
-        fm.guild_names[42] = "Sapphire"
-        fm.set_focus_immediately(42, "text")
-        assert fm.presence_text() == "Sapphire / #general"
-
     def test_falls_back_to_channel_id_when_name_unknown(self, tmp_path: Path) -> None:
         fm = self._fm(tmp_path)
+        fm.set_focus_immediately(42, "text")
+        assert fm.presence_text() == "#42"
+
+
+class TestPresenceGuild:
+    def _fm(self, tmp_path: Path) -> FocusManager:
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        return FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+
+    def test_returns_none_with_no_focus(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        assert fm.presence_guild() is None
+
+    def test_returns_none_when_guild_unknown(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.set_focus_immediately(42, "text")
+        assert fm.presence_guild() is None
+
+    def test_returns_guild_name(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
         fm.guild_names[42] = "Sapphire"
         fm.set_focus_immediately(42, "text")
-        assert fm.presence_text() == "Sapphire / #42"
+        assert fm.presence_guild() == "Sapphire"
 
 
 # ---------------------------------------------------------------------------

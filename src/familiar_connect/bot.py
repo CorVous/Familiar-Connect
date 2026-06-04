@@ -753,11 +753,19 @@ def apply_reaction_clear(
 
 async def _sync_presence(bot: discord.Bot, fm: FocusManager) -> None:
     """Update bot presence to reflect current text focus."""
-    text = fm.presence_text()
+    guild = fm.presence_guild()
+    channel = fm.presence_text()
+    if guild and channel:
+        state = f"✨ {guild} -> {channel}"
+    elif channel:
+        state = f"✨ {channel}"
+    else:
+        state = None
     await bot.change_presence(
         activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=text if text is not None else "Discord",
+            type=discord.ActivityType.custom,
+            name="Custom Status",
+            state=state,
         ),
         status=discord.Status.online,
     )
