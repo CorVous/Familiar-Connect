@@ -390,9 +390,16 @@ class TextResponder:
             else:
                 thread_target = message_id
 
+        # if the model shifted focus this turn, send to the new channel
+        send_channel_id = channel_id
+        if self._focus_manager is not None:
+            pending = self._focus_manager.pending_text_focus()
+            if pending is not None:
+                send_channel_id = pending
+
         try:
             sent_message_id = await self._send_text(
-                channel_id, rewritten, thread_target, mention_user_ids
+                send_channel_id, rewritten, thread_target, mention_user_ids
             )
         except Exception as exc:  # noqa: BLE001 — surface but don't crash loop
             _logger.warning(
@@ -415,7 +422,7 @@ class TextResponder:
         # ``send_text`` — audit trail for "did bot thread this reply?"
         await self._history.append_turn(
             familiar_id=self._familiar_id,
-            channel_id=channel_id,
+            channel_id=send_channel_id,
             role="assistant",
             content=rewritten,
             author=None,

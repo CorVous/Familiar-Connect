@@ -394,6 +394,42 @@ class TestModalitiesIndependent:
 
 
 # ---------------------------------------------------------------------------
+# FocusManager.pending_text_focus
+# ---------------------------------------------------------------------------
+
+
+class TestPendingTextFocus:
+    def test_returns_none_with_no_pending(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        assert fm.pending_text_focus() is None
+
+    def test_returns_channel_after_text_defer(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        assert fm.pending_text_focus() == 5
+
+    def test_returns_none_for_voice_only_shift(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=8)
+        assert fm.pending_text_focus() is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_after_end_turn(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        assert fm.pending_text_focus() is None
+
+
+# ---------------------------------------------------------------------------
 # set_focus_immediately
 # ---------------------------------------------------------------------------
 

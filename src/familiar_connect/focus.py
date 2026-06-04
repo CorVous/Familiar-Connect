@@ -89,6 +89,10 @@ class FocusManager:
         self._pending_shift[modality] = channel_id
         _logger.debug("defer shift channel=%d modality=%s", channel_id, modality)
 
+    def pending_text_focus(self) -> int | None:
+        """Pending text shift channel_id if deferred; else None."""
+        return self._pending_shift.get("text")
+
     def should_wake(self, channel_id: int) -> bool:
         """Whether a non-focused arrival warrants an idle nudge.
 
