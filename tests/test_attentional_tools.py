@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from familiar_connect.llm import LLMDelta, Message
+from familiar_connect.llm import LLMClient, LLMDelta, Message
 from familiar_connect.tools.builtins import (
     build_read_channel_tool,
     build_shift_focus_tool,
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from familiar_connect.bus.protocols import EventBus
+    from familiar_connect.focus import FocusManager
     from familiar_connect.history.async_store import AsyncHistoryStore
 
 
@@ -50,8 +51,8 @@ if TYPE_CHECKING:
 
 def _make_ctx(
     *,
-    focus_manager: object = None,
-    store: object = None,
+    focus_manager: FocusManager | None = None,
+    store: AsyncHistoryStore | None = None,
     channel_id: int = 42,
     channel_kind: str = "text",
 ) -> ToolContext:
@@ -208,12 +209,12 @@ class _Script:
     deltas: list[LLMDelta] = field(default_factory=list)
 
 
-class _ScriptedStreamLLM:
+class _ScriptedStreamLLM(LLMClient):
     """Minimal scripted LLM for loop tests."""
 
     def __init__(self, scripts: list[_Script]) -> None:
+        super().__init__(api_key="k", model="m")
         self._scripts = scripts
-        self.multimodal: bool = False
 
     async def stream_completion(
         self,

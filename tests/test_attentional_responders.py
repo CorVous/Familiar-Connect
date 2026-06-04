@@ -40,6 +40,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from familiar_connect.focus import FocusManager
+
 
 # ---------------------------------------------------------------------------
 # Scripted LLM helpers
@@ -163,7 +165,7 @@ def _make_text_responder(
     tmp_path: Path,
     llm: LLMClient | None = None,
     send: _CapturingSend | None = None,
-    focus_manager: object = None,
+    focus_manager: FocusManager | None = None,
 ) -> tuple[TextResponder, HistoryStore]:
     card = tmp_path / "character.md"
     card.write_text("You are a familiar.\n")
@@ -193,7 +195,7 @@ def _make_voice_responder(
     tmp_path: Path,
     llm: LLMClient | None = None,
     player: MockTTSPlayer | None = None,
-    focus_manager: object = None,
+    focus_manager: FocusManager | None = None,
 ) -> tuple[VoiceResponder, HistoryStore]:
     card = tmp_path / "character.md"
     card.write_text("You are a familiar.\n")

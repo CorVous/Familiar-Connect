@@ -19,7 +19,7 @@ from familiar_connect.bot import _defer_interaction, _reply
 
 def _not_found() -> discord.NotFound:
     resp = SimpleNamespace(status=404, reason="Not Found")
-    return discord.NotFound(resp, "Unknown interaction")  # type: ignore[arg-type]
+    return discord.NotFound(resp, "Unknown interaction")  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 
 
 def _ctx(*, defer: AsyncMock | None = None, followup: AsyncMock | None = None):
