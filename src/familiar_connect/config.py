@@ -367,6 +367,11 @@ class CharacterConfig:
     # lives in ``_default/character.toml`` ``[prompt]`` — no Python
     # default (default profile is the single source of truth).
     post_history_instructions: str = ""
+    # appended to the neutral image-description base prompt (see
+    # ``tools.image_describe._DESCRIBE_PROMPT``). per-familiar persona
+    # tuning — e.g. a non-present character bans naming modern brands /
+    # franchises. empty = neutral base only. lives in ``[prompt]``.
+    image_description_constraints: str = ""
     # retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
     memory_retrieval: MemoryRetrievalConfig = field(
         default_factory=MemoryRetrievalConfig
@@ -557,7 +562,9 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(prompt_raw, dict):
         msg = f"[prompt] must be a table, got {type(prompt_raw).__name__}"
         raise ConfigError(msg)
-    post_history_instructions = _parse_prompt_config(prompt_raw)
+    post_history_instructions, image_description_constraints = _parse_prompt_config(
+        prompt_raw
+    )
 
     memory_raw = data.get("memory", {})
     if not isinstance(memory_raw, dict):
@@ -587,6 +594,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         budget_curves=budget_curves,
         discord_text=discord_text,
         post_history_instructions=post_history_instructions,
+        image_description_constraints=image_description_constraints,
         memory_retrieval=memory_retrieval,
         memory_providers=memory_providers,
         embedding=embedding,
@@ -645,27 +653,34 @@ def _parse_discord_text_config(raw: dict) -> DiscordTextConfig:
     )
 
 
-_PROMPT_FIELDS: frozenset[str] = frozenset({"post_history_instructions"})
+_PROMPT_FIELDS: frozenset[str] = frozenset({
+    "post_history_instructions",
+    "image_description_constraints",
+})
 
 
-def _parse_prompt_config(raw: dict) -> str:
-    """Validate ``[prompt]``; return post-history instructions text.
+def _parse_prompt_config(raw: dict) -> tuple[str, str]:
+    """Validate ``[prompt]``; return (post_history, image_constraints).
 
-    Empty / absent → ``""`` (block omitted). Default text shipped in
-    ``_default/character.toml`` so it deep-merges in unless the
-    familiar overrides it.
+    Both empty / absent → ``""`` (omitted). Defaults ship in
+    ``_default/character.toml`` and deep-merge unless overridden.
     """
     unknown = set(raw) - _PROMPT_FIELDS
     if unknown:
         bad = ", ".join(sorted(unknown))
         msg = f"[prompt] has unknown keys: {bad}"
         raise ConfigError(msg)
-    v = raw.get("post_history_instructions", "")
+    return (
+        _prompt_str(raw, "post_history_instructions"),
+        _prompt_str(raw, "image_description_constraints"),
+    )
+
+
+def _prompt_str(raw: dict, key: str) -> str:
+    """Read stripped string ``key`` from ``[prompt]``; absent → ``""``."""
+    v = raw.get(key, "")
     if not isinstance(v, str):
-        msg = (
-            "[prompt].post_history_instructions must be a string, "
-            f"got {type(v).__name__}"
-        )
+        msg = f"[prompt].{key} must be a string, got {type(v).__name__}"
         raise ConfigError(msg)
     return v.strip()
 
