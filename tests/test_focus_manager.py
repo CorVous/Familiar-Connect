@@ -450,3 +450,106 @@ class TestSetFocusImmediately:
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         fm.set_focus_immediately(channel_id=4, modality="voice")
         assert fm.get_focus("voice") == 4
+
+
+# ---------------------------------------------------------------------------
+# FocusManager.presence_text
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceText:
+    def _fm(self, tmp_path: Path) -> FocusManager:
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        return FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+
+    def test_returns_none_with_no_focus(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        assert fm.presence_text() is None
+
+    def test_returns_channel_name(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.channel_names[42] = "general"
+        fm.set_focus_immediately(42, "text")
+        assert fm.presence_text() == "#general"
+
+    def test_falls_back_to_channel_id_when_name_unknown(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.set_focus_immediately(42, "text")
+        assert fm.presence_text() == "#42"
+
+
+class TestPresenceGuild:
+    def _fm(self, tmp_path: Path) -> FocusManager:
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        return FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+
+    def test_returns_none_with_no_focus(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        assert fm.presence_guild() is None
+
+    def test_returns_none_when_guild_unknown(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.set_focus_immediately(42, "text")
+        assert fm.presence_guild() is None
+
+    def test_returns_guild_name(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.guild_names[42] = "Sapphire"
+        fm.set_focus_immediately(42, "text")
+        assert fm.presence_guild() == "Sapphire"
+
+
+# ---------------------------------------------------------------------------
+# FocusManager.on_shift
+# ---------------------------------------------------------------------------
+
+
+class TestOnShift:
+    def _fm(self, tmp_path: Path) -> FocusManager:
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        return FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+
+    def test_on_shift_is_none_by_default(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        assert fm.on_shift is None
+
+    @pytest.mark.asyncio
+    async def test_on_shift_called_once_after_text_shift(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        callback = AsyncMock()
+        fm.on_shift = callback
+        fm.defer_shift(channel_id=5)
+        await fm.end_turn()
+        callback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_on_shift_called_once_for_text_and_voice_shift(
+        self, tmp_path: Path
+    ) -> None:
+        store = _make_store()
+        reg = _make_registry(
+            tmp_path,
+            channel_kind={5: SubscriptionKind.text, 8: SubscriptionKind.voice},
+        )
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        callback = AsyncMock()
+        fm.on_shift = callback
+        fm.defer_shift(channel_id=5)
+        fm.defer_shift(channel_id=8)
+        await fm.end_turn()
+        callback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_on_shift_not_called_when_no_pending_shifts(
+        self, tmp_path: Path
+    ) -> None:
+        fm = self._fm(tmp_path)
+        callback = AsyncMock()
+        fm.on_shift = callback
+        await fm.end_turn()
+        callback.assert_not_awaited()

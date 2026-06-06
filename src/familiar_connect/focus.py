@@ -11,7 +11,7 @@ from familiar_connect import log_style as ls
 from familiar_connect.subscriptions import SubscriptionKind
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.subscriptions import SubscriptionRegistry
@@ -61,6 +61,10 @@ class FocusManager:
         self._nudge_pending = False
         # channel_id → display name; populated by bot on_ready
         self.channel_names: dict[int, str] = {}
+        # channel_id → guild name; populated by bot on_ready
+        self.guild_names: dict[int, str] = {}
+        # called once after end_turn applies ≥1 shift; None disables
+        self.on_shift: Callable[[], Awaitable[None]] | None = None
 
     async def initialize(self) -> None:
         """Load persisted focus pointers from DB."""
@@ -114,6 +118,7 @@ class FocusManager:
         # focused turn happened → reset idle clock + release nudge dedupe
         self._last_active = self._clock()
         self._nudge_pending = False
+        shifted = False
         for modality, channel_id in list(self._pending_shift.items()):
             lock = self._voice_lock if modality == "voice" else self._text_lock
             async with lock:
@@ -139,6 +144,9 @@ class FocusManager:
                     text_channel_id=self._text_focus,
                     voice_channel_id=self._voice_focus,
                 )
+                shifted = True
+        if shifted and self.on_shift is not None:
+            await self.on_shift()
 
     def channel_label(self, channel_id: int | None) -> str:
         """Format channel_id as '#name(id)' or '#id' when name unknown."""
@@ -146,6 +154,20 @@ class FocusManager:
             return "none"
         name = self.channel_names.get(channel_id)
         return f"#{name}({channel_id})" if name else f"#{channel_id}"
+
+    def presence_guild(self) -> str | None:
+        """Guild name for current text focus channel; None when unset or unknown."""
+        if self._text_focus is None:
+            return None
+        return self.guild_names.get(self._text_focus)
+
+    def presence_text(self) -> str | None:
+        """'#channel-name' for current text focus; None when unset."""
+        channel_id = self._text_focus
+        if channel_id is None:
+            return None
+        name = self.channel_names.get(channel_id, str(channel_id))
+        return f"#{name}"
 
     def set_focus_immediately(self, channel_id: int, modality: str) -> None:
         """Set focus without deferral (used at startup)."""

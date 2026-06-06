@@ -747,6 +747,31 @@ def apply_reaction_clear(
 
 
 # ---------------------------------------------------------------------------
+# Presence sync
+# ---------------------------------------------------------------------------
+
+
+async def _sync_presence(bot: discord.Bot, fm: FocusManager) -> None:
+    """Update bot presence to reflect current text focus."""
+    guild = fm.presence_guild()
+    channel = fm.presence_text()
+    if guild and channel:
+        state = f"✨ {guild} -> {channel}"
+    elif channel:
+        state = f"✨ {channel}"
+    else:
+        state = None
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.custom,
+            name="Custom Status",
+            state=state,
+        ),
+        status=discord.Status.online,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bot factory
 # ---------------------------------------------------------------------------
 
@@ -1071,7 +1096,7 @@ def _register_events(
     handle: BotHandle,
 ) -> None:
     @bot.event
-    async def on_ready() -> None:  # noqa: RUF029 — Discord event handler contract
+    async def on_ready() -> None:
         user = bot.user
         if user is not None:
             familiar.bot_user_id = user.id
@@ -1080,6 +1105,12 @@ def _register_events(
         if fm is not None:
             fm.channel_names.update({
                 ch.id: ch.name
+                for guild in bot.guilds
+                for ch in guild.channels
+                if hasattr(ch, "name")
+            })
+            fm.guild_names.update({
+                ch.id: guild.name
                 for guild in bot.guilds
                 for ch in guild.channels
                 if hasattr(ch, "name")
@@ -1095,6 +1126,8 @@ def _register_events(
                 f"{ls.kv('text', fm.channel_label(fm.get_focus('text')), vc=ls.LW)} "
                 f"{ls.kv('voice', fm.channel_label(fm.get_focus('voice')), vc=ls.LW)}"
             )
+            fm.on_shift = lambda: _sync_presence(bot, fm)
+            await _sync_presence(bot, fm)
 
     @bot.event
     async def on_message(message: discord.Message) -> None:
