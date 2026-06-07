@@ -33,3 +33,8 @@ data/familiars/*
 /data/models/
 
 .aider*
+
+# Claude Code local agent artifacts (worktrees, run logs, locks)
+.claude/projects/
+.claude/worktrees/
+.claude/scheduled_tasks.lock

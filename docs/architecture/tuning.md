@@ -207,6 +207,24 @@ longer needed.
 - **`<silent>` sentinel** — already wired (see
   [multi-party addressivity](context-pipeline.md#multi-party-addressivity)).
   Don't override the sentinel instruction in the character prompt.
+  Under tool calling the `silent(reasoning)` tool is the equivalent
+  agentic-path gate.
+
+### Attentional focus
+
+No TOML knobs. The familiar attends to one text + one voice channel
+at a time; unfocused channels' messages are **staged** (stored, no
+reply) until the model shifts focus. Focus is model-driven through
+the `shift_focus(channel_id)` tool, so it only moves on slots with
+[`tool_calling = true`](#tool_calling) — otherwise focus stays on its
+startup default. On startup focus defaults to the first text and
+first voice subscription; thereafter it persists in the
+`focus_pointers` table across restarts. The `read_channel(limit?)`
+tool lets the familiar peek at the focused text channel without
+consuming staged turns. Inspect current focus + per-channel unread
+counts via `/diagnostics` (`Focus: text=#… voice=#…`,
+`Unreads: #… (N)`). See
+[Attentional stream](context-pipeline.md#attentional-stream).
 
 ## Discord text channel knobs
 
@@ -503,7 +521,13 @@ Maps to OpenRouter's `reasoning` parameter:
 
 ### `tool_calling`
 
-Gates alarm and cancel tools on the slot's agentic loop.
+Runs the slot's agentic loop with the full tool registry:
+`set_alarm` / `cancel_alarm`, `silent`, `shift_focus`, and (text
+only) `read_channel`. With it `false` the registry never installs, so
+the model can't shift focus or stay silent *via tools* — the
+`<silent>` text sentinel still works on the bare streaming path, but
+focus stays pinned to its startup default. Enable it on `prose` /
+`fast` to make the attentional stream model-driven.
 
 ### `image_tools`
 

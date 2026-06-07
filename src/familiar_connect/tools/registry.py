@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
 
     from familiar_connect.bus.protocols import EventBus
+    from familiar_connect.focus import FocusManager
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.llm import LLMClient
 
@@ -46,6 +47,8 @@ class ToolContext:
     scheduler: Any | None = None  # AlarmScheduler — avoids import cycle
     images: dict[str, str] = field(default_factory=dict)  # img_id → URL
     description_llm: LLMClient | None = None  # vision model client
+    focus_manager: FocusManager | None = None  # attentional focus controller
+    store: AsyncHistoryStore | None = None  # explicit store ref for read_channel
 
 
 @dataclass

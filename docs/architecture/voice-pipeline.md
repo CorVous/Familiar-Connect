@@ -334,7 +334,7 @@ in **stability descending** order:
 | 1 | `CharacterCardLayer` | file content change |
 | 2 | `OperatingModeLayer` | `viewer_mode` flip (constant per mode) |
 | 3 | `ConversationSummaryLayer` | `SummaryWorker` writes (every N turns) |
-| 4 | `CrossChannelContextLayer` | any source channel's summary writes |
+| 4 | `CrossChannelContextLayer` | retired — emits nothing (attentional stream surfaces cross-channel turns via `RecentHistoryLayer`) |
 | 5 | `PeopleDossierLayer` | `PeopleDossierWorker` watermark advances |
 | 6 | `RagContextLayer` | per-turn cue (always changes) |
 | — | `RecentHistoryLayer` | per-turn (contributes user/assistant messages, not system text) |

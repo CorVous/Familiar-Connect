@@ -194,9 +194,8 @@ class RecentHistoryLayer:
         when neither side carries a platform message id or reply
         marker and gap between them ≤ ``coalesce_max_gap_seconds``.
         """
-        turns = await self._store.recent(
+        turns = await self._store.recent_cross_channel(
             familiar_id=ctx.familiar_id,
-            channel_id=ctx.channel_id or 0,
             limit=self._window_size,
         )
         turns = _coalesce_voice_fragments(
@@ -685,8 +684,11 @@ def _turn_to_message_with_context(
         # past tool results replay as narration, never protocol ``tool``
         # messages. recent-history drops tool-call linkage, so a bare
         # ``role=tool`` turn orphans (no matching ``tool_use``) and
-        # upstream (Anthropic) 500s. fold into assistant-side text.
-        return Message(role="assistant", content=f"[tool result] {content}")
+        # upstream (Anthropic) 500s. render as user-side narration —
+        # NOT assistant: an assistant-role replay teaches the model to
+        # open fresh replies with ``[tool result] …`` and even fabricate
+        # results (mimicry, same trap as the ``[#id]`` tag above).
+        return Message(role="user", content=f"[tool result] {content}")
     if role == "assistant" or author is None:
         body = f"{content} {reactions_suffix}" if reactions_suffix else content
         return Message(role=role, content=body)
@@ -723,7 +725,7 @@ def _turn_to_message_with_context(
                 + " "
             )
 
-    prefixed = f"[{ts} {label}{msg_id_tag}] {reply_prefix}{content}"
+    prefixed = f"[{ts} {label} #{turn.channel_id}{msg_id_tag}] {reply_prefix}{content}"
     if reactions_suffix:
         prefixed = f"{prefixed} {reactions_suffix}"
     return Message(role=role, content=prefixed, name=name)
@@ -828,39 +830,8 @@ class CrossChannelContextLayer:
     def _viewer_key(self, ctx: AssemblyContext) -> str:
         return f"{ctx.viewer_mode}:{ctx.channel_id}"
 
-    async def build(self, ctx: AssemblyContext) -> str:
-        sources = self._viewer_map.get(ctx.channel_id or -1, [])
-        if not sources:
-            return ""
-
-        now = datetime.now(tz=UTC)
-        sections: list[str] = []
-        # token budget for whole block; sections added until next
-        # would push us over. newest source first so most recently
-        # active channel always lands.
-        remaining = self._max_tokens
-        for source_id in sources:
-            entry = await self._store.get_cross_context(
-                familiar_id=ctx.familiar_id,
-                viewer_mode=self._viewer_key(ctx),
-                source_channel_id=source_id,
-            )
-            if entry is None or not entry.summary_text.strip():
-                continue
-            age = (now - entry.created_at).total_seconds()
-            if age > self._ttl_seconds:
-                continue
-            section = f"### From channel #{source_id}\n\n" + entry.summary_text.strip()
-            if remaining is not None:
-                cost = estimate_tokens(section)
-                if cost > remaining and sections:
-                    break
-                section = _truncate_to_tokens(section, max_tokens=remaining)
-                remaining -= estimate_tokens(section)
-            sections.append(section)
-        if not sections:
-            return ""
-        return "## Cross-channel context\n\n" + "\n\n".join(sections)
+    async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
+        return ""  # retired — attentional stream replaces cross-channel summaries
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         sources = self._viewer_map.get(ctx.channel_id or -1, [])

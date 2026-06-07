@@ -24,6 +24,12 @@ Always follow red/green TDD:
 
 ## After Every Code Assignment
 
+Shortcut: `scripts/ci-local.sh` runs steps 1–5 below exactly as the CI
+`lint-and-test` job does (it also puts `uv` on PATH and re-syncs disk
+exec bits to git's modes first, so `ruff` doesn't fire spurious `EXE002`
+on machines whose mounts mark files executable). Run the steps by hand
+when you need finer control.
+
 1. Run `uv sync --dev --extra local-turn` to keep dependencies up to date (the `local-turn` extra brings in `numpy` + `huggingface_hub`, which test collection imports unconditionally)
 2. Run `uv run ruff check` to lint
 3. Run `uv run ruff format` to format

@@ -17,9 +17,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
+from familiar_connect.bus.envelope import Event
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.final_reminder import build_final_reminder
@@ -147,10 +150,11 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
-    from familiar_connect.bus.envelope import Event, TurnScope
+    from familiar_connect.bus.envelope import TurnScope
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.bus.router import TurnRouter
     from familiar_connect.context.assembler import Assembler
+    from familiar_connect.focus import FocusManager
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.llm import LLMClient
     from familiar_connect.tools.registry import ToolContext, ToolRegistry
@@ -189,6 +193,7 @@ class TextResponder:
             Callable[[int, str, dict[str, str]], ToolContext] | None
         ) = None,
         post_history_instructions: str = "",
+        focus_manager: FocusManager | None = None,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -210,10 +215,12 @@ class TextResponder:
         # responder runs ``agentic_loop`` instead of bare ``chat_stream``
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
+        # attentional focus controller; None = backward-compat (no focus gating)
+        self._focus_manager = focus_manager
         # in-process dedup; bus doesn't republish today, cheap insurance
         self._seen: set[str] = set()
 
-    async def handle(self, event: Event, bus: EventBus) -> None:  # noqa: ARG002
+    async def handle(self, event: Event, bus: EventBus) -> None:
         if event.topic != TOPIC_DISCORD_TEXT:
             return
         if event.event_id in self._seen:
@@ -225,7 +232,12 @@ class TextResponder:
             return
         channel_id = payload.get("channel_id")
         content = payload.get("content") or ""
-        if not isinstance(channel_id, int) or not content:
+        # idle nudge: synthetic wake event has no real user content —
+        # it just earns the model a focused turn (see _emit_idle_nudge)
+        is_wake = payload.get("wake") is True
+        if not isinstance(channel_id, int):
+            return
+        if not content and not is_wake:
             return
         raw_author = payload.get("author")
         author = raw_author if isinstance(raw_author, Author) else None
@@ -275,23 +287,50 @@ class TextResponder:
                     nick=m.guild_nick,
                 )
 
-        # persist user turn *before* streaming so RecentHistoryLayer
-        # in same task sees it. mirrors VoiceResponder
-        user_turn = await self._history.append_turn(
-            familiar_id=self._familiar_id,
-            channel_id=channel_id,
-            role="user",
-            content=content,
-            author=author,
-            guild_id=guild_id,
-            platform_message_id=message_id,
-            reply_to_message_id=reply_to_message_id,
+        # focus-aware staging: when a focus_manager is wired and
+        # channel is not focused, persist as staged turn and return —
+        # no LLM call, no reply. unread digest surfaces it next turn.
+        # wake events skip staging+persist entirely: they carry no real
+        # user content, only earn the model a focused turn.
+        focused = self._focus_manager is None or self._focus_manager.is_focused(
+            channel_id
         )
-        if mentions:
-            await self._history.record_mentions(
-                turn_id=user_turn.id,
-                canonical_keys=[m.canonical_key for m in mentions],
+        if not is_wake:
+            # persist user turn *before* streaming so RecentHistoryLayer
+            # in same task sees it. mirrors VoiceResponder
+            user_turn = await self._history.append_turn(
+                familiar_id=self._familiar_id,
+                channel_id=channel_id,
+                role="user",
+                content=content,
+                author=author,
+                guild_id=guild_id,
+                platform_message_id=message_id,
+                reply_to_message_id=reply_to_message_id,
+                consumed=focused,  # staged when not focused
             )
+            if mentions:
+                await self._history.record_mentions(
+                    turn_id=user_turn.id,
+                    canonical_keys=[m.canonical_key for m in mentions],
+                )
+            if not focused:
+                author_label = author.display_name if author else "unknown"
+                _logger.info(
+                    f"{ls.tag('📥 Staged', ls.Y)} "
+                    f"{ls.kv('ch', str(channel_id), vc=ls.LW)} "
+                    f"{ls.kv('from', author_label, vc=ls.LW)} "
+                    f"{ls.kv('text', content, vc=ls.LW)}"
+                )
+                # focused channel idle long enough → nudge the model so
+                # stranded unreads don't starve. model decides via
+                # shift_focus; the nudge never moves focus itself.
+                if self._focus_manager is not None and self._focus_manager.should_wake(
+                    channel_id
+                ):
+                    await self._emit_idle_nudge(bus)
+                return
+
         # seed retrieval before assembly so RagContextLayer sees the cue
         self._assembler.set_rag_cue(content)
 
@@ -351,9 +390,16 @@ class TextResponder:
             else:
                 thread_target = message_id
 
+        # if the model shifted focus this turn, send to the new channel
+        send_channel_id = channel_id
+        if self._focus_manager is not None:
+            pending = self._focus_manager.pending_text_focus()
+            if pending is not None:
+                send_channel_id = pending
+
         try:
             sent_message_id = await self._send_text(
-                channel_id, rewritten, thread_target, mention_user_ids
+                send_channel_id, rewritten, thread_target, mention_user_ids
             )
         except Exception as exc:  # noqa: BLE001 — surface but don't crash loop
             _logger.warning(
@@ -376,7 +422,7 @@ class TextResponder:
         # ``send_text`` — audit trail for "did bot thread this reply?"
         await self._history.append_turn(
             familiar_id=self._familiar_id,
-            channel_id=channel_id,
+            channel_id=send_channel_id,
             role="assistant",
             content=rewritten,
             author=None,
@@ -385,6 +431,45 @@ class TextResponder:
             reply_to_message_id=thread_target,
         )
         self._router.end_turn(scope)
+        if self._focus_manager is not None:
+            await self._focus_manager.end_turn()
+
+    async def _emit_idle_nudge(self, bus: EventBus) -> None:
+        """Publish a synthetic wake event for the focused text channel.
+
+        Earns the model one focused turn so it sees the unread digest
+        and can choose to shift_focus. Never moves focus itself.
+        """
+        fm = self._focus_manager
+        if fm is None:
+            return
+        focus_ch = fm.get_focus("text")
+        if focus_ch is None:
+            return
+        fm.mark_nudge_pending()
+        synth_id = uuid.uuid4().hex
+        await bus.publish(
+            Event(
+                event_id=synth_id,
+                turn_id=f"idle-wake-{synth_id}",
+                session_id=str(focus_ch),
+                parent_event_ids=(),
+                topic=TOPIC_DISCORD_TEXT,
+                timestamp=datetime.now(tz=UTC),
+                sequence_number=0,
+                payload={
+                    "familiar_id": self._familiar_id,
+                    "channel_id": focus_ch,
+                    "content": "[idle: unread messages waiting elsewhere]",
+                    "author": None,
+                    "wake": True,
+                },
+            )
+        )
+        _logger.info(
+            f"{ls.tag('⏰ Nudge', ls.LC)} "
+            f"{ls.kv('focus', fm.channel_label(focus_ch), vc=ls.LW)}"
+        )
 
     def _build_ping_resolver(
         self,
@@ -441,12 +526,27 @@ class TextResponder:
             guild_id=guild_id,
         )
         prompt = await self._assembler.assemble(ctx)
+        # focus context for unread digest + focus directive
+        focus_ch = (
+            self._focus_manager.get_focus("text") if self._focus_manager else None
+        )
+        unread_digest: dict[int, int] | None = None
+        if self._focus_manager is not None:
+            unread_digest = await self._history.staged_channels(
+                familiar_id=self._familiar_id
+            )
         # always append short output-controls instruction so model
         # knows ``[@X]`` and ``[↩]`` are routable. costs ~5 lines of
         # context, no per-channel enumeration. final reminder
         # restates current time + special inputs so model doesn't
         # drift on long-lived caches
-        reminder = build_final_reminder(viewer_mode="text")
+        ch_names = self._focus_manager.channel_names if self._focus_manager else {}
+        reminder = build_final_reminder(
+            viewer_mode="text",
+            focus_channel_id=focus_ch,
+            unread_digest=unread_digest,
+            channel_names=ch_names,
+        )
         system = "\n\n".join(
             s for s in (prompt.system_prompt, _BOT_OUTPUT_INSTRUCTIONS, reminder) if s
         )
@@ -460,6 +560,9 @@ class TextResponder:
             viewer_mode="text",
             include_mode_instruction=True,
             post_history_instructions=self._post_history_instructions,
+            focus_channel_id=focus_ch,
+            unread_digest=unread_digest,
+            channel_names=ch_names,
         )
         messages.append(Message(role="system", content=trailing))
 
@@ -630,7 +733,7 @@ class TextResponder:
                 )
                 return None
 
-        if bail_silent:
+        if bail_silent or result.is_silent:
             _logger.info(
                 f"{ls.tag('💤 Text', ls.B)} "
                 f"{ls.kv('decision', 'silent', vc=ls.LB)} "
