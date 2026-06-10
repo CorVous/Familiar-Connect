@@ -177,6 +177,53 @@ class TestAgenticLoopLeakedToolCallGuard:
         assert not result.final_content
 
     @pytest.mark.asyncio
+    async def test_python_style_leaked_silent_becomes_silent(self) -> None:
+        # Qwen3 thinking-mode artifact: writes Python call as plain text
+        leak = 'silent(reasoning="not addressed to me; general chat")'
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(leak), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is True
+        assert not result.final_content
+
+    @pytest.mark.asyncio
+    async def test_python_style_leaked_silent_case_insensitive(self) -> None:
+        leak = 'Silent(reasoning="sports chat, not aimed at me")'
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(leak), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is True
+        assert not result.final_content
+
+    @pytest.mark.asyncio
+    async def test_python_style_leaked_read_channel_stripped_not_silent(self) -> None:
+        # read_channel() as plain text: strip it, not silent
+        leak = "read_channel(limit=10)"
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(leak), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is False
+        assert not result.final_content
+
+    @pytest.mark.asyncio
     async def test_normal_reply_with_word_invoke_untouched(self) -> None:
         # stray mention mid-prose is content, not a leaked call
         text = "Let me invoke my legendary wit."

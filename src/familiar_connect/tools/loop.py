@@ -99,21 +99,33 @@ def _finalize_tool_calls(pending: dict[int, dict[str, Any]]) -> list[dict[str, A
 _LEADING_INVOKE_RE = re.compile(r"\s*<(?:\w+:)?invoke\b")
 _INVOKE_BLOCK_RE = re.compile(r"<(?:\w+:)?invoke\b.*?</(?:\w+:)?invoke>", re.DOTALL)
 _INVOKE_NAME_RE = re.compile(r'<(?:\w+:)?invoke\b[^>]*\bname="([^"]+)"')
+# Qwen3 thinking-mode artifact: model writes Python-style calls as plain text
+# e.g. silent(reasoning="…") or read_channel() instead of using the tools API.
+_PYTHON_SILENT_RE = re.compile(r"^\s*silent\s*\(", re.IGNORECASE)
+_PYTHON_TOOL_RE = re.compile(r"^\s*(read_channel|shift_focus)\s*\(", re.IGNORECASE)
 
 
 def _strip_leaked_tool_calls(content: str) -> tuple[str, bool]:
-    """Strip leaked ``<invoke …>`` XML emitted as plain text.
+    """Strip leaked tool invocations emitted as plain text.
+
+    Handles two formats:
+    - XML: ``<invoke name="silent">…</invoke>``
+    - Python: ``silent(reasoning="…")`` (Qwen3 thinking-mode artifact)
 
     Returns ``(cleaned, silent_leak)``. ``silent_leak`` True when a
-    stripped block named the ``silent`` tool — caller treats turn as
-    silent. Only fires when content *leads* with an invoke tag, so a
-    stray ``invoke`` mid-prose stays content.
+    stripped invocation named the ``silent`` tool — caller treats turn as
+    silent. Only fires when content *leads* with an invocation, so a
+    stray mention mid-prose stays content.
     """
-    if not _LEADING_INVOKE_RE.match(content):
-        return content, False
-    silent_leak = "silent" in _INVOKE_NAME_RE.findall(content)
-    cleaned = _INVOKE_BLOCK_RE.sub("", content).strip()
-    return cleaned, silent_leak
+    if _LEADING_INVOKE_RE.match(content):
+        silent_leak = "silent" in _INVOKE_NAME_RE.findall(content)
+        cleaned = _INVOKE_BLOCK_RE.sub("", content).strip()
+        return cleaned, silent_leak
+    if _PYTHON_SILENT_RE.match(content):
+        return "", True
+    if _PYTHON_TOOL_RE.match(content):
+        return "", False
+    return content, False
 
 
 def serialize_image_result(
