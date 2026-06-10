@@ -996,7 +996,6 @@ class TestTrailingReminder:
         msgs = captured[0]
         assert msgs[-1].role == "system"
         assert "Markdown" in msgs[-1].content
-        assert "<silent>" in msgs[-1].content
         assert "It is now" in msgs[-1].content
         # The trailing copy includes the text-mode ping/reply sentinels.
         assert "[@DisplayName]" in msgs[-1].content

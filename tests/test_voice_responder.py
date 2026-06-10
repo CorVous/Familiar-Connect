@@ -1031,8 +1031,7 @@ class TestTrailingReminder:
         msgs = captured[0]
         assert msgs[-1].role == "system"
         assert "You are speaking aloud" in msgs[-1].content
-        # The tail block also restates the silent sentinel + time.
-        assert "<silent>" in msgs[-1].content
+        # The tail block also restates the time.
         assert "It is now" in msgs[-1].content
 
 

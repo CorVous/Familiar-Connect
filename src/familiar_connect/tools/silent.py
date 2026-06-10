@@ -34,17 +34,16 @@ def build_silent_tool() -> Tool:
     return Tool(
         name="silent",
         description=(
-            "Stay silent this turn — do not send a reply. "
-            "Use when observation or context-gathering is appropriate "
-            "but a response would be intrusive or premature. "
-            "Provide a brief reasoning."
+            "Stay completely silent — send no reply to the channel. "
+            "Use when the conversation is not aimed at you and you have no stake. "
+            "The reasoning argument is a private internal note — never shown in chat."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "reasoning": {
                     "type": "string",
-                    "description": "Why the familiar is staying silent",
+                    "description": "Private internal note — never shown in chat.",
                 },
             },
             "required": ["reasoning"],

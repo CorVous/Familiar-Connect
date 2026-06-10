@@ -543,6 +543,7 @@ class TextResponder:
         ch_names = self._focus_manager.channel_names if self._focus_manager else {}
         reminder = build_final_reminder(
             viewer_mode="text",
+            include_time=False,
             focus_channel_id=focus_ch,
             unread_digest=unread_digest,
             channel_names=ch_names,
