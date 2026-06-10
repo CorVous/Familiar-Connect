@@ -111,6 +111,43 @@ class TestFtsSearch:
         # Should not raise; may return empty.
         store.search_turns(familiar_id="fam", query="fox?", limit=10)
 
+    @pytest.mark.parametrize(
+        "cue",
+        [
+            "isn't that fox cool",  # apostrophe contraction
+            "the fox's tail",  # possessive
+            "fox: real or not",  # colon (tantivy field syntax)
+            'he said "fox" again',  # quotes (tantivy phrase syntax)
+            "fox (the animal)",  # parens (tantivy grouping)
+        ],
+    )
+    def test_chat_punctuation_does_not_poison_recall(self, cue: str) -> None:
+        """Query-syntax chars in chat cues must not zero out retrieval.
+
+        ``parse_query`` raises on raw apostrophes/colons/quotes;
+        swallowing that to ``[]`` silently disables RAG for any
+        message containing a contraction or possessive. Query must
+        be sanitized to match the index-side simple tokenizer.
+        """
+        store = _store_with_turns()
+        results = store.search_turns(familiar_id="fam", query=cue, limit=10)
+        assert results, f"cue {cue!r} returned no hits"
+        assert all("fox" in r.content.lower() for r in results)
+
+    def test_uppercase_boolean_words_treated_as_text(self) -> None:
+        """AND/OR/NOT in chat are words, not operators.
+
+        Operator semantics would turn "fox AND strawberry" conjunctive
+        (zero hits — no turn has both) instead of disjunctive recall.
+        """
+        store = _store_with_turns()
+        results = store.search_turns(
+            familiar_id="fam", query="fox AND strawberry", limit=10
+        )
+        contents = [r.content.lower() for r in results]
+        assert any("fox" in c for c in contents)
+        assert any("strawberry" in c for c in contents)
+
     def test_latest_indexed_id_tracks_writes(self) -> None:
         store = _store_with_turns()
         latest = store.latest_fts_id(familiar_id="fam")
