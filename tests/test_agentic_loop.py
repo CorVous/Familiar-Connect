@@ -224,6 +224,79 @@ class TestAgenticLoopLeakedToolCallGuard:
         assert not result.final_content
 
     @pytest.mark.asyncio
+    async def test_bare_closing_think_tag_stripped(self) -> None:
+        # Qwen3 thinking-mode artifact: response is a lone </think> tag
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text("</think>"), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is False
+        assert not result.final_content
+
+    @pytest.mark.asyncio
+    async def test_leading_closing_think_tag_stripped_text_kept(self) -> None:
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text("</think>\nUmu."), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.final_content == "Umu."
+
+    @pytest.mark.asyncio
+    async def test_leading_think_block_stripped_text_kept(self) -> None:
+        # full reasoning block leaked into content: never ship it
+        leak = "<think>\nshe weighs the gate\n</think>\nUmu."
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(leak), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.final_content == "Umu."
+
+    @pytest.mark.asyncio
+    async def test_think_tag_after_leaked_silent_still_silent(self) -> None:
+        # artifact tag must not mask a leaked silent() behind it
+        leak = '</think>\nsilent(reasoning="gate unmet")'
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(leak), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.is_silent is True
+        assert not result.final_content
+
+    @pytest.mark.asyncio
+    async def test_think_mention_mid_prose_untouched(self) -> None:
+        text = "I think </think> is a vulgar rune."
+        llm = _ScriptedStreamLLM([
+            _Script(deltas=[_delta_text(text), _delta_finish("stop")])
+        ])
+        result = await agentic_loop(
+            llm=llm,
+            messages=[Message(role="user", content="hi")],
+            registry=ToolRegistry(),
+            ctx=_make_ctx(),
+        )
+        assert result.final_content == text
+
+    @pytest.mark.asyncio
     async def test_normal_reply_with_word_invoke_untouched(self) -> None:
         # stray mention mid-prose is content, not a leaked call
         text = "Let me invoke my legendary wit."
