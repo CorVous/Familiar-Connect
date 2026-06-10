@@ -12,23 +12,35 @@ def _at(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
 
 
 class TestBuildFinalReminder:
-    def test_text_mode_lists_all_sentinels(self) -> None:
+    def test_text_mode_lists_ping_and_reply_sentinels(self) -> None:
         out = build_final_reminder(viewer_mode="text", now=_at(2026, 5, 4, 14, 30))
         assert "It is now: 2026-05-04 2:30PM UTC" in out
-        assert "<silent>" in out
         assert "[@DisplayName]" in out
         assert "[↩ <message_id>]" in out
 
-    def test_voice_mode_only_silent_sentinel(self) -> None:
+    def test_text_mode_no_silent_sentinel(self) -> None:
+        out = build_final_reminder(viewer_mode="text", now=_at(2026, 5, 4, 14, 30))
+        assert "`<silent>`" not in out
+
+    def test_voice_mode_no_sentinels(self) -> None:
         out = build_final_reminder(viewer_mode="voice", now=_at(2026, 1, 1, 9, 5))
         assert "It is now: 2026-01-01 9:05AM UTC" in out
-        assert "<silent>" in out
         assert "[@DisplayName]" not in out
         assert "message_id" not in out
+        assert "`<silent>`" not in out
 
     def test_starts_with_horizontal_rule(self) -> None:
         out = build_final_reminder(viewer_mode="text", now=_at(2026, 5, 4, 0, 0))
         assert out.startswith("---")
+
+    def test_include_time_false_omits_timestamp(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            include_time=False,
+        )
+        assert "It is now:" not in out
+        assert "[@DisplayName]" in out
 
     def test_voice_mode_instruction_appended_when_requested(self) -> None:
         out = build_final_reminder(
@@ -65,10 +77,10 @@ class TestBuildFinalReminder:
         out = build_final_reminder(
             viewer_mode="voice",
             now=_at(2026, 5, 4, 14, 30),
-            post_history_instructions="# Etiquette\n\nUse <silent> generously.",
+            post_history_instructions="# Etiquette\n\nBe terse.",
         )
         assert "# Etiquette" in out
-        assert "Use <silent> generously." in out
+        assert "Be terse." in out
 
     def test_post_history_instructions_land_at_tail(self) -> None:
         out = build_final_reminder(
@@ -92,4 +104,4 @@ class TestBuildFinalReminder:
             post_history_instructions="   ",
         )
         # whitespace-only must not leave a dangling separator
-        assert out.rstrip().endswith("`<silent>` - do nothing")
+        assert not out.endswith("\n\n")

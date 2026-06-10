@@ -1,10 +1,8 @@
 """Tail block appended to every system prompt.
 
 Restates current time (so model doesn't drift on long-lived caches)
-and enumerates literal sentinels the responder honours:
-``<silent>``, ``[@DisplayName]``, ``[↩ <message_id>]``. Voice
-channels only see ``<silent>`` — others have no meaning without
-text routing.
+and enumerates text-channel sentinels: ``[@DisplayName]``,
+``[↩ <message_id>]``.
 
 Rendered a *second time* by the responders as a trailing
 ``system`` message after recent history, with
@@ -45,6 +43,7 @@ def build_final_reminder(
     *,
     viewer_mode: str,
     now: datetime | None = None,
+    include_time: bool = True,
     include_mode_instruction: bool = False,
     tools_enabled: bool = False,
     post_history_instructions: str | None = None,
@@ -54,10 +53,11 @@ def build_final_reminder(
 ) -> str:
     """Render closing reminder block.
 
-    Always lists ``<silent>``. Text channels add ping + reply
-    sentinels — those rely on per-message routing the voice path
-    lacks. ``include_mode_instruction`` appends the per-mode
-    operating directive — used by trailing-system-message copy so
+    Text channels list ping + reply sentinels.
+    ``include_time=False`` omits the timestamp — use on head system
+    messages to keep the cache prefix stable.
+    ``include_mode_instruction`` appends the per-mode operating
+    directive — used by trailing-system-message copy so
     directive lands at tail of context window. ``tools_enabled``
     (voice only) appends a short instruction targeting the
     empty-content tool_call failure mode — nudges model to speak
@@ -68,18 +68,14 @@ def build_final_reminder(
     ``post_history_instructions`` (per-familiar etiquette) appended
     last — deepest, most recency-biased slot. Blank/None omits it.
     """
-    when = _fmt_when(now or datetime.now(tz=UTC))
-    lines = [
-        "---",
-        "",
-        f"It is now: {when}",
-        "",
-        "Special input:",
-        "",
-        "* `<silent>` - do nothing",
-    ]
+    lines = ["---"]
+    if include_time:
+        when = _fmt_when(now or datetime.now(tz=UTC))
+        lines.extend(["", f"It is now: {when}"])
     if viewer_mode == "text":
         lines.extend([
+            "",
+            "Special input:",
             "",
             "* `[@DisplayName]` - ping user",
             "* `[↩ <message_id>]` - reply to message",
