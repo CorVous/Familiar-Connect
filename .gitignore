@@ -38,3 +38,6 @@ data/familiars/*
 .claude/projects/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+
+# macOS Finder junk
+.DS_Store
