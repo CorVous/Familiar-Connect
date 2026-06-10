@@ -38,3 +38,9 @@ data/familiars/*
 .claude/projects/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+
+# macOS Finder junk
+.DS_Store
+
+# Eval run artifacts — regenerable output of eval_sapphire_holistic.py
+evals/results/
