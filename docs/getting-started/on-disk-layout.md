@@ -15,6 +15,9 @@ dirs are created lazily alongside the DB. Multiple character folders
 can sit side-by-side under `data/familiars/`; only the one
 `FAMILIAR_ID` points at is loaded per process.
 
+An optional `seed_turns.toml` carries authored memories (journal
+turns plus stance facts) applied by `familiar-connect seed-memory` —
+see [Memory strategies](../architecture/memory-strategies.md#seeding-authored-memories).
 An optional `activities.toml` carries the activities catalog —
 see [Activities](../architecture/activities.md#configuration).
 

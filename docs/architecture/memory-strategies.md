@@ -396,6 +396,54 @@ projector, not a replacement.
 Mixing them lets the agent rewrite its own character description.
 Splitting them keeps the trust boundary inspectable.
 
+## Seeding authored memories
+
+`familiar-connect seed-memory --familiar <id>` inserts authored
+memories from `data/familiars/<id>/seed_turns.toml`: first-person
+"journal" turns plus hand-written stance facts citing them. This is
+the home for a character's *feelings and stances* — opinions on
+people, recurring concerns, private convictions — which belong in
+the retrieval store rather than the system prompt, so they surface
+when relevant and can later evolve through real conversations.
+
+Facts are inserted directly, not LLM-extracted: `FactExtractor` is
+deliberately tuned to skip feelings and self-statements, the exact
+content seeding carries. Each authored fact cites its journal turn
+via `source_turn_ids`, so provenance works like any extracted fact.
+Seeded facts are global (`channel_id` NULL); journal turns land in a
+reserved channel that is not in `subscriptions.toml`, so they never
+render as chat history but remain FTS-searchable.
+
+Format:
+
+```toml
+channel_id = 999000000000000001  # reserved journal channel
+
+[[entries]]
+id = "monksnail-parasite"        # permanent idempotency key
+turn = "The monksnail shifted its grip again. The file grows."
+facts = [
+    { text = "Sapphire is convinced the monksnail is a parasite.", importance = 8 },
+]
+```
+
+Properties:
+
+- **Idempotent** — entries key on `platform_message_id =
+  "seed:<id>"`; re-runs skip existing entries. Editing an existing
+  entry is *not* re-applied: add a new entry (supersession retires
+  the old fact) or wipe and reseed.
+- **Watermark-aware** — when the store has no unprocessed extractor
+  backlog, the memory-writer watermark advances past the seed turns
+  so `FactExtractor` never re-processes them. With a backlog, the
+  watermark is left untouched and the extractor re-sweeps seed turns
+  (harmless — authored facts are already present). Prefer seeding
+  while the bot is offline or idle.
+- **Embedded immediately** — runs `FactEmbeddingWorker` to
+  completion using the configured `[providers.embedding]` backend;
+  `--no-embed` skips this (embedding signal stays cold until the
+  bot's worker catches up).
+
 ## Operator playbook
 
 ### Rebuild a side-index
@@ -403,6 +451,9 @@ Splitting them keeps the trust boundary inspectable.
 ```bash
 sqlite3 data/familiars/<id>/history.db "DELETE FROM facts;"
 # next FactExtractor tick rebuilds from turns
+familiar-connect seed-memory --familiar <id>
+# required after a wipe: extractor skips stance/feeling content,
+# so seeded facts only come back via seed-memory
 ```
 
 ### Force a dossier re-fold
