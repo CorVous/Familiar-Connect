@@ -14,6 +14,8 @@
 # the directory as a reference, not a runnable familiar. Do not set
 # FAMILIAR_ID=_default.
 
+# IANA zone name (e.g. "America/Los_Angeles"); sets the timezone the
+# familiar's clock renders in. Invalid names fail at startup.
 display_tz = "UTC"
 aliases    = []
 

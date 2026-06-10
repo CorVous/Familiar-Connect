@@ -84,6 +84,7 @@ class VoiceResponder:
             "checking...",
         ),
         post_history_instructions: str = "",
+        display_tz: str = "UTC",
         focus_manager: FocusManager | None = None,
     ) -> None:
         self._assembler = assembler
@@ -97,6 +98,8 @@ class VoiceResponder:
         # per-familiar etiquette appended to the trailing reminder
         # (post-history). empty = omitted.
         self._post_history_instructions = post_history_instructions
+        # IANA zone for the final-reminder clock (validated at config load)
+        self._display_tz = display_tz
         # one in-flight final-handling task per (session, user);
         # replaced when newer final from same speaker arrives.
         # cross-user tasks coexist; their reply-generation critical
@@ -341,7 +344,9 @@ class VoiceResponder:
             and self._tool_context_factory is not None
             and self._llm.tool_calling_enabled
         )
-        reminder = build_final_reminder(viewer_mode="voice", tools_enabled=tool_mode)
+        reminder = build_final_reminder(
+            viewer_mode="voice", display_tz=self._display_tz, tools_enabled=tool_mode
+        )
         system = "\n\n".join(s for s in (prompt.system_prompt, reminder) if s)
         messages: list[Message] = []
         if system:
@@ -354,6 +359,7 @@ class VoiceResponder:
         # trailing copy so it lands closest to next assistant turn
         trailing = build_final_reminder(
             viewer_mode="voice",
+            display_tz=self._display_tz,
             include_mode_instruction=True,
             tools_enabled=tool_mode,
             post_history_instructions=self._post_history_instructions,

@@ -979,6 +979,7 @@ class TestDefaultAssemblerLayerOrder:
         familiar = MagicMock(name="familiar")
         familiar.root = tmp_path
         familiar.history_store = MagicMock(name="history_store")
+        familiar.config.display_tz = "UTC"  # real IANA name; layers resolve ZoneInfo
         asm = _default_assembler(
             familiar, window_size=20, budget=TierBudget(total_tokens=3000)
         )

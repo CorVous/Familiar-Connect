@@ -9,6 +9,7 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from familiar_connect.budget import ModelBudgetCurve, TierBudget
 
@@ -471,6 +472,14 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     text_silence_gap_fold_seconds = _parse_text_silence_gap_fold(history_section)
 
     display_tz = str(data.get("display_tz", "UTC"))
+    try:
+        ZoneInfo(display_tz)
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        msg = (
+            f"invalid display_tz {display_tz!r} — use an IANA name "
+            "like 'America/Los_Angeles'"
+        )
+        raise ConfigError(msg) from e
 
     aliases_raw = data.get("aliases", [])
     if not isinstance(aliases_raw, list):

@@ -193,6 +193,7 @@ class TextResponder:
             Callable[[int, str, dict[str, str]], ToolContext] | None
         ) = None,
         post_history_instructions: str = "",
+        display_tz: str = "UTC",
         focus_manager: FocusManager | None = None,
     ) -> None:
         self._assembler = assembler
@@ -205,6 +206,8 @@ class TextResponder:
         # per-familiar etiquette appended to the trailing reminder
         # (post-history). empty = omitted.
         self._post_history_instructions = post_history_instructions
+        # IANA zone for the final-reminder clock (validated at config load)
+        self._display_tz = display_tz
         # discord ``Bot is typing…`` indicator factory; ``None`` opts out
         self._trigger_typing = trigger_typing
         # typing-event policy — bot pingpong backoff + user-typing cancel.
@@ -559,6 +562,7 @@ class TextResponder:
         # assistant's next turn
         trailing = build_final_reminder(
             viewer_mode="text",
+            display_tz=self._display_tz,
             include_mode_instruction=True,
             post_history_instructions=self._post_history_instructions,
             focus_channel_id=focus_ch,

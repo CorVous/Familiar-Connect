@@ -15,6 +15,7 @@ there.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 # per-viewer-mode operating directive in the trailing reminder.
 # intentionally duplicates strings ``OperatingModeLayer`` is
@@ -32,17 +33,21 @@ _MODE_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-def _fmt_when(now: datetime) -> str:
-    """Render as ``YYYY-MM-DD H:MMpm UTC`` (no leading zero on hour)."""
-    aware = now.astimezone(UTC)
+def _fmt_when(now: datetime, display_tz: str = "UTC") -> str:
+    """Render as ``YYYY-MM-DD H:MMpm TZ`` in *display_tz* (no leading zero on hour).
+
+    *display_tz* must be a valid IANA name; validated at config load.
+    """
+    aware = now.astimezone(ZoneInfo(display_tz))
     clock = aware.strftime("%I:%M%p").lstrip("0")
-    return f"{aware.strftime('%Y-%m-%d')} {clock} UTC"
+    return f"{aware.strftime('%Y-%m-%d')} {clock} {aware.strftime('%Z')}"
 
 
 def build_final_reminder(
     *,
     viewer_mode: str,
     now: datetime | None = None,
+    display_tz: str = "UTC",
     include_time: bool = True,
     include_mode_instruction: bool = False,
     tools_enabled: bool = False,
@@ -55,7 +60,8 @@ def build_final_reminder(
 
     Text channels list ping + reply sentinels.
     ``include_time=False`` omits the timestamp — use on head system
-    messages to keep the cache prefix stable.
+    messages to keep the cache prefix stable. ``display_tz`` (IANA
+    name) sets the zone the ``It is now:`` line renders in.
     ``include_mode_instruction`` appends the per-mode operating
     directive — used by trailing-system-message copy so
     directive lands at tail of context window. ``tools_enabled``
@@ -70,7 +76,7 @@ def build_final_reminder(
     """
     lines = ["---"]
     if include_time:
-        when = _fmt_when(now or datetime.now(tz=UTC))
+        when = _fmt_when(now or datetime.now(tz=UTC), display_tz)
         lines.extend(["", f"It is now: {when}"])
     if viewer_mode == "text":
         lines.extend([
