@@ -158,6 +158,7 @@ class LLMClient:
         tool_calling: bool = False,
         image_tools: bool = False,
         multimodal: bool = False,
+        no_stream: bool = False,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -180,6 +181,9 @@ class LLMClient:
         self.image_tools_enabled = image_tools
         # whether to send image content blocks in tool-result messages
         self.multimodal = multimodal
+        # skip SSE streaming; fixes tool-call-as-text on models with
+        # streaming + thinking-off interaction bugs (e.g. Qwen3 vLLM)
+        self.no_stream = no_stream
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
@@ -336,6 +340,29 @@ class LLMClient:
             text, tool-call fragments, or finish reason.
 
         """
+        if self.no_stream:
+            msg = await self.chat(messages)
+            if isinstance(msg.content, str) and msg.content:
+                yield LLMDelta(content=msg.content)
+            if msg.tool_calls:
+                for i, tc in enumerate(msg.tool_calls):
+                    fn = tc.get("function", {})
+                    yield LLMDelta(
+                        tool_calls=[
+                            {
+                                "index": i,
+                                "id": tc.get("id", f"call_{i}"),
+                                "type": "function",
+                                "function": {
+                                    "name": fn.get("name", ""),
+                                    "arguments": fn.get("arguments", "{}"),
+                                },
+                            }
+                        ]
+                    )
+            yield LLMDelta(finish_reason="stop" if not msg.tool_calls else "tool_calls")
+            return
+
         url = f"{self.base_url}/chat/completions"
         headers = self.build_headers()
         payload = self.build_payload(messages, tools=tools)
