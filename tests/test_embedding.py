@@ -8,6 +8,7 @@ shipped built-ins (``off``, ``hash``).
 
 from __future__ import annotations
 
+import importlib.util
 import math
 
 import pytest
@@ -106,6 +107,23 @@ class TestEmbedderFactory:
     def test_unknown_backend_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown embedding backend"):
             create_embedder(EmbeddingConfig(backend="nonexistent"))
+
+    def test_fastembed_without_extra_fails_at_load(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``backend=fastembed`` with extra missing → refuse to start.
+
+        Fail-fast at config load beats lazily crashing mid-turn on the
+        first message. Error names the install hint.
+        """
+        real = importlib.util.find_spec
+
+        def fake_find_spec(name: str, package: str | None = None) -> object | None:
+            return None if name == "fastembed" else real(name, package)
+
+        monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+        with pytest.raises(RuntimeError, match="local-embed"):
+            create_embedder(EmbeddingConfig(backend="fastembed"))
 
 
 class TestEmbeddingConfig:

@@ -722,6 +722,14 @@ uv sync --extra local-embed
 Brings in `fastembed` + `onnxruntime` + `numpy`. Model downloads on
 first use (cached under `~/.cache/fastembed`). Common choices:
 
+If `backend = "fastembed"` is selected but the extra isn't installed,
+the bot **refuses to start** — `create_embedder` checks for the
+`fastembed` import at load and raises with the `uv sync --extra
+local-embed` hint. Fail-fast at boot beats a misconfigured deploy
+silently crashing on its first message. (The import is checked, not
+the model download — startup stays fast; the ~130 MB model still
+loads lazily on first embed.)
+
 | `fastembed_model` | Dim | Approx size | Notes |
 |---|---|---|---|
 | `BAAI/bge-small-en-v1.5` | 384 | ~130 MB | Default. Best speed/quality tradeoff. |

@@ -15,6 +15,7 @@ Live-model tests against a real BGE-small download are tagged
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -32,15 +33,31 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+def _pretend_fastembed_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake the factory's import probe — dev env lacks the extra."""
+    real = importlib.util.find_spec
+
+    def fake_find_spec(name: str, package: str | None = None) -> object | None:
+        if name == "fastembed":
+            return SimpleNamespace(name="fastembed")
+        return real(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+
 class TestFactory:
     def test_known_embedders_includes_fastembed(self) -> None:
         assert "fastembed" in known_embedders()
 
-    def test_factory_picks_fastembed_when_selected(self) -> None:
+    def test_factory_picks_fastembed_when_selected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _pretend_fastembed_installed(monkeypatch)
         e = create_embedder(EmbeddingConfig(backend="fastembed"))
         assert isinstance(e, FastEmbedEmbedder)
 
-    def test_factory_threads_model_name(self) -> None:
+    def test_factory_threads_model_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _pretend_fastembed_installed(monkeypatch)
         e = create_embedder(
             EmbeddingConfig(
                 backend="fastembed",

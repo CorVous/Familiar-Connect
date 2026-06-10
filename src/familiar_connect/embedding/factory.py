@@ -10,13 +10,14 @@ Built-ins:
 * ``off`` — returns ``None``. Disables seam end to end.
 * ``hash`` — :class:`HashEmbedder`. Deterministic, no extra deps.
 * ``fastembed`` — :class:`FastEmbedEmbedder`. ONNX-backed sentence
-  embedder. Constructed eagerly; model itself loads lazily on first
-  ``embed()`` so missing ``local-embed`` extra fails loudly the first
-  time a vector is needed (not at config parse).
+  embedder. Factory probes the ``fastembed`` import at load and raises
+  if the ``local-embed`` extra is missing — fail fast at startup, not
+  mid-turn. Model itself still loads lazily on first ``embed()``.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -71,6 +72,16 @@ def _hash_factory(config: EmbeddingConfig) -> Embedder:
 
 
 def _fastembed_factory(config: EmbeddingConfig) -> Embedder:
+    # fail fast at load: a deploy that selects fastembed but lacks the
+    # extra should refuse to start, not crash mid-turn on first embed.
+    # probe the import only (not the ~130 MB model) — startup stays fast,
+    # model still loads lazily on first embed().
+    if importlib.util.find_spec("fastembed") is None:
+        msg = (
+            "embedding backend 'fastembed' requires the 'local-embed' extra. "
+            "Install with `uv sync --extra local-embed`."
+        )
+        raise RuntimeError(msg)
     return FastEmbedEmbedder(
         model_name=config.fastembed_model,
         cache_dir=config.fastembed_cache_dir,
