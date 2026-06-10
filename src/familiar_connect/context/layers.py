@@ -13,8 +13,9 @@ import operator
 import re
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import TYPE_CHECKING, Protocol
+from zoneinfo import ZoneInfo
 
 from familiar_connect.budget import (
     estimate_message_tokens,
@@ -145,9 +146,12 @@ class RecentHistoryLayer:
         max_tokens: int | None = None,
         coalesce_max_gap_seconds: float = 45.0,
         silence_gap_fold_seconds: float = 0.0,
+        display_tz: str = "UTC",
     ) -> None:
         self._store = store
         self._sync = store.sync
+        # IANA zone for rendered turn clocks (validated at config load)
+        self._tz = ZoneInfo(display_tz)
         self._window_size = window_size
         self._max_tokens = max_tokens
         # 0 disables; otherwise consecutive same-speaker turns within
@@ -223,6 +227,7 @@ class RecentHistoryLayer:
                 guild_id=ctx.guild_id,
                 in_window_msg_ids=in_window_msg_ids,
                 reactions=reactions.get(turn.platform_message_id or "", ()),
+                tz=self._tz,
             )
             for turn in turns
         ]
@@ -578,14 +583,14 @@ def _rerank_fact_candidates(
     return [f for _, _, f in ranked[:limit]]
 
 
-def _format_clock_12h(ts: datetime) -> str:
-    """UTC time as ``2:29PM`` (no leading zero on hour)."""
-    return ts.astimezone(UTC).strftime("%I:%M%p").lstrip("0")
+def _format_clock_12h(ts: datetime, tz: tzinfo = UTC) -> str:
+    """Time in *tz* as ``2:29PM`` (no leading zero on hour)."""
+    return ts.astimezone(tz).strftime("%I:%M%p").lstrip("0")
 
 
-def _format_date_iso(ts: datetime) -> str:
-    """UTC date as ``YYYY-MM-DD``."""
-    return ts.astimezone(UTC).strftime("%Y-%m-%d")
+def _format_date_iso(ts: datetime, tz: tzinfo = UTC) -> str:
+    """Date in *tz* as ``YYYY-MM-DD``."""
+    return ts.astimezone(tz).strftime("%Y-%m-%d")
 
 
 def _trim_messages_to_token_cap(
@@ -616,6 +621,7 @@ def _reply_prefix(
     store: HistoryStore,
     familiar_id: str,
     guild_id: int | None,
+    tz: tzinfo = UTC,
 ) -> str:
     """``[↩ Bob (HH:MM): …]`` prefix for a child reply turn.
 
@@ -637,7 +643,7 @@ def _reply_prefix(
     if parent_in_window:
         snippet = _truncate(parent_text, limit=_REPLY_PARENT_SNIPPET_CAP)
         return f"↩ {parent_label}: {snippet}"
-    parent_ts = parent.timestamp.astimezone(UTC).strftime("%H:%M")
+    parent_ts = parent.timestamp.astimezone(tz).strftime("%H:%M")
     full = _truncate(parent_text, limit=_REPLY_PARENT_FULL_CAP)
     return f"↩ {parent_label} ({parent_ts}): {full}"
 
@@ -658,10 +664,11 @@ def _turn_to_message_with_context(
     guild_id: int | None,
     in_window_msg_ids: set[str],
     reactions: tuple[tuple[str, int], ...] = (),
+    tz: tzinfo = UTC,
 ) -> Message:
     """Render :class:`HistoryTurn` into LLM :class:`Message`.
 
-    Timestamp rendered as UTC ``HH:MM``. Date intentionally omitted
+    Timestamp rendered as ``HH:MM`` in *tz*. Date intentionally omitted
     — recent-history window is short. Reply markers and mention
     rewriting applied here so all enrichment lives in one place.
     ``platform_message_id`` for *user* turns (when present) surfaces
@@ -699,7 +706,7 @@ def _turn_to_message_with_context(
         familiar_id=familiar_id,
     )
     name = sanitize_name(author.canonical_key)
-    ts = turn.timestamp.astimezone(UTC).strftime("%H:%M")
+    ts = turn.timestamp.astimezone(tz).strftime("%H:%M")
 
     # reply marker, depth-adaptive
     reply_prefix = ""
@@ -721,6 +728,7 @@ def _turn_to_message_with_context(
                     store=store,
                     familiar_id=familiar_id,
                     guild_id=guild_id,
+                    tz=tz,
                 )
                 + " "
             )
@@ -1024,9 +1032,12 @@ class RagContextLayer:
         embedding_weight: float = 0.0,
         embedder: Embedder | None = None,
         fact_overfetch: int = 12,
+        display_tz: str = "UTC",
     ) -> None:
         self._store = store
         self._sync = store.sync
+        # IANA zone for rendered date headers + clocks (validated at config load)
+        self._tz = ZoneInfo(display_tz)
         self._max_results = max_results
         self._max_facts = max_facts
         self._recent_window_size = recent_window_size
@@ -1175,7 +1186,7 @@ class RagContextLayer:
         """Group hits + neighbour context by date, render blockquote lines.
 
         For each FTS hit, expand to ``id ± context_window`` and
-        de-dupe, then bucket by UTC date. Each bucket emits a
+        de-dupe, then bucket by date in *display_tz*. Each bucket emits a
         ``YYYY-MM-DD:`` header followed by ``> [H:MMpm Author]:
         text`` lines so model sees a hit with surrounding chatter.
 
@@ -1207,7 +1218,9 @@ class RagContextLayer:
 
         by_date: dict[str, list[HistoryTurn]] = {}
         for turn in kept:
-            by_date.setdefault(_format_date_iso(turn.timestamp), []).append(turn)
+            by_date.setdefault(_format_date_iso(turn.timestamp, self._tz), []).append(
+                turn
+            )
 
         lines: list[str] = []
         for date_label in sorted(by_date):
@@ -1220,7 +1233,7 @@ class RagContextLayer:
                     familiar_id=ctx.familiar_id,
                     guild_id=ctx.guild_id,
                 )
-                clock = _format_clock_12h(turn.timestamp)
+                clock = _format_clock_12h(turn.timestamp, self._tz)
                 content_lines = rewritten.split("\n")
                 lines.append(f"> [{clock} {label}]: {content_lines[0]}")
                 # keep blockquote intact across newlines; bare `>` for

@@ -251,6 +251,7 @@ def _default_assembler(
                 importance_weight=retrieval.importance_weight,
                 embedding_weight=retrieval.embedding_weight,
                 embedder=embedder,
+                display_tz=familiar.config.display_tz,
             ),
             RecentHistoryLayer(
                 store=store,
@@ -260,6 +261,7 @@ def _default_assembler(
                     familiar.config.recent_history_coalesce_max_gap_seconds
                 ),
                 silence_gap_fold_seconds=silence_gap_fold_seconds,
+                display_tz=familiar.config.display_tz,
             ),
         ],
         budgeter=Budgeter(budget, channel_total_tokens=channel_total_tokens),
