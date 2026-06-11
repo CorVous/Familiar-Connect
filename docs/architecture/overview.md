@@ -16,6 +16,8 @@ Deeper dives:
 - [Voice pipeline](voice-pipeline.md) — cascaded vs S2S,
   two-stage turn detection, sentence streaming, swap points.
 - [Tuning](tuning.md) — every operator knob, one page.
+- [Prompting field lessons](prompting.md) — measured findings from
+  character-prompt iteration across model scales.
 - [Roadmap](roadmap.md) — research-driven priorities.
 
 ```mermaid
