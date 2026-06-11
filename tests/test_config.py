@@ -196,6 +196,26 @@ class TestLoadCharacterConfig:
         cfg = load_character_config(tmp_path / "missing.toml", defaults_path=defaults)
         assert cfg.llm["prose"].reasoning is None
 
+    def test_reasoning_default_sentinel_overrides_merged_value(
+        self, tmp_path: Path
+    ) -> None:
+        # TOML has no null — "default" is the only way to reclaim model
+        # default when _default/character.toml merges a reasoning level in
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text(
+            '[llm.fast]\nmodel = "x"\nreasoning = "off"\n'
+            '[llm.prose]\nmodel = "x"\nreasoning = "medium"\n'
+            '[llm.background]\nmodel = "x"\n'
+        )
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "m"\nreasoning = "default"\n'
+            '[llm.prose]\nmodel = "m"\nreasoning = "default"\n'
+        )
+        cfg = load_character_config(path, defaults_path=defaults)
+        assert cfg.llm["fast"].reasoning is None
+        assert cfg.llm["prose"].reasoning is None
+
     def test_invalid_reasoning_rejected(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:

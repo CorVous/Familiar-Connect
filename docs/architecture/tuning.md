@@ -130,7 +130,9 @@ max_concurrent_requests = 4  # process-wide cap on in-flight LLM requests
 [llm.fast]
 model        = "anthropic/claude-haiku-4.5"
 temperature  = 0.7
-reasoning    = "off"        # "off" | "low" | "medium" | "high" | omit
+reasoning    = "off"        # "off" | "low" | "medium" | "high" | "default" | omit
+                            # "default" = model default; overrides a level merged
+                            # in from _default/character.toml (TOML has no null)
 tool_calling = false
 
 [llm.prose]
