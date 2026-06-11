@@ -572,13 +572,27 @@ max_concurrent_requests  = 4               # shared; process-wide cap
 [llm.<slot>]
 model                    = "z-ai/glm-5.1"   # required
 temperature              = 0.7              # optional, [0, 2]
+top_p                    = 0.95             # optional, [0, 1]
+top_k                    = 20               # optional, positive int
+presence_penalty         = 1.5              # optional, [-2, 2]
 provider_order           = ["z-ai"]         # optional, OpenRouter pin
 provider_allow_fallbacks = true             # optional, default true
-reasoning                = "medium"         # "off"|"low"|"medium"|"high"|omit
+reasoning                = "medium"         # "off"|"none"|"low"|"medium"|"high"|"default"|omit
+think_prepend            = false            # optional, default false
 tool_calling             = false            # optional, default false
 image_tools              = false            # optional, default false
 multimodal               = false            # optional, default false
 ```
+
+### Sampling knobs (`top_p` / `top_k` / `presence_penalty`)
+
+Optional pass-throughs to the OpenRouter payload; omitted = provider
+default. Set them when a model card prescribes specific values — e.g.
+Qwen3.6 requires `presence_penalty = 1.5` and mode-specific
+temperature/top_p, because near-greedy decoding (low temperature,
+default penalties) sends that family into endless repetition loops:
+runaway multi-minute thinking turns in thinking mode, degenerate text
+otherwise.
 
 ### `reasoning`
 
@@ -586,9 +600,22 @@ Maps to OpenRouter's `reasoning` parameter:
 
 - `"off"` → `reasoning.exclude = true` (suppress thinking even on
   models that reason by default, like GLM 5.1).
+- `"none"` → `reasoning.effort = "none"` (disable thinking generation
+  entirely — the no-think mode for hybrid-reasoning models like
+  Qwen3.6; pair with `think_prepend`).
 - `"low"` / `"medium"` / `"high"` → `reasoning.effort = <level>`.
+- `"default"` → no `reasoning` field; reclaims the model default over
+  a level merged in from `_default/character.toml`.
 - omitted → no `reasoning` field; defer to model default. Haiku 4.5
   never reasons regardless; GLM 5.1 reasons by default.
+
+### `think_prepend`
+
+Appends a fake closed think block (`<think>\n\n</think>`) as an
+assistant prefill message on every request from this slot's client.
+Qwen3.6 no-think stabiliser: with `reasoning = "none"` and no prefill,
+the model leaks thinking as plain text. Useless on other models —
+leave `false`.
 
 ### `tool_calling`
 

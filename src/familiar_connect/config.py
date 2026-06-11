@@ -43,6 +43,7 @@ Tiered by latency / quality:
 
 REASONING_LEVELS: frozenset[str] = frozenset({
     "off",
+    "none",
     "low",
     "medium",
     "high",
@@ -51,6 +52,8 @@ REASONING_LEVELS: frozenset[str] = frozenset({
 """Allowed values for ``[llm.<slot>].reasoning``.
 
 * ``"off"`` — explicitly suppress (OpenRouter ``reasoning.exclude``).
+* ``"none"`` — disable thinking generation (``effort="none"``); on
+  qwen3.6 pair with ``think_prepend`` or thinking leaks as text.
 * ``"low"`` / ``"medium"`` / ``"high"`` — effort levels.
 * ``"default"`` — model default; overrides a level merged in from
   ``_default/character.toml`` (TOML has no null).
@@ -64,6 +67,16 @@ class LLMSlotConfig:
 
     model: str
     temperature: float | None = None
+    # extra sampling knobs; ``None`` = provider default. Qwen3.x cards
+    # prescribe per-mode values — near-greedy decoding causes endless
+    # repetition loops on that family.
+    top_p: float | None = None
+    top_k: int | None = None
+    presence_penalty: float | None = None
+    # Qwen3 no-think stabiliser: append fake closed think block as
+    # assistant prefill each call. Required with ``reasoning="none"``
+    # on qwen3.6 — without it thinking leaks as plain text.
+    think_prepend: bool = False
     # OpenRouter provider routing override. ``None`` = default (per-call).
     # Pinned order stabilises prompt caching, costs some availability.
     # Stopgap — see docs/architecture/tuning.md § provider pinning.
@@ -1452,6 +1465,30 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
                 f"got {type(temperature_raw).__name__}"
             )
             raise ConfigError(msg)
+        top_p = _parse_ranged_float(name, section, "top_p", 0.0, 1.0)
+        presence_penalty = _parse_ranged_float(
+            name, section, "presence_penalty", -2.0, 2.0
+        )
+        top_k_raw = section.get("top_k")
+        top_k: int | None = None
+        if top_k_raw is not None:
+            if (
+                not isinstance(top_k_raw, int)
+                or isinstance(top_k_raw, bool)
+                or top_k_raw < 1
+            ):
+                msg = (
+                    f"[llm.{name}].top_k must be a positive integer, got {top_k_raw!r}"
+                )
+                raise ConfigError(msg)
+            top_k = top_k_raw
+        think_prepend_raw = section.get("think_prepend", False)
+        if not isinstance(think_prepend_raw, bool):
+            msg = (
+                f"[llm.{name}].think_prepend must be a bool, "
+                f"got {type(think_prepend_raw).__name__}"
+            )
+            raise ConfigError(msg)
         provider_order = _parse_provider_order(name, section.get("provider_order"))
         allow_fallbacks_raw = section.get("provider_allow_fallbacks", True)
         if not isinstance(allow_fallbacks_raw, bool):
@@ -1504,6 +1541,10 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
         slots[name] = LLMSlotConfig(
             model=model,
             temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence_penalty=presence_penalty,
+            think_prepend=think_prepend_raw,
             provider_order=provider_order,
             provider_allow_fallbacks=allow_fallbacks_raw,
             reasoning=reasoning,
@@ -1512,6 +1553,27 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
             multimodal=multimodal_raw,
         )
     return slots
+
+
+def _parse_ranged_float(
+    slot_name: str,
+    section: dict,
+    key: str,
+    lo: float,
+    hi: float,
+) -> float | None:
+    """Validate optional numeric ``[llm.<slot>].<key>`` within [lo, hi]."""
+    raw = section.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        msg = f"[llm.{slot_name}].{key} must be a number, got {type(raw).__name__}"
+        raise ConfigError(msg)
+    value = float(raw)
+    if not lo <= value <= hi:
+        msg = f"[llm.{slot_name}].{key} must be in [{lo:g}, {hi:g}], got {value}"
+        raise ConfigError(msg)
+    return value
 
 
 def _parse_provider_order(slot_name: str, raw: object) -> tuple[str, ...] | None:

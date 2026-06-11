@@ -59,8 +59,9 @@ Surface today:
 - `[llm].max_concurrent_requests` — process-wide cap on in-flight
   LLM requests across every slot (default `4`).
 - `[llm.fast]` / `[llm.prose]` / `[llm.background]` — tiered LLM slots
-  (model, temperature, optional `provider_order`, `reasoning`,
-  `tool_calling`, `image_tools`, `multimodal`). Schema and call-site →
+  (model, temperature, optional `top_p` / `top_k` / `presence_penalty`,
+  `provider_order`, `reasoning`, `think_prepend`, `tool_calling`,
+  `image_tools`, `multimodal`). Schema and call-site →
   slot mapping at [Tuning — LLM slots](tuning.md#llm-slots).
   `tool_calling` is wired end-to-end: when `true`, the responder for
   that slot installs the in-process `ToolRegistry` (today: `set_alarm`,

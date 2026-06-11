@@ -162,19 +162,30 @@ class LLMClient:
         model: str,
         base_url: str = OPENROUTER_BASE_URL,
         temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
         slot: str | None = None,
         provider_order: tuple[str, ...] | None = None,
         provider_allow_fallbacks: bool = True,
         reasoning: str | None = None,
+        reasoning_max_tokens: int | None = None,
         tool_calling: bool = False,
         image_tools: bool = False,
         multimodal: bool = False,
         no_stream: bool = False,
+        think_prepend: bool = False,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
+        # Extra sampling knobs; ``None`` = provider default. Qwen3.x cards
+        # prescribe top_p/top_k/presence_penalty per mode — near-greedy
+        # decoding causes endless thinking loops on that family.
+        self.top_p = top_p
+        self.top_k = top_k
+        self.presence_penalty = presence_penalty
         # Call-site label — surfaces in span names + per-call log.
         # ``None`` keeps backward-compat for tests / one-off clients.
         self.slot = slot
@@ -185,6 +196,10 @@ class LLMClient:
         # OpenRouter reasoning effort; ``None`` = model default;
         # ``"off"`` → ``exclude=True``; ``"low"|"medium"|"high"`` → ``effort=…``.
         self.reasoning = reasoning
+        # Hard thinking-token budget → ``reasoning.max_tokens``; enforced
+        # token-level by vLLM-backed providers. Wins over ``reasoning``
+        # effort (OpenRouter accepts one of the two).
+        self.reasoning_max_tokens = reasoning_max_tokens
         # Gate for agentic-loop / tool-registry plumbing. responders
         # read to decide whether to install tools on a call.
         self.tool_calling_enabled = tool_calling
@@ -195,6 +210,11 @@ class LLMClient:
         # Skip SSE streaming; fixes tool-call-as-text on models with
         # streaming + thinking-off interaction bugs (e.g. Qwen3 vLLM)
         self.no_stream = no_stream
+        # Qwen3 no-think stabiliser: append fake closed think block as
+        # assistant prefill on every payload. Required with
+        # ``reasoning="none"`` on qwen3.6 — without it thinking leaks
+        # as plain text.
+        self.think_prepend = think_prepend
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self: Self) -> httpx.AsyncClient:
@@ -243,14 +263,27 @@ class LLMClient:
             "model": self.model,
             "messages": [m.to_dict() for m in messages],
         }
+        if self.think_prepend:
+            payload["messages"].append({
+                "role": "assistant",
+                "content": "<think>\n\n</think>",
+            })
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.top_k is not None:
+            payload["top_k"] = self.top_k
+        if self.presence_penalty is not None:
+            payload["presence_penalty"] = self.presence_penalty
         if self.provider_order is not None:
             payload["provider"] = {
                 "order": list(self.provider_order),
                 "allow_fallbacks": self.provider_allow_fallbacks,
             }
-        if self.reasoning == "off":
+        if self.reasoning_max_tokens is not None:
+            payload["reasoning"] = {"max_tokens": self.reasoning_max_tokens}
+        elif self.reasoning == "off":
             payload["reasoning"] = {"exclude": True}
         elif self.reasoning is not None:
             payload["reasoning"] = {"effort": self.reasoning}
@@ -656,6 +689,9 @@ def create_llm_clients(
             api_key=api_key,
             model=slot.model,
             temperature=slot.temperature,
+            top_p=slot.top_p,
+            top_k=slot.top_k,
+            presence_penalty=slot.presence_penalty,
             slot=slot_name,
             provider_order=slot.provider_order,
             provider_allow_fallbacks=slot.provider_allow_fallbacks,
@@ -663,6 +699,7 @@ def create_llm_clients(
             tool_calling=slot.tool_calling,
             image_tools=slot.image_tools,
             multimodal=slot.multimodal,
+            think_prepend=slot.think_prepend,
         )
         temp = slot.temperature if slot.temperature is not None else "default"
         log_parts = [
@@ -677,6 +714,12 @@ def create_llm_clients(
                 log_parts.append(ls.kv("fallbacks", "off", vc=ls.LY))
         if slot.reasoning is not None:
             log_parts.append(ls.kv("reasoning", slot.reasoning, vc=ls.LM))
+        for knob in ("top_p", "top_k", "presence_penalty"):
+            value = getattr(slot, knob)
+            if value is not None:
+                log_parts.append(ls.kv(knob, str(value)))
+        if slot.think_prepend:
+            log_parts.append(ls.kv("think_prepend", "on", vc=ls.LM))
         if slot.tool_calling:
             log_parts.append(ls.kv("tools", "on", vc=ls.LM))
         if slot.image_tools:
