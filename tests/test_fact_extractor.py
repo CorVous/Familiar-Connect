@@ -235,6 +235,32 @@ class TestFactExtractorTick:
             "your own" in system_msg.content_str.lower()
         ), system_msg.content_str
 
+    @pytest.mark.asyncio
+    async def test_extract_prompt_distinguishes_claims_and_fiction(self) -> None:
+        """Extractor's instruction must demand claim attribution + fiction handling.
+
+        One speaker's assertions about another person: stored attributed,
+        never flat. Roleplay events: recorded as bits, never real events.
+        Guards the recontamination path — extractor processes every turn
+        regardless of whether the assistant engaged.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        text = system_msg.content_str.lower()
+        assert "claim" in text, system_msg.content_str
+        assert "fiction" in text, system_msg.content_str
+        assert "running joke" in text, system_msg.content_str
+
 
 class TestFactExtractorSubjects:
     """Participants manifest in prompt + ``subject_keys`` parsed back into facts.

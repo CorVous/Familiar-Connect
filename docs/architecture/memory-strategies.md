@@ -43,7 +43,7 @@ Implementation details for what ships live in
 | `fts/facts/` (tantivy) | sync write from `append_fact` | `RagContextLayer` |
 | `summaries` | `SummaryWorker` | `ConversationSummaryLayer` |
 | `cross_context_summaries` | `SummaryWorker` | `CrossChannelContextLayer` (retired — see [attentional stream](context-pipeline.md#attentional-stream)) |
-| `facts` | `FactExtractor` | `RagContextLayer` (via FTS) |
+| `facts` | `FactExtractor`[^claims] | `RagContextLayer` (via FTS) |
 | `facts.superseded_*` | `FactSupersedeWorker` | every fact reader (filters retired) |
 | `people_dossiers` | `PeopleDossierWorker` | `PeopleDossierLayer` |
 | `reflections` | `ReflectionWorker` | `ReflectionLayer` |
@@ -116,6 +116,13 @@ it here. Unknown names fail loudly at config load — a typo never
 silently drops a writer. Empty list disables all projection
 (side-indices stop refreshing; reads still work against whatever
 exists).
+
+[^claims]: Extraction prompt enforces claim/event discipline: one
+    speaker's assertions about another person stored attributed
+    ("X claims …"), never as flat fact; roleplay and running bits
+    recorded as bits, not real events. Guards against memory
+    poisoning via in-character narration — extractor sees every
+    turn whether or not the familiar engaged.
 
 ### 3. Retrieval ranking (`RagContextLayer`)
 
