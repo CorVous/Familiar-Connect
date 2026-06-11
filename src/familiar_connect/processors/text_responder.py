@@ -798,6 +798,29 @@ class TextResponder:
                     on_iteration_end=_on_iter_end,
                     max_iterations=self._loop_max_iterations,
                 )
+                # qwen leak quirk: stripped tool-call-as-text leaves an
+                # empty completion (no text, no tool, not silent) on a
+                # turn the model meant to answer — one retry, never two
+                if (
+                    not result.final_content
+                    and not result.is_silent
+                    and not result.tool_calls_made
+                    and not bail_silent
+                    and not scope.is_cancelled()
+                ):
+                    _logger.info(
+                        f"{ls.tag('Text', ls.Y)} "
+                        f"{ls.kv('retry', 'empty_completion', vc=ls.LY)} "
+                        f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
+                    )
+                    result = await agentic_loop(
+                        llm=self._llm,
+                        messages=messages,
+                        registry=registry,
+                        ctx=ctx,
+                        on_delta=_on_delta,
+                        on_iteration_end=_on_iter_end,
+                    )
             except Exception as exc:  # noqa: BLE001
                 _logger.warning(
                     f"{ls.tag('Text', ls.R)} "

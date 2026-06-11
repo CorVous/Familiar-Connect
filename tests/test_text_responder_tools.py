@@ -234,6 +234,84 @@ async def test_text_responder_runs_agentic_loop(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Empty-completion retry (qwen tool-leak quirk)
+# ---------------------------------------------------------------------------
+
+
+def _empty_retry_fixture(
+    tmp_path: Path, scripts: list[list[LLMDelta]]
+) -> tuple[TextResponder, _ScriptedToolLLM, _CapturingSend]:
+    registry = ToolRegistry()
+    llm = _ScriptedToolLLM(scripts)
+    send = _CapturingSend()
+
+    def _ctx_factory(
+        channel_id: int, turn_id: str, images: dict | None = None
+    ) -> ToolContext:
+        return ToolContext(
+            familiar_id="fam",
+            channel_id=channel_id,
+            channel_kind="text",
+            turn_id=turn_id,
+            history=AsyncHistoryStore(HistoryStore(":memory:")),
+            bus=InProcessEventBus(),
+            images=images or {},
+        )
+
+    responder, _, _ = _make_responder(
+        llm=llm,
+        send=send,
+        tmp_path=tmp_path,
+        registry=registry,
+        tool_context_factory=_ctx_factory,
+    )
+    return responder, llm, send
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_retries_once(tmp_path: Path) -> None:
+    """Empty completion (no text, no tool, not silent) → one retry.
+
+    Qwen leak quirk: stripped tool-call-as-text leaves an empty turn the
+    model meant to answer — without retry she mutely drops it.
+    """
+    scripts = [
+        [LLMDelta(finish_reason="stop")],  # empty completion
+        [LLMDelta(content="Better."), LLMDelta(finish_reason="stop")],
+    ]
+    responder, llm, send = _empty_retry_fixture(tmp_path, scripts)
+    bus = InProcessEventBus()
+    await bus.start()
+    try:
+        await responder.handle(_discord_text_event(), bus)
+    finally:
+        await bus.shutdown()
+
+    assert len(llm.calls) == 2
+    assert len(send.calls) == 1
+    assert send.calls[0][1] == "Better."
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_retries_only_once(tmp_path: Path) -> None:
+    """Two empty completions → give up silently, no third call."""
+    scripts = [
+        [LLMDelta(finish_reason="stop")],
+        [LLMDelta(finish_reason="stop")],
+    ]
+    responder, llm, send = _empty_retry_fixture(tmp_path, scripts)
+    bus = InProcessEventBus()
+    await bus.start()
+    try:
+        await responder.handle(_discord_text_event(), bus)
+    finally:
+        await bus.shutdown()
+
+    assert len(llm.calls) == 2
+    assert send.calls == []
+
+
+# ---------------------------------------------------------------------------
 # Images threading test
 # ---------------------------------------------------------------------------
 
