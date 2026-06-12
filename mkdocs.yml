@@ -62,6 +62,7 @@ nav:
       - architecture/context-pipeline.md
       - architecture/memory-strategies.md
       - architecture/activities.md
+      - architecture/sleep.md
       - architecture/voice-pipeline.md
       - architecture/streaming-bus.md
       - architecture/configuration-model.md

@@ -405,6 +405,144 @@ class TestSupersedeInvalidatesDossier:
         )
 
 
+class TestRetireFact:
+    """`retire_fact` superseding without a replacement — junk removal."""
+
+    def _store_with_fact(self) -> tuple[HistoryStore, int]:
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam", channel_id=1, role="user", content="hi", author=None
+        )
+        f = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Noise that should not have been minted.",
+            source_turn_ids=[1],
+        )
+        return store, f.id
+
+    def test_retire_marks_superseded_without_replacement(self) -> None:
+        store, fid = self._store_with_fact()
+        store.retire_fact(familiar_id="fam", fact_id=fid)
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        retired = next(f for f in all_facts if f.id == fid)
+        assert retired.superseded_at is not None
+        assert retired.superseded_by is None
+
+    def test_retired_fact_excluded_from_current(self) -> None:
+        store, fid = self._store_with_fact()
+        store.retire_fact(familiar_id="fam", fact_id=fid)
+        assert store.recent_facts(familiar_id="fam", limit=10) == []
+
+    def test_retire_unknown_raises(self) -> None:
+        store, _ = self._store_with_fact()
+        with pytest.raises(ValueError, match="unknown fact"):
+            store.retire_fact(familiar_id="fam", fact_id=999)
+
+    def test_retire_already_superseded_raises(self) -> None:
+        store, fid = self._store_with_fact()
+        store.retire_fact(familiar_id="fam", fact_id=fid)
+        with pytest.raises(ValueError, match="already superseded"):
+            store.retire_fact(familiar_id="fam", fact_id=fid)
+
+    def test_retire_invalidates_subject_dossier(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam", channel_id=1, role="user", content="hi", author=None
+        )
+        subjects = (FactSubject(canonical_key="discord:A", display_at_write="Aria"),)
+        f = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria once claimed a thing — bit, not fact.",
+            source_turn_ids=[1],
+            subjects=subjects,
+        )
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:A",
+            last_fact_id=f.id,
+            dossier_text="Aria claimed a thing.",
+        )
+        store.retire_fact(familiar_id="fam", fact_id=f.id)
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is None
+        )
+
+
+class TestFactsByIds:
+    """Exact fetch by id set — used by sleep-apply to snapshot sources."""
+
+    def test_fetches_requested_including_superseded(self) -> None:
+        store = _store_with_turns_and_facts()
+        new = store.append_fact(
+            familiar_id="fam", channel_id=1, text="replacement", source_turn_ids=[5]
+        )
+        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        got = store.facts_by_ids(familiar_id="fam", ids=[1, 2])
+        assert {f.id for f in got} == {1, 2}
+        # superseded row still returned (snapshot must see it)
+        assert next(f for f in got if f.id == 1).superseded_at is not None
+
+    def test_empty_and_unknown(self) -> None:
+        store = _store_with_turns_and_facts()
+        assert store.facts_by_ids(familiar_id="fam", ids=[]) == []
+        assert store.facts_by_ids(familiar_id="fam", ids=[999]) == []
+
+    def test_scoped_to_familiar(self) -> None:
+        store = _store_with_turns_and_facts()
+        store.append_fact(
+            familiar_id="other", channel_id=1, text="x", source_turn_ids=[1]
+        )
+        got = store.facts_by_ids(familiar_id="other", ids=[1, 2, 3])
+        assert all(f.familiar_id == "other" for f in got)
+
+
+class TestSleepWatermark:
+    """Two-axis watermark: hygiene owns fact id, dream owns turn id.
+
+    ``advance_sleep_watermark`` is partial-update — each pass touches
+    only its own axis so neither can clobber the other's progress.
+    """
+
+    def test_get_unset_returns_none(self) -> None:
+        store = HistoryStore(":memory:")
+        assert store.get_sleep_watermark(familiar_id="fam") is None
+
+    def test_advance_inserts_with_zero_for_omitted_axis(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(familiar_id="fam", last_fact_id=42)
+        wm = store.get_sleep_watermark(familiar_id="fam")
+        assert wm is not None
+        assert (wm.last_fact_id, wm.last_turn_id) == (42, 0)
+
+    def test_advance_updates_only_named_axis(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(familiar_id="fam", last_fact_id=42)
+        # dream advances turn axis — fact axis must be untouched
+        store.advance_sleep_watermark(familiar_id="fam", last_turn_id=99)
+        wm = store.get_sleep_watermark(familiar_id="fam")
+        assert wm is not None
+        assert (wm.last_fact_id, wm.last_turn_id) == (42, 99)
+
+    def test_advance_both_axes(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(
+            familiar_id="fam", last_fact_id=10, last_turn_id=20
+        )
+        wm = store.get_sleep_watermark(familiar_id="fam")
+        assert wm is not None
+        assert (wm.last_fact_id, wm.last_turn_id) == (10, 20)
+
+    def test_advance_noop_when_both_none(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(familiar_id="fam")
+        assert store.get_sleep_watermark(familiar_id="fam") is None
+
+
 class TestFactBiTemporal:
     """Bi-temporal validity: ``valid_from`` / ``valid_to`` (M1 — world-time).
 

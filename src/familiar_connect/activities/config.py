@@ -26,8 +26,21 @@ CONTENT_SOURCES: frozenset[str] = frozenset({"authored"})
 youtube) — rejected with explicit message until implemented.
 """
 
+SLEEP_TYPE_ID = "sleep"
+"""Reserved catalog id — window-scheduled sleep activity.
+
+Only this entry may carry ``window``/``grace_minutes``; with a
+``window``, ``duration_minutes`` is optional (return is fixed at
+window end, never a rolled duration).
+"""
+
 _ENTRY_REQUIRED: frozenset[str] = frozenset({"id", "label", "duration_minutes", "seed"})
-_ENTRY_KEYS: frozenset[str] = _ENTRY_REQUIRED | {"reachable", "content_source"}
+_ENTRY_KEYS: frozenset[str] = _ENTRY_REQUIRED | {
+    "reachable",
+    "content_source",
+    "window",
+    "grace_minutes",
+}
 _TOP_LEVEL_KEYS: frozenset[str] = frozenset({
     "archive_after_minutes",
     "idle_nudge_minutes",
@@ -43,19 +56,27 @@ class ActivityType:
 
     :param id: stable identifier referenced by ``start_activity`` tool.
     :param label: presence/status text shown while out.
-    :param duration_minutes: ``(lo, hi)`` roll range, ``0 < lo <= hi``.
+    :param duration_minutes: ``(lo, hi)`` roll range, ``0 < lo <= hi``;
+        ``None`` only on the sleep entry (window-scheduled).
     :param reachable: real @ping while out triggers judgment turn.
     :param content_source: experience text origin; see
         :data:`CONTENT_SOURCES`.
-    :param seed: authored prompt seed for experience generation.
+    :param seed: authored prompt seed for experience generation
+        (dream prose for the sleep entry).
+    :param window: sleep window ``(start, end)`` in display_tz; may
+        wrap midnight; :data:`SLEEP_TYPE_ID` entry only.
+    :param grace_minutes: minutes after window start before
+        force-sleep; sleep entry only.
     """
 
     id: str
     label: str
-    duration_minutes: tuple[int, int]
+    duration_minutes: tuple[int, int] | None = None
     reachable: bool = True
     content_source: str = "authored"
     seed: str = ""
+    window: tuple[time, time] | None = None
+    grace_minutes: int = 30
 
 
 @dataclass(frozen=True)
@@ -161,6 +182,9 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         )
         raise ConfigError(msg)
     missing = _ENTRY_REQUIRED - set(entry)
+    if "window" in entry or entry.get("id") == SLEEP_TYPE_ID:
+        # window-scheduled: return fixed at window end, duration unused
+        missing -= {"duration_minutes"}
     if missing:
         msg = f"[[catalog]] entry #{idx} missing required keys: {sorted(missing)}"
         raise ConfigError(msg)
@@ -174,7 +198,40 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         strings[key] = value
     entry_id = strings["id"]
 
-    duration = _parse_duration_minutes(entry["duration_minutes"], entry_id)
+    # window/grace_minutes reserved for the sleep entry — keeps the
+    # schedule semantics in one place instead of half-supported
+    # windows on arbitrary types
+    if entry_id != SLEEP_TYPE_ID:
+        for key in ("window", "grace_minutes"):
+            if key in entry:
+                msg = (
+                    f"[[catalog]] {entry_id!r}: {key} is valid only on the "
+                    f"reserved {SLEEP_TYPE_ID!r} entry"
+                )
+                raise ConfigError(msg)
+    elif "window" not in entry:
+        msg = f"[[catalog]] {SLEEP_TYPE_ID!r}: 'window' is required"
+        raise ConfigError(msg)
+
+    window: tuple[time, time] | None = None
+    if "window" in entry:
+        window = _parse_hhmm_range(entry["window"], key="window")
+
+    grace_minutes = entry.get("grace_minutes", 30)
+    if (
+        not isinstance(grace_minutes, int)
+        or isinstance(grace_minutes, bool)
+        or grace_minutes <= 0
+    ):
+        msg = (
+            f"[[catalog]] {entry_id!r}: grace_minutes must be a positive "
+            f"integer, got {grace_minutes!r}"
+        )
+        raise ConfigError(msg)
+
+    duration: tuple[int, int] | None = None
+    if "duration_minutes" in entry:
+        duration = _parse_duration_minutes(entry["duration_minutes"], entry_id)
 
     reachable = entry.get("reachable", True)
     if not isinstance(reachable, bool):
@@ -206,6 +263,8 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         reachable=reachable,
         content_source=content_source,
         seed=strings["seed"],
+        window=window,
+        grace_minutes=grace_minutes,
     )
 
 
@@ -230,9 +289,12 @@ def _parse_duration_minutes(value: object, entry_id: str) -> tuple[int, int]:
 
 
 def _parse_active_hours(value: object) -> tuple[time, time]:
+    return _parse_hhmm_range(value, key="active_hours")
+
+
+def _parse_hhmm_range(value: object, *, key: str) -> tuple[time, time]:
     msg = (
-        f"active_hours must be 'HH:MM-HH:MM' (may wrap midnight, "
-        f"start != end), got {value!r}"
+        f"{key} must be 'HH:MM-HH:MM' (may wrap midnight, start != end), got {value!r}"
     )
     if not isinstance(value, str):
         raise ConfigError(msg)

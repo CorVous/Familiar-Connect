@@ -134,6 +134,24 @@ class WatermarkEntry:
 
 
 @dataclass(frozen=True)
+class SleepWatermark:
+    """Highest fact/turn ids the last sleep consolidation pass saw.
+
+    Bounds the *turns* window the next pass covers (re-attribution
+    context above ``last_turn_id``); a missed night widens it. The
+    *facts* window is always the current fact base, not id-bounded —
+    consolidation reasons over all live facts. ``last_fact_id`` is the
+    high-water mark the watermark advances to, recording progress.
+    Distinct from memory-writer/reflection watermarks — sleep runs on
+    its own (nightly) cadence.
+    """
+
+    last_fact_id: int
+    last_turn_id: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class FocusPointers:
     """Current text/voice channel focus for a familiar."""
 
@@ -386,6 +404,16 @@ CREATE TABLE IF NOT EXISTS reflection_watermark (
     familiar_id   TEXT    PRIMARY KEY,
     last_turn_id  INTEGER NOT NULL,
     last_fact_id  INTEGER NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
+
+-- Sleep-consolidation watermark. Highest fact/turn ids the last
+-- nightly hygiene pass saw. Window the next pass covers = ids above
+-- these; a missed night just widens it. One row per familiar.
+CREATE TABLE IF NOT EXISTS sleep_watermark (
+    familiar_id   TEXT    PRIMARY KEY,
+    last_fact_id  INTEGER NOT NULL,
+    last_turn_id  INTEGER NOT NULL,
     updated_at    TEXT    NOT NULL
 );
 
@@ -1761,6 +1789,67 @@ class HistoryStore:
         )
         self._conn.commit()
 
+    def get_sleep_watermark(
+        self,
+        *,
+        familiar_id: str,
+    ) -> SleepWatermark | None:
+        """Last sleep-consolidation watermark for *familiar_id*, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT last_fact_id, last_turn_id, updated_at
+              FROM sleep_watermark
+             WHERE familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SleepWatermark(
+            last_fact_id=int(row["last_fact_id"]),
+            last_turn_id=int(row["last_turn_id"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def advance_sleep_watermark(
+        self,
+        *,
+        familiar_id: str,
+        last_fact_id: int | None = None,
+        last_turn_id: int | None = None,
+    ) -> None:
+        """Advance one or both watermark axes; leave omitted axes intact.
+
+        Partial-update by design: hygiene owns ``last_fact_id``, dream
+        owns ``last_turn_id``. Passing only one updates only that column,
+        so neither pass can clobber the other's progress. On first insert
+        an omitted axis defaults to 0. Both ``None`` is a no-op.
+        """
+        if last_fact_id is None and last_turn_id is None:
+            return
+        timestamp = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO sleep_watermark
+                (familiar_id, last_fact_id, last_turn_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (familiar_id)
+            DO UPDATE SET
+                last_fact_id = COALESCE(?, last_fact_id),
+                last_turn_id = COALESCE(?, last_turn_id),
+                updated_at   = excluded.updated_at
+            """,
+            (
+                familiar_id,
+                last_fact_id if last_fact_id is not None else 0,
+                last_turn_id if last_turn_id is not None else 0,
+                timestamp,
+                last_fact_id,
+                last_turn_id,
+            ),
+        )
+        self._conn.commit()
+
     def turns_since_watermark(
         self,
         *,
@@ -2017,6 +2106,7 @@ class HistoryStore:
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
         importance: int | None = None,
+        dedup: bool = True,
     ) -> Fact:
         """Persist one fact. ``source_turn_ids`` + ``subjects`` stored as JSON.
 
@@ -2033,6 +2123,11 @@ class HistoryStore:
         Out-of-range values clamp to ``[1, 10]`` so a stray LLM
         number can't poison rank-time math. ``None`` preserved
         verbatim — downstream consumers treat as neutral midpoint.
+
+        ``dedup`` (default True) gates near-duplicate suppression. The
+        sleep-hygiene merge passes ``dedup=False`` so a consolidated
+        fact whose text equals one of the rows it supersedes still
+        inserts a fresh row (the olds are superseded right after).
         """
         ids = [int(i) for i in source_turn_ids]
         subjects_tuple = tuple(subjects)
@@ -2052,7 +2147,7 @@ class HistoryStore:
         # normalized text (kills alias/nickname restatement pile-up).
         # bypass when valid_to is set — such a fact may close/bound an
         # existing one, not restate it.
-        if valid_to is None:
+        if dedup and valid_to is None:
             existing = self._find_current_dup(
                 familiar_id=familiar_id,
                 norm_text=_normalize_fact_text(text),
@@ -2128,6 +2223,36 @@ class HistoryStore:
             ):
                 return fact
         return None
+
+    def facts_by_ids(
+        self,
+        *,
+        familiar_id: str,
+        ids: Iterable[int],
+    ) -> list[Fact]:
+        """Fetch facts by id, scoped to ``familiar_id``, oldest first.
+
+        Includes superseded rows — callers (sleep-apply) snapshot
+        source facts that a concurrent writer may retire mid-pass.
+        """
+        unique_ids = sorted({int(i) for i in ids})
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to, importance
+              FROM facts
+             WHERE familiar_id = ?
+               AND id IN ({placeholders})
+             ORDER BY id ASC
+            """,  # noqa: S608
+            (familiar_id, *unique_ids),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
 
     def recent_facts(
         self,
@@ -2315,19 +2440,65 @@ class HistoryStore:
             """,
             (ts, new_id, old_id, familiar_id),
         )
-        # Invalidate this fact's subjects' dossiers so PeopleDossierWorker
-        # rebuilds them from scratch. Worker compounds prior text + only
-        # newer facts; it never un-bakes a superseded fact. Must DELETE the
-        # row (not reset the watermark) — a surviving row re-compounds the
-        # stale/poisoned prose via the "Previous dossier" path. Absent row →
-        # prior=None → clean full rebuild. NULL subjects → no dossier to drop.
-        for key in _canonical_keys_from_subjects_json(row["subjects_json"]):
+        self._invalidate_subject_dossiers(
+            familiar_id=familiar_id, subjects_json=row["subjects_json"]
+        )
+        self._conn.commit()
+
+    def retire_fact(
+        self,
+        *,
+        familiar_id: str,
+        fact_id: int,
+    ) -> None:
+        """Retire ``fact_id`` with no replacement — junk removal.
+
+        Supersession's sibling for the sleep-hygiene pass: marks
+        ``superseded_at`` (now, UTC) but leaves ``superseded_by`` NULL
+        (nothing replaces it). Refuses already-retired rows
+        (``ValueError`` — same one-shot discipline as
+        :meth:`supersede_fact`). Invalidates affected subjects'
+        dossiers identically.
+        """
+        row = self._conn.execute(
+            "SELECT superseded_at, subjects_json FROM facts "
+            "WHERE id = ? AND familiar_id = ?",
+            (fact_id, familiar_id),
+        ).fetchone()
+        if row is None:
+            msg = f"unknown fact id={fact_id} for familiar={familiar_id}"
+            raise ValueError(msg)
+        if row["superseded_at"] is not None:
+            msg = f"fact id={fact_id} already superseded"
+            raise ValueError(msg)
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            "UPDATE facts SET superseded_at = ? WHERE id = ? AND familiar_id = ?",
+            (ts, fact_id, familiar_id),
+        )
+        self._invalidate_subject_dossiers(
+            familiar_id=familiar_id, subjects_json=row["subjects_json"]
+        )
+        self._conn.commit()
+
+    def _invalidate_subject_dossiers(
+        self, *, familiar_id: str, subjects_json: str | None
+    ) -> None:
+        """Drop baked dossiers for a retired/superseded fact's subjects.
+
+        PeopleDossierWorker compounds prior dossier text + only newer
+        facts; it never un-bakes a retired fact. DELETE the row (not
+        reset the watermark) — a surviving row re-compounds the
+        stale/poisoned prose via the "Previous dossier" path. Absent
+        row → prior=None → clean full rebuild. NULL subjects → no-op.
+        Caller commits.
+        """
+        for key in _canonical_keys_from_subjects_json(subjects_json):
             self._conn.execute(
                 "DELETE FROM people_dossiers "
                 "WHERE familiar_id = ? AND canonical_key = ?",
                 (familiar_id, key),
             )
-        self._conn.commit()
 
     # ------------------------------------------------------------------
     # fact embeddings (M6) — semantic recall side-index
@@ -3103,6 +3274,16 @@ class HistoryStore:
         )
         self._conn.commit()
 
+    def set_activity_experience(
+        self, *, activity_id: int, experience_text: str
+    ) -> None:
+        """Persist dream/experience prose on one activity row (idempotent)."""
+        self._conn.execute(
+            "UPDATE activities SET experience_text = ? WHERE id = ?",
+            (experience_text, activity_id),
+        )
+        self._conn.commit()
+
     def active_activity(self, *, familiar_id: str) -> ActivityRecord | None:
         """Newest activity with ``actual_return_at IS NULL``, or ``None``."""
         row = self._conn.execute(
@@ -3116,6 +3297,30 @@ class HistoryStore:
              LIMIT 1
             """,
             (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_activity(row)
+
+    def latest_activity(
+        self, *, familiar_id: str, type_id: str
+    ) -> ActivityRecord | None:
+        """Newest activity of *type_id* (active or finished), or ``None``.
+
+        Sleep-window guard keys on this: most recent sleep row's
+        ``started_at`` vs the current window occurrence's start.
+        """
+        row = self._conn.execute(
+            """
+            SELECT id, familiar_id, type_id, label,
+                   started_at, planned_return_at, note,
+                   status, actual_return_at, experience_text
+              FROM activities
+             WHERE familiar_id = ? AND type_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (familiar_id, type_id),
         ).fetchone()
         if row is None:
             return None
