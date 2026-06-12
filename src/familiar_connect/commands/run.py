@@ -374,6 +374,8 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         familiar_id=familiar.id,
         store=familiar.history_store,
         subscriptions=familiar.subscriptions,
+        idle_wake_seconds=familiar.config.focus.idle_wake_seconds,
+        nudge_debounce_seconds=familiar.config.focus.nudge_debounce_seconds,
     )
     await focus_manager.initialize()
 
@@ -497,6 +499,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         post_history_instructions=familiar.config.post_history_instructions,
         display_tz=familiar.config.display_tz,
         focus_manager=focus_manager,
+        loop_max_iterations=familiar.config.tools.loop_max_iterations,
     )
     text_responder = TextResponder(
         assembler=text_assembler,
@@ -512,12 +515,14 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         post_history_instructions=familiar.config.post_history_instructions,
         display_tz=familiar.config.display_tz,
         focus_manager=focus_manager,
+        loop_max_iterations=familiar.config.tools.loop_max_iterations,
     )
     projector_context = ProjectorContext(
         store=familiar.history_store,
         llm_clients=familiar.llm_clients,
         familiar_id=familiar.id,
         embedder=embedder,
+        memory=familiar.config.memory_providers,
     )
     projectors = create_projectors(
         names=list(familiar.config.memory_providers.projectors),

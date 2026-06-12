@@ -195,6 +195,7 @@ class TextResponder:
         post_history_instructions: str = "",
         display_tz: str = "UTC",
         focus_manager: FocusManager | None = None,
+        loop_max_iterations: int = 5,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -218,6 +219,8 @@ class TextResponder:
         # responder runs ``agentic_loop`` instead of bare ``chat_stream``
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
+        # hard cap on agentic-loop rounds per turn ([tools].loop_max_iterations)
+        self._loop_max_iterations = loop_max_iterations
         # attentional focus controller; None = backward-compat (no focus gating)
         self._focus_manager = focus_manager
         # in-process dedup; bus doesn't republish today, cheap insurance
@@ -730,6 +733,7 @@ class TextResponder:
                     ctx=ctx,
                     on_delta=_on_delta,
                     on_iteration_end=_on_iter_end,
+                    max_iterations=self._loop_max_iterations,
                 )
             except Exception as exc:  # noqa: BLE001
                 _logger.warning(

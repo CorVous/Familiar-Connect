@@ -824,3 +824,25 @@ class TestOpenRouterLive:
 
         assert result.role == "assistant"
         assert len(result.content) > 0
+
+
+# --- Configured request-concurrency cap ---
+
+
+class TestRequestSemaphoreConfig:
+    def test_configure_request_semaphore_sets_cap(self) -> None:
+        sem = llm_module.configure_request_semaphore(7)
+        assert llm_module.get_request_semaphore() is sem
+        assert sem._value == 7
+
+    def test_create_llm_clients_applies_configured_cap(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """``[llm].max_concurrent_requests`` sizes the shared semaphore."""
+        path = tmp_path / "character.toml"
+        path.write_text("[llm]\nmax_concurrent_requests = 6\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        create_llm_clients("sk-or-test-abc", cfg)
+        assert llm_module.get_request_semaphore()._value == 6

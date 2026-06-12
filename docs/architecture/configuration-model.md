@@ -13,7 +13,7 @@ by the admin, never exposed through Discord.
 - `CARTESIA_API_KEY` — Cartesia TTS (required when `[tts].provider="cartesia"`)
 - `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech
 - `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS
-- `DEEPGRAM_API_KEY` — Deepgram STT credential. Other Deepgram knobs live in `[providers.stt.deepgram]`; matching `DEEPGRAM_*` env vars override TOML at startup. Full list: [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
+- `DEEPGRAM_API_KEY` — Deepgram STT credential. Every other Deepgram knob lives in `[providers.stt.deepgram]`. Full list: [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
 - `FAMILIAR_ID` — picks the character folder under `data/familiars/` this process runs.
 
 Lives in environment variables or a `.env` file. Never checked into
@@ -32,8 +32,9 @@ Surface today:
   (e.g. `"PST"`) fail fast at config load.
 - `aliases` — names the familiar answers to.
 - `[providers.history].voice_window_size` / `.text_window_size` —
-  recent-history layer windows, tiered by responder (defaults 20 / 30).
-  Stopgap until a dynamic budgeter ships.
+  recent-history layer windows, tiered by responder (defaults
+  100 / 200). Safety nets behind the token-aware `[budget.<tier>]`
+  caps.
 - `[providers.history].coalesce_max_gap_seconds` — at prompt-render
   time, collapse consecutive same-speaker voice fragments when the
   gap between them is within this many seconds. Default `45.0`; `0`
@@ -46,10 +47,17 @@ Surface today:
   selector + per-backend knobs (`endpointing_ms`, `keyterms`, …). Only
   `deepgram` today; V3 widens. Per-knob env override available. See
   [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
+- `[providers.memory]` — memory projector selection (`projectors`
+  list) plus per-worker tuning tables
+  (`[providers.memory.<name>]` — cadences, batch sizes,
+  thresholds). See
+  [Tuning — Memory projectors](tuning.md#memory-projectors-m5).
 - `[llm].image_description_model` — model name for vision-based image
   descriptions (e.g. `"openai/gpt-4o"`). Shared across all slots; empty
   string (default) disables the description step. When set, `create_llm_clients`
   builds a reserved `"__image_description__"` client.
+- `[llm].max_concurrent_requests` — process-wide cap on in-flight
+  LLM requests across every slot (default `4`).
 - `[llm.fast]` / `[llm.prose]` / `[llm.background]` — tiered LLM slots
   (model, temperature, optional `provider_order`, `reasoning`,
   `tool_calling`, `image_tools`, `multimodal`). Schema and call-site →
@@ -64,6 +72,11 @@ Surface today:
   See [Tool calling](overview.md#tool-calling) and
   [Image viewing](overview.md#image-viewing).
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
+- `[focus]` — attentional idle-nudge timing (`idle_wake_seconds`,
+  `nudge_debounce_seconds`). See
+  [Tuning — Attentional focus](tuning.md#attentional-focus).
+- `[tools]` — agentic loop bounds (`loop_max_iterations`, default
+  `5`), shared by voice and text responders.
 - `[prompt].post_history_instructions` — free-text block appended to
   the *trailing* reminder, the system message that sits after recent
   history (right before the model's next turn). The deepest,

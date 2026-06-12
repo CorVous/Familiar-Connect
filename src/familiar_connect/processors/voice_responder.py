@@ -86,6 +86,7 @@ class VoiceResponder:
         post_history_instructions: str = "",
         display_tz: str = "UTC",
         focus_manager: FocusManager | None = None,
+        loop_max_iterations: int = 5,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -114,6 +115,8 @@ class VoiceResponder:
         # agentic-loop wiring — see :meth:`_stream_and_speak_with_tools`
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
+        # hard cap on agentic-loop rounds per turn ([tools].loop_max_iterations)
+        self._loop_max_iterations = loop_max_iterations
         # short stock phrases spoken before tool execution when
         # iteration produced no spoken content. rotated round-robin
         # so repeat use doesn't always say same word
@@ -574,6 +577,7 @@ class VoiceResponder:
                 on_delta=_on_delta,
                 on_before_tools=_on_before_tools,
                 on_iteration_end=_on_iteration_end,
+                max_iterations=self._loop_max_iterations,
             )
         except Exception as exc:  # noqa: BLE001 — stream errors shouldn't crash loop
             _logger.warning(
