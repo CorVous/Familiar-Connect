@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
+from familiar_connect.identity import is_self_key
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -46,11 +47,14 @@ class PeopleDossierWorker:
         store: AsyncHistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
+        familiar_display_name: str | None = None,
         tick_interval_s: float = 20.0,
     ) -> None:
         self._store = store
         self._llm = llm_client
         self._familiar_id = familiar_id
+        # label for the reserved self-subject; title-cased id when absent
+        self._familiar_display_name = familiar_display_name or familiar_id.title()
         self._tick_interval_s = tick_interval_s
 
     # ------------------------------------------------------------------
@@ -100,15 +104,22 @@ class PeopleDossierWorker:
         if not new_facts:
             return
 
-        display = await self._store.resolve_label(
-            canonical_key=canonical_key,
-            guild_id=None,
-            familiar_id=self._familiar_id,
-        )
+        # self-subject resolves to the familiar's display name — store
+        # has no account row for ``self:<id>``, so resolve_label would
+        # fall through to the raw id portion.
+        if is_self_key(canonical_key):
+            display = self._familiar_display_name
+        else:
+            display = await self._store.resolve_label(
+                canonical_key=canonical_key,
+                guild_id=None,
+                familiar_id=self._familiar_id,
+            )
         prompt = _build_dossier_prompt(
             display_name=display,
             prior_dossier=prior.dossier_text if prior is not None else None,
             new_facts=new_facts,
+            is_self=is_self_key(canonical_key),
         )
         reply = await self._llm.chat(prompt)
         text = reply.content_str.strip()
@@ -140,14 +151,29 @@ def _build_dossier_prompt(
     display_name: str,
     prior_dossier: str | None,
     new_facts: Iterable[Fact],
+    is_self: bool = False,
 ) -> list[Message]:
-    header = (
-        "You maintain a short, retrieval-friendly dossier about one "
-        f"person ({display_name}) — 3-5 sentences. Preserve concrete "
-        "details, names, places, commitments. Drop transient feelings "
-        "and conversational filler. Reconcile contradictions in favour "
-        "of newer evidence. Reply with the updated dossier text only."
-    )
+    if is_self:
+        # self-record is the substrate for consistently-forming opinions
+        # (feeds the sleep cycle) — keep settled feelings/stances, shed
+        # only momentary reactions. do NOT blanket-drop feelings.
+        header = (
+            f"You maintain {display_name}'s evolving self-record — who she "
+            "is becoming — in 3-5 sentences. Preserve her settled opinions, "
+            "stances, and feelings about people and things (the views she "
+            "holds consistently), plus concrete choices and commitments. "
+            "Drop only momentary, in-the-moment reactions and filler. "
+            "Reconcile contradictions in favour of newer evidence. Reply "
+            "with the updated self-record text only."
+        )
+    else:
+        header = (
+            "You maintain a short, retrieval-friendly dossier about one "
+            f"person ({display_name}) — 3-5 sentences. Preserve concrete "
+            "details, names, places, commitments. Drop transient feelings "
+            "and conversational filler. Reconcile contradictions in favour "
+            "of newer evidence. Reply with the updated dossier text only."
+        )
     body_lines: list[str] = []
     if prior_dossier:
         body_lines.extend([

@@ -22,6 +22,7 @@ from familiar_connect.budget import (
     estimate_tokens,
 )
 from familiar_connect.history.store import HistoryTurn
+from familiar_connect.identity import is_self_key, self_canonical_key
 from familiar_connect.llm import Message, sanitize_name
 
 if TYPE_CHECKING:
@@ -871,7 +872,9 @@ class PeopleDossierLayer:
     Reads ``people_dossiers`` (maintained by
     :class:`PeopleDossierWorker`) for canonical keys that show up as
     authors *or* mentions in last ``window_size`` turns of the
-    active channel. Candidates de-duped most-recent-first, capped at
+    active channel. The familiar's own self-subject always leads —
+    it is always "present", exempt from the ``max_people`` cap.
+    Other candidates de-duped most-recent-first, capped at
     ``max_people`` — same hard-count budgeting style as
     :class:`RecentHistoryLayer`'s ``window_size``. Subjects without
     a stored dossier skipped silently; worker fills them in within
@@ -892,27 +895,30 @@ class PeopleDossierLayer:
         window_size: int = 20,
         max_people: int = 8,
         max_tokens: int | None = None,
+        familiar_display_name: str | None = None,
     ) -> None:
         self._store = store
         self._sync = store.sync
         self._window_size = window_size
         self._max_people = max_people
         self._max_tokens = max_tokens
+        # self-subject label so the familiar's own dossier always injects
+        # (always "present"), unlike channel-gated people. self key derived
+        # from ctx.familiar_id at build time.
+        self._familiar_display_name = familiar_display_name
+
+    def _self_key(self, ctx: AssemblyContext) -> str:
+        return self_canonical_key(ctx.familiar_id)
 
     def _candidate_keys(self, ctx: AssemblyContext) -> list[str]:
         """Ordered, deduped canonical keys for the active channel.
 
-        Newest turn first. Per turn, author's key comes before
-        turn's mentions — a person speaking *now* outranks one being
-        talked about. Capped at ``max_people``.
+        Self-subject leads — the familiar is always present. Then,
+        newest turn first; per turn, author's key before its mentions
+        (a person speaking *now* outranks one being talked about).
+        Self-subject doesn't count against ``max_people``; people
+        capped at ``max_people``.
         """
-        if ctx.channel_id is None:
-            return []
-        turns = self._sync.recent(
-            familiar_id=ctx.familiar_id,
-            channel_id=ctx.channel_id,
-            limit=self._window_size,
-        )
         ordered: list[str] = []
         seen: set[str] = set()
 
@@ -922,14 +928,35 @@ class PeopleDossierLayer:
             seen.add(key)
             ordered.append(key)
 
-        for turn in reversed(turns):  # Newest first
+        # always-present self-subject leads, exempt from the people cap
+        _add(self._self_key(ctx))
+
+        if ctx.channel_id is None:
+            return ordered
+        turns = self._sync.recent(
+            familiar_id=ctx.familiar_id,
+            channel_id=ctx.channel_id,
+            limit=self._window_size,
+        )
+        people: list[str] = []
+        people_seen: set[str] = set()
+
+        def _add_person(key: str) -> None:
+            if key in people_seen:
+                return
+            people_seen.add(key)
+            people.append(key)
+
+        for turn in reversed(turns):  # newest first
             if turn.author is not None:
-                _add(turn.author.canonical_key)
+                _add_person(turn.author.canonical_key)
             for key in self._sync.mentions_for_turn(turn_id=turn.id):
-                _add(key)
-            if len(ordered) >= self._max_people:
+                _add_person(key)
+            if len(people) >= self._max_people:
                 break
-        return ordered[: self._max_people]
+        for key in people[: self._max_people]:
+            _add(key)
+        return ordered
 
     async def build(self, ctx: AssemblyContext) -> str:
         candidates = self._candidate_keys(ctx)
@@ -943,13 +970,19 @@ class PeopleDossierLayer:
             )
             if entry is None or not entry.dossier_text.strip():
                 continue
-            display = await self._store.resolve_label(
-                canonical_key=key,
-                guild_id=ctx.guild_id,
-                familiar_id=ctx.familiar_id,
-            )
-            profile = await self._store.get_account_profile(canonical_key=key)
-            header = _format_profile_header(display, profile)
+            if is_self_key(key):
+                # no account row for the self-subject; use familiar's name
+                # and skip the profile (username/pronouns/bio) lookup.
+                display = self._familiar_display_name or ctx.familiar_id.title()
+                header = _format_profile_header(display, None)
+            else:
+                display = await self._store.resolve_label(
+                    canonical_key=key,
+                    guild_id=ctx.guild_id,
+                    familiar_id=ctx.familiar_id,
+                )
+                profile = await self._store.get_account_profile(canonical_key=key)
+                header = _format_profile_header(display, profile)
             section = f"{header}\n\n{entry.dossier_text.strip()}"
             if remaining is not None:
                 cost = estimate_tokens(section)
