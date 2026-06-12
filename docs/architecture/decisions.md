@@ -1,6 +1,6 @@
 # Design Decisions Considered and Rejected
 
-Ideas seriously considered during planning and deliberately turned down. Recorded here so future contributors don't rediscover them from scratch without the rationale.
+Ideas seriously considered during planning and deliberately turned down. Recorded here so future contributors don't rediscover them without the rationale.
 
 ## Bridging to a running SillyTavern instance
 

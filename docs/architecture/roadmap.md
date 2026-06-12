@@ -13,7 +13,7 @@ survey itself lives in [Memory strategies](memory-strategies.md) and
 
 ## Shipped
 
-Folded into the architecture pages; the detail now lives there.
+Folded into the architecture pages; the detail lives there.
 
 | Item | Lands in |
 |---|---|
