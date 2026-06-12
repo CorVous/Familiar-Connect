@@ -53,6 +53,18 @@ Every writer is watermark-driven and idempotent; deleting a
 side-index table rebuilds it from `turns`. See
 [Context pipeline](context-pipeline.md) for watermark semantics.
 
+`append_fact` suppresses near-duplicates at insert: when a new fact's
+normalized text (lowercased, whitespace-collapsed, surrounding
+quotes/punctuation stripped) matches an existing **current**
+(non-superseded, non-expired) fact for the same `familiar_id` **and**
+the same subject-key set, the insert is skipped and the existing fact
+returned — no new row, no supersede. This kills alias/nickname
+restatement pile-up ("Cor is called Cor", once per turn batch) that
+bloated dossiers and RAG. Comparison is deterministic exact-match
+after normalization; semantic/embedding-based dedup is a deliberate
+non-goal here (would risk false-positive suppression of genuinely
+distinct facts) — a possible follow-up via `fact_embeddings`.
+
 Tantivy commits on Windows occasionally race with antivirus
 segment-scans (`PermissionDenied` on a fresh `.term` file).
 `FtsIndex._commit` retries those transient locks with short backoff;
@@ -120,7 +132,11 @@ exists).
 [^claims]: Extraction prompt enforces claim/event discipline: one
     speaker's assertions about another person stored attributed
     ("X claims …"), never as flat fact; roleplay and running bits
-    recorded as bits, not real events. Guards against memory
+    recorded as bits, not real events. Identity ties to the
+    Participant `canonical_key`, never a name adopted in play:
+    impersonation bits ("No I am Cor") never mint identity facts and
+    never merge two people; world trivia a speaker mentions isn't a
+    fact about them. Guards against memory
     poisoning via in-character narration — extractor sees every
     turn whether or not the familiar engaged.
 
@@ -338,7 +354,15 @@ Different writers populate the two axes; do not conflate them:
   same subject and asks the background LLM which (if any) to
   retire. Strict `HistoryStore.supersede_fact()` raises on
   re-supersession so a double-write surfaces as a bug rather than
-  silently rewiring the chain.
+  silently rewiring the chain. Superseding also **deletes the
+  retired fact's subjects' `people_dossiers` rows** (same
+  `familiar_id`): the dossier worker compounds prior text and never
+  un-bakes a retired fact, so a surviving row would keep the stale
+  prose alive. Dropping the row makes the worker's next tick rebuild
+  it clean from current facts (the `prior=None` path). The watermark
+  is deliberately *not* reset instead — a kept row re-compounds the
+  poisoned text via its "Previous dossier" prompt. Subject-less facts
+  have no dossier to drop.
 
 A fact can be retired (system-time) while its world-time validity
 stays open: e.g., the extractor re-renders the same belief with
