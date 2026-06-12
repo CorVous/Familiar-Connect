@@ -12,6 +12,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.config import (
+    FactSupersedeConfig,
+    MemoryProvidersConfig,
+    PeopleDossierConfig,
+    ReflectionConfig,
+    RichNoteConfig,
+    RollingSummaryConfig,
+)
 from familiar_connect.embedding import HashEmbedder
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
@@ -235,3 +243,87 @@ class TestMemoryProvidersConfig:
         target.write_text("", encoding="utf-8")
         with pytest.raises(ConfigError, match="unknown memory projector"):
             load_character_config(target, defaults_path=defaults)
+
+
+class TestWorkerKnobThreading:
+    """Factories thread ``[providers.memory.<name>]`` knobs into workers."""
+
+    def _ctx_with(self, memory: MemoryProvidersConfig) -> ProjectorContext:
+        store = HistoryStore(":memory:")
+        return ProjectorContext(
+            store=AsyncHistoryStore(store),
+            llm_clients={"background": _StubLLM()},
+            familiar_id="fam",
+            memory=memory,
+        )
+
+    def test_context_defaults_to_default_memory_config(self) -> None:
+        assert _ctx().memory == MemoryProvidersConfig()
+
+    def test_rolling_summary_knobs(self) -> None:
+        memory = MemoryProvidersConfig(
+            rolling_summary=RollingSummaryConfig(
+                turns_threshold=3, cross_k=2, tick_interval_s=1.5
+            )
+        )
+        [w] = create_projectors(
+            names=["rolling_summary"], context=self._ctx_with(memory)
+        )
+        assert isinstance(w, SummaryWorker)
+        assert w._turns_threshold == 3
+        assert w._cross_k == 2
+        assert w._tick_interval_s == pytest.approx(1.5)
+
+    def test_rich_note_knobs(self) -> None:
+        memory = MemoryProvidersConfig(
+            rich_note=RichNoteConfig(
+                batch_size=3, tick_interval_s=7.0, participants_max=12
+            )
+        )
+        [w] = create_projectors(names=["rich_note"], context=self._ctx_with(memory))
+        assert isinstance(w, FactExtractor)
+        assert w._batch_size == 3
+        assert w._tick_interval_s == pytest.approx(7.0)
+        assert w._participants_max == 12
+
+    def test_people_dossier_knobs(self) -> None:
+        memory = MemoryProvidersConfig(
+            people_dossier=PeopleDossierConfig(tick_interval_s=11.0)
+        )
+        [w] = create_projectors(
+            names=["people_dossier"], context=self._ctx_with(memory)
+        )
+        assert isinstance(w, PeopleDossierWorker)
+        assert w._tick_interval_s == pytest.approx(11.0)
+
+    def test_reflection_knobs(self) -> None:
+        memory = MemoryProvidersConfig(
+            reflection=ReflectionConfig(
+                turns_threshold=8,
+                max_reflections_per_tick=1,
+                max_turns_per_tick=25,
+                recent_facts_limit=5,
+                tick_interval_s=90.0,
+            )
+        )
+        [w] = create_projectors(names=["reflection"], context=self._ctx_with(memory))
+        assert isinstance(w, ReflectionWorker)
+        assert w._turns_threshold == 8
+        assert w._max_per_tick == 1
+        assert w._max_turns_per_tick == 25
+        assert w._recent_facts_limit == 5
+        assert w._tick_interval_s == pytest.approx(90.0)
+
+    def test_fact_supersede_knobs(self) -> None:
+        memory = MemoryProvidersConfig(
+            fact_supersede=FactSupersedeConfig(
+                batch_size=2, tick_interval_s=120.0, priors_max=6
+            )
+        )
+        [w] = create_projectors(
+            names=["fact_supersede"], context=self._ctx_with(memory)
+        )
+        assert isinstance(w, FactSupersedeWorker)
+        assert w._batch_size == 2
+        assert w._tick_interval_s == pytest.approx(120.0)
+        assert w._priors_max == 6

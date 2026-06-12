@@ -7,7 +7,7 @@ Loads ``character.toml`` once on startup, deep-merged over
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -250,18 +250,99 @@ class MemoryRetrievalConfig:
 
 
 @dataclass(frozen=True)
+class RollingSummaryConfig:
+    """``[providers.memory.rolling_summary]`` worker knobs.
+
+    :param turns_threshold: new turns per channel before rolling
+        summary refreshes.
+    :param cross_k: new turns in source channel before cross-channel
+        summary refreshes.
+    :param tick_interval_s: idle interval between worker ticks.
+    """
+
+    turns_threshold: int = 10
+    cross_k: int = 5
+    tick_interval_s: float = 5.0
+
+
+@dataclass(frozen=True)
+class RichNoteConfig:
+    """``[providers.memory.rich_note]`` (fact extractor) worker knobs.
+
+    :param batch_size: unprocessed turns per extraction tick; also
+        the accumulation threshold before a tick does work.
+    :param tick_interval_s: idle interval between worker ticks.
+    :param participants_max: cap on participant manifest rows in the
+        extraction prompt.
+    """
+
+    batch_size: int = 10
+    tick_interval_s: float = 15.0
+    participants_max: int = 30
+
+
+@dataclass(frozen=True)
+class PeopleDossierConfig:
+    """``[providers.memory.people_dossier]`` worker knobs.
+
+    :param tick_interval_s: idle interval between worker ticks.
+    """
+
+    tick_interval_s: float = 20.0
+
+
+@dataclass(frozen=True)
+class ReflectionConfig:
+    """``[providers.memory.reflection]`` worker knobs.
+
+    :param turns_threshold: new turns before a reflection tick fires.
+    :param max_reflections_per_tick: cap on reflections written per
+        tick.
+    :param max_turns_per_tick: window cap on turns fed to the prompt.
+    :param recent_facts_limit: recent facts included in the prompt.
+    :param tick_interval_s: idle interval between worker ticks.
+    """
+
+    turns_threshold: int = 20
+    max_reflections_per_tick: int = 3
+    max_turns_per_tick: int = 50
+    recent_facts_limit: int = 20
+    tick_interval_s: float = 60.0
+
+
+@dataclass(frozen=True)
+class FactSupersedeConfig:
+    """``[providers.memory.fact_supersede]`` worker knobs.
+
+    :param batch_size: new facts evaluated per tick (one LLM call
+        each, batched per subject).
+    :param tick_interval_s: idle interval between worker ticks.
+    :param priors_max: cap on prior facts shown to LLM per subject.
+    """
+
+    batch_size: int = 5
+    tick_interval_s: float = 60.0
+    priors_max: int = 20
+
+
+@dataclass(frozen=True)
 class MemoryProvidersConfig:
-    """Memory-projector selector from ``[providers.memory]`` (M5).
+    """Memory-projector selector + per-projector knobs (M5).
 
     Lifts existing writers (`SummaryWorker`, `FactExtractor`,
-    `PeopleDossierWorker`, `ReflectionWorker`) behind
-    :class:`MemoryProjector` Protocol so operators swap strategy via
-    TOML. Default keeps every shipped projector.
+    `PeopleDossierWorker`, `ReflectionWorker`, `FactSupersedeWorker`)
+    behind :class:`MemoryProjector` Protocol so operators swap
+    strategy via TOML. Default keeps every shipped projector.
 
     :param projectors: ordered tuple of projector names. Each must be
         registered in
         :mod:`familiar_connect.processors.projectors`. Empty tuple
         disables all memory projection.
+
+    Per-projector tuning tables (``[providers.memory.<name>]``)
+    mirror ``[providers.stt.<backend>]`` — knobs accepted regardless
+    of whether the projector is in ``projectors`` so operators can
+    toggle without re-typing.
     """
 
     projectors: tuple[str, ...] = (
@@ -271,6 +352,36 @@ class MemoryProvidersConfig:
         "reflection",
         "fact_supersede",
     )
+    rolling_summary: RollingSummaryConfig = field(default_factory=RollingSummaryConfig)
+    rich_note: RichNoteConfig = field(default_factory=RichNoteConfig)
+    people_dossier: PeopleDossierConfig = field(default_factory=PeopleDossierConfig)
+    reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
+    fact_supersede: FactSupersedeConfig = field(default_factory=FactSupersedeConfig)
+
+
+@dataclass(frozen=True)
+class FocusConfig:
+    """``[focus]`` knobs — attentional idle-nudge timing.
+
+    :param idle_wake_seconds: focused-channel silence before a
+        non-focused arrival nudges the model.
+    :param nudge_debounce_seconds: rapid arrivals within this window
+        share one nudge.
+    """
+
+    idle_wake_seconds: float = 120.0
+    nudge_debounce_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
+class ToolsConfig:
+    """``[tools]`` knobs — agentic tool-loop behavior.
+
+    :param loop_max_iterations: hard cap on agentic-loop iterations
+        per turn; protects against runaway tool loops.
+    """
+
+    loop_max_iterations: int = 5
 
 
 @dataclass(frozen=True)
@@ -386,6 +497,13 @@ class CharacterConfig:
     # model name for vision-based image descriptions (shared [llm] level).
     # empty string = feature disabled.
     image_description_model: str = ""
+    # process-wide cap on concurrent LLM requests (shared [llm] level);
+    # bottleneck is the OpenRouter key's rate limit, not one slot.
+    llm_max_concurrent_requests: int = 4
+    # attentional idle-nudge timing — see :class:`FocusConfig`.
+    focus: FocusConfig = field(default_factory=FocusConfig)
+    # agentic tool-loop knobs — see :class:`ToolsConfig`.
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
         """Return overrides for ``channel_id``; empty if none."""
@@ -491,13 +609,28 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(llm_raw, dict):
         msg = f"[llm] must be a table, got {type(llm_raw).__name__}"
         raise ConfigError(msg)
-    # split shared scalar before slot parsing (parser rejects non-slot keys)
+    # split shared scalars before slot parsing (parser rejects non-slot keys)
+    llm_shared_keys = ("image_description_model", "max_concurrent_requests")
     idm_raw = llm_raw.get("image_description_model", "")
     if not isinstance(idm_raw, str):
         msg = "[llm].image_description_model must be a string"
         raise ConfigError(msg)
     image_description_model = idm_raw
-    llm_slots_raw = {k: v for k, v in llm_raw.items() if k != "image_description_model"}
+    max_concurrent_raw = llm_raw.get(
+        "max_concurrent_requests", CharacterConfig.llm_max_concurrent_requests
+    )
+    if isinstance(max_concurrent_raw, bool) or not isinstance(max_concurrent_raw, int):
+        msg = (
+            "[llm].max_concurrent_requests must be a positive integer, "
+            f"got {type(max_concurrent_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    if max_concurrent_raw <= 0:
+        msg = (
+            f"[llm].max_concurrent_requests must be positive, got {max_concurrent_raw}"
+        )
+        raise ConfigError(msg)
+    llm_slots_raw = {k: v for k, v in llm_raw.items() if k not in llm_shared_keys}
     llm = _parse_llm_slots(llm_slots_raw)
 
     tts_raw = data.get("tts", {})
@@ -585,6 +718,18 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     memory_retrieval = _parse_memory_retrieval(retrieval_raw)
 
+    focus_raw = data.get("focus", {})
+    if not isinstance(focus_raw, dict):
+        msg = f"[focus] must be a table, got {type(focus_raw).__name__}"
+        raise ConfigError(msg)
+    focus = _parse_focus_config(focus_raw)
+
+    tools_raw = data.get("tools", {})
+    if not isinstance(tools_raw, dict):
+        msg = f"[tools] must be a table, got {type(tools_raw).__name__}"
+        raise ConfigError(msg)
+    tools = _parse_tools_config(tools_raw)
+
     return CharacterConfig(
         voice_window_size=voice_window_size,
         text_window_size=text_window_size,
@@ -608,6 +753,9 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         memory_providers=memory_providers,
         embedding=embedding,
         image_description_model=image_description_model,
+        llm_max_concurrent_requests=max_concurrent_raw,
+        focus=focus,
+        tools=tools,
     )
 
 
@@ -692,6 +840,65 @@ def _prompt_str(raw: dict, key: str) -> str:
         msg = f"[prompt].{key} must be a string, got {type(v).__name__}"
         raise ConfigError(msg)
     return v.strip()
+
+
+_FOCUS_FIELDS: frozenset[str] = frozenset({
+    "idle_wake_seconds",
+    "nudge_debounce_seconds",
+})
+
+
+def _parse_focus_config(raw: dict) -> FocusConfig:
+    """Validate ``[focus]``; positive numbers only."""
+    unknown = set(raw) - _FOCUS_FIELDS
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[focus] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    defaults = FocusConfig()
+
+    def _positive_float(key: str, fallback: float) -> float:
+        v = raw.get(key, fallback)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = f"[focus].{key} must be a number, got {type(v).__name__}"
+            raise ConfigError(msg)
+        if v <= 0:
+            msg = f"[focus].{key} must be positive, got {v}"
+            raise ConfigError(msg)
+        return float(v)
+
+    return FocusConfig(
+        idle_wake_seconds=_positive_float(
+            "idle_wake_seconds", defaults.idle_wake_seconds
+        ),
+        nudge_debounce_seconds=_positive_float(
+            "nudge_debounce_seconds", defaults.nudge_debounce_seconds
+        ),
+    )
+
+
+_TOOLS_FIELDS: frozenset[str] = frozenset({"loop_max_iterations"})
+
+
+def _parse_tools_config(raw: dict) -> ToolsConfig:
+    """Validate ``[tools]``."""
+    unknown = set(raw) - _TOOLS_FIELDS
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[tools] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    defaults = ToolsConfig()
+    v = raw.get("loop_max_iterations", defaults.loop_max_iterations)
+    if isinstance(v, bool) or not isinstance(v, int):
+        msg = (
+            "[tools].loop_max_iterations must be a positive integer, "
+            f"got {type(v).__name__}"
+        )
+        raise ConfigError(msg)
+    if v <= 0:
+        msg = f"[tools].loop_max_iterations must be positive, got {v}"
+        raise ConfigError(msg)
+    return ToolsConfig(loop_max_iterations=v)
 
 
 def _parse_budgets(raw: dict) -> dict[str, TierBudget]:
@@ -837,7 +1044,73 @@ def _parse_memory_retrieval(raw: dict) -> MemoryRetrievalConfig:
     return MemoryRetrievalConfig(**out)
 
 
-_MEMORY_PROVIDERS_FIELDS: frozenset[str] = frozenset({"projectors"})
+# projector names with a tunable [providers.memory.<name>] sub-table.
+# fact_embedding has no knobs (its tuning lives in [providers.embedding]).
+_MEMORY_WORKER_SECTION_NAMES: frozenset[str] = frozenset({
+    "rolling_summary",
+    "rich_note",
+    "people_dossier",
+    "reflection",
+    "fact_supersede",
+})
+
+_MEMORY_PROVIDERS_FIELDS: frozenset[str] = frozenset({
+    "projectors",
+    *_MEMORY_WORKER_SECTION_NAMES,
+})
+
+
+def _worker_section(raw: dict, name: str) -> dict:
+    """Pull ``[providers.memory.<name>]`` sub-table; absent → ``{}``."""
+    section = raw.get(name, {})
+    if not isinstance(section, dict):
+        msg = f"[providers.memory.{name}] must be a table, got {type(section).__name__}"
+        raise ConfigError(msg)
+    return section
+
+
+def _worker_knobs(
+    name: str,
+    raw: dict,
+    defaults: RollingSummaryConfig
+    | RichNoteConfig
+    | PeopleDossierConfig
+    | ReflectionConfig
+    | FactSupersedeConfig,
+) -> dict[str, int | float]:
+    """Validate one ``[providers.memory.<name>]`` knob table.
+
+    Field names + kinds inferred from the *defaults* dataclass: ints
+    stay positive ints, floats accept ints and must be positive.
+    Returns kwargs for ``replace``-style construction.
+    """
+    valid_fields = {f.name: f.type for f in fields(defaults)}
+    unknown = set(raw) - set(valid_fields)
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[providers.memory.{name}] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    kwargs: dict[str, int | float] = {}
+    for key, type_name in valid_fields.items():
+        if key not in raw:
+            continue
+        v = raw[key]
+        want_int = type_name == "int"
+        ok = (
+            isinstance(v, int) if want_int else isinstance(v, (int, float))
+        ) and not isinstance(v, bool)
+        if not ok:
+            kind = "a positive integer" if want_int else "a positive number"
+            msg = (
+                f"[providers.memory.{name}].{key} must be {kind}, "
+                f"got {type(v).__name__}"
+            )
+            raise ConfigError(msg)
+        if v <= 0:
+            msg = f"[providers.memory.{name}].{key} must be positive, got {v}"
+            raise ConfigError(msg)
+        kwargs[key] = v if want_int else float(v)
+    return kwargs
 
 
 def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
@@ -846,15 +1119,61 @@ def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
     Names checked against
     :func:`familiar_connect.processors.projectors.known_projectors` so
     typo fails loudly at config load rather than silently dropping a
-    writer.
+    writer. Per-projector knob tables parsed for every built-in with
+    tunables, listed in ``projectors`` or not.
     """
     unknown = set(raw) - _MEMORY_PROVIDERS_FIELDS
     if unknown:
         bad = ", ".join(sorted(unknown))
         msg = f"[providers.memory] has unknown keys: {bad}"
         raise ConfigError(msg)
+
+    defaults = MemoryProvidersConfig()
+    rolling_summary = replace(
+        defaults.rolling_summary,
+        **_worker_knobs(
+            "rolling_summary",
+            _worker_section(raw, "rolling_summary"),
+            defaults.rolling_summary,
+        ),
+    )
+    rich_note = replace(
+        defaults.rich_note,
+        **_worker_knobs(
+            "rich_note", _worker_section(raw, "rich_note"), defaults.rich_note
+        ),
+    )
+    people_dossier = replace(
+        defaults.people_dossier,
+        **_worker_knobs(
+            "people_dossier",
+            _worker_section(raw, "people_dossier"),
+            defaults.people_dossier,
+        ),
+    )
+    reflection = replace(
+        defaults.reflection,
+        **_worker_knobs(
+            "reflection", _worker_section(raw, "reflection"), defaults.reflection
+        ),
+    )
+    fact_supersede = replace(
+        defaults.fact_supersede,
+        **_worker_knobs(
+            "fact_supersede",
+            _worker_section(raw, "fact_supersede"),
+            defaults.fact_supersede,
+        ),
+    )
+
     if "projectors" not in raw:
-        return MemoryProvidersConfig()
+        return MemoryProvidersConfig(
+            rolling_summary=rolling_summary,
+            rich_note=rich_note,
+            people_dossier=people_dossier,
+            reflection=reflection,
+            fact_supersede=fact_supersede,
+        )
     raw_projectors = raw["projectors"]
     if not isinstance(raw_projectors, list) or not all(
         isinstance(p, str) for p in raw_projectors
@@ -874,7 +1193,14 @@ def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
                 f"projector {name!r}; valid: {valid}"
             )
             raise ConfigError(msg)
-    return MemoryProvidersConfig(projectors=tuple(raw_projectors))
+    return MemoryProvidersConfig(
+        projectors=tuple(raw_projectors),
+        rolling_summary=rolling_summary,
+        rich_note=rich_note,
+        people_dossier=people_dossier,
+        reflection=reflection,
+        fact_supersede=fact_supersede,
+    )
 
 
 _EMBEDDING_FIELDS: frozenset[str] = frozenset({
@@ -1224,7 +1550,11 @@ def _parse_history_windows(raw: dict) -> tuple[int, int]:
             raise ConfigError(msg)
         return v
 
-    return _positive_int("voice_window_size", 20), _positive_int("text_window_size", 30)
+    # fallbacks match CharacterConfig dataclass defaults; shipped values
+    # live in _default/character.toml and overlay these at load time
+    return _positive_int("voice_window_size", 100), _positive_int(
+        "text_window_size", 200
+    )
 
 
 def _parse_recent_history_coalesce_gap(raw: dict) -> float:

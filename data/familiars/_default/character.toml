@@ -145,11 +145,48 @@ embedding_weight  = 0.0
 # rich_note        fact extractor (the "rich-note" projector).
 # people_dossier   per-person summary off the facts watermark.
 # reflection       higher-order syntheses with citation provenance.
+# fact_supersede   retires prior facts replaced by newer ones.
 # fact_embedding   M6 — vectors for semantic recall. Opt-in: requires
 #                  [providers.embedding].backend != "off".
 
 [providers.memory]
-projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+projectors = [
+    "rolling_summary",
+    "rich_note",
+    "people_dossier",
+    "reflection",
+    "fact_supersede",
+]
+
+# Per-projector worker tuning. Cadences trade memory freshness
+# against LLM spend — every tick that finds work costs background
+# LLM calls. Knobs accepted whether or not the projector is listed
+# above, so toggling a projector keeps its tuning.
+
+[providers.memory.rolling_summary]
+turns_threshold = 10    # new turns per channel before summary refreshes
+cross_k         = 5     # new source-channel turns before cross-channel refresh
+tick_interval_s = 5.0
+
+[providers.memory.rich_note]
+batch_size       = 10   # turns per extraction batch (also the trigger threshold)
+tick_interval_s  = 15.0
+participants_max = 30   # cap on participant manifest rows in the prompt
+
+[providers.memory.people_dossier]
+tick_interval_s = 20.0
+
+[providers.memory.reflection]
+turns_threshold          = 20   # new turns before a reflection pass
+max_reflections_per_tick = 3
+max_turns_per_tick       = 50   # window cap on turns fed to the prompt
+recent_facts_limit       = 20   # recent facts included in the prompt
+tick_interval_s          = 60.0
+
+[providers.memory.fact_supersede]
+batch_size      = 5     # new facts evaluated per tick (one LLM call each)
+tick_interval_s = 60.0
+priors_max      = 20    # prior facts shown to the LLM per subject
 
 # --- Embeddings (M6) -------------------------------------------------------
 #
@@ -332,10 +369,17 @@ image_description_constraints = ""
 #   Model used to generate text descriptions of images. Empty = disabled.
 #   Example: image_description_model = "openai/gpt-4o"
 #
+# max_concurrent_requests: shared key at [llm] level. Process-wide cap
+#   on in-flight LLM requests across every slot — the bottleneck is the
+#   OpenRouter key's rate limit, not any single call site.
+#
 # provider_order pins OpenRouter routing for prompt-cache stability.
 # STOPGAP — drop once OpenRouter's default routing reliably hits a
 # cache-supporting provider. See docs/architecture/tuning.md
 # § provider pinning.
+
+[llm]
+max_concurrent_requests = 4
 
 [llm.fast]
 model        = "anthropic/claude-haiku-4.5"
@@ -376,3 +420,25 @@ tool_calling   = true
 respond_to_typing        = true
 typing_backoff_initial_s = 1.0
 typing_backoff_max_s     = 30.0
+
+# --- Attentional focus -------------------------------------------------------
+#
+# idle_wake_seconds: focused-channel silence before traffic in a
+# non-focused channel nudges the model awake (the nudge never moves
+# focus — only the model's shift_focus tool does).
+# nudge_debounce_seconds: rapid arrivals within this window share one
+# nudge.
+
+[focus]
+idle_wake_seconds      = 120.0
+nudge_debounce_seconds = 30.0
+
+# --- Tools -------------------------------------------------------------------
+#
+# loop_max_iterations: hard cap on agentic-loop rounds per turn
+# (model call → tool execution → re-call). Protects against runaway
+# tool loops; raise for deeper multi-tool tasks at the cost of
+# latency + spend.
+
+[tools]
+loop_max_iterations = 5

@@ -20,13 +20,22 @@ from familiar_connect.config import (
     DeepgramSTTConfig,
     DiscordTextConfig,
     EmbeddingConfig,
+    FactSupersedeConfig,
+    FocusConfig,
     LLMSlotConfig,
+    MemoryProvidersConfig,
     MemoryRetrievalConfig,
+    PeopleDossierConfig,
+    ReflectionConfig,
+    RichNoteConfig,
+    RollingSummaryConfig,
     STTConfig,
+    ToolsConfig,
     TTSConfig,
     TurnDetectionConfig,
     load_character_config,
 )
+from familiar_connect.processors.projectors import DEFAULT_PROJECTORS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1137,3 +1146,234 @@ class TestImageToolConfig:
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert not cfg.image_description_model
+
+
+class TestFocusConfig:
+    """``[focus]`` knobs — attentional idle-nudge timing."""
+
+    def test_defaults(self) -> None:
+        cfg = FocusConfig()
+        assert cfg.idle_wake_seconds == pytest.approx(120.0)
+        assert cfg.nudge_debounce_seconds == pytest.approx(30.0)
+
+    def test_present_on_character_config(self) -> None:
+        cfg = CharacterConfig()
+        assert isinstance(cfg.focus, FocusConfig)
+
+    def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[focus]\nidle_wake_seconds = 45.0\nnudge_debounce_seconds = 10\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.focus.idle_wake_seconds == pytest.approx(45.0)
+        assert cfg.focus.nudge_debounce_seconds == pytest.approx(10.0)
+
+    def test_must_be_positive(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[focus]\nidle_wake_seconds = -1\n")
+        with pytest.raises(ConfigError, match="idle_wake_seconds"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[focus]\nbogus = 1\n")
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestToolsConfig:
+    """``[tools]`` knobs — agentic loop bounds."""
+
+    def test_defaults(self) -> None:
+        assert ToolsConfig().loop_max_iterations == 5
+
+    def test_present_on_character_config(self) -> None:
+        cfg = CharacterConfig()
+        assert isinstance(cfg.tools, ToolsConfig)
+
+    def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[tools]\nloop_max_iterations = 9\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.tools.loop_max_iterations == 9
+
+    def test_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[tools]\nloop_max_iterations = 0\n")
+        with pytest.raises(ConfigError, match="loop_max_iterations"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[tools]\nbogus = 1\n")
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestLLMMaxConcurrentRequests:
+    """Shared ``[llm].max_concurrent_requests`` scalar."""
+
+    def test_defaults_to_four(self) -> None:
+        assert CharacterConfig().llm_max_concurrent_requests == 4
+
+    def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[llm]\nmax_concurrent_requests = 8\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm_max_concurrent_requests == 8
+
+    def test_not_treated_as_slot(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[llm]\nmax_concurrent_requests = 8\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert set(cfg.llm) == {"fast", "prose", "background"}
+
+    def test_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[llm]\nmax_concurrent_requests = 0\n")
+        with pytest.raises(ConfigError, match="max_concurrent_requests"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestMemoryWorkerConfigs:
+    """Per-projector tuning tables under ``[providers.memory.<name>]``."""
+
+    def test_dataclass_defaults_match_legacy_hardcodes(self) -> None:
+        assert RollingSummaryConfig() == RollingSummaryConfig(
+            turns_threshold=10, cross_k=5, tick_interval_s=5.0
+        )
+        assert RichNoteConfig() == RichNoteConfig(
+            batch_size=10, tick_interval_s=15.0, participants_max=30
+        )
+        assert PeopleDossierConfig() == PeopleDossierConfig(tick_interval_s=20.0)
+        assert ReflectionConfig() == ReflectionConfig(
+            turns_threshold=20,
+            max_reflections_per_tick=3,
+            max_turns_per_tick=50,
+            recent_facts_limit=20,
+            tick_interval_s=60.0,
+        )
+        assert FactSupersedeConfig() == FactSupersedeConfig(
+            batch_size=5, tick_interval_s=60.0, priors_max=20
+        )
+
+    def test_present_on_memory_providers(self) -> None:
+        cfg = MemoryProvidersConfig()
+        assert isinstance(cfg.rolling_summary, RollingSummaryConfig)
+        assert isinstance(cfg.rich_note, RichNoteConfig)
+        assert isinstance(cfg.people_dossier, PeopleDossierConfig)
+        assert isinstance(cfg.reflection, ReflectionConfig)
+        assert isinstance(cfg.fact_supersede, FactSupersedeConfig)
+
+    def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            "[providers.memory.rolling_summary]\n"
+            "turns_threshold = 4\n"
+            "cross_k = 2\n"
+            "tick_interval_s = 1.5\n"
+            "[providers.memory.rich_note]\n"
+            "batch_size = 3\n"
+            "tick_interval_s = 7\n"
+            "participants_max = 12\n"
+            "[providers.memory.people_dossier]\n"
+            "tick_interval_s = 11.0\n"
+            "[providers.memory.reflection]\n"
+            "turns_threshold = 8\n"
+            "max_reflections_per_tick = 1\n"
+            "max_turns_per_tick = 25\n"
+            "recent_facts_limit = 5\n"
+            "tick_interval_s = 90.0\n"
+            "[providers.memory.fact_supersede]\n"
+            "batch_size = 2\n"
+            "tick_interval_s = 120.0\n"
+            "priors_max = 6\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        mem = cfg.memory_providers
+        assert mem.rolling_summary == RollingSummaryConfig(
+            turns_threshold=4, cross_k=2, tick_interval_s=1.5
+        )
+        assert mem.rich_note == RichNoteConfig(
+            batch_size=3, tick_interval_s=7.0, participants_max=12
+        )
+        assert mem.people_dossier == PeopleDossierConfig(tick_interval_s=11.0)
+        assert mem.reflection == ReflectionConfig(
+            turns_threshold=8,
+            max_reflections_per_tick=1,
+            max_turns_per_tick=25,
+            recent_facts_limit=5,
+            tick_interval_s=90.0,
+        )
+        assert mem.fact_supersede == FactSupersedeConfig(
+            batch_size=2, tick_interval_s=120.0, priors_max=6
+        )
+
+    def test_partial_override_keeps_other_knobs(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.memory.rich_note]\nbatch_size = 3\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.memory_providers.rich_note.batch_size == 3
+        assert cfg.memory_providers.rich_note.tick_interval_s == pytest.approx(15.0)
+
+    def test_must_be_positive(self, tmp_path: Path, default_profile_path: Path) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.memory.rich_note]\nbatch_size = 0\n")
+        with pytest.raises(ConfigError, match="batch_size"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_knob_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.memory.rolling_summary]\nbogus = 1\n")
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_unknown_subtable_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.memory.bogus_worker]\ntick_interval_s = 1\n")
+        with pytest.raises(ConfigError, match="bogus_worker"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
+class TestDefaultProfileDrift:
+    """Shipped ``_default/character.toml`` must agree with code defaults."""
+
+    def test_default_profile_enables_every_default_projector(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.memory_providers.projectors == DEFAULT_PROJECTORS
+
+    def test_dataclass_projectors_match_registry_default(self) -> None:
+        assert MemoryProvidersConfig().projectors == DEFAULT_PROJECTORS
+
+    def test_history_window_fallbacks_match_dataclass_defaults(
+        self, tmp_path: Path
+    ) -> None:
+        """Parser fallbacks (defaults file omits keys) match dataclass."""
+        defaults = tmp_path / "defaults.toml"
+        defaults.write_text("")
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=defaults)
+        assert cfg.voice_window_size == CharacterConfig().voice_window_size
+        assert cfg.text_window_size == CharacterConfig().text_window_size

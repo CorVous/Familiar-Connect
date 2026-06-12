@@ -32,9 +32,13 @@ tune per host without a rebuild.
 | STT backend selector | `[providers.stt].backend` | unchanged |
 | Turn detection strategy + tuning | `[providers.turn_detection]` + `[providers.turn_detection.local]` | unchanged |
 | Memory projector selection | `[providers.memory]` (M5) | unchanged |
+| Memory worker cadences / batch sizes | `[providers.memory.<name>]` | unchanged |
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
 | Embedding backend (M6) | `[providers.embedding]` | unchanged |
 | RAG / fact retrieval ranking | `[memory.retrieval]` (M2 + M6) | unchanged |
+| Attentional idle-nudge timing | `[focus]` | unchanged |
+| Agentic tool-loop cap | `[tools]` | unchanged |
+| LLM request concurrency | `[llm].max_concurrent_requests` | unchanged |
 
 ## Environment variables
 
@@ -88,6 +92,16 @@ embedding_weight  = 0.0   # M6 — needs [providers.embedding] + projector
 backend = "off"           # "off" | "hash"
 dim     = 256             # for backends that accept one
 
+[providers.memory]        # M5 — see § Memory projectors
+projectors = [
+    "rolling_summary", "rich_note", "people_dossier",
+    "reflection", "fact_supersede",
+]
+
+[providers.memory.rich_note]   # per-worker tuning — one table per projector
+batch_size      = 10
+tick_interval_s = 15.0
+
 [providers.turn_detection]
 strategy = "deepgram"    # "deepgram" | "ten+smart_turn"
 
@@ -108,6 +122,9 @@ cartesia_model    = "sonic-3"
 gemini_voice      = "Kore"
 gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
+
+[llm]
+max_concurrent_requests = 4  # process-wide cap on in-flight LLM requests
 
 [llm.fast]
 model        = "anthropic/claude-haiku-4.5"
@@ -139,6 +156,13 @@ message_rendering   = "prefixed"  # "prefixed" | "name_only"
 respond_to_typing        = true   # cancel in-flight reply on user typing
 typing_backoff_initial_s = 1.0    # first pause when another bot is typing
 typing_backoff_max_s     = 30.0   # ceiling after exponential doubling
+
+[focus]
+idle_wake_seconds      = 120.0    # focused-channel silence before a nudge
+nudge_debounce_seconds = 30.0     # rapid arrivals share one nudge
+
+[tools]
+loop_max_iterations = 5           # hard cap on agentic-loop rounds per turn
 ```
 
 ## Tuning by goal
@@ -212,7 +236,7 @@ longer needed.
 
 ### Attentional focus
 
-No TOML knobs. The familiar attends to one text + one voice channel
+The familiar attends to one text + one voice channel
 at a time; unfocused channels' messages are **staged** (stored, no
 reply) until the model shifts focus. Focus is model-driven through
 the `shift_focus(channel_id)` tool, so it only moves on slots with
@@ -225,6 +249,23 @@ consuming staged turns. Inspect current focus + per-channel unread
 counts via `/diagnostics` (`Focus: text=#… voice=#…`,
 `Unreads: #… (N)`). See
 [Attentional stream](context-pipeline.md#attentional-stream).
+
+Idle-nudge timing lives in `[focus]`:
+
+```toml
+[focus]
+idle_wake_seconds      = 120.0
+nudge_debounce_seconds = 30.0
+```
+
+| Field | Default | Purpose |
+|---|---|---|
+| `idle_wake_seconds` | `120.0` | Focused-channel silence before traffic in a non-focused channel nudges the model awake. The nudge never moves focus — only the model's `shift_focus` does. |
+| `nudge_debounce_seconds` | `30.0` | Rapid arrivals within this window share one nudge; the next unread after the window fires again. |
+
+Lower `idle_wake_seconds` for a more responsive familiar across
+channels; raise it to keep attention pinned during active
+conversations.
 
 ## Discord text channel knobs
 
@@ -497,6 +538,7 @@ unknown slots fail loudly at config load. See
 ```toml
 [llm]
 image_description_model  = ""              # shared; empty = disabled
+max_concurrent_requests  = 4               # shared; process-wide cap
 
 [llm.<slot>]
 model                    = "z-ai/glm-5.1"   # required
@@ -528,6 +570,19 @@ the model can't shift focus or stay silent *via tools* — the
 `<silent>` text sentinel still works on the bare streaming path, but
 focus stays pinned to its startup default. Enable it on `prose` /
 `fast` to make the attentional stream model-driven.
+
+The loop's per-turn iteration cap (model call → tool execution →
+re-call) is `[tools].loop_max_iterations` (default `5`, shared by
+voice and text responders). Raise it for deeper multi-tool tasks at
+the cost of latency and spend.
+
+### `max_concurrent_requests`
+
+Shared key at `[llm]` level. Sizes the process-wide semaphore that
+caps in-flight LLM requests across every slot — the bottleneck is
+the OpenRouter key's rate limit, not any single call site. Default
+`4`. Lower it when hitting 429s; raise it when background workers
+queue behind each other.
 
 ### `image_tools`
 
@@ -752,7 +807,7 @@ fastembed_model = "BAAI/bge-small-en-v1.5"
 [providers.memory]
 projectors = [
     "rolling_summary", "rich_note", "people_dossier", "reflection",
-    "fact_embedding",
+    "fact_supersede", "fact_embedding",
 ]
 
 [memory.retrieval]
@@ -784,7 +839,10 @@ picks which run; unknown names raise at config load.
 
 ```toml
 [providers.memory]
-projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+projectors = [
+    "rolling_summary", "rich_note", "people_dossier",
+    "reflection", "fact_supersede",
+]
 ```
 
 | Name | Class | Side-index produced |
@@ -793,13 +851,54 @@ projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
 | `rich_note` | `FactExtractor` | `facts` |
 | `people_dossier` | `PeopleDossierWorker` | `people_dossiers` |
 | `reflection` | `ReflectionWorker` | `reflections` |
+| `fact_supersede` | `FactSupersedeWorker` | retires replaced rows in `facts` |
 | `fact_embedding` | `FactEmbeddingWorker` | `fact_embeddings` (M6, opt-in) |
 
-Default keeps the original four; `fact_embedding` is registered but
+Default keeps the five above; `fact_embedding` is registered but
 must be added explicitly since it depends on a configured embedder
 backend (see [Embeddings (M6)](#embeddings-m6)). Drop a name to
 disable that writer. Empty list disables every memory projector
 (read paths still work — they just see stale side-indices).
+
+### Worker tuning
+
+Each built-in projector reads a `[providers.memory.<name>]` knob
+table. Cadences trade memory freshness against LLM spend — every
+tick that finds work costs background LLM calls. Knob tables are
+accepted whether or not the projector is listed in `projectors`, so
+toggling a projector keeps its tuning.
+
+```toml
+[providers.memory.rolling_summary]
+turns_threshold = 10    # new turns per channel before summary refreshes
+cross_k         = 5     # new source-channel turns before cross refresh
+tick_interval_s = 5.0
+
+[providers.memory.rich_note]
+batch_size       = 10   # turns per extraction batch (also the trigger)
+tick_interval_s  = 15.0
+participants_max = 30   # cap on participant manifest rows in the prompt
+
+[providers.memory.people_dossier]
+tick_interval_s = 20.0
+
+[providers.memory.reflection]
+turns_threshold          = 20   # new turns before a reflection pass
+max_reflections_per_tick = 3
+max_turns_per_tick       = 50   # window cap on turns fed to the prompt
+recent_facts_limit       = 20   # recent facts included in the prompt
+tick_interval_s          = 60.0
+
+[providers.memory.fact_supersede]
+batch_size      = 5     # new facts evaluated per tick (one LLM call each)
+tick_interval_s = 60.0
+priors_max      = 20    # prior facts shown to the LLM per subject
+```
+
+All knobs are positive numbers; unknown keys fail at config load.
+For experiments, drop `tick_interval_s` and the thresholds to make
+side-indices converge fast; for production, raise them to cut
+background spend.
 
 Third-party projectors (Graphiti / Cognee / external memory
 service) plug in by calling
@@ -837,7 +936,10 @@ idle_close_s = 30.0
 # shipped (M5) — see § Memory projectors
 
 [providers.memory]
-projectors = ["rolling_summary", "rich_note", "people_dossier", "reflection"]
+projectors = [
+    "rolling_summary", "rich_note", "people_dossier",
+    "reflection", "fact_supersede",
+]
 
 # planned (V5)
 

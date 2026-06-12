@@ -63,6 +63,17 @@ def get_request_semaphore(
     return _request_semaphore
 
 
+def configure_request_semaphore(max_concurrent: int) -> asyncio.Semaphore:
+    """Size process-wide semaphore from ``[llm].max_concurrent_requests``.
+
+    Replaces any lazily created default; called once at startup by
+    :func:`create_llm_clients`, before any request is in flight.
+    """
+    global _request_semaphore  # noqa: PLW0603
+    _request_semaphore = asyncio.Semaphore(max_concurrent)
+    return _request_semaphore
+
+
 @dataclass
 class Message:
     """Chat message — content + optional speaker name + tool fields.
@@ -637,6 +648,7 @@ def create_llm_clients(
     ``"__image_description__"`` holds the vision model client when
     ``[llm].image_description_model`` is set.
     """
+    configure_request_semaphore(character_config.llm_max_concurrent_requests)
     clients: dict[str, LLMClient] = {}
     for slot_name in LLM_SLOT_NAMES:
         slot = character_config.llm[slot_name]

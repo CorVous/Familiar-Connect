@@ -362,3 +362,77 @@ async def test_image_tools_only_enters_loop(tmp_path: Path) -> None:
     # handler ran — loop entered despite tool_calling=False
     assert len(handler_seen) == 1
     assert send.calls[0][1] == "Looks like a cat."
+
+
+# ---------------------------------------------------------------------------
+# Loop cap threading test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loop_max_iterations_caps_agentic_loop(tmp_path: Path) -> None:
+    """``loop_max_iterations=1`` stops after the first tool round."""
+
+    async def _h(_args: dict, _ctx: ToolContext) -> str:
+        await asyncio.sleep(0)
+        return '{"ok": true}'
+
+    registry = ToolRegistry()
+    registry.register(Tool(name="set_alarm", description="", parameters={}, handler=_h))
+
+    # every iteration asks for another tool call — only the cap stops it
+    scripts = [
+        [
+            _tc_delta("c1", "set_alarm", {"reason": "a", "delay_seconds": 5}),
+            LLMDelta(finish_reason="tool_calls"),
+        ],
+        [
+            _tc_delta("c2", "set_alarm", {"reason": "b", "delay_seconds": 5}),
+            LLMDelta(finish_reason="tool_calls"),
+        ],
+    ]
+    llm = _ScriptedToolLLM(scripts)
+    send = _CapturingSend()
+
+    def _ctx_factory(
+        channel_id: int, turn_id: str, images: dict | None = None
+    ) -> ToolContext:
+        return ToolContext(
+            familiar_id="fam",
+            channel_id=channel_id,
+            channel_kind="text",
+            turn_id=turn_id,
+            history=AsyncHistoryStore(HistoryStore(":memory:")),
+            bus=InProcessEventBus(),
+            images=images or {},
+        )
+
+    card = tmp_path / "character.md"
+    card.write_text("You are a familiar.\n")
+    store = HistoryStore(":memory:")
+    assembler = Assembler(
+        layers=[
+            CharacterCardLayer(card_path=card),
+            RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20),
+        ]
+    )
+    responder = TextResponder(
+        assembler=assembler,
+        llm_client=llm,
+        send_text=send,
+        history_store=AsyncHistoryStore(store),
+        router=TurnRouter(),
+        familiar_id="fam",
+        tool_registry=registry,
+        tool_context_factory=_ctx_factory,
+        loop_max_iterations=1,
+    )
+    bus = InProcessEventBus()
+    await bus.start()
+    try:
+        await responder.handle(_discord_text_event(), bus)
+    finally:
+        await bus.shutdown()
+
+    # cap of 1 → exactly one completion call despite pending tool calls
+    assert len(llm.calls) == 1
