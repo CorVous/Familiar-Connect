@@ -87,7 +87,7 @@ def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | N
     on any download/FS error — bot falls back to Deepgram-only
     endpointing rather than crashing.
     """
-    # lazy: huggingface_hub is the `local-turn` extra, not always installed
+    # Lazy: huggingface_hub is the `local-turn` extra, not always installed
     try:
         from huggingface_hub import hf_hub_download  # noqa: PLC0415
     except ModuleNotFoundError:
@@ -116,7 +116,7 @@ def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | N
         )
         return None
     if not resolved.exists():
-        # cache rot — hf_hub_download returned a path that's gone
+        # Cache rot — hf_hub_download returned a path that's gone
         _logger.warning(
             f"{ls.tag('🎙️  Voice', ls.Y)} "
             f"{ls.kv('local_turn_detection', 'disabled', vc=ls.LY)} "

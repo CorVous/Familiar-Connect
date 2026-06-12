@@ -31,26 +31,26 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# binary frame header: [seq: uint16BE][op: uint8][payload...]
+# Binary frame header: [seq: uint16BE][op: uint8][payload...]
 _BINARY_HEADER_STRUCT = struct.Struct(">HB")
-# transition ID prefix on ops 29 and 30: [transition_id: uint16BE]
+# Transition ID prefix on ops 29 and 30: [transition_id: uint16BE]
 _TRANSITION_ID_STRUCT = struct.Struct(">H")
 
 
 class DaveVoiceWebSocket(DiscordVoiceWebSocket):
     """Voice WebSocket with DAVE protocol support."""
 
-    # declared for type-checkers; base class sets these at runtime
+    # Declared for type-checkers; base class sets these at runtime
     _connection: Any
     gateway: str
 
-    # dave opcodes (JSON)
+    # Dave opcodes (JSON)
     DAVE_PREPARE_TRANSITION = 21
     DAVE_EXECUTE_TRANSITION = 22
     DAVE_TRANSITION_READY = 23
     DAVE_PREPARE_EPOCH = 24
 
-    # dave/MLS opcodes (binary)
+    # Dave/MLS opcodes (binary)
     MLS_EXTERNAL_SENDER = 25
     MLS_KEY_PACKAGE = 26
     MLS_PROPOSALS = 27
@@ -126,7 +126,7 @@ class DaveVoiceWebSocket(DiscordVoiceWebSocket):
         """
         op = msg.get("op")
         if op == self.SESSION_DESCRIPTION:
-            # read dave_protocol_version before super() so
+            # Read dave_protocol_version before super() so
             # _reinit_dave_session() runs before binary MLS arrives
             data = msg.get("d") or {}
             version = int(data.get("dave_protocol_version", 0))

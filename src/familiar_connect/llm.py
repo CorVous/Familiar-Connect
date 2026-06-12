@@ -85,10 +85,10 @@ class Message:
     role: str
     content: str | list[dict[str, Any]]
     name: str | None = None
-    # assistant turns invoking tools — list of OpenAI ``tool_calls`` dicts
+    # Assistant turns invoking tools — list of OpenAI ``tool_calls`` dicts
     # ``{"id", "type":"function", "function":{"name","arguments"}}``.
     tool_calls: list[dict[str, Any]] | None = None
-    # tool-role turns reference the call they answered
+    # Tool-role turns reference the call they answered
     tool_call_id: str | None = None
 
     @property
@@ -175,7 +175,7 @@ class LLMClient:
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
-        # call-site label — surfaces in span names + per-call log.
+        # Call-site label — surfaces in span names + per-call log.
         # ``None`` keeps backward-compat for tests / one-off clients.
         self.slot = slot
         # OpenRouter routing override; ``None`` = default. See
@@ -185,14 +185,14 @@ class LLMClient:
         # OpenRouter reasoning effort; ``None`` = model default;
         # ``"off"`` → ``exclude=True``; ``"low"|"medium"|"high"`` → ``effort=…``.
         self.reasoning = reasoning
-        # gate for agentic-loop / tool-registry plumbing. responders
+        # Gate for agentic-loop / tool-registry plumbing. responders
         # read to decide whether to install tools on a call.
         self.tool_calling_enabled = tool_calling
-        # gate for view_image registration (independent of tool_calling)
+        # Gate for view_image registration (independent of tool_calling)
         self.image_tools_enabled = image_tools
-        # whether to send image content blocks in tool-result messages
+        # Whether to send image content blocks in tool-result messages
         self.multimodal = multimodal
-        # skip SSE streaming; fixes tool-call-as-text on models with
+        # Skip SSE streaming; fixes tool-call-as-text on models with
         # streaming + thinking-off interaction bugs (e.g. Qwen3 vLLM)
         self.no_stream = no_stream
         self._http: httpx.AsyncClient | None = None
@@ -223,7 +223,7 @@ class LLMClient:
         ``{"error": {"message": "Unsupported value: 'temperature' …"}}``.
         """
         slot_suffix = f".{self.slot}" if self.slot else ""
-        # mock response objects in tests may return non-string ``.text``;
+        # Mock response objects in tests may return non-string ``.text``;
         # coerce so logging never crashes request path.
         body_str = body if isinstance(body, str) else ""
         _logger.warning(
@@ -275,7 +275,7 @@ class LLMClient:
             if response.status_code != 429:
                 return response
 
-            # last attempt — don't sleep, just return 429
+            # Last attempt — don't sleep, just return 429
             if attempt == _MAX_RETRIES:
                 break
 
@@ -297,7 +297,7 @@ class LLMClient:
             )
             await asyncio.sleep(delay)
 
-        # all retries exhausted — caller's raise_for_status() handles it
+        # All retries exhausted — caller's raise_for_status() handles it
         assert response is not None  # noqa: S101 — loop always runs at least once
         return response
 
@@ -327,7 +327,7 @@ class LLMClient:
 
         reply = choices[0]["message"]
         # ``content`` may be ``None`` when model only emitted tool_calls.
-        # normalize to empty string so callers treat content uniformly.
+        # Normalize to empty string so callers treat content uniformly.
         content = reply.get("content") or ""
         tc = reply.get("tool_calls")
         tc_list: list[dict[str, Any]] | None = None
@@ -378,7 +378,7 @@ class LLMClient:
         headers = self.build_headers()
         payload = self.build_payload(messages, tools=tools)
         payload["stream"] = True
-        # ask OpenRouter for trailing chunk carrying token usage +
+        # Ask OpenRouter for trailing chunk carrying token usage +
         # provider that served call. costs one extra SSE chunk for
         # per-call cache/route visibility.
         payload["usage"] = {"include": True}
@@ -439,7 +439,7 @@ class LLMClient:
                     finish_reason=finish,
                 )
         except (GeneratorExit, asyncio.CancelledError):
-            # caller closed generator (barge-in / silent gate / scope
+            # Caller closed generator (barge-in / silent gate / scope
             # cancel). distinct status so /diagnostics shows real
             # provider errors clearly.
             metrics.status = "cancelled"
@@ -685,7 +685,7 @@ def create_llm_clients(
             log_parts.append(ls.kv("multimodal", "on", vc=ls.LM))
         _logger.info(" ".join(log_parts))
 
-    # vision description client — reserved slot, built when configured
+    # Vision description client — reserved slot, built when configured
     if character_config.image_description_model:
         clients["__image_description__"] = LLMClient(
             api_key=api_key,

@@ -18,7 +18,7 @@ import hashlib
 import math
 import re
 
-# word-boundary tokenisation matches FTS5's ``unicode61`` shape
+# Word-boundary tokenisation matches FTS5's ``unicode61`` shape
 # closely enough for "is the BM25 hit also similar by embedding?"
 # sanity checks. drop diacritics + casefold so paraphrase variation
 # in the cue still hashes onto same buckets ("Café" / "cafe" / "CAFE").

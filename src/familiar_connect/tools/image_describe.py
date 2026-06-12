@@ -9,7 +9,7 @@ from familiar_connect.llm import Message
 if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
-# neutral base — no character/persona constraints. per-familiar
+# Neutral base — no character/persona constraints. per-familiar
 # `constraints` (from [prompt].image_description_constraints) append
 # here; base stays stable so authors add one sentence, not re-author
 # the whole prompt.

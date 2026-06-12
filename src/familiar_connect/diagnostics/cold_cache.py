@@ -35,10 +35,10 @@ _logger = logging.getLogger("familiar_connect.diagnostics.cold_cache")
 _WORD_RE = re.compile(r"[\w']{3,}", re.UNICODE)
 _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]{2,})\b")
 
-# capitalized discourse markers / sentence-starters that the regex
+# Capitalized discourse markers / sentence-starters that the regex
 # above would otherwise flag on every short voice fragment ("But.",
 # "Okay.", "Which means…"). stored lowercase; matched case-insensitively.
-# incomplete by design — additions are cheap, full NER out of scope.
+# Incomplete by design — additions are cheap, full NER out of scope.
 _SENTENCE_STARTER_STOPWORDS: frozenset[str] = frozenset({
     "actually",
     "also",

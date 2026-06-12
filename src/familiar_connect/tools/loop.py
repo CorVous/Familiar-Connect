@@ -19,7 +19,7 @@ from familiar_connect import log_style as ls
 from familiar_connect.llm import LLMDelta, Message
 from familiar_connect.tools.registry import ImageResult
 
-# lazy import to avoid circular import; resolved at call time
+# Lazy import to avoid circular import; resolved at call time
 _SILENT_RESULT: str | None = None
 
 
@@ -57,7 +57,7 @@ class AgenticResult:
     iterations: int
     tool_calls_made: int
     transcript: list[Message] = field(default_factory=list)
-    is_silent: bool = False  # set when silent tool was called
+    is_silent: bool = False  # Set when silent tool was called
 
 
 def _accumulate_tool_calls(
@@ -94,7 +94,7 @@ def _finalize_tool_calls(pending: dict[int, dict[str, Any]]) -> list[dict[str, A
     return [pending[i] for i in sorted(pending) if pending[i].get("id")]
 
 
-# leaked tool-call: model writes the invocation as text instead of using
+# Leaked tool-call: model writes the invocation as text instead of using
 # the tool-calling channel. matches bare + namespaced ``<invoke …>`` tags.
 _LEADING_INVOKE_RE = re.compile(r"\s*<(?:\w+:)?invoke\b")
 _INVOKE_BLOCK_RE = re.compile(r"<(?:\w+:)?invoke\b.*?</(?:\w+:)?invoke>", re.DOTALL)
@@ -290,7 +290,7 @@ async def agentic_loop(
             messages.append(tool_msg)
             tool_msgs.append(tool_msg)
 
-        # detect silent tool BEFORE on_iteration_end so the call +
+        # Detect silent tool BEFORE on_iteration_end so the call +
         # its reasoning aren't persisted to history (which would
         # re-seed the model's rationale for silence next turn)
         silent_sentinel = _get_silent_result()
@@ -319,7 +319,7 @@ async def agentic_loop(
             )
             break
 
-    # guard: model occasionally emits a tool-call as text rather than
+    # Guard: model occasionally emits a tool-call as text rather than
     # invoking it. never ship/store that — it leaks and seeds a mimicry
     # cascade. a leaked ``silent`` call is honoured as silence.
     cleaned, silent_leak = _strip_leaked_tool_calls(last_content)

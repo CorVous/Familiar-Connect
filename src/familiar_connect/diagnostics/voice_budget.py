@@ -40,7 +40,7 @@ PHASE_LLM_FIRST_TOKEN: Final = "llm_first_token"  # noqa: S105 — phase label, 
 PHASE_TTS_FIRST_AUDIO: Final = "tts_first_audio"
 PHASE_PLAYBACK_START: Final = "playback_start"
 
-# adjacent-phase gaps. ``(prev, curr, span_name)``; emitted when
+# Adjacent-phase gaps. ``(prev, curr, span_name)``; emitted when
 # ``curr`` is recorded and ``prev`` was already present.
 _GAPS: Final[tuple[tuple[str, str, str], ...]] = (
     (PHASE_VAD_END, PHASE_STT_FINAL, "voice.vad_to_stt"),
@@ -96,7 +96,7 @@ class VoiceBudgetRecorder:
                 continue
             ms = max(0, round((phases[curr] - phases[prev]) * 1000))
             self._emit(turn_id, name, ms)
-        # cumulative total fires once on terminal phase if funnel
+        # Cumulative total fires once on terminal phase if funnel
         # started cleanly. useful as user-perceived latency signal.
         if current == PHASE_PLAYBACK_START and PHASE_STT_FINAL in phases:
             ms = max(
@@ -113,7 +113,7 @@ class VoiceBudgetRecorder:
             f"{ls.kv('span', name, vc=ls.LM)} "
             f"{ls.kv('ms', str(ms), vc=ls.LC)}"
         )
-        # span recording must never raise into the voice path
+        # Span recording must never raise into the voice path
         with contextlib.suppress(Exception):
             get_span_collector().record(name=name, ms=ms, status="ok")
 

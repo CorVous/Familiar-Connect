@@ -47,7 +47,7 @@ def _open_as_rgb(raw: bytes) -> Image.Image:
         img.seek(idx)
         frames.append(img.convert("RGB"))
 
-    # scale all frames to the tallest frame's height, then stitch horizontally
+    # Scale all frames to the tallest frame's height, then stitch horizontally
     h = max(f.height for f in frames)
     parts: list[Image.Image] = []
     for f in frames:
@@ -76,7 +76,7 @@ def compress_to_jpeg(raw: bytes, *, ceiling: int = _SIZE_CEILING) -> bytes:
     :raises ImageTooLargeError: no quality setting achieves target size.
     """
     img = _open_as_rgb(raw)
-    # thumbnail only downscales — preserves images already within limits
+    # Thumbnail only downscales — preserves images already within limits
     img.thumbnail((_MAX_EDGE, _MAX_EDGE))
 
     for quality in range(_START_QUALITY, _MIN_QUALITY - 1, -_QUALITY_STEP):

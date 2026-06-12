@@ -35,7 +35,7 @@ _logger = logging.getLogger("familiar_connect.processors.fact_extractor")
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
-# patterns marking "facts" that are really self-capability statements
+# Patterns marking "facts" that are really self-capability statements
 # (e.g., "I cannot remember names"). belong in system prompt or
 # runtime config — not facts store, where they'd silently expire the
 # moment capability changes. belt-and-braces post-filter; extractor
@@ -128,9 +128,9 @@ class FactExtractor:
                     int(i) for i in raw_sources if isinstance(i, int) and i in valid_ids
                 ]
             if not source_ids:
-                # fall back to whole batch rather than dropping fact
+                # Fall back to whole batch rather than dropping fact
                 source_ids = list(valid_ids)
-            # prefer channel of first source turn for scoping
+            # Prefer channel of first source turn for scoping
             channel_id = channel_ids.get(source_ids[0])
             text = str(fact.get("text", "")).strip()
             if not text:
@@ -159,18 +159,18 @@ class FactExtractor:
                 valid_to=valid_to,
                 importance=importance,
             )
-            # mirror resolved subjects into ``turn_mentions``. bridges
+            # Mirror resolved subjects into ``turn_mentions``. bridges
             # bare-text references like "what about Aria?" into same
             # mention index Discord ``@`` pings populate, so
             # ``PeopleDossierLayer`` picks them up at next assemble —
             # no separate read path, no fact-table join in hot path.
-            # idempotent (PK-deduped on store side).
+            # Idempotent (PK-deduped on store side).
             if subjects:
                 keys = [s.canonical_key for s in subjects]
                 for tid in source_ids:
                     await self._store.record_mentions(turn_id=tid, canonical_keys=keys)
 
-        # always advance watermark, even on empty/bad output, to prevent loops
+        # Always advance watermark, even on empty/bad output, to prevent loops
         last_id = new_turns[-1].id
         await self._store.put_writer_watermark(
             familiar_id=self._familiar_id, last_written_id=last_id
@@ -218,11 +218,11 @@ def _build_participants(
     manifest dropped silently (LLM may hallucinate).
     """
     out: dict[str, str] = {}
-    # batch authors first, with per-turn guild_id
+    # Batch authors first, with per-turn guild_id
     channel_guilds: dict[int, int | None] = {}
     for t in turns:
         if t.channel_id is not None:
-            # last guild_id wins per channel; usually consistent within batch
+            # Last guild_id wins per channel; usually consistent within batch
             channel_guilds[t.channel_id] = t.guild_id
         if t.author is None:
             continue
@@ -231,7 +231,7 @@ def _build_participants(
             guild_id=t.guild_id,
             familiar_id=familiar_id,
         )
-    # widen with recent channel participants, capped at max_total
+    # Widen with recent channel participants, capped at max_total
     for channel_id, guild_id in channel_guilds.items():
         if len(out) >= max_total:
             break
@@ -339,7 +339,7 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
     """
     if not reply or not reply.strip():
         return []
-    # strip common code-fence prelude like ``` or ```json
+    # Strip common code-fence prelude like ``` or ```json
     cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
     match = _JSON_ARRAY_RE.search(cleaned)
     blob = match.group(0) if match else cleaned
@@ -353,7 +353,7 @@ def _parse_facts(reply: str) -> list[dict[str, object]]:
     for item in parsed:
         if not isinstance(item, dict):
             continue
-        # coerce source_turn_ids to ints
+        # Coerce source_turn_ids to ints
         raw_ids = item.get("source_turn_ids", [])
         ids: list[int] = []
         if isinstance(raw_ids, list):
@@ -420,7 +420,7 @@ def _parse_iso_dt(raw: object) -> datetime | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    # date-only strings parse to naive datetimes; assume UTC for consistency
+    # Date-only strings parse to naive datetimes; assume UTC for consistency
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed

@@ -48,7 +48,7 @@ INT16_MAX = 32768.0
 class FasterWhisperTranscriber:
     """Local CTranslate2-backed Whisper transcriber."""
 
-    # bot-side per-user idle window. read by ``bot._start_voice_intake`` to
+    # Bot-side per-user idle window. read by ``bot._start_voice_intake`` to
     # spawn idle watchdog. parity with sibling backends.
     _IDLE_CLOSE_S: float = 30.0
 

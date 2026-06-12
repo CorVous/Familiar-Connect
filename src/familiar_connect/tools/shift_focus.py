@@ -39,7 +39,7 @@ async def _shift_focus_handler(args: dict[str, Any], ctx: ToolContext) -> str:
     fm.defer_shift(channel_id)
 
     payload: dict[str, Any] = {"ok": True, "channel_id": channel_id}
-    # eager content fetch — voice/empty channels yield [] (model learns
+    # Eager content fetch — voice/empty channels yield [] (model learns
     # it's empty). store may be absent in fm-only contexts → bare ack
     if ctx.store is not None:
         turns = await ctx.store.recent(

@@ -46,7 +46,7 @@ async def _fetch_image_bytes(url: str) -> bytes:
     async with client, client.stream("GET", url) as response:
         response.raise_for_status()
         ct = response.headers.get("content-type", "")
-        # strip params like "image/jpeg; charset=..."
+        # Strip params like "image/jpeg; charset=..."
         ct_base = ct.split(";")[0].strip().lower()
         if ct_base not in _ALLOWED_CONTENT_TYPES:
             msg = f"non-image content-type: {ct!r}"
@@ -86,7 +86,7 @@ async def _view_image_handler(
         )
         return json.dumps({"error": f"fetch failed: {exc}"})
 
-    # describe at high quality (JPEG 95, 4MB) — result persists
+    # Describe at high quality (JPEG 95, 4MB) — result persists
     # compress separately at lower ceiling for prose model payload
     if ctx.description_llm is None:
         desc = "(no description model configured)"

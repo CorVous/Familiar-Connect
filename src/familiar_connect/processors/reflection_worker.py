@@ -103,7 +103,7 @@ class ReflectionWorker:
             return
 
         latest_fact = await self._store.latest_fact_id(familiar_id=self._familiar_id)
-        # always advance watermark to ``latest_turn`` regardless of
+        # Always advance watermark to ``latest_turn`` regardless of
         # how tick lands — empty LLM reply, malformed JSON, all items
         # filtered are no-ops on reflections table but must not pin
         # worker to a growing window
@@ -133,7 +133,7 @@ class ReflectionWorker:
         )
         if not new_turns:
             return
-        # cap window — bursty chat or first run on long-lived db
+        # Cap window — bursty chat or first run on long-lived db
         # otherwise ships hundreds of turns per tick. keep tail (most
         # recent) since that's what reflection cares about; older
         # turns skipped, not deferred
@@ -154,7 +154,7 @@ class ReflectionWorker:
 
         valid_turn_ids = {t.id for t in new_turns}
         valid_fact_ids = {f.id for f in recent_facts}
-        # reflection may legitimately cite older facts surfaced via
+        # Reflection may legitimately cite older facts surfaced via
         # dossier; widen valid set to all known facts so we don't
         # drop those unnecessarily
         all_known_fact_ids = (
@@ -163,7 +163,7 @@ class ReflectionWorker:
             else await self._store.all_fact_ids(familiar_id=self._familiar_id)
         )
 
-        # per-channel scoping: pick most-frequent channel in batch,
+        # Per-channel scoping: pick most-frequent channel in batch,
         # fall back to None for cross-channel batches
         channel_id = _dominant_channel(new_turns)
 
@@ -192,7 +192,7 @@ class ReflectionWorker:
                 if isinstance(raw_facts, list)
                 else []
             )
-            # require at least one valid citation; uncited reflection
+            # Require at least one valid citation; uncited reflection
             # is free-floating opinion, not synthesis
             if not cited_turns and not cited_facts:
                 continue
@@ -237,7 +237,7 @@ def _dominant_channel(turns: Iterable[HistoryTurn]) -> int | None:
         return next(iter(counts))
     if not counts:
         return None
-    # mixed batch — caller decides; default to most-frequent
+    # Mixed batch — caller decides; default to most-frequent
     return max(counts.items(), key=operator.itemgetter(1))[0]
 
 

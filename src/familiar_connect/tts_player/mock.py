@@ -24,7 +24,7 @@ class MockTTSPlayer:
         self.calls: list[tuple[str, bool]] = []  # (text, was_cancelled_or_stopped)
         self.total_played_ms: int = 0
         self._stop_event = asyncio.Event()
-        # set when playback begins; barge-in tests await this to interrupt
+        # Set when playback begins; barge-in tests await this to interrupt
         # mid-speech without racing a fixed sleep against pipeline startup
         self.speak_started = asyncio.Event()
 
@@ -35,7 +35,7 @@ class MockTTSPlayer:
         played_ms = 0
         cancelled_or_stopped = False
 
-        # reset per-call stop gate on re-entry
+        # Reset per-call stop gate on re-entry
         self._stop_event = asyncio.Event()
 
         while played_ms < budget_ms:
@@ -51,7 +51,7 @@ class MockTTSPlayer:
             except TimeoutError:
                 played_ms += step
                 continue
-            # stop_event fired during wait
+            # Stop_event fired during wait
             cancelled_or_stopped = True
             break
 

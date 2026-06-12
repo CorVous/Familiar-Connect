@@ -11,12 +11,12 @@ from familiar_connect import __version__, log_style
 from familiar_connect.commands import diagnose_cmd, run_cmd, version_cmd
 from familiar_connect.log_style import StyledFormatter
 
-# dynamic package name from installed metadata
+# Dynamic package name from installed metadata
 try:
     _PACKAGE_METADATA = importlib.metadata.metadata(__package__ or "familiar_connect")
     _CLI_NAME = _PACKAGE_METADATA["Name"]
 except (importlib.metadata.PackageNotFoundError, KeyError):
-    # fallback for editable-install
+    # Fallback for editable-install
     _CLI_NAME = "familiar-connect"
 
 _logger = logging.getLogger(__name__)
@@ -45,10 +45,10 @@ def setup_logging(verbose: int = 0, level: str | None = None) -> None:
     logging.basicConfig(
         level=log_level,
         handlers=[handler],
-        force=True,  # reconfigure if already configured
+        force=True,  # Reconfigure if already configured
     )
 
-    # keep INFO visible even if root is WARNING; -vv still flips DEBUG
+    # Keep INFO visible even if root is WARNING; -vv still flips DEBUG
     pkg_logger = logging.getLogger("familiar_connect")
     pkg_logger.setLevel(min(log_level, logging.INFO))
 
@@ -74,13 +74,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Increase verbosity (can be repeated: -v, -vv, -vvv)",
     )
 
-    # shared subcommand args (empty placeholder)
+    # Shared subcommand args (empty placeholder)
     common_parser = argparse.ArgumentParser(add_help=False)
 
     subparsers = parser.add_subparsers(
         dest="command",
         help="Available commands",
-        required=False,  # allow bare invocation to print help
+        required=False,  # Allow bare invocation to print help
     )
 
     run_cmd.add_parser(subparsers, common_parser)

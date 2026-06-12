@@ -41,11 +41,11 @@ class SilentDetector:
             self._decided = True
             return True
         if len(stripped) >= len(SILENT_TOKEN):
-            # enough non-whitespace seen to rule out sentinel
+            # Enough non-whitespace seen to rule out sentinel
             self._decided = False
             return False
         if stripped and not SILENT_TOKEN.startswith(stripped):
-            # diverged before reaching full length
+            # Diverged before reaching full length
             self._decided = False
             return False
         return None

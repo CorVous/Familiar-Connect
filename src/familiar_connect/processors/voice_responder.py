@@ -96,33 +96,33 @@ class VoiceResponder:
         self._router = router
         self._familiar_id = familiar_id
         self._member_resolver = member_resolver
-        # per-familiar etiquette appended to the trailing reminder
+        # Per-familiar etiquette appended to the trailing reminder
         # (post-history). empty = omitted.
         self._post_history_instructions = post_history_instructions
         # IANA zone for the final-reminder clock (validated at config load)
         self._display_tz = display_tz
-        # one in-flight final-handling task per (session, user);
+        # One in-flight final-handling task per (session, user);
         # replaced when newer final from same speaker arrives.
-        # cross-user tasks coexist; their reply-generation critical
+        # Cross-user tasks coexist; their reply-generation critical
         # section serializes on the per-channel reply gate below.
         self._inflight: dict[str, asyncio.Task[None]] = {}
-        # per-channel reply gate: one reply generated at a time per
+        # Per-channel reply gate: one reply generated at a time per
         # voice channel. cross-speaker pipelines serialize here so the
         # later one assembles after the earlier commits and can resolve
         # <silent>. playback is already serial on the shared voice
         # client, so the wait adds no perceived latency.
         self._reply_locks: dict[int, asyncio.Lock] = {}
-        # agentic-loop wiring — see :meth:`_stream_and_speak_with_tools`
+        # Agentic-loop wiring — see :meth:`_stream_and_speak_with_tools`
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
-        # hard cap on agentic-loop rounds per turn ([tools].loop_max_iterations)
+        # Hard cap on agentic-loop rounds per turn ([tools].loop_max_iterations)
         self._loop_max_iterations = loop_max_iterations
-        # short stock phrases spoken before tool execution when
+        # Short stock phrases spoken before tool execution when
         # iteration produced no spoken content. rotated round-robin
         # so repeat use doesn't always say same word
         self._tool_filler_phrases = tool_filler_phrases
         self._tool_filler_idx = 0
-        # attentional focus controller; None = backward-compat (no focus gating)
+        # Attentional focus controller; None = backward-compat (no focus gating)
         self._focus_manager = focus_manager
 
     @staticmethod
@@ -168,8 +168,8 @@ class VoiceResponder:
     def _on_activity_start(self, event: Event) -> None:
         user_id = self._user_id_from_event(event)
         scope_key = self._scope_key(event.session_id, user_id)
-        # begin_turn cancels prior scope for this (session, user).
-        # if prior scope is one currently being spoken, player's poll
+        # Begin_turn cancels prior scope for this (session, user).
+        # If prior scope is one currently being spoken, player's poll
         # loop catches ``scope.is_cancelled()`` and stops playback
         # within one poll tick. global ``tts.stop()`` here would also
         # cut a *different* user's in-flight reply — Discord gives us
@@ -195,7 +195,7 @@ class VoiceResponder:
         scope_key = self._scope_key(event.session_id, user_id)
         prior_task = self._inflight.get(scope_key)
         if prior_task is not None and not prior_task.done():
-            # newer final from same speaker without intervening
+            # Newer final from same speaker without intervening
             # activity.start is unusual but defendable: cancel prior
             # so we don't double-speak. cross-user finals don't
             # collide because they live under different scope keys
@@ -208,7 +208,7 @@ class VoiceResponder:
         task.add_done_callback(lambda t, sid=scope_key: self._on_final_done(sid, t))
 
     def _on_final_done(self, scope_key: str, task: asyncio.Task[None]) -> None:
-        # only clear slot if we still own it — a newer turn may
+        # Only clear slot if we still own it — a newer turn may
         # have already replaced our entry
         if self._inflight.get(scope_key) is task:
             self._inflight.pop(scope_key, None)
@@ -217,7 +217,7 @@ class VoiceResponder:
         try:
             await self._on_final(event)
         except asyncio.CancelledError:
-            # expected on barge-in: a newer final hard-cancelled us
+            # Expected on barge-in: a newer final hard-cancelled us
             return
 
     # ------------------------------------------------------------------
@@ -229,7 +229,7 @@ class VoiceResponder:
         scope_key = self._scope_key(event.session_id, user_id)
         scope = self._router.active_scope(scope_key)
         if scope is None or scope.turn_id != event.turn_id:
-            # stale final — newer utterance already started
+            # Stale final — newer utterance already started
             return
         channel_id = _parse_voice_session(event.session_id)
         if channel_id is None:
@@ -245,15 +245,15 @@ class VoiceResponder:
 
         author = self._resolve_author(channel_id=channel_id, user_id=user_id)
 
-        # cold-cache signals — instrumentation only (no action yet).
-        # runs before user turn appended so ``prev_turn_at`` reflects
+        # Cold-cache signals — instrumentation only (no action yet).
+        # Runs before user turn appended so ``prev_turn_at`` reflects
         # real gap
         self._emit_cold_cache_signals(
             channel_id=channel_id, turn_id=scope.turn_id, text=text
         )
 
-        # record user turn so RecentHistoryLayer picks it up next time.
-        # appended outside the reply gate — observation never gated by
+        # Record user turn so RecentHistoryLayer picks it up next time.
+        # Appended outside the reply gate — observation never gated by
         # a busy channel, so every speaker's turn lands even when the
         # bot is mid-reply to someone else
         await self._history.append_turn(
@@ -264,21 +264,21 @@ class VoiceResponder:
             author=author,
         )
 
-        # per-channel reply gate. set_rag_cue + assemble + stream +
+        # Per-channel reply gate. set_rag_cue + assemble + stream +
         # assistant-turn commit run under the lock: a second speaker's
         # pipeline assembles only after this one commits, so it sees the
         # reply in context (and can go <silent>). set_rag_cue lives
         # inside too — it mutates shared assembler state a concurrent
         # pipeline would otherwise clobber mid-assemble
         async with self._gate_for(channel_id):
-            # seed retrieval cue for RagContextLayer (if wired)
+            # Seed retrieval cue for RagContextLayer (if wired)
             self._assembler.set_rag_cue(text)
 
             reply = await self._stream_and_speak(scope, channel_id)
             if reply is None or scope.is_cancelled():
                 return
             # Cartesia rejects empty/whitespace ``transcript`` with HTTP 400.
-            # empty reply usually means LLM stream emitted no deltas —
+            # Empty reply usually means LLM stream emitted no deltas —
             # bad model name, content filter, or upstream error frame
             # parser silently dropped. mirrors ``TextResponder``'s guard.
             # _stream_and_speak gates TTS on this too, so just skip
@@ -355,7 +355,7 @@ class VoiceResponder:
         if system:
             messages.append(Message(role="system", content=system))
         messages.extend(prompt.recent_history)
-        # trailing reminder: same content + per-mode operating
+        # Trailing reminder: same content + per-mode operating
         # directive ("You are speaking aloud…") so format gate lives
         # at tail of context, where recency-biased models are more
         # likely to honor it. end-placed tool nudge piggybacks on
@@ -377,14 +377,14 @@ class VoiceResponder:
         accumulated: list[str] = []
         streamer = SentenceStreamer()
         silent = SilentDetector()
-        # sentences buffered while silent gate still pending.
-        # drained in arrival order once gate opens; dropped on ``True``
+        # Sentences buffered while silent gate still pending.
+        # Drained in arrival order once gate opens; dropped on ``True``
         pending: list[str] = []
         gate_open = False  # SilentDetector returned False — speak path live
         budget = get_voice_budget_recorder()
         first_delta_seen = False
-        # exactly one decision line per turn — silent | respond | preempted.
-        # tracked so cancel-mid-speak after gate_open doesn't double-log
+        # Exactly one decision line per turn — silent | respond | preempted.
+        # Tracked so cancel-mid-speak after gate_open doesn't double-log
         decision_logged = False
 
         try:
@@ -421,7 +421,7 @@ class VoiceResponder:
                             return None
                         await self._speak(pending.pop(0), scope=scope)
 
-            # stream ended undecided (very short / whitespace-only
+            # Stream ended undecided (very short / whitespace-only
             # reply). treat non-empty content as speak path so
             # _on_final's empty-reply guard runs symmetrically with
             # streaming case
@@ -521,14 +521,14 @@ class VoiceResponder:
                 await _drain_pending()
 
         async def _on_before_tools(assistant: Message) -> None:
-            # flush any in-flight sentence boundary so we don't speak
+            # Flush any in-flight sentence boundary so we don't speak
             # a half-formed clause after tool execution
             if gate_open:
                 tail = streamer.flush()
                 if tail.strip():
                     pending.append(tail)
                 await _drain_pending()
-            # filler backstop: empty content with imminent tools →
+            # Filler backstop: empty content with imminent tools →
             # speak short stock phrase so user hears acknowledgement
             # before silent tool window
             if assistant.tool_calls and not assistant.content_str.strip():
@@ -540,7 +540,7 @@ class VoiceResponder:
             assistant: Message,
             tool_msgs: list[Message],
         ) -> None:
-            # only persist intermediate iterations — terminal
+            # Only persist intermediate iterations — terminal
             # text-only iteration handled by :meth:`_on_final`
             # alongside user turn
             if not assistant.tool_calls:
@@ -586,13 +586,13 @@ class VoiceResponder:
             )
             return None
 
-        # flush any trailing sentence from terminal iteration
+        # Flush any trailing sentence from terminal iteration
         if gate_open:
             tail = streamer.flush()
             if tail.strip():
                 pending.append(tail)
             await _drain_pending()
-        # short / whitespace-only terminal content: still mark respond
+        # Short / whitespace-only terminal content: still mark respond
         # so empty-reply log doesn't double-fire
         if not gate_open and silent.decided is None and "".join(accumulated).strip():
             self._log_respond(scope.turn_id)
@@ -639,7 +639,7 @@ class VoiceResponder:
         """Skip whitespace-only chunks; ``DiscordVoicePlayer`` would too."""
         if not text.strip():
             return
-        # first call per turn marks tts_first_audio. recorder dedupes
+        # First call per turn marks tts_first_audio. recorder dedupes
         # so subsequent sentences don't overwrite
         get_voice_budget_recorder().record(
             turn_id=scope.turn_id, phase=PHASE_TTS_FIRST_AUDIO
@@ -662,7 +662,7 @@ class VoiceResponder:
                 familiar_id=self._familiar_id, channel_id=channel_id
             )
             prior_context = summary.summary_text if summary is not None else ""
-            # pull most recent turn's timestamp for silence-gap
+            # Pull most recent turn's timestamp for silence-gap
             recent = self._sync_history.recent(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,

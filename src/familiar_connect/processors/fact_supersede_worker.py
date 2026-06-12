@@ -104,13 +104,13 @@ class FactSupersedeWorker:
         if not new:
             return 0
 
-        # oldest-new first so cascading retirements settle deterministically
+        # Oldest-new first so cascading retirements settle deterministically
         new.sort(key=lambda f: f.id)
         retired = 0
         for f_new in new:
             retired += await self._evaluate(f_new)
 
-        # advance watermark to highest id seen this tick (even on bad
+        # Advance watermark to highest id seen this tick (even on bad
         # llm output) — prevents loops on a fact whose prompt model
         # consistently fails to parse
         if candidates:
@@ -137,7 +137,7 @@ class FactSupersedeWorker:
                 canonical_key=subject.canonical_key,
                 include_superseded=False,
             )
-            # exclude f_new itself, dedupe across subjects, cap to priors_max
+            # Exclude f_new itself, dedupe across subjects, cap to priors_max
             unique = [
                 p for p in priors if p.id != f_new.id and p.id not in seen_priors
             ][-self._priors_max :]
@@ -159,7 +159,7 @@ class FactSupersedeWorker:
                         new_id=f_new.id,
                     )
                 except ValueError:
-                    # already retired by earlier subject in this fact
+                    # Already retired by earlier subject in this fact
                     continue
                 retired += 1
         return retired

@@ -25,7 +25,7 @@ def init(strip: bool = False) -> None:  # noqa: FBT001, FBT002
 # Public colour constants
 # ---------------------------------------------------------------------------
 
-# colorama Fore.X are class-level ints; AnsiCodes constructor rewrites
+# Colorama Fore.X are class-level ints; AnsiCodes constructor rewrites
 # them to ANSI escape strings at instantiation. cast so static checkers
 # see str.
 W = cast("str", Fore.WHITE)
@@ -74,7 +74,7 @@ def trunc(text: str, limit: int = 200) -> str:
 # ---------------------------------------------------------------------------
 
 
-# matches a leading `tag(text, color)` render: W[ COLOR text W] RS
+# Matches a leading `tag(text, color)` render: W[ COLOR text W] RS
 _TAG_RE = re.compile(r"^\x1b\[\d+m\[\x1b\[\d+m([^\x1b]+)\x1b\[\d+m\]\x1b\[0m")
 
 
@@ -101,7 +101,7 @@ class StyledFormatter(logging.Formatter):
             out = f"{LW}DEBUG{RS}: {msg}"
         else:
             out = msg
-        # mirror logging.Formatter: append exc_info / stack_info when present
+        # Mirror logging.Formatter: append exc_info / stack_info when present
         if record.exc_info and not record.exc_text:
             record.exc_text = self.formatException(record.exc_info)
         if record.exc_text:

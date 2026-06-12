@@ -91,18 +91,18 @@ class DeepgramTranscriber:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._receive_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
-        # set by ``stop()`` so receive loop can distinguish
+        # Set by ``stop()`` so receive loop can distinguish
         # self-initiated close from server/transport closes
         self._shutting_down: bool = False
-        # set when receive loop sees server CLOSE frame; writers
+        # Set when receive loop sees server CLOSE frame; writers
         # short-circuit so audio/KeepAlive don't race closing
         # transport (avoids `ClientConnectionResetError` and resulting
         # close_code=1006 misclassification of clean 1000 close).
         self._closing: bool = False
-        # sliding window of recent PCM chunks; replayed to new WS on reconnect
+        # Sliding window of recent PCM chunks; replayed to new WS on reconnect
         self._replay_buffer: collections.deque[bytes] = collections.deque()
         self._replay_buffer_bytes: int = 0
-        # guards concurrent send_audio / replay-drain so bytes stay ordered
+        # Guards concurrent send_audio / replay-drain so bytes stay ordered
         self._send_lock: asyncio.Lock = asyncio.Lock()
 
     def build_ws_url(self: Self) -> str:
@@ -157,7 +157,7 @@ class DeepgramTranscriber:
             keyterms=self.keyterms,
             replay_buffer_s=self.replay_buffer_s,
         )
-        # carry over any env-tuned class attrs the factory bumped
+        # Carry over any env-tuned class attrs the factory bumped
         c._KEEPALIVE_INTERVAL = self._KEEPALIVE_INTERVAL
         c._MAX_RECONNECTS = self._MAX_RECONNECTS
         c._RECONNECT_BACKOFF_CAP = self._RECONNECT_BACKOFF_CAP
@@ -179,7 +179,7 @@ class DeepgramTranscriber:
         if not transcript:
             return None
 
-        # extract speaker from first word when diarization active
+        # Extract speaker from first word when diarization active
         speaker: int | None = None
         words = best.get("words", [])
         if words and "speaker" in words[0]:
@@ -282,7 +282,7 @@ class DeepgramTranscriber:
 
     async def stop(self: Self) -> None:
         """Gracefully close Deepgram connection."""
-        # flip before CloseStream so late close frame in receive loop
+        # Flip before CloseStream so late close frame in receive loop
         # doesn't race into reconnect
         self._shutting_down = True
         if self._keepalive_task is not None:
@@ -309,16 +309,16 @@ class DeepgramTranscriber:
             self._session = None
 
     _MAX_RECONNECTS: int = 5
-    _RECONNECT_DELAY: float = 1.0  # base delay; first attempt is immediate
-    _RECONNECT_BACKOFF_CAP: float = 16.0  # max backoff in seconds
+    _RECONNECT_DELAY: float = 1.0  # Base delay; first attempt is immediate
+    _RECONNECT_BACKOFF_CAP: float = 16.0  # Max backoff in seconds
     _KEEPALIVE_INTERVAL: float = 3.0
-    # bot-side per-user idle window. read by ``bot._start_voice_intake`` to
+    # Bot-side per-user idle window. read by ``bot._start_voice_intake`` to
     # spawn idle watchdog. 0 disables. lives on transcriber so env-var
     # factory and ``clone()`` carry it without bot.py importing config
     # plumbing of its own.
     _IDLE_CLOSE_S: float = 30.0
 
-    # close codes indicating permanent, non-recoverable condition
+    # Close codes indicating permanent, non-recoverable condition
     # (auth, billing, policy). reconnecting would just fail identically.
     # 1008 = policy violation (RFC 6455). 4xxx = Deepgram application-level.
     _NO_RECONNECT_CLOSE_CODES: frozenset[int] = frozenset({1008})
@@ -327,7 +327,7 @@ class DeepgramTranscriber:
     def _should_reconnect(cls, close_code: object) -> bool:
         """Classify close code. False → stop; True → reconnect."""
         if not isinstance(close_code, int):
-            # transport-level drop (no close frame seen) — retry
+            # Transport-level drop (no close frame seen) — retry
             return True
         if close_code in cls._NO_RECONNECT_CLOSE_CODES:
             return False
@@ -349,14 +349,14 @@ class DeepgramTranscriber:
 
     async def _reconnect(self: Self) -> None:
         """Close old session, open fresh; drain replay buffer to new WS."""
-        # tear down old connection
+        # Tear down old connection
         if self._ws is not None and not self._ws.closed:
             with contextlib.suppress(Exception):
                 await self._ws.close()
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
-        # open new connection
+        # Open new connection
         self._session = aiohttp.ClientSession()
         url = self.build_ws_url()
         self._ws = await self._ws_connect(
@@ -364,7 +364,7 @@ class DeepgramTranscriber:
             url,
             self.build_headers(),
         )
-        # fresh socket — clear closing flag set by prior CLOSE frame
+        # Fresh socket — clear closing flag set by prior CLOSE frame
         self._closing = False
         _logger.info(
             f"{ls.tag('🔄 WebSocket', ls.Y)} "
@@ -372,7 +372,7 @@ class DeepgramTranscriber:
             f"{ls.word('reconnected', ls.W)}"
         )
 
-        # replay buffered audio; hold send_lock so send_audio callers
+        # Replay buffered audio; hold send_lock so send_audio callers
         # queue behind drain rather than interleaving
         async with self._send_lock:
             chunks_replayed = len(self._replay_buffer)
@@ -384,7 +384,7 @@ class DeepgramTranscriber:
             self._replay_buffer_bytes = 0
 
         if chunks_replayed:
-            # wait ~replay duration before Finalize so Deepgram can
+            # Wait ~replay duration before Finalize so Deepgram can
             # process the burst. replay arrives much faster than
             # real-time, and Finalize emits "what's been transcribed
             # so far" — firing immediately produces partial covering
@@ -415,7 +415,7 @@ class DeepgramTranscriber:
         while consecutive_reconnects <= self._MAX_RECONNECTS:
             if self._ws is None:
                 return
-            # explicit `receive()` instead of `async for` so we observe
+            # Explicit `receive()` instead of `async for` so we observe
             # CLOSE message itself — aiohttp's `__anext__` swallows
             # CLOSE/CLOSING/CLOSED via `StopAsyncIteration` and only
             # leaves `ws.close_code` behind. seeing CLOSE lets us flip
@@ -433,10 +433,10 @@ class DeepgramTranscriber:
                         result = self._parse_response(data)
                         if result is not None:
                             await output.put(result)
-                            # got real data — reset reconnect counter
+                            # Got real data — reset reconnect counter
                             consecutive_reconnects = 0
                     else:
-                        # full payload — `Metadata` carries session-end stats
+                        # Full payload — `Metadata` carries session-end stats
                         # (duration, models, model_info) needed to diagnose
                         # per-user session closes; truncating hides everything
                         # past request_id.
@@ -447,7 +447,7 @@ class DeepgramTranscriber:
                             f"{ls.kv('data', msg.data, vc=ls.LW)}"
                         )
                 elif msg.type == aiohttp.WSMsgType.CLOSE:
-                    # server-initiated close frame; freeze writers so
+                    # Server-initiated close frame; freeze writers so
                     # they don't write to closing transport while
                     # aiohttp finishes close handshake. CLOSED/ERROR
                     # below are post-close states — `ws.closed` already
@@ -486,7 +486,7 @@ class DeepgramTranscriber:
                 )
                 return
 
-            # non-recoverable close (auth/billing/policy) → stop retrying
+            # Non-recoverable close (auth/billing/policy) → stop retrying
             if not self._should_reconnect(close_code):
                 _logger.error(
                     f"{ls.tag('🔌 WebSocket', ls.R)} "
@@ -498,11 +498,11 @@ class DeepgramTranscriber:
 
             outage_start = time.monotonic()
             consecutive_reconnects += 1
-            # exponential backoff: first attempt immediate; subsequent
+            # Exponential backoff: first attempt immediate; subsequent
             # failures back off as 1x, 2x, 4x... base delay up to cap
             backoff = 0.0
             if consecutive_reconnects > 1:
-                exponent = consecutive_reconnects - 2  # attempt 2 → 2^0 = 1
+                exponent = consecutive_reconnects - 2  # Attempt 2 → 2^0 = 1
                 backoff = min(
                     self._RECONNECT_DELAY * (2**exponent),
                     self._RECONNECT_BACKOFF_CAP,

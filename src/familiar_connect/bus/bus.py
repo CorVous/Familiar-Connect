@@ -91,7 +91,7 @@ class _Subscription:
         """
         while True:
             if self._closed.is_set():
-                # drain already-queued, then exit
+                # Drain already-queued, then exit
                 while True:
                     try:
                         yield self._queue.get_nowait()
@@ -115,7 +115,7 @@ class _Subscription:
             if get_task in done and not get_task.cancelled():
                 yield get_task.result()
                 continue
-            # closed — drain and exit
+            # Closed — drain and exit
             while True:
                 try:
                     yield self._queue.get_nowait()
@@ -145,7 +145,7 @@ class InProcessEventBus:
         self.lifecycle = Lifecycle.DRAINING
         for sub in self._subscriptions:
             sub.close()
-        # one loop tick for subscribers to drain before stopped
+        # One loop tick for subscribers to drain before stopped
         await asyncio.sleep(0)
         self.lifecycle = Lifecycle.STOPPED
 

@@ -65,7 +65,7 @@ class SmartTurnDetector:
         self.threshold = threshold
         self._max_samples = int(max_duration_s * sample_rate)
         self._session = ort.InferenceSession(str(model_path))
-        # first input name on graph — Pipecat exports use ``input_values``
+        # First input name on graph — Pipecat exports use ``input_values``
         # (Wav2Vec2 convention) but stay resilient
         self._input_name = self._session.get_inputs()[0].name
 
@@ -73,7 +73,7 @@ class SmartTurnDetector:
         """Run classifier; return ``[0, 1]`` is-complete probability."""
         audio = np.frombuffer(pcm_audio, dtype=np.int16).astype(np.float32) / 32768.0
         if audio.shape[0] > self._max_samples:
-            # keep most recent window — turn-end semantics live there
+            # Keep most recent window — turn-end semantics live there
             audio = audio[-self._max_samples :]
         outputs = self._session.run(
             None,
@@ -84,7 +84,7 @@ class SmartTurnDetector:
         logits = cast("np.ndarray", outputs[0])
         last_dim = logits.shape[-1]
         if last_dim == 2:
-            # softmax over [incomplete, complete]; numerically stable
+            # Softmax over [incomplete, complete]; numerically stable
             shifted = logits - logits.max(axis=-1, keepdims=True)
             exp = np.exp(shifted)
             probs = exp / exp.sum(axis=-1, keepdims=True)

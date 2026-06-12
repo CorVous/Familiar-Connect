@@ -124,7 +124,7 @@ class AlarmScheduler:
                 fired_at=fired_at.isoformat(),
             )
             if not updated:
-                # already fired or cancelled by another path — skip publish
+                # Already fired or cancelled by another path — skip publish
                 return
             payload = {
                 "alarm_id": row["id"],

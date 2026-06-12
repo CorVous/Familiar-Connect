@@ -38,7 +38,7 @@ _logger = logging.getLogger(__name__)
 CARTESIA_BASE_URL = "https://api.cartesia.ai"
 CARTESIA_WS_URL = "wss://api.cartesia.ai/tts/websocket"
 CARTESIA_API_VERSION = "2024-06-10"
-DEFAULT_SAMPLE_RATE = 48000  # matches Discord's native rate
+DEFAULT_SAMPLE_RATE = 48000  # Matches Discord's native rate
 
 DEFAULT_AZURE_VOICE = "en-US-AmberNeural"
 """Default Azure Neural voice; mirrors ``config.DEFAULT_AZURE_TTS_VOICE``."""
@@ -253,7 +253,7 @@ class CartesiaTTSClient:
                             status = event.get("status_code")
                             msg_txt = f"Cartesia TTS error (status={status}): {err}"
                             raise RuntimeError(msg_txt)
-                        # timestamps event silently dropped
+                        # Timestamps event silently dropped
                     elif msg.type in {
                         aiohttp.WSMsgType.CLOSED,
                         aiohttp.WSMsgType.ERROR,
@@ -300,7 +300,7 @@ def _parse_word_timestamps(raw: dict[str, Any]) -> list[WordTimestamp]:
 # Greeting cache (shared across all TTS providers)
 # ---------------------------------------------------------------------------
 
-# file-based greeting audio cache; stored in `data/cache/greetings/`
+# File-based greeting audio cache; stored in `data/cache/greetings/`
 # keyed by hash of (provider, voice_id, greeting). shared across all
 # TTS clients.
 
@@ -309,7 +309,7 @@ _GREETING_CACHE_DIR = Path("data/cache/greetings")
 
 def _get_greeting_cache_path(provider: str, voice_id: str, greeting: str) -> Path:
     """Filesystem path for cached greeting audio."""
-    # stable hash of key parts
+    # Stable hash of key parts
     key = f"{provider}:{voice_id}:{greeting}"
     hash_hex = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return _GREETING_CACHE_DIR / f"{hash_hex}.bin"
@@ -327,18 +327,18 @@ async def get_cached_greeting_audio(
     synthesize and store bytes to disk; subsequent calls read from
     file.
     """
-    # ensure cache directory exists (blocking I/O off event loop)
+    # Ensure cache directory exists (blocking I/O off event loop)
     await asyncio.to_thread(_GREETING_CACHE_DIR.mkdir, parents=True, exist_ok=True)
 
     cache_path = _get_greeting_cache_path(provider, voice_id, greeting)
     if cache_path.is_file():
-        # cache hit: read audio bytes from file
+        # Cache hit: read audio bytes from file
         audio_bytes = await asyncio.to_thread(cache_path.read_bytes)
         return TTSResult(audio=audio_bytes, timestamps=[])
 
-    # cache miss: synthesize via TTS client
+    # Cache miss: synthesize via TTS client
     tts_result = await client.synthesize(greeting)
-    # write audio bytes to cache file
+    # Write audio bytes to cache file
     await asyncio.to_thread(cache_path.write_bytes, tts_result.audio)
     return TTSResult(audio=tts_result.audio, timestamps=[])
 
@@ -383,7 +383,7 @@ class AzureTTSClient:
         )
         synthesizer = speechsdk.SpeechSynthesizer(
             speech_config=speech_config,
-            audio_config=None,  # audio returned via result.audio_data
+            audio_config=None,  # Audio returned via result.audio_data
         )
         return speechsdk, synthesizer
 
@@ -567,7 +567,7 @@ class GeminiTTSClient:
         pcm_24k: bytes = pcm_24k_or_none
         audio = _upsample_s16le_2x(pcm_24k)
 
-        # duration of 48 kHz audio in ms (16-bit = 2 bytes/sample)
+        # Duration of 48 kHz audio in ms (16-bit = 2 bytes/sample)
         total_ms = len(audio) / 2 / self.sample_rate * 1000.0
         timestamps = _estimate_word_timestamps(text, total_ms)
 

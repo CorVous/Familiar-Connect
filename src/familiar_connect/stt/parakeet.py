@@ -47,7 +47,7 @@ INT16_MAX = 32768.0
 class ParakeetTranscriber:
     """Local Parakeet-TDT transcriber."""
 
-    # bot-side per-user idle window. read by ``bot._start_voice_intake`` to
+    # Bot-side per-user idle window. read by ``bot._start_voice_intake`` to
     # spawn idle watchdog. parity with ``DeepgramTranscriber._IDLE_CLOSE_S``.
     _IDLE_CLOSE_S: float = 30.0
 
@@ -69,7 +69,7 @@ class ParakeetTranscriber:
         self._resampler = Resampler48to16()
         self._buffer = bytearray()
         self._output: asyncio.Queue[TranscriptionEvent] | None = None
-        # serialise overlapping finalize calls (idle watchdog + endpointer)
+        # Serialise overlapping finalize calls (idle watchdog + endpointer)
         self._finalize_lock = asyncio.Lock()
 
     def clone(self: Self) -> ParakeetTranscriber:
@@ -80,7 +80,7 @@ class ParakeetTranscriber:
             sample_rate=self.sample_rate,
             channels=self.channels,
         )
-        # share heavy model — load once per process
+        # Share heavy model — load once per process
         c._model = self._model
         c._IDLE_CLOSE_S = self._IDLE_CLOSE_S
         return c

@@ -113,7 +113,7 @@ class PeopleDossierWorker:
         reply = await self._llm.chat(prompt)
         text = reply.content_str.strip()
         if not text:
-            # don't overwrite real dossier with empty reply
+            # Don't overwrite real dossier with empty reply
             return
         await self._store.put_people_dossier(
             familiar_id=self._familiar_id,

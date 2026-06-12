@@ -22,7 +22,7 @@ _logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
-# known model dimensionalities. pre-populated so we can advertise
+# Known model dimensionalities. pre-populated so we can advertise
 # ``dim`` before first embed call lands; on a model not listed here,
 # ``dim`` stays 0 until first embed call probes a real vector. worker
 # logging falls back gracefully on either path.
@@ -64,7 +64,7 @@ class FastEmbedEmbedder:
         # onnxruntime-gpu installed). push to worker thread so asyncio
         # loop keeps draining.
         vectors = await asyncio.to_thread(self._embed_sync, texts)
-        # update ``dim`` opportunistically first time we see a real
+        # Update ``dim`` opportunistically first time we see a real
         # vector — covers models not in ``_KNOWN_DIMS``.
         if vectors and not self.dim:
             self.dim = len(vectors[0])

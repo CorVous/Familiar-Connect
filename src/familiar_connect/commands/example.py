@@ -26,13 +26,13 @@ def add_parser(
     common_parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(
-        "example",  # change to your command name
+        "example",  # Change to your command name
         parents=[common_parser],
         help="Example subcommand (replace with your description)",
         description="Detailed description of what this command does",
     )
 
-    # command-specific args
+    # Command-specific args
     parser.add_argument(
         "name",
         help="Example positional argument",

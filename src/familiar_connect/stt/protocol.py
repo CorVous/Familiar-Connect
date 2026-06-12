@@ -52,8 +52,8 @@ class TranscriptionResult:
         return Message(role="user", content=f"[Voice] {self.text}", name=name)
 
 
-# transcriber drives transcription text + VAD edges:
-# interims → DeepgramVoiceActivityDetector (speech-start / speech-end)
+# Transcriber drives transcription text + VAD edges:
+# Interims → DeepgramVoiceActivityDetector (speech-start / speech-end)
 # finals → VoiceLullMonitor (conversational-lull detection)
 TranscriptionEvent = TranscriptionResult
 

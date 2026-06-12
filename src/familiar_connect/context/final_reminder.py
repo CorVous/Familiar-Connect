@@ -17,8 +17,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-# per-viewer-mode operating directive in the trailing reminder.
-# intentionally duplicates strings ``OperatingModeLayer`` is
+# Per-viewer-mode operating directive in the trailing reminder.
+# Intentionally duplicates strings ``OperatingModeLayer`` is
 # configured with in ``commands/run.py``: head copy primes system
 # prompt; tail copy combats recency bias on long contexts. keep
 # wording in sync if you edit one.

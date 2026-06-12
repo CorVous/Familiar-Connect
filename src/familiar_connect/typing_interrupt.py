@@ -51,7 +51,7 @@ class TypingInterruptHandler:
         self._router = router
         self._is_subscribed = is_subscribed
         self._bot_user_id = bot_user_id_provider
-        # per-channel backoff ladder. ``_next_backoff_s`` is value to
+        # Per-channel backoff ladder. ``_next_backoff_s`` is value to
         # apply on *next* bot-typing event; doubles after each.
         # ``_deadline`` is monotonic clock time channel parked until.
         self._next_backoff_s: dict[int, float] = {}
@@ -82,7 +82,7 @@ class TypingInterruptHandler:
         if deadline is None:
             return None
         if deadline <= time.monotonic():
-            # expired — clean up so next call sees a free lane
+            # Expired — clean up so next call sees a free lane
             self._deadline.pop(channel_id, None)
             return None
         return deadline
@@ -115,7 +115,7 @@ class TypingInterruptHandler:
 
     @property
     def _current_applied_s(self) -> dict[int, float]:
-        # lazily-created sibling map; kept here so the public surface
+        # Lazily-created sibling map; kept here so the public surface
         # stays small. last value applied per channel — survives until
         # the next user message resets the ladder.
         if not hasattr(self, "_applied"):
@@ -129,7 +129,7 @@ class TypingInterruptHandler:
         applied = min(next_s, self._config.typing_backoff_max_s)
         self._current_applied_s[channel_id] = applied
         self._deadline[channel_id] = time.monotonic() + applied
-        # double for the next event; cap on read so the ladder doesn't
+        # Double for the next event; cap on read so the ladder doesn't
         # silently overflow the float range.
         self._next_backoff_s[channel_id] = min(
             applied * 2.0, self._config.typing_backoff_max_s
