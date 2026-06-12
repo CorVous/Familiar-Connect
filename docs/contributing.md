@@ -10,6 +10,12 @@ Dependencies via [uv](https://docs.astral.sh/uv/). Update `uv` first:
 uv self update
 ```
 
+If `uv self update` fails (pip-installed uv, or GitHub API rate limits from cloud/sandbox egress IPs), upgrade from PyPI instead:
+
+```bash
+python3 -m pip install --user --upgrade uv
+```
+
 Install project + dev + docs groups plus the `local-turn` extra (numpy + huggingface_hub are imported by test collection):
 
 ```bash
