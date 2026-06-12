@@ -120,7 +120,11 @@ exists).
 [^claims]: Extraction prompt enforces claim/event discipline: one
     speaker's assertions about another person stored attributed
     ("X claims …"), never as flat fact; roleplay and running bits
-    recorded as bits, not real events. Guards against memory
+    recorded as bits, not real events. Identity ties to the
+    Participant `canonical_key`, never a name adopted in play:
+    impersonation bits ("No I am Cor") never mint identity facts and
+    never merge two people; world trivia a speaker mentions isn't a
+    fact about them. Guards against memory
     poisoning via in-character narration — extractor sees every
     turn whether or not the familiar engaged.
 
