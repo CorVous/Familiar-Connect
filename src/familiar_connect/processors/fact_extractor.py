@@ -23,6 +23,7 @@ from familiar_connect import log_style as ls
 from familiar_connect.activities import ACTIVITY_RETURN_MODE
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.history.store import FactSubject
+from familiar_connect.identity import is_self_key, self_canonical_key
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -55,9 +56,25 @@ _SELF_CAPABILITY_RE = re.compile(
 )
 
 
-def _is_self_capability(text: str) -> bool:
-    """Heuristic prefix-match for self-capability "facts"."""
-    return bool(_SELF_CAPABILITY_RE.match(text))
+# inability following a third-person self-name (e.g. "Sapphire cannot
+# remember names"). third-person self-naming is trained for narrative,
+# but a name-prefixed *inability* is a capability claim, not narrative.
+# narrow + word-bounded on purpose: copula/dynamic negation ("is not
+# fond", "doesn't trust"), positive ability ("can sing"), and word-prefix
+# collisions ("cancelled" ⊃ "can") are narrative/stance — the self-dossier
+# payload — and must NOT match.
+_NAME_CAPABILITY_TAIL = r"\s+(?:cannot\b|can't\b|can\s+not\b|is\s+unable\b|has\s+no\b)"
+
+
+def _is_self_capability(text: str, name_re: re.Pattern[str] | None = None) -> bool:
+    """Heuristic prefix-match for self-capability "facts".
+
+    ``name_re`` (optional): pre-compiled display-name capability matcher
+    catching third-person-named limits.
+    """
+    if _SELF_CAPABILITY_RE.match(text):
+        return True
+    return bool(name_re and name_re.match(text))
 
 
 class FactExtractor:
@@ -71,6 +88,7 @@ class FactExtractor:
         store: AsyncHistoryStore,
         llm_client: LLMClient,
         familiar_id: str,
+        familiar_display_name: str | None = None,
         batch_size: int = 10,
         tick_interval_s: float = 15.0,
         participants_max: int = 30,
@@ -79,6 +97,14 @@ class FactExtractor:
         self._sync = store.sync
         self._llm = llm_client
         self._familiar_id = familiar_id
+        # display name for the reserved self-subject; title-cased id when absent
+        self._familiar_display_name = familiar_display_name or familiar_id.title()
+        # drop capability statements phrased third-person with the name
+        # (e.g. "Sapphire cannot remember names")
+        self._self_name_capability_re = re.compile(
+            r"^\s*" + re.escape(self._familiar_display_name) + _NAME_CAPABILITY_TAIL,
+            re.IGNORECASE,
+        )
         self._batch_size = max(1, batch_size)
         self._tick_interval_s = tick_interval_s
         self._participants_max = max(1, participants_max)
@@ -125,7 +151,16 @@ class FactExtractor:
                 familiar_id=self._familiar_id,
                 max_total=self._participants_max,
             )
-            prompt = _build_extract_prompt(batch, participants)
+            # reserve self-subject so the model can tag the familiar's own
+            # narrative; validated like any other manifest key downstream.
+            self_key = self_canonical_key(self._familiar_id)
+            participants[self_key] = self._familiar_display_name
+            prompt = _build_extract_prompt(
+                batch,
+                participants,
+                self_key=self_key,
+                self_name=self._familiar_display_name,
+            )
             reply = await self._llm.chat(prompt)
             facts = _parse_facts(reply.content_str)
         valid_ids = {t.id for t in batch}
@@ -148,7 +183,7 @@ class FactExtractor:
             text = str(fact.get("text", "")).strip()
             if not text:
                 continue
-            if _is_self_capability(text):
+            if _is_self_capability(text, self._self_name_capability_re):
                 dropped_self_cap += 1
                 _logger.debug(
                     f"{ls.tag('Facts', ls.Y)} "
@@ -177,9 +212,13 @@ class FactExtractor:
             # mention index Discord ``@`` pings populate, so
             # ``PeopleDossierLayer`` picks them up at next assemble —
             # no separate read path, no fact-table join in hot path.
-            # Idempotent (PK-deduped on store side).
-            if subjects:
-                keys = [s.canonical_key for s in subjects]
+            # idempotent (PK-deduped on store side). skip the self key —
+            # always-injected by PeopleDossierLayer, so mirroring it only
+            # pollutes turn_mentions and would consume a max_people slot.
+            keys = [
+                s.canonical_key for s in subjects if not is_self_key(s.canonical_key)
+            ]
+            if keys:
                 for tid in source_ids:
                     await self._store.record_mentions(turn_id=tid, canonical_keys=keys)
 
@@ -291,11 +330,30 @@ def _resolve_subjects(
 def _build_extract_prompt(
     turns: Iterable[HistoryTurn],
     participants: dict[str, str],
+    *,
+    self_key: str | None = None,
+    self_name: str | None = None,
 ) -> list[Message]:
+    self_clause = ""
+    if self_key and self_name:
+        self_clause = (
+            f"\n\nYou ({self_name}) are a participant too, keyed "
+            f"``{self_key}``. Record YOUR OWN narrative under that key: "
+            "the bits/performances you ran, choices you made, and your "
+            f"relational stances or feelings toward people ('{self_name} "
+            f"performed a teasing bit', '{self_name} chose to disengage', "
+            f"'{self_name} privately felt proud'). Tag those with "
+            f"``{self_key}`` — never file them under the person the bit "
+            "was about. This is the ONLY exception to 'not about you', "
+            "and it covers narrative/choices/feelings ONLY. Self-"
+            "CAPABILITY or limitation statements ('I cannot remember "
+            "names', 'as an AI…') are still NOT facts — drop them "
+            "entirely; they belong in the system prompt."
+        )
     header = (
         "Extract a short list of atomic facts about the people and "
         "events in the chat turns below — observations about the "
-        "world, not about you.\n\n"
+        "world, not about you." + self_clause + "\n\n"
         "Reply with a JSON array. Each item has:\n"
         "- ``text`` (one sentence)\n"
         "- ``source_turn_ids`` (list of turn ids the fact was distilled from)\n"

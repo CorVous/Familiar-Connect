@@ -60,6 +60,17 @@ class Familiar:
     hosted endpointer in charge.
     """
 
+    @property
+    def display_name(self) -> str:
+        """Human-readable name for prompts / self-subject.
+
+        First configured alias when present (``Sapphire``), else
+        title-cased ``id`` (``sapphire`` → ``Sapphire``).
+        """
+        if self.config.aliases:
+            return self.config.aliases[0]
+        return self.id.title()
+
     @classmethod
     def load_from_disk(
         cls,

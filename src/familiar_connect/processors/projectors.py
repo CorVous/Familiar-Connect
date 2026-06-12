@@ -81,6 +81,9 @@ class ProjectorContext:
     familiar_id: str
     embedder: Embedder | None = None
     memory: MemoryProvidersConfig = field(default_factory=MemoryProvidersConfig)
+    # human-readable name for the reserved self-subject; ``None`` →
+    # consumers default to title-cased ``familiar_id``.
+    familiar_display_name: str | None = None
 
 
 ProjectorFactory = Callable[[ProjectorContext], MemoryProjector]
@@ -146,6 +149,7 @@ def _rich_note_factory(ctx: ProjectorContext) -> MemoryProjector:
         store=ctx.store,
         llm_client=ctx.llm_clients["background"],
         familiar_id=ctx.familiar_id,
+        familiar_display_name=ctx.familiar_display_name,
         batch_size=knobs.batch_size,
         tick_interval_s=knobs.tick_interval_s,
         participants_max=knobs.participants_max,
@@ -157,6 +161,7 @@ def _people_dossier_factory(ctx: ProjectorContext) -> MemoryProjector:
         store=ctx.store,
         llm_client=ctx.llm_clients["background"],
         familiar_id=ctx.familiar_id,
+        familiar_display_name=ctx.familiar_display_name,
         tick_interval_s=ctx.memory.people_dossier.tick_interval_s,
     )
 
