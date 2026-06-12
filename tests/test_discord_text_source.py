@@ -122,6 +122,33 @@ class TestPublishText:
         assert ev.payload["mentions"] == (bob,)
 
     @pytest.mark.asyncio
+    async def test_carries_pings_bot_flag(self) -> None:
+        """``pings_bot`` (real bot ping incl. reply-ping) must round-trip."""
+        bus = InProcessEventBus()
+        await bus.start()
+        source = DiscordTextSource(bus=bus, familiar_id="fam")
+        received: list = []
+
+        async def consume() -> None:
+            async for ev in bus.subscribe((TOPIC_DISCORD_TEXT,)):
+                received.append(ev)
+                return
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0)
+        await source.publish_text(
+            channel_id=111,
+            guild_id=222,
+            author=_author(),
+            content="you there?",
+            pings_bot=True,
+        )
+        await asyncio.wait_for(task, timeout=1.0)
+        await bus.shutdown()
+
+        assert received[0].payload["pings_bot"] is True
+
+    @pytest.mark.asyncio
     async def test_message_id_reply_and_mentions_default(self) -> None:
         """Backwards-compatible defaults: callers can omit the new fields."""
         bus = InProcessEventBus()
@@ -149,6 +176,7 @@ class TestPublishText:
         assert ev.payload["message_id"] is None
         assert ev.payload["reply_to_message_id"] is None
         assert ev.payload["mentions"] == ()
+        assert ev.payload["pings_bot"] is False
 
     @pytest.mark.asyncio
     async def test_turn_id_equals_event_id_for_source_events(self) -> None:

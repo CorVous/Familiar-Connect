@@ -8,7 +8,7 @@ turn to history. Mirrors :class:`VoiceResponder` but without TTS.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -17,9 +17,12 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
+    from familiar_connect.activities.engine import ActivityEngine
+
 import asyncio
 import time
 
+from familiar_connect.activities.engine import GateAction, GateDecision
 from familiar_connect.bus import InProcessEventBus, TurnRouter
 from familiar_connect.bus.envelope import Event
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
@@ -91,7 +94,22 @@ def _discord_text_event(
     channel_id: int = 42,
     content: str = "hi there",
     seq: int = 1,
+    pings_bot: bool | None = None,
 ) -> Event:
+    payload: dict[str, object] = {
+        "familiar_id": "fam",
+        "channel_id": channel_id,
+        "guild_id": 99,
+        "author": Author(
+            platform="discord",
+            user_id="1",
+            username="alice",
+            display_name="Alice",
+        ),
+        "content": content,
+    }
+    if pings_bot is not None:
+        payload["pings_bot"] = pings_bot
     return Event(
         event_id=event_id,
         turn_id=event_id,
@@ -100,18 +118,7 @@ def _discord_text_event(
         topic=TOPIC_DISCORD_TEXT,
         timestamp=datetime.now(tz=UTC),
         sequence_number=seq,
-        payload={
-            "familiar_id": "fam",
-            "channel_id": channel_id,
-            "guild_id": 99,
-            "author": Author(
-                platform="discord",
-                user_id="1",
-                username="alice",
-                display_name="Alice",
-            ),
-            "content": content,
-        },
+        payload=payload,
     )
 
 
@@ -153,6 +160,7 @@ def _make_responder(
     trigger_typing: Callable[[int], AbstractAsyncContextManager[None]] | None = None,
     post_history_instructions: str = "",
     display_tz: str = "UTC",
+    activity_engine: object | None = None,
 ) -> tuple[TextResponder, TurnRouter, HistoryStore]:
     card = tmp_path / "character.md"
     card.write_text("You are a familiar.\n")
@@ -174,6 +182,7 @@ def _make_responder(
         trigger_typing=trigger_typing,
         post_history_instructions=post_history_instructions,
         display_tz=display_tz,
+        activity_engine=cast("ActivityEngine | None", activity_engine),
     )
     return responder, router, store
 
@@ -1110,6 +1119,284 @@ class TestStripLeakedMetadataPrefix:
         assert _strip_leaked_metadata_prefix("just a normal reply") == (
             "just a normal reply"
         )
+
+
+class _FakeActivityEngine:
+    """Records gate/notify/end_turn calls; returns a fixed decision."""
+
+    def __init__(self, decision: GateDecision) -> None:
+        self.decision = decision
+        self.gate_payloads: list[dict] = []
+        self.replies_notified = 0
+        self.turns_ended = 0
+        self.missed_pings: list[int] = []
+        self.traffic_notes = 0
+
+    def gate(self, payload: dict) -> GateDecision:
+        self.gate_payloads.append(payload)
+        return self.decision
+
+    async def notify_reply_sent(self) -> None:
+        self.replies_notified += 1
+
+    async def end_turn(self) -> None:
+        self.turns_ended += 1
+
+    def note_missed_ping(self, turn_id: int) -> None:
+        self.missed_pings.append(turn_id)
+
+    def note_traffic(self) -> None:
+        self.traffic_notes += 1
+
+
+class TestActivityGate:
+    """Absence gate at the top of ``handle()`` — engine optional."""
+
+    @pytest.mark.asyncio
+    async def test_suppress_records_staged_turn_and_skips_reply(
+        self, tmp_path: Path
+    ) -> None:
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.SUPPRESS))
+        typing = _RecordingTyping()
+        send = _CapturingSend()
+        responder, _, store = _make_responder(
+            llm=_ScriptedLLM(deltas=["should not stream"]),
+            send=send,
+            tmp_path=tmp_path,
+            trigger_typing=typing,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="anyone home?"), bus)
+        await bus.shutdown()
+
+        # no typing, no reply, no assistant turn
+        assert send.calls == []
+        assert typing.entered == 0
+        turns = store.recent(familiar_id="fam", channel_id=42, limit=10)
+        assert all(t.role != "assistant" for t in turns)
+        # user turn recorded staged — surfaced on return
+        row = store._conn.execute(
+            "SELECT consumed_at FROM turns WHERE role = 'user'"
+        ).fetchone()
+        assert row is not None
+        assert row["consumed_at"] is None
+        # no bookkeeping on suppressed turns
+        assert engine.replies_notified == 0
+        assert engine.turns_ended == 0
+        # quiet clock still fed — she "hears" traffic while out
+        assert engine.traffic_notes == 1
+
+    @pytest.mark.asyncio
+    async def test_silent_outcome_still_applies_deferred_start(
+        self, tmp_path: Path
+    ) -> None:
+        """Silent slip-away still applies the deferred start.
+
+        A stale staged start leaking into a later turn would teleport
+        her out mid-conversation.
+        """
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.NORMAL))
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["<silent>"]),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="[idle: quiet]"), bus)
+        await bus.shutdown()
+
+        assert send.calls == []  # nothing posts
+        assert engine.turns_ended == 1  # deferred start still applies
+        assert engine.replies_notified == 0  # silent ≠ reply
+
+    @pytest.mark.asyncio
+    async def test_suppressed_ping_noted_as_missed(self, tmp_path: Path) -> None:
+        """Live capture: suppressed turn that pinged the bot → note_missed_ping."""
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.SUPPRESS))
+        send = _CapturingSend()
+        responder, _, store = _make_responder(
+            llm=_ScriptedLLM(deltas=["nope"]),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event(content="you there?", pings_bot=True), bus
+        )
+        await bus.shutdown()
+
+        assert send.calls == []
+        row = store._conn.execute("SELECT id FROM turns WHERE role = 'user'").fetchone()
+        assert row is not None
+        assert engine.missed_pings == [row["id"]]
+
+    @pytest.mark.asyncio
+    async def test_suppressed_non_ping_not_noted(self, tmp_path: Path) -> None:
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.SUPPRESS))
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["nope"]),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="just chatting"), bus)
+        await bus.shutdown()
+
+        assert engine.missed_pings == []
+
+    @pytest.mark.asyncio
+    async def test_note_traffic_on_normal_turns(self, tmp_path: Path) -> None:
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.NORMAL))
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["ok"]),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await responder.handle(
+            _discord_text_event(event_id="e-2", content="hi again"), bus
+        )
+        await bus.shutdown()
+
+        assert engine.traffic_notes == 2
+
+    @pytest.mark.asyncio
+    async def test_judgment_injects_state_line_for_this_turn(
+        self, tmp_path: Path
+    ) -> None:
+        captured: list[list[Message]] = []
+
+        class _CapturingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:
+                captured.append(list(messages))
+                return Message(role="assistant", content="back!")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                captured.append(list(messages))
+                yield "back!"
+
+        state = "You are 20 min into creek walk — Alice pinged you."
+        engine = _FakeActivityEngine(
+            GateDecision(action=GateAction.JUDGMENT, state_line=state)
+        )
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_CapturingLLM(),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hey you there?"), bus)
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        msgs = captured[0]
+        assert msgs[-1].role == "system"
+        assert state in msgs[-1].content_str
+        # reply shipped ⇒ cut-short notify + deferred-start apply
+        assert send.calls
+        assert engine.replies_notified == 1
+        assert engine.turns_ended == 1
+
+    @pytest.mark.asyncio
+    async def test_judgment_silent_means_stay_out(self, tmp_path: Path) -> None:
+        engine = _FakeActivityEngine(
+            GateDecision(action=GateAction.JUDGMENT, state_line="state")
+        )
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["<silent>"]),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="ping"), bus)
+        await bus.shutdown()
+
+        assert send.calls == []
+        assert engine.replies_notified == 0
+
+    @pytest.mark.asyncio
+    async def test_normal_reply_applies_end_turn_without_notify(
+        self, tmp_path: Path
+    ) -> None:
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.NORMAL))
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["ok"]),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert send.calls
+        assert engine.replies_notified == 0
+        assert engine.turns_ended == 1
+
+    @pytest.mark.asyncio
+    async def test_normal_decision_leaves_prompt_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        captured: list[list[Message]] = []
+
+        class _CapturingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:
+                captured.append(list(messages))
+                return Message(role="assistant", content="ok")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                captured.append(list(messages))
+                yield "ok"
+
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.NORMAL))
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_CapturingLLM(),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert captured
+        assert "pinged" not in captured[0][-1].content_str
 
 
 class TestAssistantTurnRendering:

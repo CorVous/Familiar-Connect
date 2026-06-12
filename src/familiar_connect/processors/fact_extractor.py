@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
+from familiar_connect.activities import ACTIVITY_RETURN_MODE
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.history.store import FactSubject
 from familiar_connect.llm import Message
@@ -106,18 +107,30 @@ class FactExtractor:
         if len(new_turns) < self._batch_size:
             return
 
-        participants = _build_participants(
-            new_turns,
-            store=self._sync,
-            familiar_id=self._familiar_id,
-            max_total=self._participants_max,
-        )
-        prompt = _build_extract_prompt(new_turns, participants)
-        reply = await self._llm.chat(prompt)
-        facts = _parse_facts(reply.content_str)
-        valid_ids = {t.id for t in new_turns}
-        channel_ids: dict[int, int] = {t.id: t.channel_id for t in new_turns}
-        ts_by_id: dict[int, datetime] = {t.id: t.timestamp for t in new_turns}
+        # activity-return turns never enter extraction (v1 provenance):
+        # experience text is self-generated fiction — same claim/fiction
+        # discipline as the prompt rules below; activity engine already
+        # records the activity as a mechanical event-fact. keyed on
+        # turns.mode (content prefix is display-only); watermark below
+        # still advances.
+        batch = [t for t in new_turns if t.mode != ACTIVITY_RETURN_MODE]
+        skipped_return = len(new_turns) - len(batch)
+
+        facts: list[dict[str, object]] = []
+        participants: dict[str, str] = {}
+        if batch:
+            participants = _build_participants(
+                batch,
+                store=self._sync,
+                familiar_id=self._familiar_id,
+                max_total=self._participants_max,
+            )
+            prompt = _build_extract_prompt(batch, participants)
+            reply = await self._llm.chat(prompt)
+            facts = _parse_facts(reply.content_str)
+        valid_ids = {t.id for t in batch}
+        channel_ids: dict[int, int] = {t.id: t.channel_id for t in batch}
+        ts_by_id: dict[int, datetime] = {t.id: t.timestamp for t in batch}
 
         dropped_self_cap = 0
         for fact in facts:
@@ -180,6 +193,7 @@ class FactExtractor:
             f"{ls.kv('batch_size', str(len(new_turns)), vc=ls.LY)} "
             f"{ls.kv('extracted', str(len(facts)), vc=ls.LC)} "
             f"{ls.kv('dropped_self_cap', str(dropped_self_cap), vc=ls.LY)} "
+            f"{ls.kv('skipped_return', str(skipped_return), vc=ls.LY)} "
             f"{ls.kv('watermark', str(last_id), vc=ls.LW)}"
         )
 

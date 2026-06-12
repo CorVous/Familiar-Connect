@@ -40,6 +40,7 @@ class DiscordTextSource:
         reply_to_message_id: str | None = None,
         mentions: tuple[Author, ...] = (),
         images: dict[str, str] | None = None,
+        pings_bot: bool = False,
     ) -> Event:
         """Construct + publish text event; return envelope.
 
@@ -50,6 +51,10 @@ class DiscordTextSource:
         :class:`Author`); empty when no user mentions.
         ``images`` — img_id → URL map for view_image tool; empty when
         no images detected in message.
+        ``pings_bot`` — bot user in ``message.mentions`` (``<@id>``
+        mentions AND reply-pings; roles/@everyone excluded). Needed
+        because ``mentions`` filters bot users and reply-pings carry
+        no mention string in content.
         """
         self._seq += 1
         event_id = f"discord-text-{uuid4().hex[:12]}"
@@ -71,6 +76,7 @@ class DiscordTextSource:
                 "reply_to_message_id": reply_to_message_id,
                 "mentions": mentions,
                 "images": images or {},
+                "pings_bot": pings_bot,
             },
         )
         await self._bus.publish(ev)

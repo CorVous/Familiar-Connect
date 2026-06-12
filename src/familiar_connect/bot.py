@@ -518,6 +518,7 @@ async def ingest_event(
     reply_to_message_id: str | None = None,
     mentions: tuple[Author, ...] = (),
     images: dict[str, str] | None = None,
+    pings_bot: bool = False,
 ) -> None:
     """Publish text event onto bus.
 
@@ -535,7 +536,23 @@ async def ingest_event(
         reply_to_message_id=reply_to_message_id,
         mentions=mentions,
         images=images or {},
+        pings_bot=pings_bot,
     )
+
+
+def message_pings_bot(
+    message: discord.Message,
+    bot_user_id: int | None,
+) -> bool:
+    """Real bot ping: bot user appears in ``message.mentions``.
+
+    py-cord puts both ``<@id>`` mentions and reply-ping targets in
+    ``mentions``; role/@everyone mentions live elsewhere and never
+    count. Bare name-mentions don't count either.
+    """
+    if bot_user_id is None:
+        return False
+    return any(getattr(u, "id", None) == bot_user_id for u in message.mentions)
 
 
 def compose_content_with_embeds(
@@ -769,6 +786,36 @@ async def _sync_presence(bot: discord.Bot, fm: FocusManager) -> None:
         ),
         status=discord.Status.online,
     )
+
+
+def build_activity_presence_cb(
+    handle: BotHandle,
+) -> Callable[[str, str | None], Awaitable[None]]:
+    """Presence callback for :class:`ActivityEngine`.
+
+    ``("idle", label)`` while out — yellow dot + activity label;
+    ``("online", None)`` on return — restores normal focus presence
+    via :func:`_sync_presence`. No-op until the bot is ready
+    (headless tests, pre-login engine start).
+    """
+
+    async def _cb(status: str, label: str | None) -> None:
+        bot = handle.bot
+        if not bot.is_ready():
+            return
+        if status == "idle":
+            await bot.change_presence(
+                status=discord.Status.idle,
+                activity=discord.CustomActivity(name=label or "away"),
+            )
+            return
+        fm = handle.focus_manager
+        if fm is not None:
+            await _sync_presence(bot, fm)
+        else:
+            await bot.change_presence(status=discord.Status.online)
+
+    return _cb
 
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1224,9 @@ def _register_events(
             reply_to_message_id=reply_to,
             mentions=mention_authors,
             images=images,
+            # mention_authors filters bots, so reply-pings at the bot
+            # vanish from metadata — pings_bot carries them explicitly
+            pings_bot=message_pings_bot(message, familiar.bot_user_id),
         )
 
     @bot.event
