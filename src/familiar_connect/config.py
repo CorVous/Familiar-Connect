@@ -57,7 +57,7 @@ class LLMSlotConfig:
     model: str
     temperature: float | None = None
     # OpenRouter provider routing override. ``None`` = default (per-call).
-    # Pinned order stabilises prompt caching, costs some availability.
+    # pinned order stabilises prompt caching, costs some availability.
     # stopgap — see docs/architecture/tuning.md § provider pinning.
     provider_order: tuple[str, ...] | None = None
     provider_allow_fallbacks: bool = True
