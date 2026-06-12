@@ -27,7 +27,9 @@ Per-familiar, loaded once from
 
 Surface today:
 
-- `display_tz` — IANA timezone (default `"UTC"`).
+- `display_tz` — IANA timezone (default `"UTC"`) the final-reminder
+  clock renders in (e.g. `"It is now: … 2:30PM PDT"`). Invalid names
+  (e.g. `"PST"`) fail fast at config load.
 - `aliases` — names the familiar answers to.
 - `[providers.history].voice_window_size` / `.text_window_size` —
   recent-history layer windows, tiered by responder (defaults 20 / 30).

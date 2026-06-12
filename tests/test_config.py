@@ -92,6 +92,22 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match="unknown LLM slot 'main_prose'"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_invalid_display_tz_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('display_tz = "PST"\n')
+        with pytest.raises(ConfigError, match="display_tz"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_valid_display_tz_accepted(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('display_tz = "America/Los_Angeles"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.display_tz == "America/Los_Angeles"
+
     def test_temperature_out_of_range(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:

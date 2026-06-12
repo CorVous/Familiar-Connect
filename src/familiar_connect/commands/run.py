@@ -251,6 +251,7 @@ def _default_assembler(
                 importance_weight=retrieval.importance_weight,
                 embedding_weight=retrieval.embedding_weight,
                 embedder=embedder,
+                display_tz=familiar.config.display_tz,
             ),
             RecentHistoryLayer(
                 store=store,
@@ -260,6 +261,7 @@ def _default_assembler(
                     familiar.config.recent_history_coalesce_max_gap_seconds
                 ),
                 silence_gap_fold_seconds=silence_gap_fold_seconds,
+                display_tz=familiar.config.display_tz,
             ),
         ],
         budgeter=Budgeter(budget, channel_total_tokens=channel_total_tokens),
@@ -493,6 +495,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         tool_registry=voice_tool_registry,
         tool_context_factory=_make_tool_context("voice"),
         post_history_instructions=familiar.config.post_history_instructions,
+        display_tz=familiar.config.display_tz,
         focus_manager=focus_manager,
     )
     text_responder = TextResponder(
@@ -507,6 +510,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         tool_registry=text_tool_registry,
         tool_context_factory=_make_tool_context("text"),
         post_history_instructions=familiar.config.post_history_instructions,
+        display_tz=familiar.config.display_tz,
         focus_manager=focus_manager,
     )
     projector_context = ProjectorContext(

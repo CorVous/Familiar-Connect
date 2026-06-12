@@ -259,8 +259,9 @@ fallback channel map (out of scope for the initial cut).
   applied; the assembler always uses the default stability-descending
   order regardless of this field).
 - `message_rendering` — `"prefixed"` (always include
-  `[HH:MM display_name]` content prefix; UTC) or `"name_only"`
-  (rely on the OpenAI `name` field alone — saves tokens in DMs).
+  `[HH:MM display_name]` content prefix; rendered in the familiar's
+  `display_tz`) or `"name_only"` (rely on the OpenAI `name` field
+  alone — saves tokens in DMs).
 
 ## Model-specific budget curves
 

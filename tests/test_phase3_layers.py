@@ -351,6 +351,37 @@ class TestRagContextLayer:
         assert "> [2:29PM Peebo]: my brain's dying" in out
 
     @pytest.mark.asyncio
+    async def test_renders_in_configured_display_tz(self) -> None:
+        """Date header + clock localize to display_tz (here crossing midnight)."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="my brain's dying",
+            author=Author(
+                platform="discord",
+                user_id="111",
+                username="peebo",
+                display_name="Peebo",
+            ),
+        )
+        # 02:29 UTC on May 3 -> May 2 19:29 PDT (date *and* clock shift)
+        ts = datetime(2026, 5, 3, 2, 29, tzinfo=UTC).isoformat()
+        store._conn.execute("UPDATE turns SET timestamp = ? WHERE id = 1", (ts,))
+        store._conn.commit()
+        layer = RagContextLayer(
+            store=AsyncHistoryStore(store),
+            max_results=5,
+            context_window=0,
+            display_tz="America/Los_Angeles",
+        )
+        layer.set_current_cue("brain")
+        out = await layer.build(_ctx(channel_id=1))
+        assert "2026-05-02:" in out
+        assert "> [7:29PM Peebo]: my brain's dying" in out
+
+    @pytest.mark.asyncio
     async def test_multiline_message_prefixes_every_line(self) -> None:
         """Multi-line content keeps the blockquote intact on every line."""
         store = HistoryStore(":memory:")

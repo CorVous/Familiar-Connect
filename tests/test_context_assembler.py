@@ -171,6 +171,32 @@ class TestRecentHistoryLayer:
         )
 
     @pytest.mark.asyncio
+    async def test_timestamp_prefix_renders_in_configured_display_tz(self) -> None:
+        store = HistoryStore(":memory:")
+        alice = Author(
+            platform="discord", user_id="42", username="alice", display_name="Alice"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=10,
+            role="user",
+            content="hey",
+            author=alice,
+        )
+        # 21:30 UTC -> 14:30 PDT in Los Angeles
+        ts = datetime(2026, 5, 4, 21, 30, tzinfo=UTC).isoformat()
+        store._conn.execute("UPDATE turns SET timestamp = ? WHERE id = 1", (ts,))
+        store._conn.commit()
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            display_tz="America/Los_Angeles",
+        )
+        messages = await layer.recent_messages(_ctx(channel_id=10))
+        user_msg = next(m for m in messages if m.role == "user")
+        assert user_msg.content_str.startswith("[14:30 Alice #10] hey")
+
+    @pytest.mark.asyncio
     async def test_respects_window_size(self) -> None:
         store = HistoryStore(":memory:")
         for i in range(50):

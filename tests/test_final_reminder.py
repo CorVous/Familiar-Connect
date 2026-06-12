@@ -29,6 +29,19 @@ class TestBuildFinalReminder:
         assert "message_id" not in out
         assert "`<silent>`" not in out
 
+    def test_display_tz_converts_clock_and_abbrev(self) -> None:
+        # 21:30 UTC -> 14:30 PDT in summer Los Angeles
+        out = build_final_reminder(
+            viewer_mode="voice",
+            now=_at(2026, 5, 4, 21, 30),
+            display_tz="America/Los_Angeles",
+        )
+        assert "It is now: 2026-05-04 2:30PM PDT" in out
+
+    def test_display_tz_defaults_to_utc(self) -> None:
+        out = build_final_reminder(viewer_mode="voice", now=_at(2026, 5, 4, 21, 30))
+        assert "It is now: 2026-05-04 9:30PM UTC" in out
+
     def test_starts_with_horizontal_rule(self) -> None:
         out = build_final_reminder(viewer_mode="text", now=_at(2026, 5, 4, 0, 0))
         assert out.startswith("---")
