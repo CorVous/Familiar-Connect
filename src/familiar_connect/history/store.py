@@ -498,6 +498,30 @@ def _subject_key_set(subjects: Iterable[FactSubject]) -> frozenset[str]:
     return frozenset(s.canonical_key for s in subjects)
 
 
+def _canonical_keys_from_subjects_json(subjects_json: str | None) -> frozenset[str]:
+    """Canonical str keys from a fact row's ``subjects_json``.
+
+    Empty on NULL / unparseable / non-list / no valid keys. Tolerant
+    of malformed items: skips non-dict entries and non-``str`` keys.
+    """
+    if not subjects_json:
+        return frozenset()
+    try:
+        parsed = json.loads(subjects_json)
+    except (TypeError, ValueError):
+        return frozenset()
+    if not isinstance(parsed, list):
+        return frozenset()
+    keys: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("canonical_key")
+        if isinstance(key, str):
+            keys.add(key)
+    return frozenset(keys)
+
+
 def _facts_validity_where(
     *,
     include_superseded: bool,
@@ -1746,19 +1770,8 @@ class HistoryStore:
         ).fetchall()
         out: dict[str, int] = {}
         for row in rows:
-            try:
-                parsed = json.loads(row["subjects_json"])
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(parsed, list):
-                continue
             fact_id = int(row["id"])
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-                key = item.get("canonical_key")
-                if not isinstance(key, str):
-                    continue
+            for key in _canonical_keys_from_subjects_json(row["subjects_json"]):
                 # ORDER BY id ASC ⇒ later assignment wins ⇒ max id
                 out[key] = fact_id
         return out
@@ -2191,7 +2204,8 @@ class HistoryStore:
         (double-write) rather than something to silently absorb.
         """
         row = self._conn.execute(
-            "SELECT superseded_at FROM facts WHERE id = ? AND familiar_id = ?",
+            "SELECT superseded_at, subjects_json FROM facts "
+            "WHERE id = ? AND familiar_id = ?",
             (old_id, familiar_id),
         ).fetchone()
         if row is None:
@@ -2209,6 +2223,18 @@ class HistoryStore:
             """,
             (ts, new_id, old_id, familiar_id),
         )
+        # Invalidate this fact's subjects' dossiers so PeopleDossierWorker
+        # rebuilds them from scratch. Worker compounds prior text + only
+        # newer facts; it never un-bakes a superseded fact. Must DELETE the
+        # row (not reset the watermark) — a surviving row re-compounds the
+        # stale/poisoned prose via the "Previous dossier" path. Absent row →
+        # prior=None → clean full rebuild. NULL subjects → no dossier to drop.
+        for key in _canonical_keys_from_subjects_json(row["subjects_json"]):
+            self._conn.execute(
+                "DELETE FROM people_dossiers "
+                "WHERE familiar_id = ? AND canonical_key = ?",
+                (familiar_id, key),
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------

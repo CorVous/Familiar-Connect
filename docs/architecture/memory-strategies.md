@@ -354,7 +354,15 @@ Different writers populate the two axes; do not conflate them:
   same subject and asks the background LLM which (if any) to
   retire. Strict `HistoryStore.supersede_fact()` raises on
   re-supersession so a double-write surfaces as a bug rather than
-  silently rewiring the chain.
+  silently rewiring the chain. Superseding also **deletes the
+  retired fact's subjects' `people_dossiers` rows** (same
+  `familiar_id`): the dossier worker compounds prior text and never
+  un-bakes a retired fact, so a surviving row would keep the stale
+  prose alive. Dropping the row makes the worker's next tick rebuild
+  it clean from current facts (the `prior=None` path). The watermark
+  is deliberately *not* reset instead — a kept row re-compounds the
+  poisoned text via its "Previous dossier" prompt. Subject-less facts
+  have no dossier to drop.
 
 A fact can be retired (system-time) while its world-time validity
 stays open: e.g., the extractor re-renders the same belief with
