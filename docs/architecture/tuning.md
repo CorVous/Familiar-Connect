@@ -664,6 +664,27 @@ Override one knob in your familiar's `character.toml`:
 total_tokens = 5000   # rest of the voice envelope inherits from _default
 ```
 
+### Per-channel and per-model overrides
+
+`[channels.<id>].total_tokens` overrides the tier's post-assembly trim
+cap for one channel — tighten a high-traffic channel without touching
+the global tier default. `Budgeter.trim()` selects the channel cap when
+`channel_id` matches.
+
+`[budget.model_curves."<model-name>"]` registers per-section float
+multipliers for a model; all 14 `TierBudget` fields are valid keys,
+unset fields default to `1.0`. `CharacterConfig.budget_for()` applies
+the curve when the tier's active slot uses that model (tier→slot:
+`voice→fast`, `text→prose`, `background→background`). Channel
+`total_tokens` overrides take precedence over the curve-scaled value.
+
+```toml
+[budget.model_curves."claude-opus-4-7"]
+total_tokens          = 2.0
+recent_history_tokens = 2.5
+rag_tokens            = 1.5
+```
+
 ## History / context layers
 
 | Knob | Default | Source |

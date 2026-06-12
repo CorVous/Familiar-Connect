@@ -244,39 +244,9 @@ text event with the voice channel id. Real Discord voice and text channels
 have distinct ids, so production wiring needs an explicit voice-to-text
 fallback channel map (out of scope for the initial cut).
 
-## Per-channel latency knobs
+## Per-channel and per-model tuning
 
-`[channels.<id>]` in `character.toml` overrides four knobs:
-
-- `history_window_size` — how many recent turns `RecentHistoryLayer`
-  pulls for this channel. Overrides the tier default
-  (`[providers.history].voice_window_size` for voice channels,
-  `.text_window_size` for text channels).
-- `total_tokens` — post-assembly trim cap for this channel only. Overrides
-  the `[budget.<tier>].total_tokens` envelope so high-traffic channels can
-  get a tighter budget without touching the global tier default.
-- `prompt_layers` — ordered list of layer names (parsed but not yet
-  applied; the assembler always uses the default stability-descending
-  order regardless of this field).
-- `message_rendering` — `"prefixed"` (always include
-  `[HH:MM display_name]` content prefix; rendered in the familiar's
-  `display_tz`) or `"name_only"` (rely on the OpenAI `name` field
-  alone — saves tokens in DMs).
-
-## Model-specific budget curves
-
-`[budget.model_curves."<model-name>"]` blocks register per-section
-multipliers for a model. All 14 `TierBudget` field names are valid keys;
-unset fields default to 1.0 (no change). Example:
-
-```toml
-[budget.model_curves."claude-opus-4-7"]
-total_tokens = 2.0
-recent_history_tokens = 2.5
-rag_tokens = 1.5
-```
-
-`CharacterConfig.budget_for(tier, channel_id)` applies the curve when the
-tier's active LLM slot uses that model name. The tier→slot mapping is
-`voice→fast`, `text→prose`, `background→background`. Per-channel
-`total_tokens` overrides take precedence over the curve-scaled value.
+`[channels.<id>]` overrides (`history_window_size`, `total_tokens`,
+`prompt_layers`, `message_rendering`) and `[budget.model_curves]`
+per-model multipliers live in
+[Tuning — prompt assembly budget](tuning.md#prompt-assembly-budget).

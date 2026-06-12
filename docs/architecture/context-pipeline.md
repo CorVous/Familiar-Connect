@@ -1013,40 +1013,10 @@ Background: PeopleDossierWorker tick (every 20 s)
 
 ## Configuration
 
-Per-channel overrides in `character.toml` (`[channels.<id>]`):
-
-- `history_window_size` — overrides the tier default
-  (`voice_window_size` / `text_window_size`) for this channel's
-  `RecentHistoryLayer`.
-- `prompt_layers` — explicit ordered list of layer names (parsed; full
-  per-channel reordering arrives alongside richer layer stacks).
-- `message_rendering` — `"prefixed"` (keep `[HH:MM display_name]` in
-  content) or `"name_only"` (rely on OpenAI `name` field).
-
-`SummaryWorker` honours:
-
-- `turns_threshold` (default 10) — new turns before rolling summary
-  regenerates.
-- `cross_k` (default 5) — new turns in source channel before
-  cross-channel summary regenerates.
-- `cross_channel_map: dict[int, list[int]]` — per-viewer source list.
-- `tick_interval_s` (default 5) — seconds between ticks.
-
-`CrossChannelContextLayer` (retired — `build` emits nothing) still
-accepts:
-
-- `ttl_seconds` (default 600) — read-side staleness threshold (unused
-  now the layer never renders).
-- `viewer_map` — mirrors `cross_channel_map` on the worker side.
-
-`PeopleDossierWorker` honours:
-
-- `tick_interval_s` (default 20) — seconds between ticks (¼ of
-  `SummaryWorker`'s default).
-
-`PeopleDossierLayer` honours:
-
-- `window_size` (default 20) — how far back into the channel to look
-  when collecting candidate canonical keys (authors + mentions).
-- `max_people` (default 8) — hard cap on dossiers rendered per prompt;
-  oldest mentions drop first when the candidate set exceeds the cap.
+Per-channel `[channels.<id>]` overrides, worker cadences
+(`[providers.memory.<name>]`), and the per-tier budget caps that size
+each layer are the operator surface for this pipeline. All live in
+[Tuning](tuning.md) — see
+[History / context layers](tuning.md#history-context-layers),
+[Per-channel overrides](tuning.md#per-channel-overrides), and
+[Memory projectors — worker tuning](tuning.md#worker-tuning).
