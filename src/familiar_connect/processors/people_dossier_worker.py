@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
@@ -34,6 +35,42 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.people_dossier_worker")
+
+# self-dossier is always-injected; the dream pass writes momentary "texture"
+# opinions at low importance that should stay out of it (they remain in the
+# DB, RAG-recallable). durable stances land 7-9, texture 2-3. NULL-importance
+# (legacy / extractor) facts are kept — only explicitly-low ones are filtered.
+SELF_DOSSIER_MIN_IMPORTANCE = 5
+
+# self prompt annotates facts "(importance N)"; strip any that the writer
+# echoes back so metadata never lands in the always-injected self-record
+_IMPORTANCE_TAG = re.compile(r"\(importance \d+\)\s*")
+
+
+def _dossier_facts(facts: list[Fact], *, is_self: bool) -> list[Fact]:
+    """Facts that should shape a dossier.
+
+    Self-dossier drops low-importance texture, then orders kept facts
+    importance-desc (NULL ranks at keep-threshold; stable sort
+    preserves recency within tier) so writer sees most central stances
+    first. Other subjects and NULL-importance facts pass through
+    unchanged.
+    """
+    if not is_self:
+        return facts
+    kept = [
+        f
+        for f in facts
+        if f.importance is None or f.importance >= SELF_DOSSIER_MIN_IMPORTANCE
+    ]
+    # stable sort, importance-desc; NULL ranks at the keep-threshold band
+    kept.sort(
+        key=lambda f: (
+            f.importance if f.importance is not None else SELF_DOSSIER_MIN_IMPORTANCE
+        ),
+        reverse=True,
+    )
+    return kept
 
 
 class PeopleDossierWorker:
@@ -104,10 +141,24 @@ class PeopleDossierWorker:
         if not new_facts:
             return
 
+        is_self = is_self_key(canonical_key)
+        dossier_facts = _dossier_facts(new_facts, is_self=is_self)
+        if not dossier_facts:
+            # window held only low-importance texture — advance the watermark
+            # past it (keeping prior text) so we don't re-filter every tick.
+            if prior is not None:
+                await self._store.put_people_dossier(
+                    familiar_id=self._familiar_id,
+                    canonical_key=canonical_key,
+                    last_fact_id=latest_fact_id,
+                    dossier_text=prior.dossier_text,
+                )
+            return
+
         # self-subject resolves to the familiar's display name — store
         # has no account row for ``self:<id>``, so resolve_label would
         # fall through to the raw id portion.
-        if is_self_key(canonical_key):
+        if is_self:
             display = self._familiar_display_name
         else:
             display = await self._store.resolve_label(
@@ -118,11 +169,14 @@ class PeopleDossierWorker:
         prompt = _build_dossier_prompt(
             display_name=display,
             prior_dossier=prior.dossier_text if prior is not None else None,
-            new_facts=new_facts,
-            is_self=is_self_key(canonical_key),
+            new_facts=dossier_facts,
+            is_self=is_self,
         )
         reply = await self._llm.chat(prompt)
         text = reply.content_str.strip()
+        if is_self:
+            # defensive: writer may echo the "(importance N)" annotations
+            text = _IMPORTANCE_TAG.sub("", text).strip()
         if not text:
             # Don't overwrite real dossier with empty reply
             return
@@ -163,8 +217,12 @@ def _build_dossier_prompt(
             "stances, and feelings about people and things (the views she "
             "holds consistently), plus concrete choices and commitments. "
             "Drop only momentary, in-the-moment reactions and filler. "
-            "Reconcile contradictions in favour of newer evidence. Reply "
-            "with the updated self-record text only."
+            "Reconcile contradictions in favour of newer evidence. Facts "
+            "carry an importance score (higher = more central/durable to "
+            "who she is); weight higher-importance stances more heavily, "
+            "and since the record is only 3-5 sentences, when space is "
+            "tight favour durable high-importance stances over lower ones "
+            "(never invent). Reply with the updated self-record text only."
         )
     else:
         header = (
@@ -182,7 +240,16 @@ def _build_dossier_prompt(
         ])
     else:
         body_lines.append("Facts:")
-    body_lines.extend(f"- {f.text}" for f in new_facts)
+    if is_self:
+        # annotate scored facts so the writer can weight them; NULL untagged
+        body_lines.extend(
+            f"- (importance {f.importance}) {f.text}"
+            if f.importance is not None
+            else f"- {f.text}"
+            for f in new_facts
+        )
+    else:
+        body_lines.extend(f"- {f.text}" for f in new_facts)
     return [
         Message(role="system", content=header),
         Message(role="user", content="\n".join(body_lines)),
