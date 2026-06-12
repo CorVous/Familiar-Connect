@@ -39,6 +39,7 @@ tune per host without a rebuild.
 | Attentional idle-nudge timing | `[focus]` | unchanged |
 | Agentic tool-loop cap | `[tools]` | unchanged |
 | LLM request concurrency | `[llm].max_concurrent_requests` | unchanged |
+| Activities catalog + cadence | `data/familiars/<id>/activities.toml` | unchanged |
 
 ## Environment variables
 
@@ -243,9 +244,10 @@ the `shift_focus(channel_id)` tool, so it only moves on slots with
 [`tool_calling = true`](#tool_calling) — otherwise focus stays on its
 startup default. On startup focus defaults to the first text and
 first voice subscription; thereafter it persists in the
-`focus_pointers` table across restarts. The `read_channel(limit?)`
-tool lets the familiar peek at the focused text channel without
-consuming staged turns. Inspect current focus + per-channel unread
+`focus_pointers` table across restarts. The
+`read_channel(limit?, before_id?, around_id?)` tool lets the familiar
+peek at the focused text channel without consuming staged turns,
+paging back or jumping to a turn id. Inspect current focus + per-channel unread
 counts via `/diagnostics` (`Focus: text=#… voice=#…`,
 `Unreads: #… (N)`). See
 [Attentional stream](context-pipeline.md#attentional-stream).
@@ -299,6 +301,31 @@ signal — including on regenerated replies after a barge-in cancel.
 The indicator opens lazily, only after `SilentDetector` rules out the
 `<silent>` sentinel, so reasoning resolving to silence never flickers
 it on. Stops cleanly when the streaming context exits.
+
+## Activities
+
+Sidecar `data/familiars/<id>/activities.toml`, not `character.toml`.
+Missing file or empty catalog = feature off (zero behavior change);
+invalid content fails loudly at startup. Full lifecycle and catalog
+entry schema: [Activities](activities.md).
+
+```toml
+archive_after_minutes = 45
+idle_nudge_minutes    = 20
+min_gap_minutes       = 90
+active_hours          = "10:00-23:00"
+```
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `archive_after_minutes` | `45` | Absence at/above this sets the per-channel archive watermark at the departure turn — prompt window resets there; `read_channel` scrollback doesn't. |
+| `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge may offer `start_activity`; also the nudge debounce window. |
+| `min_gap_minutes` | `90` | Minimum gap after a return before the next nudge. |
+| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges only fire inside this window. |
+
+Per-activity behavior (duration range, reachability while out,
+experience seed) lives on the `[[catalog]]` entries — see the
+[catalog entry schema](activities.md#configuration).
 
 ### Better long-term memory
 
@@ -565,7 +592,9 @@ Maps to OpenRouter's `reasoning` parameter:
 
 Runs the slot's agentic loop with the full tool registry:
 `set_alarm` / `cancel_alarm`, `silent`, `shift_focus`, and (text
-only) `read_channel`. With it `false` the registry never installs, so
+only) `read_channel` plus `start_activity` (the latter only when the
+[activities catalog](activities.md#configuration) is non-empty).
+With it `false` the registry never installs, so
 the model can't shift focus or stay silent *via tools* — the
 `<silent>` text sentinel still works on the bare streaming path, but
 focus stays pinned to its startup default. Enable it on `prose` /

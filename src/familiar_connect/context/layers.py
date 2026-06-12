@@ -198,9 +198,15 @@ class RecentHistoryLayer:
         when neither side carries a platform message id or reply
         marker and gap between them ≤ ``coalesce_max_gap_seconds``.
         """
+        # respect_archive: window resets at per-channel activity
+        # archive watermark — shrinks, never backfills. Applied before
+        # coalescing/folding so merged turns never smuggle archived
+        # text. ``read_channel`` and other store callers stay
+        # unfiltered (fresh eyes ≠ memory hole).
         turns = await self._store.recent_cross_channel(
             familiar_id=ctx.familiar_id,
             limit=self._window_size,
+            respect_archive=True,
         )
         turns = _coalesce_voice_fragments(
             turns, max_gap_seconds=self._coalesce_max_gap_seconds

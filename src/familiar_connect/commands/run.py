@@ -21,7 +21,9 @@ if TYPE_CHECKING:
 import discord
 
 from familiar_connect import log_style as ls
-from familiar_connect.bot import BotHandle, create_bot
+from familiar_connect.activities.config import load_activities_config
+from familiar_connect.activities.engine import ActivityEngine
+from familiar_connect.bot import BotHandle, build_activity_presence_cb, create_bot
 from familiar_connect.budget import Budgeter, TierBudget
 from familiar_connect.bus.topics import (
     TOPIC_DISCORD_TEXT,
@@ -57,13 +59,9 @@ from familiar_connect.processors.projectors import (
 )
 from familiar_connect.stt import create_transcriber
 from familiar_connect.subscriptions import SubscriptionKind
-from familiar_connect.tools.alarm import build_alarm_tool, build_cancel_alarm_tool
-from familiar_connect.tools.image import build_view_image_tool
-from familiar_connect.tools.read_channel import build_read_channel_tool
-from familiar_connect.tools.registry import ToolContext, ToolRegistry
+from familiar_connect.tools.builtins import build_text_registry, build_voice_registry
+from familiar_connect.tools.registry import ToolContext
 from familiar_connect.tools.scheduler import AlarmScheduler
-from familiar_connect.tools.shift_focus import build_shift_focus_tool
-from familiar_connect.tools.silent import build_silent_tool
 from familiar_connect.tools.waker import AlarmWaker
 from familiar_connect.tts import create_tts_client
 from familiar_connect.tts_player import (
@@ -286,6 +284,39 @@ async def _run_alarm_waker(familiar: Familiar, waker: AlarmWaker) -> None:
         await waker.handle(event, familiar.bus)
 
 
+def _build_activity_engine(
+    familiar: Familiar,
+    *,
+    focus_manager: FocusManager,
+    handle: BotHandle,
+) -> ActivityEngine | None:
+    """Build :class:`ActivityEngine` from the familiar's activities.toml.
+
+    Sidecar merged over ``_default`` skeleton (character.toml
+    precedent). Missing file or empty catalog ⇒ ``None`` — no engine,
+    zero behavior change.
+    """
+    config = load_activities_config(
+        familiar.root / "activities.toml",
+        defaults_path=familiar.root.parent / "_default" / "activities.toml",
+    )
+    if not config.enabled:
+        return None
+    return ActivityEngine(
+        store=familiar.history_store,
+        config=config,
+        llm_clients=familiar.llm_clients,
+        bus=familiar.bus,
+        focus_manager=focus_manager,
+        presence_cb=build_activity_presence_cb(handle),
+        familiar_id=familiar.id,
+        display_tz=familiar.config.display_tz,
+        # late-bound: on_ready fills familiar.bot_user_id after login
+        bot_user_id=lambda: familiar.bot_user_id,
+        voice_active_fn=lambda: bool(handle.voice_runtime),
+    )
+
+
 def _first_voice_client(handle: BotHandle) -> discord.VoiceClient | None:
     """Pick any active voice client from runtime map.
 
@@ -436,26 +467,21 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         bus=familiar.bus,
         familiar_id=familiar.id,
     )
-    voice_tool_registry = ToolRegistry()
-    voice_tool_registry.register(build_alarm_tool(alarm_scheduler))
-    voice_tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
-    voice_tool_registry.register(build_silent_tool())
-    voice_tool_registry.register(build_shift_focus_tool())
-
-    text_tool_registry = ToolRegistry()
-    text_tool_registry.register(build_alarm_tool(alarm_scheduler))
-    text_tool_registry.register(build_cancel_alarm_tool(alarm_scheduler))
-    text_tool_registry.register(build_silent_tool())
-    text_tool_registry.register(build_shift_focus_tool())
-    text_tool_registry.register(build_read_channel_tool())
-
+    # absence controller — None unless activities.toml has a catalog
+    activity_engine = _build_activity_engine(
+        familiar, focus_manager=focus_manager, handle=handle
+    )
+    voice_tool_registry = build_voice_registry(
+        alarm_scheduler, focus_manager=focus_manager
+    )
     prose_slot = familiar.config.llm.get("prose")
-    if prose_slot is not None and prose_slot.image_tools:
-        text_tool_registry.register(
-            build_view_image_tool(
-                describe_constraints=familiar.config.image_description_constraints
-            )
-        )
+    text_tool_registry = build_text_registry(
+        alarm_scheduler,
+        image_tools=prose_slot is not None and prose_slot.image_tools,
+        describe_constraints=familiar.config.image_description_constraints,
+        focus_manager=focus_manager,
+        activity_engine=activity_engine,
+    )
 
     # description client: used by view_image handler via ToolContext
     description_llm = familiar.llm_clients.get("__image_description__")
@@ -516,6 +542,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         display_tz=familiar.config.display_tz,
         focus_manager=focus_manager,
         loop_max_iterations=familiar.config.tools.loop_max_iterations,
+        activity_engine=activity_engine,
     )
     projector_context = ProjectorContext(
         store=familiar.history_store,
@@ -532,6 +559,9 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     # load pending alarms now so they start counting down before
     # bot accepts new traffic
     await alarm_scheduler.start()
+    # reload any in-flight activity + arm idle-nudge loop
+    if activity_engine is not None:
+        await activity_engine.start()
 
     # cooperative shutdown: SIGINT/SIGTERM set the event, the supervisor
     # task unwinds the group, and the finally below tears down in order
@@ -574,6 +604,9 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 await familiar.transcriber.stop()
         with contextlib.suppress(Exception):
             await alarm_scheduler.shutdown()
+        if activity_engine is not None:
+            with contextlib.suppress(Exception):
+                await activity_engine.stop()
         familiar.router.shutdown()
         await familiar.bus.shutdown()
         for client in familiar.llm_clients.values():

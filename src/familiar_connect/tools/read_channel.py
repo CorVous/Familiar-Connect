@@ -39,11 +39,29 @@ async def _read_channel_handler(args: dict[str, Any], ctx: ToolContext) -> str:
     raw_limit = args.get("limit", _DEFAULT_LIMIT)
     limit = min(raw_limit, _MAX_LIMIT) if isinstance(raw_limit, int) else _DEFAULT_LIMIT
 
-    turns = await store.recent(
-        familiar_id=ctx.familiar_id,
-        channel_id=channel_id,
-        limit=limit,
-    )
+    before_id = args.get("before_id")
+    around_id = args.get("around_id")
+    if before_id is not None and around_id is not None:
+        return json.dumps({"error": "before_id and around_id are mutually exclusive"})
+
+    # deliberately unfiltered by archive watermark: fresh eyes may
+    # scroll archived past (filter applies only to the prompt window)
+    if around_id is not None:
+        half = max(1, limit // 2)
+        turns = await store.turns_around(
+            familiar_id=ctx.familiar_id,
+            channel_id=channel_id,
+            turn_id=around_id,
+            before=half,
+            after=half,
+        )
+    else:
+        turns = await store.recent(
+            familiar_id=ctx.familiar_id,
+            channel_id=channel_id,
+            limit=limit,
+            before_id=before_id,
+        )
 
     result = serialize_turns(turns)
     _logger.info(
@@ -60,6 +78,7 @@ def build_read_channel_tool() -> Tool:
         name="read_channel",
         description=(
             "Read recent turns from the currently focused text channel. "
+            "Page back with before_id, or jump to a turn with around_id. "
             "Read-only; does not consume or acknowledge messages. "
             "Voice focus not supported."
         ),
@@ -76,6 +95,13 @@ def build_read_channel_tool() -> Tool:
                 "before_id": {
                     "type": "integer",
                     "description": "Return turns with id < before_id (for paging).",
+                },
+                "around_id": {
+                    "type": "integer",
+                    "description": (
+                        "Jump to this turn id; returns surrounding turns. "
+                        "Cannot combine with before_id."
+                    ),
                 },
             },
             "required": [],
