@@ -239,6 +239,79 @@ class TestFactExtractorTick:
             "your own" in system_msg.content_str.lower()
         ), system_msg.content_str
 
+    @pytest.mark.asyncio
+    async def test_extract_prompt_distinguishes_claims_and_fiction(self) -> None:
+        """Extractor's instruction must demand claim attribution + fiction handling.
+
+        One speaker's assertions about another person: stored attributed,
+        never flat. Roleplay events: recorded as bits, never real events.
+        Guards the recontamination path — extractor processes every turn
+        regardless of whether the assistant engaged.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        text = system_msg.content_str.lower()
+        assert "claim" in text, system_msg.content_str
+        assert "fiction" in text, system_msg.content_str
+        assert "running joke" in text, system_msg.content_str
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_guards_identity_impersonation(self) -> None:
+        """Prompt must forbid minting identity facts from impersonation bits.
+
+        A member play-acting as another person ("No I am Cor") must not
+        become an identity fact or merge two participants — the pants↔Cor
+        dossier bleed. Identity ties to canonical_key, never an adopted name.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        text = system_msg.content_str.lower()
+        assert "impersonat" in text, system_msg.content_str
+        assert "distinct" in text, system_msg.content_str
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_guards_world_trivia(self) -> None:
+        """Generic trivia a speaker mentions isn't a fact ABOUT them.
+
+        Helios typing Pokémon lore became his only 'fact', yielding a
+        junk dossier. Trivia/game-lore must be skipped or left subjectless.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        text = system_msg.content_str.lower()
+        assert "trivia" in text, system_msg.content_str
+        assert "subjectless" in text, system_msg.content_str
+
 
 class TestFactExtractorActivityReturnSkip:
     """Activity-return turns never enter extraction (v1 provenance).
