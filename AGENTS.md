@@ -32,7 +32,7 @@ exec bits to git's modes first, so `ruff` doesn't fire spurious `EXE002`
 on machines whose mounts mark files executable). Run the steps by hand
 when you need finer control.
 
-1. Run `uv sync --dev --extra local-turn` to keep dependencies up to date (the `local-turn` extra brings in `numpy` + `huggingface_hub`, which test collection imports unconditionally)
+1. Run `uv sync --dev --extra local-turn --extra local-embed` to keep dependencies up to date (`local-turn` brings in `numpy` + `huggingface_hub`, which test collection imports unconditionally; `local-embed` keeps `fastembed` installed — the live bot runs from this repo's `.venv` and crashes at startup without it)
 2. Run `uv run ruff check` to lint
 3. Run `uv run ruff format` to format
 4. Run `uv run ty check` to type-check
