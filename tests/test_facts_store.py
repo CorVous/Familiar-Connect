@@ -509,3 +509,185 @@ class TestFactImportance:
             assert isinstance(score, float)
         # Order matches default search_facts (BM25 desc = best first).
         assert scored[0][1] <= scored[1][1]
+
+
+class TestFactDedup:
+    """Conservative near-duplicate suppression at insert.
+
+    Alias/nickname restatements ("Cor is called X", "Cor goes by X")
+    piled up — one current fact per turn batch. Guard at insert:
+    normalized-text exact-match scoped to same subject-key set +
+    same familiar skips the redundant row. No supersede, no mutate.
+    """
+
+    def test_normalized_duplicate_skips_insert(self) -> None:
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:1", display_at_write="Cor"),)
+        first = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Postbirb Prime is called Cor.",
+            source_turn_ids=[1],
+            subjects=subj,
+        )
+        # case + whitespace + surrounding-quote/punct variants normalize equal.
+        again = store.append_fact(
+            familiar_id="fam",
+            channel_id=2,
+            text='  "postbirb   prime is called cor"  ',
+            source_turn_ids=[2],
+            subjects=subj,
+        )
+        assert store.all_fact_ids(familiar_id="fam") == {first.id}
+        assert again.id == first.id
+
+    def test_differing_text_inserts(self) -> None:
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:1", display_at_write="Cor"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor likes tea.",
+            source_turn_ids=[1],
+            subjects=subj,
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor likes coffee.",
+            source_turn_ids=[2],
+            subjects=subj,
+        )
+        assert len(store.all_fact_ids(familiar_id="fam")) == 2
+
+    def test_same_text_differing_subjects_inserts(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="likes tea.",
+            source_turn_ids=[1],
+            subjects=(FactSubject(canonical_key="discord:1", display_at_write="Cor"),),
+        )
+        # same normalized text, different subject — distinct fact.
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="likes tea.",
+            source_turn_ids=[2],
+            subjects=(FactSubject(canonical_key="discord:2", display_at_write="Aria"),),
+        )
+        assert len(store.all_fact_ids(familiar_id="fam")) == 2
+
+    def test_null_subject_not_dup_of_keyed_subject(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="likes tea.",
+            source_turn_ids=[1],
+            subjects=(FactSubject(canonical_key="discord:1", display_at_write="Cor"),),
+        )
+        # subjectless fact with same text is NOT a dup of the keyed one.
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="likes tea.",
+            source_turn_ids=[2],
+        )
+        assert len(store.all_fact_ids(familiar_id="fam")) == 2
+
+    def test_dup_scoped_to_familiar(self) -> None:
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:1", display_at_write="Cor"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor likes tea.",
+            source_turn_ids=[1],
+            subjects=subj,
+        )
+        store.append_fact(
+            familiar_id="other",
+            channel_id=1,
+            text="Cor likes tea.",
+            source_turn_ids=[2],
+            subjects=subj,
+        )
+        assert len(store.all_fact_ids(familiar_id="fam")) == 1
+        assert len(store.all_fact_ids(familiar_id="other")) == 1
+
+    def test_superseded_match_does_not_block_insert(self) -> None:
+        """Only CURRENT facts dedup — a superseded twin must not block."""
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:1", display_at_write="Cor"),)
+        old = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor likes tea.",
+            source_turn_ids=[1],
+            subjects=subj,
+        )
+        replacement = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor prefers coffee.",
+            source_turn_ids=[2],
+            subjects=subj,
+        )
+        store.supersede_fact(familiar_id="fam", old_id=old.id, new_id=replacement.id)
+        # re-stating the retired fact inserts a fresh current row.
+        again = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor likes tea.",
+            source_turn_ids=[3],
+            subjects=subj,
+        )
+        assert again.id not in {old.id, replacement.id}
+
+    def test_valid_to_bypasses_dedup(self) -> None:
+        """A fact carrying ``valid_to`` may close/bound an existing one.
+
+        Such inserts must never be swallowed as dups.
+        """
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:1", display_at_write="Cor"),)
+        first = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor lives in Berlin.",
+            source_turn_ids=[1],
+            subjects=subj,
+        )
+        bounding = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Cor lives in Berlin.",
+            source_turn_ids=[2],
+            subjects=subj,
+            valid_to=datetime(2025, 6, 1, tzinfo=UTC),
+        )
+        assert bounding.id != first.id
+        assert len(store.all_fact_ids(familiar_id="fam")) == 2
+
+    def test_quote_wrapped_variant_dedups(self) -> None:
+        """Internal quotes normalize away so ``called 'Cor'`` == ``called Cor``."""
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:1", display_at_write="Cor"),)
+        first = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Postbirb Prime is called Cor.",
+            source_turn_ids=[1],
+            subjects=subj,
+        )
+        again = store.append_fact(
+            familiar_id="fam",
+            channel_id=2,
+            text="Postbirb Prime is called 'Cor'.",
+            source_turn_ids=[2],
+            subjects=subj,
+        )
+        assert again.id == first.id
+        assert store.all_fact_ids(familiar_id="fam") == {first.id}

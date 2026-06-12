@@ -474,6 +474,30 @@ _TURN_COLS = (
 )
 
 
+def _normalize_fact_text(text: str) -> str:
+    """Deterministic key for near-duplicate fact detection.
+
+    Lowercase, collapse whitespace, remove quote chars everywhere,
+    strip surrounding punctuation. Exact-match-after-normalization
+    only — no semantic similarity (kills the "called 'Cor'"
+    restatement class without risking false-positive suppression of
+    genuinely distinct facts). Internal non-quote punct kept (stripping
+    it risks false positives).
+    """
+    collapsed = " ".join(text.lower().split())
+    dequoted = collapsed.replace("'", "").replace('"', "")
+    return dequoted.strip(".,!?;:()[]{} \t\n")
+
+
+def _subject_key_set(subjects: Iterable[FactSubject]) -> frozenset[str]:
+    """Canonical-key set identifying a fact's subjects.
+
+    Dups scoped per subject set: a NULL-subject fact and a keyed one
+    with same text are NOT dups.
+    """
+    return frozenset(s.canonical_key for s in subjects)
+
+
 def _facts_validity_where(
     *,
     include_superseded: bool,
@@ -1918,6 +1942,19 @@ class HistoryStore:
             if subjects_tuple
             else None
         )
+        # near-duplicate suppression: skip insert when a CURRENT fact
+        # for the same familiar + same subject-key set has matching
+        # normalized text (kills alias/nickname restatement pile-up).
+        # bypass when valid_to is set — such a fact may close/bound an
+        # existing one, not restate it.
+        if valid_to is None:
+            existing = self._find_current_dup(
+                familiar_id=familiar_id,
+                norm_text=_normalize_fact_text(text),
+                subject_keys=_subject_key_set(subjects_tuple),
+            )
+            if existing is not None:
+                return existing
         ts = datetime.now(tz=UTC)
         valid_from_eff = valid_from if valid_from is not None else ts
         importance_eff: int | None
@@ -1959,6 +1996,33 @@ class HistoryStore:
             valid_to=valid_to,
             importance=importance_eff,
         )
+
+    def _find_current_dup(
+        self,
+        *,
+        familiar_id: str,
+        norm_text: str,
+        subject_keys: frozenset[str],
+    ) -> Fact | None:
+        """Existing current fact matching normalized text + subject set.
+
+        Scans current (non-superseded, non-expired) facts for the
+        familiar. Comparison is exact-match after normalization;
+        subject scoping is set-equality on canonical keys.
+        """
+        where, params = _facts_validity_where(include_superseded=False, as_of=None)
+        rows = self._conn.execute(
+            f"SELECT * FROM facts WHERE familiar_id = ? {where}",  # noqa: S608
+            (familiar_id, *params),
+        ).fetchall()
+        for row in rows:
+            fact = _row_to_fact(row)
+            if (
+                _normalize_fact_text(fact.text) == norm_text
+                and _subject_key_set(fact.subjects) == subject_keys
+            ):
+                return fact
+        return None
 
     def recent_facts(
         self,

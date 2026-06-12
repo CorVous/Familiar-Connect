@@ -53,6 +53,18 @@ Every writer is watermark-driven and idempotent; deleting a
 side-index table rebuilds it from `turns`. See
 [Context pipeline](context-pipeline.md) for watermark semantics.
 
+`append_fact` suppresses near-duplicates at insert: when a new fact's
+normalized text (lowercased, whitespace-collapsed, surrounding
+quotes/punctuation stripped) matches an existing **current**
+(non-superseded, non-expired) fact for the same `familiar_id` **and**
+the same subject-key set, the insert is skipped and the existing fact
+returned — no new row, no supersede. This kills alias/nickname
+restatement pile-up ("Cor is called Cor", once per turn batch) that
+bloated dossiers and RAG. Comparison is deterministic exact-match
+after normalization; semantic/embedding-based dedup is a deliberate
+non-goal here (would risk false-positive suppression of genuinely
+distinct facts) — a possible follow-up via `fact_embeddings`.
+
 Tantivy commits on Windows occasionally race with antivirus
 segment-scans (`PermissionDenied` on a fresh `.term` file).
 `FtsIndex._commit` retries those transient locks with short backoff;
