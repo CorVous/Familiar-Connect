@@ -138,7 +138,12 @@ exists).
     never merge two people; world trivia a speaker mentions isn't a
     fact about them. Guards against memory
     poisoning via in-character narration — extractor sees every
-    turn whether or not the familiar engaged.
+    turn whether or not the familiar engaged. Activity-return turns
+    are skipped wholesale, keyed on the turns `mode` column
+    (`"activity_return"`); the `[returned from <label>]` prefix
+    stays as a display marker only. Experience text is self-generated
+    fiction, and the activity is already recorded as a mechanical
+    event-fact — see [Activities](activities.md#memory).
 
 ### 3. Retrieval ranking (`RagContextLayer`)
 
