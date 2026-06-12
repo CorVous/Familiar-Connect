@@ -1,6 +1,8 @@
 ## First Step
 
-Update uv before anything else: `uv self update`
+Update uv before anything else: `uv self update`. If that fails
+(pip-installed uv, GitHub API rate limit from cloud/sandbox egress IPs),
+upgrade from PyPI instead: `python3 -m pip install --user --upgrade uv`
 
 ## Key Documents
 

@@ -96,6 +96,42 @@ async def test_waker_republishes_as_discord_text_for_text_alarms() -> None:
 
 
 @pytest.mark.asyncio
+async def test_waker_payload_carries_alarm_marker() -> None:
+    """Marker ``alarm: True`` lets the activity gate pierce absences."""
+    bus = InProcessEventBus()
+    await bus.start()
+    waker = AlarmWaker(familiar_id=_FAMILIAR)
+
+    received: list[Event] = []
+
+    async def _consume_alarm() -> None:
+        sub = bus.subscribe((TOPIC_ALARM_FIRED,), policy=BackpressurePolicy.UNBOUNDED)
+        async for event in sub:
+            await waker.handle(event, bus)
+
+    async def _consume_text() -> None:
+        sub = bus.subscribe((TOPIC_DISCORD_TEXT,), policy=BackpressurePolicy.UNBOUNDED)
+        async for event in sub:
+            received.append(event)  # noqa: PERF401 — extend would block here
+
+    consumer_alarm = asyncio.create_task(_consume_alarm())
+    consumer_text = asyncio.create_task(_consume_text())
+    try:
+        await asyncio.sleep(0)
+        await _publish_alarm_event(
+            bus, channel_id=42, channel_kind="text", reason="ping"
+        )
+        await asyncio.sleep(0.05)
+    finally:
+        consumer_alarm.cancel()
+        consumer_text.cancel()
+        await bus.shutdown()
+
+    assert len(received) == 1
+    assert received[0].payload["alarm"] is True
+
+
+@pytest.mark.asyncio
 async def test_waker_ignores_other_familiars() -> None:
     bus = InProcessEventBus()
     await bus.start()

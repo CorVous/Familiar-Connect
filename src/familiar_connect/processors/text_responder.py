@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
+from familiar_connect.activities.engine import GateAction
 from familiar_connect.bus.envelope import Event
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.context.assembler import AssemblyContext
@@ -150,6 +151,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
+    from familiar_connect.activities.engine import ActivityEngine
     from familiar_connect.bus.envelope import TurnScope
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.bus.router import TurnRouter
@@ -196,6 +198,7 @@ class TextResponder:
         display_tz: str = "UTC",
         focus_manager: FocusManager | None = None,
         loop_max_iterations: int = 5,
+        activity_engine: ActivityEngine | None = None,
     ) -> None:
         self._assembler = assembler
         self._llm = llm_client
@@ -223,6 +226,8 @@ class TextResponder:
         self._loop_max_iterations = loop_max_iterations
         # Attentional focus controller; None = backward-compat (no focus gating)
         self._focus_manager = focus_manager
+        # Absence controller; None = no activity gating (zero behavior change)
+        self._activity_engine = activity_engine
         # In-process dedup; bus doesn't republish today, cheap insurance
         self._seen: set[str] = set()
 
@@ -263,6 +268,10 @@ class TextResponder:
         images: dict[str, str] = raw_images if isinstance(raw_images, dict) else {}
 
         self._seen.add(event.event_id)
+        # Quiet-clock for idle activity nudges — every handled event
+        # counts as traffic, even staged/suppressed ones
+        if self._activity_engine is not None:
+            self._activity_engine.note_traffic()
         # Honor any active pingpong-backoff (another bot has been
         # typing in this channel) before claiming lane. then reset
         # ladder so future bot-typing events start at initial step
@@ -293,6 +302,19 @@ class TextResponder:
                     nick=m.guild_nick,
                 )
 
+        # Activity gate — engine optional (None ⇒ zero behavior change).
+        # SUPPRESS: she's away from the screen — record the user turn
+        # staged and stop (no typing, no LLM, no reply). JUDGMENT:
+        # normal reply flow plus engine state line injected for this
+        # turn only.
+        gate = (
+            self._activity_engine.gate(payload)
+            if self._activity_engine is not None
+            else None
+        )
+        suppressed = gate is not None and gate.action is GateAction.SUPPRESS
+        judgment = gate is not None and gate.action is GateAction.JUDGMENT
+
         # Focus-aware staging: when a focus_manager is wired and
         # channel is not focused, persist as staged turn and return —
         # no LLM call, no reply. unread digest surfaces it next turn.
@@ -313,13 +335,29 @@ class TextResponder:
                 guild_id=guild_id,
                 platform_message_id=message_id,
                 reply_to_message_id=reply_to_message_id,
-                consumed=focused,  # Staged when not focused
+                consumed=focused and not suppressed,  # Staged when unfocused/absent
             )
             if mentions:
                 await self._history.record_mentions(
                     turn_id=user_turn.id,
                     canonical_keys=[m.canonical_key for m in mentions],
                 )
+            if suppressed:
+                # live missed-ping capture: covers cross-channel pings
+                # and reply-pings the at-return content scan can't see
+                if (
+                    self._activity_engine is not None
+                    and payload.get("pings_bot") is True
+                ):
+                    self._activity_engine.note_missed_ping(user_turn.id)
+                author_label = author.display_name if author else "unknown"
+                _logger.info(
+                    f"{ls.tag('Activity', ls.G)} suppressed "
+                    f"{ls.kv('ch', str(channel_id), vc=ls.LW)} "
+                    f"{ls.kv('from', author_label, vc=ls.LW)} "
+                    f"{ls.kv('text', ls.trunc(content, 200), vc=ls.LW)}"
+                )
+                return
             if not focused:
                 author_label = author.display_name if author else "unknown"
                 _logger.info(
@@ -336,6 +374,9 @@ class TextResponder:
                 ):
                     await self._emit_idle_nudge(bus)
                 return
+        elif suppressed:
+            # wake event while absent — carries no user content, drop
+            return
 
         # Seed retrieval before assembly so RagContextLayer sees the cue
         self._assembler.set_rag_cue(content)
@@ -357,8 +398,15 @@ class TextResponder:
             channel_id=channel_id,
             guild_id=guild_id,
             images=images,
+            activity_state_line=(
+                gate.state_line if gate is not None and judgment else None
+            ),
         )
         if reply is None or scope.is_cancelled():
+            # silent slip-away: deferred start (if any) still applies —
+            # a stale staged start must never leak into a later turn
+            if self._activity_engine is not None:
+                await self._activity_engine.end_turn()
             return
         # Discord rejects empty / whitespace-only messages (HTTP 400,
         # error code 50006). empty reply usually means LLM stream
@@ -370,6 +418,8 @@ class TextResponder:
                 f"{ls.kv('skip', 'empty_reply', vc=ls.LY)} "
                 f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
             )
+            if self._activity_engine is not None:
+                await self._activity_engine.end_turn()
             return
 
         # Threading opt-in via LLM-emitted marker. strip marker and
@@ -411,6 +461,8 @@ class TextResponder:
             _logger.warning(
                 f"{ls.tag('Text', ls.R)} {ls.kv('send_error', repr(exc), vc=ls.R)}"
             )
+            if self._activity_engine is not None:
+                await self._activity_engine.end_turn()
             return
         _logger.info(
             f"{ls.tag('💬 Text', ls.G)} "
@@ -439,6 +491,12 @@ class TextResponder:
         self._router.end_turn(scope)
         if self._focus_manager is not None:
             await self._focus_manager.end_turn()
+        if self._activity_engine is not None:
+            if judgment:
+                # real reply on a judgment turn ⇒ came back early
+                await self._activity_engine.notify_reply_sent()
+            # applies any tool-deferred activity start
+            await self._activity_engine.end_turn()
 
     async def _emit_idle_nudge(self, bus: EventBus) -> None:
         """Publish a synthetic wake event for the focused text channel.
@@ -524,6 +582,7 @@ class TextResponder:
         channel_id: int,
         guild_id: int | None = None,
         images: dict[str, str] | None = None,
+        activity_state_line: str | None = None,
     ) -> str | None:
         ctx = AssemblyContext(
             familiar_id=self._familiar_id,
@@ -572,6 +631,10 @@ class TextResponder:
             unread_digest=unread_digest,
             channel_names=ch_names,
         )
+        if activity_state_line:
+            # judgment-turn state line — this turn only, deepest slot
+            # (trailing system message wins on recency-biased models)
+            trailing = f"{trailing}\n\n{activity_state_line}"
         messages.append(Message(role="system", content=trailing))
 
         tool_mode = (

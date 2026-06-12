@@ -99,6 +99,69 @@ class TestRecentHistoryLayerCrossChannel:
         assert "staged message" not in all_content
 
 
+class TestRecentHistoryLayerArchiveWatermark:
+    """Window resets at the per-channel archive watermark (activities).
+
+    Watermark hides ids at/below it for its own channel only —
+    ``read_channel`` and other store callers stay unfiltered.
+    """
+
+    @staticmethod
+    def _turn(store: HistoryStore, *, channel_id: int, content: str):  # noqa: ANN205
+        alice = Author(
+            platform="discord", user_id="1", username="alice", display_name="Alice"
+        )
+        return store.append_turn(
+            familiar_id="fam",
+            channel_id=channel_id,
+            role="user",
+            content=content,
+            author=alice,
+            consumed=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_watermark_includes_all_turns(self) -> None:
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="before departure")
+        self._turn(store, channel_id=1, content="after return")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        all_content = " ".join(m.content_str for m in msgs)
+        assert "before departure" in all_content
+        assert "after return" in all_content
+
+    @pytest.mark.asyncio
+    async def test_watermark_hides_pre_archive_turns(self) -> None:
+        store = HistoryStore(":memory:")
+        departure = self._turn(store, channel_id=1, content="before departure")
+        store.set_archive_watermark(
+            familiar_id="fam", channel_id=1, turn_id=departure.id
+        )
+        self._turn(store, channel_id=1, content="after return")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        all_content = " ".join(m.content_str for m in msgs)
+        # watermark sits at the departure turn id: it and earlier hidden
+        assert "before departure" not in all_content
+        assert "after return" in all_content
+
+    @pytest.mark.asyncio
+    async def test_watermark_does_not_leak_across_channels(self) -> None:
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=2, content="other channel chatter")
+        departure = self._turn(store, channel_id=1, content="before departure")
+        store.set_archive_watermark(
+            familiar_id="fam", channel_id=1, turn_id=departure.id
+        )
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        all_content = " ".join(m.content_str for m in msgs)
+        # channel 2's older turn survives channel 1's watermark
+        assert "other channel chatter" in all_content
+        assert "before departure" not in all_content
+
+
 class TestTurnRenderingChannelTag:
     """Turn rendering must include #channel_id in prefix."""
 

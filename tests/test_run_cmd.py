@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import pathlib
 import signal
 import sys
 from typing import TYPE_CHECKING
@@ -11,10 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from familiar_connect.activities.engine import ActivityEngine
 from familiar_connect.budget import TierBudget
 from familiar_connect.cli import create_parser
 from familiar_connect.commands.run import (
     _async_main,
+    _build_activity_engine,
     _default_assembler,
     _GracefulShutdown,
     _install_shutdown_handlers,
@@ -628,7 +631,9 @@ def _fake_familiar_for_async_main() -> MagicMock:
     fam.llm_clients = {"fast": llm, "prose": llm, "background": llm}
     fam.history_store = MagicMock()
     fam.config = MagicMock(voice_window_size=10, text_window_size=10)
-    fam.root = MagicMock()
+    # real-but-missing path: activities.toml absent ⇒ engine disabled,
+    # so _async_main runs the engine-None branch (zero behavior change)
+    fam.root = pathlib.Path("data") / "familiars" / "_nonexistent-test"
     return fam
 
 
@@ -1006,3 +1011,59 @@ class TestDefaultAssemblerLayerOrder:
         recent = order.index(RecentHistoryLayer.__name__)
         assert rag == recent - 1
         assert recent == len(order) - 1
+
+
+# ---------------------------------------------------------------------------
+# activities wiring
+# ---------------------------------------------------------------------------
+
+_ACTIVITIES_TOML = """\
+[[catalog]]
+id = "walk"
+label = "creek walk"
+duration_minutes = [20, 40]
+seed = "A walk along the creek."
+"""
+
+
+def _activity_familiar(tmp_path: Path, *, with_catalog: bool) -> MagicMock:
+    root = tmp_path / "aria"
+    root.mkdir()
+    if with_catalog:
+        (root / "activities.toml").write_text(_ACTIVITIES_TOML)
+    fam = MagicMock(name="familiar")
+    fam.id = "aria"
+    fam.root = root
+    fam.bot_user_id = None
+    fam.config.display_tz = "UTC"
+    return fam
+
+
+class TestBuildActivityEngine:
+    """activities.toml drives engine construction — disabled ⇒ None."""
+
+    def test_missing_sidecar_disables_engine(self, tmp_path: Path) -> None:
+        fam = _activity_familiar(tmp_path, with_catalog=False)
+        engine = _build_activity_engine(
+            fam, focus_manager=MagicMock(), handle=MagicMock(voice_runtime={})
+        )
+        assert engine is None
+
+    def test_catalog_enables_engine(self, tmp_path: Path) -> None:
+        fam = _activity_familiar(tmp_path, with_catalog=True)
+        engine = _build_activity_engine(
+            fam, focus_manager=MagicMock(), handle=MagicMock(voice_runtime={})
+        )
+        assert isinstance(engine, ActivityEngine)
+
+    def test_voice_active_fn_tracks_runtime_map(self, tmp_path: Path) -> None:
+        fam = _activity_familiar(tmp_path, with_catalog=True)
+        handle = MagicMock(voice_runtime={})
+        engine = _build_activity_engine(fam, focus_manager=MagicMock(), handle=handle)
+        assert engine is not None
+        assert engine.defer_start("walk").get("ack") == "ok"
+        # second engine sees the live runtime entry → start refused
+        handle.voice_runtime[1] = MagicMock(name="voice_runtime")
+        other = _build_activity_engine(fam, focus_manager=MagicMock(), handle=handle)
+        assert other is not None
+        assert "voice" in other.defer_start("walk")["error"]

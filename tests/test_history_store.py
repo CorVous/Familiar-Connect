@@ -17,10 +17,14 @@ Covers familiar_connect.history.store.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import pytest
+
+from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import (
+    ActivityRecord,
     HistoryStore,
     HistoryTurn,
     SummaryEntry,
@@ -32,8 +36,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
     from typing import Any
-
-    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -1011,3 +1013,586 @@ class TestMemoryWriterWatermark:
         since = s.turns_since_watermark(familiar_id=_FAMILIAR)
         assert len(since) == 6
         assert since[0].id == turns[0].id
+
+
+# ---------------------------------------------------------------------------
+# recent — before_id paging
+# ---------------------------------------------------------------------------
+
+
+class TestRecentBeforeId:
+    def test_filters_ids_at_or_above(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 5)
+        got = s.recent(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            limit=10,
+            before_id=turns[3].id,
+        )
+        assert [t.content for t in got] == ["turn 0", "turn 1", "turn 2"]
+
+    def test_combines_with_limit(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 5)
+        got = s.recent(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            limit=2,
+            before_id=turns[4].id,
+        )
+        assert [t.content for t in got] == ["turn 2", "turn 3"]
+
+    def test_none_returns_all(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        _seed(s, 3)
+        got = s.recent(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            limit=10,
+            before_id=None,
+        )
+        assert len(got) == 3
+
+    def test_combines_with_mode(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="rp early",
+            mode="full_rp",
+        )
+        cut = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="voice",
+            mode="imitate_voice",
+        )
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="rp late",
+            mode="full_rp",
+        )
+        got = s.recent(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            limit=10,
+            mode="full_rp",
+            before_id=cut.id,
+        )
+        assert [t.content for t in got] == ["rp early"]
+
+
+# ---------------------------------------------------------------------------
+# recent_cross_channel — respect_archive (archive watermark)
+# ---------------------------------------------------------------------------
+
+
+class TestRecentCrossChannelRespectArchive:
+    """Archive filter rides the cross-channel window query.
+
+    Semantics: latest N consumed turns, minus archived ones — the
+    window shrinks, never backfills past the watermark.
+    """
+
+    @staticmethod
+    def _turn(s: HistoryStore, *, channel_id: int, content: str) -> HistoryTurn:
+        return s.append_turn(
+            channel_id=channel_id,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content=content,
+            author=_ALICE,
+        )
+
+    def test_no_watermark_row_no_filter(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        _seed(s, 3)
+        got = s.recent_cross_channel(
+            familiar_id=_FAMILIAR,
+            limit=10,
+            respect_archive=True,
+        )
+        assert len(got) == 3
+
+    def test_hides_turns_at_or_below_watermark(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 5)
+        s.set_archive_watermark(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=turns[2].id,
+        )
+        got = s.recent_cross_channel(
+            familiar_id=_FAMILIAR,
+            limit=10,
+            respect_archive=True,
+        )
+        assert [t.content for t in got] == ["turn 3", "turn 4"]
+
+    def test_default_ignores_watermark(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 5)
+        s.set_archive_watermark(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=turns[4].id,
+        )
+        got = s.recent_cross_channel(familiar_id=_FAMILIAR, limit=10)
+        assert len(got) == 5
+
+    def test_watermark_scoped_per_channel(self, tmp_path: Path) -> None:
+        """Watermark on channel A hides only A's pre-watermark turns."""
+        s = _store(tmp_path)
+        chan_a, chan_b = 100, 101
+        a1 = self._turn(s, channel_id=chan_a, content="a before")
+        self._turn(s, channel_id=chan_b, content="b before")
+        s.set_archive_watermark(familiar_id=_FAMILIAR, channel_id=chan_a, turn_id=a1.id)
+        self._turn(s, channel_id=chan_a, content="a after")
+        self._turn(s, channel_id=chan_b, content="b after")
+        got = s.recent_cross_channel(
+            familiar_id=_FAMILIAR,
+            limit=10,
+            respect_archive=True,
+        )
+        assert [t.content for t in got] == ["b before", "a after", "b after"]
+
+    def test_window_shrinks_instead_of_backfilling(self, tmp_path: Path) -> None:
+        """Latest N minus archived — never latest N unarchived."""
+        s = _store(tmp_path)
+        turns = _seed(s, 6)
+        s.set_archive_watermark(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=turns[3].id,
+        )
+        # latest 4 = turns 2..5; 2 and 3 archived ⇒ 2 survivors, no
+        # backfill from turns 0..1
+        got = s.recent_cross_channel(
+            familiar_id=_FAMILIAR,
+            limit=4,
+            respect_archive=True,
+        )
+        assert [t.content for t in got] == ["turn 4", "turn 5"]
+
+
+# ---------------------------------------------------------------------------
+# promote_staged_turns_since — return-from-absence promotion
+# ---------------------------------------------------------------------------
+
+
+class TestPromoteStagedTurnsSince:
+    """Cross-channel promotion scoped above the departure turn id.
+
+    Pre-absence staged turns (id <= after_turn_id) keep their
+    attentional semantics; everything staged during the absence is
+    consumed at return.
+    """
+
+    @staticmethod
+    def _stage(s: HistoryStore, *, channel_id: int, content: str) -> HistoryTurn:
+        return s.stage_turn(
+            channel_id=channel_id,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content=content,
+            author=_ALICE,
+        )
+
+    def test_promotes_staged_turns_across_channels(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        departure = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="before",
+        )
+        self._stage(s, channel_id=100, content="a during")
+        self._stage(s, channel_id=101, content="b during")
+        n = s.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=departure.id
+        )
+        assert n == 2
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 0
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
+
+    def test_leaves_staged_at_or_below_id_untouched(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        pre_absence = self._stage(s, channel_id=100, content="never attended")
+        during = self._stage(s, channel_id=101, content="during")
+        n = s.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=pre_absence.id
+        )
+        assert n == 1
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 1
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
+        # boundary: turn at exactly after_turn_id stays staged
+        n2 = s.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=during.id
+        )
+        assert n2 == 0
+
+    def test_leaves_consumed_turns_untouched(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        consumed = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="already consumed",
+        )
+        before = s._conn.execute(
+            "SELECT consumed_at FROM turns WHERE id = ?",
+            (consumed.id,),
+        ).fetchone()["consumed_at"]
+        n = s.promote_staged_turns_since(familiar_id=_FAMILIAR, after_turn_id=0)
+        assert n == 0
+        after = s._conn.execute(
+            "SELECT consumed_at FROM turns WHERE id = ?",
+            (consumed.id,),
+        ).fetchone()["consumed_at"]
+        assert after == before
+
+    def test_promoted_turns_appear_in_recent_cross_channel(
+        self, tmp_path: Path
+    ) -> None:
+        s = _store(tmp_path)
+        departure = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="departure",
+        )
+        self._stage(s, channel_id=101, content="chatter during absence")
+        got = s.recent_cross_channel(familiar_id=_FAMILIAR, limit=10)
+        assert [t.content for t in got] == ["departure"]
+        s.promote_staged_turns_since(familiar_id=_FAMILIAR, after_turn_id=departure.id)
+        got = s.recent_cross_channel(familiar_id=_FAMILIAR, limit=10)
+        assert [t.content for t in got] == ["departure", "chatter during absence"]
+
+
+# ---------------------------------------------------------------------------
+# turns_around
+# ---------------------------------------------------------------------------
+
+
+class TestTurnsAround:
+    def test_window_centred_on_anchor(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 11)
+        got = s.turns_around(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=turns[5].id,
+            before=2,
+            after=2,
+        )
+        assert [t.content for t in got] == [
+            "turn 3",
+            "turn 4",
+            "turn 5",
+            "turn 6",
+            "turn 7",
+        ]
+
+    def test_clips_at_history_edges(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 3)
+        got = s.turns_around(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=turns[0].id,
+            before=5,
+            after=5,
+        )
+        assert [t.content for t in got] == ["turn 0", "turn 1", "turn 2"]
+
+    def test_defaults_five_each_side(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 20)
+        got = s.turns_around(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=turns[10].id,
+        )
+        assert [t.id for t in got] == [t.id for t in turns[5:16]]
+
+    def test_partitioned_per_channel(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        anchor = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="here",
+        )
+        s.append_turn(
+            channel_id=999,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="elsewhere",
+        )
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="here too",
+        )
+        got = s.turns_around(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=anchor.id,
+        )
+        assert [t.content for t in got] == ["here", "here too"]
+
+
+# ---------------------------------------------------------------------------
+# channel_archive_watermark
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveWatermark:
+    def test_get_none_when_unset(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert (
+            s.get_archive_watermark(familiar_id=_FAMILIAR, channel_id=_CHANNEL) is None
+        )
+
+    def test_set_then_get_round_trip(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.set_archive_watermark(familiar_id=_FAMILIAR, channel_id=_CHANNEL, turn_id=42)
+        assert s.get_archive_watermark(familiar_id=_FAMILIAR, channel_id=_CHANNEL) == 42
+
+    def test_upsert_overwrites(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.set_archive_watermark(familiar_id=_FAMILIAR, channel_id=_CHANNEL, turn_id=10)
+        s.set_archive_watermark(familiar_id=_FAMILIAR, channel_id=_CHANNEL, turn_id=50)
+        assert s.get_archive_watermark(familiar_id=_FAMILIAR, channel_id=_CHANNEL) == 50
+
+    def test_scoped_per_channel(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.set_archive_watermark(familiar_id=_FAMILIAR, channel_id=100, turn_id=7)
+        assert s.get_archive_watermark(familiar_id=_FAMILIAR, channel_id=200) is None
+
+    def test_scoped_per_familiar(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.set_archive_watermark(familiar_id="aria", channel_id=_CHANNEL, turn_id=7)
+        assert s.get_archive_watermark(familiar_id="bob", channel_id=_CHANNEL) is None
+
+
+# ---------------------------------------------------------------------------
+# activities — append-only log; active row = actual_return_at IS NULL
+# ---------------------------------------------------------------------------
+
+
+_T0 = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+_T1 = _T0 + timedelta(minutes=30)
+
+
+def _create(s: HistoryStore, *, familiar_id: str = _FAMILIAR) -> int:
+    return s.create_activity(
+        familiar_id=familiar_id,
+        type_id="walk",
+        label="on a walk",
+        started_at=_T0,
+        planned_return_at=_T1,
+        note="creek",
+    )
+
+
+class TestActivities:
+    def test_create_returns_positive_id(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert _create(s) > 0
+
+    def test_active_none_when_empty(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert s.active_activity(familiar_id=_FAMILIAR) is None
+
+    def test_create_then_active_round_trip(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        activity_id = _create(s)
+        rec = s.active_activity(familiar_id=_FAMILIAR)
+        assert isinstance(rec, ActivityRecord)
+        assert rec.id == activity_id
+        assert rec.familiar_id == _FAMILIAR
+        assert rec.type_id == "walk"
+        assert rec.label == "on a walk"
+        assert rec.started_at == _T0
+        assert rec.planned_return_at == _T1
+        assert rec.note == "creek"
+        assert rec.status is None
+        assert rec.actual_return_at is None
+        assert rec.experience_text is None
+
+    def test_note_optional(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="walk",
+            label="on a walk",
+            started_at=_T0,
+            planned_return_at=_T1,
+            note=None,
+        )
+        rec = s.active_activity(familiar_id=_FAMILIAR)
+        assert rec is not None
+        assert rec.note is None
+
+    def test_finish_clears_active(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        activity_id = _create(s)
+        s.finish_activity(
+            activity_id=activity_id,
+            status="completed",
+            actual_return_at=_T1,
+            experience_text="saw a heron",
+        )
+        assert s.active_activity(familiar_id=_FAMILIAR) is None
+
+    def test_finish_persists_fields(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        activity_id = _create(s)
+        s.finish_activity(
+            activity_id=activity_id,
+            status="cut_short",
+            actual_return_at=_T1,
+            experience_text="got pinged",
+        )
+        row = s._conn.execute(
+            "SELECT status, actual_return_at, experience_text"
+            " FROM activities WHERE id = ?",
+            (activity_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "cut_short"
+        assert row["actual_return_at"] == _T1.isoformat()
+        assert row["experience_text"] == "got pinged"
+
+    def test_finish_rejects_bad_status(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        activity_id = _create(s)
+        with pytest.raises(ValueError, match="status"):
+            s.finish_activity(
+                activity_id=activity_id,
+                status="abandoned",
+                actual_return_at=_T1,
+                experience_text=None,
+            )
+
+    def test_append_only_history_kept(self, tmp_path: Path) -> None:
+        """Finished rows stay; new activity becomes the active one."""
+        s = _store(tmp_path)
+        first = _create(s)
+        s.finish_activity(
+            activity_id=first,
+            status="completed",
+            actual_return_at=_T1,
+            experience_text=None,
+        )
+        second = _create(s)
+        rec = s.active_activity(familiar_id=_FAMILIAR)
+        assert rec is not None
+        assert rec.id == second
+        row = s._conn.execute(
+            "SELECT COUNT(*) AS n FROM activities WHERE familiar_id = ?",
+            (_FAMILIAR,),
+        ).fetchone()
+        assert int(row["n"]) == 2
+
+    def test_active_isolated_per_familiar(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        _create(s, familiar_id="aria")
+        assert s.active_activity(familiar_id="bob") is None
+
+
+# ---------------------------------------------------------------------------
+# AsyncHistoryStore passthrough for new methods
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncStoreActivityWrappers:
+    @pytest.mark.asyncio
+    async def test_activity_round_trip_async(self) -> None:
+        store = AsyncHistoryStore(HistoryStore(":memory:"))
+        activity_id = await store.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="walk",
+            label="on a walk",
+            started_at=_T0,
+            planned_return_at=_T1,
+            note=None,
+        )
+        rec = await store.active_activity(familiar_id=_FAMILIAR)
+        assert rec is not None
+        assert rec.id == activity_id
+        await store.finish_activity(
+            activity_id=activity_id,
+            status="completed",
+            actual_return_at=_T1,
+            experience_text=None,
+        )
+        assert await store.active_activity(familiar_id=_FAMILIAR) is None
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_archive_watermark_and_windows_async(self) -> None:
+        inner = HistoryStore(":memory:")
+        store = AsyncHistoryStore(inner)
+        turns = [
+            inner.append_turn(
+                channel_id=_CHANNEL,
+                familiar_id=_FAMILIAR,
+                role="user",
+                content=f"turn {i}",
+            )
+            for i in range(5)
+        ]
+        await store.set_archive_watermark(
+            familiar_id=_FAMILIAR, channel_id=_CHANNEL, turn_id=turns[1].id
+        )
+        assert (
+            await store.get_archive_watermark(
+                familiar_id=_FAMILIAR, channel_id=_CHANNEL
+            )
+            == turns[1].id
+        )
+        got = await store.recent_cross_channel(
+            familiar_id=_FAMILIAR,
+            limit=10,
+            respect_archive=True,
+        )
+        assert [t.content for t in got] == ["turn 2", "turn 3", "turn 4"]
+        window = await store.turns_around(
+            familiar_id=_FAMILIAR,
+            channel_id=_CHANNEL,
+            turn_id=turns[2].id,
+            before=1,
+            after=1,
+        )
+        assert [t.content for t in window] == ["turn 1", "turn 2", "turn 3"]
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_promote_staged_turns_since_async(self) -> None:
+        inner = HistoryStore(":memory:")
+        store = AsyncHistoryStore(inner)
+        departure = inner.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="departure",
+        )
+        inner.stage_turn(
+            channel_id=_CHANNEL + 1,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="during",
+        )
+        n = await store.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=departure.id
+        )
+        assert n == 1
+        store.close()

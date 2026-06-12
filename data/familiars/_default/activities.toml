@@ -1,0 +1,39 @@
+# Activities catalog + knobs. Sidecar per familiar:
+# data/familiars/<id>/activities.toml (lorebook precedent).
+# Missing file or empty catalog => activities disabled.
+#
+# Knobs (all optional):
+#   archive_after_minutes  absence >= this sets per-channel archive
+#                          watermark at departure turn (default 45)
+#   idle_nudge_minutes     focused-channel quiet time before synthetic
+#                          idle nudge may fire (default 20)
+#   min_gap_minutes        minimum gap after a return before the next
+#                          idle nudge (default 90); gates nudges only,
+#                          never start_activity tool calls
+#   active_hours           "HH:MM-HH:MM" in display_tz; may wrap
+#                          midnight; omit => always
+#
+# Catalog entry ([[catalog]], one per activity type):
+#   id                stable identifier used by start_activity tool
+#   label             Discord presence text while out
+#   duration_minutes  [lo, hi] roll range, 0 < lo <= hi
+#   reachable         real @ping while out triggers judgment turn
+#                     (default true)
+#   content_source    "authored" (default; "adapter" reserved for
+#                     future adapter-backed types)
+#   seed              authored prompt seed for experience generation
+#
+# Ships disabled — uncomment and adapt to enable.
+
+# archive_after_minutes = 45
+# idle_nudge_minutes = 20
+# min_gap_minutes = 90
+# active_hours = "10:00-23:00"
+
+# [[catalog]]
+# id = "creek_walk"
+# label = "out for a creek walk"
+# duration_minutes = [20, 45]
+# reachable = true
+# content_source = "authored"
+# seed = "A short walk along the creek: weather, water, small wildlife, passing thoughts. Experiences are about places, things, and yourself — never invented claims about real people."

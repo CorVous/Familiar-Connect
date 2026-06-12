@@ -69,11 +69,32 @@ class HistoryTurn:
     author: Author | None
     content: str
     channel_id: int = 0
+    mode: str | None = None  # free-form tag, e.g. ACTIVITY_RETURN_MODE
     platform_message_id: str | None = None
     reply_to_message_id: str | None = None
     guild_id: int | None = None
     arrived_at: datetime | None = None  # Immutable ingest time; None on legacy rows
     consumed_at: datetime | None = None  # None = staged
+
+
+@dataclass(frozen=True)
+class ActivityRecord:
+    """One activity row (append-only log).
+
+    Active while ``actual_return_at`` is ``None``; ``status`` is
+    ``"completed"`` | ``"cut_short"`` once finished.
+    """
+
+    id: int
+    familiar_id: str
+    type_id: str
+    label: str
+    started_at: datetime
+    planned_return_at: datetime
+    note: str | None
+    status: str | None
+    actual_return_at: datetime | None
+    experience_text: str | None
 
 
 @dataclass(frozen=True)
@@ -464,14 +485,93 @@ CREATE TABLE IF NOT EXISTS unread_digest_watermark (
     updated_at     TEXT NOT NULL
 );
 
+-- Activities archive watermark. Per (familiar, channel) turn id set
+-- at the departure turn when an absence crosses the archive
+-- threshold; ``recent_cross_channel(respect_archive=True)`` hides
+-- ids at/below it.
+CREATE TABLE IF NOT EXISTS channel_archive_watermark (
+    familiar_id  TEXT    NOT NULL,
+    channel_id   INTEGER NOT NULL,
+    turn_id      INTEGER NOT NULL,
+    updated_at   TEXT    NOT NULL,
+    PRIMARY KEY (familiar_id, channel_id)
+);
+
+-- Activities (append-only, restart-safe). Active row has
+-- ``actual_return_at`` NULL; finishing stamps status
+-- ('completed' | 'cut_short'), return time, experience text.
+CREATE TABLE IF NOT EXISTS activities (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id        TEXT    NOT NULL,
+    type_id            TEXT    NOT NULL,
+    label              TEXT    NOT NULL,
+    started_at         TEXT    NOT NULL,
+    planned_return_at  TEXT    NOT NULL,
+    note               TEXT,
+    status             TEXT    CHECK(status IN ('completed','cut_short')),
+    actual_return_at   TEXT,
+    experience_text    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_activities_active
+    ON activities (familiar_id, actual_return_at, id);
+
 """
 
 _TURN_COLS = (
     "id, timestamp, role, author_platform, author_user_id, "
     "author_username, author_display_name, content, channel_id, "
-    "platform_message_id, reply_to_message_id, guild_id, "
+    "mode, platform_message_id, reply_to_message_id, guild_id, "
     "arrived_at, consumed_at"
 )
+
+
+def _normalize_fact_text(text: str) -> str:
+    """Deterministic key for near-duplicate fact detection.
+
+    Lowercase, collapse whitespace, remove quote chars everywhere,
+    strip surrounding punctuation. Exact-match-after-normalization
+    only — no semantic similarity (kills the "called 'Cor'"
+    restatement class without risking false-positive suppression of
+    genuinely distinct facts). Internal non-quote punct kept (stripping
+    it risks false positives).
+    """
+    collapsed = " ".join(text.lower().split())
+    dequoted = collapsed.replace("'", "").replace('"', "")
+    return dequoted.strip(".,!?;:()[]{} \t\n")
+
+
+def _subject_key_set(subjects: Iterable[FactSubject]) -> frozenset[str]:
+    """Canonical-key set identifying a fact's subjects.
+
+    Dups scoped per subject set: a NULL-subject fact and a keyed one
+    with same text are NOT dups.
+    """
+    return frozenset(s.canonical_key for s in subjects)
+
+
+def _canonical_keys_from_subjects_json(subjects_json: str | None) -> frozenset[str]:
+    """Canonical str keys from a fact row's ``subjects_json``.
+
+    Empty on NULL / unparseable / non-list / no valid keys. Tolerant
+    of malformed items: skips non-dict entries and non-``str`` keys.
+    """
+    if not subjects_json:
+        return frozenset()
+    try:
+        parsed = json.loads(subjects_json)
+    except (TypeError, ValueError):
+        return frozenset()
+    if not isinstance(parsed, list):
+        return frozenset()
+    keys: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("canonical_key")
+        if isinstance(key, str):
+            keys.add(key)
+    return frozenset(keys)
 
 
 def _facts_validity_where(
@@ -687,6 +787,7 @@ class HistoryStore:
             author=author,
             content=content,
             channel_id=channel_id,
+            mode=mode,
             arrived_at=arrived_at_eff,
             consumed_at=consumed_at_eff,
         )
@@ -992,37 +1093,76 @@ class HistoryStore:
         channel_id: int,
         limit: int,
         mode: str | None = None,
+        before_id: int | None = None,
     ) -> list[HistoryTurn]:
         """Most recent turns in channel, oldest-first.
 
         Per-channel partitioning prevents bleed between conversations.
         When *mode* is set, only matching legacy-tag turns returned.
+        *before_id* restricts to ``id < before_id`` (paging anchor).
+        Archive watermark not applied here — prompt-window filtering
+        lives in :meth:`recent_cross_channel`.
         """
         if limit <= 0:
             return []
+        where_extra = ""
+        params: list[object] = [familiar_id, channel_id]
         if mode is not None:
-            rows = self._conn.execute(
-                f"""
-                SELECT {_TURN_COLS}
-                  FROM turns
-                 WHERE familiar_id = ? AND channel_id = ? AND mode = ?
-                 ORDER BY id DESC
-                 LIMIT ?
-                """,  # noqa: S608
-                (familiar_id, channel_id, mode, limit),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                f"""
-                SELECT {_TURN_COLS}
-                  FROM turns
-                 WHERE familiar_id = ? AND channel_id = ?
-                 ORDER BY id DESC
-                 LIMIT ?
-                """,  # noqa: S608
-                (familiar_id, channel_id, limit),
-            ).fetchall()
+            where_extra += "AND mode = ?\n"
+            params.append(mode)
+        if before_id is not None:
+            where_extra += "AND id < ?\n"
+            params.append(before_id)
+        params.append(limit)
+        rows = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ? AND channel_id = ?
+               {where_extra}
+             ORDER BY id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            params,
+        ).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
+
+    def turns_around(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int,
+        turn_id: int,
+        before: int = 5,
+        after: int = 5,
+    ) -> list[HistoryTurn]:
+        """Window of turns centred on anchor ``turn_id``, oldest first.
+
+        Anchor included; *before* / *after* count turns each side
+        within the channel partition. Clips at history edges.
+        """
+        before_rows = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ? AND channel_id = ? AND id < ?
+             ORDER BY id DESC
+             LIMIT ?
+            """,  # noqa: S608
+            (familiar_id, channel_id, turn_id, max(before, 0)),
+        ).fetchall()
+        anchor_after_rows = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}
+              FROM turns
+             WHERE familiar_id = ? AND channel_id = ? AND id >= ?
+             ORDER BY id ASC
+             LIMIT ?
+            """,  # noqa: S608
+            (familiar_id, channel_id, turn_id, max(after, 0) + 1),
+        ).fetchall()
+        rows = [*reversed(before_rows), *anchor_after_rows]
+        return [_row_to_turn(r) for r in rows]
 
     def recent_distinct_authors(
         self,
@@ -1722,19 +1862,8 @@ class HistoryStore:
         ).fetchall()
         out: dict[str, int] = {}
         for row in rows:
-            try:
-                parsed = json.loads(row["subjects_json"])
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(parsed, list):
-                continue
             fact_id = int(row["id"])
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-                key = item.get("canonical_key")
-                if not isinstance(key, str):
-                    continue
+            for key in _canonical_keys_from_subjects_json(row["subjects_json"]):
                 # ORDER BY id ASC ⇒ later assignment wins ⇒ max id
                 out[key] = fact_id
         return out
@@ -1918,6 +2047,19 @@ class HistoryStore:
             if subjects_tuple
             else None
         )
+        # near-duplicate suppression: skip insert when a CURRENT fact
+        # for the same familiar + same subject-key set has matching
+        # normalized text (kills alias/nickname restatement pile-up).
+        # bypass when valid_to is set — such a fact may close/bound an
+        # existing one, not restate it.
+        if valid_to is None:
+            existing = self._find_current_dup(
+                familiar_id=familiar_id,
+                norm_text=_normalize_fact_text(text),
+                subject_keys=_subject_key_set(subjects_tuple),
+            )
+            if existing is not None:
+                return existing
         ts = datetime.now(tz=UTC)
         valid_from_eff = valid_from if valid_from is not None else ts
         importance_eff: int | None
@@ -1959,6 +2101,33 @@ class HistoryStore:
             valid_to=valid_to,
             importance=importance_eff,
         )
+
+    def _find_current_dup(
+        self,
+        *,
+        familiar_id: str,
+        norm_text: str,
+        subject_keys: frozenset[str],
+    ) -> Fact | None:
+        """Existing current fact matching normalized text + subject set.
+
+        Scans current (non-superseded, non-expired) facts for the
+        familiar. Comparison is exact-match after normalization;
+        subject scoping is set-equality on canonical keys.
+        """
+        where, params = _facts_validity_where(include_superseded=False, as_of=None)
+        rows = self._conn.execute(
+            f"SELECT * FROM facts WHERE familiar_id = ? {where}",  # noqa: S608
+            (familiar_id, *params),
+        ).fetchall()
+        for row in rows:
+            fact = _row_to_fact(row)
+            if (
+                _normalize_fact_text(fact.text) == norm_text
+                and _subject_key_set(fact.subjects) == subject_keys
+            ):
+                return fact
+        return None
 
     def recent_facts(
         self,
@@ -2127,7 +2296,8 @@ class HistoryStore:
         (double-write) rather than something to silently absorb.
         """
         row = self._conn.execute(
-            "SELECT superseded_at FROM facts WHERE id = ? AND familiar_id = ?",
+            "SELECT superseded_at, subjects_json FROM facts "
+            "WHERE id = ? AND familiar_id = ?",
             (old_id, familiar_id),
         ).fetchone()
         if row is None:
@@ -2145,6 +2315,18 @@ class HistoryStore:
             """,
             (ts, new_id, old_id, familiar_id),
         )
+        # Invalidate this fact's subjects' dossiers so PeopleDossierWorker
+        # rebuilds them from scratch. Worker compounds prior text + only
+        # newer facts; it never un-bakes a superseded fact. Must DELETE the
+        # row (not reset the watermark) — a surviving row re-compounds the
+        # stale/poisoned prose via the "Previous dossier" path. Absent row →
+        # prior=None → clean full rebuild. NULL subjects → no dossier to drop.
+        for key in _canonical_keys_from_subjects_json(row["subjects_json"]):
+            self._conn.execute(
+                "DELETE FROM people_dossiers "
+                "WHERE familiar_id = ? AND canonical_key = ?",
+                (familiar_id, key),
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -2613,6 +2795,30 @@ class HistoryStore:
         self._conn.commit()
         return int(cur.rowcount or 0)
 
+    def promote_staged_turns_since(
+        self,
+        *,
+        familiar_id: str,
+        after_turn_id: int,
+    ) -> int:
+        """Set consumed_at = NOW() for staged turns with id > after_turn_id.
+
+        All channels — return-from-absence promotion ("she reads the
+        screen when she gets back"). Pre-absence staged turns
+        (id <= after_turn_id) keep their attentional semantics.
+        Returns count of promoted rows.
+        """
+        now = datetime.now(tz=UTC).isoformat()
+        cur = self._conn.execute(
+            """
+            UPDATE turns SET consumed_at = ?
+             WHERE familiar_id = ? AND consumed_at IS NULL AND id > ?
+            """,
+            (now, familiar_id, after_turn_id),
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
     def count_staged(self, *, familiar_id: str, channel_id: int) -> int:
         """Count turns with consumed_at IS NULL for familiar + channel."""
         row = self._conn.execute(
@@ -2643,24 +2849,41 @@ class HistoryStore:
         *,
         familiar_id: str,
         limit: int,
+        respect_archive: bool = False,
     ) -> list[HistoryTurn]:
         """Last *limit* consumed turns across all channels, oldest-first.
 
         Fetches DESC then reverses so callers get temporal order
         without a subquery.
+
+        *respect_archive* drops turns at/below their channel's archive
+        watermark — applied *outside* the latest-*limit* window, so the
+        window shrinks rather than backfills past the watermark
+        (archive marks a break, not a paging anchor). Missing
+        watermark row ⇒ no filter for that channel.
         """
         if limit <= 0:
             return []
-        rows = self._conn.execute(
-            f"""
-            SELECT {_TURN_COLS}
+        inner = f"""
+            SELECT {_TURN_COLS}, familiar_id
               FROM turns
              WHERE familiar_id = ? AND consumed_at IS NOT NULL
              ORDER BY arrived_at DESC, id DESC
              LIMIT ?
-            """,  # noqa: S608
-            (familiar_id, limit),
-        ).fetchall()
+        """  # noqa: S608
+        if respect_archive:
+            query = f"""
+                SELECT * FROM ({inner}) AS t
+                 WHERE t.id > COALESCE(
+                           (SELECT turn_id
+                              FROM channel_archive_watermark w
+                             WHERE w.familiar_id = t.familiar_id
+                               AND w.channel_id = t.channel_id), 0)
+                 ORDER BY t.arrived_at DESC, t.id DESC
+            """  # noqa: S608
+        else:
+            query = inner
+        rows = self._conn.execute(query, (familiar_id, limit)).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
 
     # ------------------------------------------------------------------
@@ -2717,6 +2940,188 @@ class HistoryStore:
         self._conn.commit()
 
     # ------------------------------------------------------------------
+    # Channel archive watermark (activities)
+    # ------------------------------------------------------------------
+
+    def set_archive_watermark(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int,
+        turn_id: int,
+    ) -> None:
+        """Upsert archive watermark for familiar + channel.
+
+        Set at departure turn id when absence exceeds the archive
+        threshold; :meth:`recent_cross_channel` with
+        ``respect_archive=True`` hides turns at/below it.
+        """
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO channel_archive_watermark
+                (familiar_id, channel_id, turn_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (familiar_id, channel_id) DO UPDATE SET
+                turn_id    = excluded.turn_id,
+                updated_at = excluded.updated_at
+            """,
+            (familiar_id, channel_id, int(turn_id), ts),
+        )
+        self._conn.commit()
+
+    def set_archive_watermark_all(
+        self,
+        *,
+        familiar_id: str,
+        turn_id: int,
+    ) -> None:
+        """Upsert archive watermark for every channel with turns.
+
+        Absence is global — one departure point breaks every channel's
+        window (turn ids are globally monotonic).
+        """
+        ts = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO channel_archive_watermark
+                (familiar_id, channel_id, turn_id, updated_at)
+            SELECT DISTINCT familiar_id, channel_id, ?, ?
+              FROM turns
+             WHERE familiar_id = ?
+            ON CONFLICT (familiar_id, channel_id) DO UPDATE SET
+                turn_id    = excluded.turn_id,
+                updated_at = excluded.updated_at
+            """,
+            (int(turn_id), ts, familiar_id),
+        )
+        self._conn.commit()
+
+    def latest_id_at_or_before(
+        self,
+        *,
+        familiar_id: str,
+        ts: datetime,
+    ) -> int | None:
+        """Highest turn id with timestamp ≤ *ts*, across all channels.
+
+        Departure-point recovery after restart (timestamps stored
+        isoformat UTC — lexicographic compare is chronological).
+        """
+        row = self._conn.execute(
+            """
+            SELECT MAX(id) AS max_id
+              FROM turns
+             WHERE familiar_id = ? AND timestamp <= ?
+            """,
+            (familiar_id, ts.isoformat()),
+        ).fetchone()
+        if row is None or row["max_id"] is None:
+            return None
+        return int(row["max_id"])
+
+    def get_archive_watermark(
+        self,
+        *,
+        familiar_id: str,
+        channel_id: int,
+    ) -> int | None:
+        """Archive watermark turn id, or ``None`` when unset."""
+        row = self._conn.execute(
+            """
+            SELECT turn_id
+              FROM channel_archive_watermark
+             WHERE familiar_id = ? AND channel_id = ?
+            """,
+            (familiar_id, channel_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["turn_id"])
+
+    # ------------------------------------------------------------------
+    # Activities — append-only absence log
+    # ------------------------------------------------------------------
+
+    def create_activity(
+        self,
+        *,
+        familiar_id: str,
+        type_id: str,
+        label: str,
+        started_at: datetime,
+        planned_return_at: datetime,
+        note: str | None,
+    ) -> int:
+        """Insert activity row; return its id.
+
+        Row is "active" until :meth:`finish_activity` stamps
+        ``actual_return_at``.
+        """
+        cur = self._conn.execute(
+            """
+            INSERT INTO activities
+                (familiar_id, type_id, label,
+                 started_at, planned_return_at, note)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                familiar_id,
+                type_id,
+                label,
+                started_at.isoformat(),
+                planned_return_at.isoformat(),
+                note,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def finish_activity(
+        self,
+        *,
+        activity_id: int,
+        status: str,
+        actual_return_at: datetime,
+        experience_text: str | None,
+    ) -> None:
+        """Stamp return fields on one activity.
+
+        *status* must be ``"completed"`` or ``"cut_short"`` —
+        anything else raises ``ValueError``.
+        """
+        if status not in {"completed", "cut_short"}:
+            msg = f"invalid activity status: {status!r}"
+            raise ValueError(msg)
+        self._conn.execute(
+            """
+            UPDATE activities
+               SET status = ?, actual_return_at = ?, experience_text = ?
+             WHERE id = ?
+            """,
+            (status, actual_return_at.isoformat(), experience_text, activity_id),
+        )
+        self._conn.commit()
+
+    def active_activity(self, *, familiar_id: str) -> ActivityRecord | None:
+        """Newest activity with ``actual_return_at IS NULL``, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT id, familiar_id, type_id, label,
+                   started_at, planned_return_at, note,
+                   status, actual_return_at, experience_text
+              FROM activities
+             WHERE familiar_id = ? AND actual_return_at IS NULL
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_activity(row)
+
+    # ------------------------------------------------------------------
     # Unread digest watermark
     # ------------------------------------------------------------------
 
@@ -2753,6 +3158,27 @@ class HistoryStore:
             (familiar_id, watermark_at.isoformat(), ts),
         )
         self._conn.commit()
+
+
+def _row_to_activity(row: Row) -> ActivityRecord:
+    return ActivityRecord(
+        id=int(row["id"]),
+        familiar_id=str(row["familiar_id"]),
+        type_id=str(row["type_id"]),
+        label=str(row["label"]),
+        started_at=datetime.fromisoformat(row["started_at"]),
+        planned_return_at=datetime.fromisoformat(row["planned_return_at"]),
+        note=str(row["note"]) if row["note"] is not None else None,
+        status=str(row["status"]) if row["status"] is not None else None,
+        actual_return_at=(
+            datetime.fromisoformat(row["actual_return_at"])
+            if row["actual_return_at"] is not None
+            else None
+        ),
+        experience_text=(
+            str(row["experience_text"]) if row["experience_text"] is not None else None
+        ),
+    )
 
 
 def _row_to_reflection(row: Row) -> Reflection:
@@ -2879,6 +3305,10 @@ def _row_to_turn(row: Row) -> HistoryTurn:
         author = None
 
     try:
+        mode_raw = row["mode"]
+    except (IndexError, KeyError):
+        mode_raw = None
+    try:
         platform_message_id = row["platform_message_id"]
     except (IndexError, KeyError):
         platform_message_id = None
@@ -2905,6 +3335,7 @@ def _row_to_turn(row: Row) -> HistoryTurn:
         author=author,
         content=str(row["content"]),
         channel_id=channel_id,
+        mode=str(mode_raw) if mode_raw is not None else None,
         platform_message_id=(
             str(platform_message_id) if platform_message_id is not None else None
         ),

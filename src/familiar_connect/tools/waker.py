@@ -77,6 +77,8 @@ class AlarmWaker:
             "message_id": None,
             "reply_to_message_id": None,
             "mentions": (),
+            # marker: her own alarm pierces activity absence gating
+            "alarm": True,
         }
         await bus.publish(
             Event(

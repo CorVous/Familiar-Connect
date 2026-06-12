@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.activities import (
+    ACTIVITY_RETURN_MODE,
+    RETURN_TURN_MARKER_PREFIX,
+)
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import Author
@@ -234,6 +238,206 @@ class TestFactExtractorTick:
         assert "self-capability" in system_msg.content_str.lower() or (
             "your own" in system_msg.content_str.lower()
         ), system_msg.content_str
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_distinguishes_claims_and_fiction(self) -> None:
+        """Extractor's instruction must demand claim attribution + fiction handling.
+
+        One speaker's assertions about another person: stored attributed,
+        never flat. Roleplay events: recorded as bits, never real events.
+        Guards the recontamination path — extractor processes every turn
+        regardless of whether the assistant engaged.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        text = system_msg.content_str.lower()
+        assert "claim" in text, system_msg.content_str
+        assert "fiction" in text, system_msg.content_str
+        assert "running joke" in text, system_msg.content_str
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_guards_identity_impersonation(self) -> None:
+        """Prompt must forbid minting identity facts from impersonation bits.
+
+        A member play-acting as another person ("No I am Cor") must not
+        become an identity fact or merge two participants — the pants↔Cor
+        dossier bleed. Identity ties to canonical_key, never an adopted name.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        text = system_msg.content_str.lower()
+        assert "impersonat" in text, system_msg.content_str
+        assert "distinct" in text, system_msg.content_str
+
+    @pytest.mark.asyncio
+    async def test_extract_prompt_guards_world_trivia(self) -> None:
+        """Generic trivia a speaker mentions isn't a fact ABOUT them.
+
+        Helios typing Pokémon lore became his only 'fact', yielding a
+        junk dossier. Trivia/game-lore must be skipped or left subjectless.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        system_msg = next(m for m in llm.calls[0] if m.role == "system")
+        text = system_msg.content_str.lower()
+        assert "trivia" in text, system_msg.content_str
+        assert "subjectless" in text, system_msg.content_str
+
+
+class TestFactExtractorActivityReturnSkip:
+    """Activity-return turns never enter extraction (v1 provenance).
+
+    Experience text persisted on return is self-generated fiction;
+    only the engine's mechanical event-fact records the activity.
+    Skip keyed on ``turns.mode == ACTIVITY_RETURN_MODE`` — the
+    content prefix is display-only.
+    """
+
+    @pytest.mark.asyncio
+    async def test_user_message_with_marker_prefix_not_skipped(self) -> None:
+        """Display prefix in ordinary user content must still extract."""
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 9)
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="[returned from vacation] anyway, ask me about Lisbon",
+            author=None,
+        )
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        assert len(llm.calls) == 1
+        prompt_text = "\n".join(m.content_str for m in llm.calls[0])
+        # no mode tag ⇒ regular user turn ⇒ shown to LLM
+        assert "ask me about Lisbon" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_return_turn_excluded_from_extraction_batch(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 9)
+        marker = store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="system",
+            content=f"{RETURN_TURN_MARKER_PREFIX}creek walk] watched a heron fish",
+            author=None,
+            mode=ACTIVITY_RETURN_MODE,
+        )
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        assert len(llm.calls) == 1
+        prompt_text = "\n".join(m.content_str for m in llm.calls[0])
+        # normal turns still extracted; return turn never shown to LLM
+        assert "turn 0" in prompt_text
+        assert "heron" not in prompt_text
+        # watermark still advances over the marker turn — no loop
+        wm = store.get_writer_watermark(familiar_id="fam")
+        assert wm is not None
+        assert wm.last_written_id == marker.id
+
+    @pytest.mark.asyncio
+    async def test_fallback_sources_exclude_return_turn(self) -> None:
+        """Whole-batch source fallback must not cite the return turn."""
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 9)
+        marker = store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="system",
+            content=f"{RETURN_TURN_MARKER_PREFIX}creek walk] watched a heron fish",
+            author=None,
+            mode=ACTIVITY_RETURN_MODE,
+        )
+        llm = _ScriptedLLM(
+            replies=[
+                # no source_turn_ids ⇒ extractor falls back to whole batch
+                _facts_json([{"text": "Aria likes strawberries."}])
+            ]
+        )
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].text == "Aria likes strawberries."
+        assert marker.id not in facts[0].source_turn_ids
+
+    @pytest.mark.asyncio
+    async def test_all_return_batch_skips_llm_but_advances_watermark(self) -> None:
+        store = HistoryStore(":memory:")
+        last_id = 0
+        for i in range(10):
+            t = store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="system",
+                content=f"{RETURN_TURN_MARKER_PREFIX}walk {i}] saw things",
+                author=None,
+                mode=ACTIVITY_RETURN_MODE,
+            )
+            last_id = t.id
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        assert llm.calls == []
+        wm = store.get_writer_watermark(familiar_id="fam")
+        assert wm is not None
+        assert wm.last_written_id == last_id
 
 
 class TestFactExtractorSubjects:

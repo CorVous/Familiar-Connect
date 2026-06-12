@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
+from familiar_connect.activities import ACTIVITY_RETURN_MODE
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.history.store import FactSubject
 from familiar_connect.llm import Message
@@ -106,18 +107,30 @@ class FactExtractor:
         if len(new_turns) < self._batch_size:
             return
 
-        participants = _build_participants(
-            new_turns,
-            store=self._sync,
-            familiar_id=self._familiar_id,
-            max_total=self._participants_max,
-        )
-        prompt = _build_extract_prompt(new_turns, participants)
-        reply = await self._llm.chat(prompt)
-        facts = _parse_facts(reply.content_str)
-        valid_ids = {t.id for t in new_turns}
-        channel_ids: dict[int, int] = {t.id: t.channel_id for t in new_turns}
-        ts_by_id: dict[int, datetime] = {t.id: t.timestamp for t in new_turns}
+        # activity-return turns never enter extraction (v1 provenance):
+        # experience text is self-generated fiction — same claim/fiction
+        # discipline as the prompt rules below; activity engine already
+        # records the activity as a mechanical event-fact. keyed on
+        # turns.mode (content prefix is display-only); watermark below
+        # still advances.
+        batch = [t for t in new_turns if t.mode != ACTIVITY_RETURN_MODE]
+        skipped_return = len(new_turns) - len(batch)
+
+        facts: list[dict[str, object]] = []
+        participants: dict[str, str] = {}
+        if batch:
+            participants = _build_participants(
+                batch,
+                store=self._sync,
+                familiar_id=self._familiar_id,
+                max_total=self._participants_max,
+            )
+            prompt = _build_extract_prompt(batch, participants)
+            reply = await self._llm.chat(prompt)
+            facts = _parse_facts(reply.content_str)
+        valid_ids = {t.id for t in batch}
+        channel_ids: dict[int, int] = {t.id: t.channel_id for t in batch}
+        ts_by_id: dict[int, datetime] = {t.id: t.timestamp for t in batch}
 
         dropped_self_cap = 0
         for fact in facts:
@@ -180,6 +193,7 @@ class FactExtractor:
             f"{ls.kv('batch_size', str(len(new_turns)), vc=ls.LY)} "
             f"{ls.kv('extracted', str(len(facts)), vc=ls.LC)} "
             f"{ls.kv('dropped_self_cap', str(dropped_self_cap), vc=ls.LY)} "
+            f"{ls.kv('skipped_return', str(skipped_return), vc=ls.LY)} "
             f"{ls.kv('watermark', str(last_id), vc=ls.LW)}"
         )
 
@@ -306,6 +320,35 @@ def _build_extract_prompt(
         "5 = ordinary detail, 10 = safety-critical / identity-defining "
         "(allergies, names, long-standing preferences, life events). "
         "Omit when unsure.\n\n"
+        "Distinguish events from assertions:\n"
+        "- What a speaker asserts about ANOTHER person — their body, "
+        "health, medication, preferences, relationships, or state of "
+        "mind — is a claim, not a fact. Record it attributed ('X "
+        "claims ...', 'X says ...') with the speaker named, or skip "
+        "it. Record it as flat fact only when the person it concerns "
+        "confirms it in these turns.\n"
+        "- In-character bits, running jokes, roleplay, and fictional "
+        "narration (violence, transformations, creatures, magic done "
+        "to people) are fiction. Never record fictional events as "
+        "real ones ('Y was hit with a crowbar'). If a bit recurs "
+        "enough to matter, record the BIT as the fact ('running joke "
+        "in which ...', 'X and Y's shared fiction that ...'), "
+        "including who plays along and who refuses.\n"
+        "- A speaker describing themselves (their history, tastes, "
+        "abilities) may be recorded as their own account; "
+        "extraordinary self-claims stay attributed ('X describes "
+        "herself as ...').\n"
+        "- Identity ties to a Participant's canonical_key, never to a "
+        "name a speaker adopts in play. A member impersonating another, "
+        "claiming to BE them, or borrowing their name in a bit is "
+        "roleplay: record it as a bit if it matters ('X joked they were "
+        "Y'), never as an identity fact, and NEVER merge two "
+        "Participants into one. Impersonated or confused, they stay "
+        "distinct people with distinct keys.\n"
+        "- World trivia, game lore, or general knowledge a speaker "
+        "happens to mention is not a fact ABOUT that speaker. Skip it or "
+        "leave it subjectless; never attach trivia to them as a "
+        "personal fact.\n\n"
         "Skip small talk and transient feelings. If nothing useful, "
         "reply with []. Do NOT emit self-capability statements about "
         "yourself, the assistant, or your own limitations (e.g., 'I "
