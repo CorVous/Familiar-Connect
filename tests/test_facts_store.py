@@ -6,7 +6,37 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from familiar_connect.history.store import Fact, FactSubject, HistoryStore
+from familiar_connect.history.store import (
+    Fact,
+    FactSubject,
+    HistoryStore,
+    _canonical_keys_from_subjects_json,
+)
+
+
+class TestCanonicalKeysFromSubjectsJson:
+    """Shared parser for ``subjects_json`` → canonical str keys."""
+
+    def test_none_and_empty(self) -> None:
+        assert _canonical_keys_from_subjects_json(None) == frozenset()
+        assert _canonical_keys_from_subjects_json("") == frozenset()
+
+    def test_unparseable_or_non_list(self) -> None:
+        assert _canonical_keys_from_subjects_json("{not json") == frozenset()
+        assert _canonical_keys_from_subjects_json('{"a": 1}') == frozenset()
+
+    def test_extracts_str_keys_skips_malformed(self) -> None:
+        blob = (
+            '[{"canonical_key": "discord:1", "display_at_write": "Cor"},'
+            ' {"canonical_key": 5},'  # non-str key skipped
+            ' "not a dict",'  # non-dict skipped
+            ' {"display_at_write": "no key"},'  # missing key skipped
+            ' {"canonical_key": "discord:2", "display_at_write": "Aria"}]'
+        )
+        assert _canonical_keys_from_subjects_json(blob) == frozenset({
+            "discord:1",
+            "discord:2",
+        })
 
 
 def _store_with_turns_and_facts() -> HistoryStore:
@@ -243,6 +273,136 @@ class TestFactSupersession:
         store = _store_with_turns_and_facts()
         with pytest.raises(ValueError, match="unknown fact"):
             store.supersede_fact(familiar_id="fam", old_id=999, new_id=1)
+
+
+class TestSupersedeInvalidatesDossier:
+    """Superseding a fact must drop affected subjects' baked dossiers.
+
+    PeopleDossierWorker compounds prior dossier text + new facts; it
+    never un-bakes a superseded fact. Deleting the row forces the
+    worker's prior=None clean rebuild.
+    """
+
+    def _store_with_subject_fact(self) -> tuple[HistoryStore, int, int]:
+        """Store + (old_id, new_id) for subject ``discord:A``."""
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi",
+            author=None,
+        )
+        subjects = (FactSubject(canonical_key="discord:A", display_at_write="Aria"),)
+        old = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria loves hiking.",
+            source_turn_ids=[1],
+            subjects=subjects,
+        )
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria hates hiking now.",
+            source_turn_ids=[1],
+            subjects=subjects,
+        )
+        return store, old.id, new.id
+
+    def test_supersede_deletes_subject_dossier(self) -> None:
+        store, old_id, new_id = self._store_with_subject_fact()
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:A",
+            last_fact_id=old_id,
+            dossier_text="Aria loves hiking.",
+        )
+        store.supersede_fact(familiar_id="fam", old_id=old_id, new_id=new_id)
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is None
+        )
+
+    def test_supersede_null_subject_leaves_dossiers(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi",
+            author=None,
+        )
+        old = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="The weather is nice.",
+            source_turn_ids=[1],
+        )
+        new = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="The weather turned grim.",
+            source_turn_ids=[1],
+        )
+        # Unrelated dossier must survive a subjectless supersede.
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:A",
+            last_fact_id=1,
+            dossier_text="Aria loves hiking.",
+        )
+        store.supersede_fact(familiar_id="fam", old_id=old.id, new_id=new.id)
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is not None
+        )
+
+    def test_supersede_spares_other_subjects_dossier(self) -> None:
+        store, old_id, new_id = self._store_with_subject_fact()
+        # Subject B's dossier is unrelated to A's superseded fact.
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:A",
+            last_fact_id=old_id,
+            dossier_text="Aria loves hiking.",
+        )
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:B",
+            last_fact_id=old_id,
+            dossier_text="Boris works nights.",
+        )
+        store.supersede_fact(familiar_id="fam", old_id=old_id, new_id=new_id)
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is None
+        )
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:B")
+            is not None
+        )
+
+    def test_supersede_spares_other_familiars_dossier(self) -> None:
+        store, old_id, new_id = self._store_with_subject_fact()
+        # Same canonical key, different familiar — must not be touched.
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:A",
+            last_fact_id=old_id,
+            dossier_text="Aria loves hiking.",
+        )
+        store.put_people_dossier(
+            familiar_id="other",
+            canonical_key="discord:A",
+            last_fact_id=old_id,
+            dossier_text="Aria, per other familiar.",
+        )
+        store.supersede_fact(familiar_id="fam", old_id=old_id, new_id=new_id)
+        assert (
+            store.get_people_dossier(familiar_id="other", canonical_key="discord:A")
+            is not None
+        )
 
 
 class TestFactBiTemporal:
