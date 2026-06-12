@@ -73,6 +73,6 @@ def _emit(name: str, t0: float, status: str) -> None:
         f"{ls.kv('ms', str(elapsed_ms), vc=ls.LC)} "
         f"{ls.kv('status', status, vc=ls.LG if status == 'ok' else ls.R)}"
     )
-    # span recording must never raise; suppress broadly
+    # Span recording must never raise; suppress broadly
     with contextlib.suppress(Exception):
         get_span_collector().record(name=name, ms=elapsed_ms, status=status)

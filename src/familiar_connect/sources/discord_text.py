@@ -60,7 +60,7 @@ class DiscordTextSource:
         event_id = f"discord-text-{uuid4().hex[:12]}"
         ev = Event(
             event_id=event_id,
-            turn_id=event_id,  # source event: turn_id == event_id
+            turn_id=event_id,  # Source event: turn_id == event_id
             session_id=f"discord:{channel_id}",
             parent_event_ids=(),
             topic=TOPIC_DISCORD_TEXT,

@@ -68,7 +68,9 @@ All comments, docstrings, and documentation must follow this style:
 * Document what's close and stable
     * Avoid "far away" references likely to change
     * Exception: ok if lints/tests/jobs catch breakage
-* Start inline comments lowercase
+* Capitalize the first word of a comment (PEP 8), unless it's an
+  identifier that begins lowercase (`os.environ`, `self._x`, backticked
+  code). Continuation lines of a multi-line sentence stay lowercase.
 * Use periods only for full sentences
 * Use full sentences only when needed; lean on context
 

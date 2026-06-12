@@ -30,13 +30,13 @@ class MacroContext:
     description: str = ""
 
 
-# matches {{// any comment text }}
+# Matches {{// any comment text }}
 _COMMENT_RE = re.compile(r"\{\{//[^}]*\}\}")
 
-# matches any {{macro}} or {{macro::arg}} token
+# Matches any {{macro}} or {{macro::arg}} token
 _MACRO_RE = re.compile(r"\{\{([^}]+)\}\}")
 
-_SIMPLE: dict[str, str] = {}  # populated per-call from context
+_SIMPLE: dict[str, str] = {}  # Populated per-call from context
 
 
 def substitute(text: str, ctx: MacroContext) -> str:
@@ -69,7 +69,7 @@ def substitute(text: str, ctx: MacroContext) -> str:
             return ""
         if key in simple:
             return simple[key]
-        # unknown macro — pass through
+        # Unknown macro — pass through
         return m.group(0)
 
     # 2 & 3. replace all macros in one pass

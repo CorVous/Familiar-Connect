@@ -67,11 +67,11 @@ class UtteranceEndpointer:
         self._speech_chunks_threshold = max(1, int(speech_start_ms / _VAD_CHUNK_MS))
 
         self._resampler = Resampler48to16()
-        # remainder bytes from partial VAD frame — accumulate next feed
+        # Remainder bytes from partial VAD frame — accumulate next feed
         self._frame_carry: bytearray = bytearray()
         self._utterance: bytearray = bytearray()
 
-        # state flags
+        # State flags
         self._speaking: bool = False
         self._post_incomplete: bool = False
         self._speech_streak: int = 0
@@ -96,7 +96,7 @@ class UtteranceEndpointer:
         if not resampled:
             return
         self._frame_carry.extend(resampled)
-        # consume as many full VAD frames as carry holds
+        # Consume as many full VAD frames as carry holds
         while len(self._frame_carry) >= _VAD_CHUNK_BYTES:
             frame = bytes(self._frame_carry[:_VAD_CHUNK_BYTES])
             del self._frame_carry[:_VAD_CHUNK_BYTES]
@@ -116,10 +116,10 @@ class UtteranceEndpointer:
                     self._post_incomplete = False
             return
 
-        # silence frame
+        # Silence frame
         self._speech_streak = 0
         if not self._speaking:
-            # idle silence — drop the buffer to bound memory; nothing to classify
+            # Idle silence — drop the buffer to bound memory; nothing to classify
             self._utterance.clear()
             return
 
@@ -127,7 +127,7 @@ class UtteranceEndpointer:
         if self._silence_streak < self._silence_chunks_threshold:
             return
 
-        # silence threshold hit after speech → classify (unless already
+        # Silence threshold hit after speech → classify (unless already
         # did and got `incomplete` with no new speech since).
         if self._post_incomplete:
             return
@@ -147,6 +147,6 @@ class UtteranceEndpointer:
             self._vad.reset()
             await self._on_complete(audio)
         else:
-            # keep buffer; await fresh speech, then fresh silence streak
+            # Keep buffer; await fresh speech, then fresh silence streak
             self._post_incomplete = True
             self._speaking = False

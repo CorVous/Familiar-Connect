@@ -58,7 +58,7 @@ class Assembler:
         budgeter: Budgeter | None = None,
     ) -> None:
         self._layers: list[Layer] = list(layers)
-        # key: (layer.name, invalidation_key) -> rendered text
+        # Key: (layer.name, invalidation_key) -> rendered text
         self._cache: dict[tuple[str, str], str] = {}
         self._budgeter = budgeter
 

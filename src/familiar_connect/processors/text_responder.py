@@ -36,7 +36,7 @@ from familiar_connect.silence import SilentDetector
 # inbound ``<@USER_ID>`` mentions into
 _PING_MARKER_RE = re.compile(r"\[@([^\]\n]+)\]")
 
-# thread-reply marker. either ``[↩]`` (matches inbound reply glyph
+# Thread-reply marker. either ``[↩]`` (matches inbound reply glyph
 # read path uses) or ``[reply]`` for tokenizer safety. optional
 # whitespace + token after glyph captures target
 # ``platform_message_id`` — LLM can point at specific message
@@ -44,18 +44,18 @@ _PING_MARKER_RE = re.compile(r"\[@([^\]\n]+)\]")
 # legacy meaning: thread to triggering message
 _THREAD_MARKER_RE = re.compile(r"\[(?:↩|reply)(?:\s+([^\]\n]+))?\]")
 
-# defense-in-depth: when model leaks metadata-shaped prefix like
+# Defense-in-depth: when model leaks metadata-shaped prefix like
 # ``[#1500709436557445449]`` or ``[4:03AM]`` at very start of reply
 # (mimicking recent-history rendering format), drop it.
-# conservative: only matches bracketed clump containing ``#``,
+# Conservative: only matches bracketed clump containing ``#``,
 # digits + ``:``, or ``AM/PM``, optionally followed by another such
 # bracket, so we don't eat a legitimate ``[note]`` opener
 _LEAKED_META_PREFIX_RE = re.compile(
     r"^\s*(?:\[[^\]\n]*(?:#\d|\d:\d|[AP]M)[^\]\n]*\]\s*)+"
 )
 
-# short addendum to system prompt explaining two output controls.
-# costs ~5 lines; doesn't enumerate per-channel participants — LLM
+# Short addendum to system prompt explaining two output controls.
+# Costs ~5 lines; doesn't enumerate per-channel participants — LLM
 # grounds names in recent history, resolver attempts match against
 # active speakers at send time
 _BOT_OUTPUT_INSTRUCTIONS = (
@@ -162,7 +162,7 @@ if TYPE_CHECKING:
     from familiar_connect.tools.registry import ToolContext, ToolRegistry
     from familiar_connect.typing_interrupt import TypingInterruptHandler
 
-    # optional Discord typing-indicator hook. wrapped around
+    # Optional Discord typing-indicator hook. wrapped around
     # streaming + send path so channel shows ``Bot is typing…``
     # while LLM is generating. ``None`` = indicator disabled
     TriggerTyping = Callable[[int], AsyncContextManager[None]]
@@ -207,28 +207,28 @@ class TextResponder:
         self._sync_history = history_store.sync
         self._router = router
         self._familiar_id = familiar_id
-        # per-familiar etiquette appended to the trailing reminder
+        # Per-familiar etiquette appended to the trailing reminder
         # (post-history). empty = omitted.
         self._post_history_instructions = post_history_instructions
         # IANA zone for the final-reminder clock (validated at config load)
         self._display_tz = display_tz
-        # discord ``Bot is typing…`` indicator factory; ``None`` opts out
+        # Discord ``Bot is typing…`` indicator factory; ``None`` opts out
         self._trigger_typing = trigger_typing
-        # typing-event policy — bot pingpong backoff + user-typing cancel.
+        # Typing-event policy — bot pingpong backoff + user-typing cancel.
         # ``None`` disables both (tests, future non-discord paths)
         self._typing_handler = typing_handler
-        # agentic-loop tool registry. paired with non-None
+        # Agentic-loop tool registry. paired with non-None
         # ``tool_context_factory`` and ``llm.tool_calling_enabled``,
         # responder runs ``agentic_loop`` instead of bare ``chat_stream``
         self._tool_registry = tool_registry
         self._tool_context_factory = tool_context_factory
-        # hard cap on agentic-loop rounds per turn ([tools].loop_max_iterations)
+        # Hard cap on agentic-loop rounds per turn ([tools].loop_max_iterations)
         self._loop_max_iterations = loop_max_iterations
-        # attentional focus controller; None = backward-compat (no focus gating)
+        # Attentional focus controller; None = backward-compat (no focus gating)
         self._focus_manager = focus_manager
-        # absence controller; None = no activity gating (zero behavior change)
+        # Absence controller; None = no activity gating (zero behavior change)
         self._activity_engine = activity_engine
-        # in-process dedup; bus doesn't republish today, cheap insurance
+        # In-process dedup; bus doesn't republish today, cheap insurance
         self._seen: set[str] = set()
 
     async def handle(self, event: Event, bus: EventBus) -> None:
@@ -243,7 +243,7 @@ class TextResponder:
             return
         channel_id = payload.get("channel_id")
         content = payload.get("content") or ""
-        # idle nudge: synthetic wake event has no real user content —
+        # Idle nudge: synthetic wake event has no real user content —
         # it just earns the model a focused turn (see _emit_idle_nudge)
         is_wake = payload.get("wake") is True
         if not isinstance(channel_id, int):
@@ -268,11 +268,11 @@ class TextResponder:
         images: dict[str, str] = raw_images if isinstance(raw_images, dict) else {}
 
         self._seen.add(event.event_id)
-        # quiet-clock for idle activity nudges — every handled event
+        # Quiet-clock for idle activity nudges — every handled event
         # counts as traffic, even staged/suppressed ones
         if self._activity_engine is not None:
             self._activity_engine.note_traffic()
-        # honor any active pingpong-backoff (another bot has been
+        # Honor any active pingpong-backoff (another bot has been
         # typing in this channel) before claiming lane. then reset
         # ladder so future bot-typing events start at initial step
         if self._typing_handler is not None:
@@ -282,7 +282,7 @@ class TextResponder:
             session_id=event.session_id, turn_id=event.turn_id
         )
 
-        # refresh canonical identity rows for everyone we know about
+        # Refresh canonical identity rows for everyone we know about
         # in this turn. soft annotation: accounts table is "what we
         # most recently saw" cache, not source of truth
         if author is not None:
@@ -302,7 +302,7 @@ class TextResponder:
                     nick=m.guild_nick,
                 )
 
-        # activity gate — engine optional (None ⇒ zero behavior change).
+        # Activity gate — engine optional (None ⇒ zero behavior change).
         # SUPPRESS: she's away from the screen — record the user turn
         # staged and stop (no typing, no LLM, no reply). JUDGMENT:
         # normal reply flow plus engine state line injected for this
@@ -315,16 +315,16 @@ class TextResponder:
         suppressed = gate is not None and gate.action is GateAction.SUPPRESS
         judgment = gate is not None and gate.action is GateAction.JUDGMENT
 
-        # focus-aware staging: when a focus_manager is wired and
+        # Focus-aware staging: when a focus_manager is wired and
         # channel is not focused, persist as staged turn and return —
         # no LLM call, no reply. unread digest surfaces it next turn.
-        # wake events skip staging+persist entirely: they carry no real
+        # Wake events skip staging+persist entirely: they carry no real
         # user content, only earn the model a focused turn.
         focused = self._focus_manager is None or self._focus_manager.is_focused(
             channel_id
         )
         if not is_wake:
-            # persist user turn *before* streaming so RecentHistoryLayer
+            # Persist user turn *before* streaming so RecentHistoryLayer
             # in same task sees it. mirrors VoiceResponder
             user_turn = await self._history.append_turn(
                 familiar_id=self._familiar_id,
@@ -335,7 +335,7 @@ class TextResponder:
                 guild_id=guild_id,
                 platform_message_id=message_id,
                 reply_to_message_id=reply_to_message_id,
-                consumed=focused and not suppressed,  # staged when unfocused/absent
+                consumed=focused and not suppressed,  # Staged when unfocused/absent
             )
             if mentions:
                 await self._history.record_mentions(
@@ -366,7 +366,7 @@ class TextResponder:
                     f"{ls.kv('from', author_label, vc=ls.LW)} "
                     f"{ls.kv('text', content, vc=ls.LW)}"
                 )
-                # focused channel idle long enough → nudge the model so
+                # Focused channel idle long enough → nudge the model so
                 # stranded unreads don't starve. model decides via
                 # shift_focus; the nudge never moves focus itself.
                 if self._focus_manager is not None and self._focus_manager.should_wake(
@@ -378,10 +378,10 @@ class TextResponder:
             # wake event while absent — carries no user content, drop
             return
 
-        # seed retrieval before assembly so RagContextLayer sees the cue
+        # Seed retrieval before assembly so RagContextLayer sees the cue
         self._assembler.set_rag_cue(content)
 
-        # build label→canonical_key map for resolving any ``[@X]``
+        # Build label→canonical_key map for resolving any ``[@X]``
         # markers LLM emits. not surfaced in prompt; LLM grounds on
         # names visible in recent history, resolver matches against
         # active speakers at send time
@@ -389,7 +389,7 @@ class TextResponder:
             channel_id=channel_id, guild_id=guild_id
         )
 
-        # typing indicator opens lazily inside ``_stream_reply`` once
+        # Typing indicator opens lazily inside ``_stream_reply`` once
         # silent-sentinel decision resolves to ``False`` — reasoning
         # tokens routinely precede ``<silent>`` verdict; don't want
         # ``Bot is typing…`` flickering on for those
@@ -422,7 +422,7 @@ class TextResponder:
                 await self._activity_engine.end_turn()
             return
 
-        # threading opt-in via LLM-emitted marker. strip marker and
+        # Threading opt-in via LLM-emitted marker. strip marker and
         # only pass reply target to ``send_text`` when model
         # deliberately asked to thread. captured id (e.g.
         # ``[↩ msg-001]``) routes to specific message when known;
@@ -446,7 +446,7 @@ class TextResponder:
             else:
                 thread_target = message_id
 
-        # if the model shifted focus this turn, send to the new channel
+        # If the model shifted focus this turn, send to the new channel
         send_channel_id = channel_id
         if self._focus_manager is not None:
             pending = self._focus_manager.pending_text_focus()
@@ -475,7 +475,7 @@ class TextResponder:
         if scope.is_cancelled():
             return
 
-        # persist what bot actually sent, including whether we
+        # Persist what bot actually sent, including whether we
         # threaded. ``reply_to_message_id`` matches what we passed to
         # ``send_text`` — audit trail for "did bot thread this reply?"
         await self._history.append_turn(
@@ -591,7 +591,7 @@ class TextResponder:
             guild_id=guild_id,
         )
         prompt = await self._assembler.assemble(ctx)
-        # focus context for unread digest + focus directive
+        # Focus context for unread digest + focus directive
         focus_ch = (
             self._focus_manager.get_focus("text") if self._focus_manager else None
         )
@@ -600,7 +600,7 @@ class TextResponder:
             unread_digest = await self._history.staged_channels(
                 familiar_id=self._familiar_id
             )
-        # always append short output-controls instruction so model
+        # Always append short output-controls instruction so model
         # knows ``[@X]`` and ``[↩]`` are routable. costs ~5 lines of
         # context, no per-channel enumeration. final reminder
         # restates current time + special inputs so model doesn't
@@ -618,7 +618,7 @@ class TextResponder:
         )
         messages: list[Message] = [Message(role="system", content=system)]
         messages.extend(prompt.recent_history)
-        # recency-biased models routinely ignore mode/format
+        # Recency-biased models routinely ignore mode/format
         # directives buried at top of long context. re-emit as
         # trailing ``system`` message so they sit right before
         # assistant's next turn
@@ -656,7 +656,7 @@ class TextResponder:
 
         accumulated: list[str] = []
         silent = SilentDetector()
-        # typing indicator stays closed until ``SilentDetector`` rules
+        # Typing indicator stays closed until ``SilentDetector`` rules
         # out sentinel — keeps ``Bot is typing…`` from flickering
         # during reasoning that resolves to ``<silent>``.
         # ``AsyncExitStack`` owns eventual ``__aexit__`` whether
@@ -670,7 +670,7 @@ class TextResponder:
                     accumulated.append(delta)
                     decision = silent.feed(delta)
                     if decision is True:
-                        # mirror cancellation: no send, no assistant turn.
+                        # Mirror cancellation: no send, no assistant turn.
                         # 'decision=silent' log replaces would-be
                         # empty-reply warning (which targets bad model /
                         # content-filter cases, not deliberate silence)
@@ -725,7 +725,7 @@ class TextResponder:
         ctx = ctx_factory(channel_id, scope.turn_id, images or {})
 
         # ``agentic_loop`` returns terminal assistant content.
-        # responder's ``handle`` persists it + posts via send_text
+        # Responder's ``handle`` persists it + posts via send_text
         silent = SilentDetector()
         typing_started = False
         bail_silent = False
@@ -754,7 +754,7 @@ class TextResponder:
                 assistant: Message,
                 tool_msgs: list[Message],
             ) -> None:
-                # skip persistence for terminal text-only iteration —
+                # Skip persistence for terminal text-only iteration —
                 # ``handle()`` writes final assistant turn alongside
                 # platform message id from ``send_text``
                 if not assistant.tool_calls:
@@ -785,7 +785,7 @@ class TextResponder:
                     )
 
             try:
-                # local import — avoids dragging tools into module
+                # Local import — avoids dragging tools into module
                 # top for callers that never use them
                 from familiar_connect.tools.loop import agentic_loop  # noqa: PLC0415
 

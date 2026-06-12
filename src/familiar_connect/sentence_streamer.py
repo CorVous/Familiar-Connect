@@ -14,8 +14,8 @@ boundary. Decision local — no language model lookahead.
 
 from __future__ import annotations
 
-# titles + low-risk Latin abbreviations. lowercase, no trailing dot.
-# kept tight: false negatives (one extra sentence) cheaper than false
+# Titles + low-risk Latin abbreviations. lowercase, no trailing dot.
+# Kept tight: false negatives (one extra sentence) cheaper than false
 # positives (mid-sentence flush of "Mr.").
 _ABBREVIATIONS: frozenset[str] = frozenset({
     "mr",
@@ -83,12 +83,12 @@ class SentenceStreamer:
             if ch not in _TERMINATORS:
                 i += 1
                 continue
-            # eat consecutive terminators ("?!" → one boundary)
+            # Eat consecutive terminators ("?!" → one boundary)
             end = i + 1
             while end < len(buf) and buf[end] in _TERMINATORS:
                 end += 1
             if end >= len(buf):
-                # punctuation at buffer end — wait for next delta
+                # Punctuation at buffer end — wait for next delta
                 return None
             if not buf[end].isspace():
                 # ".5" / "1.0" / "?<tag>" — not a boundary
@@ -98,7 +98,7 @@ class SentenceStreamer:
                 i = end
                 continue
             head = buf[:end]
-            # consume one separator char so next sentence starts clean
+            # Consume one separator char so next sentence starts clean
             rest_start = end
             while rest_start < len(buf) and buf[rest_start].isspace():
                 rest_start += 1
@@ -108,7 +108,7 @@ class SentenceStreamer:
     def _looks_like_abbreviation(self, dot_index: int) -> bool:
         """``dot_index`` indexes ``.`` in ``self._buf``; walk back the token."""
         buf = self._buf
-        # collect token immediately preceding the dot, allowing inner
+        # Collect token immediately preceding the dot, allowing inner
         # dots so "e.g" / "i.e" round-trip ("e.g." ends at second dot).
         j = dot_index - 1
         while j >= 0 and (buf[j].isalpha() or buf[j] == "."):
@@ -118,5 +118,5 @@ class SentenceStreamer:
             return False
         if token in _ABBREVIATIONS:
             return True
-        # single-letter initial: "J. K. Rowling"
+        # Single-letter initial: "J. K. Rowling"
         return len(token) == 1 and token.isalpha()

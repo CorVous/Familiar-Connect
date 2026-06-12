@@ -58,17 +58,17 @@ class LLMSlotConfig:
     temperature: float | None = None
     # OpenRouter provider routing override. ``None`` = default (per-call).
     # Pinned order stabilises prompt caching, costs some availability.
-    # stopgap — see docs/architecture/tuning.md § provider pinning.
+    # Stopgap — see docs/architecture/tuning.md § provider pinning.
     provider_order: tuple[str, ...] | None = None
     provider_allow_fallbacks: bool = True
     # OpenRouter reasoning effort. ``None`` = model default.
-    # see ``REASONING_LEVELS`` for allowed strings.
+    # See ``REASONING_LEVELS`` for allowed strings.
     reasoning: str | None = None
-    # surface-only flag for now — call sites haven't wired tools yet.
+    # Surface-only flag for now — call sites haven't wired tools yet.
     tool_calling: bool = False
-    # gate for view_image registration (independent of tool_calling)
+    # Gate for view_image registration (independent of tool_calling)
     image_tools: bool = False
-    # send image content blocks in tool-result messages (vision-capable models)
+    # Send image content blocks in tool-result messages (vision-capable models)
     multimodal: bool = False
 
 
@@ -448,15 +448,15 @@ def _default_budgets() -> dict[str, TierBudget]:
 class CharacterConfig:
     """Config loaded once per install from ``character.toml``."""
 
-    # hard cap on history turns. token-aware budget below usually
+    # Hard cap on history turns. token-aware budget below usually
     # bites first; keep this as safety net (and way to force absolute
     # upper bound on prompt size).
     voice_window_size: int = 100
     text_window_size: int = 200
-    # consecutive same-speaker voice fragments within this gap (seconds)
+    # Consecutive same-speaker voice fragments within this gap (seconds)
     # collapse into one rendered history message. 0 disables.
     recent_history_coalesce_max_gap_seconds: float = 45.0
-    # fold text-channel turns before last silence gap >= this value
+    # Fold text-channel turns before last silence gap >= this value
     # into rolling summary (0 = disabled).
     text_silence_gap_fold_seconds: float = 0.0
     display_tz: str = "UTC"
@@ -466,25 +466,25 @@ class CharacterConfig:
     channels: dict[int, ChannelOverrides] = field(default_factory=dict)
     turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
     stt: STTConfig = field(default_factory=STTConfig)
-    # per-tier token envelopes for Budgeter. operators tune
+    # Per-tier token envelopes for Budgeter. operators tune
     # ``total_tokens`` per tier; sub-caps derive from it unless
     # explicitly overridden.
     budgets: dict[str, TierBudget] = field(default_factory=_default_budgets)
-    # per-model multipliers keyed by model name (e.g. "claude-opus-4-7").
-    # applied in :meth:`budget_for` when tier's LLM slot uses that model.
+    # Per-model multipliers keyed by model name (e.g. "claude-opus-4-7").
+    # Applied in :meth:`budget_for` when tier's LLM slot uses that model.
     budget_curves: dict[str, ModelBudgetCurve] = field(default_factory=dict)
     discord_text: DiscordTextConfig = field(default_factory=DiscordTextConfig)
-    # free-text block appended to the *trailing* reminder (after
+    # Free-text block appended to the *trailing* reminder (after
     # recent history), per familiar. empty = omitted. default text
     # lives in ``_default/character.toml`` ``[prompt]`` — no Python
     # default (default profile is the single source of truth).
     post_history_instructions: str = ""
-    # appended to the neutral image-description base prompt (see
+    # Appended to the neutral image-description base prompt (see
     # ``tools.image_describe._DESCRIBE_PROMPT``). per-familiar persona
     # tuning — e.g. a non-present character bans naming modern brands /
     # franchises. empty = neutral base only. lives in ``[prompt]``.
     image_description_constraints: str = ""
-    # retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
+    # Retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
     memory_retrieval: MemoryRetrievalConfig = field(
         default_factory=MemoryRetrievalConfig
     )
@@ -494,15 +494,15 @@ class CharacterConfig:
     )
     # M6 — embedder backend selection from [providers.embedding].
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
-    # model name for vision-based image descriptions (shared [llm] level).
-    # empty string = feature disabled.
+    # Model name for vision-based image descriptions (shared [llm] level).
+    # Empty string = feature disabled.
     image_description_model: str = ""
-    # process-wide cap on concurrent LLM requests (shared [llm] level);
+    # Process-wide cap on concurrent LLM requests (shared [llm] level);
     # bottleneck is the OpenRouter key's rate limit, not one slot.
     llm_max_concurrent_requests: int = 4
-    # attentional idle-nudge timing — see :class:`FocusConfig`.
+    # Attentional idle-nudge timing — see :class:`FocusConfig`.
     focus: FocusConfig = field(default_factory=FocusConfig)
-    # agentic tool-loop knobs — see :class:`ToolsConfig`.
+    # Agentic tool-loop knobs — see :class:`ToolsConfig`.
     tools: ToolsConfig = field(default_factory=ToolsConfig)
 
     def for_channel(self, channel_id: int | None) -> ChannelOverrides:
@@ -544,7 +544,7 @@ class CharacterConfig:
         return base
 
 
-# tier → LLM slot mapping (mirrors run.py responder wiring).
+# Tier → LLM slot mapping (mirrors run.py responder wiring).
 _TIER_TO_SLOT: dict[str, str] = {
     "voice": "fast",
     "text": "prose",
@@ -609,7 +609,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(llm_raw, dict):
         msg = f"[llm] must be a table, got {type(llm_raw).__name__}"
         raise ConfigError(msg)
-    # split shared scalars before slot parsing (parser rejects non-slot keys)
+    # Split shared scalars before slot parsing (parser rejects non-slot keys)
     llm_shared_keys = ("image_description_model", "max_concurrent_requests")
     idm_raw = llm_raw.get("image_description_model", "")
     if not isinstance(idm_raw, str):
@@ -681,7 +681,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(budget_raw, dict):
         msg = f"[budget] must be a table, got {type(budget_raw).__name__}"
         raise ConfigError(msg)
-    # strip model_curves before tier parsing — _parse_budgets rejects unknown keys.
+    # Strip model_curves before tier parsing — _parse_budgets rejects unknown keys.
     budget_curves_raw = budget_raw.get("model_curves", {})
     if not isinstance(budget_curves_raw, dict):
         msg = "[budget.model_curves] must be a table"
@@ -967,7 +967,7 @@ def _parse_tier_budget(tier: str, raw: dict, *, default: TierBudget) -> TierBudg
     })
 
 
-# same names as _BUDGET_FIELDS; used to validate [budget.model_curves] sections.
+# Same names as _BUDGET_FIELDS; used to validate [budget.model_curves] sections.
 _CURVE_FIELDS: frozenset[str] = frozenset(_BUDGET_FIELDS)
 
 
@@ -1044,8 +1044,8 @@ def _parse_memory_retrieval(raw: dict) -> MemoryRetrievalConfig:
     return MemoryRetrievalConfig(**out)
 
 
-# projector names with a tunable [providers.memory.<name>] sub-table.
-# fact_embedding has no knobs (its tuning lives in [providers.embedding]).
+# Projector names with a tunable [providers.memory.<name>] sub-table.
+# Fact_embedding has no knobs (its tuning lives in [providers.embedding]).
 _MEMORY_WORKER_SECTION_NAMES: frozenset[str] = frozenset({
     "rolling_summary",
     "rich_note",
@@ -1180,7 +1180,7 @@ def _parse_memory_providers(raw: dict) -> MemoryProvidersConfig:
     ):
         msg = "[providers.memory].projectors must be a list of strings"
         raise ConfigError(msg)
-    # deferred to avoid pulling registry into module import time —
+    # Deferred to avoid pulling registry into module import time —
     # config.py loaded by lots of test helpers.
     from familiar_connect.processors.projectors import known_projectors  # noqa: PLC0415
 
@@ -1234,7 +1234,7 @@ def _parse_embedding_config(raw: dict) -> EmbeddingConfig:
             f"got {type(backend).__name__}"
         )
         raise ConfigError(msg)
-    # deferred to keep config.py importable without embedding
+    # Deferred to keep config.py importable without embedding
     # registry — same shape as projector validator.
     from familiar_connect.embedding.factory import known_embedders  # noqa: PLC0415
 
@@ -1550,7 +1550,7 @@ def _parse_history_windows(raw: dict) -> tuple[int, int]:
             raise ConfigError(msg)
         return v
 
-    # fallbacks match CharacterConfig dataclass defaults; shipped values
+    # Fallbacks match CharacterConfig dataclass defaults; shipped values
     # live in _default/character.toml and overlay these at load time
     return _positive_int("voice_window_size", 100), _positive_int(
         "text_window_size", 200

@@ -55,7 +55,7 @@ flowchart LR
   - `DiscordTextSource` — called from `on_message`; publishes `discord.text`.
   - `TwitchSource` — drains the `TwitchWatcher` queue; publishes `twitch.event`.
   - `VoiceSource` — drains the Deepgram transcription queue; publishes `voice.activity.start`, `voice.transcript.partial`, `voice.transcript.final`, `voice.activity.end`. All events in one utterance share `turn_id`.
-- **Context assembly** — `Assembler` composes a layered system prompt in stability-descending order: `CharacterCardLayer` (`data/familiars/<id>/character.md` — persona plus operational essentials such as the `<silent>` token), `OperatingModeLayer` (voice-terse vs text-verbose), `ConversationSummaryLayer`, `CrossChannelContextLayer` (neutralized — kept for schema compatibility but emits no content), `LorebookLayer`, `PeopleDossierLayer`, `ReflectionLayer`, `RagContextLayer`, then `RecentHistoryLayer` (user/assistant messages, not system text; now queries across all channels, not just the active one). See [Context pipeline](context-pipeline.md).
+- **Context assembly** — `Assembler` composes a layered system prompt in stability-descending order: `CharacterCardLayer` (`data/familiars/<id>/character.md` — persona plus operational essentials such as the `<silent>` token), `OperatingModeLayer` (voice-terse vs text-verbose), `ConversationSummaryLayer`, `CrossChannelContextLayer` (neutralized — kept for schema compatibility but emits no content), `LorebookLayer`, `PeopleDossierLayer`, `ReflectionLayer`, `RagContextLayer`, then `RecentHistoryLayer` (user/assistant messages, not system text; queries across all channels, not just the active one). See [Context pipeline](context-pipeline.md).
 - **LLM** — `LLMClient` exposes `chat()` (blocking) and `chat_stream()` (async-iterator of content deltas). The streaming variant releases the process-wide rate-limit semaphore as soon as the request is accepted, so barge-in cancellation isn't starved.
 - **TTSPlayer** — `speak(text, scope=...)` returns when playback finishes or the turn scope is cancelled. Production default is `DiscordVoicePlayer`, which synthesizes via the configured TTS client and pushes the resulting PCM through `voice_client.play(...)`. Without a configured TTS client, the loop falls back to `LoggingTTSPlayer`, which only logs intended speech. `MockTTSPlayer` is used in tests.
 - **BotHandle** — adapter exposed to lifecycle wiring so bus-only processors can post back to Discord without holding a direct `discord.Bot` reference. Carries `send_text(channel_id, content)`, a `trigger_typing(channel_id)` async-context-manager factory that surfaces Discord's "Bot is typing…" indicator while a reply streams, a `typing_interrupt` policy seam that translates `on_typing` events into turn cancellations and bot-pingpong backoff (see [Discord text channel knobs](tuning.md#discord-text-channel-knobs)), and a `voice_runtime: dict[int, VoiceRuntime]` map populated by `/subscribe-voice`.
@@ -247,39 +247,9 @@ text event with the voice channel id. Real Discord voice and text channels
 have distinct ids, so production wiring needs an explicit voice-to-text
 fallback channel map (out of scope for the initial cut).
 
-## Per-channel latency knobs
+## Per-channel and per-model tuning
 
-`[channels.<id>]` in `character.toml` overrides four knobs:
-
-- `history_window_size` — how many recent turns `RecentHistoryLayer`
-  pulls for this channel. Overrides the tier default
-  (`[providers.history].voice_window_size` for voice channels,
-  `.text_window_size` for text channels).
-- `total_tokens` — post-assembly trim cap for this channel only. Overrides
-  the `[budget.<tier>].total_tokens` envelope so high-traffic channels can
-  get a tighter budget without touching the global tier default.
-- `prompt_layers` — ordered list of layer names (parsed but not yet
-  applied; the assembler always uses the default stability-descending
-  order regardless of this field).
-- `message_rendering` — `"prefixed"` (always include
-  `[HH:MM display_name]` content prefix; rendered in the familiar's
-  `display_tz`) or `"name_only"` (rely on the OpenAI `name` field
-  alone — saves tokens in DMs).
-
-## Model-specific budget curves
-
-`[budget.model_curves."<model-name>"]` blocks register per-section
-multipliers for a model. All 14 `TierBudget` field names are valid keys;
-unset fields default to 1.0 (no change). Example:
-
-```toml
-[budget.model_curves."claude-opus-4-7"]
-total_tokens = 2.0
-recent_history_tokens = 2.5
-rag_tokens = 1.5
-```
-
-`CharacterConfig.budget_for(tier, channel_id)` applies the curve when the
-tier's active LLM slot uses that model name. The tier→slot mapping is
-`voice→fast`, `text→prose`, `background→background`. Per-channel
-`total_tokens` overrides take precedence over the curve-scaled value.
+`[channels.<id>]` overrides (`history_window_size`, `total_tokens`,
+`prompt_layers`, `message_rendering`) and `[budget.model_curves]`
+per-model multipliers live in
+[Tuning — prompt assembly budget](tuning.md#prompt-assembly-budget).

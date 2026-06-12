@@ -301,7 +301,7 @@ class TwitchWatcher:
         await self.register_listeners(eventsub, send)
         try:
             await eventsub.start()
-            # sleep forever; cancellation from parent TaskGroup ends this
+            # Sleep forever; cancellation from parent TaskGroup ends this
             await asyncio.Event().wait()
         finally:
             await eventsub.stop()

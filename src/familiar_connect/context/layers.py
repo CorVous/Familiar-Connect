@@ -41,12 +41,12 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-# discord mention syntax: <@USER_ID>, ! variant for nick form
+# Discord mention syntax: <@USER_ID>, ! variant for nick form
 _DISCORD_MENTION_RE = re.compile(r"<@!?(\d+)>")
 
-# soft cap on parent reply's full content inlined into child's prefix
+# Soft cap on parent reply's full content inlined into child's prefix
 _REPLY_PARENT_FULL_CAP = 400
-# snippet cap when parent is already in recent window
+# Snippet cap when parent is already in recent window
 _REPLY_PARENT_SNIPPET_CAP = 80
 
 
@@ -165,7 +165,7 @@ class RecentHistoryLayer:
         return ""
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
-        # dynamic — always rebuild. real caching would key on
+        # Dynamic — always rebuild. real caching would key on
         # ``(channel_id, latest_turn_id)`` but turns are still needed,
         # so nothing to reuse.
         return "always-rebuild"
@@ -355,7 +355,7 @@ def _render_fact_line(
             guild_id=guild_id,
             familiar_id=familiar_id,
         )
-        # no row + snapshot ⇒ resolve_label returned raw user_id;
+        # No row + snapshot ⇒ resolve_label returned raw user_id;
         # nothing meaningful to annotate against.
         if current_display == subject.canonical_key.partition(":")[2]:
             continue
@@ -419,7 +419,7 @@ def _truncate(text: str, *, limit: int) -> str:
     return text[: max(0, limit - 1)] + "…"
 
 
-# bio cap for prompt header — long bios bloat context budget;
+# Bio cap for prompt header — long bios bloat context budget;
 # dossier carries the substance, so 240 chars of free text suffices
 _BIO_CHAR_CAP = 240
 
@@ -582,7 +582,7 @@ def _rerank_fact_candidates(
             + importance_weight * importance_q
             + embedding_weight * embedding_q
         )
-        # idx = candidate position from SQL BM25 sort; stable tiebreak
+        # Idx = candidate position from SQL BM25 sort; stable tiebreak
         # so equal-scored facts keep deterministic order
         ranked.append((score, -idx, fact))
     ranked.sort(key=operator.itemgetter(0, 1), reverse=True)
@@ -694,7 +694,7 @@ def _turn_to_message_with_context(
     )
     reactions_suffix = _format_reactions(reactions)
     if role == "tool":
-        # past tool results replay as narration, never protocol ``tool``
+        # Past tool results replay as narration, never protocol ``tool``
         # messages. recent-history drops tool-call linkage, so a bare
         # ``role=tool`` turn orphans (no matching ``tool_use``) and
         # upstream (Anthropic) 500s. render as user-side narration —
@@ -714,7 +714,7 @@ def _turn_to_message_with_context(
     name = sanitize_name(author.canonical_key)
     ts = turn.timestamp.astimezone(tz).strftime("%H:%M")
 
-    # reply marker, depth-adaptive
+    # Reply marker, depth-adaptive
     reply_prefix = ""
     if turn.reply_to_message_id:
         parent = store.lookup_turn_by_platform_message_id(
@@ -845,7 +845,7 @@ class CrossChannelContextLayer:
         return f"{ctx.viewer_mode}:{ctx.channel_id}"
 
     async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
-        return ""  # retired — attentional stream replaces cross-channel summaries
+        return ""  # Retired — attentional stream replaces cross-channel summaries
 
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         sources = self._viewer_map.get(ctx.channel_id or -1, [])
@@ -922,7 +922,7 @@ class PeopleDossierLayer:
             seen.add(key)
             ordered.append(key)
 
-        for turn in reversed(turns):  # newest first
+        for turn in reversed(turns):  # Newest first
             if turn.author is not None:
                 _add(turn.author.canonical_key)
             for key in self._sync.mentions_for_turn(turn_id=turn.id):
@@ -1113,7 +1113,7 @@ class RagContextLayer:
                 self._embedding_weight,
             )
             self._embedder_warned = True
-        # window cutoff for current channel: anything newer than this
+        # Window cutoff for current channel: anything newer than this
         # id is already in RecentHistoryLayer's output
         max_id: int | None = None
         if self._recent_window_size > 0 and ctx.channel_id is not None:
@@ -1157,7 +1157,7 @@ class RagContextLayer:
         if not turn_results and not fact_results:
             return ""
 
-        # build candidate item lines first so token cap applies
+        # Build candidate item lines first so token cap applies
         # uniformly across facts + turns. facts come first — usually
         # higher signal per token than retrieved turns
         fact_lines = [
@@ -1242,10 +1242,10 @@ class RagContextLayer:
                 clock = _format_clock_12h(turn.timestamp, self._tz)
                 content_lines = rewritten.split("\n")
                 lines.append(f"> [{clock} {label}]: {content_lines[0]}")
-                # keep blockquote intact across newlines; bare `>` for
+                # Keep blockquote intact across newlines; bare `>` for
                 # blank lines so spacing inside the quote is preserved
                 lines.extend(f"> {cont}" if cont else ">" for cont in content_lines[1:])
-            lines.append("")  # blank line between date groups
+            lines.append("")  # Blank line between date groups
         if lines and not lines[-1]:
             lines.pop()
         return lines
@@ -1299,7 +1299,7 @@ class ReflectionLayer:
         )
         if not rows:
             return ""
-        # single batched query for stale citations across every row
+        # Single batched query for stale citations across every row
         all_cited_facts: list[int] = []
         for r in rows:
             all_cited_facts.extend(r.cited_fact_ids)
@@ -1470,7 +1470,7 @@ class LorebookLayer:
         idxs = self._matched_indices(entries, scan)
         if not idxs:
             return ""
-        # sort by priority desc; ties keep file order via index
+        # Sort by priority desc; ties keep file order via index
         idxs.sort(key=lambda i: (-entries[i].priority, i))
         idxs = idxs[: self._max_entries]
 

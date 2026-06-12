@@ -68,11 +68,11 @@ class VoiceSource:
         self._channel_id = voice_channel_id
         self._queue = queue
         self._seq = 0
-        # per-user state machine: user_id → current_turn_id (None when idle).
+        # Per-user state machine: user_id → current_turn_id (None when idle).
         # ``None`` user_id is legacy unattributed slot — kept so older
         # mixed-stream paths still work.
         self._turn_ids: dict[int | None, str] = {}
-        # local-endpointer ``on_turn_complete`` perf-counter timestamps
+        # Local-endpointer ``on_turn_complete`` perf-counter timestamps
         # awaiting turn_id. drained on next transcript event for same
         # user_id; latest fire wins if multiple stack up.
         self._pending_vad_end: dict[int, float] = {}
@@ -107,7 +107,7 @@ class VoiceSource:
                 payload={"user_id": user_id},
             )
 
-        # drain pending vad_end ahead of any other phase so gap to
+        # Drain pending vad_end ahead of any other phase so gap to
         # ``stt_final`` emits in order. ``user_id is None`` is legacy
         # unattributed slot — never carries a buffered mark.
         if user_id is not None:
@@ -118,7 +118,7 @@ class VoiceSource:
                 )
 
         if result.is_final:
-            # stamp before publish so recorder sees stt_final ahead of
+            # Stamp before publish so recorder sees stt_final ahead of
             # responder's llm_first_token mark — preserves gap order.
             get_voice_budget_recorder().record(turn_id=turn_id, phase=PHASE_STT_FINAL)
             await self._publish(

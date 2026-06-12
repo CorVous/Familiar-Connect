@@ -81,7 +81,7 @@ class FactEmbeddingWorker:
         texts = [f.text for f in pending]
         vectors = await self._embedder.embed(texts)
         if len(vectors) != len(pending):
-            # backend bug — surface loudly, skip batch;
+            # Backend bug — surface loudly, skip batch;
             # watermark retries next tick
             _logger.warning(
                 f"{ls.tag('FactEmbed', ls.R)} "

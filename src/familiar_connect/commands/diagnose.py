@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# matches ``span=<name>`` + ``ms=<int>`` KV pairs, tolerates ANSI codes
+# Matches ``span=<name>`` + ``ms=<int>`` KV pairs, tolerates ANSI codes
 # and other intervening tokens
 _ANSI = r"(?:\x1b\[\d+m)*"
 _SPAN_RE = re.compile(

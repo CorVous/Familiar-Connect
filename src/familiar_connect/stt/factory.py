@@ -45,7 +45,7 @@ def create_transcriber(config: STTConfig) -> Transcriber:
     if backend == "faster_whisper":
         return _create_faster_whisper(config)
 
-    # unreachable while every _KNOWN_BACKENDS entry has a dispatch arm
+    # Unreachable while every _KNOWN_BACKENDS entry has a dispatch arm
     msg = f"backend {backend!r} accepted but not dispatched"  # pragma: no cover
     raise ValueError(msg)  # pragma: no cover
 
@@ -62,7 +62,7 @@ def _create_parakeet(config: STTConfig) -> Transcriber:
         )
     except RuntimeError as exc:
         # numpy missing → ``ParakeetTranscriber`` module raises on import.
-        # re-raise as ValueError so ``run.py`` catches + warns uniformly.
+        # Re-raise as ValueError so ``run.py`` catches + warns uniformly.
         raise ValueError(str(exc)) from exc
     return create_parakeet_transcriber(config.parakeet)
 

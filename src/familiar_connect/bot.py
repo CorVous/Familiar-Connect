@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from familiar_connect.stt import Transcriber, TranscriptionResult
     from familiar_connect.voice.turn_detection import UtteranceEndpointer
 
-    # outbound text callback. returns posted-message id for reply-chain
+    # Outbound text callback. returns posted-message id for reply-chain
     # tracking, None on send failure. ``reply_to_message_id`` threads
     # via ``MessageReference``; ``mention_user_ids`` →
     # ``AllowedMentions(users=...)`` so only resolved targets ping.
@@ -58,12 +58,12 @@ if TYPE_CHECKING:
         Awaitable[str | None],
     ]
 
-    # py-cord ``Bot is typing…`` indicator hook. Returns fresh async
+    # Py-cord ``Bot is typing…`` indicator hook. Returns fresh async
     # context manager wrapping response generation so indicator stays
     # for duration. Implemented in ``create_bot`` via ``channel.typing()``.
     TriggerTyping = Callable[[int], AsyncContextManager[None]]
 
-    # resolves Discord member for voice turns so they carry same
+    # Resolves Discord member for voice turns so they carry same
     # author attribution as text turns.
     ResolveMember = Callable[[int, int], "Author | None"]
 
@@ -128,16 +128,16 @@ class VoiceRuntime:
     source_task: asyncio.Task[None]
     transcribers: dict[int, Transcriber] = field(default_factory=dict)
     fanin_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
-    # per-user audio drain tasks — one ``send_audio`` + one
+    # Per-user audio drain tasks — one ``send_audio`` + one
     # ``feed_audio`` per chunk per user, parallel across users.
-    # populated lazily on first audio per user_id.
+    # Populated lazily on first audio per user_id.
     user_pump_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
-    # closes per-user streams after extended silence so Deepgram
+    # Closes per-user streams after extended silence so Deepgram
     # doesn't tear them down server-side mid-utterance. reopened
     # lazily on next audio chunk for that user.
     idle_watchdog_task: asyncio.Task[None] | None = None
     # V1 phase 2: per-user local turn-endpointer (TEN-VAD + Smart Turn).
-    # empty when ``familiar.local_turn_detector`` unset.
+    # Empty when ``familiar.local_turn_detector`` unset.
     endpointers: dict[int, UtteranceEndpointer] = field(default_factory=dict)
 
 
@@ -257,12 +257,12 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
     transcribers: dict[int, Transcriber] = {}
     fanin_tasks: dict[int, asyncio.Task[None]] = {}
     endpointers: dict[int, UtteranceEndpointer] = {}
-    # per-user audio drain tasks + inbound queues. router below
+    # Per-user audio drain tasks + inbound queues. router below
     # demuxes shared ``audio_queue`` into these so one slow user's
     # ``send_audio``/``feed_audio`` can't head-of-line-block the rest.
     user_pump_tasks: dict[int, asyncio.Task[None]] = {}
     user_audio_queues: dict[int, asyncio.Queue[bytes]] = {}
-    # last audio-chunk arrival per user (monotonic seconds). drives
+    # Last audio-chunk arrival per user (monotonic seconds). drives
     # idle watchdog below; entries removed when stream closed.
     last_audio_time: dict[int, float] = {}
 
@@ -293,7 +293,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         if detector is not None:
 
             async def _on_complete(_audio: bytes, uid: int = user_id) -> None:
-                # park vad_end ahead of finalize so buffered timestamp
+                # Park vad_end ahead of finalize so buffered timestamp
                 # reaches VoiceSource before resulting stt_final.
                 source.record_vad_end(user_id=uid)
                 target = transcribers.get(uid)
@@ -309,7 +309,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             _fanin(user_id, per_user_q),
             name=f"voice-fanin-{channel_id}-{user_id}",
         )
-        # warm voice-member cache. voice-only users who haven't sent
+        # Warm voice-member cache. voice-only users who haven't sent
         # text aren't in ``guild._members`` (no privileged ``members``
         # intent), so resolver would miss them and bot would log
         # voice turns anonymously. fire-and-forget — fetch races with
@@ -362,7 +362,7 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         reconnect + replay cycle, keeps logs quiet. Stream reopened
         on user's next audio chunk via ``_ensure_transcriber``.
         """
-        # quarter idle window so stale stream closed within ~25 % of
+        # Quarter idle window so stale stream closed within ~25 % of
         # threshold; floor keeps CPU negligible without forcing slow
         # tests to wait a full second per scan.
         interval = max(idle_close_s / 4.0, 0.01)
@@ -460,7 +460,7 @@ async def _stop_voice_intake(
     channel_id: int,
 ) -> None:
     """Cancel pump + source + fan-ins, stop recording, stop every clone."""
-    del familiar  # template not stopped — only clones own connections
+    del familiar  # Template not stopped — only clones own connections
     rt = handle.voice_runtime.pop(channel_id, None)
     if rt is None:
         return
@@ -485,7 +485,7 @@ async def _stop_voice_intake(
         await asyncio.gather(*rt.user_pump_tasks.values(), return_exceptions=True)
     if rt.fanin_tasks:
         await asyncio.gather(*rt.fanin_tasks.values(), return_exceptions=True)
-    # per-user transcriber teardown in parallel — each WS close is
+    # Per-user transcriber teardown in parallel — each WS close is
     # independent. sequential awaits would N-times unsubscribe
     # latency and push slash-command handler past Discord's 3 s
     # interaction-token deadline.
@@ -526,7 +526,7 @@ async def ingest_event(
     one seam to point at. Logging lives in debug processor; this
     function stays narrow.
     """
-    del familiar  # reserved for future per-familiar routing
+    del familiar  # Reserved for future per-familiar routing
     await source.publish_text(
         channel_id=channel_id,
         guild_id=guild_id,
@@ -575,8 +575,8 @@ def compose_content_with_embeds(
     return f"{content}\n\n{embed_text}"
 
 
-# regex for inline image URLs not already captured as attachments/embeds.
-# matches http(s) URLs ending with common image extensions (with optional query string)
+# Regex for inline image URLs not already captured as attachments/embeds.
+# Matches http(s) URLs ending with common image extensions (with optional query string)
 _IMAGE_URL_RE = re.compile(
     r"https?://\S+\.(?:png|jpe?g|gif|webp|bmp|tiff?)(?:\?\S+)?",
     re.IGNORECASE,
@@ -619,8 +619,8 @@ def collect_images(
     content. Assigns img_0, img_1 … ; appends ``[image: img_N (filename)]``
     markers to content. Dedupes by URL — same URL only gets one id.
     """
-    images: dict[str, str] = {}  # img_id → url
-    seen_urls: dict[str, str] = {}  # url → img_id
+    images: dict[str, str] = {}  # Img_id → url
+    seen_urls: dict[str, str] = {}  # Url → img_id
     markers: list[str] = []
 
     def _add(url: str, filename: str) -> None:
@@ -643,7 +643,7 @@ def collect_images(
         img = getattr(embed, "image", None)
         if img is None:
             continue
-        # prefer proxy_url — Discord's re-hosted copy is more reliably fetchable
+        # Prefer proxy_url — Discord's re-hosted copy is more reliably fetchable
         # than the original source URL, which may be unsigned or externally hosted
         url = getattr(img, "proxy_url", None) or getattr(img, "url", None) or ""
         if not url:
@@ -876,7 +876,7 @@ def create_bot(
             _logger.warning("send_text: channel %d not messageable", channel_id)
             return None
 
-        # always restrict who can be pinged. defers @everyone / role
+        # Always restrict who can be pinged. defers @everyone / role
         # decisions to Discord's bot-and-role permissions.
         allowed = discord.AllowedMentions(
             everyone=False,
@@ -1044,7 +1044,7 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             await _reply(ctx, "Could not join voice.")
             return
 
-        # bring up sink + transcriber + voice source. returns None if
+        # Bring up sink + transcriber + voice source. returns None if
         # no transcriber configured — bot still joined for playback.
         rt = await _start_voice_intake(
             handle=handle,
@@ -1070,7 +1070,7 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
         summary = get_span_collector().summary()
         text = render_summary_table(summary)
 
-        # focus + unread summary
+        # Focus + unread summary
         fm = handle.focus_manager
         if fm is not None:
             text_focus = fm.get_focus("text")
@@ -1105,7 +1105,7 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             await ctx.respond("Not in a voice channel here.", ephemeral=True)
             return
 
-        # defer immediately — Discord's interaction token expires after
+        # Defer immediately — Discord's interaction token expires after
         # 3 s. with per-user transcribers each having their own WS,
         # teardown easily exceeds that. defer() converts response to
         # "thinking…"; followup below replaces it.
@@ -1147,7 +1147,7 @@ def _register_events(
         user = bot.user
         if user is not None:
             familiar.bot_user_id = user.id
-        # populate channel name cache so focus logs show names
+        # Populate channel name cache so focus logs show names
         fm = handle.focus_manager
         if fm is not None:
             fm.channel_names.update({
@@ -1204,7 +1204,7 @@ def _register_events(
         )
         # ``message.embeds`` usually empty here — Discord unfurls URLs
         # server-side and fires ``on_message_edit`` a moment later.
-        # pre-cached unfurls (and bot-author embeds, though bots
+        # Pre-cached unfurls (and bot-author embeds, though bots
         # filtered above) do arrive populated, so merge whatever is
         # on inbound message and let edit handler patch the rest.
         text = compose_content_with_embeds(message.content, message.embeds or ())
@@ -1261,7 +1261,7 @@ def _register_events(
     async def on_typing(  # noqa: RUF029 — Discord event handler contract
         channel: discord.abc.Messageable,
         user: discord.User | discord.Member,
-        when: object,  # discord passes a datetime; unused here
+        when: object,  # Discord passes a datetime; unused here
     ) -> None:
         del when
         if handle.typing_interrupt is None:
@@ -1350,7 +1350,7 @@ def _register_events(
         sub = familiar.subscriptions.voice_in_guild(member.guild.id)
         if sub is None or sub.channel_id != after.channel.id:
             return
-        # warm voice-member cache. only reliable place to learn
+        # Warm voice-member cache. only reliable place to learn
         # voice-only members without privileged ``members`` intent —
         # message events miss anyone who never types.
         handle.voice_members[member.id] = Author.from_discord_member(member)

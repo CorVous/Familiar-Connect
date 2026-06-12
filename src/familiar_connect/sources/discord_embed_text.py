@@ -47,7 +47,7 @@ def _format_one(embed: Any) -> str:  # noqa: ANN401 — duck-typed
         header_bits.append(f"({provider_name})")
     if author_name:
         header_bits.append(author_name)
-    # avoid echoing same string twice when embed's title mirrors
+    # Avoid echoing same string twice when embed's title mirrors
     # author handle (common on Tumblr / Bluesky cards).
     if title and title != author_name:
         header_bits.append(title)
@@ -71,7 +71,7 @@ def _format_one(embed: Any) -> str:  # noqa: ANN401 — duck-typed
         lines.append(f"— {footer_text}")
 
     if not lines:
-        # image-only embed: surface link target so LLM at least knows
+        # Image-only embed: surface link target so LLM at least knows
         # a media URL was attached. drop entirely when even url
         # missing — nothing to say.
         if url:

@@ -72,9 +72,9 @@ def _hash_factory(config: EmbeddingConfig) -> Embedder:
 
 
 def _fastembed_factory(config: EmbeddingConfig) -> Embedder:
-    # fail fast at load: a deploy that selects fastembed but lacks the
+    # Fail fast at load: a deploy that selects fastembed but lacks the
     # extra should refuse to start, not crash mid-turn on first embed.
-    # probe the import only (not the ~130 MB model) — startup stays fast,
+    # Probe the import only (not the ~130 MB model) — startup stays fast,
     # model still loads lazily on first embed().
     if importlib.util.find_spec("fastembed") is None:
         msg = (

@@ -439,11 +439,8 @@ the scope. Pinned by
 
 ## Per-channel tuning
 
-`[channels.<id>]` already covers voice-relevant knobs:
-
-- `history_window_size` — trim recent history on busy channels to
-  shave LLM prompt + TTFT.
-- `prompt_layers` — drop expensive layers on low-stakes channels.
-- `message_rendering` — `name_only` saves DM tokens.
-
-V1 adds strategy-level per-channel overrides once A1 lands.
+`[channels.<id>]` already covers voice-relevant knobs — trim
+`history_window_size` on busy channels to shave LLM prompt + TTFT, drop
+expensive layers via `prompt_layers`. See
+[Tuning — per-channel overrides](tuning.md#per-channel-overrides). V1
+adds strategy-level per-channel overrides once A1 lands.

@@ -45,10 +45,10 @@ class ToolContext:
     history: AsyncHistoryStore
     bus: EventBus
     scheduler: Any | None = None  # AlarmScheduler — avoids import cycle
-    images: dict[str, str] = field(default_factory=dict)  # img_id → URL
-    description_llm: LLMClient | None = None  # vision model client
-    focus_manager: FocusManager | None = None  # attentional focus controller
-    store: AsyncHistoryStore | None = None  # explicit store ref for read_channel
+    images: dict[str, str] = field(default_factory=dict)  # Img_id → URL
+    description_llm: LLMClient | None = None  # Vision model client
+    focus_manager: FocusManager | None = None  # Attentional focus controller
+    store: AsyncHistoryStore | None = None  # Explicit store ref for read_channel
 
 
 @dataclass

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger("familiar_connect.tts_player.discord")
 
 _POLL_S = 0.02
-# max wait after ``vc.stop()`` for pycord's audio thread to flip
+# Max wait after ``vc.stop()`` for pycord's audio thread to flip
 # ``is_playing()`` to False before releasing play lock. Pycord checks
 # the stop flag on each ~20 ms tick so real wait is one or two polls;
 # upper bound is a safety net for a wedged audio thread. Without this
@@ -83,7 +83,7 @@ class DiscordVoicePlayer:
     ) -> None:
         self._tts = tts_client
         self._get_voice_client = get_voice_client
-        # serialize playback. per-user scopes (voice_responder) let two
+        # Serialize playback. per-user scopes (voice_responder) let two
         # speakers' replies coexist, but ``VoiceClient`` is single-track
         # — concurrent ``vc.play`` raises
         # ``ClientException('Already playing audio.')``. this lock makes
@@ -93,7 +93,7 @@ class DiscordVoicePlayer:
     async def speak(self, text: str, *, scope: TurnScope) -> None:
         if scope.is_cancelled():
             return
-        # defense-in-depth: Cartesia 400s on empty/whitespace transcript
+        # Defense-in-depth: Cartesia 400s on empty/whitespace transcript
         if not text.strip():
             _logger.warning(
                 f"{ls.tag('Player', ls.Y)} "
@@ -162,7 +162,7 @@ class DiscordVoicePlayer:
             try:
                 vc.play(source)
             except discord.ClientException as exc:
-                # belt-and-braces — shouldn't happen with lock held
+                # Belt-and-braces — shouldn't happen with lock held
                 _logger.warning(
                     f"{ls.tag('Player', ls.R)} "
                     f"{ls.kv('play_error', repr(exc), vc=ls.R)}"
@@ -189,7 +189,7 @@ class DiscordVoicePlayer:
                         return
                     await asyncio.sleep(_POLL_S)
             finally:
-                # ensure feeder unwinds — under cancellation pycord's
+                # Ensure feeder unwinds — under cancellation pycord's
                 # cleanup already closed the source, but on natural
                 # drain the producer may still be appending tail bytes
                 source.close_input()

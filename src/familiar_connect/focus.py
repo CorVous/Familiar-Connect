@@ -18,9 +18,9 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# default focused-channel silence before a non-focused arrival nudges the model
+# Default focused-channel silence before a non-focused arrival nudges the model
 _DEFAULT_IDLE_WAKE_S = 120.0
-# debounce window: rapid arrivals within this window share one nudge
+# Debounce window: rapid arrivals within this window share one nudge
 _DEFAULT_NUDGE_DEBOUNCE_S = 30.0
 
 
@@ -54,20 +54,20 @@ class FocusManager:
         self._subscriptions = subscriptions
         self._text_focus: int | None = None
         self._voice_focus: int | None = None
-        self._pending_shift: dict[str, int] = {}  # modality -> channel_id
+        self._pending_shift: dict[str, int] = {}  # Modality -> channel_id
         self._text_lock = asyncio.Lock()
         self._voice_lock = asyncio.Lock()
-        # idle-nudge state
+        # Idle-nudge state
         self._clock = clock
         self._idle_wake_seconds = idle_wake_seconds
         self._nudge_debounce_seconds = nudge_debounce_seconds
         self._last_active = clock()
-        self._last_nudge: float = float("-inf")  # never nudged initially
-        # channel_id → display name; populated by bot on_ready
+        self._last_nudge: float = float("-inf")  # Never nudged initially
+        # Channel_id → display name; populated by bot on_ready
         self.channel_names: dict[int, str] = {}
-        # channel_id → guild name; populated by bot on_ready
+        # Channel_id → guild name; populated by bot on_ready
         self.guild_names: dict[int, str] = {}
-        # called once after end_turn applies ≥1 shift; None disables
+        # Called once after end_turn applies ≥1 shift; None disables
         self.on_shift: Callable[[], Awaitable[None]] | None = None
 
     async def initialize(self) -> None:
@@ -122,7 +122,7 @@ class FocusManager:
 
     async def end_turn(self) -> None:
         """Apply pending focus shifts; called after each turn completes."""
-        self._last_active = self._clock()  # reset idle clock
+        self._last_active = self._clock()  # Reset idle clock
         shifted = False
         for modality, channel_id in list(self._pending_shift.items()):
             lock = self._voice_lock if modality == "voice" else self._text_lock

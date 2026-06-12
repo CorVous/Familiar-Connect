@@ -29,7 +29,7 @@ class Resampler48to16:
     """
 
     def __init__(self) -> None:
-        # held int samples carried into next feed (0, 1, or 2)
+        # Held int samples carried into next feed (0, 1, or 2)
         self._carry: list[int] = []
 
     def reset(self) -> None:
@@ -84,8 +84,8 @@ def mono_to_stereo(data: bytes) -> bytes:
     for i in range(0, len(data), 2):
         sample = data[i : i + 2]
         out_off = i * 2
-        result[out_off : out_off + 2] = sample  # left
-        result[out_off + 2 : out_off + 4] = sample  # right
+        result[out_off : out_off + 2] = sample  # Left
+        result[out_off + 2 : out_off + 4] = sample  # Right
     return bytes(result)
 
 
@@ -107,7 +107,7 @@ class StreamingPCMSource(discord.AudioSource):
 
     def __init__(self) -> None:
         self._buf = bytearray()
-        # condition guards both ``_buf`` and ``_closed``
+        # Condition guards both ``_buf`` and ``_closed``
         self._cond = threading.Condition()
         self._closed = False
 
@@ -134,7 +134,7 @@ class StreamingPCMSource(discord.AudioSource):
                 del self._buf[:DISCORD_FRAME_SIZE]
                 return out
             if self._buf:
-                # zero-pad final partial frame so pycord plays it before stop
+                # Zero-pad final partial frame so pycord plays it before stop
                 out = bytes(self._buf) + b"\x00" * (DISCORD_FRAME_SIZE - len(self._buf))
                 self._buf.clear()
                 return out
@@ -144,7 +144,7 @@ class StreamingPCMSource(discord.AudioSource):
         return False
 
     def cleanup(self) -> None:
-        # called by pycord on player stop; release any blocked reader
+        # Called by pycord on player stop; release any blocked reader
         self.close_input()
 
 

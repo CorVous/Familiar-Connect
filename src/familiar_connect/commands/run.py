@@ -221,7 +221,7 @@ def _default_assembler(
             ),
             CrossChannelContextLayer(
                 store=store,
-                viewer_map={},  # populated by per-channel config when present
+                viewer_map={},  # Populated by per-channel config when present
                 ttl_seconds=600,
                 max_tokens=budget.cross_channel_tokens,
             ),
@@ -240,7 +240,7 @@ def _default_assembler(
                 store=store,
                 max_results=budget.max_rag_turns,
                 max_facts=budget.max_rag_facts,
-                # match RecentHistoryLayer's window so RAG only surfaces
+                # Match RecentHistoryLayer's window so RAG only surfaces
                 # turns *older* than what's already shown verbatim
                 recent_window_size=window_size,
                 max_tokens=budget.rag_tokens,
@@ -386,7 +386,7 @@ def _install_shutdown_handlers(stop: asyncio.Event) -> Callable[[], None]:
         try:
             loop.add_signal_handler(sig, _on_signal, sig.name)
         except (NotImplementedError, RuntimeError, ValueError):
-            # no asyncio signal support here — KeyboardInterrupt covers it
+            # No asyncio signal support here — KeyboardInterrupt covers it
             _logger.debug("signal handler unavailable for %s", sig.name)
         else:
             installed.append(sig)
@@ -410,7 +410,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     )
     await focus_manager.initialize()
 
-    # startup default: if no focus pointer persisted, use first subscribed
+    # Startup default: if no focus pointer persisted, use first subscribed
     # channel per modality so attentional stream is always live.
     for sub in familiar.subscriptions.all():
         if (
@@ -456,10 +456,10 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     else:
         tts_player = LoggingTTSPlayer()
 
-    # tool-calling: scheduler + split registries + per-turn context factory.
-    # voice registry: alarm + cancel only (view_image NEVER in voice).
-    # text registry: alarm + cancel + view_image (when image_tools enabled).
-    # familiar's ``llm_clients`` already carry ``tool_calling_enabled`` (see
+    # Tool-calling: scheduler + split registries + per-turn context factory.
+    # Voice registry: alarm + cancel only (view_image NEVER in voice).
+    # Text registry: alarm + cancel + view_image (when image_tools enabled).
+    # Familiar's ``llm_clients`` already carry ``tool_calling_enabled`` (see
     # :func:`create_llm_clients`); responders check that flag before
     # entering the agentic loop, so wiring is always safe.
     alarm_scheduler = AlarmScheduler(
@@ -483,7 +483,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         activity_engine=activity_engine,
     )
 
-    # description client: used by view_image handler via ToolContext
+    # Description client: used by view_image handler via ToolContext
     description_llm = familiar.llm_clients.get("__image_description__")
 
     def _make_tool_context(
@@ -556,14 +556,14 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         context=projector_context,
     )
 
-    # load pending alarms now so they start counting down before
+    # Load pending alarms now so they start counting down before
     # bot accepts new traffic
     await alarm_scheduler.start()
     # reload any in-flight activity + arm idle-nudge loop
     if activity_engine is not None:
         await activity_engine.start()
 
-    # cooperative shutdown: SIGINT/SIGTERM set the event, the supervisor
+    # Cooperative shutdown: SIGINT/SIGTERM set the event, the supervisor
     # task unwinds the group, and the finally below tears down in order
     # (see _install_shutdown_handlers)
     stop = asyncio.Event()
@@ -589,12 +589,12 @@ async def _async_main(token: str, familiar: Familiar) -> None:
                 tg.create_task(proj.run(), name=proj.name)
             tg.create_task(handle.bot.start(token), name="discord-bot")
     except* _GracefulShutdown:
-        # signal-initiated: siblings already cancelled by the group;
+        # Signal-initiated: siblings already cancelled by the group;
         # fall through to finally for orderly teardown
         _logger.info(f"{ls.tag('Shutdown', ls.G)} {ls.word('clean', ls.LG)}")
     finally:
         remove_signal_handlers()
-        # close py-cord first so its aiohttp ClientSession doesn't leak
+        # Close py-cord first so its aiohttp ClientSession doesn't leak
         # past loop shutdown; suppress so close error can't mask the
         # original exception that triggered the finally
         with contextlib.suppress(Exception):
@@ -614,16 +614,16 @@ async def _async_main(token: str, familiar: Familiar) -> None:
 
 
 _OPUS_FALLBACK_PATHS = [
-    # macOS — Homebrew
-    "/opt/homebrew/lib/libopus.dylib",  # apple silicon
-    "/usr/local/lib/libopus.dylib",  # intel
-    # macOS — MacPorts
+    # MacOS — Homebrew
+    "/opt/homebrew/lib/libopus.dylib",  # Apple silicon
+    "/usr/local/lib/libopus.dylib",  # Intel
+    # MacOS — MacPorts
     "/opt/local/lib/libopus.dylib",
     # Linux — common distro paths
-    "/usr/lib/x86_64-linux-gnu/libopus.so.0",  # debian/ubuntu amd64
-    "/usr/lib/aarch64-linux-gnu/libopus.so.0",  # debian/ubuntu arm64
-    "/usr/lib64/libopus.so.0",  # fedora/RHEL/centos
-    "/usr/lib/libopus.so.0",  # arch/alpine
+    "/usr/lib/x86_64-linux-gnu/libopus.so.0",  # Debian/ubuntu amd64
+    "/usr/lib/aarch64-linux-gnu/libopus.so.0",  # Debian/ubuntu arm64
+    "/usr/lib64/libopus.so.0",  # Fedora/RHEL/centos
+    "/usr/lib/libopus.so.0",  # Arch/alpine
     "/usr/lib/libopus.so",
     # Windows — common install locations
     "C:\\Windows\\System32\\opus.dll",
@@ -674,7 +674,7 @@ def run(args: argparse.Namespace) -> int:
         _logger.error("%s", exc)
         return 1
 
-    # load merged character config first so both LLM client and TTS
+    # Load merged character config first so both LLM client and TTS
     # client factories have access to per-slot model selections and
     # [tts] voice id/model
     defaults_path = familiar_root.parent / "_default" / "character.toml"

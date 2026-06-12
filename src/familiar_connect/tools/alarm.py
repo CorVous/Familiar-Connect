@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 
 _MAX_REASON_LEN = 200
 _MIN_DELAY_S = 1
-_MAX_DELAY_S = 60 * 60 * 24 * 365  # one year cap — defensive
-# allow tiny past-skew so an immediate ``now`` doesn't bounce
+_MAX_DELAY_S = 60 * 60 * 24 * 365  # One year cap — defensive
+# Allow tiny past-skew so an immediate ``now`` doesn't bounce
 _PAST_SKEW_S = 5
 
 

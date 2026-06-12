@@ -34,7 +34,7 @@ class HistoryWriter:
     def __init__(self, *, store: AsyncHistoryStore, familiar_id: str) -> None:
         self._store = store
         self._familiar_id = familiar_id
-        # in-process dedup set; survives a single run. acceptable
+        # In-process dedup set; survives a single run. acceptable
         # because bus doesn't republish on retry today
         self._seen: set[str] = set()
 

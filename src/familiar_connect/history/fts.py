@@ -37,7 +37,7 @@ _logger = logging.getLogger(__name__)
 # tantivy `_writer.commit()` occasionally hits Windows file locks held
 # briefly by Defender/AV on freshly-written segment files; back off and
 # retry rather than letting one .term collision tear down the bot.
-# delays are seconds; total worst-case wait ≈ 0.75s before re-raise.
+# Delays are seconds; total worst-case wait ≈ 0.75s before re-raise.
 _COMMIT_RETRY_DELAYS: tuple[float, ...] = (0.05, 0.2, 0.5)
 
 # tantivy raises a plain ValueError whose message wraps a Rust `IoError`
@@ -55,7 +55,7 @@ def _is_transient_lock_error(exc: ValueError) -> bool:
     return any(sig in msg for sig in _LOCK_SIGNATURES)
 
 
-# drop common English stopwords before FTS matching. without this,
+# Drop common English stopwords before FTS matching. without this,
 # chat cues like "hey do you know about X" dilute BM25 and produce
 # noisy hits on filler. same list as pre-Turso FTS5 path.
 _FTS_STOPWORDS: tuple[str, ...] = (
@@ -152,7 +152,7 @@ _ANALYZER_NAME = "familiar_en"
 
 
 def _build_analyzer() -> tantivy.TextAnalyzer:
-    # stemmer covers old `fox*` prefix-match trick for plurals
+    # Stemmer covers old `fox*` prefix-match trick for plurals
     # (fox/foxes, bear/bears) without dragging in unrelated prefixes
     # (foxhound). remove_long caps token length so URLs + garbage
     # can't bloat index — matches unicode61's 64-char default.
@@ -196,7 +196,7 @@ class FtsIndex:
             self._index = tantivy.Index(schema, path=str(self._path), reuse=True)
         self._index.register_tokenizer(_ANALYZER_NAME, _build_analyzer())
         self._lock = RLock()
-        # one persistent writer per index — cheaper than open/close per write.
+        # One persistent writer per index — cheaper than open/close per write.
         self._writer = self._index.writer(heap_size=15_000_000, num_threads=1)
 
     def _commit_writer(self) -> None:
@@ -226,7 +226,7 @@ class FtsIndex:
                 time.sleep(delay)
             else:
                 return
-        # final attempt — let any error propagate to caller.
+        # Final attempt — let any error propagate to caller.
         self._commit_writer()
 
     def add(self, row_id: int, content: str) -> None:
@@ -235,7 +235,7 @@ class FtsIndex:
             doc = tantivy.Document()
             doc.add_integer("row_id", int(row_id))
             doc.add_text("content", content)
-            # upsert — delete any prior doc with same row_id.
+            # Upsert — delete any prior doc with same row_id.
             self._writer.delete_documents("row_id", int(row_id))
             self._writer.add_document(doc)
             self._commit()

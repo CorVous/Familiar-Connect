@@ -42,7 +42,7 @@ _logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-# result rows come back as ``turso.Row``; spell as ``Any`` to keep
+# Result rows come back as ``turso.Row``; spell as ``Any`` to keep
 # private ``_row_to_*`` helpers free of a third-party type alias
 Row = Any
 
@@ -73,7 +73,7 @@ class HistoryTurn:
     platform_message_id: str | None = None
     reply_to_message_id: str | None = None
     guild_id: int | None = None
-    arrived_at: datetime | None = None  # immutable ingest time; None on legacy rows
+    arrived_at: datetime | None = None  # Immutable ingest time; None on legacy rows
     consumed_at: datetime | None = None  # None = staged
 
 
@@ -648,16 +648,16 @@ class HistoryStore:
                 self._conn.commit()
             except Exception:  # noqa: BLE001, S110  # column already exists
                 pass
-        # backfill: existing rows treat timestamp as arrived_at
+        # Backfill: existing rows treat timestamp as arrived_at
         self._conn.execute(
             "UPDATE turns SET arrived_at = timestamp WHERE arrived_at IS NULL"
         )
-        # backfill: existing rows are considered already consumed
+        # Backfill: existing rows are considered already consumed
         self._conn.execute(
             "UPDATE turns SET consumed_at = timestamp WHERE consumed_at IS NULL"
         )
         self._conn.commit()
-        # create cross-channel ordering index after columns exist
+        # Create cross-channel ordering index after columns exist
         self._conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_turns_consumed
@@ -1346,7 +1346,7 @@ class HistoryStore:
                 return str(row["global_name"])
             if row["username"]:
                 return str(row["username"])
-        # snapshot fallback: latest turn carries an Author whose
+        # Snapshot fallback: latest turn carries an Author whose
         # display_name was correct at write time. cheaper than a
         # join; sensible "last we saw them" answer for legacy rows
         # pre-dating the accounts table.
@@ -1356,7 +1356,7 @@ class HistoryStore:
             )
             if snapshot is not None:
                 return snapshot.label
-        # fall back to user_id portion of canonical_key
+        # Fall back to user_id portion of canonical_key
         if ":" in canonical_key:
             return canonical_key.partition(":")[2] or canonical_key
         return canonical_key
@@ -1941,7 +1941,7 @@ class HistoryStore:
         """
         if limit <= 0:
             return []
-        # overfetch from FTS so post-filter (familiar/channel/max_id)
+        # Overfetch from FTS so post-filter (familiar/channel/max_id)
         # doesn't starve the result. cap at 10x to bound work
         fts_limit = max(limit * 4, limit)
         hits = self._fts_turns.search(query, limit=fts_limit)
@@ -1970,7 +1970,7 @@ class HistoryStore:
             params,
         ).fetchall()
         turns = [_row_to_turn(r) for r in rows]
-        # re-rank by BM25 desc (higher = better in tantivy), tie-break
+        # Re-rank by BM25 desc (higher = better in tantivy), tie-break
         # newer-first to match old ``ORDER BY ..., t.id DESC``
         turns.sort(key=lambda t: (-score_by_id.get(t.id, 0.0), -t.id))
         return turns[:limit]
@@ -2185,7 +2185,7 @@ class HistoryStore:
         """
         if limit <= 0:
             return []
-        # overfetch from FTS so validity/familiar filters don't
+        # Overfetch from FTS so validity/familiar filters don't
         # starve the result. 4x is enough in practice (validity cheap)
         fts_limit = max(limit * 4, limit)
         hits = self._fts_facts.search(query, limit=fts_limit)
@@ -2535,7 +2535,7 @@ class HistoryStore:
                 (familiar_id, limit),
             ).fetchall()
         else:
-            # include channel-agnostic rows (channel_id IS NULL) so a
+            # Include channel-agnostic rows (channel_id IS NULL) so a
             # global reflection still surfaces in any channel
             rows = self._conn.execute(
                 """

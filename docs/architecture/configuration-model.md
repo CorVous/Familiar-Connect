@@ -113,5 +113,5 @@ meaningful selection.
 
 `data/familiars/<id>/subscriptions.toml` — which Discord channels the
 bot listens in. Written by `/subscribe-text` and `/subscribe-voice`.
-Not editable by hand in practice; the slash commands rewrite the whole
-file on every mutation.
+Not meant for hand edits — the slash commands rewrite the whole file on
+every mutation.
