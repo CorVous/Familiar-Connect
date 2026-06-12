@@ -1,0 +1,546 @@
+"""Dream / opinion-formation pass — bucketing, candidates, synthesis, apply."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+
+import pytest
+
+from familiar_connect.history.async_store import AsyncHistoryStore
+from familiar_connect.history.store import HistoryStore, HistoryTurn
+from familiar_connect.identity import Author, is_self_key
+from familiar_connect.sleep.dream import (
+    Candidate,
+    DayBatch,
+    DreamPlan,
+    DreamWindow,
+    OpinionFact,
+    _build_synthesis_prompt,
+    _render_turn,
+    apply_dream,
+    bucket_by_day,
+    dream_audit,
+    extract_candidates,
+    gather_days,
+    plan_dream,
+    validate_opinions,
+)
+from tests.conftest import FakeLLMClient
+
+
+def _user_turn(tid: int, display_name: str, content: str = "hi") -> HistoryTurn:
+    return HistoryTurn(
+        id=tid,
+        timestamp=datetime(2026, 6, 12, tzinfo=UTC),
+        role="user",
+        author=Author(
+            platform="discord",
+            user_id=str(tid),
+            username="u",
+            display_name=display_name,
+        ),
+        content=content,
+        channel_id=1,
+    )
+
+
+class TestRenderTurn:
+    def test_self_turn_marked_you(self) -> None:
+        r = _render_turn(_turn(1, datetime(2026, 6, 12, tzinfo=UTC)), "Sapphire")
+        assert "(you)" in r
+        assert "Sapphire" in r
+
+    def test_same_named_user_disambiguated(self) -> None:
+        # a user posting under HER name must not read as her own turn
+        r = _render_turn(_user_turn(2, "Sapphire"), "Sapphire")
+        assert "(you)" not in r
+        assert "not you" in r.lower()
+
+    def test_other_user_plain(self) -> None:
+        r = _render_turn(_user_turn(3, "Aria"), "Sapphire")
+        assert "Aria" in r
+        assert "(you)" not in r
+        assert "not you" not in r.lower()
+
+
+def _turn(
+    tid: int, when: datetime, role: str = "assistant", content: str = "x"
+) -> HistoryTurn:
+    return HistoryTurn(
+        id=tid,
+        timestamp=when,
+        role=role,
+        author=None,
+        content=content,
+        channel_id=1,
+    )
+
+
+class TestBucketByDay:
+    def test_buckets_by_local_calendar_day(self) -> None:
+        # 02:00Z = 2026-06-11 19:00 PT ; 10:00Z = 2026-06-12 03:00 PT
+        turns = (
+            _turn(1, datetime(2026, 6, 12, 2, 0, tzinfo=UTC)),
+            _turn(2, datetime(2026, 6, 12, 10, 0, tzinfo=UTC)),
+        )
+        days = bucket_by_day(turns, "America/Los_Angeles")
+        assert [d.date for d in days] == ["2026-06-11", "2026-06-12"]
+        assert days[0].turn_ids == frozenset({1})
+        assert days[1].turn_ids == frozenset({2})
+
+    def test_days_ordered_oldest_first(self) -> None:
+        turns = (
+            _turn(2, datetime(2026, 6, 13, 12, 0, tzinfo=UTC)),
+            _turn(1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC)),
+        )
+        days = bucket_by_day(turns, "UTC")
+        assert [d.date for d in days] == ["2026-06-12", "2026-06-13"]
+
+    def test_self_turn_ids_are_assistant_role(self) -> None:
+        turns = (
+            _turn(1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC), role="assistant"),
+            _turn(2, datetime(2026, 6, 12, 12, 1, tzinfo=UTC), role="user"),
+        )
+        day = bucket_by_day(turns, "UTC")[0]
+        assert day.self_turn_ids == frozenset({1})
+        assert day.turn_ids == frozenset({1, 2})
+
+    def test_empty(self) -> None:
+        assert bucket_by_day((), "UTC") == []
+
+
+class TestGatherDays:
+    @pytest.mark.asyncio
+    async def test_gathers_turns_since_watermark(self) -> None:
+        raw = HistoryStore(":memory:")
+        for _ in range(3):
+            raw.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="assistant",
+                content="hi",
+                author=None,
+            )
+        store = AsyncHistoryStore(raw)
+        win = await gather_days(store, familiar_id="fam", display_tz="UTC")
+        # all today (now) -> one day bucket, 3 turns
+        assert win.max_turn_id == 3
+        total = sum(len(d.turns) for d in win.days)
+        assert total == 3
+
+    @pytest.mark.asyncio
+    async def test_respects_prior_turn_watermark(self) -> None:
+        raw = HistoryStore(":memory:")
+        for _ in range(4):
+            raw.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="assistant",
+                content="hi",
+                author=None,
+            )
+        raw.advance_sleep_watermark(familiar_id="fam", last_turn_id=2)
+        store = AsyncHistoryStore(raw)
+        win = await gather_days(store, familiar_id="fam", display_tz="UTC")
+        ids = {t.id for d in win.days for t in d.turns}
+        assert ids == {3, 4}
+
+
+def _day(date: str, turns: tuple[HistoryTurn, ...]) -> DayBatch:
+    return DayBatch(date=date, turns=turns)
+
+
+def _window(days: tuple[DayBatch, ...]) -> DreamWindow:
+    max_id = max((t.id for d in days for t in d.turns), default=0)
+    return DreamWindow(
+        familiar_id="fam", days=days, prior_watermark=None, max_turn_id=max_id
+    )
+
+
+class TestExtractCandidates:
+    @pytest.mark.asyncio
+    async def test_keeps_only_in_day_turn_ids(self) -> None:
+        day = _day(
+            "2026-06-12",
+            (
+                _turn(1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC), role="assistant"),
+                _turn(2, datetime(2026, 6, 12, 12, 1, tzinfo=UTC), role="user"),
+            ),
+        )
+        # LLM cites a real id (1) and a hallucinated out-of-day id (999)
+        reply = json.dumps({
+            "candidates": [{"text": "She liked the joke.", "turn_ids": [1, 999]}]
+        })
+        cands = await extract_candidates(
+            FakeLLMClient(replies=[reply]), day, self_name="Sapphire", denylist=()
+        )
+        assert len(cands) == 1
+        assert cands[0].turn_ids == (1,)  # 999 dropped
+
+    @pytest.mark.asyncio
+    async def test_drops_candidate_with_no_valid_ids(self) -> None:
+        day = _day(
+            "2026-06-12",
+            (_turn(1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC)),),
+        )
+        reply = json.dumps({"candidates": [{"text": "ungrounded", "turn_ids": [999]}]})
+        cands = await extract_candidates(
+            FakeLLMClient(replies=[reply]), day, self_name="Sapphire", denylist=()
+        )
+        assert cands == []
+
+
+def _cand(text: str, date: str, turn_ids: tuple[int, ...]) -> Candidate:
+    return Candidate(text=text, date=date, turn_ids=turn_ids)
+
+
+class TestSynthesisPrompt:
+    def test_prompt_instructs_importance_rating(self) -> None:
+        msgs = _build_synthesis_prompt(
+            [_cand("likes lo-fi", "2026-06-12", (1,))],
+            self_name="Sapphire",
+            prior_self_dossier=None,
+        )
+        system = msgs[0].content
+        assert isinstance(system, str)
+        assert "importance" in system.lower()
+        # rubric anchors present
+        assert "1-10" in system
+
+
+class TestValidateOpinions:
+    def _win(self) -> DreamWindow:
+        return _window((
+            _day(
+                "2026-06-12",
+                (
+                    _turn(
+                        1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC), role="assistant"
+                    ),
+                    _turn(2, datetime(2026, 6, 12, 12, 1, tzinfo=UTC), role="user"),
+                ),
+            ),
+            _day(
+                "2026-06-20",
+                (_turn(5, datetime(2026, 6, 20, 12, 0, tzinfo=UTC), role="assistant"),),
+            ),
+        ))
+
+    def test_accepts_grounded_and_sets_valid_from_earliest(self) -> None:
+        cands = [
+            _cand("likes lo-fi", "2026-06-12", (1,)),
+            _cand("again", "2026-06-20", (5,)),
+        ]
+        raw = [
+            {"text": "Sapphire loves lo-fi.", "source_turn_ids": [1, 5], "reason": "x"}
+        ]
+        plan = validate_opinions(
+            raw,
+            candidates=cands,
+            window=self._win(),
+            cap=50,
+        )
+        assert len(plan.opinions) == 1
+        op = plan.opinions[0]
+        assert set(op.source_turn_ids) == {1, 5}
+        assert op.valid_from_date == "2026-06-12"  # earliest
+
+    def test_rejects_grounding_outside_candidate_union(self) -> None:
+        cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
+        raw = [{"text": "x", "source_turn_ids": [1, 5], "reason": "x"}]
+        plan = validate_opinions(
+            raw,
+            candidates=cands,
+            window=self._win(),
+            cap=50,
+        )
+        assert plan.opinions == ()
+        assert plan.rejected[0].rail == "ungrounded"
+
+    def test_rejects_zero_grounding(self) -> None:
+        cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
+        raw = [{"text": "x", "source_turn_ids": [], "reason": "x"}]
+        plan = validate_opinions(
+            raw,
+            candidates=cands,
+            window=self._win(),
+            cap=50,
+        )
+        assert plan.opinions == ()
+        assert plan.rejected[0].rail == "ungrounded"
+
+    def test_flags_no_self_authored_grounding(self) -> None:
+        # turn 2 is a user turn; an opinion grounded only there isn't HER act
+        cands = [_cand("room said", "2026-06-12", (2,))]
+        raw = [
+            {
+                "text": "Sapphire thinks tea is nice.",
+                "source_turn_ids": [2],
+                "reason": "x",
+            }
+        ]
+        plan = validate_opinions(
+            raw,
+            candidates=cands,
+            window=self._win(),
+            cap=50,
+        )
+        assert len(plan.opinions) == 1
+        assert plan.opinions[0].self_grounded is False
+        assert any("no_self_authored" in f for f in plan.flags)
+
+    def test_dedups_restatements(self) -> None:
+        cands = [_cand("a", "2026-06-12", (1,)), _cand("b", "2026-06-20", (5,))]
+        raw = [
+            {"text": "Sapphire loves lo-fi.", "source_turn_ids": [1], "reason": "x"},
+            {"text": "Sapphire loves lo-fi!", "source_turn_ids": [5], "reason": "x"},
+        ]
+        plan = validate_opinions(
+            raw,
+            candidates=cands,
+            window=self._win(),
+            cap=50,
+        )
+        assert len(plan.opinions) == 1
+        assert any(r.rail == "duplicate" for r in plan.rejected)
+
+    def test_cap(self) -> None:
+        cands = [_cand(f"c{i}", "2026-06-12", (1,)) for i in range(5)]
+        raw = [
+            {"text": f"op {i}", "source_turn_ids": [1], "reason": "x"} for i in range(5)
+        ]
+        plan = validate_opinions(
+            raw,
+            candidates=cands,
+            window=self._win(),
+            cap=3,
+        )
+        assert len(plan.opinions) == 3
+        assert sum(1 for r in plan.rejected if r.rail == "cap") == 2
+
+    def test_reads_importance_from_model(self) -> None:
+        cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
+        raw = [
+            {
+                "text": "Sapphire loves lo-fi.",
+                "source_turn_ids": [1],
+                "reason": "x",
+                "importance": 8,
+            }
+        ]
+        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        assert plan.opinions[0].importance == 8
+
+    def test_importance_clamped_high(self) -> None:
+        cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
+        raw = [
+            {
+                "text": "Sapphire loves lo-fi.",
+                "source_turn_ids": [1],
+                "reason": "x",
+                "importance": 99,
+            }
+        ]
+        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        assert plan.opinions[0].importance == 10
+
+    def test_importance_defaults_to_neutral_when_zero(self) -> None:
+        # 0 is out-of-range low -> clamp; absent/non-int -> default 5
+        cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
+        raw = [
+            {
+                "text": "Sapphire loves lo-fi.",
+                "source_turn_ids": [1],
+                "reason": "x",
+                "importance": 0,
+            }
+        ]
+        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        assert plan.opinions[0].importance == 1
+
+    def test_importance_missing_defaults_to_five(self) -> None:
+        cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
+        raw = [{"text": "Sapphire loves lo-fi.", "source_turn_ids": [1], "reason": "x"}]
+        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        # absent importance -> neutral 5, opinion still accepted
+        assert len(plan.opinions) == 1
+        assert plan.opinions[0].importance == 5
+
+    def test_importance_non_integer_defaults_to_five(self) -> None:
+        cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
+        raw = [
+            {
+                "text": "Sapphire loves lo-fi.",
+                "source_turn_ids": [1],
+                "reason": "x",
+                "importance": "very",
+            }
+        ]
+        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        assert len(plan.opinions) == 1
+        assert plan.opinions[0].importance == 5
+
+
+class TestPlanDream:
+    @pytest.mark.asyncio
+    async def test_end_to_end(self) -> None:
+        raw = HistoryStore(":memory:")
+        raw.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content="lo-fi is real music, fight me",
+            author=None,
+        )
+        store = AsyncHistoryStore(raw)
+        # day-1 candidate reply, then synthesis reply
+        cand_reply = json.dumps({
+            "candidates": [{"text": "defends lo-fi", "turn_ids": [1]}]
+        })
+        synth_reply = json.dumps({
+            "opinions": [
+                {
+                    "text": "Sapphire is fiercely protective of lo-fi as real music.",
+                    "source_turn_ids": [1],
+                    "reason": "defended it",
+                }
+            ]
+        })
+        llm = FakeLLMClient(replies=[cand_reply, synth_reply])
+        plan = await plan_dream(
+            store, llm, familiar_id="fam", display_tz="UTC", self_name="Sapphire"
+        )
+        assert len(plan.opinions) == 1
+        assert plan.opinions[0].source_turn_ids == (1,)
+        assert plan.new_last_turn_id == 1
+
+
+def _opinion(
+    text: str,
+    ids: tuple[int, ...],
+    date: str,
+    *,
+    self_grounded: bool = True,
+    importance: int = 5,
+) -> OpinionFact:
+    return OpinionFact(
+        text=text,
+        source_turn_ids=ids,
+        valid_from_date=date,
+        self_grounded=self_grounded,
+        importance=importance,
+    )
+
+
+class TestApplyDream:
+    @pytest.mark.asyncio
+    async def test_mints_self_facts_with_provenance_and_valid_from(self) -> None:
+        raw = HistoryStore(":memory:")
+        raw.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content="lo-fi is real music",
+            author=None,
+        )
+        store = AsyncHistoryStore(raw)
+        plan = DreamPlan(
+            familiar_id="fam",
+            opinions=(
+                _opinion("Sapphire defends lo-fi as real music.", (1,), "2026-06-12"),
+            ),
+            rejected=(),
+            flags=(),
+            new_last_turn_id=1,
+        )
+        report = await apply_dream(store, plan, familiar_display_name="Sapphire")
+        assert len(report.minted) == 1
+        fact = raw.recent_facts(familiar_id="fam", limit=10)[0]
+        assert fact.source_turn_ids == (1,)
+        assert is_self_key(fact.subjects[0].canonical_key)
+        assert fact.subjects[0].display_at_write == "Sapphire"
+        assert fact.valid_from is not None
+        assert fact.valid_from.date().isoformat() == "2026-06-12"
+
+    @pytest.mark.asyncio
+    async def test_mints_with_importance(self) -> None:
+        raw = HistoryStore(":memory:")
+        raw.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content="lo-fi is real music",
+            author=None,
+        )
+        store = AsyncHistoryStore(raw)
+        plan = DreamPlan(
+            familiar_id="fam",
+            opinions=(
+                _opinion("Sapphire defends lo-fi.", (1,), "2026-06-12", importance=8),
+            ),
+            rejected=(),
+            flags=(),
+            new_last_turn_id=1,
+        )
+        await apply_dream(store, plan, familiar_display_name="Sapphire")
+        fact = raw.recent_facts(familiar_id="fam", limit=10)[0]
+        assert fact.importance == 8
+
+    @pytest.mark.asyncio
+    async def test_advances_turn_axis_only(self) -> None:
+        raw = HistoryStore(":memory:")
+        raw.append_turn(
+            familiar_id="fam", channel_id=1, role="assistant", content="x", author=None
+        )
+        # hygiene previously set the fact axis; dream must not stomp it
+        raw.advance_sleep_watermark(familiar_id="fam", last_fact_id=77)
+        store = AsyncHistoryStore(raw)
+        plan = DreamPlan(
+            familiar_id="fam",
+            opinions=(_opinion("Sapphire likes tea.", (1,), "2026-06-12"),),
+            rejected=(),
+            flags=(),
+            new_last_turn_id=1,
+        )
+        await apply_dream(store, plan, familiar_display_name="Sapphire")
+        wm = raw.get_sleep_watermark(familiar_id="fam")
+        assert wm is not None
+        assert (wm.last_fact_id, wm.last_turn_id) == (77, 1)
+
+
+class TestDreamAudit:
+    def test_renders_cited_excerpts_and_flags(self) -> None:
+        plan = DreamPlan(
+            familiar_id="fam",
+            opinions=(_opinion("Sapphire defends lo-fi.", (1,), "2026-06-12"),),
+            rejected=(),
+            flags=("no_self_authored: some take",),
+            new_last_turn_id=1,
+            days_considered=3,
+            candidates_considered=9,
+        )
+        excerpts = {1: "Sapphire: lo-fi is real music"}
+        audit = dream_audit(plan, excerpts=excerpts, applied=False)
+        blob = json.dumps(audit)  # must serialize
+        back = json.loads(blob)
+        assert back["applied"] is False
+        op = back["opinions"][0]
+        assert op["valid_from"] == "2026-06-12"
+        assert op["importance"] == 5
+        assert op["grounding"][0]["turn_id"] == 1
+        assert "lo-fi is real music" in op["grounding"][0]["excerpt"]
+        assert back["flags"] == ["no_self_authored: some take"]
+
+    def test_audit_carries_assigned_importance(self) -> None:
+        plan = DreamPlan(
+            familiar_id="fam",
+            opinions=(
+                _opinion("Sapphire defends lo-fi.", (1,), "2026-06-12", importance=9),
+            ),
+            rejected=(),
+            flags=(),
+            new_last_turn_id=1,
+        )
+        audit = dream_audit(plan, excerpts={1: "x"}, applied=False)
+        assert audit["opinions"][0]["importance"] == 9

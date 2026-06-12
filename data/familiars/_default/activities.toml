@@ -23,6 +23,20 @@
 #                     future adapter-backed types)
 #   seed              authored prompt seed for experience generation
 #
+# Reserved sleep entry (id must be "sleep") — behavioral sleep window:
+#   window            "HH:MM-HH:MM" in display_tz; may wrap midnight;
+#                     required on the sleep entry. Bedtime nudge fires
+#                     at window start; force-sleep after grace_minutes;
+#                     wake is fixed at window END (alarm-style), so
+#                     duration_minutes is optional and ignored.
+#   grace_minutes     minutes after window start before force-sleep
+#                     (default 30)
+# window/grace_minutes are valid ONLY on the sleep entry. Sleep
+# departure runs the hygiene + dream passes in the background (audits
+# in sleep_audits/); the seed retunes the dream prose narrated at
+# wake. A one-shot hand-authored first dream can be placed at
+# data/familiars/<id>/seed_dream.md (consumed on first sleep).
+#
 # Ships disabled — uncomment and adapt to enable.
 
 # archive_after_minutes = 45
@@ -37,3 +51,11 @@
 # reachable = true
 # content_source = "authored"
 # seed = "A short walk along the creek: weather, water, small wildlife, passing thoughts. Experiences are about places, things, and yourself — never invented claims about real people."
+
+# [[catalog]]
+# id = "sleep"
+# label = "asleep"
+# window = "00:00-08:00"
+# grace_minutes = 30
+# reachable = false
+# seed = "The night's dream, told on waking: vivid, a little strange, woven from the day's leftovers — openly a dream, never reported as real events."

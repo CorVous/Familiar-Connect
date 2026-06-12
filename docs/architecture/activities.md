@@ -203,18 +203,45 @@ Top-level knobs (all optional):
 | `archive_after_minutes` | `45` | Absence at/above this sets the archive watermark for all channels at the departure turn. |
 | `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge may fire; also the nudge debounce window. |
 | `min_gap_minutes` | `90` | Minimum gap after a return before the next nudge. Gates nudges only — never blocks a `start_activity` call. |
-| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. |
+| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. Keep it disjoint from the sleep `window` — overlap lets an idle "do something" nudge and the bedtime "go to bed" nudge co-fire in the pre-grace stretch (once force-sleep fires, the active state suppresses the idle nudge). |
 
 Catalog entry (`[[catalog]]`, one per activity type):
 
 | Field | Required | Purpose |
 |---|---|---|
-| `id` | yes | Stable identifier; becomes a `start_activity` enum value. Must be unique. |
+| `id` | yes | Stable identifier; becomes a `start_activity` enum value. Must be unique. `sleep` is reserved (below). |
 | `label` | yes | Discord presence text while out; also names the activity in turns and facts. |
-| `duration_minutes` | yes | `[lo, hi]` roll range in minutes, `0 < lo <= hi`. |
+| `duration_minutes` | yes* | `[lo, hi]` roll range in minutes, `0 < lo <= hi`. *Optional and ignored on a `window` entry — return is fixed at window end. |
 | `reachable` | no (`true`) | A real @ping while out earns a judgment turn; `false` means nothing until return. |
 | `content_source` | no (`"authored"`) | Where experience text comes from. Only `"authored"` is valid today; `"adapter"` is a reserved seam for future adapter-backed types (e.g. actually watching a video and reporting on it) and is rejected with an explicit message until implemented. |
-| `seed` | yes | Authored prompt seed for experience generation. |
+| `seed` | yes | Authored prompt seed for experience generation (dream prose for the sleep entry). |
+
+### The reserved `sleep` entry
+
+The catalog id `sleep` is reserved for the [sleep cycle](sleep.md).
+Its entry must carry `window = "HH:MM-HH:MM"` (in `display_tz`, may
+wrap midnight) and may set `grace_minutes` (default 30); both keys are
+rejected on any other entry — the schedule semantics live in one
+place. While the entry is otherwise an ordinary catalog row (the model
+can `start_activity` into it at the bedtime nudge), the engine's tick
+loop owns its schedule: a once-per-occurrence bedtime nudge at window
+start, a force-start past `grace_minutes`, and a wake **fixed at the
+window's end** regardless of start time. Because the wake is fixed,
+`start_activity("sleep")` is refused more than an hour before the
+window — a midday call would otherwise mean a ~20-hour absence. Sleep departure fires the
+hygiene + dream passes in the background, and the return turn carries
+the dream prose under `mode = "sleep_return"` — see
+[sleep.md](sleep.md) for the full semantics.
+
+```toml
+[[catalog]]
+id            = "sleep"
+label         = "asleep"
+window        = "00:00-08:00"   # display_tz; may wrap midnight
+grace_minutes = 30
+reachable     = false
+seed          = "The night's dream, told on waking: vivid, a little strange."
+```
 
 ## Interaction with the context pipeline
 
@@ -250,6 +277,11 @@ is self-generated fiction — the same claim/fiction discipline that
 keeps in-character narration out of the fact store applies, and the
 mechanical event-fact already records that the activity happened.
 The extractor watermark still advances over skipped turns.
+
+The sleep return turn is the exception: tagged `mode = "sleep_return"`
+(`SLEEP_RETURN_MODE`), it **is** processed — with a code-enforced rail
+that dream-grounded facts land dream-framed under the `self:` subject
+only. See [sleep.md](sleep.md#dream-aware-extraction).
 
 ## Deliberately v1
 
