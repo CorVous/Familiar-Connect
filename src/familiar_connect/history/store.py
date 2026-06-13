@@ -675,10 +675,22 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     def _migrate(self) -> None:
-        """Add arrived_at / consumed_at to turns if missing; backfill."""
+        """Add arrived_at / consumed_at to turns if missing; backfill once.
+
+        Backfill runs only when the column is *newly created* — existing
+        rows then predate the staged/consumed model and are legacy
+        (backfilled as arrived/consumed). Running it on every open would
+        re-promote deliberately-staged turns (``consumed_at IS NULL`` is
+        intentional under the focus model), flushing staging across
+        restarts.
+        """
         for col in ("arrived_at", "consumed_at"):
             try:
                 self._conn.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")  # noqa: S608,RUF100
+                # column newly added => existing rows are legacy; backfill once
+                self._conn.execute(
+                    f"UPDATE turns SET {col} = timestamp WHERE {col} IS NULL"  # noqa: S608
+                )
                 self._conn.commit()
             except Exception:  # noqa: BLE001, S110  # column already exists
                 pass
@@ -688,15 +700,6 @@ class HistoryStore:
             self._conn.commit()
         except Exception:  # noqa: BLE001, S110  # column already exists
             pass
-        # Backfill: existing rows treat timestamp as arrived_at
-        self._conn.execute(
-            "UPDATE turns SET arrived_at = timestamp WHERE arrived_at IS NULL"
-        )
-        # Backfill: existing rows are considered already consumed
-        self._conn.execute(
-            "UPDATE turns SET consumed_at = timestamp WHERE consumed_at IS NULL"
-        )
-        self._conn.commit()
         # Create cross-channel ordering index after columns exist
         self._conn.execute(
             """
