@@ -1,7 +1,7 @@
 """Tests for :class:`familiar_connect.processors.summary_worker.SummaryWorker`.
 
-Watermark-driven regeneration for both per-channel rolling summaries
-and cross-channel summaries. See plan § Design.4, § Design.5.
+Watermark-driven regeneration of the focus-stream rolling summary
+(consumed cross-channel stream) and the retired cross-channel summaries.
 """
 
 from __future__ import annotations
@@ -14,7 +14,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 from familiar_connect.history.async_store import AsyncHistoryStore
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.history.store import (
+    FOCUS_STREAM_CHANNEL_ID,
+    HistoryStore,
+    SummaryEntry,
+)
 from familiar_connect.llm import LLMClient, Message
 from familiar_connect.processors.summary_worker import SummaryWorker
 
@@ -40,7 +44,13 @@ class _ScriptedLLM(LLMClient):
         yield reply.content_str
 
 
-def _seed_turns(store: HistoryStore, count: int, channel_id: int = 1) -> None:
+def _seed_turns(
+    store: HistoryStore,
+    count: int,
+    channel_id: int = 1,
+    *,
+    consumed: bool = True,
+) -> None:
     for i in range(count):
         store.append_turn(
             familiar_id="fam",
@@ -48,15 +58,21 @@ def _seed_turns(store: HistoryStore, count: int, channel_id: int = 1) -> None:
             role="user" if i % 2 == 0 else "assistant",
             content=f"message {i}",
             author=None,
+            consumed=consumed,
         )
 
 
-class TestRollingSummary:
+def _focus_summary(store: HistoryStore) -> SummaryEntry | None:
+    return store.get_summary(familiar_id="fam", channel_id=FOCUS_STREAM_CHANNEL_ID)
+
+
+class TestFocusStreamSummary:
     @pytest.mark.asyncio
-    async def test_generates_summary_when_threshold_crossed(self) -> None:
+    async def test_summarises_consumed_cross_channel_stream(self) -> None:
         store = HistoryStore(":memory:")
-        _seed_turns(store, 12)  # 12 > threshold 10
-        llm = _ScriptedLLM(replies=["Alice said hi and things happened."])
+        _seed_turns(store, 6, channel_id=1)
+        _seed_turns(store, 6, channel_id=2)  # 12 consumed across two channels
+        llm = _ScriptedLLM(replies=["Cross-channel: hi everywhere."])
 
         worker = SummaryWorker(
             store=AsyncHistoryStore(store),
@@ -66,10 +82,11 @@ class TestRollingSummary:
         )
         await worker.tick()
 
-        summary = store.get_summary(familiar_id="fam", channel_id=1)
+        summary = _focus_summary(store)
         assert summary is not None
-        assert "Alice" in summary.summary_text
         assert summary.last_summarised_id == 12
+        assert summary.last_consumed_at is not None
+        assert summary.summary_text
 
     @pytest.mark.asyncio
     async def test_noop_below_threshold(self) -> None:
@@ -85,11 +102,29 @@ class TestRollingSummary:
         )
         await worker.tick()
 
-        assert store.get_summary(familiar_id="fam", channel_id=1) is None
+        assert _focus_summary(store) is None
         assert llm.calls == []
 
     @pytest.mark.asyncio
-    async def test_compounding_uses_prior_summary(self) -> None:
+    async def test_ignores_staged_turns(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 3, channel_id=1)  # consumed
+        _seed_turns(store, 20, channel_id=2, consumed=False)  # staged, unfocused
+        llm = _ScriptedLLM(replies=["should not fire"])
+
+        worker = SummaryWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=10,
+        )
+        await worker.tick()
+
+        assert _focus_summary(store) is None  # 3 consumed < threshold
+        assert llm.calls == []
+
+    @pytest.mark.asyncio
+    async def test_compounds_prior_summary_into_prompt(self) -> None:
         store = HistoryStore(":memory:")
         _seed_turns(store, 12)
         llm = _ScriptedLLM(
@@ -106,25 +141,87 @@ class TestRollingSummary:
             turns_threshold=10,
         )
         await worker.tick()
-
-        # Add 10 more turns, trigger another tick
         _seed_turns(store, 10)
         await worker.tick()
 
-        summary = store.get_summary(familiar_id="fam", channel_id=1)
+        summary = _focus_summary(store)
         assert summary is not None
         assert "Round 2" in summary.summary_text
-        # Second call passes the prior summary in the prompt
         second_call = llm.calls[1]
         joined = "\n".join(m.content_str for m in second_call)
         assert "Round 1 summary" in joined
 
     @pytest.mark.asyncio
-    async def test_multiple_channels_independently(self) -> None:
+    async def test_backfill_cap_bounds_first_run(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 500)
+        llm = _ScriptedLLM(replies=["batch 1", "batch 2"])
+
+        worker = SummaryWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=10,
+            backfill_cap=200,
+        )
+        await worker.tick()
+        first = _focus_summary(store)
+        assert first is not None
+        assert first.last_summarised_id == 200
+
+        await worker.tick()
+        second = _focus_summary(store)
+        assert second is not None
+        assert second.last_summarised_id == 400
+
+    @pytest.mark.asyncio
+    async def test_late_promoted_turn_picked_up_on_next_tick(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 12, channel_id=1)  # consumed; ids 1..12
+        llm = _ScriptedLLM(replies=["round 1", "round 2 with dormant content"])
+
+        worker = SummaryWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=10,
+        )
+        await worker.tick()
+        first = _focus_summary(store)
+        assert first is not None
+        assert first.last_summarised_id == 12
+
+        # 10 staged turns in a dormant channel; below-watermark consumed_at NULL
+        for i in range(10):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=2,
+                role="user",
+                content=f"dormant {i}",
+                author=None,
+                consumed=False,
+            )
+        # nothing consumed yet -> noop
+        await worker.tick()
+        unchanged = _focus_summary(store)
+        assert unchanged is not None
+        assert unchanged.last_summarised_id == 12
+
+        # focus shifts -> promote; consumed_at = NOW (> watermark)
+        store.promote_staged_turns(familiar_id="fam", channel_id=2)
+        await worker.tick()
+        second = _focus_summary(store)
+        assert second is not None
+        assert second.last_summarised_id == 22
+        third_call = llm.calls[1]
+        joined = "\n".join(m.content_str for m in third_call)
+        assert "dormant" in joined
+
+    @pytest.mark.asyncio
+    async def test_per_channel_summary_no_longer_written(self) -> None:
         store = HistoryStore(":memory:")
         _seed_turns(store, 12, channel_id=1)
-        _seed_turns(store, 12, channel_id=2)
-        llm = _ScriptedLLM(replies=["ch1 summary", "ch2 summary"])
+        llm = _ScriptedLLM(replies=["focus summary"])
 
         worker = SummaryWorker(
             store=AsyncHistoryStore(store),
@@ -134,13 +231,8 @@ class TestRollingSummary:
         )
         await worker.tick()
 
-        s1 = store.get_summary(familiar_id="fam", channel_id=1)
-        s2 = store.get_summary(familiar_id="fam", channel_id=2)
-        assert s1 is not None
-        assert s1.summary_text
-        assert s2 is not None
-        assert s2.summary_text
-        assert s1.summary_text != s2.summary_text
+        assert store.get_summary(familiar_id="fam", channel_id=1) is None
+        assert _focus_summary(store) is not None
 
 
 class TestCrossChannelSummary:

@@ -90,7 +90,7 @@ context re-run `build` only for layers whose key changed.
 
 | Layer | Source | Invalidation |
 |---|---|---|
-| `ConversationSummaryLayer` | `summaries` table | `ch<id>:wm<last_summarised_id>` |
+| `ConversationSummaryLayer` | `summaries` table — the single per-familiar focus-stream row at `FOCUS_STREAM_CHANNEL_ID` (`ctx.channel_id` ignored) | `focus:<last_consumed_at>:<last_summarised_id>` |
 | `CrossChannelContextLayer` | **retired** — `build` always returns `""` (attentional stream replaced it; see [below](#attentional-stream)) | unchanged (still keyed; never rendered) |
 | `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `self:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
@@ -132,11 +132,21 @@ mimicking its own apparent past output — the same mimicry trap the
 
 Background task on `tick_interval_s` (default 5s). Per tick:
 
-1. **Per-channel rolling summary** — for each channel with turns,
-   compare `latest_id` to `summaries.last_summarised_id`. If the gap
-   is `>= turns_threshold` (default 10), build a prompt with
-   `(prior summary, new turns since watermark)`, call `LLMClient.chat`,
-   write to `summaries`.
+1. **Focus-stream rolling summary** — one per-familiar summary of the
+   **consumed cross-channel stream** (the conversation the familiar
+   actually attended to), stored in `summaries` under
+   `FOCUS_STREAM_CHANNEL_ID`. Fetch consumed turns past the composite
+   `(consumed_at, id)` watermark via `consumed_turns_after`; if
+   `>= turns_threshold` (default 10) accumulated, build a prompt with
+   `(prior summary, new turns)`, call `LLMClient.chat`, write back with
+   the new watermark. Watermarking on `consumed_at` — not `id` — is
+   load-bearing: a focus shift promotes a dormant channel's staged
+   backlog with an **old `id`** but a **fresh `consumed_at`**
+   (`promote_staged_turns` sets it to now), so an id cursor would skip
+   it forever. First run is bounded by `backfill_cap` (default 200)
+   then compounds forward. This tiles with `RecentHistoryLayer`: both
+   describe the same consumed attentional thread (summary = older turns,
+   recent history = the tail).
 2. **Cross-channel summary** — for each `(viewer_channel, source)`
    pair in `cross_channel_map`, compare `source.latest_id` to
    `cross_context_summaries.source_last_id`. If the gap is `>= cross_k`
@@ -848,7 +858,8 @@ changed.
 `familiar_connect.diagnostics.cold_cache` provides three detectors:
 
 - `detect_topic_shift` — Jaccard overlap between the new turn's
-  content words and the rolling summary; fires below 0.15. Skipped
+  content words and the focus-stream rolling summary (read at the
+  sentinel key); fires below 0.15. Skipped
   when the new turn has fewer than `min_tokens` (default 4) content
   tokens, since short voice fragments would otherwise fire on every
   utterance regardless of topic continuity.
@@ -1044,7 +1055,7 @@ Voice transcript final on channel C (voice:C)
       Assembler.assemble(ctx)
         → cached CharacterCard / OperatingMode
         → CrossChannelContextLayer: retired — emits nothing
-        → ConversationSummaryLayer: read from summaries
+        → ConversationSummaryLayer: read focus-stream summary (sentinel)
         → PeopleDossierLayer: read from people_dossiers, capped at max_people
         → RagContextLayer: FTS search on cue
         → RecentHistoryLayer: last N consumed turns across all channels
@@ -1054,7 +1065,7 @@ Voice transcript final on channel C (voice:C)
       router.end_turn(scope); FocusManager.end_turn()
 
 Background: SummaryWorker tick (every 5 s)
-  → for each channel: maybe regenerate rolling summary
+  → maybe regenerate focus-stream summary (consumed cross-channel stream)
   → for each viewer×source: maybe regenerate cross-channel summary
 
 Background: PeopleDossierWorker tick (every 20 s)

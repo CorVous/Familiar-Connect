@@ -18,7 +18,11 @@ from familiar_connect.context.layers import (
     RecentHistoryLayer,
 )
 from familiar_connect.history.async_store import AsyncHistoryStore
-from familiar_connect.history.store import FactSubject, HistoryStore
+from familiar_connect.history.store import (
+    FOCUS_STREAM_CHANNEL_ID,
+    FactSubject,
+    HistoryStore,
+)
 from familiar_connect.identity import Author
 
 
@@ -28,16 +32,27 @@ def _ctx(*, channel_id: int = 1, viewer_mode: str = "voice") -> AssemblyContext:
     )
 
 
+def _put_focus_summary(
+    store: HistoryStore,
+    *,
+    summary_text: str,
+    last_summarised_id: int = 5,
+    last_consumed_at: str | None = "2026-06-13T10:00:00+00:00",
+) -> None:
+    store.put_summary(
+        familiar_id="fam",
+        channel_id=FOCUS_STREAM_CHANNEL_ID,
+        last_summarised_id=last_summarised_id,
+        summary_text=summary_text,
+        last_consumed_at=last_consumed_at,
+    )
+
+
 class TestConversationSummaryLayer:
     @pytest.mark.asyncio
     async def test_returns_summary_text(self) -> None:
         store = HistoryStore(":memory:")
-        store.put_summary(
-            familiar_id="fam",
-            channel_id=1,
-            last_summarised_id=5,
-            summary_text="Earlier they talked about foxes.",
-        )
+        _put_focus_summary(store, summary_text="Earlier they talked about foxes.")
         layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
         out = await layer.build(_ctx())
         assert "foxes" in out
@@ -48,24 +63,44 @@ class TestConversationSummaryLayer:
         layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
         assert not await layer.build(_ctx())
 
-    def test_invalidation_key_tracks_watermark(self) -> None:
+    @pytest.mark.asyncio
+    async def test_build_ignores_ctx_channel_id(self) -> None:
         store = HistoryStore(":memory:")
-        store.put_summary(
-            familiar_id="fam",
-            channel_id=1,
-            last_summarised_id=5,
-            summary_text="v1",
-        )
+        _put_focus_summary(store, summary_text="the one true thread")
         layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
+        assert "thread" in await layer.build(_ctx(channel_id=1))
+        assert "thread" in await layer.build(_ctx(channel_id=999))
+
+    @pytest.mark.asyncio
+    async def test_loads_same_summary_in_text_and_voice(self) -> None:
+        store = HistoryStore(":memory:")
+        _put_focus_summary(store, summary_text="modality-agnostic thread")
+        layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
+        text_out = await layer.build(_ctx(viewer_mode="text"))
+        voice_out = await layer.build(_ctx(viewer_mode="voice"))
+        assert text_out == voice_out
+        assert "modality-agnostic" in text_out
+
+    def test_invalidation_key_tracks_composite_watermark(self) -> None:
+        store = HistoryStore(":memory:")
+        layer = ConversationSummaryLayer(store=AsyncHistoryStore(store))
+        assert layer.invalidation_key(_ctx()) == "none"
+        _put_focus_summary(
+            store,
+            summary_text="v1",
+            last_summarised_id=5,
+            last_consumed_at="2026-06-13T10:00:00+00:00",
+        )
         k1 = layer.invalidation_key(_ctx())
-        store.put_summary(
-            familiar_id="fam",
-            channel_id=1,
-            last_summarised_id=10,
+        _put_focus_summary(
+            store,
             summary_text="v2",
+            last_summarised_id=10,
+            last_consumed_at="2026-06-13T11:00:00+00:00",
         )
         k2 = layer.invalidation_key(_ctx())
         assert k1 != k2
+        assert k1 != "none"
 
 
 class TestCrossChannelContextLayer:
