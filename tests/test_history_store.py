@@ -592,6 +592,138 @@ class TestSummaryCache:
         assert entry.last_summarised_id == 99
         assert entry.summary_text == "persisted"
 
+    def test_put_get_summary_roundtrips_last_consumed_at(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.put_summary(
+            familiar_id=_FAMILIAR,
+            last_summarised_id=7,
+            summary_text="x",
+            last_consumed_at="2026-06-13T10:00:00+00:00",
+        )
+        entry = s.get_summary(familiar_id=_FAMILIAR)
+        assert entry is not None
+        assert entry.last_consumed_at == "2026-06-13T10:00:00+00:00"
+
+    def test_get_summary_old_row_has_null_last_consumed_at(
+        self, tmp_path: Path
+    ) -> None:
+        s = _store(tmp_path)
+        s.put_summary(
+            familiar_id=_FAMILIAR,
+            last_summarised_id=3,
+            summary_text="legacy",
+        )
+        entry = s.get_summary(familiar_id=_FAMILIAR)
+        assert entry is not None
+        assert entry.last_consumed_at is None
+
+
+# ---------------------------------------------------------------------------
+# Consumed cross-channel stream (focus-stream summary source)
+# ---------------------------------------------------------------------------
+
+
+class TestConsumedTurnsAfter:
+    def _old(self, n: int) -> datetime:
+        """Deterministic past timestamp, n seconds before a fixed epoch."""
+        return datetime(2026, 6, 13, 9, 0, 0, tzinfo=UTC) + timedelta(seconds=n)
+
+    def test_empty_cursor_returns_all_consumed(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        _seed(s, 5)
+        out = s.consumed_turns_after(
+            familiar_id=_FAMILIAR,
+            after_consumed_at="",
+            after_id=0,
+            limit=10,
+        )
+        assert [t.id for t in out] == [1, 2, 3, 4, 5]
+
+    def test_respects_limit(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        _seed(s, 10)
+        out = s.consumed_turns_after(
+            familiar_id=_FAMILIAR,
+            after_consumed_at="",
+            after_id=0,
+            limit=3,
+        )
+        assert [t.id for t in out] == [1, 2, 3]
+
+    def test_composite_cursor_advances_to_empty(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        turns = _seed(s, 4)
+        last = turns[-1]
+        assert last.consumed_at is not None
+        out = s.consumed_turns_after(
+            familiar_id=_FAMILIAR,
+            after_consumed_at=last.consumed_at.isoformat(),
+            after_id=last.id,
+            limit=10,
+        )
+        assert out == []
+
+    def test_excludes_staged(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="staged",
+            consumed=False,
+        )
+        out = s.consumed_turns_after(
+            familiar_id=_FAMILIAR,
+            after_consumed_at="",
+            after_id=0,
+            limit=10,
+        )
+        assert out == []
+
+    def test_includes_late_promoted_low_id(self, tmp_path: Path) -> None:
+        """Old-id staged turn promoted after watermark is NOT skipped.
+
+        The headline correctness guarantee: id-based watermark would miss
+        it; consumed_at-based does not.
+        """
+        s = _store(tmp_path)
+        # id=1: staged turn, old arrived_at, consumed_at NULL for now
+        s.append_turn(
+            channel_id=300,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="dormant-channel msg",
+            consumed=False,
+            arrived_at=self._old(0),
+        )
+        # id=2,3: consumed turns in the focused channel
+        b = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="b",
+        )
+        c = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="c",
+        )
+        assert c.consumed_at is not None
+        # watermark sits past c (higher id, but its consumed_at is "now")
+        watermark = (c.consumed_at.isoformat(), c.id)
+        # focus shifts to channel 300 -> promote staged turn (consumed_at=NOW)
+        promoted = s.promote_staged_turns(familiar_id=_FAMILIAR, channel_id=300)
+        assert promoted == 1
+        out = s.consumed_turns_after(
+            familiar_id=_FAMILIAR,
+            after_consumed_at=watermark[0],
+            after_id=watermark[1],
+            limit=10,
+        )
+        assert [t.id for t in out] == [1]  # low id, but newly consumed
+        _ = b  # appended for id sequencing
+
 
 # ---------------------------------------------------------------------------
 # Mode column on turns

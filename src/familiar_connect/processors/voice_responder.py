@@ -29,6 +29,7 @@ from familiar_connect.diagnostics.voice_budget import (
     PHASE_TTS_FIRST_AUDIO,
     get_voice_budget_recorder,
 )
+from familiar_connect.history.store import FOCUS_STREAM_CHANNEL_ID
 from familiar_connect.llm import LLMDelta, Message
 from familiar_connect.sentence_streamer import SentenceStreamer
 from familiar_connect.silence import SilentDetector
@@ -658,8 +659,10 @@ class VoiceResponder:
         Best-effort — instrumentation must never block reply path.
         """
         try:
+            # focus-stream summary is per-familiar at the reserved sentinel
             summary = self._sync_history.get_summary(
-                familiar_id=self._familiar_id, channel_id=channel_id
+                familiar_id=self._familiar_id,
+                channel_id=FOCUS_STREAM_CHANNEL_ID,
             )
             prior_context = summary.summary_text if summary is not None else ""
             # Pull most recent turn's timestamp for silence-gap

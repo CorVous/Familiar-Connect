@@ -21,7 +21,7 @@ from familiar_connect.budget import (
     estimate_message_tokens,
     estimate_tokens,
 )
-from familiar_connect.history.store import HistoryTurn
+from familiar_connect.history.store import FOCUS_STREAM_CHANNEL_ID, HistoryTurn
 from familiar_connect.identity import is_self_key, self_canonical_key
 from familiar_connect.llm import Message, sanitize_name
 
@@ -778,9 +778,12 @@ def _turn_to_message(
 class ConversationSummaryLayer:
     """Read-only layer over :class:`HistoryStore` summaries.
 
-    Produced by :class:`SummaryWorker`. Invalidation key keys on
-    ``last_summarised_id`` so assembler cache rebuilds only when
-    summary actually changes.
+    Produced by :class:`SummaryWorker`. Reads the single per-familiar
+    focus-stream summary (consumed cross-channel stream) at
+    ``FOCUS_STREAM_CHANNEL_ID`` — ``ctx.channel_id`` is ignored so the
+    summary tiles with cross-channel recent history. Invalidation key
+    keys on the composite ``(last_consumed_at, last_summarised_id)``
+    watermark so assembler cache rebuilds only when it advances.
     """
 
     name: str = "conversation_summary"
@@ -798,7 +801,7 @@ class ConversationSummaryLayer:
     async def build(self, ctx: AssemblyContext) -> str:
         entry = await self._store.get_summary(
             familiar_id=ctx.familiar_id,
-            channel_id=ctx.channel_id or 0,
+            channel_id=FOCUS_STREAM_CHANNEL_ID,
         )
         if entry is None or not entry.summary_text.strip():
             return ""
@@ -810,11 +813,11 @@ class ConversationSummaryLayer:
     def invalidation_key(self, ctx: AssemblyContext) -> str:
         entry = self._sync.get_summary(
             familiar_id=ctx.familiar_id,
-            channel_id=ctx.channel_id or 0,
+            channel_id=FOCUS_STREAM_CHANNEL_ID,
         )
         if entry is None:
             return "none"
-        return f"ch{ctx.channel_id}:wm{entry.last_summarised_id}"
+        return f"focus:{entry.last_consumed_at}:{entry.last_summarised_id}"
 
 
 class CrossChannelContextLayer:
