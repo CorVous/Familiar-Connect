@@ -29,7 +29,7 @@ start_activity tool call   → ActivityEngine.defer_start(type_id, note)
 
 reply ships                → engine.end_turn()
                                → INSERT INTO activities (...)
-                               → presence: idle + activity label
+                               → presence: idle (dnd if unreachable) + activity label
                                → remember departure turn id
                                → arm return timer
 
@@ -149,7 +149,9 @@ The return timer (or a cut-short reply) drives one flow:
    missed pings the return is silent — no turn, no announcement
    without cause.
 7. **Presence** — status returns to online; while out it was idle
-   (yellow) with the catalog `label` as activity text.
+   (yellow) with the catalog `label` as activity text. Unreachable
+   types (`reachable = false`) show do-not-disturb (red) instead of
+   idle.
 
 ### Restart safety
 
@@ -162,6 +164,14 @@ boot + floor rather than inline, which means the return flow (and
 its missed-ping wake) lands on a live bus and survives a restart.
 The departure turn id is recomputed from turn timestamps (same
 precedent as `AlarmScheduler`).
+
+Away presence survives restarts and reconnects via `on_ready`: the
+engine starts before Discord login, so its own boot-time presence
+call never reaches Discord. After the focus presence sync, `on_ready`
+calls the engine's `resync_presence()`, which re-issues idle/dnd plus
+label when an activity is still in flight (a no-op when idle or when
+activities are disabled). Gateway reconnects re-fire `on_ready`, so a
+presence reset mid-activity heals the same way.
 
 ## Configuration
 
