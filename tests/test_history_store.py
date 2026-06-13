@@ -726,6 +726,37 @@ class TestConsumedTurnsAfter:
 
 
 # ---------------------------------------------------------------------------
+# Migration backfill scope
+# ---------------------------------------------------------------------------
+
+
+class TestMigrationBackfillScope:
+    def test_staged_turn_stays_staged_after_reopen(self, tmp_path: Path) -> None:
+        """``consumed_at`` backfill is one-time, not every open.
+
+        A deliberately-staged turn (focus model) must survive a restart;
+        the legacy ``NULL -> consumed`` backfill must not re-promote it.
+        """
+        path = tmp_path / "history.db"
+        s = HistoryStore(path)
+        turn = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="staged",
+            consumed=False,
+        )
+        assert turn.consumed_at is None
+        s.close()
+
+        reopened = HistoryStore(path)
+        row = reopened._conn.execute(
+            "SELECT consumed_at FROM turns WHERE id = ?", (turn.id,)
+        ).fetchone()
+        assert row["consumed_at"] is None  # still staged, not promoted
+
+
+# ---------------------------------------------------------------------------
 # Mode column on turns
 # ---------------------------------------------------------------------------
 
