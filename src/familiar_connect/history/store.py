@@ -48,6 +48,11 @@ Row = Any
 
 PathLike = str | Path
 
+# reserved channel_id for the per-familiar focus-stream summary (consumed
+# cross-channel stream). distinct from real (large positive) channel ids and
+# from the channel-less bucket (0).
+FOCUS_STREAM_CHANNEL_ID = -1
+
 
 @dataclass(frozen=True)
 class HistoryTurn:
@@ -104,6 +109,7 @@ class SummaryEntry:
     last_summarised_id: int
     summary_text: str
     created_at: datetime
+    last_consumed_at: str | None = None  # composite-watermark cursor; None=legacy
 
 
 @dataclass(frozen=True)
@@ -737,6 +743,12 @@ class HistoryStore:
                 self._conn.commit()
             except Exception:  # noqa: BLE001, S110  # column already exists
                 pass
+        # Focus-stream summary composite watermark; NULL = cold start
+        try:
+            self._conn.execute("ALTER TABLE summaries ADD COLUMN last_consumed_at TEXT")
+            self._conn.commit()
+        except Exception:  # noqa: BLE001, S110  # column already exists
+            pass
         # Backfill: existing rows treat timestamp as arrived_at
         self._conn.execute(
             "UPDATE turns SET arrived_at = timestamp WHERE arrived_at IS NULL"
@@ -1607,7 +1619,7 @@ class HistoryStore:
         """Fetch cached summary for familiar + channel, or ``None``."""
         row = self._conn.execute(
             """
-            SELECT last_summarised_id, summary_text, created_at
+            SELECT last_summarised_id, summary_text, created_at, last_consumed_at
               FROM summaries
              WHERE familiar_id = ? AND channel_id = ?
             """,
@@ -1615,10 +1627,12 @@ class HistoryStore:
         ).fetchone()
         if row is None:
             return None
+        lca = row["last_consumed_at"]
         return SummaryEntry(
             last_summarised_id=int(row["last_summarised_id"]),
             summary_text=str(row["summary_text"]),
             created_at=datetime.fromisoformat(row["created_at"]),
+            last_consumed_at=str(lca) if lca is not None else None,
         )
 
     def put_summary(
@@ -1628,6 +1642,7 @@ class HistoryStore:
         last_summarised_id: int,
         summary_text: str,
         channel_id: int = 0,
+        last_consumed_at: str | None = None,
     ) -> None:
         """Insert or replace summary for familiar + channel."""
         timestamp = datetime.now(tz=UTC).isoformat()
@@ -1635,13 +1650,14 @@ class HistoryStore:
             """
             INSERT INTO summaries
                 (familiar_id, channel_id,
-                 last_summarised_id, summary_text, created_at)
-            VALUES (?, ?, ?, ?, ?)
+                 last_summarised_id, summary_text, created_at, last_consumed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (familiar_id, channel_id)
             DO UPDATE SET
                 last_summarised_id = excluded.last_summarised_id,
                 summary_text       = excluded.summary_text,
-                created_at         = excluded.created_at
+                created_at         = excluded.created_at,
+                last_consumed_at   = excluded.last_consumed_at
             """,
             (
                 familiar_id,
@@ -1649,6 +1665,7 @@ class HistoryStore:
                 last_summarised_id,
                 summary_text,
                 timestamp,
+                last_consumed_at,
             ),
         )
         self._conn.commit()
@@ -3207,6 +3224,42 @@ class HistoryStore:
             query = inner
         rows = self._conn.execute(query, (familiar_id, limit)).fetchall()
         return [_row_to_turn(r) for r in reversed(rows)]
+
+    def consumed_turns_after(
+        self,
+        *,
+        familiar_id: str,
+        after_consumed_at: str,
+        after_id: int,
+        limit: int,
+    ) -> list[HistoryTurn]:
+        """Consumed turns past the ``(consumed_at, id)`` watermark, in order.
+
+        Powers the focus-stream summary: the consumed cross-channel stream
+        ordered by *attention* time. Watermarking on ``consumed_at`` (not
+        ``id``) is load-bearing — late-promoted staged turns carry an old
+        ``id`` but a fresh ``consumed_at`` (``promote_staged_turns`` sets it
+        to NOW), so an id cursor would skip them forever.
+
+        Cursor is exclusive: ``consumed_at > after`` OR equal-and ``id >``.
+        Empty ``after_consumed_at`` (cold start) matches all consumed turns.
+        Index ``idx_turns_consumed`` covers the ordering.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            f"""
+            SELECT {_TURN_COLS}, familiar_id
+              FROM turns
+             WHERE familiar_id = ?
+               AND consumed_at IS NOT NULL
+               AND (consumed_at > ? OR (consumed_at = ? AND id > ?))
+             ORDER BY consumed_at ASC, id ASC
+             LIMIT ?
+            """,  # noqa: S608
+            (familiar_id, after_consumed_at, after_consumed_at, after_id, limit),
+        ).fetchall()
+        return [_row_to_turn(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Focus pointers

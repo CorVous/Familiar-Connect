@@ -2,12 +2,14 @@
 
 Regenerates two kinds of summaries from raw ``turns`` table:
 
-- **Per-channel rolling summary** (stored in ``summaries``): when
-  channel's ``latest_id - last_summarised_id`` exceeds
-  ``turns_threshold``, worker produces new summary by feeding prior
-  summary plus new turns to LLM. Compounding strategy keeps cost
-  bounded; periodic full recompute is future-phase addition (see
-  plan § Design.4).
+- **Focus-stream rolling summary** (stored in ``summaries`` under
+  ``FOCUS_STREAM_CHANNEL_ID``): the consumed cross-channel stream —
+  the conversation the familiar actually attended to. When
+  ``turns_threshold`` new consumed turns accumulate past the composite
+  ``(consumed_at, id)`` watermark, worker compounds prior summary plus
+  new turns via LLM. Watermarking on ``consumed_at`` (not ``id``)
+  catches late-promoted staged turns. First run bounded by
+  ``backfill_cap``.
 - **Cross-channel summary** (stored in ``cross_context_summaries``):
   per ``(viewer_channel, source_channel)`` pair listed in
   ``cross_channel_map``, summary produced whenever source channel
@@ -26,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
+from familiar_connect.history.store import FOCUS_STREAM_CHANNEL_ID
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -50,6 +53,7 @@ class SummaryWorker:
         llm_client: LLMClient,
         familiar_id: str,
         turns_threshold: int = 10,
+        backfill_cap: int = 200,
         cross_channel_map: dict[int, list[int]] | None = None,
         cross_k: int = 5,
         tick_interval_s: float = 5.0,
@@ -58,6 +62,7 @@ class SummaryWorker:
         self._llm = llm_client
         self._familiar_id = familiar_id
         self._turns_threshold = max(1, turns_threshold)
+        self._backfill_cap = max(1, backfill_cap)
         self._cross_map = cross_channel_map or {}
         self._cross_k = max(1, cross_k)
         self._tick_interval_s = tick_interval_s
@@ -82,38 +87,42 @@ class SummaryWorker:
 
     @span("summary.tick")
     async def tick(self) -> None:
-        """One pass; refresh any stale rolling + cross-channel summaries."""
-        channels = await self._channels_with_turns()
-        for channel_id in channels:
-            await self._maybe_refresh_rolling(channel_id)
+        """Refresh focus-stream + cross-channel summaries."""
+        await self._refresh_focus_stream()
 
         for viewer_channel_id, sources in self._cross_map.items():
             for source_id in sources:
                 await self._maybe_refresh_cross(viewer_channel_id, source_id)
 
     # ------------------------------------------------------------------
-    # Rolling summary
+    # Focus-stream rolling summary
     # ------------------------------------------------------------------
 
-    async def _maybe_refresh_rolling(self, channel_id: int) -> None:
-        latest = await self._store.latest_id(
-            familiar_id=self._familiar_id, channel_id=channel_id
-        )
-        if latest is None or latest <= 0:
-            return
-        prior = await self._store.get_summary(
-            familiar_id=self._familiar_id, channel_id=channel_id
-        )
-        last_summarised = prior.last_summarised_id if prior is not None else 0
-        if latest - last_summarised < self._turns_threshold:
-            return
+    async def _refresh_focus_stream(self) -> None:
+        """Compound the consumed cross-channel stream into one summary.
 
-        new_turns = await self._turns_in_range(
-            channel_id=channel_id,
-            min_id_exclusive=last_summarised,
-            max_id_inclusive=latest,
+        Follows attention, not channels: watermark is the composite
+        ``(consumed_at, id)`` cursor, so late-promoted staged turns aren't
+        missed. Stored under ``FOCUS_STREAM_CHANNEL_ID``. First run is
+        bounded by ``backfill_cap`` then compounds forward.
+        """
+        prior = await self._store.get_summary(
+            familiar_id=self._familiar_id, channel_id=FOCUS_STREAM_CHANNEL_ID
         )
-        if not new_turns:
+        if prior is not None:
+            after_consumed_at = prior.last_consumed_at or ""
+            after_id = prior.last_summarised_id
+        else:
+            after_consumed_at = ""
+            after_id = 0
+
+        new_turns = await self._store.consumed_turns_after(
+            familiar_id=self._familiar_id,
+            after_consumed_at=after_consumed_at,
+            after_id=after_id,
+            limit=max(self._turns_threshold, self._backfill_cap),
+        )
+        if len(new_turns) < self._turns_threshold:
             return
 
         prompt = _build_rolling_prompt(
@@ -124,16 +133,19 @@ class SummaryWorker:
         text = reply.content_str.strip()
         if not text:
             return
+        last = new_turns[-1]
+        last_consumed = last.consumed_at.isoformat() if last.consumed_at else None
         await self._store.put_summary(
             familiar_id=self._familiar_id,
-            channel_id=channel_id,
-            last_summarised_id=latest,
+            channel_id=FOCUS_STREAM_CHANNEL_ID,
+            last_summarised_id=last.id,
             summary_text=text,
+            last_consumed_at=last_consumed,
         )
         _logger.info(
             f"{ls.tag('Summary', ls.LC)} "
-            f"{ls.kv('channel', str(channel_id), vc=ls.LY)} "
-            f"{ls.kv('watermark', str(latest), vc=ls.LC)} "
+            f"{ls.kv('focus_stream', str(len(new_turns)), vc=ls.LY)} "
+            f"{ls.kv('watermark', str(last.id), vc=ls.LC)} "
             f"{ls.kv('chars', str(len(text)), vc=ls.LW)}"
         )
 
@@ -196,10 +208,6 @@ class SummaryWorker:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _channels_with_turns(self) -> set[int]:
-        """Channels with at least one turn for this familiar."""
-        return await self._store.all_channel_ids(familiar_id=self._familiar_id)
-
     async def _turns_in_range(
         self,
         *,
@@ -226,9 +234,9 @@ def _build_rolling_prompt(
     new_turns: Iterable[HistoryTurn],
 ) -> list[Message]:
     header = (
-        "You produce concise, retrieval-friendly summaries of chat "
-        "history. 3-5 sentences. Preserve proper nouns, commitments, "
-        "and open questions. Omit small talk."
+        "You produce concise, retrieval-friendly summaries of a familiar's "
+        "attended conversation across channels. 3-5 sentences. Preserve "
+        "proper nouns, commitments, and open questions. Omit small talk."
     )
     body_lines: list[str] = []
     if prior_summary:
@@ -237,7 +245,7 @@ def _build_rolling_prompt(
         body_lines.append("Turns:")
     for t in new_turns:
         who = t.author.display_name if t.author is not None else t.role
-        body_lines.append(f"- [{who}] {t.content}")
+        body_lines.append(f"- [#{t.channel_id} {who}] {t.content}")
     user = "\n".join(body_lines)
     return [
         Message(role="system", content=header),

@@ -20,7 +20,7 @@ from familiar_connect.context import (
     RecentHistoryLayer,
 )
 from familiar_connect.history.async_store import AsyncHistoryStore
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.history.store import FOCUS_STREAM_CHANNEL_ID, HistoryStore
 from familiar_connect.identity import Author
 
 
@@ -150,7 +150,7 @@ class TestConversationSummaryLayerMaxTokens:
         # Need at least one turn so summary makes sense; just write summary.
         store.put_summary(
             familiar_id="fam",
-            channel_id=1,
+            channel_id=FOCUS_STREAM_CHANNEL_ID,
             summary_text=long_text,
             last_summarised_id=1,
         )
