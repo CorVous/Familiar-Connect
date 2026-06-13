@@ -193,6 +193,12 @@ class ActivityEngine:
         self._active = row
         self._departure_channel_id = self._focus.get_focus("text")
         self._departure_turn_id = await self._recover_departure_turn_id(row)
+        # away presence for the reloaded row — dead pre-login (cb ready
+        # guard drops it); prod relies on on_ready → resync_presence.
+        # kept so engine-unit tests exercise the reload path directly
+        await self._set_presence(
+            self._away_status(self._type_for(row.type_id)), row.label
+        )
         _logger.info(
             f"{ls.tag('Activity', ls.G)} reloaded "
             f"{ls.kv('label', row.label, vc=ls.G)} "
@@ -205,6 +211,22 @@ class ActivityEngine:
             )
         else:
             self._arm_return_timer(row.planned_return_at)
+
+    async def resync_presence(self) -> None:
+        """Re-issue away presence for an in-flight activity; idle ⇒ no-op.
+
+        Prod path for restart-mid-activity: engine starts before
+        Discord login, so :meth:`start`'s away call is dropped by the
+        cb's ready guard, and on_ready's focus sync sets online.
+        on_ready calls this after that sync — also covers gateway
+        reconnects, which reset presence.
+        """
+        active = self._active
+        if active is None:
+            return
+        await self._set_presence(
+            self._away_status(self._type_for(active.type_id)), active.label
+        )
 
     async def stop(self) -> None:
         """Cancel return timer + nudge loop. Doesn't modify DB — restart-safe."""
@@ -313,7 +335,9 @@ class ActivityEngine:
             self._departure_turn_id = await self._store.latest_id(
                 familiar_id=self._familiar_id
             )
-            await self._set_presence("idle", staged.activity_type.label)
+            await self._set_presence(
+                self._away_status(staged.activity_type), staged.activity_type.label
+            )
             self._arm_return_timer(planned_return)
             _logger.info(
                 f"{ls.tag('🚶 Activity', ls.G)} departed "
@@ -782,6 +806,13 @@ class ActivityEngine:
             if entry.id == type_id:
                 return entry
         return None
+
+    @staticmethod
+    def _away_status(activity_type: ActivityType | None) -> str:
+        """``dnd`` while unreachable, ``idle`` otherwise; unknown ⇒ dnd."""
+        if activity_type is None or not activity_type.reachable:
+            return "dnd"
+        return "idle"
 
     def _is_ping(self, content: str) -> bool:
         """Real @mention of the bot in raw content; bare name doesn't count.

@@ -472,6 +472,9 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     activity_engine = _build_activity_engine(
         familiar, focus_manager=focus_manager, handle=handle
     )
+    # on_ready resyncs away presence via this — engine.start() runs
+    # pre-login, so its own presence call never reaches Discord
+    handle.activity_engine = activity_engine
     voice_tool_registry = build_voice_registry(
         alarm_scheduler, focus_manager=focus_manager
     )

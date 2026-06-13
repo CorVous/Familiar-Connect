@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from contextlib import AbstractAsyncContextManager as AsyncContextManager
 
+    from familiar_connect.activities.engine import ActivityEngine
     from familiar_connect.familiar import Familiar
     from familiar_connect.focus import FocusManager
     from familiar_connect.history.store import HistoryStore
@@ -171,6 +172,8 @@ class BotHandle:
     """Seam for ``on_typing`` events; consumed by ``TextResponder``."""
     focus_manager: FocusManager | None = None
     """Attentional focus controller; wired in when available."""
+    activity_engine: ActivityEngine | None = None
+    """Absence controller; ``on_ready`` resyncs away presence via it."""
 
 
 async def _on_recording_done(sink: RecordingSink, *args: object) -> None:  # noqa: RUF029 — pycord requires coroutine fn even when there's nothing to await
@@ -793,9 +796,10 @@ def build_activity_presence_cb(
 ) -> Callable[[str, str | None], Awaitable[None]]:
     """Presence callback for :class:`ActivityEngine`.
 
-    ``("idle", label)`` while out — yellow dot + activity label;
-    ``("online", None)`` on return — restores normal focus presence
-    via :func:`_sync_presence`. No-op until the bot is ready
+    ``("idle", label)`` while out reachable — yellow dot + activity
+    label; ``("dnd", label)`` while out unreachable — red dot, same
+    label; ``("online", None)`` on return — restores normal focus
+    presence via :func:`_sync_presence`. No-op until the bot is ready
     (headless tests, pre-login engine start).
     """
 
@@ -803,9 +807,10 @@ def build_activity_presence_cb(
         bot = handle.bot
         if not bot.is_ready():
             return
-        if status == "idle":
+        if status in {"idle", "dnd"}:
+            away = discord.Status.idle if status == "idle" else discord.Status.dnd
             await bot.change_presence(
-                status=discord.Status.idle,
+                status=away,
                 activity=discord.CustomActivity(name=label or "away"),
             )
             return
@@ -1175,6 +1180,12 @@ def _register_events(
             )
             fm.on_shift = lambda: _sync_presence(bot, fm)
             await _sync_presence(bot, fm)
+        # AFTER the focus sync: re-issue away presence if mid-activity —
+        # engine.start() ran pre-login (cb dropped its call), and gateway
+        # reconnects reset presence. no-op when idle or engine unwired
+        engine = handle.activity_engine
+        if engine is not None:
+            await engine.resync_presence()
 
     @bot.event
     async def on_message(message: discord.Message) -> None:

@@ -245,6 +245,16 @@ class TestEndTurnAppliesStart:
         await engine.stop()
 
     @pytest.mark.asyncio
+    async def test_unreachable_departure_sets_dnd_presence(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await _start_activity(engine, "hatbox")
+        assert presence.calls == [("dnd", "hatbox tending")]
+        await engine.stop()
+
+    @pytest.mark.asyncio
     async def test_end_turn_without_staged_is_noop(
         self, store: AsyncHistoryStore, clock: FakeClock
     ) -> None:
@@ -770,7 +780,8 @@ class TestReturnFlow:
         assert store.sync.active_activity(familiar_id=_FAMILIAR) is not None
         assert engine.return_timer_armed
         assert armed == [clock.now + timedelta(seconds=20)]
-        assert presence.calls == []
+        # away presence re-established, but no inline return flip to online
+        assert presence.calls == [("idle", "creek walk")]
         # still absent until the floor timer fires
         assert engine.gate(_payload("hello")).action is GateAction.SUPPRESS
         await engine.stop()
@@ -794,6 +805,74 @@ class TestRestart:
         assert engine.return_timer_armed
         # gate still suppresses while reloaded activity is active
         assert engine.gate(_payload("hello")).action is GateAction.SUPPRESS
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_restores_idle_presence_for_reachable_row(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="walk",
+            label="creek walk",
+            started_at=clock.now - timedelta(minutes=5),
+            planned_return_at=clock.now + timedelta(minutes=25),
+            note=None,
+        )
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        assert presence.calls == [("idle", "creek walk")]
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_restores_dnd_presence_for_unreachable_row(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="hatbox",
+            label="hatbox tending",
+            started_at=clock.now - timedelta(minutes=5),
+            planned_return_at=clock.now + timedelta(minutes=15),
+            note=None,
+        )
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        assert presence.calls == [("dnd", "hatbox tending")]
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_resync_presence_reissues_away_for_active_row(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        """Post-ready resync — boot-reload away call was dropped pre-ready."""
+        store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="hatbox",
+            label="hatbox tending",
+            started_at=clock.now - timedelta(minutes=5),
+            planned_return_at=clock.now + timedelta(minutes=15),
+            note=None,
+        )
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        presence.calls.clear()  # isolate the resync re-issue
+        await engine.resync_presence()
+        assert presence.calls == [("dnd", "hatbox tending")]
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_resync_presence_noop_when_idle(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        await engine.resync_presence()
+        assert presence.calls == []
         await engine.stop()
 
     @pytest.mark.asyncio
