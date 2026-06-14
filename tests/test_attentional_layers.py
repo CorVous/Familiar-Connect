@@ -343,3 +343,20 @@ class TestBuildFinalReminderUnreadDigest:
         )
         assert "attention is currently on #3" in out
         assert "#10 (4)" in out
+
+    def test_named_unread_channel_surfaces_numeric_id(self) -> None:
+        """Named unread channel still exposes its id so shift_focus can target it.
+
+        Digest renders #name; without the numeric id in context the model
+        can't pass a valid channel_id to shift_focus (hallucinates → guard
+        bounce → tool-loop). Id must ride alongside the name.
+        """
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={422137955130408970: 2},
+            channel_names={422137955130408970: "the-annex"},
+        )
+        assert "#the-annex" in out
+        assert "422137955130408970" in out  # id available for shift_focus
+        assert "shift_focus" in out
