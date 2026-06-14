@@ -36,6 +36,27 @@ async def _shift_focus_handler(args: dict[str, Any], ctx: ToolContext) -> str:
     if not isinstance(channel_id, int):
         return json.dumps({"error": "missing or invalid 'channel_id' (integer)"})
 
+    # guard: only subscribed channels are valid targets — focusing a
+    # dead channel would strand attention. list valid targets so the
+    # model can recover in-turn rather than narrating a channel it
+    # can't reach.
+    if not fm.is_subscribed(channel_id):
+        available = [
+            {"channel_id": cid, "label": fm.channel_label(cid)}
+            for cid in fm.subscribed_channels()
+        ]
+        _logger.info(
+            f"{ls.tag('🔀 shift_focus', ls.LC)} rejected "
+            f"{ls.kv('channel', str(channel_id), vc=ls.LW)} (not subscribed)"
+        )
+        return json.dumps({
+            "error": (
+                f"channel {channel_id} is not subscribed — cannot focus "
+                "there. Pick one of available_channels."
+            ),
+            "available_channels": available,
+        })
+
     fm.defer_shift(channel_id)
 
     payload: dict[str, Any] = {"ok": True, "channel_id": channel_id}
