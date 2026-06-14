@@ -105,6 +105,13 @@ def build_final_reminder(
             n = names.get(cid)
             return f"#{n}" if n else f"#{cid}"
 
+        def _ch_id(cid: int) -> str:
+            # unread entries carry the numeric id so shift_focus can target
+            # them; named channels otherwise render id-less and the model
+            # hallucinates the channel_id. no-name case already shows the id.
+            n = names.get(cid)
+            return f"#{n} (id {cid})" if n else f"#{cid}"
+
         focus_part = (
             f"Your attention is currently on {_ch(focus_channel_id)}."
             if focus_channel_id is not None
@@ -117,7 +124,7 @@ def build_final_reminder(
         )
         if active:
             ch_list = ", ".join(
-                _ch(cid) + (f" ({cnt})" if cnt > 1 else "") for cid, cnt in active
+                _ch_id(cid) + (f" ({cnt})" if cnt > 1 else "") for cid, cnt in active
             )
             total = sum(c for _, c in active)
             verb = "is" if total == 1 else "are"
