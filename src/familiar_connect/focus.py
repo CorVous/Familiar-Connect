@@ -71,20 +71,43 @@ class FocusManager:
         self.on_shift: Callable[[], Awaitable[None]] | None = None
 
     async def initialize(self) -> None:
-        """Load persisted focus pointers from DB."""
+        """Load persisted focus pointers from DB.
+
+        Pointers to channels no longer subscribed are dropped (avoid
+        stranding focus on a dead channel); startup fallback re-seeds.
+        """
         ptrs = await self._store.get_focus_pointers(self._familiar_id)
         if ptrs is not None:
-            self._text_focus = ptrs.text_channel_id
-            self._voice_focus = ptrs.voice_channel_id
+            self._text_focus = self._keep_if_subscribed(ptrs.text_channel_id)
+            self._voice_focus = self._keep_if_subscribed(ptrs.voice_channel_id)
             _logger.info(
                 f"{ls.tag('Focus', ls.LC)} loaded "
                 f"{ls.kv('text', self.channel_label(self._text_focus), vc=ls.LW)} "
                 f"{ls.kv('voice', self.channel_label(self._voice_focus), vc=ls.LW)}"
             )
 
+    def _keep_if_subscribed(self, channel_id: int | None) -> int | None:
+        """Pass through channel_id when subscribed; else None (warn on drop)."""
+        if channel_id is None or self.is_subscribed(channel_id):
+            return channel_id
+        _logger.warning(
+            f"{ls.tag('Focus', ls.LC)} dropped stale pointer "
+            f"{ls.kv('channel', self.channel_label(channel_id), vc=ls.LW)} "
+            "(no longer subscribed)"
+        )
+        return None
+
     def get_focus(self, modality: str) -> int | None:
         """Return current focus channel_id for modality."""
         return self._text_focus if modality == "text" else self._voice_focus
+
+    def is_subscribed(self, channel_id: int) -> bool:
+        """Whether channel_id is a known text/voice subscription."""
+        return self._subscriptions.kind_for(channel_id) is not None
+
+    def subscribed_channels(self) -> list[int]:
+        """Sorted, deduped channel_ids across text + voice subscriptions."""
+        return sorted({sub.channel_id for sub in self._subscriptions.all()})
 
     def is_focused(self, channel_id: int) -> bool:
         """Check if channel_id is the active text or voice focus."""
