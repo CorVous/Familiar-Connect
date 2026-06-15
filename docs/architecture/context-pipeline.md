@@ -950,7 +950,8 @@ inbound message:
 
 - **Focused channel** — the user turn is appended with
   `consumed=True`, the normal reply loop runs (assemble → stream →
-  post), and `FocusManager.end_turn()` fires afterward.
+  post), and `FocusManager.end_turn()` fires afterward (idle-clock
+  bookkeeping only).
 - **Unfocused channel** — the user turn is appended with
   `consumed=False` (staged), a `[📥 Staged]` line is logged, and the
   responder returns early: **no assembly, no LLM call, no reply.** The
@@ -958,33 +959,44 @@ inbound message:
   turn.
 
 `VoiceResponder` calls `end_turn()` after each completed voice turn
-too, so deferred voice-focus shifts apply on the same cadence.
+too.
 
 ### FocusManager
 
 `familiar_connect.focus.FocusManager` holds two independent pointers
 (`text_focus`, `voice_focus`), each guarded by its own
-`asyncio.Lock`. Shifts are **model-decided and deferred**:
+`asyncio.Lock`. Shifts are **model-decided and applied immediately**:
 
 1. The `shift_focus(channel_id)` tool first **guards the target**: if
    `channel_id` is not in the `SubscriptionRegistry` the shift is
    rejected and the tool returns an `available_channels` list (every
    subscribed channel_id + label) so the model can retry a live target
    instead of stranding attention on a dead channel. Valid targets call
-   `defer_shift` — modality (text/voice) inferred from the registry. The
-   intent is queued, not applied mid-turn. The tool also eagerly
-   fetches the target channel's recent turns (≤20) and returns them in
-   the tool result, so the agentic loop feeds the channel's content
-   back into the same turn — the model sees the channel before it
-   responds rather than narrating one it can't see. Voice/empty
-   channels yield an empty list. The reply still posts to the channel
-   being answered; only attention moves.
-2. `end_turn()` (called by the responder after the reply commits)
-   drains pending shifts under the per-modality lock. For a text
-   shift it calls `promote_staged_turns(channel_id)` — flipping that
-   channel's staged turns to consumed (`consumed_at = now`) so the
-   backlog interleaves into the next cross-channel window — then moves
-   the pointer and persists both pointers via `set_focus_pointers`.
+   `shift_now` — modality (text/voice) inferred from the registry. The
+   tool also eagerly fetches the target channel's recent turns (≤20) and
+   returns them in the tool result, so the agentic loop feeds the
+   channel's content back into the same turn — the model sees the
+   channel before it responds rather than narrating one it can't see.
+   Voice/empty channels yield an empty list.
+2. `shift_now` applies the move **at tool-call time**, under the
+   per-modality lock. For a text shift it calls
+   `promote_staged_turns(channel_id)` — flipping that channel's staged
+   turns to consumed (`consumed_at = now`) so the backlog interleaves
+   into the next cross-channel window — then moves the pointer, persists
+   both pointers via `set_focus_pointers`, and fires `on_shift`
+   (presence). Because the move is immediate, any reply later in the
+   same turn posts to the **new** channel (the responder sends to the
+   current text focus), and a turn that goes **silent** still leaves her
+   where she went — there is no deferred state to leak into a later turn.
+   (Earlier designs deferred the shift to `end_turn`; an uncommitted
+   deferral could leak and misroute the *next* turn's reply — e.g. a
+   `#general` reply posting into `#media`. Immediate application removes
+   that bug class.)
+
+Because `shift_focus` applies for real, it is **not** a way to peek: it
+moves her off her current channel until she shifts back. The unread
+digest (and, eventually, an idle nudge) is the mechanism for noticing
+other channels without leaving.
 
 Pointers persist in the `focus_pointers` table
 (`familiar_id PK, text_channel_id, voice_channel_id, updated_at`); on
@@ -1047,10 +1059,11 @@ Discord text on channel C
       seeds RagContextLayer cue = content
       Assembler.assemble(ctx, viewer_mode="text")
       LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
+      (shift_focus, if called, already moved focus + promoted staged)
       if `<silent>` detected: bail (no send, no assistant turn)
-      else: BotHandle.send_text(channel_id, reply); append assistant turn
+      else: BotHandle.send_text(current text focus, reply); append assistant turn
       router.end_turn(scope)
-      FocusManager.end_turn()  (apply deferred shifts; promote staged)
+      FocusManager.end_turn()  (idle-clock bookkeeping only)
 
 Voice transcript final on channel C (voice:C)
   → VoiceSource publishes voice.transcript.final

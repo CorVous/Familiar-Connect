@@ -72,7 +72,7 @@ def _make_ctx(
 
 def _make_focus_manager() -> MagicMock:
     fm = MagicMock()
-    fm.defer_shift = MagicMock()
+    fm.shift_now = AsyncMock()
     fm.get_focus = MagicMock(return_value=99)
     fm.is_subscribed = MagicMock(return_value=True)
     fm.subscribed_channels = MagicMock(return_value=[55, 99])
@@ -130,11 +130,11 @@ class TestToolContextNewFields:
 
 class TestShiftFocusTool:
     @pytest.mark.asyncio
-    async def test_calls_defer_shift(self) -> None:
+    async def test_calls_shift_now(self) -> None:
         fm = _make_focus_manager()
         ctx = _make_ctx(focus_manager=fm)
         await _shift_focus_handler({"channel_id": 55}, ctx)
-        fm.defer_shift.assert_called_once_with(55)
+        fm.shift_now.assert_awaited_once_with(55)
 
     @pytest.mark.asyncio
     async def test_returns_ok_json(self) -> None:
@@ -209,7 +209,7 @@ class TestShiftFocusTool:
         result = await _shift_focus_handler({"channel_id": 12345}, ctx)
         parsed = json.loads(result)
         assert "error" in parsed
-        fm.defer_shift.assert_not_called()
+        fm.shift_now.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_unsubscribed_error_lists_available_channels(self) -> None:

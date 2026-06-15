@@ -543,19 +543,11 @@ async def run_tests() -> None:
             user_message=f"Sapphire, can you shift your attention to channel {OTHER_CHANNEL}?",
             author=COR,
         )
-        deferred = fm._pending_shift.get("text")
         check(
-            "shift_focus tool registers deferred shift",
-            deferred == OTHER_CHANNEL or fm.get_focus("text") == OTHER_CHANNEL,
-            f"pending={fm._pending_shift}, current_focus={fm.get_focus('text')}, elapsed={elapsed9:.2f}s",
-            response=reply9 or "(silent)",
-        )
-        # apply end_turn so focus actually shifts
-        await fm.end_turn()
-        check(
-            "After end_turn() focus pointer updated",
+            "shift_focus tool applies immediately",
             fm.get_focus("text") == OTHER_CHANNEL,
-            f"focus={fm.get_focus('text')}",
+            f"current_focus={fm.get_focus('text')}, elapsed={elapsed9:.2f}s",
+            response=reply9 or "(silent)",
         )
         promoted = store.count_staged(familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL)
         check(
