@@ -446,12 +446,14 @@ class TextResponder:
             else:
                 thread_target = message_id
 
-        # If the model shifted focus this turn, send to the new channel
+        # shift_focus applies immediately, so a mid-turn shift already
+        # moved focus — post the reply to the current text focus (== the
+        # event channel when no shift happened)
         send_channel_id = channel_id
         if self._focus_manager is not None:
-            pending = self._focus_manager.pending_text_focus()
-            if pending is not None:
-                send_channel_id = pending
+            focus = self._focus_manager.get_focus("text")
+            if focus is not None:
+                send_channel_id = focus
 
         try:
             sent_message_id = await self._send_text(

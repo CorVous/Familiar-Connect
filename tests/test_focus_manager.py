@@ -240,79 +240,61 @@ class TestFocusManagerIsFocused:
 
 
 # ---------------------------------------------------------------------------
-# FocusManager.defer_shift + end_turn
+# FocusManager.shift_now (immediate) + end_turn (idle-clock only)
 # ---------------------------------------------------------------------------
 
 
-class TestFocusManagerDeferShiftEndTurn:
+class TestFocusManagerShiftNow:
     @pytest.mark.asyncio
-    async def test_defer_shift_text_promotes_staged_turns(self, tmp_path: Path) -> None:
+    async def test_shift_now_text_promotes_staged_turns(self, tmp_path: Path) -> None:
 
         store = _make_store(promote_count=3)
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=5)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=5)
         store.promote_staged_turns.assert_awaited_once_with(
             familiar_id="fam", channel_id=5
         )
 
     @pytest.mark.asyncio
-    async def test_defer_shift_text_updates_text_focus(self, tmp_path: Path) -> None:
+    async def test_shift_now_text_updates_text_focus(self, tmp_path: Path) -> None:
 
         store = _make_store(promote_count=0)
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=5)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=5)
         assert fm.get_focus("text") == 5
 
     @pytest.mark.asyncio
-    async def test_defer_shift_voice_updates_voice_focus(self, tmp_path: Path) -> None:
+    async def test_shift_now_voice_updates_voice_focus(self, tmp_path: Path) -> None:
 
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=8)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=8)
         assert fm.get_focus("voice") == 8
 
     @pytest.mark.asyncio
-    async def test_defer_shift_voice_does_not_promote(self, tmp_path: Path) -> None:
+    async def test_shift_now_voice_does_not_promote(self, tmp_path: Path) -> None:
 
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=8)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=8)
         store.promote_staged_turns.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_end_turn_persists_pointers(self, tmp_path: Path) -> None:
+    async def test_shift_now_persists_pointers(self, tmp_path: Path) -> None:
 
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=5)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=5)
         store.set_focus_pointers.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_end_turn_clears_pending_shift(self, tmp_path: Path) -> None:
-
-        store = _make_store()
-        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
-        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=5)
-        await fm.end_turn()
-        # second end_turn should not call promote again
-        store.promote_staged_turns.reset_mock()
-        await fm.end_turn()
-        store.promote_staged_turns.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_end_turn_noop_when_no_pending(self, tmp_path: Path) -> None:
-
+    async def test_end_turn_does_not_touch_focus(self, tmp_path: Path) -> None:
+        # end_turn is idle-clock bookkeeping only; never moves/persists focus
         store = _make_store()
         reg = _make_registry(tmp_path)
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
@@ -484,8 +466,7 @@ class TestModalitiesIndependent:
         )
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.initialize()
-        fm.defer_shift(channel_id=5)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=5)
         # voice should be unchanged
         assert fm.get_focus("voice") == 99
         assert fm.get_focus("text") == 5
@@ -500,46 +481,9 @@ class TestModalitiesIndependent:
         )
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.initialize()
-        fm.defer_shift(channel_id=8)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=8)
         assert fm.get_focus("text") == 11
         assert fm.get_focus("voice") == 8
-
-
-# ---------------------------------------------------------------------------
-# FocusManager.pending_text_focus
-# ---------------------------------------------------------------------------
-
-
-class TestPendingTextFocus:
-    def test_returns_none_with_no_pending(self, tmp_path: Path) -> None:
-        store = _make_store()
-        reg = _make_registry(tmp_path)
-        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        assert fm.pending_text_focus() is None
-
-    def test_returns_channel_after_text_defer(self, tmp_path: Path) -> None:
-        store = _make_store()
-        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
-        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=5)
-        assert fm.pending_text_focus() == 5
-
-    def test_returns_none_for_voice_only_shift(self, tmp_path: Path) -> None:
-        store = _make_store()
-        reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
-        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=8)
-        assert fm.pending_text_focus() is None
-
-    @pytest.mark.asyncio
-    async def test_returns_none_after_end_turn(self, tmp_path: Path) -> None:
-        store = _make_store()
-        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
-        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
-        fm.defer_shift(channel_id=5)
-        await fm.end_turn()
-        assert fm.pending_text_focus() is None
 
 
 # ---------------------------------------------------------------------------
@@ -630,20 +574,17 @@ class TestOnShift:
         assert fm.on_shift is None
 
     @pytest.mark.asyncio
-    async def test_on_shift_called_once_after_text_shift(self, tmp_path: Path) -> None:
+    async def test_on_shift_called_after_shift_now(self, tmp_path: Path) -> None:
         store = _make_store()
         reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         callback = AsyncMock()
         fm.on_shift = callback
-        fm.defer_shift(channel_id=5)
-        await fm.end_turn()
+        await fm.shift_now(channel_id=5)
         callback.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_on_shift_called_once_for_text_and_voice_shift(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_on_shift_fires_per_shift(self, tmp_path: Path) -> None:
         store = _make_store()
         reg = _make_registry(
             tmp_path,
@@ -652,15 +593,12 @@ class TestOnShift:
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         callback = AsyncMock()
         fm.on_shift = callback
-        fm.defer_shift(channel_id=5)
-        fm.defer_shift(channel_id=8)
-        await fm.end_turn()
-        callback.assert_awaited_once()
+        await fm.shift_now(channel_id=5)
+        await fm.shift_now(channel_id=8)
+        assert callback.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_on_shift_not_called_when_no_pending_shifts(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_on_shift_not_called_by_end_turn(self, tmp_path: Path) -> None:
         fm = self._fm(tmp_path)
         callback = AsyncMock()
         fm.on_shift = callback
