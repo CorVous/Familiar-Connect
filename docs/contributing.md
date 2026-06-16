@@ -16,10 +16,10 @@ If `uv self update` fails (pip-installed uv, or GitHub API rate limits from clou
 python3 -m pip install --user --upgrade uv
 ```
 
-Install project + dev + docs groups plus the `local-turn` extra (numpy + huggingface_hub are imported by test collection):
+Install project + dev + docs groups plus the `local-turn` (numpy + huggingface_hub, imported by test collection) and `local-embed` (fastembed, needed at runtime) extras:
 
 ```bash
-uv sync --dev --group docs --extra local-turn
+uv sync --dev --group docs --extra local-turn --extra local-embed
 ```
 
 See [Installation](getting-started/installation.md) for runtime prerequisites (libopus, Discord token, OpenRouter key, Cartesia key, etc.).
@@ -39,12 +39,14 @@ Red / green TDD:
 Run the same four checks CI runs:
 
 ```bash
-uv sync --dev --extra local-turn  # sync deps
+uv sync --dev --extra local-turn --extra local-embed  # sync deps
 uv run ruff check             # lint
 uv run ruff format            # format
 uv run ty check               # type-check
 uv run pytest                 # run suite
 ```
+
+Or run `scripts/ci-local.sh` for all of the above in one pass — the same job CI runs.
 
 Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing.
 
