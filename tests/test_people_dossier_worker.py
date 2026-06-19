@@ -199,6 +199,64 @@ class TestPeopleDossierWorker:
         assert entry.dossier_text == "keep me"
 
     @pytest.mark.asyncio
+    async def test_builds_self_dossier_with_familiar_label(self) -> None:
+        """Self-keyed fact compounds a self-dossier; prompt uses the name."""
+        store = HistoryStore(":memory:")
+        _seed_subject_fact(
+            store,
+            text="Sapphire ran a gaslighting bit and felt proud.",
+            canonical_key="self:fam",
+            display="Sapphire",
+        )
+        llm = _ScriptedLLM(replies=["Sapphire: enjoys running provocative bits."])
+
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        entry = store.get_people_dossier(familiar_id="fam", canonical_key="self:fam")
+        assert entry is not None
+        assert entry.last_fact_id == 1
+        # prompt addressed the familiar by name, not the raw key
+        joined = "\n".join(m.content_str for m in llm.calls[0])
+        assert "Sapphire" in joined
+        assert "self:fam" not in joined
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_prompt_preserves_opinions(self) -> None:
+        """Self-record keeps durable feelings/opinions; person-dossier sheds them.
+
+        Self-dossier is the substrate for consistently-forming opinions
+        (feeds the sleep cycle), so it must NOT use the person prompt's
+        blanket 'drop transient feelings'.
+        """
+        store = HistoryStore(":memory:")
+        _seed_subject_fact(
+            store,
+            text="Sapphire warmed to SpaceFish and stays wary of KaillaDame.",
+            canonical_key="self:fam",
+            display="Sapphire",
+        )
+        llm = _ScriptedLLM(replies=["Sapphire: warm to SpaceFish, wary of KaillaDame."])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        system = next(m for m in llm.calls[0] if m.role == "system").content_str
+        low = system.lower()
+        # keeps settled opinions/stances; does not blanket-drop feelings
+        assert "opinion" in low or "stance" in low
+        assert "drop transient feelings" not in low
+
+    @pytest.mark.asyncio
     async def test_no_subjects_means_no_llm_call(self) -> None:
         store = HistoryStore(":memory:")
         store.append_fact(  # subject-less fact
