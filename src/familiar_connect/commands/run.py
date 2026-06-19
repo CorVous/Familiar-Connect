@@ -235,6 +235,7 @@ def _default_assembler(
                 window_size=window_size,
                 max_people=budget.max_dossier_people,
                 max_tokens=budget.dossier_tokens,
+                familiar_display_name=familiar.display_name,
             ),
             RagContextLayer(
                 store=store,
@@ -548,6 +549,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         store=familiar.history_store,
         llm_clients=familiar.llm_clients,
         familiar_id=familiar.id,
+        familiar_display_name=familiar.display_name,
         embedder=embedder,
         memory=familiar.config.memory_providers,
     )

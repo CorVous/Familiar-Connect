@@ -604,6 +604,219 @@ class TestFactExtractorSubjects:
         assert facts[0].subjects == ()
 
 
+class TestFactExtractorSelfSubject:
+    """Familiar's OWN narrative routes to the reserved ``self:`` subject.
+
+    The familiar's performances/bits, choices, and relational
+    stances/feelings get a home (the self-dossier) instead of
+    poisoning whichever person the bit was about. Self-CAPABILITY
+    statements stay dropped — capabilities/limits aren't narrative.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prompt_teaches_self_key_and_name(self) -> None:
+        """Manifest carries self key + name; routes narrative, bans capability."""
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        prompt_text = "\n".join(m.content_str for m in llm.calls[0])
+        assert "self:fam" in prompt_text
+        assert "Sapphire" in prompt_text
+        lower = prompt_text.lower()
+        # routes narrative/feelings to self key
+        assert "self:fam" in prompt_text
+        # still forbids self-capability
+        assert "self-capability" in lower or "your own" in lower
+
+    @pytest.mark.asyncio
+    async def test_self_narrative_routed_to_self_subject(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Sapphire ran a bit and privately felt proud.",
+                        "source_turn_ids": [1],
+                        "subject_keys": ["self:fam"],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].subjects == (
+            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_self_key_not_mirrored_into_turn_mentions(self) -> None:
+        """Self key is always-injected — must not enter ``turn_mentions``.
+
+        Mirroring it would pollute the index and consume a ``max_people``
+        slot in ``PeopleDossierLayer``, breaking the self cap-exemption.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Sapphire chose to disengage.",
+                        "source_turn_ids": [3],
+                        "subject_keys": ["self:fam"],
+                    }
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        # fact still carries the self subject, but the turn is not mention-tagged
+        assert store.recent_facts(familiar_id="fam", limit=10)[0].subjects == (
+            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+        )
+        assert store.mentions_for_turn(turn_id=3) == ()
+
+    @pytest.mark.asyncio
+    async def test_self_capability_still_dropped_with_self_key(self) -> None:
+        """Self-key routing must NOT regress the capability post-filter."""
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "I cannot remember names.",
+                        "source_turn_ids": [1],
+                        "subject_keys": ["self:fam"],
+                    },
+                    {
+                        "text": "Sapphire chose to walk away from the argument.",
+                        "source_turn_ids": [2],
+                        "subject_keys": ["self:fam"],
+                    },
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        texts = {f.text for f in facts}
+        assert texts == {"Sapphire chose to walk away from the argument."}, texts
+
+    @pytest.mark.asyncio
+    async def test_display_name_capability_dropped_narrative_kept(self) -> None:
+        """Third-person self-naming may phrase a capability with the name.
+
+        "Sapphire cannot remember names" is a capability, not narrative —
+        must be dropped even though it isn't first-person.
+        """
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Sapphire cannot remember names.",
+                        "source_turn_ids": [1],
+                        "subject_keys": ["self:fam"],
+                    },
+                    {
+                        "text": "Sapphire chose to walk away.",
+                        "source_turn_ids": [2],
+                        "subject_keys": ["self:fam"],
+                    },
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        texts = {f.text for f in facts}
+        assert texts == {"Sapphire chose to walk away."}, texts
+
+    @pytest.mark.asyncio
+    async def test_display_name_capability_no_false_positives(self) -> None:
+        """Name-capability filter is inability-only — must not eat narrative.
+
+        Word-prefix collisions ("cancelled" ⊃ "can"), copula/dynamic
+        negation ("is not fond", "doesn't trust"), and positive ability
+        are NARRATIVE/stance — the self-dossier's payload — and must stay.
+        Only genuine inability ("cannot", "has no", "is unable") drops.
+        """
+        keep = [
+            "Sapphire cancelled the movie night.",  # 'can' prefix
+            "Sapphire candidly admitted she was wrong.",  # 'can' prefix
+            "Sapphire is not fond of KaillaDame.",  # relational stance
+            "Sapphire doesn't trust easily.",  # trait/stance
+            "Sapphire can sing surprisingly well.",  # positive ability
+        ]
+        drop = [
+            "Sapphire cannot remember names.",
+            "Sapphire has no internet access.",
+        ]
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 10)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {"text": t, "source_turn_ids": [1], "subject_keys": ["self:fam"]}
+                    for t in keep + drop
+                ])
+            ]
+        )
+        extractor = FactExtractor(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+            batch_size=10,
+        )
+        await extractor.tick()
+
+        texts = {f.text for f in store.recent_facts(familiar_id="fam", limit=20)}
+        assert texts == set(keep), texts
+
+
 class TestFactExtractorParticipantsWidening:
     """Manifest extends past batch authors to recent channel participants.
 
@@ -1188,4 +1401,8 @@ def _turn_count_in_prompt(messages: list[Message]) -> int:
     user_msg = next((m for m in messages if m.role == "user"), None)
     if user_msg is None:
         return 0
-    return sum(1 for line in user_msg.content_str.splitlines() if line.startswith("- "))
+    # ``- id=`` distinguishes turn lines from manifest entries
+    # (``- <key> — <name>``), now always non-empty via the self-subject.
+    return sum(
+        1 for line in user_msg.content_str.splitlines() if line.startswith("- id=")
+    )

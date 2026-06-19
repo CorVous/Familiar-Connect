@@ -11,7 +11,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from familiar_connect.identity import Author
+from familiar_connect.identity import (
+    SELF_PLATFORM,
+    Author,
+    is_self_key,
+    self_canonical_key,
+)
 
 
 class TestAuthorConstruction:
@@ -202,6 +207,28 @@ class TestFromDiscordMember:
         a = Author.from_discord_member(member)
         assert a.pronouns is None
         assert a.bio is None
+
+
+class TestSelfKey:
+    """Reserved ``self:<familiar_id>`` subject for the familiar's own narrative."""
+
+    def test_builds_self_prefixed_key(self) -> None:
+        assert self_canonical_key("sapphire") == "self:sapphire"
+        assert self_canonical_key("sapphire").startswith(f"{SELF_PLATFORM}:")
+
+    def test_round_trips_membership(self) -> None:
+        key = self_canonical_key("fam")
+        assert is_self_key(key)
+
+    def test_discord_keys_are_not_self(self) -> None:
+        assert not is_self_key("discord:123")
+        assert not is_self_key("twitch:abc")
+        assert not is_self_key("")
+        assert not is_self_key("self")  # bare prefix, no id portion
+
+    def test_self_key_does_not_collide_with_discord(self) -> None:
+        # discord user_id "self" must not be mistaken for the self subject
+        assert self_canonical_key("123") != "discord:123"
 
 
 class TestFromTwitch:
