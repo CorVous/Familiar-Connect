@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import time
 from pathlib import Path
 from threading import RLock
@@ -150,6 +151,18 @@ _FTS_STOPWORDS: tuple[str, ...] = (
 
 _ANALYZER_NAME = "familiar_en"
 
+# strip tantivy query syntax before parse. raw chat cues carry
+# apostrophes ("isn't", "Cor's"), colons, quotes — parse_query raises
+# on these and the swallowed ValueError silently zeroes retrieval for
+# the whole message. index-side simple tokenizer splits on punctuation
+# anyway, so replacing it with spaces keeps token parity. lowercasing
+# defuses AND/OR/NOT operator keywords (chat words, not boolean ops).
+_QUERY_SANITIZE_RE = re.compile(r"[^\w\s]+")
+
+
+def _sanitize_query(query: str) -> str:
+    return _QUERY_SANITIZE_RE.sub(" ", query).lower()
+
 
 def _build_analyzer() -> tantivy.TextAnalyzer:
     # Stemmer covers old `fox*` prefix-match trick for plurals
@@ -273,14 +286,19 @@ class FtsIndex:
 
         Empty / stopword-only query returns ``[]`` — tantivy strips
         stopwords, leaving zero parsed terms. Operator semantics:
-        disjunctive by default (OR), so multi-token cues match on any
-        substantive token (parity with old ``_build_fts_match``).
+        disjunctive always (OR) — query sanitized to bare lowercase
+        tokens, so multi-token cues match on any substantive token
+        (parity with old ``_build_fts_match``) and chat punctuation
+        can't trip query-syntax errors.
         """
         if limit <= 0 or not query or not query.strip():
             return []
-        # tantivy raises ValueError on syntax/field errors — treat as empty
+        cleaned = _sanitize_query(query)
+        if not cleaned.strip():
+            return []
+        # belt-and-braces: ValueError on residual syntax/field errors → empty
         try:
-            parsed = self._index.parse_query(query, default_field_names=["content"])
+            parsed = self._index.parse_query(cleaned, default_field_names=["content"])
         except ValueError:
             return []
         searcher = self._index.searcher()
