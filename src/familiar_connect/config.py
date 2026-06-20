@@ -41,11 +41,19 @@ Tiered by latency / quality:
   on, tools on (surface only — no tool wiring yet).
 """
 
-REASONING_LEVELS: frozenset[str] = frozenset({"off", "low", "medium", "high"})
+REASONING_LEVELS: frozenset[str] = frozenset({
+    "off",
+    "low",
+    "medium",
+    "high",
+    "default",
+})
 """Allowed values for ``[llm.<slot>].reasoning``.
 
 * ``"off"`` — explicitly suppress (OpenRouter ``reasoning.exclude``).
 * ``"low"`` / ``"medium"`` / ``"high"`` — effort levels.
+* ``"default"`` — model default; overrides a level merged in from
+  ``_default/character.toml`` (TOML has no null).
 * omitted (``None``) — defer to model's default.
 """
 
@@ -1464,7 +1472,8 @@ def _parse_llm_slots(raw: dict) -> dict[str, LLMSlotConfig]:
                     f"valid options: {valid}"
                 )
                 raise ConfigError(msg)
-            reasoning = reasoning_raw
+            # "default" reclaims model default over a merged-in level
+            reasoning = None if reasoning_raw == "default" else reasoning_raw
         else:
             msg = (
                 f"[llm.{name}].reasoning must be a string, "
