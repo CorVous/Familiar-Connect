@@ -103,6 +103,14 @@ _INVOKE_NAME_RE = re.compile(r'<(?:\w+:)?invoke\b[^>]*\bname="([^"]+)"')
 # e.g. silent(reasoning="…") or read_channel() instead of using the tools API.
 _PYTHON_SILENT_RE = re.compile(r"^\s*silent\s*\(", re.IGNORECASE)
 _PYTHON_TOOL_RE = re.compile(r"^\s*(read_channel|shift_focus)\s*\(", re.IGNORECASE)
+# Qwen3 thinking-mode artifact: stray ``</think>`` (or whole ``<think>…</think>``
+# block) leaks into content. leading only — mid-prose mention stays content.
+_LEADING_THINK_RE = re.compile(r"^\s*(?:<think>.*?</think>|</think>)\s*", re.DOTALL)
+
+
+def _strip_think_artifacts(content: str) -> str:
+    """Strip leading think-tag artifacts; reasoning never ships as text."""
+    return _LEADING_THINK_RE.sub("", content, count=1)
 
 
 def _strip_leaked_tool_calls(content: str) -> tuple[str, bool]:
@@ -321,8 +329,11 @@ async def agentic_loop(
 
     # Guard: model occasionally emits a tool-call as text rather than
     # invoking it. never ship/store that — it leaks and seeds a mimicry
-    # cascade. a leaked ``silent`` call is honoured as silence.
-    cleaned, silent_leak = _strip_leaked_tool_calls(last_content)
+    # cascade. a leaked ``silent`` call is honoured as silence. think-tag
+    # artifacts strip first so they can't mask a leaked call behind them.
+    cleaned, silent_leak = _strip_leaked_tool_calls(
+        _strip_think_artifacts(last_content)
+    )
     if cleaned != last_content:
         _logger.warning(
             f"{ls.tag('Tools', ls.LY)} "
