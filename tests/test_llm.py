@@ -244,6 +244,58 @@ class TestLLMClient:
         payload = client.build_payload([Message(role="user", content="x")])
         assert payload["reasoning"] == {"effort": level}
 
+    def test_payload_omits_sampling_params_when_unset(self) -> None:
+        """Default — no sampling fields beyond temperature; provider defaults."""
+        client = LLMClient(api_key="k", model="m")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert "top_p" not in payload
+        assert "top_k" not in payload
+        assert "presence_penalty" not in payload
+
+    def test_payload_includes_sampling_params(self) -> None:
+        """top_p / top_k / presence_penalty pass through to the payload."""
+        client = LLMClient(
+            api_key="k",
+            model="m",
+            top_p=0.95,
+            top_k=20,
+            presence_penalty=1.5,
+        )
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["top_p"] == pytest.approx(0.95)
+        assert payload["top_k"] == 20
+        assert payload["presence_penalty"] == pytest.approx(1.5)
+
+    def test_payload_reasoning_max_tokens(self) -> None:
+        """``reasoning_max_tokens`` maps to OpenRouter ``reasoning.max_tokens``."""
+        client = LLMClient(api_key="k", model="m", reasoning_max_tokens=2048)
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["reasoning"] == {"max_tokens": 2048}
+
+    def test_payload_reasoning_max_tokens_wins_over_effort(self) -> None:
+        """OpenRouter accepts one of effort/max_tokens — explicit budget wins."""
+        client = LLMClient(
+            api_key="k", model="m", reasoning="low", reasoning_max_tokens=2048
+        )
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["reasoning"] == {"max_tokens": 2048}
+
+    def test_payload_no_prefill_by_default(self) -> None:
+        client = LLMClient(api_key="k", model="m")
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["messages"][-1]["role"] == "user"
+
+    def test_payload_think_prepend_appends_prefill(self) -> None:
+        """Qwen3 no-think stabiliser: fake closed think block as final message."""
+        client = LLMClient(api_key="k", model="m", think_prepend=True)
+        payload = client.build_payload([Message(role="user", content="x")])
+        assert payload["messages"][-1] == {
+            "role": "assistant",
+            "content": "<think>\n\n</think>",
+        }
+        # original user message still present before the prefill
+        assert payload["messages"][-2]["role"] == "user"
+
 
 class TestLLMClientChat:
     @pytest.fixture
@@ -501,6 +553,28 @@ class TestCreateLLMClients:
         assert clients["fast"].reasoning == "off"
         assert clients["prose"].reasoning == "medium"
         assert clients["background"].reasoning == "medium"
+
+    def test_sampling_and_think_prepend_threaded_through(
+        self,
+        tmp_path: Path,
+        default_profile_path: Path,
+    ) -> None:
+        """Slot sampling knobs + think_prepend land on its :class:`LLMClient`."""
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "qwen/qwen3.6-35b-a3b"\ntop_p = 0.8\n'
+            "top_k = 20\npresence_penalty = 1.5\nthink_prepend = true\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        clients = create_llm_clients("sk-or-test-abc", cfg)
+        fast = clients["fast"]
+        assert fast.top_p == pytest.approx(0.8)
+        assert fast.top_k == 20
+        assert fast.presence_penalty == pytest.approx(1.5)
+        assert fast.think_prepend is True
+        # untouched slot keeps provider defaults
+        assert clients["prose"].top_p is None
+        assert clients["prose"].think_prepend is False
 
     def test_returns_distinct_client_instances(
         self,

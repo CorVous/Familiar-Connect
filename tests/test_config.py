@@ -186,6 +186,15 @@ class TestLoadCharacterConfig:
         assert cfg.llm["prose"].reasoning == "medium"
         assert cfg.llm["background"].reasoning == "high"
 
+    def test_reasoning_none_level_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``"none"`` (disable thinking, OpenRouter effort=none) is valid."""
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.fast]\nmodel = "m"\nreasoning = "none"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.llm["fast"].reasoning == "none"
+
     def test_reasoning_omitted_means_none(self, tmp_path: Path) -> None:
         defaults = tmp_path / "defaults.toml"
         defaults.write_text(
@@ -195,6 +204,66 @@ class TestLoadCharacterConfig:
         )
         cfg = load_character_config(tmp_path / "missing.toml", defaults_path=defaults)
         assert cfg.llm["prose"].reasoning is None
+
+    def test_sampling_params_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``top_p``/``top_k``/``presence_penalty``/``think_prepend`` parse."""
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[llm.fast]\nmodel = "m"\ntop_p = 0.8\ntop_k = 20\n'
+            "presence_penalty = 1.5\nthink_prepend = true\n"
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        slot = cfg.llm["fast"]
+        assert slot.top_p == pytest.approx(0.8)
+        assert slot.top_k == 20
+        assert slot.presence_penalty == pytest.approx(1.5)
+        assert slot.think_prepend is True
+
+    def test_sampling_params_omitted_mean_provider_default(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        cfg = load_character_config(
+            tmp_path / "missing.toml", defaults_path=default_profile_path
+        )
+        slot = cfg.llm["prose"]
+        assert slot.top_p is None
+        assert slot.top_k is None
+        assert slot.presence_penalty is None
+        assert slot.think_prepend is False
+
+    def test_top_p_out_of_range(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\ntop_p = 1.5\n')
+        with pytest.raises(ConfigError, match="top_p must be in"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_top_k_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\ntop_k = 0\n')
+        with pytest.raises(ConfigError, match="top_k must be"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_presence_penalty_out_of_range(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.prose]\nmodel = "m"\npresence_penalty = 3.0\n')
+        with pytest.raises(ConfigError, match="presence_penalty must be in"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_think_prepend_must_be_bool(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[llm.fast]\nmodel = "m"\nthink_prepend = "yes"\n')
+        with pytest.raises(ConfigError, match="think_prepend must be a bool"):
+            load_character_config(path, defaults_path=default_profile_path)
 
     def test_reasoning_default_sentinel_overrides_merged_value(
         self, tmp_path: Path
