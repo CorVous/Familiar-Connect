@@ -1,8 +1,9 @@
 """``shift_focus`` tool.
 
-Deferred focus shift: registers intent with FocusManager at handler
-time; applied atomically at end_turn. Modality inferred from
-SubscriptionRegistry inside FocusManager.defer_shift.
+Immediate focus shift: applies at handler time via
+``FocusManager.shift_now`` (modality inferred from SubscriptionRegistry).
+No deferral — focus moves the moment the tool is called, so a silent
+turn still leaves her where she went and nothing leaks.
 
 Content-bearing: handler eagerly fetches target channel's recent turns
 and returns them so the model sees the channel in-turn (agentic loop
@@ -57,7 +58,7 @@ async def _shift_focus_handler(args: dict[str, Any], ctx: ToolContext) -> str:
             "available_channels": available,
         })
 
-    fm.defer_shift(channel_id)
+    await fm.shift_now(channel_id)
 
     payload: dict[str, Any] = {"ok": True, "channel_id": channel_id}
     # Eager content fetch — voice/empty channels yield [] (model learns
@@ -83,11 +84,12 @@ def build_shift_focus_tool() -> Tool:
     return Tool(
         name="shift_focus",
         description=(
-            "Shift attentional focus to a different channel. Returns that "
-            "channel's recent messages so you can see it before responding "
-            "(empty list = nothing there yet). Your reply will post to the "
-            "new channel. Modality (text/voice) inferred from channel "
-            "subscription."
+            "Move your attention to a different channel — for real, right "
+            "now. You stop following your current channel until you shift "
+            "back, and any reply this turn posts to the new channel. Returns "
+            "the target's recent messages (empty list = nothing there yet). "
+            "Use it to actually go somewhere, not to glance. Modality "
+            "(text/voice) inferred from channel subscription."
         ),
         parameters={
             "type": "object",

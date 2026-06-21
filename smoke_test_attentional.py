@@ -145,7 +145,7 @@ async def run_smoke_tests() -> None:
         check("is_focused(TEXT_CHANNEL)", fm.is_focused(TEXT_CHANNEL))
         check("is_focused(OTHER_CHANNEL) = False", not fm.is_focused(OTHER_CHANNEL))
 
-        # stage a turn, then defer shift + end_turn
+        # stage a turn, then shift focus immediately
         store2.append_turn(
             familiar_id=FAMILIAR_ID,
             channel_id=OTHER_CHANNEL,
@@ -153,14 +153,13 @@ async def run_smoke_tests() -> None:
             content="staged msg",
             consumed=False,
         )
-        fm.defer_shift(OTHER_CHANNEL)
-        await fm.end_turn()
+        await fm.shift_now(OTHER_CHANNEL)
         check(
-            "end_turn promotes staged turns",
+            "shift_now promotes staged turns",
             store2.count_staged(familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL) == 0,
         )
         check(
-            "focus pointer updated after end_turn",
+            "focus pointer updated after shift_now",
             fm.get_focus("text") == OTHER_CHANNEL,
         )
 
@@ -263,10 +262,9 @@ async def run_smoke_tests() -> None:
             )
             elapsed = time.perf_counter() - t0
             check(
-                "shift_focus tool called (deferred shift registered)",
-                fm2._pending_shift.get("text") == OTHER_CHANNEL
-                or fm2.get_focus("text") == OTHER_CHANNEL,
-                f"pending={fm2._pending_shift}, focus={fm2.get_focus('text')}, elapsed={elapsed:.2f}s",
+                "shift_focus tool applied immediately",
+                fm2.get_focus("text") == OTHER_CHANNEL,
+                f"focus={fm2.get_focus('text')}, elapsed={elapsed:.2f}s",
             )
         except Exception as e:
             check("shift_focus tool", False, f"exception: {e}")
