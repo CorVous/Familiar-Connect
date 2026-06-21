@@ -81,8 +81,9 @@ class TestCoerceJson:
         assert result.value == [{"text": "f", "source_turn_ids": [1]}]
 
     def test_any_expect_keeps_first_blob_behavior(self) -> None:
-        # expect="any" preserves the old whichever-starts-first rule.
-        reply = '["b"] and then {"retire":[]}'
+        # expect="any" preserves the old whichever-starts-first rule:
+        # array starts before object here, so the array wins.
+        reply = '["b"] then {"k":1}'
         result = coerce_json(reply, expect="any")
         assert result.parsed_ok is True
         assert result.value == ["b"]
