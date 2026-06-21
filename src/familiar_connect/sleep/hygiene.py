@@ -21,15 +21,18 @@ produces a :class:`HygienePlan`; it never touches the DB itself —
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from familiar_connect.history.store import _normalize_fact_text, _subject_key_set
 from familiar_connect.identity import self_canonical_key
 from familiar_connect.llm import Message
+from familiar_connect.structured_output import (
+    coerce_json,
+    coerce_positive_int_list,
+    coerce_str_list,
+)
 
 if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
@@ -45,8 +48,6 @@ _logger = logging.getLogger(__name__)
 DEFAULT_FACTS_MAX = 500
 DEFAULT_TURNS_MAX = 400
 DEFAULT_RETIRE_CAP = 50
-
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
@@ -239,15 +240,9 @@ def parse_actions(reply: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]
     Permissive: bad JSON, missing keys, non-list values all degrade to
     empty lists rather than raising. Non-dict items are dropped.
     """
-    if not reply or not reply.strip():
-        return [], []
-    cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
-    match = _JSON_OBJECT_RE.search(cleaned)
-    blob = match.group(0) if match else cleaned
-    try:
-        parsed = json.loads(blob)
-    except ValueError:
-        return [], []
+    parsed = coerce_json(reply, expect="object").value or {}
+    # coerce_json only extracts a blob; a non-object payload (e.g. an
+    # array reached via the no-match fallback) must still degrade.
     if not isinstance(parsed, dict):
         return [], []
 
@@ -269,42 +264,10 @@ def reply_parse_failed(reply: str) -> bool:
     """
     if not reply or not reply.strip():
         return False
-    cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
-    match = _JSON_OBJECT_RE.search(cleaned)
-    blob = match.group(0) if match else cleaned
-    try:
-        return not isinstance(json.loads(blob), dict)
-    except ValueError:
-        return True
-
-
-def _int_ids(raw: Any) -> tuple[int, ...]:  # noqa: ANN401
-    """Coerce a JSON list into a tuple of distinct positive ints, in order."""
-    if not isinstance(raw, list):
-        return ()
-    out: list[int] = []
-    for item in raw:
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, int):
-            val = item
-        elif isinstance(item, str) and item.strip().lstrip("-").isdigit():
-            val = int(item.strip())
-        else:
-            continue
-        if val > 0 and val not in out:
-            out.append(val)
-    return tuple(out)
-
-
-def _str_keys(raw: Any) -> tuple[str, ...]:  # noqa: ANN401
-    if not isinstance(raw, list):
-        return ()
-    out: list[str] = []
-    for item in raw:
-        if isinstance(item, str) and item.strip() and item not in out:
-            out.append(item)
-    return tuple(out)
+    result = coerce_json(reply, expect="object")
+    # a clean plan parses AND is an object; anything else (malformed JSON
+    # → parsed_ok=False, or a non-object payload) counts as a failure.
+    return not (result.parsed_ok and isinstance(result.value, dict))
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +318,7 @@ def validate(
         return None
 
     for payload in retire_raw:
-        ids = _int_ids(payload.get("fact_ids"))
+        ids = tuple(coerce_positive_int_list(payload.get("fact_ids")))
         if not ids:
             rejected.append(RejectedAction("retire", payload, "no_ids", "no fact_ids"))
             continue
@@ -374,7 +337,7 @@ def validate(
         mutated += len(ids)
 
     for payload in rewrite_raw:
-        ids = _int_ids(payload.get("old_fact_ids"))
+        ids = tuple(coerce_positive_int_list(payload.get("old_fact_ids")))
         if not ids:
             rejected.append(
                 RejectedAction("rewrite", payload, "no_ids", "no old_fact_ids")
@@ -390,7 +353,7 @@ def validate(
                 RejectedAction("rewrite", payload, "empty_text", "blank new_text")
             )
             continue
-        keys = _str_keys(payload.get("subject_keys"))
+        keys = tuple(coerce_str_list(payload.get("subject_keys")))
         source_keys = {s.canonical_key for fid in ids for s in by_id[fid].subjects}
         # subject_lost: dropping all subjects when sources had some silently
         # orphans the fact (NULL subjects_json) and the supersession

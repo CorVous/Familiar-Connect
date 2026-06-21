@@ -14,14 +14,13 @@ of LLM-assisted retirement is harmless.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.llm import Message
+from familiar_connect.structured_output import coerce_json
 
 if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
@@ -29,8 +28,6 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.fact_supersede_worker")
-
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class FactSupersedeWorker:
@@ -196,15 +193,8 @@ def _parse_superseded_ids(reply: str, *, valid: set[int]) -> list[int]:
     Permissive: bad JSON, missing key, non-list value, non-int items
     all degrade to ``[]`` rather than raising.
     """
-    if not reply or not reply.strip():
-        return []
-    cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
-    match = _JSON_OBJECT_RE.search(cleaned)
-    blob = match.group(0) if match else cleaned
-    try:
-        parsed = json.loads(blob)
-    except ValueError:
-        return []
+    parsed = coerce_json(reply, expect="object").value or {}
+    # coerce_json only extracts; a non-object payload still degrades.
     if not isinstance(parsed, dict):
         return []
     raw = parsed.get("superseded_ids")
