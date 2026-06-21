@@ -2,12 +2,15 @@
 
 Chat-tuned models wrap JSON in ``` / ```json fences and pad it with
 prose. Three call sites already each reimplement the same "strip the
-fence, pull the first balanced object/array, ``json.loads``, and
-degrade to empty on any failure" idiom:
+fence, pull the balanced blob, ``json.loads``, degrade to empty on any
+failure" idiom — but each parses one SHAPE, and a faithful superset has
+to honour that so a reply containing both shapes can't flip to the wrong
+one. ``coerce_json`` takes a required ``expect`` keyword for this:
 
-  * :func:`familiar_connect.sleep.hygiene.parse_actions`
-  * :func:`familiar_connect.sleep.dream._extract_object`
-  * :func:`familiar_connect.processors.fact_extractor._parse_facts`
+  * :func:`familiar_connect.sleep.hygiene.parse_actions` — object only.
+  * :func:`familiar_connect.sleep.dream._extract_object` — object only.
+  * :func:`familiar_connect.processors.fact_extractor._parse_facts` —
+    array only.
 
 This module is the single authoritative version of that idiom (the
 Rule-of-Three case), plus the two id/key coercers those sites share.
@@ -22,7 +25,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 # Greedy + DOTALL: span from the first ``{``/``[`` to the last matching
 # bracket, so a multi-line object survives. Mirrors the per-site regexes
@@ -30,6 +33,10 @@ from typing import Any
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
+# A signed decimal integer and nothing else: gates ``int()`` so a
+# string like ``"--5"`` (which ``.lstrip("-").isdigit()`` wrongly
+# accepted) drops instead of crashing the parse.
+_INT_RE = re.compile(r"-?\d+")
 
 
 @dataclass(frozen=True)
@@ -47,18 +54,25 @@ class JsonResult:
     parsed_ok: bool = False
 
 
-def coerce_json(reply: str) -> JsonResult:
+def coerce_json(reply: str, *, expect: Literal["object", "array", "any"]) -> JsonResult:
     """Parse a possibly-fenced LLM reply into JSON; never raise.
 
-    Strips ``` / ```json fences, extracts the first balanced ``{...}``
-    object or ``[...]`` array (whichever appears first), and
-    ``json.loads`` it. Any failure — empty reply, no JSON, malformed
+    Strips ``` / ```json fences, extracts a balanced JSON blob of the
+    SHAPE the caller asks for, and ``json.loads`` it. ``expect`` is
+    required — each call site parses one shape today, and a reply that
+    happens to contain both must not flip to the wrong one:
+
+      * ``"object"`` — first ``{...}`` only (hygiene, dream).
+      * ``"array"`` — first ``[...]`` only (fact_extractor).
+      * ``"any"`` — whichever of object/array starts earlier.
+
+    Any failure — empty reply, no JSON of the wanted shape, malformed
     JSON — degrades to ``JsonResult(value=None, parsed_ok=False)``.
     """
     if not reply or not reply.strip():
         return JsonResult()
     cleaned = _FENCE_RE.sub("", reply).strip()
-    blob = _first_json_blob(cleaned)
+    blob = _shaped_json_blob(cleaned, expect)
     try:
         value = json.loads(blob)
     except ValueError:
@@ -66,15 +80,15 @@ def coerce_json(reply: str) -> JsonResult:
     return JsonResult(value=value, parsed_ok=True)
 
 
-def _first_json_blob(cleaned: str) -> str:
-    """Whichever of the first object / first array starts earlier.
+def _shaped_json_blob(cleaned: str, expect: Literal["object", "array", "any"]) -> str:
+    """Return the first balanced blob matching ``expect``, else all text.
 
-    A reply that is bare JSON (no surrounding prose) has no match and is
-    handed through verbatim, letting ``json.loads`` accept scalars and
-    pre-trimmed payloads exactly as the per-site code does.
+    A reply that is bare JSON (no surrounding prose) has no shape match
+    and is handed through verbatim, letting ``json.loads`` accept scalars
+    and pre-trimmed payloads exactly as the per-site code does.
     """
-    obj = _JSON_OBJECT_RE.search(cleaned)
-    arr = _JSON_ARRAY_RE.search(cleaned)
+    obj = _JSON_OBJECT_RE.search(cleaned) if expect in {"object", "any"} else None
+    arr = _JSON_ARRAY_RE.search(cleaned) if expect in {"array", "any"} else None
     if obj and arr:
         return (obj if obj.start() <= arr.start() else arr).group(0)
     match = obj or arr
@@ -96,7 +110,7 @@ def coerce_positive_int_list(raw: Any) -> list[int]:  # noqa: ANN401 — arbitra
             continue
         if isinstance(item, int):
             val = item
-        elif isinstance(item, str) and item.strip().lstrip("-").isdigit():
+        elif isinstance(item, str) and _INT_RE.fullmatch(item.strip()):
             val = int(item.strip())
         else:
             continue
