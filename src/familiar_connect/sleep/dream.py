@@ -21,9 +21,7 @@ through hygiene (textual redundancy / contradiction) — see the
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -32,6 +30,7 @@ from zoneinfo import ZoneInfo
 from familiar_connect.history.store import FactSubject, _normalize_fact_text
 from familiar_connect.identity import self_canonical_key
 from familiar_connect.llm import Message
+from familiar_connect.structured_output import coerce_json, coerce_positive_int_list
 
 if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
@@ -42,8 +41,6 @@ _logger = logging.getLogger(__name__)
 
 DEFAULT_TURNS_MAX_PER_DAY = 600
 DEFAULT_OPINION_CAP = 60
-
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -143,25 +140,6 @@ def _render_turn(t: HistoryTurn, self_name: str) -> str:
     return f"[{t.id}] {label}: {t.content}"
 
 
-def _coerce_ids(raw: Any) -> tuple[int, ...]:  # noqa: ANN401
-    """Distinct positive ints from a JSON list, order-preserving."""
-    if not isinstance(raw, list):
-        return ()
-    out: list[int] = []
-    for item in raw:
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, int):
-            val = item
-        elif isinstance(item, str) and item.strip().lstrip("-").isdigit():
-            val = int(item.strip())
-        else:
-            continue
-        if val > 0 and val not in out:
-            out.append(val)
-    return tuple(out)
-
-
 def _coerce_importance(raw: Any) -> int:  # noqa: ANN401
     """1-10 importance from model output; clamp range, default 5.
 
@@ -180,16 +158,11 @@ def _coerce_importance(raw: Any) -> int:  # noqa: ANN401
 
 def _extract_object(reply: str) -> dict[str, Any] | None:
     """Permissive: pull the first JSON object from an LLM reply, or None."""
-    if not reply or not reply.strip():
+    result = coerce_json(reply, expect="object")
+    if not result.parsed_ok:
         return None
-    cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
-    match = _JSON_OBJECT_RE.search(cleaned)
-    blob = match.group(0) if match else cleaned
-    try:
-        parsed = json.loads(blob)
-    except ValueError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    # coerce_json only extracts; a non-object payload still degrades.
+    return result.value if isinstance(result.value, dict) else None
 
 
 def _build_candidate_prompt(
@@ -250,7 +223,11 @@ async def extract_candidates(
         if not text:
             continue
         # code-enforce: keep only ids that really belong to this day
-        ids = tuple(i for i in _coerce_ids(item.get("turn_ids")) if i in day.turn_ids)
+        ids = tuple(
+            i
+            for i in coerce_positive_int_list(item.get("turn_ids"))
+            if i in day.turn_ids
+        )
         if not ids:
             continue
         out.append(Candidate(text=text, date=day.date, turn_ids=ids))
@@ -396,7 +373,7 @@ def validate_opinions(
         if not text:
             rejected.append(RejectedOpinion(payload, "empty_text", "blank text"))
             continue
-        ids = _coerce_ids(payload.get("source_turn_ids"))
+        ids = tuple(coerce_positive_int_list(payload.get("source_turn_ids")))
         bad = [i for i in ids if i not in candidate_union]
         if not ids or bad:
             rejected.append(

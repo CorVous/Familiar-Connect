@@ -13,7 +13,6 @@ unwraps fences + extraneous prose common in chat-tuned models.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from datetime import UTC, datetime
@@ -25,6 +24,7 @@ from familiar_connect.diagnostics.spans import span
 from familiar_connect.history.store import FactSubject
 from familiar_connect.identity import is_self_key, self_canonical_key
 from familiar_connect.llm import Message
+from familiar_connect.structured_output import coerce_json
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -34,8 +34,6 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.fact_extractor")
-
-_JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 # Patterns marking "facts" that are really self-capability statements
 # (e.g., "I cannot remember names"). belong in system prompt or
@@ -465,20 +463,12 @@ def _build_extract_prompt(
 def _parse_facts(reply: str) -> list[dict[str, object]]:
     """Permissive JSON-array parser.
 
-    Strips code fences, extracts first balanced ``[...]`` blob,
-    coerces via :func:`json.loads`. Malformed input returns ``[]``
-    rather than raising.
+    Defers fence-stripping + balanced-``[...]`` extraction to
+    :func:`familiar_connect.structured_output.coerce_json`; malformed
+    input returns ``[]`` rather than raising.
     """
-    if not reply or not reply.strip():
-        return []
-    # Strip common code-fence prelude like ``` or ```json
-    cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
-    match = _JSON_ARRAY_RE.search(cleaned)
-    blob = match.group(0) if match else cleaned
-    try:
-        parsed = json.loads(blob)
-    except ValueError:
-        return []
+    parsed = coerce_json(reply, expect="array").value or []
+    # coerce_json only extracts; a non-array payload still degrades.
     if not isinstance(parsed, list):
         return []
     out: list[dict[str, object]] = []
