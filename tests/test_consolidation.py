@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+from familiar_connect.config import load_character_config
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import Fact, FactSubject, HistoryStore
 from familiar_connect.identity import self_canonical_key
@@ -18,7 +20,18 @@ from familiar_connect.sleep.consolidation import (
     plan_consolidation,
     validate,
 )
+from familiar_connect.sleep.maintenance import SleepPromptText
 from tests.conftest import FakeLLMClient
+
+# Real consolidation prose = the merged ``_default`` config (single source
+# of truth); production threads it via ``SleepPromptText.from_config``.
+_DEFAULT_PROFILE = (
+    Path(__file__).resolve().parent.parent
+    / "data"
+    / "familiars"
+    / "_default"
+    / "character.toml"
+)
 
 
 def _fact(
@@ -315,6 +328,30 @@ class TestBuildPrompt:
         msgs = build_prompt(win, self_key="self:fam", system="MY OWN INSTRUCTIONS")
         assert msgs[0].role == "system"
         assert msgs[0].content == "MY OWN INSTRUCTIONS"
+
+    def test_default_config_threads_through_builder_to_nonempty_system(self) -> None:
+        """Config→prompt wiring guard: silent-empty-prompt regression.
+
+        Resolves the prose the way production does — real ``_default``
+        config → ``SleepPromptText.from_config`` → ``build_prompt`` — and
+        asserts the system ``Message`` is non-empty, carrying a distinctive
+        ``_default`` phrase. Would fail if any thread-through line dropped
+        and the builder received ``""``.
+        """
+        cfg = load_character_config(_DEFAULT_PROFILE, defaults_path=_DEFAULT_PROFILE)
+        prompts = SleepPromptText.from_config(
+            consolidation_system=cfg.sleep_consolidation_system,
+            stance_system=cfg.sleep_stance_system,
+            synthesis_system=cfg.sleep_synthesis_system,
+        )
+        win = _window((_fact(1, "noise"),))
+        msgs = build_prompt(
+            win, self_key="self:fam", system=prompts.consolidation_system
+        )
+        system = msgs[0].content
+        assert isinstance(system, str)
+        assert system.strip()
+        assert "memory-consolidation pass" in system
 
 
 class TestGatherWindow:
