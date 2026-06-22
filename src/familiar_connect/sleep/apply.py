@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from familiar_connect.history.store import FactSubject
+from familiar_connect.history.store import FactDraft, FactSubject
 from familiar_connect.identity import is_self_key
 
 if TYPE_CHECKING:
@@ -80,12 +80,11 @@ async def apply_hygiene(
     """Execute a plan's accepted actions; advance the sleep watermark."""
     fam = plan.familiar_id
 
-    # snapshot source facts up front (exact id fetch, includes superseded)
-    # so rewrites union provenance + resolve subject displays even as rows
-    # get superseded — and a >100k fact base can't drop a needed row.
+    # snapshot rewrite sources up front (exact id fetch, includes
+    # superseded) to resolve subject displays + the merge channel even as
+    # rows get superseded — and so a >100k fact base can't drop a needed
+    # row. Provenance union is the store's job now (see supersede).
     needed: set[int] = set()
-    for a in plan.retire:
-        needed.update(a.fact_ids)
     for a in plan.rewrite:
         needed.update(a.old_fact_ids)
     by_id = {f.id: f for f in await store.facts_by_ids(familiar_id=fam, ids=needed)}
@@ -93,59 +92,44 @@ async def apply_hygiene(
     skipped: list[tuple[str, int, str]] = []
     retired: list[int] = []
     for action in plan.retire:
-        for fid in action.fact_ids:
-            # a concurrent writer may have retired/superseded this since
-            # plan time — skip + record rather than crash the whole pass.
-            try:
-                await store.retire_fact(familiar_id=fam, fact_id=fid)
-            except ValueError as exc:
-                skipped.append(("retire", fid, str(exc)))
-                continue
-            retired.append(fid)
+        # the store retires each id, recording (not raising on) any a
+        # concurrent writer already retired/superseded since plan time.
+        result = await store.supersede(
+            familiar_id=fam, obsolete_facts=action.fact_ids, new_fact=None
+        )
+        retired.extend(result.superseded)
+        skipped.extend(("retire", fid, reason) for fid, reason in result.skipped)
 
     rewritten: list[tuple[tuple[int, ...], int]] = []
     for action in plan.rewrite:
-        # pre-flight: if any source is gone/superseded, skip the whole
-        # rewrite before appending — never strand a half-merged fact.
-        live = await store.facts_by_ids(familiar_id=fam, ids=action.old_fact_ids)
-        live_current = {f.id for f in live if f.superseded_at is None}
-        stale = [fid for fid in action.old_fact_ids if fid not in live_current]
-        if stale:
+        # the store owns the merge: it pre-flights every source, unions
+        # their provenance, and mints (dedup=False) only if all are
+        # current — declining the whole merge otherwise. Subjects stay
+        # caller-prepared; channel follows the first obsolete row.
+        result = await store.supersede(
+            familiar_id=fam,
+            obsolete_facts=action.old_fact_ids,
+            new_fact=FactDraft(
+                channel_id=by_id[action.old_fact_ids[0]].channel_id,
+                text=action.new_text,
+                subjects=tuple(
+                    _subjects_for_rewrite(
+                        action,
+                        by_id=by_id,
+                        familiar_display_name=familiar_display_name,
+                    )
+                ),
+            ),
+        )
+        if result.minted is None:
+            # a source raced between plan + apply, so the store declined
+            # the merge whole — same outcome as the old pre-flight skip:
+            # nothing minted, the action recorded as skipped, no raise.
             skipped.extend(
-                ("rewrite", fid, "source no longer current") for fid in stale
+                ("rewrite", fid, reason) for fid, reason in result.skipped
             )
             continue
-        # union provenance across the merged facts, order-preserving
-        turn_ids: list[int] = []
-        for fid in action.old_fact_ids:
-            for tid in by_id[fid].source_turn_ids:
-                if tid not in turn_ids:
-                    turn_ids.append(tid)
-        channel_id = by_id[action.old_fact_ids[0]].channel_id
-        subjects = _subjects_for_rewrite(
-            action, by_id=by_id, familiar_display_name=familiar_display_name
-        )
-        # dedup=False: the consolidated text may equal one of the rows
-        # we're about to supersede; force a fresh row so the merge isn't
-        # swallowed by near-dup suppression.
-        new_fact = await store.append_fact(
-            familiar_id=fam,
-            channel_id=channel_id,
-            text=action.new_text,
-            source_turn_ids=turn_ids,
-            subjects=subjects,
-            dedup=False,
-        )
-        for fid in action.old_fact_ids:
-            try:
-                await store.supersede_fact(
-                    familiar_id=fam, old_id=fid, new_id=new_fact.id
-                )
-            except ValueError as exc:
-                # lost a race after the pre-flight — new fact stays current
-                # (carries the merged content); leave the old be, record it.
-                skipped.append(("rewrite", fid, str(exc)))
-        rewritten.append((action.old_fact_ids, new_fact.id))
+        rewritten.append((action.old_fact_ids, result.minted.id))
 
     # hygiene owns the FACT axis only; the turn axis belongs to the dream
     # pass. Advancing just last_fact_id leaves dream's progress untouched.
