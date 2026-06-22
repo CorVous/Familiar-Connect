@@ -66,7 +66,7 @@ async def test_flags_stale_when_any_cited_fact_superseded() -> None:
         text="Aria lives in Berlin.",
         source_turn_ids=[2],
     )
-    store.supersede_fact(familiar_id="fam", old_id=f1.id, new_id=f2.id)
+    store.supersede(familiar_id="fam", obsolete_facts=[f1.id], new_fact=f2.id)
     store.append_reflection(
         familiar_id="fam",
         channel_id=1,

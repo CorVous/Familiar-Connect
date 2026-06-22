@@ -357,9 +357,10 @@ Different writers populate the two axes; do not conflate them:
   bookkeeping** — set by `FactSupersedeWorker`, which evaluates
   each newly-arrived fact against prior current facts about the
   same subject and asks the background LLM which (if any) to
-  retire. Strict `HistoryStore.supersede_fact()` raises on
-  re-supersession so a double-write surfaces as a bug rather than
-  silently rewiring the chain. Superseding also **deletes the
+  retire, via `HistoryStore.supersede()` (existing-id form). A
+  prior already retired by a concurrent writer is recorded in the
+  result's `skipped` rather than rewiring the chain twice. Superseding
+  also **deletes the
   retired fact's subjects' `people_dossiers` rows** (same
   `familiar_id`): the dossier worker compounds prior text and never
   un-bakes a retired fact, so a surviving row would keep the stale

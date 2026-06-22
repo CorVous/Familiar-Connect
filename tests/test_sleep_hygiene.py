@@ -342,7 +342,7 @@ class TestGatherWindow:
         new = raw.append_fact(
             familiar_id="fam", channel_id=1, text="f3", source_turn_ids=[3]
         )
-        raw.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        raw.supersede(familiar_id="fam", obsolete_facts=[1], new_fact=new.id)
         store = AsyncHistoryStore(raw)
         win = await gather_window(store, familiar_id="fam")
         assert "f1" not in {f.text for f in win.facts}

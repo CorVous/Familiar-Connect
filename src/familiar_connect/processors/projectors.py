@@ -180,7 +180,7 @@ def _reflection_factory(ctx: ProjectorContext) -> MemoryProjector:
     )
 
 
-def _fact_supersede_factory(ctx: ProjectorContext) -> MemoryProjector:
+def _fact_supersede_worker_factory(ctx: ProjectorContext) -> MemoryProjector:
     knobs = ctx.memory.fact_supersede
     return FactSupersedeWorker(
         store=ctx.store,
@@ -211,7 +211,7 @@ register_projector("rolling_summary", _summary_factory)
 register_projector("rich_note", _rich_note_factory)
 register_projector("people_dossier", _people_dossier_factory)
 register_projector("reflection", _reflection_factory)
-register_projector("fact_supersede", _fact_supersede_factory)
+register_projector("fact_supersede", _fact_supersede_worker_factory)
 register_projector("fact_embedding", _fact_embedding_factory)
 
 

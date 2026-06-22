@@ -133,7 +133,7 @@ class TestApplyHygiene:
         """F1: a planned fact superseded between plan + apply is skipped."""
         raw, junk_id, d1, d2 = _store_with_facts()
         # simulate the live bot retiring the junk fact during the plan→apply gap
-        raw.retire_fact(familiar_id="fam", fact_id=junk_id)
+        raw.supersede(familiar_id="fam", obsolete_facts=[junk_id], new_fact=None)
         store = AsyncHistoryStore(raw)
         plan = HygienePlan(
             familiar_id="fam",

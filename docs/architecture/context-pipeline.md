@@ -206,7 +206,7 @@ Per tick:
 
 1. `recent_facts(familiar_id, include_superseded=False)` returns up to `batch_size` (default 5) current facts. Facts newer than the internal watermark are evaluated oldest-first.
 2. For each new fact, for each subject, pull prior current facts for that subject (capped at `priors_max`, default 20). Ask the LLM which priors the new fact contradicts or directly replaces.
-3. Call `supersede_fact(old_id, new_id)` for each retired id. Already-superseded priors (retired by an earlier subject this tick) are skipped silently.
+3. Call `supersede(obsolete_facts=retired_ids, new_fact=<the new fact>)` to repoint each retired prior at the new fact (existing-id form mints nothing). Already-superseded priors (retired by an earlier subject this tick) land in the result's `skipped` rather than raising.
 4. Advance the watermark to the highest fact id seen this tick — even on bad LLM output, preventing a loop on a fact the model can't parse.
 
 Facts without subjects are skipped (`FactExtractor` must resolve at
@@ -311,9 +311,13 @@ new one and mark the old row `superseded_at = now`,
   IS NULL` — reads see "what's currently true".
 - Pass `include_superseded=True` for audit, contradiction
   inspection, or future provenance UIs.
-- `supersede_fact(old_id, new_id)` is the only write API; it
-  refuses to re-supersede an already-superseded row (signals an
-  upstream bug rather than absorbing it silently).
+- `supersede(obsolete_facts, new_fact)` is the unified write API
+  (alongside `append_fact`). It retires (`new_fact=None`), repoints
+  obsolete rows at an existing fact (a `Fact`/id, mints nothing), or
+  atomically mints and points a merge (`new_fact` a `FactDraft`). It
+  returns a `SupersedeResult` whose `skipped` records any obsolete row
+  already superseded by a concurrent writer — a tolerated skip, not a
+  raise.
 
 The `fts_facts` index covers all rows including superseded ones (the
 FTS triggers don't filter); read paths apply the

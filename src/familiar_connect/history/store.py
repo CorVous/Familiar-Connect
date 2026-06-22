@@ -2456,82 +2456,6 @@ class HistoryStore:
         max_id = row["max_id"] if row is not None else None
         return int(max_id) if max_id is not None else 0
 
-    def supersede_fact(
-        self,
-        *,
-        familiar_id: str,
-        old_id: int,
-        new_id: int,
-    ) -> None:
-        """Mark ``old_id`` as superseded by ``new_id``.
-
-        Both ids must belong to ``familiar_id``. Old row keeps its
-        text and provenance; only ``superseded_at`` (now, UTC) and
-        ``superseded_by`` are written. Re-superseding an already-
-        superseded row raises ``ValueError`` — signals upstream bug
-        (double-write) rather than something to silently absorb.
-        """
-        row = self._conn.execute(
-            "SELECT superseded_at, subjects_json FROM facts "
-            "WHERE id = ? AND familiar_id = ?",
-            (old_id, familiar_id),
-        ).fetchone()
-        if row is None:
-            msg = f"unknown fact id={old_id} for familiar={familiar_id}"
-            raise ValueError(msg)
-        if row["superseded_at"] is not None:
-            msg = f"fact id={old_id} already superseded"
-            raise ValueError(msg)
-        ts = datetime.now(tz=UTC).isoformat()
-        self._conn.execute(
-            """
-            UPDATE facts
-               SET superseded_at = ?, superseded_by = ?
-             WHERE id = ? AND familiar_id = ?
-            """,
-            (ts, new_id, old_id, familiar_id),
-        )
-        self._invalidate_subject_dossiers(
-            familiar_id=familiar_id, subjects_json=row["subjects_json"]
-        )
-        self._conn.commit()
-
-    def retire_fact(
-        self,
-        *,
-        familiar_id: str,
-        fact_id: int,
-    ) -> None:
-        """Retire ``fact_id`` with no replacement — junk removal.
-
-        Supersession's sibling for the sleep-hygiene pass: marks
-        ``superseded_at`` (now, UTC) but leaves ``superseded_by`` NULL
-        (nothing replaces it). Refuses already-retired rows
-        (``ValueError`` — same one-shot discipline as
-        :meth:`supersede_fact`). Invalidates affected subjects'
-        dossiers identically.
-        """
-        row = self._conn.execute(
-            "SELECT superseded_at, subjects_json FROM facts "
-            "WHERE id = ? AND familiar_id = ?",
-            (fact_id, familiar_id),
-        ).fetchone()
-        if row is None:
-            msg = f"unknown fact id={fact_id} for familiar={familiar_id}"
-            raise ValueError(msg)
-        if row["superseded_at"] is not None:
-            msg = f"fact id={fact_id} already superseded"
-            raise ValueError(msg)
-        ts = datetime.now(tz=UTC).isoformat()
-        self._conn.execute(
-            "UPDATE facts SET superseded_at = ? WHERE id = ? AND familiar_id = ?",
-            (ts, fact_id, familiar_id),
-        )
-        self._invalidate_subject_dossiers(
-            familiar_id=familiar_id, subjects_json=row["subjects_json"]
-        )
-        self._conn.commit()
-
     def supersede(
         self,
         *,
@@ -2572,8 +2496,7 @@ class HistoryStore:
         """
         ids = [int(i) for i in obsolete_facts]
         obsolete_rows = {
-            f.id: f
-            for f in self.facts_by_ids(familiar_id=familiar_id, ids=ids)
+            f.id: f for f in self.facts_by_ids(familiar_id=familiar_id, ids=ids)
         }
 
         if isinstance(new_fact, FactDraft):
@@ -2666,9 +2589,7 @@ class HistoryStore:
                 keys=_subject_key_set(obsolete_rows[fid].subjects),
             )
         self._conn.commit()
-        return SupersedeResult(
-            minted=minted, superseded=tuple(ids), skipped=()
-        )
+        return SupersedeResult(minted=minted, superseded=tuple(ids), skipped=())
 
     def ancestors_of(
         self,
@@ -2697,31 +2618,19 @@ class HistoryStore:
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
 
-    def _invalidate_subject_dossiers(
-        self, *, familiar_id: str, subjects_json: str | None
-    ) -> None:
-        """Drop baked dossiers for a retired/superseded fact's subjects.
-
-        PeopleDossierWorker compounds prior dossier text + only newer
-        facts; it never un-bakes a retired fact. DELETE the row (not
-        reset the watermark) — a surviving row re-compounds the
-        stale/poisoned prose via the "Previous dossier" path. Absent
-        row → prior=None → clean full rebuild. NULL subjects → no-op.
-        Caller commits.
-        """
-        self._invalidate_dossiers_for_keys(
-            familiar_id=familiar_id,
-            keys=_canonical_keys_from_subjects_json(subjects_json),
-        )
-
     def _invalidate_dossiers_for_keys(
         self, *, familiar_id: str, keys: Iterable[str]
     ) -> None:
         """DELETE baked dossiers for ``keys`` — authoritative primitive.
 
-        Sole owner of the dossier-drop knowledge; both the
-        ``subjects_json`` form above and :meth:`supersede` (which holds
-        parsed :class:`FactSubject`s) route through here. Caller commits.
+        Sole owner of the dossier-drop knowledge; :meth:`supersede`
+        routes here (it holds parsed :class:`FactSubject`s).
+
+        PeopleDossierWorker compounds prior dossier text + only newer
+        facts; never un-bakes a retired fact. DELETE the row (not reset
+        the watermark) — a surviving row re-compounds stale/poisoned
+        prose via the "Previous dossier" path. Absent row → prior=None →
+        clean full rebuild. Empty ``keys`` → no-op. Caller commits.
         """
         for key in keys:
             self._conn.execute(

@@ -2,7 +2,8 @@
 
 For each newly-appended fact, asks background LLM whether it
 retires any prior current facts about the same subject — if so,
-calls :meth:`HistoryStore.supersede_fact` to mark them.
+calls :meth:`HistoryStore.supersede` (existing-id form) to repoint
+them at the new fact.
 
 System-time bookkeeping half of the fact lifecycle. ``valid_to``
 (world-time) is left to extractor and to speaker who anchors a
@@ -148,17 +149,17 @@ class FactSupersedeWorker:
                 reply.content_str,
                 valid={p.id for p in unique},
             )
-            for old_id in ids:
-                try:
-                    await self._store.supersede_fact(
-                        familiar_id=self._familiar_id,
-                        old_id=old_id,
-                        new_id=f_new.id,
-                    )
-                except ValueError:
-                    # Already retired by earlier subject in this fact
-                    continue
-                retired += 1
+            if not ids:
+                continue
+            # Existing-id form: repoint each old row at f_new (mints
+            # nothing). Per-id skip-and-record — a prior already retired
+            # by an earlier subject lands in `skipped`, not an exception.
+            result = await self._store.supersede(
+                familiar_id=self._familiar_id,
+                obsolete_facts=ids,
+                new_fact=f_new,
+            )
+            retired += len(result.superseded)
         return retired
 
 
