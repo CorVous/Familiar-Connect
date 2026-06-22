@@ -653,6 +653,16 @@ def _canonical_keys_from_subjects_json(subjects_json: str | None) -> frozenset[s
     return frozenset(keys)
 
 
+def _placeholders(n: int) -> str:
+    """Build SQL ``IN``-clause placeholder list: ``n`` bound ``?`` marks.
+
+    Emits ONLY bound-parameter placeholders (``"?,?,?"``), never data —
+    so an f-string interpolating the result cannot inject SQL. Caller
+    binds the actual values as query parameters. ``n <= 0`` -> ``""``.
+    """
+    return ",".join("?" * n)
+
+
 def _facts_validity_where(
     *,
     include_superseded: bool,
@@ -2289,8 +2299,10 @@ class HistoryStore:
         unique_ids = sorted({int(i) for i in ids})
         if not unique_ids:
             return []
-        placeholders = ",".join("?" for _ in unique_ids)
+        placeholders = _placeholders(len(unique_ids))
         rows = self._conn.execute(
+            # S608 safe: only bound `?` placeholders interpolated; ids
+            # are int-coerced above and passed as bound params below.
             f"""
             SELECT id, familiar_id, channel_id, text,
                    source_turn_ids, created_at,

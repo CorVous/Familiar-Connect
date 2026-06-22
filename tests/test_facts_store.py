@@ -22,8 +22,8 @@ class TestPlaceholders:
         assert _placeholders(1) == "?"
 
     def test_empty_for_nonpositive(self) -> None:
-        assert _placeholders(0) == ""
-        assert _placeholders(-1) == ""
+        assert not _placeholders(0)
+        assert not _placeholders(-1)
 
     def test_only_question_marks_never_data(self) -> None:
         # Safety contract: result is purely ``?`` + ``,`` — no data ever
