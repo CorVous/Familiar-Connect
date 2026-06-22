@@ -1433,13 +1433,22 @@ def _seed_with_dream_turn(store: HistoryStore) -> tuple[list[int], int]:
     return normal_ids, dream.id
 
 
-def _dream_extractor(store: HistoryStore, llm: _ScriptedLLM) -> FactExtractor:
+def _dream_extractor(
+    store: HistoryStore,
+    llm: _ScriptedLLM,
+    *,
+    dream_extraction_clause: str | None = None,
+) -> FactExtractor:
+    kwargs: dict[str, object] = {}
+    if dream_extraction_clause is not None:
+        kwargs["dream_extraction_clause"] = dream_extraction_clause
     return FactExtractor(
         store=AsyncHistoryStore(store),
         llm_client=llm,
         familiar_id="fam",
         familiar_display_name="Sapphire",
         batch_size=10,
+        **kwargs,
     )
 
 
@@ -1471,6 +1480,53 @@ class TestSleepReturnDreamExtraction:
         llm = _ScriptedLLM(replies=[_facts_json([])])
         await _dream_extractor(store, llm).tick()
         assert "dream" not in llm.calls[0][0].content_str.lower()
+
+    @pytest.mark.asyncio
+    async def test_configured_dream_clause_reaches_llm(self) -> None:
+        """Caller-supplied clause template (with placeholders) is interpolated."""
+        store = HistoryStore(":memory:")
+        _, dream_id = _seed_with_dream_turn(store)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        clause = "DREAM-MARKER {self_name} keyed {self_key} ids {ids}"
+        await _dream_extractor(
+            store, llm, dream_extraction_clause=clause
+        ).tick()
+        system = llm.calls[0][0].content_str
+        assert "DREAM-MARKER Sapphire keyed self:fam" in system
+        assert str(dream_id) in system
+
+    @pytest.mark.asyncio
+    async def test_claim_discipline_rail_fires_with_config_clause(self) -> None:
+        """Code rail forces self-subject + framing even when clause is config-sourced.
+
+        A config override changes the dream-clause phrasing; it can't stop
+        the code rail from re-keying a dream-grounded fact to ``self:`` and
+        dream-framing it.
+        """
+        store = HistoryStore(":memory:")
+        _, dream_id = _seed_with_dream_turn(store)
+        llm = _ScriptedLLM(
+            replies=[
+                _facts_json([
+                    {
+                        "text": "Cor fought a dragon in the rafters.",
+                        "source_turn_ids": [dream_id],
+                        "subject_keys": ["discord:1"],
+                    }
+                ])
+            ]
+        )
+        await _dream_extractor(
+            store, llm, dream_extraction_clause="say anything about {self_name}"
+        ).tick()
+        facts = store.recent_facts(familiar_id="fam", limit=10)
+        assert len(facts) == 1
+        assert facts[0].text == (
+            "Sapphire dreamed that Cor fought a dragon in the rafters."
+        )
+        assert facts[0].subjects == (
+            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+        )
 
     @pytest.mark.asyncio
     async def test_dream_fact_forced_to_self_subject_and_framed(self) -> None:
