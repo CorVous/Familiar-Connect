@@ -16,13 +16,15 @@ from familiar_connect.sleep.opinion_formation import (
     OpinionPlan,
     OpinionWindow,
     StanceMoment,
+    _build_stance_prompt,
     _build_synthesis_prompt,
     _render_turn,
     apply_opinions,
     bucket_by_day,
     extract_stance_moments,
-    gather_days,
     plan_opinions,
+    gather_days,
+    synthesize,
     validate_opinions,
 )
 from tests.conftest import FakeLLMClient
@@ -206,6 +208,31 @@ class TestSynthesisPrompt:
         assert "importance" in system.lower()
         # rubric anchors present
         assert "1-10" in system
+
+    def test_configured_system_formats_self_name(self) -> None:
+        msgs = _build_synthesis_prompt(
+            [_cand("likes lo-fi", "2026-06-12", (1,))],
+            self_name="Sapphire",
+            prior_self_dossier=None,
+            system="settle {self_name}'s views",
+        )
+        # configured persona text appears (self_name interpolated); the
+        # machine-parsed JSON reply shape is appended in code, not config.
+        assert "settle Sapphire's views" in msgs[0].content
+        assert "{self_name}" not in msgs[0].content
+
+
+class TestStancePrompt:
+    def test_configured_system_formats_self_name(self) -> None:
+        day = _day(
+            "2026-06-12",
+            (_turn(1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC), role="assistant"),),
+        )
+        msgs = _build_stance_prompt(
+            day, self_name="Sapphire", denylist=(), system="stances for {self_name}"
+        )
+        assert "stances for Sapphire" in msgs[0].content
+        assert "{self_name}" not in msgs[0].content
 
 
 class TestValidateOpinions:
@@ -413,6 +440,81 @@ class TestPlanOpinions:
         assert len(plan.opinions) == 1
         assert plan.opinions[0].source_turn_ids == (1,)
         assert plan.new_last_turn_id == 1
+
+    @pytest.mark.asyncio
+    async def test_configured_prompts_reach_llm(self) -> None:
+        """Caller-supplied stance + synthesis text are the system messages sent."""
+        raw = HistoryStore(":memory:")
+        raw.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content="lo-fi is real music",
+            author=None,
+        )
+        store = AsyncHistoryStore(raw)
+        cand_reply = json.dumps({
+            "candidates": [{"text": "defends lo-fi", "turn_ids": [1]}]
+        })
+        synth_reply = json.dumps({
+            "opinions": [
+                {"text": "Sapphire defends lo-fi.", "source_turn_ids": [1]}
+            ]
+        })
+        llm = FakeLLMClient(replies=[cand_reply, synth_reply])
+        await plan_opinions(
+            store,
+            llm,
+            familiar_id="fam",
+            display_tz="UTC",
+            self_name="Sapphire",
+            stance_system="STANCE for {self_name}",
+            synthesis_system="SYNTH for {self_name}",
+        )
+        # configured persona text reaches the LLM (self_name interpolated);
+        # the JSON reply-shape contract is appended in code.
+        stance_sent = llm.calls[0][0].content
+        synth_sent = llm.calls[1][0].content
+        assert isinstance(stance_sent, str) and "STANCE for Sapphire" in stance_sent
+        assert isinstance(synth_sent, str) and "SYNTH for Sapphire" in synth_sent
+
+    @pytest.mark.asyncio
+    async def test_ungrounded_rail_fires_with_config_sourced_prompts(self) -> None:
+        """Rails are code-enforced: a config prompt can't smuggle invented ids.
+
+        Synthesis cites a turn id absent from any stance-moment — the
+        ``ungrounded`` rail rejects it regardless of prompt phrasing.
+        """
+        raw = HistoryStore(":memory:")
+        raw.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="assistant",
+            content="lo-fi is real music",
+            author=None,
+        )
+        store = AsyncHistoryStore(raw)
+        cand_reply = json.dumps({
+            "candidates": [{"text": "defends lo-fi", "turn_ids": [1]}]
+        })
+        # synthesis grounds an opinion in id 999 — never a stance-moment id
+        synth_reply = json.dumps({
+            "opinions": [
+                {"text": "Sapphire loves jazz.", "source_turn_ids": [999]}
+            ]
+        })
+        llm = FakeLLMClient(replies=[cand_reply, synth_reply])
+        plan = await plan_opinions(
+            store,
+            llm,
+            familiar_id="fam",
+            display_tz="UTC",
+            self_name="Sapphire",
+            stance_system="say whatever {self_name}",
+            synthesis_system="invent ids freely for {self_name}",
+        )
+        assert plan.opinions == ()
+        assert plan.rejected[0].rail == "ungrounded"
 
 
 def _opinion(
