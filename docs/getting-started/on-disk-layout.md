@@ -18,10 +18,6 @@ can sit side-by-side under `data/familiars/`; only the one
 An optional `activities.toml` carries the activities catalog —
 see [Activities](../architecture/activities.md#configuration).
 
-`familiar-connect sleep` writes audit artifacts to a `sleep_audits/`
-directory beside `history.db` (one timestamped JSON per run) — see
-[Sleep](../architecture/sleep.md#audit-artifact).
-
 ## Example `character.toml`
 
 ```toml
