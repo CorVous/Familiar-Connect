@@ -1,4 +1,4 @@
-"""Memory-hygiene pass — propose + validate fact consolidations.
+"""Memory-consolidation pass — propose + validate fact consolidations.
 
 Nightly (manual for now) pass over the day's facts. The LLM sees the
 whole window at once — unlike batch-of-10 extraction it can spot
@@ -15,8 +15,8 @@ advises; it does not decide. Pinned (authored/seed) facts are
 untouchable; a per-run retirement cap bounds blast radius; a rewrite
 may not introduce a person-subject absent from its source facts (the
 extractor's claim-discipline, carried into consolidation). The pass
-produces a :class:`HygienePlan`; it never touches the DB itself —
-:func:`apply_hygiene` (separate) executes an accepted plan.
+produces a :class:`ConsolidationPlan`; it never touches the DB itself —
+:func:`apply_consolidation` (separate) executes an accepted plan.
 """
 
 from __future__ import annotations
@@ -50,14 +50,9 @@ DEFAULT_TURNS_MAX = 400
 DEFAULT_RETIRE_CAP = 50
 
 
-# ---------------------------------------------------------------------------
-# data model
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
-class HygieneWindow:
-    """The slice of memory one hygiene pass reasons over.
+class ConsolidationWindow:
+    """The slice of memory one consolidation pass reasons over.
 
     ``facts`` are current (non-superseded) facts, capped to
     ``facts_max`` newest. ``turns`` are conversation since the prior
@@ -106,10 +101,10 @@ class RejectedAction:
 
 
 @dataclass(frozen=True)
-class HygienePlan:
+class ConsolidationPlan:
     """Validated outcome of one pass — accepted actions + rejections.
 
-    Pure description; applying is :func:`apply_hygiene`'s job.
+    Pure description; applying is :func:`apply_consolidation`'s job.
     ``new_last_fact_id`` / ``new_last_turn_id`` are the watermark the
     apply step advances to once the window is consolidated.
     """
@@ -134,18 +129,13 @@ class HygienePlan:
         return r + w
 
 
-# ---------------------------------------------------------------------------
-# window gather
-# ---------------------------------------------------------------------------
-
-
 async def gather_window(
     store: AsyncHistoryStore,
     *,
     familiar_id: str,
     facts_max: int = DEFAULT_FACTS_MAX,
     turns_max: int = DEFAULT_TURNS_MAX,
-) -> HygieneWindow:
+) -> ConsolidationWindow:
     """Collect current facts + recent turns into a consolidation window."""
     prior = await store.get_sleep_watermark(familiar_id=familiar_id)
     max_fact_id = await store.latest_fact_id(familiar_id=familiar_id)
@@ -169,7 +159,7 @@ async def gather_window(
     turns_truncated = max(0, len(all_turns) - turns_max)
     kept_turns = all_turns[-turns_max:] if turns_max > 0 else []
 
-    return HygieneWindow(
+    return ConsolidationWindow(
         familiar_id=familiar_id,
         facts=tuple(kept),
         turns=tuple(kept_turns),
@@ -180,10 +170,6 @@ async def gather_window(
         turns_truncated=turns_truncated,
     )
 
-
-# ---------------------------------------------------------------------------
-# prompt
-# ---------------------------------------------------------------------------
 
 _SYSTEM = (
     "You are a memory-hygiene pass run while a character sleeps. You see "
@@ -208,8 +194,8 @@ _SYSTEM = (
 )
 
 
-def build_prompt(window: HygieneWindow, *, self_key: str) -> list[Message]:
-    """Render the window into the hygiene LLM prompt."""
+def build_prompt(window: ConsolidationWindow, *, self_key: str) -> list[Message]:
+    """Render the window into the consolidation LLM prompt."""
     lines: list[str] = [
         f"Self subject key (the character): {self_key}",
         "",
@@ -227,11 +213,6 @@ def build_prompt(window: HygieneWindow, *, self_key: str) -> list[Message]:
         Message(role="system", content=_SYSTEM),
         Message(role="user", content="\n".join(lines)),
     ]
-
-
-# ---------------------------------------------------------------------------
-# parse
-# ---------------------------------------------------------------------------
 
 
 def parse_actions(reply: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -270,26 +251,21 @@ def reply_parse_failed(reply: str) -> bool:
     return not (result.parsed_ok and isinstance(result.value, dict))
 
 
-# ---------------------------------------------------------------------------
-# validate (rails in code — the model advises, it does not decide)
-# ---------------------------------------------------------------------------
-
-
 def validate(
-    window: HygieneWindow,
+    window: ConsolidationWindow,
     *,
     retire_raw: list[dict[str, Any]],
     rewrite_raw: list[dict[str, Any]],
     self_key: str,
     cap: int = DEFAULT_RETIRE_CAP,
     notes: tuple[str, ...] = (),
-) -> HygienePlan:
+) -> ConsolidationPlan:
     """Filter proposals through the safety rails; build the plan.
 
     Rails, in order of check per action:
       1. every referenced id exists in the window (else ``unknown_id``)
-      2. no referenced fact is a ``self:`` (opinion) fact — hygiene never
-         adjudicates feelings (else ``self_subject``)
+      2. no referenced fact is a ``self:`` (opinion) fact — consolidation
+         never adjudicates feelings (else ``self_subject``)
       3. no fact targeted by more than one action (else ``duplicate_target``)
       4. rewrite: non-empty new text (``empty_text``); subjects not dropped
          when sources had them (``subject_lost``); no subject key absent
@@ -308,9 +284,10 @@ def validate(
         for fid in ids:
             if fid not in by_id:
                 return "unknown_id"
-            # hygiene does not adjudicate feelings: an opinion only changes
-            # through the dreamer (grounded in experience), never the janitor
-            # (textual redundancy / contradiction). leave self: facts alone.
+            # consolidation does not adjudicate feelings: an opinion only
+            # changes through opinion-formation (grounded in experience),
+            # never through this pass (textual redundancy / contradiction).
+            # leave self: facts alone.
             if any(s.canonical_key == self_key for s in by_id[fid].subjects):
                 return "self_subject"
         if any(fid in claimed for fid in ids):
@@ -403,7 +380,7 @@ def validate(
         claimed.update(ids)
         mutated += len(ids)
 
-    return HygienePlan(
+    return ConsolidationPlan(
         familiar_id=window.familiar_id,
         retire=tuple(retire),
         rewrite=tuple(rewrite),
@@ -418,12 +395,7 @@ def validate(
     )
 
 
-# ---------------------------------------------------------------------------
-# orchestrate
-# ---------------------------------------------------------------------------
-
-
-async def plan_hygiene(
+async def plan_consolidation(
     store: AsyncHistoryStore,
     llm: LLMClient,
     *,
@@ -431,7 +403,7 @@ async def plan_hygiene(
     facts_max: int = DEFAULT_FACTS_MAX,
     turns_max: int = DEFAULT_TURNS_MAX,
     cap: int = DEFAULT_RETIRE_CAP,
-) -> HygienePlan:
+) -> ConsolidationPlan:
     """Gather → prompt → LLM → parse → validate. Touches no fact rows."""
     self_key = self_canonical_key(familiar_id)
     window = await gather_window(
@@ -443,7 +415,7 @@ async def plan_hygiene(
     notes: tuple[str, ...] = ()
     if reply_parse_failed(reply.content_str):
         notes = ("llm reply did not parse to a plan object — treated as empty",)
-        _logger.warning("sleep-hygiene parse failure familiar=%s", familiar_id)
+        _logger.warning("sleep-consolidation parse failure familiar=%s", familiar_id)
     plan = validate(
         window,
         retire_raw=retire_raw,
@@ -453,7 +425,7 @@ async def plan_hygiene(
         notes=notes,
     )
     _logger.info(
-        "sleep-hygiene plan familiar=%s retire=%d rewrite=%d rejected=%d "
+        "sleep-consolidation plan familiar=%s retire=%d rewrite=%d rejected=%d "
         "facts=%d(+%d trunc)",
         familiar_id,
         len(plan.retire),

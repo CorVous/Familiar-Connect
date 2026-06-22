@@ -2,7 +2,8 @@
 
 A *maintenance pass* is one discrete, one-shot consolidation over the
 familiar's database (run once per sleep, not a forever-loop). Today's
-two: ``hygiene`` (fact retire/rewrite) and ``dream`` (opinion-formation).
+two: ``consolidation`` (fact retire/rewrite) and ``opinion``
+(opinion-formation).
 
 Mirrors the projector registry (:mod:`processors.projectors`) Cassidy
 cited as precedent — a :class:`MaintenancePass` Protocol for the common
@@ -12,16 +13,18 @@ and an ordered :data:`DEFAULT_PASSES`. This is the explicit "list of
 maintenance actions to run, and when" — configurable, not a hard-coded
 inseparable network of modules.
 
-The ONE thing projectors lack: an ordered inter-pass data-flow. Hygiene's
-retirements feed dream's known-bits deny-list. Modeled as sequential
-:func:`run_passes` where each pass reads/writes a shared
-:class:`MaintenanceRun` — hygiene stashes its retired-fact ids, dream
-resolves them to texts for its deny-list.
+The ONE thing projectors lack: an ordered inter-pass data-flow.
+Consolidation's retirements feed the opinion pass's known-bits
+deny-list. Modeled as sequential :func:`run_passes` where each pass
+reads/writes a shared :class:`MaintenanceRun` — consolidation stashes
+its retired-fact ids, the opinion pass resolves them to texts for its
+deny-list.
 
-The free functions :func:`execute_sleep` / :func:`execute_dream` remain
-the plan→apply orchestrators each pass wraps; ad-hoc callers may still
-use them directly. Lives under :mod:`familiar_connect.sleep` so the
-engine imports it without pulling the CLI command package.
+The free functions :func:`execute_consolidation` /
+:func:`execute_opinion_formation` remain the plan→apply orchestrators
+each pass wraps; ad-hoc callers may still use them directly. Lives under
+:mod:`familiar_connect.sleep` so the engine imports it without pulling
+the CLI command package.
 """
 
 from __future__ import annotations
@@ -33,17 +36,17 @@ from typing import TYPE_CHECKING, Protocol
 
 from familiar_connect import log_style as ls
 from familiar_connect.identity import self_canonical_key
-from familiar_connect.sleep.apply import apply_hygiene
-from familiar_connect.sleep.dream import (
-    DEFAULT_OPINION_CAP,
-    apply_dream,
-    plan_dream,
-)
-from familiar_connect.sleep.hygiene import (
+from familiar_connect.sleep.apply import apply_consolidation
+from familiar_connect.sleep.consolidation import (
     DEFAULT_FACTS_MAX,
     DEFAULT_RETIRE_CAP,
     DEFAULT_TURNS_MAX,
-    plan_hygiene,
+    plan_consolidation,
+)
+from familiar_connect.sleep.opinion_formation import (
+    DEFAULT_OPINION_CAP,
+    apply_opinions,
+    plan_opinions,
 )
 
 if TYPE_CHECKING:
@@ -52,14 +55,14 @@ if TYPE_CHECKING:
 
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.llm import LLMClient
-    from familiar_connect.sleep.dream import DreamPlan
-    from familiar_connect.sleep.hygiene import HygienePlan
+    from familiar_connect.sleep.consolidation import ConsolidationPlan
+    from familiar_connect.sleep.opinion_formation import OpinionPlan
 
 _logger = logging.getLogger(__name__)
 
 # Registered pass names — also the keys callers pass to ``create_passes``.
-HYGIENE_PASS = "hygiene"  # noqa: S105 — pass name, not a secret
-DREAM_PASS = "dream"  # noqa: S105 — pass name, not a secret
+CONSOLIDATION_PASS = "consolidation"  # noqa: S105 — pass name, not a secret
+OPINION_PASS = "opinion"  # noqa: S105 — pass name, not a secret
 
 
 class _Rejection(Protocol):
@@ -85,7 +88,7 @@ def _log_rejections(pass_name: str, rejected: Sequence[_Rejection]) -> None:
         )
 
 
-async def execute_sleep(
+async def execute_consolidation(
     *,
     store: AsyncHistoryStore,
     llm: LLMClient,
@@ -95,14 +98,15 @@ async def execute_sleep(
     facts_max: int = DEFAULT_FACTS_MAX,
     turns_max: int = DEFAULT_TURNS_MAX,
     cap: int = DEFAULT_RETIRE_CAP,
-) -> HygienePlan:
+) -> ConsolidationPlan:
     """Plan (always) → apply (if ``apply``). Return the plan.
 
     Dependency-injected so the orchestration is testable without
-    config/network. ``plan_hygiene`` is read-only; only ``apply_hygiene``
-    mutates, so dry-run (``apply=False``) never writes to ``store``.
+    config/network. ``plan_consolidation`` is read-only; only
+    ``apply_consolidation`` mutates, so dry-run (``apply=False``) never
+    writes to ``store``.
     """
-    plan = await plan_hygiene(
+    plan = await plan_consolidation(
         store,
         llm,
         familiar_id=familiar_id,
@@ -110,14 +114,16 @@ async def execute_sleep(
         turns_max=turns_max,
         cap=cap,
     )
-    _log_rejections("hygiene", plan.rejected)
+    _log_rejections("consolidation", plan.rejected)
     if apply:
-        await apply_hygiene(store, plan, familiar_display_name=familiar_display_name)
+        await apply_consolidation(
+            store, plan, familiar_display_name=familiar_display_name
+        )
     return plan
 
 
-def hygiene_denylist_ids(plan: HygienePlan) -> list[int]:
-    """Fact ids hygiene judged junk/bits this run — feeds dream's deny-list."""
+def consolidation_denylist_ids(plan: ConsolidationPlan) -> list[int]:
+    """Fact ids judged junk/bits this run — feeds the opinion deny-list."""
     ids: list[int] = []
     for a in plan.retire:
         ids.extend(a.fact_ids)
@@ -126,7 +132,7 @@ def hygiene_denylist_ids(plan: HygienePlan) -> list[int]:
     return ids
 
 
-async def execute_dream(
+async def execute_opinion_formation(
     *,
     store: AsyncHistoryStore,
     llm: LLMClient,
@@ -136,18 +142,18 @@ async def execute_dream(
     apply: bool,
     denylist: tuple[str, ...] = (),
     cap: int = DEFAULT_OPINION_CAP,
-) -> DreamPlan:
+) -> OpinionPlan:
     """Plan opinions → apply (if ``apply``). Return the plan.
 
-    ``plan_dream`` is read-only; only ``apply_dream`` mints facts, so a
-    dry run never writes. ``denylist`` (hygiene's retired-fact texts) is
-    fed to the prompt as known-bits context.
+    ``plan_opinions`` is read-only; only ``apply_opinions`` records facts,
+    so a dry run never writes. ``denylist`` (consolidation's retired-fact
+    texts) is fed to the prompt as known-bits context.
     """
     self_key = self_canonical_key(familiar_id)
     prior = await store.get_people_dossier(
         familiar_id=familiar_id, canonical_key=self_key
     )
-    plan = await plan_dream(
+    plan = await plan_opinions(
         store,
         llm,
         familiar_id=familiar_id,
@@ -157,9 +163,9 @@ async def execute_dream(
         prior_self_dossier=prior.dossier_text if prior is not None else None,
         cap=cap,
     )
-    _log_rejections("dream", plan.rejected)
+    _log_rejections("opinion", plan.rejected)
     if apply:
-        await apply_dream(store, plan, familiar_display_name=familiar_display_name)
+        await apply_opinions(store, plan, familiar_display_name=familiar_display_name)
     return plan
 
 
@@ -194,18 +200,18 @@ class MaintenanceContext:
 class MaintenanceRun:
     """Mutable accumulator threading one pass's result to the next.
 
-    The ordered data-flow projectors lack: hygiene writes the fact ids it
-    retired this run; dream reads them (resolving to texts) for its
-    known-bits deny-list. Carrying ids here — not running passes
-    independently — keeps the exact engine denylist behavior.
+    The ordered data-flow projectors lack: consolidation writes the fact
+    ids it retired this run; the opinion pass reads them (resolving to
+    texts) for its known-bits deny-list. Carrying ids here — not running
+    passes independently — keeps the exact engine denylist behavior.
 
-    ``dream_plan`` is the dream pass's product, surfaced for the
+    ``opinion_plan`` is the opinion pass's product, surfaced for the
     engine-owned prose-gen step (prose stays engine-owned; the run only
     carries the result it consumes).
     """
 
     denylist_fact_ids: list[int] = field(default_factory=list)
-    dream_plan: DreamPlan | None = None
+    opinion_plan: OpinionPlan | None = None
 
 
 class MaintenancePass(Protocol):
@@ -279,15 +285,15 @@ async def run_passes(
 
 
 @dataclass(frozen=True)
-class HygienePass:
-    """Fact retire/rewrite consolidation. Stashes retired ids for dream."""
+class ConsolidationPass:
+    """Fact retire/rewrite consolidation. Stashes retired ids for opinions."""
 
     ctx: MaintenanceContext
-    name: str = HYGIENE_PASS
+    name: str = CONSOLIDATION_PASS
 
-    async def run(self, run: MaintenanceRun) -> HygienePlan:
+    async def run(self, run: MaintenanceRun) -> ConsolidationPlan:
         ctx = self.ctx
-        plan = await execute_sleep(
+        plan = await execute_consolidation(
             store=ctx.store,
             llm=ctx.llm,
             familiar_id=ctx.familiar_id,
@@ -297,19 +303,24 @@ class HygienePass:
             turns_max=ctx.turns_max,
             cap=ctx.retire_cap,
         )
-        # thread retirements forward → dream's deny-list (ordered data-flow)
-        run.denylist_fact_ids.extend(hygiene_denylist_ids(plan))
+        _logger.info(
+            f"{ls.tag('Sleep', ls.G)} consolidation "
+            f"{ls.kv('retired', str(len(plan.retire)), vc=ls.LW)} "
+            f"{ls.kv('merged', str(len(plan.rewrite)), vc=ls.LW)}"
+        )
+        # thread retirements forward → opinion deny-list (ordered data-flow)
+        run.denylist_fact_ids.extend(consolidation_denylist_ids(plan))
         return plan
 
 
 @dataclass(frozen=True)
-class DreamPass:
-    """Opinion-formation. Reads hygiene's retired ids as its deny-list."""
+class OpinionFormationPass:
+    """Opinion-formation. Reads consolidation's retired ids as its deny-list."""
 
     ctx: MaintenanceContext
-    name: str = DREAM_PASS
+    name: str = OPINION_PASS
 
-    async def run(self, run: MaintenanceRun) -> DreamPlan:
+    async def run(self, run: MaintenanceRun) -> OpinionPlan:
         ctx = self.ctx
         denylist: tuple[str, ...] = ()
         if run.denylist_fact_ids:
@@ -317,7 +328,7 @@ class DreamPass:
                 familiar_id=ctx.familiar_id, ids=run.denylist_fact_ids
             )
             denylist = tuple(f.text for f in facts)
-        plan = await execute_dream(
+        plan = await execute_opinion_formation(
             store=ctx.store,
             llm=ctx.llm,
             familiar_id=ctx.familiar_id,
@@ -327,21 +338,25 @@ class DreamPass:
             denylist=denylist,
             cap=ctx.opinion_cap,
         )
-        run.dream_plan = plan  # surface for engine-owned prose-gen
+        _logger.info(
+            f"{ls.tag('Sleep', ls.G)} opinions "
+            f"{ls.kv('formed', str(len(plan.opinions)), vc=ls.LW)}"
+        )
+        run.opinion_plan = plan  # surface for engine-owned prose-gen
         return plan
 
 
-def _hygiene_factory(ctx: MaintenanceContext) -> MaintenancePass:
-    return HygienePass(ctx)
+def _consolidation_factory(ctx: MaintenanceContext) -> MaintenancePass:
+    return ConsolidationPass(ctx)
 
 
-def _dream_factory(ctx: MaintenanceContext) -> MaintenancePass:
-    return DreamPass(ctx)
+def _opinion_factory(ctx: MaintenanceContext) -> MaintenancePass:
+    return OpinionFormationPass(ctx)
 
 
-register_pass(HYGIENE_PASS, _hygiene_factory)
-register_pass(DREAM_PASS, _dream_factory)
+register_pass(CONSOLIDATION_PASS, _consolidation_factory)
+register_pass(OPINION_PASS, _opinion_factory)
 
 
-DEFAULT_PASSES: tuple[str, ...] = (HYGIENE_PASS, DREAM_PASS)
-"""Passes run when none explicitly selected — hygiene then dream."""
+DEFAULT_PASSES: tuple[str, ...] = (CONSOLIDATION_PASS, OPINION_PASS)
+"""Passes run when none explicitly selected — consolidation then opinions."""

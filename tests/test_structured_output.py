@@ -1,13 +1,15 @@
 """Tests for the shared structured-output coercion module.
 
 Encodes the degradation contract three existing call sites
-(:mod:`familiar_connect.sleep.hygiene`, :mod:`...sleep.dream`,
+(:mod:`familiar_connect.sleep.consolidation`,
+:mod:`...sleep.opinion_formation`,
 :mod:`...processors.fact_extractor`) duplicate today: strip code
 fences, pull the SHAPE-SPECIFIC balanced JSON object/array, ``json.loads``
 it, and DEGRADE on any failure rather than raise.
 
 ``coerce_json`` takes a required ``expect`` keyword so each call site can
-ask for the exact shape it parses today — object-only (hygiene, dream),
+ask for the exact shape it parses today — object-only (consolidation,
+opinion-formation),
 array-only (fact_extractor), or first-blob (``"any"``). This keeps the
 module a faithful superset: a reply containing BOTH shapes must not flip
 to the wrong one.
@@ -63,9 +65,9 @@ class TestCoerceJson:
 
     def test_object_expect_skips_leading_array(self) -> None:
         # Critic probe: a reply with BOTH shapes, array first. An
-        # object-expecting site (hygiene) must get the OBJECT, not the
-        # array — else hygiene.reply_parse_failed flips True and the
-        # plan is zeroed.
+        # object-expecting site (consolidation) must get the OBJECT, not
+        # the array — else consolidation.reply_parse_failed flips True
+        # and the plan is zeroed.
         reply = '["b"] and then {"retire":[{"fact_ids":[1]}],"rewrite":[]}'
         result = coerce_json(reply, expect="object")
         assert result.parsed_ok is True
@@ -100,9 +102,10 @@ class TestCoercePositiveIntList:
         # "--5".lstrip("-") == "5" passes .isdigit() but int("--5")
         # crashes — the never-raise promise must hold; malformed items
         # drop rather than blow up the worker.
-        assert coerce_positive_int_list(
-            ["--5", "3-", "x", "1.5", 0, -2, 3, 3, 7]
-        ) == [3, 7]
+        assert coerce_positive_int_list(["--5", "3-", "x", "1.5", 0, -2, 3, 3, 7]) == [
+            3,
+            7,
+        ]
 
 
 class TestCoerceStrList:

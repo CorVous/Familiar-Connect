@@ -1,4 +1,4 @@
-"""Apply a validated :class:`HygienePlan` to the DB.
+"""Apply a validated :class:`ConsolidationPlan` to the DB.
 
 Separate from planning so a dry run can compute the plan without
 touching the DB. Apply is supersede-only: retires drop facts with no
@@ -18,7 +18,7 @@ from familiar_connect.identity import is_self_key
 
 if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
-    from familiar_connect.sleep.hygiene import HygienePlan, RewriteAction
+    from familiar_connect.sleep.consolidation import ConsolidationPlan, RewriteAction
 
 _logger = logging.getLogger(__name__)
 
@@ -68,9 +68,9 @@ def _subjects_for_rewrite(
     return out
 
 
-async def apply_hygiene(
+async def apply_consolidation(
     store: AsyncHistoryStore,
-    plan: HygienePlan,
+    plan: ConsolidationPlan,
     *,
     familiar_display_name: str | None = None,
 ) -> ApplyReport:
@@ -126,15 +126,15 @@ async def apply_hygiene(
             continue
         rewritten.append((action.old_fact_ids, result.minted.id))
 
-    # hygiene owns the FACT axis only; the turn axis belongs to the dream
-    # pass. Advancing just last_fact_id leaves dream's progress untouched.
+    # consolidation owns the FACT axis only; the turn axis belongs to the
+    # opinion pass. Advancing just last_fact_id leaves its progress untouched.
     await store.advance_sleep_watermark(
         familiar_id=fam,
         last_fact_id=plan.new_last_fact_id,
     )
     _logger.info(
-        "sleep-hygiene applied familiar=%s retired=%d rewritten=%d skipped=%d "
-        "fact_watermark=%d",
+        "sleep-consolidation applied familiar=%s retired=%d rewritten=%d "
+        "skipped=%d fact_watermark=%d",
         fam,
         len(retired),
         len(rewritten),

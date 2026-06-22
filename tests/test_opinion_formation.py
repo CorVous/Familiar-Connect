@@ -1,4 +1,4 @@
-"""Dream / opinion-formation pass — bucketing, candidates, synthesis, apply."""
+"""Opinion-formation pass — bucketing, stance moments, synthesis, apply."""
 
 from __future__ import annotations
 
@@ -10,19 +10,19 @@ import pytest
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore, HistoryTurn
 from familiar_connect.identity import Author, is_self_key
-from familiar_connect.sleep.dream import (
-    Candidate,
+from familiar_connect.sleep.opinion_formation import (
     DayBatch,
-    DreamPlan,
-    DreamWindow,
     OpinionFact,
+    OpinionPlan,
+    OpinionWindow,
+    StanceMoment,
     _build_synthesis_prompt,
     _render_turn,
-    apply_dream,
+    apply_opinions,
     bucket_by_day,
-    extract_candidates,
+    extract_stance_moments,
     gather_days,
-    plan_dream,
+    plan_opinions,
     validate_opinions,
 )
 from tests.conftest import FakeLLMClient
@@ -150,14 +150,14 @@ def _day(date: str, turns: tuple[HistoryTurn, ...]) -> DayBatch:
     return DayBatch(date=date, turns=turns)
 
 
-def _window(days: tuple[DayBatch, ...]) -> DreamWindow:
+def _window(days: tuple[DayBatch, ...]) -> OpinionWindow:
     max_id = max((t.id for d in days for t in d.turns), default=0)
-    return DreamWindow(
+    return OpinionWindow(
         familiar_id="fam", days=days, prior_watermark=None, max_turn_id=max_id
     )
 
 
-class TestExtractCandidates:
+class TestExtractStanceMoments:
     @pytest.mark.asyncio
     async def test_keeps_only_in_day_turn_ids(self) -> None:
         day = _day(
@@ -171,27 +171,27 @@ class TestExtractCandidates:
         reply = json.dumps({
             "candidates": [{"text": "She liked the joke.", "turn_ids": [1, 999]}]
         })
-        cands = await extract_candidates(
+        cands = await extract_stance_moments(
             FakeLLMClient(replies=[reply]), day, self_name="Sapphire", denylist=()
         )
         assert len(cands) == 1
         assert cands[0].turn_ids == (1,)  # 999 dropped
 
     @pytest.mark.asyncio
-    async def test_drops_candidate_with_no_valid_ids(self) -> None:
+    async def test_drops_stance_moment_with_no_valid_ids(self) -> None:
         day = _day(
             "2026-06-12",
             (_turn(1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC)),),
         )
         reply = json.dumps({"candidates": [{"text": "ungrounded", "turn_ids": [999]}]})
-        cands = await extract_candidates(
+        cands = await extract_stance_moments(
             FakeLLMClient(replies=[reply]), day, self_name="Sapphire", denylist=()
         )
         assert cands == []
 
 
-def _cand(text: str, date: str, turn_ids: tuple[int, ...]) -> Candidate:
-    return Candidate(text=text, date=date, turn_ids=turn_ids)
+def _cand(text: str, date: str, turn_ids: tuple[int, ...]) -> StanceMoment:
+    return StanceMoment(text=text, date=date, turn_ids=turn_ids)
 
 
 class TestSynthesisPrompt:
@@ -209,7 +209,7 @@ class TestSynthesisPrompt:
 
 
 class TestValidateOpinions:
-    def _win(self) -> DreamWindow:
+    def _win(self) -> OpinionWindow:
         return _window((
             _day(
                 "2026-06-12",
@@ -236,7 +236,7 @@ class TestValidateOpinions:
         ]
         plan = validate_opinions(
             raw,
-            candidates=cands,
+            stance_moments=cands,
             window=self._win(),
             cap=50,
         )
@@ -250,7 +250,7 @@ class TestValidateOpinions:
         raw = [{"text": "x", "source_turn_ids": [1, 5], "reason": "x"}]
         plan = validate_opinions(
             raw,
-            candidates=cands,
+            stance_moments=cands,
             window=self._win(),
             cap=50,
         )
@@ -262,7 +262,7 @@ class TestValidateOpinions:
         raw = [{"text": "x", "source_turn_ids": [], "reason": "x"}]
         plan = validate_opinions(
             raw,
-            candidates=cands,
+            stance_moments=cands,
             window=self._win(),
             cap=50,
         )
@@ -281,7 +281,7 @@ class TestValidateOpinions:
         ]
         plan = validate_opinions(
             raw,
-            candidates=cands,
+            stance_moments=cands,
             window=self._win(),
             cap=50,
         )
@@ -297,7 +297,7 @@ class TestValidateOpinions:
         ]
         plan = validate_opinions(
             raw,
-            candidates=cands,
+            stance_moments=cands,
             window=self._win(),
             cap=50,
         )
@@ -311,7 +311,7 @@ class TestValidateOpinions:
         ]
         plan = validate_opinions(
             raw,
-            candidates=cands,
+            stance_moments=cands,
             window=self._win(),
             cap=3,
         )
@@ -328,7 +328,7 @@ class TestValidateOpinions:
                 "importance": 8,
             }
         ]
-        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        plan = validate_opinions(raw, stance_moments=cands, window=self._win(), cap=50)
         assert plan.opinions[0].importance == 8
 
     def test_importance_clamped_high(self) -> None:
@@ -341,7 +341,7 @@ class TestValidateOpinions:
                 "importance": 99,
             }
         ]
-        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        plan = validate_opinions(raw, stance_moments=cands, window=self._win(), cap=50)
         assert plan.opinions[0].importance == 10
 
     def test_importance_defaults_to_neutral_when_zero(self) -> None:
@@ -355,13 +355,13 @@ class TestValidateOpinions:
                 "importance": 0,
             }
         ]
-        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        plan = validate_opinions(raw, stance_moments=cands, window=self._win(), cap=50)
         assert plan.opinions[0].importance == 1
 
     def test_importance_missing_defaults_to_five(self) -> None:
         cands = [_cand("likes lo-fi", "2026-06-12", (1,))]
         raw = [{"text": "Sapphire loves lo-fi.", "source_turn_ids": [1], "reason": "x"}]
-        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        plan = validate_opinions(raw, stance_moments=cands, window=self._win(), cap=50)
         # absent importance -> neutral 5, opinion still accepted
         assert len(plan.opinions) == 1
         assert plan.opinions[0].importance == 5
@@ -376,12 +376,12 @@ class TestValidateOpinions:
                 "importance": "very",
             }
         ]
-        plan = validate_opinions(raw, candidates=cands, window=self._win(), cap=50)
+        plan = validate_opinions(raw, stance_moments=cands, window=self._win(), cap=50)
         assert len(plan.opinions) == 1
         assert plan.opinions[0].importance == 5
 
 
-class TestPlanDream:
+class TestPlanOpinions:
     @pytest.mark.asyncio
     async def test_end_to_end(self) -> None:
         raw = HistoryStore(":memory:")
@@ -407,7 +407,7 @@ class TestPlanDream:
             ]
         })
         llm = FakeLLMClient(replies=[cand_reply, synth_reply])
-        plan = await plan_dream(
+        plan = await plan_opinions(
             store, llm, familiar_id="fam", display_tz="UTC", self_name="Sapphire"
         )
         assert len(plan.opinions) == 1
@@ -432,7 +432,7 @@ def _opinion(
     )
 
 
-class TestApplyDream:
+class TestApplyOpinions:
     @pytest.mark.asyncio
     async def test_mints_self_facts_with_provenance_and_valid_from(self) -> None:
         raw = HistoryStore(":memory:")
@@ -444,7 +444,7 @@ class TestApplyDream:
             author=None,
         )
         store = AsyncHistoryStore(raw)
-        plan = DreamPlan(
+        plan = OpinionPlan(
             familiar_id="fam",
             opinions=(
                 _opinion("Sapphire defends lo-fi as real music.", (1,), "2026-06-12"),
@@ -453,8 +453,8 @@ class TestApplyDream:
             flags=(),
             new_last_turn_id=1,
         )
-        report = await apply_dream(store, plan, familiar_display_name="Sapphire")
-        assert len(report.minted) == 1
+        report = await apply_opinions(store, plan, familiar_display_name="Sapphire")
+        assert len(report.recorded) == 1
         fact = raw.recent_facts(familiar_id="fam", limit=10)[0]
         assert fact.source_turn_ids == (1,)
         assert is_self_key(fact.subjects[0].canonical_key)
@@ -473,7 +473,7 @@ class TestApplyDream:
             author=None,
         )
         store = AsyncHistoryStore(raw)
-        plan = DreamPlan(
+        plan = OpinionPlan(
             familiar_id="fam",
             opinions=(
                 _opinion("Sapphire defends lo-fi.", (1,), "2026-06-12", importance=8),
@@ -482,7 +482,7 @@ class TestApplyDream:
             flags=(),
             new_last_turn_id=1,
         )
-        await apply_dream(store, plan, familiar_display_name="Sapphire")
+        await apply_opinions(store, plan, familiar_display_name="Sapphire")
         fact = raw.recent_facts(familiar_id="fam", limit=10)[0]
         assert fact.importance == 8
 
@@ -495,14 +495,14 @@ class TestApplyDream:
         # hygiene previously set the fact axis; dream must not stomp it
         raw.advance_sleep_watermark(familiar_id="fam", last_fact_id=77)
         store = AsyncHistoryStore(raw)
-        plan = DreamPlan(
+        plan = OpinionPlan(
             familiar_id="fam",
             opinions=(_opinion("Sapphire likes tea.", (1,), "2026-06-12"),),
             rejected=(),
             flags=(),
             new_last_turn_id=1,
         )
-        await apply_dream(store, plan, familiar_display_name="Sapphire")
+        await apply_opinions(store, plan, familiar_display_name="Sapphire")
         wm = raw.get_sleep_watermark(familiar_id="fam")
         assert wm is not None
         assert (wm.last_fact_id, wm.last_turn_id) == (77, 1)

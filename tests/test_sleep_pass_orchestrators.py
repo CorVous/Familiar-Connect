@@ -1,9 +1,10 @@
 """Sleep pass orchestrators — plan → apply, dry-run vs apply.
 
-``execute_sleep`` / ``execute_dream`` wrap plan+apply for both the
-activity-engine lifecycle path and any ad-hoc caller. Tests pin the
-dry-run-never-mutates contract and the rejected-proposal log signal
-(rail violations the code blocked, routed to a WARNING).
+``execute_consolidation`` / ``execute_opinion_formation`` wrap
+plan+apply for both the activity-engine lifecycle path and any ad-hoc
+caller. Tests pin the dry-run-never-mutates contract and the
+rejected-proposal log signal (rail violations the code blocked, routed
+to a WARNING).
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ import pytest
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import is_self_key
-from familiar_connect.sleep.passes import execute_dream, execute_sleep
+from familiar_connect.sleep.maintenance import (
+    execute_consolidation,
+    execute_opinion_formation,
+)
 from tests.conftest import FakeLLMClient
 
 ARIA = (FactSubject(canonical_key="discord:A", display_at_write="Aria"),)
@@ -47,12 +51,12 @@ def _reply() -> str:
     })
 
 
-class TestExecuteSleep:
+class TestExecuteConsolidation:
     @pytest.mark.asyncio
     async def test_dry_run_does_not_mutate(self) -> None:
         raw = _store()
         store = AsyncHistoryStore(raw)
-        plan = await execute_sleep(
+        plan = await execute_consolidation(
             store=store,
             llm=FakeLLMClient(replies=[_reply()]),
             familiar_id="fam",
@@ -72,7 +76,7 @@ class TestExecuteSleep:
     async def test_apply_mutates_and_advances_watermark(self) -> None:
         raw = _store()
         store = AsyncHistoryStore(raw)
-        await execute_sleep(
+        await execute_consolidation(
             store=store,
             llm=FakeLLMClient(replies=[_reply()]),
             familiar_id="fam",
@@ -99,7 +103,7 @@ class TestExecuteSleep:
             "rewrite": [],
         })
         with caplog.at_level(logging.WARNING):
-            await execute_sleep(
+            await execute_consolidation(
                 store=store,
                 llm=FakeLLMClient(replies=[reply]),
                 familiar_id="fam",
@@ -110,7 +114,7 @@ class TestExecuteSleep:
         assert any("unknown_id" in r.getMessage() for r in warnings)
 
 
-def _dream_store() -> HistoryStore:
+def _opinion_store() -> HistoryStore:
     store = HistoryStore(":memory:")
     store.append_turn(
         familiar_id="fam",
@@ -122,7 +126,7 @@ def _dream_store() -> HistoryStore:
     return store
 
 
-def _dream_replies() -> list[str]:
+def _opinion_replies() -> list[str]:
     return [
         json.dumps({"candidates": [{"text": "defends lo-fi", "turn_ids": [1]}]}),
         json.dumps({
@@ -137,14 +141,14 @@ def _dream_replies() -> list[str]:
     ]
 
 
-class TestExecuteDream:
+class TestExecuteOpinionFormation:
     @pytest.mark.asyncio
     async def test_dry_run_does_not_mint(self) -> None:
-        raw = _dream_store()
+        raw = _opinion_store()
         store = AsyncHistoryStore(raw)
-        plan = await execute_dream(
+        plan = await execute_opinion_formation(
             store=store,
-            llm=FakeLLMClient(replies=_dream_replies()),
+            llm=FakeLLMClient(replies=_opinion_replies()),
             familiar_id="fam",
             familiar_display_name="Sapphire",
             display_tz="UTC",
@@ -156,11 +160,11 @@ class TestExecuteDream:
 
     @pytest.mark.asyncio
     async def test_apply_mints_self_facts(self) -> None:
-        raw = _dream_store()
+        raw = _opinion_store()
         store = AsyncHistoryStore(raw)
-        await execute_dream(
+        await execute_opinion_formation(
             store=store,
-            llm=FakeLLMClient(replies=_dream_replies()),
+            llm=FakeLLMClient(replies=_opinion_replies()),
             familiar_id="fam",
             familiar_display_name="Sapphire",
             display_tz="UTC",

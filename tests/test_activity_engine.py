@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-import familiar_connect.sleep.passes as passes_mod
+import familiar_connect.sleep.maintenance as maintenance_mod
 from familiar_connect.activities.config import ActivitiesConfig, ActivityType
 from familiar_connect.activities.engine import (
     ACTIVITY_RETURN_MODE,
@@ -33,7 +33,7 @@ from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author, is_self_key
-from familiar_connect.sleep.dream import DreamPlan, OpinionFact
+from familiar_connect.sleep.opinion_formation import OpinionFact, OpinionPlan
 
 from .conftest import FakeLLMClient, build_fake_llm_clients
 from .test_text_responder import (
@@ -1695,7 +1695,7 @@ class TestSleepSchedule:
             await engine.stop()
 
 
-def _dream_plan(*texts: str) -> DreamPlan:
+def _opinion_plan(*texts: str) -> OpinionPlan:
     opinions = tuple(
         OpinionFact(
             text=t,
@@ -1706,7 +1706,7 @@ def _dream_plan(*texts: str) -> DreamPlan:
         )
         for t in texts
     )
-    return DreamPlan(
+    return OpinionPlan(
         familiar_id=_FAMILIAR,
         opinions=opinions,
         rejected=(),
@@ -1716,41 +1716,43 @@ def _dream_plan(*texts: str) -> DreamPlan:
 
 
 class TestSleepLifecyclePasses:
-    """Sleep departure fires hygiene then dream (apply=True), background."""
+    """Sleep departure fires consolidation then opinions (apply=True)."""
 
     @pytest.mark.asyncio
-    async def test_hygiene_then_dream_applied_on_departure(
+    async def test_consolidation_then_opinion_applied_on_departure(
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         clock = _night_clock(0, 45)
         calls: list[tuple[str, dict[str, Any]]] = []
-        hplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=2)
-        dplan = _dream_plan("Rain is best heard from indoors.")
+        cplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=2)
+        dplan = _opinion_plan("Rain is best heard from indoors.")
 
-        async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
-            calls.append(("hygiene", kw))
-            return hplan
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            calls.append(("consolidation", kw))
+            return cplan
 
-        async def fake_dream(**kw: Any) -> Any:  # noqa: ANN401, RUF029
-            calls.append(("dream", kw))
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            calls.append(("opinion", kw))
             return dplan
 
-        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task
-        assert [c[0] for c in calls] == ["hygiene", "dream"]
+        assert [c[0] for c in calls] == ["consolidation", "opinion"]
         assert calls[0][1]["apply"] is True
         assert calls[1][1]["apply"] is True
         assert calls[1][1]["display_tz"] == "UTC"
-        # dream plan now flows straight into prose at pass completion —
-        # minted opinion reaches the prose-gen prompt, prose persisted
+        # opinion plan now flows straight into prose at pass completion —
+        # formed opinion reaches the prose-gen prompt, prose persisted
         llm = cast("FakeLLMClient", engine._llm_clients["background"])
         assert any(
             "Rain is best heard from indoors." in c[-1].content_str for c in llm.calls
@@ -1761,7 +1763,7 @@ class TestSleepLifecyclePasses:
         await engine.stop()
 
     @pytest.mark.asyncio
-    async def test_hygiene_denylist_threaded_into_dream(
+    async def test_consolidation_denylist_threaded_into_opinion(
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
@@ -1773,21 +1775,23 @@ class TestSleepLifecyclePasses:
             text="a known bit, retired tonight",
             source_turn_ids=(),
         )
-        hplan = SimpleNamespace(
+        cplan = SimpleNamespace(
             retire=[SimpleNamespace(fact_ids=[fact.id])], rewrite=[], mutated_count=1
         )
         seen: dict[str, Any] = {}
 
-        async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            return hplan
+            return cplan
 
-        async def fake_dream(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             seen.update(kw)
-            return _dream_plan()
+            return _opinion_plan()
 
-        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
@@ -1809,7 +1813,7 @@ class TestSleepLifecyclePasses:
             msg = "passes must not run for a walk"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(passes_mod, "execute_sleep", fail)
+        monkeypatch.setattr(maintenance_mod, "execute_consolidation", fail)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
@@ -1826,11 +1830,13 @@ class TestSleepLifecyclePasses:
         clock = _night_clock(0, 45)
         calls: list[str] = []
 
-        async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            calls.append("hygiene")
+            calls.append("consolidation")
 
-        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=False
         )
@@ -1853,14 +1859,14 @@ class TestSleepLifecyclePasses:
             msg = "llm down"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(passes_mod, "execute_sleep", boom)
+        monkeypatch.setattr(maintenance_mod, "execute_consolidation", boom)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task  # must not raise
-        assert engine._last_dream_plan is None
+        assert engine._last_opinion_plan is None
         # return flow still completes
         await engine._cancel_return_timer()
         clock.now = datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
@@ -1876,19 +1882,21 @@ class TestSleepLifecyclePasses:
     ) -> None:
         """Dream prose produced + persisted right after passes finish."""
         clock = _night_clock(0, 45)
-        hplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
-        dplan = _dream_plan("Rain is best heard from indoors.")
+        cplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
+        dplan = _opinion_plan("Rain is best heard from indoors.")
 
-        async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            return hplan
+            return cplan
 
-        async def fake_dream(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
             return dplan
 
-        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
         # spy the journal write rather than reading it back: a just-committed
         # facts INSERT is intermittently invisible to a same-test read through
         # pyturso 0.5.1 (no intervening fact write to refresh the view), which
@@ -1941,12 +1949,12 @@ class TestSleepLifecyclePasses:
         experience_text to the already-finished row nor mint a 2nd journal.
         """
         clock = _night_clock(0, 45)
-        hplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
-        dplan = _dream_plan("Rain is best heard from indoors.")
+        cplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
+        dplan = _opinion_plan("Rain is best heard from indoors.")
 
-        async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            return hplan
+            return cplan
 
         engine = _engine(
             store,
@@ -1956,14 +1964,16 @@ class TestSleepLifecyclePasses:
             experience="A dream of rain on glass.",
         )
 
-        async def fake_dream(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
             # side effect: a return finished/cleared the row mid-passes
             engine._active = None
             return dplan
 
-        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task
@@ -2016,7 +2026,7 @@ class TestDreamReturn:
         await engine._sleep_schedule_tick(clock.now)
         assert engine.active is not None
         # passes task lands the plan after departure — simulate that
-        engine._last_dream_plan = _dream_plan("Rain is best heard from indoors.")
+        engine._last_opinion_plan = _opinion_plan("Rain is best heard from indoors.")
         await engine._cancel_return_timer()
         clock.now = engine.active.planned_return_at
         await engine._run_return(status="completed")
@@ -2032,7 +2042,7 @@ class TestDreamReturn:
     async def test_prose_seed_only_when_no_plan(self, store: AsyncHistoryStore) -> None:
         clock = _night_clock(0, 45)
         engine = _engine(store, clock, config=_sleep_config())
-        assert engine._last_dream_plan is None
+        assert engine._last_opinion_plan is None
         await _sleep_and_wake(engine, clock)
         llm = cast("FakeLLMClient", engine._llm_clients["background"])
         assert llm.calls

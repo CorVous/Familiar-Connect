@@ -1,4 +1,4 @@
-"""Sleep hygiene — apply path."""
+"""Sleep consolidation — apply path."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ import pytest
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import self_canonical_key
-from familiar_connect.sleep.apply import apply_hygiene
-from familiar_connect.sleep.hygiene import (
-    HygienePlan,
+from familiar_connect.sleep.apply import apply_consolidation
+from familiar_connect.sleep.consolidation import (
+    ConsolidationPlan,
     RetireAction,
     RewriteAction,
-    plan_hygiene,
+    plan_consolidation,
 )
 from tests.conftest import FakeLLMClient
 
@@ -47,12 +47,12 @@ def _store_with_facts() -> tuple[HistoryStore, int, int, int]:
     return store, junk.id, d1.id, d2.id
 
 
-class TestApplyHygiene:
+class TestApplyConsolidation:
     @pytest.mark.asyncio
     async def test_retire_marks_superseded(self) -> None:
         raw, junk_id, _, _ = _store_with_facts()
         store = AsyncHistoryStore(raw)
-        plan = HygienePlan(
+        plan = ConsolidationPlan(
             familiar_id="fam",
             retire=(RetireAction(fact_ids=(junk_id,), reason="noise"),),
             rewrite=(),
@@ -60,7 +60,7 @@ class TestApplyHygiene:
             new_last_fact_id=3,
             new_last_turn_id=3,
         )
-        report = await apply_hygiene(store, plan)
+        report = await apply_consolidation(store, plan)
         assert report.retired_fact_ids == (junk_id,)
         current = {f.text for f in raw.recent_facts(familiar_id="fam", limit=10)}
         assert "noise" not in current
@@ -69,7 +69,7 @@ class TestApplyHygiene:
     async def test_rewrite_merges_with_union_provenance(self) -> None:
         raw, _, d1, d2 = _store_with_facts()
         store = AsyncHistoryStore(raw)
-        plan = HygienePlan(
+        plan = ConsolidationPlan(
             familiar_id="fam",
             retire=(),
             rewrite=(
@@ -84,7 +84,7 @@ class TestApplyHygiene:
             new_last_fact_id=3,
             new_last_turn_id=3,
         )
-        report = await apply_hygiene(store, plan)
+        report = await apply_consolidation(store, plan)
         assert len(report.rewritten) == 1
         old_ids, new_id = report.rewritten[0]
         assert old_ids == (d1, d2)
@@ -105,7 +105,7 @@ class TestApplyHygiene:
         raw, _, d1, _ = _store_with_facts()
         store = AsyncHistoryStore(raw)
         self_key = self_canonical_key("fam")
-        plan = HygienePlan(
+        plan = ConsolidationPlan(
             familiar_id="fam",
             retire=(),
             rewrite=(
@@ -120,7 +120,9 @@ class TestApplyHygiene:
             new_last_fact_id=3,
             new_last_turn_id=3,
         )
-        report = await apply_hygiene(store, plan, familiar_display_name="Sapphire")
+        report = await apply_consolidation(
+            store, plan, familiar_display_name="Sapphire"
+        )
         _, new_id = report.rewritten[0]
         new_fact = next(
             f for f in raw.recent_facts(familiar_id="fam", limit=10) if f.id == new_id
@@ -134,7 +136,7 @@ class TestApplyHygiene:
         # simulate the live bot retiring the junk fact during the plan→apply gap
         raw.supersede(familiar_id="fam", obsolete_facts=[junk_id], new_fact=None)
         store = AsyncHistoryStore(raw)
-        plan = HygienePlan(
+        plan = ConsolidationPlan(
             familiar_id="fam",
             retire=(RetireAction(fact_ids=(junk_id,), reason="noise"),),
             rewrite=(
@@ -150,7 +152,7 @@ class TestApplyHygiene:
             new_last_turn_id=3,
         )
         # must not raise; the still-valid rewrite still applies
-        report = await apply_hygiene(store, plan)
+        report = await apply_consolidation(store, plan)
         assert junk_id not in report.retired_fact_ids
         assert any(fid == junk_id for _, fid, _ in report.skipped)
         assert len(report.rewritten) == 1
@@ -161,7 +163,7 @@ class TestApplyHygiene:
     async def test_advances_sleep_watermark(self) -> None:
         raw, junk_id, _, _ = _store_with_facts()
         store = AsyncHistoryStore(raw)
-        plan = HygienePlan(
+        plan = ConsolidationPlan(
             familiar_id="fam",
             retire=(RetireAction(fact_ids=(junk_id,), reason="x"),),
             rewrite=(),
@@ -169,14 +171,14 @@ class TestApplyHygiene:
             new_last_fact_id=3,
             new_last_turn_id=3,
         )
-        await apply_hygiene(store, plan)
+        await apply_consolidation(store, plan)
         wm = raw.get_sleep_watermark(familiar_id="fam")
         assert wm is not None
-        # hygiene owns the fact axis only — turn axis (dream's) untouched
+        # consolidation owns the fact axis only — turn axis (opinion's) untouched
         assert (wm.last_fact_id, wm.last_turn_id) == (3, 0)
 
     @pytest.mark.asyncio
-    async def test_full_plan_apply_via_plan_hygiene(self) -> None:
+    async def test_full_plan_apply_via_plan_consolidation(self) -> None:
         raw, junk_id, d1, d2 = _store_with_facts()
         store = AsyncHistoryStore(raw)
         reply = json.dumps({
@@ -190,9 +192,9 @@ class TestApplyHygiene:
                 }
             ],
         })
-        plan = await plan_hygiene(
+        plan = await plan_consolidation(
             store, FakeLLMClient(replies=[reply]), familiar_id="fam"
         )
-        await apply_hygiene(store, plan)
+        await apply_consolidation(store, plan)
         current = {f.text for f in raw.recent_facts(familiar_id="fam", limit=10)}
         assert current == {"Aria likes berries."}

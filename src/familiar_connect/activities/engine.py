@@ -22,10 +22,11 @@ only with cause (missed pings).
 The reserved ``sleep`` catalog entry rides the same machinery with an
 engine-owned schedule (tick loop): bedtime nudge at window start,
 force-start past grace, wake fixed at window end. Sleep departure
-fires the hygiene+dream passes in the background; the return turn is
-the dream prose (``turns.mode`` tag ``sleep_return`` — extracted with
-dream framing, see fact_extractor), also minted as a dream-framed
-``self:`` fact (journal stopgap). See docs/architecture/sleep.md.
+fires the consolidation+opinion passes in the background; the return
+turn is the dream prose (``turns.mode`` tag ``sleep_return`` —
+extracted with dream framing, see fact_extractor), also minted as a
+dream-framed ``self:`` fact (journal stopgap). See
+docs/architecture/sleep.md.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ from familiar_connect.identity import (
     self_canonical_key,
 )
 from familiar_connect.llm import Message
-from familiar_connect.sleep.passes import (
+from familiar_connect.sleep.maintenance import (
     DEFAULT_PASSES,
     MaintenanceContext,
     MaintenanceRun,
@@ -71,7 +72,7 @@ if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.history.store import HistoryTurn
     from familiar_connect.llm import LLMClient
-    from familiar_connect.sleep.dream import DreamPlan
+    from familiar_connect.sleep.opinion_formation import OpinionPlan
 
 _logger = logging.getLogger(__name__)
 
@@ -227,9 +228,9 @@ class ActivityEngine:
         self._last_return: datetime | None = None
         self._nudge_task: asyncio.Task[None] | None = None
         # sleep-window state: occurrence start already nudged, the
-        # night's pass results (dream material), the running passes
+        # night's opinion-pass result (dream material), the running passes
         self._bedtime_nudge_occ: datetime | None = None
-        self._last_dream_plan: DreamPlan | None = None
+        self._last_opinion_plan: OpinionPlan | None = None
         self._sleep_passes_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
@@ -443,7 +444,7 @@ class ActivityEngine:
             experience_text=None,
         )
         if activity_type.id == SLEEP_TYPE_ID:
-            # lifecycle-coupled: hygiene then dream run while she sleeps
+            # lifecycle-coupled: consolidation then opinions run while it sleeps
             self._kick_sleep_passes()
         self._missed_ping_turn_ids.clear()  # fresh absence, no stale ids
         self._judged_author_keys.clear()  # fresh absence, fresh latch
@@ -678,19 +679,19 @@ class ActivityEngine:
         )
 
     def _kick_sleep_passes(self) -> None:
-        """Spawn hygiene+dream as a background task at sleep departure."""
-        self._last_dream_plan = None  # one night's material, never reused
+        """Spawn consolidation+opinion passes as a background task at sleep."""
+        self._last_opinion_plan = None  # one night's material, never reused
         self._sleep_passes_task = asyncio.create_task(
             self._run_sleep_passes(),
             name=f"sleep-passes-{self._familiar_id}",
         )
 
     async def _run_sleep_passes(self) -> None:
-        """Hygiene then dream (apply=True), gated on ``sleep_passes_enabled``.
+        """Consolidation then opinions (apply=True), gated on the flag.
 
         Watermark defines each pass's window — a missed night just
         widens the next one (one dream, no catch-up worker). Failures
-        log and leave ``_last_dream_plan`` None; wake prose degrades
+        log and leave ``_last_opinion_plan`` None; wake prose degrades
         to seed-only. Never raises.
 
         Dream prose is produced + persisted here, right after the
@@ -701,7 +702,7 @@ class ActivityEngine:
         journal / stale-row write). Residual window — a crash after the
         journal append but before persist re-journals seed-only prose
         next return, or a return that finishes mid-prose-gen (rare
-        possible duplicate); hygiene reconciles.
+        possible duplicate); consolidation reconciles.
         """
         # capture the sleep activity that kicked these passes — a racing
         # return must not let a late persist mis-target a newer row
@@ -710,8 +711,8 @@ class ActivityEngine:
             return  # not wired (tests / minimal deployments)
         try:
             # build the maintenance context once, run the registered passes
-            # in order. The registry owns hygiene→dream sequencing + the
-            # denylist data-flow; the engine no longer hard-codes either.
+            # in order. The registry owns consolidation→opinion sequencing +
+            # the denylist data-flow; the engine no longer hard-codes either.
             ctx = MaintenanceContext(
                 store=self._store,
                 llm=self._llm_clients["background"],
@@ -723,9 +724,9 @@ class ActivityEngine:
             run: MaintenanceRun = await run_passes(
                 create_passes(names=DEFAULT_PASSES, context=ctx)
             )
-            dream_plan = run.dream_plan
-            self._last_dream_plan = dream_plan
-            opinions = 0 if dream_plan is None else len(dream_plan.opinions)
+            opinion_plan = run.opinion_plan
+            self._last_opinion_plan = opinion_plan
+            opinions = 0 if opinion_plan is None else len(opinion_plan.opinions)
             _logger.info(
                 f"{ls.tag('🌙 Activity', ls.G)} sleep passes done "
                 f"{ls.kv('opinions', str(opinions), vc=ls.LW)}"
@@ -989,20 +990,20 @@ class ActivityEngine:
         """Wake narration: seed-dream verbatim, else LLM from seed + opinions.
 
         The authored catalog seed RETUNES dream prose — that is its
-        design point. The night's minted opinions (lifecycle passes)
+        design point. The night's formed opinions (lifecycle passes)
         are offered as dream material when available; a failed pass
         degrades to seed-only.
 
         Wake never joins the passes task — under a short/forced window
         the timer can fire before passes finish, so seed-only is the
-        expected path there, not a bug (opinions still mint on pass
+        expected path there, not a bug (opinions still form on pass
         completion; they just miss this night's narration).
         """
         seeded = self._consume_seed_dream()
         if seeded is not None:
             return seeded
-        plan = self._last_dream_plan
-        self._last_dream_plan = None  # one night's material, never reused
+        plan = self._last_opinion_plan
+        self._last_opinion_plan = None  # one night's material, never reused
         seed = activity_type.seed if activity_type is not None else active.label
         lines = [f"Dream seed: {seed}"]
         if plan is not None and plan.opinions:

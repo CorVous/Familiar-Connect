@@ -4,7 +4,8 @@ Mirrors the projector registry (``processors/projectors.py``): a
 ``MaintenancePass`` Protocol for the common trait, a module registry,
 ``create_passes(names, ctx)`` raising on unknown names, ``known_passes``,
 and an ordered ``DEFAULT_PASSES``. The one thing projectors lack: an
-ordered data-flow — hygiene's retired facts feed dream's deny-list,
+ordered data-flow — consolidation's retired facts feed the opinion
+deny-list,
 threaded through a shared run.
 """
 
@@ -15,14 +16,14 @@ from typing import Any
 
 import pytest
 
-import familiar_connect.sleep.passes as passes_mod
+import familiar_connect.sleep.maintenance as maintenance_mod
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import is_self_key
-from familiar_connect.sleep.passes import (
+from familiar_connect.sleep.maintenance import (
+    CONSOLIDATION_PASS,
     DEFAULT_PASSES,
-    DREAM_PASS,
-    HYGIENE_PASS,
+    OPINION_PASS,
     MaintenanceContext,
     create_passes,
     known_passes,
@@ -69,7 +70,7 @@ def _ctx(store: AsyncHistoryStore, *, apply: bool) -> MaintenanceContext:
     )
 
 
-def _hygiene_reply() -> str:
+def _consolidation_reply() -> str:
     # retire fact id 1 ("noise")
     return json.dumps({
         "retire": [{"fact_ids": [1], "reason": "noise"}],
@@ -77,7 +78,7 @@ def _hygiene_reply() -> str:
     })
 
 
-def _dream_replies() -> list[str]:
+def _opinion_replies() -> list[str]:
     return [
         json.dumps({"candidates": [{"text": "defends lo-fi", "turn_ids": [2]}]}),
         json.dumps({
@@ -97,8 +98,8 @@ class TestRegistryShape:
 
     def test_create_passes_returns_in_order(self) -> None:
         ctx = _ctx(AsyncHistoryStore(_store()), apply=False)
-        passes = create_passes(names=[HYGIENE_PASS, DREAM_PASS], context=ctx)
-        assert [p.name for p in passes] == [HYGIENE_PASS, DREAM_PASS]
+        passes = create_passes(names=[CONSOLIDATION_PASS, OPINION_PASS], context=ctx)
+        assert [p.name for p in passes] == [CONSOLIDATION_PASS, OPINION_PASS]
 
     def test_create_passes_unknown_name_raises(self) -> None:
         ctx = _ctx(AsyncHistoryStore(_store()), apply=False)
@@ -106,33 +107,33 @@ class TestRegistryShape:
             create_passes(names=["nope"], context=ctx)
 
     def test_known_passes_lists_registered(self) -> None:
-        assert known_passes() == {HYGIENE_PASS, DREAM_PASS}
+        assert known_passes() == {CONSOLIDATION_PASS, OPINION_PASS}
 
-    def test_default_passes_is_hygiene_then_dream(self) -> None:
-        assert DEFAULT_PASSES == (HYGIENE_PASS, DREAM_PASS)
+    def test_default_passes_is_consolidation_then_opinion(self) -> None:
+        assert DEFAULT_PASSES == (CONSOLIDATION_PASS, OPINION_PASS)
 
 
 class TestDenylistThreaded:
     """The ONE way this differs from projectors: ordered data-flow."""
 
     @pytest.mark.asyncio
-    async def test_hygiene_retirement_reaches_dream_denylist(
+    async def test_consolidation_retirement_reaches_opinion_denylist(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         raw = _store()
         store = AsyncHistoryStore(raw)
         seen: dict[str, Any] = {}
-        orig = passes_mod.execute_dream
+        orig = maintenance_mod.execute_opinion_formation
 
-        # capture the denylist the dream pass actually plans against
-        async def spy_dream(**kw: Any) -> Any:  # noqa: ANN401
+        # capture the denylist the opinion pass actually plans against
+        async def spy_opinion(**kw: Any) -> Any:  # noqa: ANN401
             seen.update(kw)
             return await orig(**kw)
 
-        monkeypatch.setattr(passes_mod, "execute_dream", spy_dream)
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", spy_opinion)
         ctx = MaintenanceContext(
             store=store,
-            llm=FakeLLMClient(replies=[_hygiene_reply(), *_dream_replies()]),
+            llm=FakeLLMClient(replies=[_consolidation_reply(), *_opinion_replies()]),
             familiar_id="fam",
             display_name="Sapphire",
             display_tz="UTC",
@@ -140,18 +141,18 @@ class TestDenylistThreaded:
         )
         await run_passes(create_passes(names=DEFAULT_PASSES, context=ctx))
 
-        # fact id 1 ("noise") retired by hygiene this run reaches dream's deny-list
+        # fact id 1 ("noise") retired this run reaches the opinion deny-list
         assert seen["denylist"] == ("noise",)
 
 
 class TestDefaultRunApplies:
     @pytest.mark.asyncio
-    async def test_default_run_executes_hygiene_then_dream(self) -> None:
+    async def test_default_run_executes_consolidation_then_opinion(self) -> None:
         raw = _store()
         store = AsyncHistoryStore(raw)
         ctx = MaintenanceContext(
             store=store,
-            llm=FakeLLMClient(replies=[_hygiene_reply(), *_dream_replies()]),
+            llm=FakeLLMClient(replies=[_consolidation_reply(), *_opinion_replies()]),
             familiar_id="fam",
             display_name="Sapphire",
             display_tz="UTC",
@@ -159,9 +160,9 @@ class TestDefaultRunApplies:
         )
         await run_passes(create_passes(names=DEFAULT_PASSES, context=ctx))
         texts = {f.text for f in raw.recent_facts(familiar_id="fam", limit=10)}
-        # hygiene retired "noise"
+        # consolidation retired "noise"
         assert "noise" not in texts
-        # dream minted a self: opinion
+        # opinion pass recorded a self: opinion
         opinions = [
             f
             for f in raw.recent_facts(familiar_id="fam", limit=10)

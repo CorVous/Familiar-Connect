@@ -7,8 +7,9 @@ failure" idiom — but each parses one SHAPE, and a faithful superset has
 to honour that so a reply containing both shapes can't flip to the wrong
 one. ``coerce_json`` takes a required ``expect`` keyword for this:
 
-  * :func:`familiar_connect.sleep.hygiene.parse_actions` — object only.
-  * :func:`familiar_connect.sleep.dream._extract_object` — object only.
+  * :func:`familiar_connect.sleep.consolidation.parse_actions` — object only.
+  * :func:`familiar_connect.sleep.opinion_formation._extract_object` —
+    object only.
   * :func:`familiar_connect.processors.fact_extractor._parse_facts` —
     array only.
 

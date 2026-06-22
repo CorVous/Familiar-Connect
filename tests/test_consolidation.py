@@ -1,4 +1,4 @@
-"""Sleep memory-hygiene pass — window gather, LLM plan, rails validation."""
+"""Sleep memory-consolidation pass — window gather, LLM plan, rails validation."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import pytest
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import Fact, FactSubject, HistoryStore
 from familiar_connect.identity import self_canonical_key
-from familiar_connect.sleep.hygiene import (
-    HygienePlan,
-    HygieneWindow,
+from familiar_connect.sleep.consolidation import (
+    ConsolidationPlan,
+    ConsolidationWindow,
     gather_window,
-    plan_hygiene,
+    plan_consolidation,
     validate,
 )
 from tests.conftest import FakeLLMClient
@@ -37,9 +37,9 @@ def _fact(
     )
 
 
-def _window(facts: tuple[Fact, ...]) -> HygieneWindow:
+def _window(facts: tuple[Fact, ...]) -> ConsolidationWindow:
     max_fid = max((f.id for f in facts), default=0)
-    return HygieneWindow(
+    return ConsolidationWindow(
         familiar_id="fam",
         facts=facts,
         turns=(),
@@ -117,7 +117,7 @@ SELF = (
 
 
 class TestSelfSubjectRail:
-    """Hygiene does not adjudicate feelings — never touches self: facts."""
+    """Consolidation does not adjudicate feelings — never touches self: facts."""
 
     def test_rejects_retire_of_self_fact(self) -> None:
         win = _window((_fact(1, "Sapphire loves lo-fi.", subjects=SELF),))
@@ -355,7 +355,7 @@ class TestGatherWindow:
         assert win.facts_truncated == 1
 
 
-class TestPlanHygiene:
+class TestPlanConsolidation:
     def _store(self) -> HistoryStore:
         store = HistoryStore(":memory:")
         store.append_turn(
@@ -384,8 +384,8 @@ class TestPlanHygiene:
         })
         store = AsyncHistoryStore(self._store())
         llm = FakeLLMClient(replies=[reply])
-        plan = await plan_hygiene(store, llm, familiar_id="fam")
-        assert isinstance(plan, HygienePlan)
+        plan = await plan_consolidation(store, llm, familiar_id="fam")
+        assert isinstance(plan, ConsolidationPlan)
         assert len(plan.retire) == 1
         assert plan.retire[0].fact_ids == (1,)
         assert plan.new_last_fact_id == 2
@@ -394,7 +394,7 @@ class TestPlanHygiene:
     async def test_plan_survives_garbage_llm(self) -> None:
         store = AsyncHistoryStore(self._store())
         llm = FakeLLMClient(replies=["not json at all"])
-        plan = await plan_hygiene(store, llm, familiar_id="fam")
+        plan = await plan_consolidation(store, llm, familiar_id="fam")
         assert plan.retire == ()
         assert plan.rewrite == ()
         # garbage reply is flagged so a zeroed plan isn't silent
@@ -404,7 +404,7 @@ class TestPlanHygiene:
     async def test_clean_empty_plan_has_no_parse_note(self) -> None:
         store = AsyncHistoryStore(self._store())
         reply = json.dumps({"retire": [], "rewrite": []})
-        plan = await plan_hygiene(
+        plan = await plan_consolidation(
             store, FakeLLMClient(replies=[reply]), familiar_id="fam"
         )
         assert plan.notes == ()
