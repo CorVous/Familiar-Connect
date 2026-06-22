@@ -38,6 +38,9 @@ from familiar_connect import log_style as ls
 from familiar_connect.identity import self_canonical_key
 from familiar_connect.sleep.apply import apply_consolidation
 from familiar_connect.sleep.consolidation import (
+    _SYSTEM as CONSOLIDATION_SYSTEM_DEFAULT,
+)
+from familiar_connect.sleep.consolidation import (
     DEFAULT_FACTS_MAX,
     DEFAULT_RETIRE_CAP,
     DEFAULT_TURNS_MAX,
@@ -45,6 +48,8 @@ from familiar_connect.sleep.consolidation import (
 )
 from familiar_connect.sleep.opinion_formation import (
     DEFAULT_OPINION_CAP,
+    STANCE_SYSTEM_DEFAULT,
+    SYNTHESIS_SYSTEM_DEFAULT,
     apply_opinions,
     plan_opinions,
 )
@@ -98,13 +103,14 @@ async def execute_consolidation(
     facts_max: int = DEFAULT_FACTS_MAX,
     turns_max: int = DEFAULT_TURNS_MAX,
     cap: int = DEFAULT_RETIRE_CAP,
+    system: str = CONSOLIDATION_SYSTEM_DEFAULT,
 ) -> ConsolidationPlan:
     """Plan (always) → apply (if ``apply``). Return the plan.
 
     Dependency-injected so the orchestration is testable without
     config/network. ``plan_consolidation`` is read-only; only
     ``apply_consolidation`` mutates, so dry-run (``apply=False``) never
-    writes to ``store``.
+    writes to ``store``. ``system`` is the config-sourced prompt text.
     """
     plan = await plan_consolidation(
         store,
@@ -113,6 +119,7 @@ async def execute_consolidation(
         facts_max=facts_max,
         turns_max=turns_max,
         cap=cap,
+        system=system,
     )
     _log_rejections("consolidation", plan.rejected)
     if apply:
@@ -142,12 +149,15 @@ async def execute_opinion_formation(
     apply: bool,
     denylist: tuple[str, ...] = (),
     cap: int = DEFAULT_OPINION_CAP,
+    stance_system: str = STANCE_SYSTEM_DEFAULT,
+    synthesis_system: str = SYNTHESIS_SYSTEM_DEFAULT,
 ) -> OpinionPlan:
     """Plan opinions → apply (if ``apply``). Return the plan.
 
     ``plan_opinions`` is read-only; only ``apply_opinions`` records facts,
     so a dry run never writes. ``denylist`` (consolidation's retired-fact
-    texts) is fed to the prompt as known-bits context.
+    texts) is fed to the prompt as known-bits context. ``stance_system`` /
+    ``synthesis_system`` are the config-sourced prompt texts.
     """
     self_key = self_canonical_key(familiar_id)
     prior = await store.get_people_dossier(
@@ -162,6 +172,8 @@ async def execute_opinion_formation(
         denylist=denylist,
         prior_self_dossier=prior.dossier_text if prior is not None else None,
         cap=cap,
+        stance_system=stance_system,
+        synthesis_system=synthesis_system,
     )
     _log_rejections("opinion", plan.rejected)
     if apply:
@@ -172,6 +184,41 @@ async def execute_opinion_formation(
 # ---------------------------------------------------------------------------
 # maintenance-pass registry (mirrors processors/projectors.py)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SleepPromptText:
+    """Config-sourced static instruction text for the sleep passes.
+
+    Built from ``CharacterConfig``'s ``[prompt]`` fields and carried into
+    every pass via :class:`MaintenanceContext`. Empty default falls back
+    to each module's in-code default (the single-source default text
+    lives in ``_default/character.toml``). Rails stay code-enforced — this
+    text is phrasing only.
+    """
+
+    consolidation_system: str = CONSOLIDATION_SYSTEM_DEFAULT
+    stance_system: str = STANCE_SYSTEM_DEFAULT
+    synthesis_system: str = SYNTHESIS_SYSTEM_DEFAULT
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        consolidation_system: str,
+        stance_system: str,
+        synthesis_system: str,
+    ) -> SleepPromptText:
+        """Build from ``[prompt]`` strings; empty → in-code default.
+
+        Production text ships in ``_default/character.toml``; empty falls
+        back so minimal / test profiles still get a working prompt.
+        """
+        return cls(
+            consolidation_system=consolidation_system or CONSOLIDATION_SYSTEM_DEFAULT,
+            stance_system=stance_system or STANCE_SYSTEM_DEFAULT,
+            synthesis_system=synthesis_system or SYNTHESIS_SYSTEM_DEFAULT,
+        )
 
 
 @dataclass(frozen=True)
@@ -194,6 +241,7 @@ class MaintenanceContext:
     turns_max: int = DEFAULT_TURNS_MAX
     retire_cap: int = DEFAULT_RETIRE_CAP
     opinion_cap: int = DEFAULT_OPINION_CAP
+    prompts: SleepPromptText = field(default_factory=SleepPromptText)
 
 
 @dataclass
@@ -302,6 +350,7 @@ class ConsolidationPass:
             facts_max=ctx.facts_max,
             turns_max=ctx.turns_max,
             cap=ctx.retire_cap,
+            system=ctx.prompts.consolidation_system,
         )
         _logger.info(
             f"{ls.tag('Sleep', ls.G)} consolidation "
@@ -337,6 +386,8 @@ class OpinionFormationPass:
             apply=ctx.apply,
             denylist=denylist,
             cap=ctx.opinion_cap,
+            stance_system=ctx.prompts.stance_system,
+            synthesis_system=ctx.prompts.synthesis_system,
         )
         _logger.info(
             f"{ls.tag('Sleep', ls.G)} opinions "

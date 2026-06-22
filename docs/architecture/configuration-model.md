@@ -86,6 +86,15 @@ Surface today:
   The shipped default is a short roleplay-etiquette note nudging the
   familiar to lean on `<silent>`. See
   [Context pipeline — Final reminder](context-pipeline.md#final-reminder).
+- `[prompt].sleep_consolidation_system`, `sleep_stance_system`,
+  `sleep_synthesis_system`, `dream_extraction_clause` — static
+  instruction text for the sleep passes and the fact-extractor's
+  dream-framing clause. Dynamic window data is interpolated in code;
+  only the wording is configurable. Placeholders: the stance / synthesis
+  fields take `{self_name}`; `dream_extraction_clause` takes
+  `{self_name}`, `{self_key}`, `{ids}`. Validation rails stay
+  code-enforced regardless of this text. See
+  [Sleep — Prompt text is config, rails are code](sleep.md#prompt-text-is-config-rails-are-code).
 
 ### Default profile
 

@@ -423,9 +423,7 @@ class TestPlanConsolidation:
         """The system text the caller supplies is the system message sent."""
         store = AsyncHistoryStore(self._store())
         llm = FakeLLMClient(replies=[json.dumps({"retire": [], "rewrite": []})])
-        await plan_consolidation(
-            store, llm, familiar_id="fam", system="TIDY UP PLEASE"
-        )
+        await plan_consolidation(store, llm, familiar_id="fam", system="TIDY UP PLEASE")
         sent = llm.calls[0]
         assert sent[0].role == "system"
         assert sent[0].content == "TIDY UP PLEASE"
@@ -454,7 +452,10 @@ class TestPlanConsolidation:
             ],
         )
         store = AsyncHistoryStore(raw)
-        reply = json.dumps({"retire": [{"fact_ids": [1], "reason": "x"}], "rewrite": []})
+        reply = json.dumps({
+            "retire": [{"fact_ids": [1], "reason": "x"}],
+            "rewrite": [],
+        })
         llm = FakeLLMClient(replies=[reply])
         plan = await plan_consolidation(
             store,

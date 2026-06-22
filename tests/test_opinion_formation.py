@@ -22,9 +22,8 @@ from familiar_connect.sleep.opinion_formation import (
     apply_opinions,
     bucket_by_day,
     extract_stance_moments,
-    plan_opinions,
     gather_days,
-    synthesize,
+    plan_opinions,
     validate_opinions,
 )
 from tests.conftest import FakeLLMClient
@@ -457,9 +456,7 @@ class TestPlanOpinions:
             "candidates": [{"text": "defends lo-fi", "turn_ids": [1]}]
         })
         synth_reply = json.dumps({
-            "opinions": [
-                {"text": "Sapphire defends lo-fi.", "source_turn_ids": [1]}
-            ]
+            "opinions": [{"text": "Sapphire defends lo-fi.", "source_turn_ids": [1]}]
         })
         llm = FakeLLMClient(replies=[cand_reply, synth_reply])
         await plan_opinions(
@@ -473,10 +470,10 @@ class TestPlanOpinions:
         )
         # configured persona text reaches the LLM (self_name interpolated);
         # the JSON reply-shape contract is appended in code.
-        stance_sent = llm.calls[0][0].content
-        synth_sent = llm.calls[1][0].content
-        assert isinstance(stance_sent, str) and "STANCE for Sapphire" in stance_sent
-        assert isinstance(synth_sent, str) and "SYNTH for Sapphire" in synth_sent
+        stance_sent = llm.calls[0][0].content_str
+        synth_sent = llm.calls[1][0].content_str
+        assert "STANCE for Sapphire" in stance_sent
+        assert "SYNTH for Sapphire" in synth_sent
 
     @pytest.mark.asyncio
     async def test_ungrounded_rail_fires_with_config_sourced_prompts(self) -> None:
@@ -499,9 +496,7 @@ class TestPlanOpinions:
         })
         # synthesis grounds an opinion in id 999 — never a stance-moment id
         synth_reply = json.dumps({
-            "opinions": [
-                {"text": "Sapphire loves jazz.", "source_turn_ids": [999]}
-            ]
+            "opinions": [{"text": "Sapphire loves jazz.", "source_turn_ids": [999]}]
         })
         llm = FakeLLMClient(replies=[cand_reply, synth_reply])
         plan = await plan_opinions(

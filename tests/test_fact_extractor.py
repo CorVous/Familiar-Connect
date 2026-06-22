@@ -17,7 +17,10 @@ from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
-from familiar_connect.processors.fact_extractor import FactExtractor
+from familiar_connect.processors.fact_extractor import (
+    DREAM_EXTRACTION_CLAUSE_DEFAULT,
+    FactExtractor,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -1437,18 +1440,15 @@ def _dream_extractor(
     store: HistoryStore,
     llm: _ScriptedLLM,
     *,
-    dream_extraction_clause: str | None = None,
+    dream_extraction_clause: str = DREAM_EXTRACTION_CLAUSE_DEFAULT,
 ) -> FactExtractor:
-    kwargs: dict[str, object] = {}
-    if dream_extraction_clause is not None:
-        kwargs["dream_extraction_clause"] = dream_extraction_clause
     return FactExtractor(
         store=AsyncHistoryStore(store),
         llm_client=llm,
         familiar_id="fam",
         familiar_display_name="Sapphire",
         batch_size=10,
-        **kwargs,
+        dream_extraction_clause=dream_extraction_clause,
     )
 
 
@@ -1488,9 +1488,7 @@ class TestSleepReturnDreamExtraction:
         _, dream_id = _seed_with_dream_turn(store)
         llm = _ScriptedLLM(replies=[_facts_json([])])
         clause = "DREAM-MARKER {self_name} keyed {self_key} ids {ids}"
-        await _dream_extractor(
-            store, llm, dream_extraction_clause=clause
-        ).tick()
+        await _dream_extractor(store, llm, dream_extraction_clause=clause).tick()
         system = llm.calls[0][0].content_str
         assert "DREAM-MARKER Sapphire keyed self:fam" in system
         assert str(dream_id) in system

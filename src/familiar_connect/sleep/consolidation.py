@@ -171,8 +171,12 @@ async def gather_window(
     )
 
 
+# Static instruction default — mirrors ``_default/character.toml``
+# ``[prompt].sleep_consolidation_system``. Used when no configured text
+# is threaded in (direct callers / tests). The validation rails in
+# :func:`validate` are code-enforced; this string only phrases the ask.
 _SYSTEM = (
-    "You are a memory-hygiene pass run while a character sleeps. You see "
+    "You are a memory-consolidation pass run while a character sleeps. You see "
     "the day's facts at once, so you can catch patterns a turn-by-turn "
     "extractor misses: near-duplicate restatements, noise minted as fact, "
     "and claims misfiled under the wrong person (e.g. a running joke about "
@@ -194,8 +198,15 @@ _SYSTEM = (
 )
 
 
-def build_prompt(window: ConsolidationWindow, *, self_key: str) -> list[Message]:
-    """Render the window into the consolidation LLM prompt."""
+def build_prompt(
+    window: ConsolidationWindow, *, self_key: str, system: str = _SYSTEM
+) -> list[Message]:
+    """Render the window into the consolidation LLM prompt.
+
+    ``system`` is the static instruction text — config-sourced per
+    familiar, defaulting to :data:`_SYSTEM`. The dynamic window data
+    (facts, turns, self_key) is assembled here regardless.
+    """
     lines: list[str] = [
         f"Self subject key (the character): {self_key}",
         "",
@@ -210,7 +221,7 @@ def build_prompt(window: ConsolidationWindow, *, self_key: str) -> list[Message]
             who = t.author.label if t.author is not None else t.role
             lines.append(f"- {who}: {t.content}")
     return [
-        Message(role="system", content=_SYSTEM),
+        Message(role="system", content=system or _SYSTEM),
         Message(role="user", content="\n".join(lines)),
     ]
 
@@ -403,13 +414,18 @@ async def plan_consolidation(
     facts_max: int = DEFAULT_FACTS_MAX,
     turns_max: int = DEFAULT_TURNS_MAX,
     cap: int = DEFAULT_RETIRE_CAP,
+    system: str = _SYSTEM,
 ) -> ConsolidationPlan:
-    """Gather → prompt → LLM → parse → validate. Touches no fact rows."""
+    """Gather → prompt → LLM → parse → validate. Touches no fact rows.
+
+    ``system`` is the config-sourced static instruction text; rails in
+    :func:`validate` enforce safety in code regardless of its phrasing.
+    """
     self_key = self_canonical_key(familiar_id)
     window = await gather_window(
         store, familiar_id=familiar_id, facts_max=facts_max, turns_max=turns_max
     )
-    prompt = build_prompt(window, self_key=self_key)
+    prompt = build_prompt(window, self_key=self_key, system=system)
     reply = await llm.chat(prompt)
     retire_raw, rewrite_raw = parse_actions(reply.content_str)
     notes: tuple[str, ...] = ()

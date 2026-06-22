@@ -58,6 +58,7 @@ from familiar_connect.sleep.maintenance import (
     DEFAULT_PASSES,
     MaintenanceContext,
     MaintenanceRun,
+    SleepPromptText,
     create_passes,
     run_passes,
 )
@@ -190,6 +191,7 @@ class ActivityEngine:
         familiar_display_name: str | None = None,
         sleep_passes_enabled: bool = False,
         seed_dream_path: Path | None = None,
+        sleep_prompts: SleepPromptText | None = None,
     ) -> None:
         self._store = store
         self._config = config
@@ -204,6 +206,9 @@ class ActivityEngine:
         # sleep lifecycle: passes on/off switch + one-shot authored first dream
         self._sleep_passes_enabled = sleep_passes_enabled
         self._seed_dream_path = seed_dream_path
+        # config-sourced static prompt text for the sleep passes (phrasing
+        # only; rails stay code-enforced). default = in-code defaults.
+        self._sleep_prompts = sleep_prompts or SleepPromptText()
         # late-bound: run.py wires before Discord login fills the real id
         self._bot_user_id_fn = bot_user_id
         self._voice_active_fn = voice_active_fn
@@ -720,6 +725,7 @@ class ActivityEngine:
                 display_name=self._display_name,
                 display_tz=self._display_tz_name,
                 apply=True,
+                prompts=self._sleep_prompts,
             )
             run: MaintenanceRun = await run_passes(
                 create_passes(names=DEFAULT_PASSES, context=ctx)

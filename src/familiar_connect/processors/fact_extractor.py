@@ -75,6 +75,21 @@ def _is_self_capability(text: str, name_re: re.Pattern[str] | None = None) -> bo
     return bool(name_re and name_re.match(text))
 
 
+# Static dream-framing clause default — mirrors ``_default/character.toml``
+# ``[prompt].dream_extraction_clause``. Placeholders ``{self_name}``,
+# ``{self_key}``, ``{ids}`` interpolated in :func:`_build_extract_prompt`.
+# The claim-discipline rail (forcing dream-grounded facts to ``self:`` and
+# dream-framing them) is enforced in :meth:`FactExtractor.tick`, not here —
+# an override changes phrasing only.
+DREAM_EXTRACTION_CLAUSE_DEFAULT = (
+    "Dream turns (ids {ids}) are {self_name}'s own dream narration from "
+    "sleep — fiction by definition, never real events. A fact distilled "
+    "from them must be dream-framed ('{self_name} dreamed that …') and "
+    "tagged ONLY with ``{self_key}`` — never recorded as a real event or "
+    "filed under another person's key."
+)
+
+
 class FactExtractor:
     """Distils facts from new turns; forever loop via ``run()``."""
 
@@ -90,6 +105,7 @@ class FactExtractor:
         batch_size: int = 10,
         tick_interval_s: float = 15.0,
         participants_max: int = 30,
+        dream_extraction_clause: str = DREAM_EXTRACTION_CLAUSE_DEFAULT,
     ) -> None:
         self._store = store
         self._sync = store.sync
@@ -97,6 +113,11 @@ class FactExtractor:
         self._familiar_id = familiar_id
         # display name for the reserved self-subject; title-cased id when absent
         self._familiar_display_name = familiar_display_name or familiar_id.title()
+        # config-sourced static dream-framing clause (phrasing only;
+        # claim-discipline rail in ``tick`` enforces self-keying/framing)
+        self._dream_extraction_clause = (
+            dream_extraction_clause or DREAM_EXTRACTION_CLAUSE_DEFAULT
+        )
         # drop capability statements phrased third-person with the name
         # (e.g. "Sapphire cannot remember names")
         self._self_name_capability_re = re.compile(
@@ -163,6 +184,7 @@ class FactExtractor:
                 self_key=self_key,
                 self_name=self._familiar_display_name,
                 dream_turn_ids=dream_ids,
+                dream_clause_template=self._dream_extraction_clause,
             )
             reply = await self._llm.chat(prompt)
             facts = _parse_facts(reply.content_str)
@@ -351,18 +373,16 @@ def _build_extract_prompt(
     self_key: str | None = None,
     self_name: str | None = None,
     dream_turn_ids: set[int] | frozenset[int] = frozenset(),
+    dream_clause_template: str = DREAM_EXTRACTION_CLAUSE_DEFAULT,
 ) -> list[Message]:
     dream_clause = ""
     if dream_turn_ids:
         ids = ", ".join(str(i) for i in sorted(dream_turn_ids))
-        dream_clause = (
-            f"\n\nDream turns (ids {ids}) are {self_name}'s own dream "
-            "narration from sleep — fiction by definition, never real "
-            "events. A fact distilled from them must be dream-framed "
-            f"('{self_name} dreamed that …') and tagged ONLY with "
-            f"``{self_key}`` — never recorded as a real event or filed "
-            "under another person's key."
-        )
+        # config-sourced static text; dynamic ids/self interpolated here.
+        # claim-discipline rail in ``tick`` enforces self-keying regardless.
+        dream_clause = "\n\n" + (
+            dream_clause_template or DREAM_EXTRACTION_CLAUSE_DEFAULT
+        ).format(self_name=self_name, self_key=self_key, ids=ids)
     self_clause = ""
     if self_key and self_name:
         self_clause = (

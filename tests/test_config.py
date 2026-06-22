@@ -445,8 +445,7 @@ class TestLoadCharacterConfig:
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            '[prompt]\ndream_extraction_clause = '
-            '"dream {self_name} {self_key} {ids}"\n'
+            '[prompt]\ndream_extraction_clause = "dream {self_name} {self_key} {ids}"\n'
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.dream_extraction_clause == "dream {self_name} {self_key} {ids}"

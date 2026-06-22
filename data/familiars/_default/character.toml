@@ -335,6 +335,17 @@ greetings         = []
 # character not set in the present bans naming modern brands, franchises,
 # or celebrities so it doesn't acquire pop-culture knowledge that breaks
 # immersion. Empty (default) = neutral base only.
+#
+# sleep_consolidation_system / sleep_stance_system / sleep_synthesis_system
+# / dream_extraction_clause: STATIC instruction text for the sleep passes
+# and the fact-extractor's dream-framing clause. Dynamic window data
+# (facts, turns, ids, denylist) is interpolated in code; only the
+# wording lives here, overridable per familiar. The validation rails
+# (unknown-id, self-subject, ungrounded, cap, dedup) stay enforced in
+# code regardless of this text — an override changes phrasing, never a
+# safety check. Placeholders: ``_stance`` / ``_synthesis`` take
+# ``{self_name}``; ``dream_extraction_clause`` takes ``{self_name}``,
+# ``{self_key}``, ``{ids}``.
 
 [prompt]
 post_history_instructions = """
@@ -345,6 +356,72 @@ interject too frequently, either. It's fine to send a message when the \
 character really wants to, of course, but prefer <silent> otherwise.
 """
 image_description_constraints = ""
+sleep_consolidation_system = """
+You are a memory-consolidation pass run while a character sleeps. You see \
+the day's facts at once, so you can catch patterns a turn-by-turn \
+extractor misses: near-duplicate restatements, noise minted as fact, and \
+claims misfiled under the wrong person (e.g. a running joke about someone \
+recorded as a fact about them).
+
+Propose only two kinds of change:
+- retire: drop a fact that is noise, a duplicate of one you keep, or a \
+bit/claim asserted as fact. No replacement.
+- rewrite: merge near-duplicates, or re-attribute a misfiled claim, into \
+ONE consolidated fact that supersedes the listed old facts.
+
+Discipline: never invent a claim the source facts don't support. When \
+re-attributing a bit/performance to the character themselves, use the \
+self subject key given below. Do NOT introduce a person not already a \
+subject of the source facts. Leave a fact alone when unsure — a \
+conservative empty plan is correct.
+
+Reply with JSON only: {"retire": [{"fact_ids": [<id>...], "reason": \
+"..."}], "rewrite": [{"old_fact_ids": [<id>...], "new_text": "...", \
+"subject_keys": ["<key>"...], "reason": "..."}]}. Use only ids from the \
+Facts list. Empty lists when nothing to do.
+"""
+sleep_stance_system = """
+You read one day of chat and surface stance-moments for {self_name}, an \
+AI character. A stance-moment is a spot where {self_name} demonstrated a \
+feeling, opinion, preference, or reaction — about media, an event, a \
+person, a bit, anything. Quote nothing; just name the stance and cite the \
+turn ids that show it.
+
+Ground every candidate in real turn ids from the transcript below. Only \
+turns marked '(you)' are {self_name}'s — never attribute a stance to \
+{self_name} from a turn they did not author, even if a user shares their \
+name. Prefer turns {self_name} authored (their own words/acts). Skip \
+small-talk with no stance. A thin day yields few or zero candidates — \
+that is fine.
+"""
+sleep_synthesis_system = """
+You synthesize {self_name}'s settled opinions from stance-moments \
+observed across many days. Merge restatements of the same stance into \
+one. Keep stances that genuinely differ (including a view {self_name} \
+changed their mind on — record both, they are both true in their time). \
+An opinion is {self_name}'s — phrase it about {self_name}. You may \
+mention other people in passing, but the opinion is {self_name}'s stance, \
+not a claim about them.
+
+CRITICAL: every opinion's source_turn_ids MUST be drawn only from the ids \
+listed on the candidates below. Invent no ids.
+
+Rate each opinion's IMPORTANCE 1-10 by how durable/central it is to who \
+{self_name} is, NOT how strongly worded:
+- 7-9 = durable core stance about identity, values, or a key \
+relationship (would still be true in a month).
+- 4-6 = characteristic but situational (recurring tendency tied to a \
+context).
+- 2-3 = momentary texture, tied to one specific exchange or event.
+Reserve 10 for rare bedrock identity; 1 for trivial.
+"""
+dream_extraction_clause = """
+Dream turns (ids {ids}) are {self_name}'s own dream narration from sleep \
+— fiction by definition, never real events. A fact distilled from them \
+must be dream-framed ('{self_name} dreamed that …') and tagged ONLY with \
+``{self_key}`` — never recorded as a real event or filed under another \
+person's key.
+"""
 
 # --- LLM slots -------------------------------------------------------------
 #

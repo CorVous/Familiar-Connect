@@ -505,6 +505,19 @@ class CharacterConfig:
     # tuning — e.g. a non-present character bans naming modern brands /
     # franchises. empty = neutral base only. lives in ``[prompt]``.
     image_description_constraints: str = ""
+    # Static instruction text for the sleep passes (consolidation +
+    # opinion-formation) and the fact-extractor dream-framing clause.
+    # Dynamic window data (facts, turns, ids, denylist) is still
+    # assembled in code; only the phrasing lives here. ``_stance`` /
+    # ``_synthesis`` accept a ``{self_name}`` placeholder;
+    # ``dream_extraction_clause`` accepts ``{self_name}``, ``{self_key}``,
+    # ``{ids}``. Rails stay code-enforced — an override changes wording,
+    # never a safety check. Defaults ship in ``_default``; empty Python
+    # default keeps the default profile the single source of truth.
+    sleep_consolidation_system: str = ""
+    sleep_stance_system: str = ""
+    sleep_synthesis_system: str = ""
+    dream_extraction_clause: str = ""
     # Retrieval ranking weights — see :class:`MemoryRetrievalConfig`.
     memory_retrieval: MemoryRetrievalConfig = field(
         default_factory=MemoryRetrievalConfig
@@ -725,9 +738,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
     if not isinstance(prompt_raw, dict):
         msg = f"[prompt] must be a table, got {type(prompt_raw).__name__}"
         raise ConfigError(msg)
-    post_history_instructions, image_description_constraints = _parse_prompt_config(
-        prompt_raw
-    )
+    prompt_fields = _parse_prompt_config(prompt_raw)
 
     memory_raw = data.get("memory", {})
     if not isinstance(memory_raw, dict):
@@ -768,8 +779,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         budgets=budgets,
         budget_curves=budget_curves,
         discord_text=discord_text,
-        post_history_instructions=post_history_instructions,
-        image_description_constraints=image_description_constraints,
+        **prompt_fields,
         memory_retrieval=memory_retrieval,
         memory_providers=memory_providers,
         embedding=embedding,
@@ -831,27 +841,31 @@ def _parse_discord_text_config(raw: dict) -> DiscordTextConfig:
     )
 
 
-_PROMPT_FIELDS: frozenset[str] = frozenset({
+# Plain-string prompt fields under ``[prompt]``; each maps 1:1 to a
+# ``CharacterConfig`` attribute of the same name. Sleep-pass fields hold
+# the STATIC instruction text only — dynamic window data stays in code.
+_PROMPT_FIELDS: tuple[str, ...] = (
     "post_history_instructions",
     "image_description_constraints",
-})
+    "sleep_consolidation_system",
+    "sleep_stance_system",
+    "sleep_synthesis_system",
+    "dream_extraction_clause",
+)
 
 
-def _parse_prompt_config(raw: dict) -> tuple[str, str]:
-    """Validate ``[prompt]``; return (post_history, image_constraints).
+def _parse_prompt_config(raw: dict) -> dict[str, str]:
+    """Validate ``[prompt]``; return field-name → stripped-string map.
 
-    Both empty / absent → ``""`` (omitted). Defaults ship in
+    Every known field present (absent → ``""``). Defaults ship in
     ``_default/character.toml`` and deep-merge unless overridden.
     """
-    unknown = set(raw) - _PROMPT_FIELDS
+    unknown = set(raw) - set(_PROMPT_FIELDS)
     if unknown:
         bad = ", ".join(sorted(unknown))
         msg = f"[prompt] has unknown keys: {bad}"
         raise ConfigError(msg)
-    return (
-        _prompt_str(raw, "post_history_instructions"),
-        _prompt_str(raw, "image_description_constraints"),
-    )
+    return {key: _prompt_str(raw, key) for key in _PROMPT_FIELDS}
 
 
 def _prompt_str(raw: dict, key: str) -> str:

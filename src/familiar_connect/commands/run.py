@@ -57,6 +57,7 @@ from familiar_connect.processors.projectors import (
     ProjectorContext,
     create_projectors,
 )
+from familiar_connect.sleep.maintenance import SleepPromptText
 from familiar_connect.stt import create_transcriber
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.tools.builtins import build_text_registry, build_voice_registry
@@ -315,11 +316,16 @@ def _build_activity_engine(
         # late-bound: on_ready fills familiar.bot_user_id after login
         bot_user_id=lambda: familiar.bot_user_id,
         voice_active_fn=lambda: bool(handle.voice_runtime),
-        # sleep lifecycle: run the hygiene+dream passes at departure +
+        # sleep lifecycle: run the consolidation+dream passes at departure +
         # one-shot authored first dream
         familiar_display_name=familiar.display_name,
         sleep_passes_enabled=True,
         seed_dream_path=familiar.root / "seed_dream.md",
+        sleep_prompts=SleepPromptText.from_config(
+            consolidation_system=familiar.config.sleep_consolidation_system,
+            stance_system=familiar.config.sleep_stance_system,
+            synthesis_system=familiar.config.sleep_synthesis_system,
+        ),
     )
 
 
@@ -560,6 +566,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         familiar_display_name=familiar.display_name,
         embedder=embedder,
         memory=familiar.config.memory_providers,
+        dream_extraction_clause=familiar.config.dream_extraction_clause,
     )
     projectors = create_projectors(
         names=list(familiar.config.memory_providers.projectors),

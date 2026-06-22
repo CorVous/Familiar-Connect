@@ -75,6 +75,28 @@ guard that the [KaillaDame disengagement] work and the
 and bits about people must inherit the same discipline that real-time
 extraction does.
 
+### Prompt text is config, rails are code
+
+The static instruction text the passes send the model lives in
+`_default/character.toml` `[prompt]`, overridable per familiar via the
+same `_default` → override deep-merge as every other config field:
+
+| Key | Used by |
+|-----|---------|
+| `sleep_consolidation_system` | hygiene/consolidation system message |
+| `sleep_stance_system` | per-day stance-moment pass (`{self_name}`) |
+| `sleep_synthesis_system` | opinion synthesis pass (`{self_name}`) |
+| `dream_extraction_clause` | fact-extractor dream-framing clause (`{self_name}`, `{self_key}`, `{ids}`) |
+
+Only the *phrasing* is configurable. The dynamic window data (facts,
+turns, cited ids, the known-bits deny-list) is still assembled in code,
+and the machine-parsed JSON reply shape is appended in code, not config.
+Crucially, **a prompt override can never weaken a rail**: the validation
+rails above (and the fact-extractor's claim-discipline rail forcing
+dream-grounded facts to `self:`, dream-framed) run *after* the model
+replies, regardless of what the prompt said. Empty config falls back to
+each module's in-code default.
+
 ### Authored facts
 
 There is no "untouchable" flag. Authored lore (her tastes, description,
