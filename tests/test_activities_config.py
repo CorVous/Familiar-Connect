@@ -247,45 +247,32 @@ class TestDefaultSkeleton:
         assert not cfg
 
 
+# Sleep schedule (window/grace) lives in character.toml [sleep] now; the
+# catalog entry only marks WHICH activity is window-scheduled. See
+# tests/test_config.py::TestLoadCharacterConfig sleep cases.
 SLEEP_ENTRY = """\
 [[catalog]]
 id = "sleep"
 label = "asleep"
-window = "00:00-08:00"
-grace_minutes = 45
 reachable = false
 seed = "The night's dream, told on waking."
 """
 
 
-class TestSleepWindowEntry:
-    """Reserved ``sleep`` catalog id — window-scheduled, fixed wake."""
+class TestSleepCatalogEntry:
+    """Reserved ``sleep`` catalog id — duration optional (fixed wake)."""
 
-    def test_window_and_grace_parse(self, tmp_path: Path) -> None:
+    def test_sleep_entry_parses(self, tmp_path: Path) -> None:
         path = write_activities(tmp_path, SLEEP_ENTRY)
         cfg = load_activities_config(path)
         entry = cfg.catalog[0]
         assert entry.id == "sleep"
-        assert entry.window == (time(0, 0), time(8, 0))
-        assert entry.grace_minutes == 45
         assert entry.reachable is False
 
-    def test_duration_minutes_optional_with_window(self, tmp_path: Path) -> None:
+    def test_duration_minutes_optional_for_sleep_entry(self, tmp_path: Path) -> None:
         path = write_activities(tmp_path, SLEEP_ENTRY)
         cfg = load_activities_config(path)
         assert cfg.catalog[0].duration_minutes is None
-
-    def test_grace_minutes_defaults_to_30(self, tmp_path: Path) -> None:
-        content = SLEEP_ENTRY.replace("grace_minutes = 45\n", "")
-        path = write_activities(tmp_path, content)
-        cfg = load_activities_config(path)
-        assert cfg.catalog[0].grace_minutes == 30
-
-    def test_window_wraps_midnight(self, tmp_path: Path) -> None:
-        content = SLEEP_ENTRY.replace('"00:00-08:00"', '"23:00-07:00"')
-        path = write_activities(tmp_path, content)
-        cfg = load_activities_config(path)
-        assert cfg.catalog[0].window == (time(23, 0), time(7, 0))
 
     def test_duration_minutes_still_parsed_if_present(self, tmp_path: Path) -> None:
         content = SLEEP_ENTRY + "duration_minutes = [400, 500]\n"
@@ -293,45 +280,26 @@ class TestSleepWindowEntry:
         cfg = load_activities_config(path)
         assert cfg.catalog[0].duration_minutes == (400, 500)
 
-    def test_window_on_non_sleep_entry_rejected(self, tmp_path: Path) -> None:
-        content = VALID_ENTRY + 'window = "00:00-08:00"\n'
-        path = write_activities(tmp_path, content)
-        with pytest.raises(ConfigError, match="window"):
-            load_activities_config(path)
-
-    def test_grace_on_non_sleep_entry_rejected(self, tmp_path: Path) -> None:
-        content = VALID_ENTRY + "grace_minutes = 30\n"
-        path = write_activities(tmp_path, content)
-        with pytest.raises(ConfigError, match="grace_minutes"):
-            load_activities_config(path)
-
-    def test_sleep_entry_without_window_rejected(self, tmp_path: Path) -> None:
-        content = SLEEP_ENTRY.replace('window = "00:00-08:00"\n', "")
-        path = write_activities(tmp_path, content)
-        with pytest.raises(ConfigError, match="window"):
-            load_activities_config(path)
-
-    @pytest.mark.parametrize("value", ["00:00", "midnight", "00:00-00:00"])
-    def test_bad_window_format_rejected(self, tmp_path: Path, value: str) -> None:
-        content = SLEEP_ENTRY.replace("00:00-08:00", value)
-        path = write_activities(tmp_path, content)
-        with pytest.raises(ConfigError, match="window"):
-            load_activities_config(path)
-
-    @pytest.mark.parametrize("value", ["0", "-5", "true", '"30"'])
-    def test_bad_grace_rejected(self, tmp_path: Path, value: str) -> None:
-        content = SLEEP_ENTRY.replace("grace_minutes = 45", f"grace_minutes = {value}")
-        path = write_activities(tmp_path, content)
-        with pytest.raises(ConfigError, match="grace_minutes"):
-            load_activities_config(path)
-
     def test_non_sleep_entry_still_requires_duration(self, tmp_path: Path) -> None:
         content = VALID_ENTRY.replace("duration_minutes = [20, 45]\n", "")
         path = write_activities(tmp_path, content)
         with pytest.raises(ConfigError, match="duration_minutes"):
             load_activities_config(path)
 
-    def test_dataclass_defaults(self) -> None:
+    def test_window_no_longer_a_catalog_key(self, tmp_path: Path) -> None:
+        """Window relocated to character.toml — not a valid catalog key."""
+        content = SLEEP_ENTRY + 'window = "00:00-08:00"\n'
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_activities_config(path)
+
+    def test_grace_no_longer_a_catalog_key(self, tmp_path: Path) -> None:
+        content = SLEEP_ENTRY + "grace_minutes = 30\n"
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_activities_config(path)
+
+    def test_dataclass_has_no_window_or_grace(self) -> None:
         entry = ActivityType(id="x", label="x", duration_minutes=(1, 2), seed="s")
-        assert entry.window is None
-        assert entry.grace_minutes == 30
+        assert not hasattr(entry, "window")
+        assert not hasattr(entry, "grace_minutes")

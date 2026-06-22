@@ -313,6 +313,9 @@ def _build_activity_engine(
         presence_cb=build_activity_presence_cb(handle),
         familiar_id=familiar.id,
         display_tz=familiar.config.display_tz,
+        # sleep schedule: wall-clock config from character.toml [sleep]
+        sleep_window=familiar.config.sleep_window,
+        sleep_grace_minutes=familiar.config.sleep_grace_minutes,
         # late-bound: on_ready fills familiar.bot_user_id after login
         bot_user_id=lambda: familiar.bot_user_id,
         voice_active_fn=lambda: bool(handle.voice_runtime),

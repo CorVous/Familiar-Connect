@@ -184,6 +184,8 @@ class ActivityEngine:
         familiar_id: str,
         display_tz: str,
         bot_user_id: Callable[[], int | None],
+        sleep_window: tuple[time, time] | None = None,
+        sleep_grace_minutes: int = 30,
         voice_active_fn: Callable[[], bool] = lambda: False,
         now_fn: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         rng: random.Random | None = None,
@@ -202,6 +204,11 @@ class ActivityEngine:
         self._familiar_id = familiar_id
         self._tz = ZoneInfo(display_tz)
         self._display_tz_name = display_tz
+        # sleep schedule: wall-clock config from character.toml (localized
+        # via display_tz here). window None ⇒ schedule disarmed. The sleep
+        # ACTIVITY still lives in the catalog; only these VALUES relocated.
+        self._sleep_window = sleep_window
+        self._sleep_grace_minutes = sleep_grace_minutes
         self._display_name = familiar_display_name or familiar_id.title()
         # sleep lifecycle: passes on/off switch + one-shot authored first dream
         self._sleep_passes_enabled = sleep_passes_enabled
@@ -350,9 +357,10 @@ class ActivityEngine:
         if activity_type is None:
             valid = ", ".join(t.id for t in self._config.catalog)
             return {"error": f"unknown activity type {type_id!r}; valid: {valid}"}
-        if activity_type.window is not None:
+        window = self._window_for(activity_type)
+        if window is not None:
             # window-scheduled: alarm-style return at window end
-            start, end = self._window_occurrence(self._now(), activity_type.window)
+            start, end = self._window_occurrence(self._now(), window)
             # early-bed guard: fixed wake at window END would turn a
             # midday call into a ~20h absence — allow at most an hour
             # before bedtime
@@ -398,11 +406,10 @@ class ActivityEngine:
         self._staged = None
         try:
             now = self._now()
-            if staged.activity_type.window is not None:
+            window = self._window_for(staged.activity_type)
+            if window is not None:
                 # fixed wake: window end, never a rolled duration
-                _, planned_return = self._window_occurrence(
-                    now, staged.activity_type.window
-                )
+                _, planned_return = self._window_occurrence(now, window)
             else:
                 planned_return = now + timedelta(minutes=staged.duration_minutes)
             await self._begin_activity(
@@ -613,11 +620,25 @@ class ActivityEngine:
     # ------------------------------------------------------------------
 
     def _sleep_type(self) -> ActivityType | None:
-        """Catalog's reserved sleep entry, or None when not authored."""
-        entry = self._type_for(SLEEP_TYPE_ID)
-        if entry is None or entry.window is None:
+        """Catalog's reserved sleep entry, or None when not scheduled.
+
+        Needs both the catalog entry (the activity to run) and a
+        configured ``sleep_window`` (the wall-clock schedule, from
+        character config) — either missing ⇒ schedule disarmed.
+        """
+        if self._sleep_window is None:
             return None
-        return entry
+        return self._type_for(SLEEP_TYPE_ID)
+
+    def _window_for(self, activity_type: ActivityType) -> tuple[time, time] | None:
+        """Return configured sleep window for *activity_type*, else None.
+
+        Window-scheduling belongs to the reserved sleep activity only;
+        the schedule itself lives in character config, not the entry.
+        """
+        if activity_type.id != SLEEP_TYPE_ID:
+            return None
+        return self._sleep_window
 
     def _window_occurrence(
         self, now: datetime, window: tuple[time, time]
@@ -650,16 +671,16 @@ class ActivityEngine:
         first idle tick after she's back, still inside the window.
         """
         entry = self._sleep_type()
-        if entry is None or entry.window is None:
+        if entry is None or self._sleep_window is None:
             return
         if self._active is not None or self._staged is not None or self._returning:
             return
-        start, end = self._window_occurrence(now, entry.window)
+        start, end = self._window_occurrence(now, self._sleep_window)
         if now < start:
             return  # before tonight's window
         if await self._slept_this_window(entry, start):
             return
-        if now >= start + timedelta(minutes=entry.grace_minutes):
+        if now >= start + timedelta(minutes=self._sleep_grace_minutes):
             await self._force_sleep(entry, end)
         elif self._bedtime_nudge_occ != start:
             await self._publish_bedtime_nudge(start)

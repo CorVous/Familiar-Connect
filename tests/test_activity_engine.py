@@ -1533,14 +1533,10 @@ class TestSleepSchedule:
         await engine.stop()
 
     @pytest.mark.asyncio
-    async def test_no_window_disarms_schedule(
-        self, store: AsyncHistoryStore
-    ) -> None:
+    async def test_no_window_disarms_schedule(self, store: AsyncHistoryStore) -> None:
         """``sleep_window=None`` ⇒ schedule never fires even with a sleep entry."""
         clock = _night_clock(0, 31)
-        engine = _engine(
-            store, clock, config=_sleep_config(), sleep_window=None
-        )
+        engine = _engine(store, clock, config=_sleep_config(), sleep_window=None)
         await engine._sleep_schedule_tick(clock.now)
         assert store.sync.active_activity(familiar_id=_FAMILIAR) is None
         await engine.stop()

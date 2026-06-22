@@ -10,12 +10,17 @@ precedent), so typos don't silently disable a knob.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time
 from typing import TYPE_CHECKING, cast
 
-from familiar_connect.config import ConfigError, _deep_merge, _read_toml
+from familiar_connect.config import (
+    ConfigError,
+    _deep_merge,
+    _read_toml,
+    parse_hhmm_range,
+)
 
 if TYPE_CHECKING:
+    from datetime import time
     from pathlib import Path
 
 
@@ -27,19 +32,18 @@ youtube) — rejected with explicit message until implemented.
 """
 
 SLEEP_TYPE_ID = "sleep"
-"""Reserved catalog id — window-scheduled sleep activity.
+"""Reserved catalog id — the window-scheduled sleep activity.
 
-Only this entry may carry ``window``/``grace_minutes``; with a
-``window``, ``duration_minutes`` is optional (return is fixed at
-window end, never a rolled duration).
+The wall-clock schedule (``window``/``grace_minutes``) lives in
+``character.toml`` ``[sleep]``, not here; this id only marks WHICH
+activity the schedule drives. The sleep entry's ``duration_minutes``
+is optional (return is fixed at window end, never a rolled duration).
 """
 
 _ENTRY_REQUIRED: frozenset[str] = frozenset({"id", "label", "duration_minutes", "seed"})
 _ENTRY_KEYS: frozenset[str] = _ENTRY_REQUIRED | {
     "reachable",
     "content_source",
-    "window",
-    "grace_minutes",
 }
 _TOP_LEVEL_KEYS: frozenset[str] = frozenset({
     "archive_after_minutes",
@@ -63,10 +67,6 @@ class ActivityType:
         :data:`CONTENT_SOURCES`.
     :param seed: authored prompt seed for experience generation
         (dream prose for the sleep entry).
-    :param window: sleep window ``(start, end)`` in display_tz; may
-        wrap midnight; :data:`SLEEP_TYPE_ID` entry only.
-    :param grace_minutes: minutes after window start before
-        force-sleep; sleep entry only.
     """
 
     id: str
@@ -75,8 +75,6 @@ class ActivityType:
     reachable: bool = True
     content_source: str = "authored"
     seed: str = ""
-    window: tuple[time, time] | None = None
-    grace_minutes: int = 30
 
 
 @dataclass(frozen=True)
@@ -145,7 +143,7 @@ def _parse_activities_config(data: dict) -> ActivitiesConfig:
 
     active_hours: tuple[time, time] | None = None
     if "active_hours" in data:
-        active_hours = _parse_active_hours(data["active_hours"])
+        active_hours = parse_hhmm_range(data["active_hours"], key="active_hours")
 
     catalog_raw = data.get("catalog", [])
     if not isinstance(catalog_raw, list):
@@ -182,8 +180,9 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         )
         raise ConfigError(msg)
     missing = _ENTRY_REQUIRED - set(entry)
-    if "window" in entry or entry.get("id") == SLEEP_TYPE_ID:
-        # window-scheduled: return fixed at window end, duration unused
+    if entry.get("id") == SLEEP_TYPE_ID:
+        # window-scheduled (schedule in character.toml [sleep]): return is
+        # fixed at window end, so duration is unused/optional
         missing -= {"duration_minutes"}
     if missing:
         msg = f"[[catalog]] entry #{idx} missing required keys: {sorted(missing)}"
@@ -197,37 +196,6 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
             raise ConfigError(msg)
         strings[key] = value
     entry_id = strings["id"]
-
-    # window/grace_minutes reserved for the sleep entry — keeps the
-    # schedule semantics in one place instead of half-supported
-    # windows on arbitrary types
-    if entry_id != SLEEP_TYPE_ID:
-        for key in ("window", "grace_minutes"):
-            if key in entry:
-                msg = (
-                    f"[[catalog]] {entry_id!r}: {key} is valid only on the "
-                    f"reserved {SLEEP_TYPE_ID!r} entry"
-                )
-                raise ConfigError(msg)
-    elif "window" not in entry:
-        msg = f"[[catalog]] {SLEEP_TYPE_ID!r}: 'window' is required"
-        raise ConfigError(msg)
-
-    window: tuple[time, time] | None = None
-    if "window" in entry:
-        window = _parse_hhmm_range(entry["window"], key="window")
-
-    grace_minutes = entry.get("grace_minutes", 30)
-    if (
-        not isinstance(grace_minutes, int)
-        or isinstance(grace_minutes, bool)
-        or grace_minutes <= 0
-    ):
-        msg = (
-            f"[[catalog]] {entry_id!r}: grace_minutes must be a positive "
-            f"integer, got {grace_minutes!r}"
-        )
-        raise ConfigError(msg)
 
     duration: tuple[int, int] | None = None
     if "duration_minutes" in entry:
@@ -263,8 +231,6 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         reachable=reachable,
         content_source=content_source,
         seed=strings["seed"],
-        window=window,
-        grace_minutes=grace_minutes,
     )
 
 
@@ -286,31 +252,3 @@ def _parse_duration_minutes(value: object, entry_id: str) -> tuple[int, int]:
     if not 0 < lo <= hi:
         raise ConfigError(msg)
     return (lo, hi)
-
-
-def _parse_active_hours(value: object) -> tuple[time, time]:
-    return _parse_hhmm_range(value, key="active_hours")
-
-
-def _parse_hhmm_range(value: object, *, key: str) -> tuple[time, time]:
-    msg = (
-        f"{key} must be 'HH:MM-HH:MM' (may wrap midnight, start != end), got {value!r}"
-    )
-    if not isinstance(value, str):
-        raise ConfigError(msg)
-    parts = value.split("-")
-    if len(parts) != 2:
-        raise ConfigError(msg)
-    parsed: list[time] = []
-    for part in parts:
-        pieces = part.split(":")
-        if len(pieces) != 2 or not all(p.isdigit() and len(p) == 2 for p in pieces):
-            raise ConfigError(msg)
-        hour, minute = int(pieces[0]), int(pieces[1])
-        if hour > 23 or minute > 59:
-            raise ConfigError(msg)
-        parsed.append(time(hour, minute))
-    start, end = parsed
-    if start == end:
-        raise ConfigError(msg)
-    return (start, end)

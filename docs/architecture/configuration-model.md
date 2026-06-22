@@ -30,6 +30,12 @@ Surface today:
 - `display_tz` — IANA timezone (default `"UTC"`) the final-reminder
   clock renders in (e.g. `"It is now: … 2:30PM PDT"`). Invalid names
   (e.g. `"PST"`) fail fast at config load.
+- `[sleep]` — sleep schedule, character-domain wall-clock config
+  localized via `display_tz`. `window = "HH:MM-HH:MM"` (may wrap
+  midnight; bad format fails fast) and `grace_minutes` (default 30)
+  drive the reserved `sleep` activity (catalog entry in
+  `activities.toml`). Omit the table to leave the schedule disarmed.
+  See [Sleep § The window](sleep.md#the-window).
 - `aliases` — names the familiar answers to.
 - `[providers.history].voice_window_size` / `.text_window_size` —
   recent-history layer windows, tiered by responder (defaults

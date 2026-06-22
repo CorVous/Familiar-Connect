@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field, fields, replace
+from datetime import time
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -481,6 +482,12 @@ class CharacterConfig:
     # into rolling summary (0 = disabled).
     text_silence_gap_fold_seconds: float = 0.0
     display_tz: str = "UTC"
+    # Sleep schedule — character-domain wall-clock config, localized via
+    # ``display_tz`` (the engine reads these; the sleep ACTIVITY stays in
+    # the activity catalog). ``window`` ``(start, end)`` may wrap midnight;
+    # ``None`` = sleep schedule disarmed.
+    sleep_window: tuple[time, time] | None = None
+    sleep_grace_minutes: int = 30
     aliases: list[str] = field(default_factory=list)
     llm: dict[str, LLMSlotConfig] = field(default_factory=dict)
     tts: TTSConfig = field(default_factory=TTSConfig)
@@ -633,6 +640,12 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         )
         raise ConfigError(msg) from e
 
+    sleep_raw = data.get("sleep", {})
+    if not isinstance(sleep_raw, dict):
+        msg = f"[sleep] must be a table, got {type(sleep_raw).__name__}"
+        raise ConfigError(msg)
+    sleep_window, sleep_grace_minutes = _parse_sleep_config(sleep_raw)
+
     aliases_raw = data.get("aliases", [])
     if not isinstance(aliases_raw, list):
         msg = f"aliases must be a list of strings, got {type(aliases_raw).__name__}"
@@ -770,6 +783,8 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         ),
         text_silence_gap_fold_seconds=text_silence_gap_fold_seconds,
         display_tz=display_tz,
+        sleep_window=sleep_window,
+        sleep_grace_minutes=sleep_grace_minutes,
         aliases=aliases,
         llm=llm,
         tts=tts,
@@ -934,6 +949,60 @@ def _parse_tools_config(raw: dict) -> ToolsConfig:
         msg = f"[tools].loop_max_iterations must be positive, got {v}"
         raise ConfigError(msg)
     return ToolsConfig(loop_max_iterations=v)
+
+
+_SLEEP_FIELDS: frozenset[str] = frozenset({"window", "grace_minutes"})
+
+
+def _parse_sleep_config(raw: dict) -> tuple[tuple[time, time] | None, int]:
+    """Validate ``[sleep]``; return ``(window, grace_minutes)``.
+
+    ``window`` localized via ``display_tz`` by the engine; absent table
+    ⇒ ``(None, 30)`` (schedule disarmed).
+    """
+    unknown = set(raw) - _SLEEP_FIELDS
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        msg = f"[sleep] has unknown keys: {bad}"
+        raise ConfigError(msg)
+    window: tuple[time, time] | None = None
+    if "window" in raw:
+        window = parse_hhmm_range(raw["window"], key="window")
+    grace = raw.get("grace_minutes", CharacterConfig.sleep_grace_minutes)
+    if isinstance(grace, bool) or not isinstance(grace, int) or grace <= 0:
+        msg = f"[sleep].grace_minutes must be a positive integer, got {grace!r}"
+        raise ConfigError(msg)
+    return window, grace
+
+
+def parse_hhmm_range(value: object, *, key: str) -> tuple[time, time]:
+    """Parse ``"HH:MM-HH:MM"`` → ``(start, end)``; may wrap midnight.
+
+    Canonical wall-clock-range parser, shared by ``[sleep].window`` and
+    the activities catalog's ``active_hours``. ``start == end`` rejected
+    (zero-length / 24h ambiguous).
+    """
+    msg = (
+        f"{key} must be 'HH:MM-HH:MM' (may wrap midnight, start != end), got {value!r}"
+    )
+    if not isinstance(value, str):
+        raise ConfigError(msg)
+    parts = value.split("-")
+    if len(parts) != 2:
+        raise ConfigError(msg)
+    parsed: list[time] = []
+    for part in parts:
+        pieces = part.split(":")
+        if len(pieces) != 2 or not all(p.isdigit() and len(p) == 2 for p in pieces):
+            raise ConfigError(msg)
+        hour, minute = int(pieces[0]), int(pieces[1])
+        if hour > 23 or minute > 59:
+            raise ConfigError(msg)
+        parsed.append(time(hour, minute))
+    start, end = parsed
+    if start == end:
+        raise ConfigError(msg)
+    return (start, end)
 
 
 def _parse_budgets(raw: dict) -> dict[str, TierBudget]:

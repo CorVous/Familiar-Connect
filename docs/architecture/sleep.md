@@ -229,12 +229,16 @@ process exists.
 
 ### The window
 
-The sleep entry carries two keys no other entry may: `window =
+The wall-clock schedule lives in `character.toml` `[sleep]` — `window =
 "HH:MM-HH:MM"` (in `display_tz`, may wrap midnight) and `grace_minutes`
-(default 30). With a `window`, `duration_minutes` is optional and
-ignored — the wake is **fixed at the window's end** (alarm-style),
-regardless of when sleep started. The engine's existing ~60s tick
-drives the schedule:
+(default 30) — not on the catalog entry. The reserved `sleep` catalog
+entry (id `"sleep"`) only marks *which* activity the schedule drives;
+the engine reads window/grace from character config (ctor args) and
+identifies the sleep activity by that id. With a configured window,
+`duration_minutes` on the entry is optional and ignored — the wake is
+**fixed at the window's end** (alarm-style), regardless of when sleep
+started. Omitting the `[sleep]` table disarms the schedule. The
+engine's existing ~60s tick drives it:
 
 - **Bedtime nudge** — when local time enters the window and she is not
   already out, one synthetic bedtime nudge (debounced per window

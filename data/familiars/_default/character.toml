@@ -19,6 +19,15 @@
 display_tz = "UTC"
 aliases    = []
 
+# Sleep schedule — wall-clock window in display_tz, drives the reserved
+# "sleep" activity (catalog entry in activities.toml). Omit the [sleep]
+# table to leave the schedule disarmed. window may wrap midnight;
+# grace_minutes (default 30) is the delay after window start before
+# force-sleep. Wake is fixed at the window's end.
+# [sleep]
+# window        = "00:00-08:00"
+# grace_minutes = 30
+
 [providers.history]
 # Hard upper bounds on history turns per tier — safety nets behind
 # the token-aware budget below. Lower these only to force a tighter
