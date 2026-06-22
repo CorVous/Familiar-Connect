@@ -10,7 +10,24 @@ from familiar_connect.history.store import (
     FactSubject,
     HistoryStore,
     _canonical_keys_from_subjects_json,
+    _placeholders,
 )
+
+
+class TestPlaceholders:
+    """``IN``-clause placeholder list — bound ``?`` marks only."""
+
+    def test_emits_bound_marks(self) -> None:
+        assert _placeholders(3) == "?,?,?"
+        assert _placeholders(1) == "?"
+
+    def test_empty_for_nonpositive(self) -> None:
+        assert _placeholders(0) == ""
+        assert _placeholders(-1) == ""
+
+    def test_only_question_marks_never_data(self) -> None:
+        # Safety contract: result is purely ``?`` + ``,`` — no data ever
+        assert set(_placeholders(5)) <= {"?", ","}
 
 
 class TestCanonicalKeysFromSubjectsJson:
