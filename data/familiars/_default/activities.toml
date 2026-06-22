@@ -29,8 +29,8 @@
 # WHICH activity the schedule drives. With a schedule, wake is fixed at
 # the window END (alarm-style), so duration_minutes is optional and
 # ignored. Sleep departure runs the hygiene + dream passes in the
-# background (audits in sleep_audits/); the seed retunes the dream
-# prose narrated at wake. A one-shot hand-authored first dream can be
+# background; the seed retunes the dream prose narrated at wake. A
+# one-shot hand-authored first dream can be
 # placed at data/familiars/<id>/seed_dream.md (consumed on first sleep).
 #
 # Ships disabled — uncomment and adapt to enable.

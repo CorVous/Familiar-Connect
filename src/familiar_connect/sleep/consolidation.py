@@ -1,21 +1,24 @@
 """Memory-consolidation pass — propose + validate fact consolidations.
 
-Nightly (manual for now) pass over the day's facts. The LLM sees the
-whole window at once — unlike batch-of-10 extraction it can spot
-day-level patterns (a claim asserted 9x by one speaker, denied by the
-subject every time = a bit, not a fact).
+Runs on sleep-activity departure (no manual CLI). LLM sees whole window
+at once — unlike small-batch extraction it spots day-level patterns (a
+claim asserted 9x by one speaker, denied by the subject every time = a
+bit, not a fact).
 
-Two action verbs, both supersede-only (never DELETE):
-  * ``retire`` — drop junk/noise/bit-asserted-as-fact (no replacement).
+Two plan-level action verbs, both resolving to the store's single
+``supersede`` (never DELETE):
+  * ``retire`` — drop junk/noise/bit-asserted-as-fact (no replacement;
+    ``supersede`` with ``new_fact=None``).
   * ``rewrite`` — merge near-dups or re-attribute a misfiled claim into
-    one consolidated fact (old facts superseded by the new one).
+    one consolidated fact (``supersede`` with a draft; old facts point
+    at the minted replacement, which owns the provenance union).
 
-Every LLM proposal is validated against rails *in code* — the model
-advises; it does not decide. Pinned (authored/seed) facts are
-untouchable; a per-run retirement cap bounds blast radius; a rewrite
-may not introduce a person-subject absent from its source facts (the
-extractor's claim-discipline, carried into consolidation). The pass
-produces a :class:`ConsolidationPlan`; it never touches the DB itself —
+Every LLM proposal validated against rails *in code* — model advises,
+does not decide. No untouchable-flag: authored facts protected only by
+rails; per-run cap bounds blast radius; a rewrite may not introduce a
+person-subject absent from its source facts (extractor's
+claim-discipline, carried into consolidation). Pass produces a
+:class:`ConsolidationPlan`, never touches DB itself —
 :func:`apply_consolidation` (separate) executes an accepted plan.
 """
 
