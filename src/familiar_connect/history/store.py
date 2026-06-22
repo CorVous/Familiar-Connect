@@ -2545,25 +2545,30 @@ class HistoryStore:
 
         * ``None`` — **retire**: each obsolete row gets ``superseded_at``
           set, ``superseded_by`` left NULL (nothing replaces it).
-        * :class:`FactDraft` — **merge**: MINT the replacement first
-          (``dedup=False``, so a consolidated text matching an obsolete
-          row still inserts), then point every obsolete row's
-          ``superseded_by`` at the minted id (many->one lineage).
+          Per-id skip-and-record: a stale id is recorded, the rest
+          still process.
+        * :class:`FactDraft` — **merge**: ATOMIC / all-or-nothing. Pre-flight
+          every obsolete row; if ANY is unknown or already superseded —
+          or ``obsolete_facts`` is empty — the merge is declined WHOLE
+          (nothing minted, ``minted=None``, every obsolete id recorded in
+          ``skipped``). Only when every row is current do we MINT the
+          replacement (``dedup=False``, so a consolidated text matching an
+          obsolete row still inserts) and point every obsolete row's
+          ``superseded_by`` at the minted id (many->one lineage). A
+          phantom merge that supersedes nothing is impossible by
+          construction.
         * :class:`Fact` / ``int`` — **repoint at an existing row**: the
           obsolete rows point at the supplied id; nothing is minted.
+          Per-id skip-and-record like retire.
 
         The store owns merge lineage + provenance. For a draft, the
         minted fact's ``source_turn_ids`` is the order-preserving UNION
         of the obsolete rows' provenance — the caller never supplies it.
         Ancestry is then resolvable from the store alone via
-        :meth:`ancestors_of` (reverse ``superseded_by`` walk).
-
-        Partial failure is skip-and-record, never fatal and never a
-        half-merge: an obsolete id that's unknown or already superseded
-        (e.g. a concurrent writer beat us) is recorded in
-        ``skipped`` and the rest still process. A draft is minted
-        regardless so the merged content survives even if some
-        obsolete updates are skipped.
+        :meth:`ancestors_of` (reverse ``superseded_by`` walk). Because the
+        merge mints only when every ancestor is valid, provenance-union
+        equals ancestry exactly — no partial merge can break the
+        invariant.
         """
         ids = [int(i) for i in obsolete_facts]
         obsolete_rows = {
@@ -2571,21 +2576,16 @@ class HistoryStore:
             for f in self.facts_by_ids(familiar_id=familiar_id, ids=ids)
         }
 
-        minted: Fact | None = None
+        if isinstance(new_fact, FactDraft):
+            return self._merge_atomically(
+                familiar_id=familiar_id,
+                ids=ids,
+                obsolete_rows=obsolete_rows,
+                draft=new_fact,
+            )
+
         if new_fact is None:
             new_id: int | None = None
-        elif isinstance(new_fact, FactDraft):
-            minted = self.append_fact(
-                familiar_id=familiar_id,
-                channel_id=new_fact.channel_id,
-                text=new_fact.text,
-                source_turn_ids=_union_provenance(
-                    obsolete_rows.get(fid) for fid in ids
-                ),
-                subjects=new_fact.subjects,
-                dedup=False,
-            )
-            new_id = minted.id
         else:
             new_id = new_fact.id if isinstance(new_fact, Fact) else int(new_fact)
 
@@ -2611,10 +2611,63 @@ class HistoryStore:
             )
             superseded.append(fid)
         self._conn.commit()
+        # retire (new_id None) and existing-id repoint mint nothing.
         return SupersedeResult(
-            minted=minted,
+            minted=None,
             superseded=tuple(superseded),
             skipped=tuple(skipped),
+        )
+
+    def _merge_atomically(
+        self,
+        *,
+        familiar_id: str,
+        ids: list[int],
+        obsolete_rows: dict[int, Fact],
+        draft: FactDraft,
+    ) -> SupersedeResult:
+        """Mint a merge only if EVERY obsolete row is current — else decline.
+
+        All-or-nothing pre-flight (mirrors ``sleep/apply.py``'s rewrite
+        semantics): an empty ``ids`` or any obsolete id that's unknown or
+        already superseded means we mint nothing and supersede nothing —
+        the merge is declined whole, every obsolete id recorded in
+        ``skipped``. This makes a phantom (a minted CURRENT fact that
+        supersedes no ancestor) impossible, so provenance-union always
+        equals ancestry.
+        """
+        stale: list[tuple[int, str]] = []
+        for fid in ids:
+            row = obsolete_rows.get(fid)
+            if row is None:
+                stale.append((fid, f"unknown fact id={fid}"))
+            elif row.superseded_at is not None:
+                stale.append((fid, f"fact id={fid} already superseded"))
+        if not ids or stale:
+            return SupersedeResult(minted=None, superseded=(), skipped=tuple(stale))
+
+        minted = self.append_fact(
+            familiar_id=familiar_id,
+            channel_id=draft.channel_id,
+            text=draft.text,
+            source_turn_ids=_union_provenance(obsolete_rows[fid] for fid in ids),
+            subjects=draft.subjects,
+            dedup=False,
+        )
+        ts = datetime.now(tz=UTC).isoformat()
+        for fid in ids:
+            self._conn.execute(
+                "UPDATE facts SET superseded_at = ?, superseded_by = ? "
+                "WHERE id = ? AND familiar_id = ?",
+                (ts, minted.id, fid, familiar_id),
+            )
+            self._invalidate_dossiers_for_keys(
+                familiar_id=familiar_id,
+                keys=_subject_key_set(obsolete_rows[fid].subjects),
+            )
+        self._conn.commit()
+        return SupersedeResult(
+            minted=minted, superseded=tuple(ids), skipped=()
         )
 
     def ancestors_of(
