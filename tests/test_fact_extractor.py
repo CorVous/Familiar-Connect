@@ -1494,6 +1494,23 @@ class TestSleepReturnDreamExtraction:
         assert str(dream_id) in system
 
     @pytest.mark.asyncio
+    async def test_dream_clause_with_stray_brace_does_not_crash(self) -> None:
+        """A clause override with a stray brace / missing placeholder degrades.
+
+        An override changes phrasing, never crashes the pass. A literal
+        ``{`` and an unknown ``{please}`` token pass through verbatim; a
+        valid ``{self_name}`` placeholder still fills.
+        """
+        store = HistoryStore(":memory:")
+        _seed_with_dream_turn(store)
+        llm = _ScriptedLLM(replies=[_facts_json([])])
+        clause = "tidy up {please} for {self_name} a { brace"
+        await _dream_extractor(store, llm, dream_extraction_clause=clause).tick()
+        system = llm.calls[0][0].content_str
+        # brace / unknown token pass through literally; valid one fills
+        assert "tidy up {please} for Sapphire a { brace" in system
+
+    @pytest.mark.asyncio
     async def test_claim_discipline_rail_fires_with_config_clause(self) -> None:
         """Code rail forces self-subject + framing even when clause is config-sourced.
 

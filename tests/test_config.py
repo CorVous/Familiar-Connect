@@ -458,6 +458,39 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match="sleep_consolidation_system"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_no_in_code_sleep_prompt_prose_constants(self) -> None:
+        """Sleep-prompt prose lives ONLY in ``_default``; no module copy.
+
+        Mirrors ``post_history_instructions`` (empty Python default, prose
+        in the profile). A second in-code copy is a drift hazard #151
+        forbids — the constants must not exist.
+        """
+        import familiar_connect.processors.fact_extractor as fe
+        import familiar_connect.sleep.consolidation as consolidation
+        import familiar_connect.sleep.opinion_formation as opinion
+
+        assert not hasattr(consolidation, "_SYSTEM")
+        assert not hasattr(opinion, "STANCE_SYSTEM_DEFAULT")
+        assert not hasattr(opinion, "SYNTHESIS_SYSTEM_DEFAULT")
+        assert not hasattr(fe, "DREAM_EXTRACTION_CLAUSE_DEFAULT")
+
+    def test_default_profile_carries_real_sleep_prompt_prose(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """The merged ``_default`` config is the single source of the prose.
+
+        Production always merges ``_default``, so the real consolidation /
+        stance / synthesis / dream text resolves from config — not an
+        in-code copy.
+        """
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert "memory-consolidation pass" in cfg.sleep_consolidation_system
+        assert "stance-moment" in cfg.sleep_stance_system
+        assert "settled opinions" in cfg.sleep_synthesis_system
+        assert "dream narration" in cfg.dream_extraction_clause
+
     def test_history_window_split_parsed(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:

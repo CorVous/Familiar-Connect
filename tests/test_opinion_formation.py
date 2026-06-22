@@ -220,6 +220,21 @@ class TestSynthesisPrompt:
         assert "settle Sapphire's views" in msgs[0].content
         assert "{self_name}" not in msgs[0].content
 
+    def test_stray_brace_or_unknown_placeholder_does_not_crash(self) -> None:
+        """A synthesis override with a stray brace / unknown token degrades.
+
+        An override changes phrasing, never crashes the pass: a literal
+        ``{`` and an unknown ``{money}`` pass through verbatim while a
+        valid ``{self_name}`` still fills.
+        """
+        msgs = _build_synthesis_prompt(
+            [_cand("likes lo-fi", "2026-06-12", (1,))],
+            self_name="Sapphire",
+            prior_self_dossier=None,
+            system="settle {self_name}'s views {money} a { brace",
+        )
+        assert "settle Sapphire's views {money} a { brace" in msgs[0].content
+
 
 class TestStancePrompt:
     def test_configured_system_formats_self_name(self) -> None:
@@ -232,6 +247,23 @@ class TestStancePrompt:
         )
         assert "stances for Sapphire" in msgs[0].content
         assert "{self_name}" not in msgs[0].content
+
+    def test_stray_brace_or_unknown_placeholder_does_not_crash(self) -> None:
+        """A stance override with a stray brace / unknown token degrades.
+
+        An override changes phrasing, never crashes the pass.
+        """
+        day = _day(
+            "2026-06-12",
+            (_turn(1, datetime(2026, 6, 12, 12, 0, tzinfo=UTC), role="assistant"),),
+        )
+        msgs = _build_stance_prompt(
+            day,
+            self_name="Sapphire",
+            denylist=(),
+            system="stances for {self_name} {mood} a { brace",
+        )
+        assert "stances for Sapphire {mood} a { brace" in msgs[0].content
 
 
 class TestValidateOpinions:
