@@ -54,9 +54,11 @@ from familiar_connect.identity import (
 )
 from familiar_connect.llm import Message
 from familiar_connect.sleep.passes import (
-    execute_dream,
-    execute_sleep,
-    hygiene_denylist_ids,
+    DEFAULT_PASSES,
+    MaintenanceContext,
+    MaintenanceRun,
+    create_passes,
+    run_passes,
 )
 
 if TYPE_CHECKING:
@@ -707,35 +709,26 @@ class ActivityEngine:
         if not self._sleep_passes_enabled:
             return  # not wired (tests / minimal deployments)
         try:
-            llm = self._llm_clients["background"]
-            plan = await execute_sleep(
+            # build the maintenance context once, run the registered passes
+            # in order. The registry owns hygiene→dream sequencing + the
+            # denylist data-flow; the engine no longer hard-codes either.
+            ctx = MaintenanceContext(
                 store=self._store,
-                llm=llm,
+                llm=self._llm_clients["background"],
                 familiar_id=self._familiar_id,
-                familiar_display_name=self._display_name,
-                apply=True,
-            )
-            denylist: tuple[str, ...] = ()
-            deny_ids = hygiene_denylist_ids(plan)
-            if deny_ids:
-                facts = await self._store.facts_by_ids(
-                    familiar_id=self._familiar_id, ids=deny_ids
-                )
-                denylist = tuple(f.text for f in facts)
-            dream_plan = await execute_dream(
-                store=self._store,
-                llm=llm,
-                familiar_id=self._familiar_id,
-                familiar_display_name=self._display_name,
+                display_name=self._display_name,
                 display_tz=self._display_tz_name,
                 apply=True,
-                denylist=denylist,
             )
+            run: MaintenanceRun = await run_passes(
+                create_passes(names=DEFAULT_PASSES, context=ctx)
+            )
+            dream_plan = run.dream_plan
             self._last_dream_plan = dream_plan
+            opinions = 0 if dream_plan is None else len(dream_plan.opinions)
             _logger.info(
                 f"{ls.tag('🌙 Activity', ls.G)} sleep passes done "
-                f"{ls.kv('hygiene_mutations', str(plan.mutated_count), vc=ls.LW)} "
-                f"{ls.kv('opinions', str(len(dream_plan.opinions)), vc=ls.LW)}"
+                f"{ls.kv('opinions', str(opinions), vc=ls.LW)}"
             )
         except Exception as exc:  # noqa: BLE001 — must not kill the engine
             _logger.error(

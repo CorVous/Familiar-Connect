@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-import familiar_connect.activities.engine as engine_mod
+import familiar_connect.sleep.passes as passes_mod
 from familiar_connect.activities.config import ActivitiesConfig, ActivityType
 from familiar_connect.activities.engine import (
     ACTIVITY_RETURN_MODE,
@@ -1737,8 +1737,8 @@ class TestSleepLifecyclePasses:
             calls.append(("dream", kw))
             return dplan
 
-        monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
+        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
@@ -1786,8 +1786,8 @@ class TestSleepLifecyclePasses:
             seen.update(kw)
             return _dream_plan()
 
-        monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
+        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
@@ -1809,7 +1809,7 @@ class TestSleepLifecyclePasses:
             msg = "passes must not run for a walk"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(engine_mod, "execute_sleep", fail)
+        monkeypatch.setattr(passes_mod, "execute_sleep", fail)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
@@ -1830,7 +1830,7 @@ class TestSleepLifecyclePasses:
             del kw
             calls.append("hygiene")
 
-        monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
+        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=False
         )
@@ -1853,7 +1853,7 @@ class TestSleepLifecyclePasses:
             msg = "llm down"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(engine_mod, "execute_sleep", boom)
+        monkeypatch.setattr(passes_mod, "execute_sleep", boom)
         engine = _engine(
             store, clock, config=_sleep_config(), sleep_passes_enabled=True
         )
@@ -1887,8 +1887,8 @@ class TestSleepLifecyclePasses:
             del kw
             return dplan
 
-        monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
+        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
         # spy the journal write rather than reading it back: a just-committed
         # facts INSERT is intermittently invisible to a same-test read through
         # pyturso 0.5.1 (no intervening fact write to refresh the view), which
@@ -1962,8 +1962,8 @@ class TestSleepLifecyclePasses:
             engine._active = None
             return dplan
 
-        monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
-        monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
+        monkeypatch.setattr(passes_mod, "execute_sleep", fake_sleep)
+        monkeypatch.setattr(passes_mod, "execute_dream", fake_dream)
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task

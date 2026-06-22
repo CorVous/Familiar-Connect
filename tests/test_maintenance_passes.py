@@ -11,9 +11,11 @@ threaded through a shared run.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
+import familiar_connect.sleep.passes as passes_mod
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import is_self_key
@@ -114,36 +116,29 @@ class TestDenylistThreaded:
     """The ONE way this differs from projectors: ordered data-flow."""
 
     @pytest.mark.asyncio
-    async def test_hygiene_retirement_reaches_dream_denylist(self) -> None:
+    async def test_hygiene_retirement_reaches_dream_denylist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         raw = _store()
         store = AsyncHistoryStore(raw)
-        seen: dict[str, object] = {}
-
-        # capture the denylist the dream pass actually plans against
-        from familiar_connect.sleep import passes as passes_mod
-
+        seen: dict[str, Any] = {}
         orig = passes_mod.execute_dream
 
-        async def spy_dream(**kw: object) -> object:
+        # capture the denylist the dream pass actually plans against
+        async def spy_dream(**kw: Any) -> Any:  # noqa: ANN401
             seen.update(kw)
             return await orig(**kw)
 
-        # patch only for this test; restore after
-        passes_mod.execute_dream = spy_dream  # type: ignore[assignment]
-        try:
-            ctx = MaintenanceContext(
-                store=store,
-                llm=FakeLLMClient(
-                    replies=[_hygiene_reply(), *_dream_replies()]
-                ),
-                familiar_id="fam",
-                display_name="Sapphire",
-                display_tz="UTC",
-                apply=True,
-            )
-            await run_passes(create_passes(names=DEFAULT_PASSES, context=ctx), ctx)
-        finally:
-            passes_mod.execute_dream = orig  # type: ignore[assignment]
+        monkeypatch.setattr(passes_mod, "execute_dream", spy_dream)
+        ctx = MaintenanceContext(
+            store=store,
+            llm=FakeLLMClient(replies=[_hygiene_reply(), *_dream_replies()]),
+            familiar_id="fam",
+            display_name="Sapphire",
+            display_tz="UTC",
+            apply=True,
+        )
+        await run_passes(create_passes(names=DEFAULT_PASSES, context=ctx))
 
         # fact id 1 ("noise") retired by hygiene this run reaches dream's deny-list
         assert seen["denylist"] == ("noise",)
@@ -162,7 +157,7 @@ class TestDefaultRunApplies:
             display_tz="UTC",
             apply=True,
         )
-        await run_passes(create_passes(names=DEFAULT_PASSES, context=ctx), ctx)
+        await run_passes(create_passes(names=DEFAULT_PASSES, context=ctx))
         texts = {f.text for f in raw.recent_facts(familiar_id="fam", limit=10)}
         # hygiene retired "noise"
         assert "noise" not in texts
