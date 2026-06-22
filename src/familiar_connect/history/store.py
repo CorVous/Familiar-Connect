@@ -213,6 +213,40 @@ class FactSubject:
 
 
 @dataclass(frozen=True)
+class FactDraft:
+    """Consolidated *content* for a merge, before the store mints it.
+
+    The caller of :meth:`HistoryStore.supersede` supplies only the
+    merged content — text, channel, and resolved subject displays.
+    The store supplies the *lineage* (obsolete rows point at the
+    minted fact) and *provenance* (``source_turn_ids`` = union of the
+    obsolete rows'), so a draft deliberately carries no turn ids.
+    """
+
+    channel_id: int | None
+    text: str
+    subjects: tuple[FactSubject, ...] = ()
+
+
+@dataclass(frozen=True)
+class SupersedeResult:
+    """Outcome of one :meth:`HistoryStore.supersede` call.
+
+    :param minted: the freshly minted replacement when ``new_fact``
+        was a :class:`FactDraft`; ``None`` for retire or when an
+        already-minted fact/id was supplied (nothing new was minted).
+    :param superseded: obsolete ids actually marked this call.
+    :param skipped: ``(id, reason)`` for obsolete rows left untouched
+        — e.g. a concurrent writer already retired them. A skip is
+        tolerated, never fatal: the merge is not rolled back.
+    """
+
+    minted: Fact | None
+    superseded: tuple[int, ...]
+    skipped: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
 class Reflection:
     """Higher-order synthesis over recent turns + facts (M3).
 
@@ -576,6 +610,23 @@ def _subject_key_set(subjects: Iterable[FactSubject]) -> frozenset[str]:
     with same text are NOT dups.
     """
     return frozenset(s.canonical_key for s in subjects)
+
+
+def _union_provenance(facts: Iterable[Fact | None]) -> list[int]:
+    """Order-preserving union of ``source_turn_ids`` across ``facts``.
+
+    A merged fact's provenance is the union of the rows it consolidates
+    — forever-provenance, no row dropped. ``None`` entries (an obsolete
+    id with no live row) contribute nothing.
+    """
+    out: list[int] = []
+    for fact in facts:
+        if fact is None:
+            continue
+        for tid in fact.source_turn_ids:
+            if tid not in out:
+                out.append(tid)
+    return out
 
 
 def _canonical_keys_from_subjects_json(subjects_json: str | None) -> frozenset[str]:
@@ -2481,6 +2532,118 @@ class HistoryStore:
         )
         self._conn.commit()
 
+    def supersede(
+        self,
+        *,
+        familiar_id: str,
+        obsolete_facts: Iterable[int],
+        new_fact: FactDraft | Fact | int | None,
+    ) -> SupersedeResult:
+        """Unified mutation: retire, merge, or repoint obsolete facts.
+
+        Three replacement shapes, distinguished by ``new_fact``:
+
+        * ``None`` — **retire**: each obsolete row gets ``superseded_at``
+          set, ``superseded_by`` left NULL (nothing replaces it).
+        * :class:`FactDraft` — **merge**: MINT the replacement first
+          (``dedup=False``, so a consolidated text matching an obsolete
+          row still inserts), then point every obsolete row's
+          ``superseded_by`` at the minted id (many->one lineage).
+        * :class:`Fact` / ``int`` — **repoint at an existing row**: the
+          obsolete rows point at the supplied id; nothing is minted.
+
+        The store owns merge lineage + provenance. For a draft, the
+        minted fact's ``source_turn_ids`` is the order-preserving UNION
+        of the obsolete rows' provenance — the caller never supplies it.
+        Ancestry is then resolvable from the store alone via
+        :meth:`ancestors_of` (reverse ``superseded_by`` walk).
+
+        Partial failure is skip-and-record, never fatal and never a
+        half-merge: an obsolete id that's unknown or already superseded
+        (e.g. a concurrent writer beat us) is recorded in
+        ``skipped`` and the rest still process. A draft is minted
+        regardless so the merged content survives even if some
+        obsolete updates are skipped.
+        """
+        ids = [int(i) for i in obsolete_facts]
+        obsolete_rows = {
+            f.id: f
+            for f in self.facts_by_ids(familiar_id=familiar_id, ids=ids)
+        }
+
+        minted: Fact | None = None
+        if new_fact is None:
+            new_id: int | None = None
+        elif isinstance(new_fact, FactDraft):
+            minted = self.append_fact(
+                familiar_id=familiar_id,
+                channel_id=new_fact.channel_id,
+                text=new_fact.text,
+                source_turn_ids=_union_provenance(
+                    obsolete_rows.get(fid) for fid in ids
+                ),
+                subjects=new_fact.subjects,
+                dedup=False,
+            )
+            new_id = minted.id
+        else:
+            new_id = new_fact.id if isinstance(new_fact, Fact) else int(new_fact)
+
+        superseded: list[int] = []
+        skipped: list[tuple[int, str]] = []
+        ts = datetime.now(tz=UTC).isoformat()
+        for fid in ids:
+            row = obsolete_rows.get(fid)
+            if row is None:
+                skipped.append((fid, f"unknown fact id={fid}"))
+                continue
+            if row.superseded_at is not None:
+                skipped.append((fid, f"fact id={fid} already superseded"))
+                continue
+            self._conn.execute(
+                "UPDATE facts SET superseded_at = ?, superseded_by = ? "
+                "WHERE id = ? AND familiar_id = ?",
+                (ts, new_id, fid, familiar_id),
+            )
+            self._invalidate_dossiers_for_keys(
+                familiar_id=familiar_id,
+                keys=_subject_key_set(row.subjects),
+            )
+            superseded.append(fid)
+        self._conn.commit()
+        return SupersedeResult(
+            minted=minted,
+            superseded=tuple(superseded),
+            skipped=tuple(skipped),
+        )
+
+    def ancestors_of(
+        self,
+        *,
+        familiar_id: str,
+        fact_id: int,
+    ) -> list[Fact]:
+        """Facts directly superseded by ``fact_id`` — its merge ancestors.
+
+        Reverse ``superseded_by`` walk: a merge points every obsolete
+        row at the minted fact (many->one), so "ancestors of X" is
+        exactly the rows whose ``superseded_by = X``. One hop — direct
+        parents, oldest first; chase the chain by re-querying each.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to, importance
+              FROM facts
+             WHERE familiar_id = ? AND superseded_by = ?
+             ORDER BY id ASC
+            """,
+            (familiar_id, int(fact_id)),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
     def _invalidate_subject_dossiers(
         self, *, familiar_id: str, subjects_json: str | None
     ) -> None:
@@ -2493,7 +2656,21 @@ class HistoryStore:
         row → prior=None → clean full rebuild. NULL subjects → no-op.
         Caller commits.
         """
-        for key in _canonical_keys_from_subjects_json(subjects_json):
+        self._invalidate_dossiers_for_keys(
+            familiar_id=familiar_id,
+            keys=_canonical_keys_from_subjects_json(subjects_json),
+        )
+
+    def _invalidate_dossiers_for_keys(
+        self, *, familiar_id: str, keys: Iterable[str]
+    ) -> None:
+        """DELETE baked dossiers for ``keys`` — authoritative primitive.
+
+        Sole owner of the dossier-drop knowledge; both the
+        ``subjects_json`` form above and :meth:`supersede` (which holds
+        parsed :class:`FactSubject`s) route through here. Caller commits.
+        """
+        for key in keys:
             self._conn.execute(
                 "DELETE FROM people_dossiers "
                 "WHERE familiar_id = ? AND canonical_key = ?",
