@@ -157,6 +157,8 @@ def _engine(
     sleep_passes_enabled: bool = False,
     seed_dream_path: Path | None = None,
     sleep_prompts: SleepPromptText | None = None,
+    sleep_window: tuple[time, time] | None = (time(0, 0), time(8, 0)),
+    sleep_grace_minutes: int = 30,
 ) -> ActivityEngine:
     kwargs: dict[str, Any] = {}
     if sleep_prompts is not None:
@@ -172,6 +174,8 @@ def _engine(
         presence_cb=presence or PresenceRecorder(),
         familiar_id=familiar_id,
         display_tz="UTC",
+        sleep_window=sleep_window,
+        sleep_grace_minutes=sleep_grace_minutes,
         bot_user_id=bot_user_id,
         voice_active_fn=lambda: voice_active,
         now_fn=clock,
@@ -1467,27 +1471,19 @@ class TestResponderInLoop:
             await bus.shutdown()
 
 
-def _sleep_type(
-    window: tuple[time, time] = (time(0, 0), time(8, 0)),
-    grace: int = 30,
-) -> ActivityType:
+def _sleep_type() -> ActivityType:
     return ActivityType(
         id="sleep",
         label="asleep",
         duration_minutes=None,
         reachable=False,
         seed="The night's dream, retold on waking.",
-        window=window,
-        grace_minutes=grace,
     )
 
 
-def _sleep_config(
-    window: tuple[time, time] = (time(0, 0), time(8, 0)),
-    grace: int = 30,
-) -> ActivitiesConfig:
+def _sleep_config() -> ActivitiesConfig:
     base = _config()
-    return _config(catalog=(*base.catalog, _sleep_type(window, grace)))
+    return _config(catalog=(*base.catalog, _sleep_type()))
 
 
 def _night_clock(hour: int, minute: int = 0, day: int = 13) -> FakeClock:
@@ -1510,6 +1506,43 @@ class TestSleepSchedule:
         row = store.sync.active_activity(familiar_id=_FAMILIAR)
         assert row is not None
         assert row.planned_return_at == datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_arms_from_character_config_window(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Window sourced from ctor (character config), not the catalog entry.
+
+        Sleep entry stays in the catalog for identification; the schedule
+        force-sleeps past grace using the ctor-supplied window/grace.
+        """
+        clock = _night_clock(0, 31)  # past 00:00 + 30 grace
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            sleep_window=(time(0, 0), time(8, 0)),
+            sleep_grace_minutes=30,
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.type_id == "sleep"
+        assert row.planned_return_at == datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_window_disarms_schedule(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """``sleep_window=None`` ⇒ schedule never fires even with a sleep entry."""
+        clock = _night_clock(0, 31)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_window=None
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert store.sync.active_activity(familiar_id=_FAMILIAR) is None
         await engine.stop()
 
     @pytest.mark.asyncio
@@ -1662,8 +1695,9 @@ class TestSleepSchedule:
     @pytest.mark.asyncio
     async def test_wrapped_window_evening_side(self, store: AsyncHistoryStore) -> None:
         clock = _night_clock(23, 45, day=12)
-        config = _sleep_config(window=(time(23, 0), time(7, 0)))
-        engine = _engine(store, clock, config=config)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_window=(time(23, 0), time(7, 0))
+        )
         await engine._sleep_schedule_tick(clock.now)
         row = store.sync.active_activity(familiar_id=_FAMILIAR)
         assert row is not None
@@ -1674,8 +1708,9 @@ class TestSleepSchedule:
     async def test_wrapped_window_morning_side(self, store: AsyncHistoryStore) -> None:
         """Occurrence started yesterday 23:00; 01:00 is past grace."""
         clock = _night_clock(1, 0, day=13)
-        config = _sleep_config(window=(time(23, 0), time(7, 0)))
-        engine = _engine(store, clock, config=config)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_window=(time(23, 0), time(7, 0))
+        )
         await engine._sleep_schedule_tick(clock.now)
         row = store.sync.active_activity(familiar_id=_FAMILIAR)
         assert row is not None
