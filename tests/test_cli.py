@@ -19,11 +19,10 @@ def test_create_parser_exists() -> None:
 
 
 def _subcommand_choices(parser: argparse.ArgumentParser) -> set[str]:
-    subparsers = next(
-        a for a in parser._subparsers._group_actions  # noqa: SLF001
-        if isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
+    action = next(
+        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
     )
-    return set(subparsers.choices)
+    return set(action.choices)
 
 
 def test_sleep_not_a_registered_subcommand() -> None:

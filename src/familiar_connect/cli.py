@@ -11,7 +11,6 @@ from familiar_connect import __version__, log_style
 from familiar_connect.commands import (
     diagnose_cmd,
     run_cmd,
-    sleep_cmd,
     version_cmd,
 )
 from familiar_connect.log_style import StyledFormatter
@@ -90,7 +89,6 @@ def create_parser() -> argparse.ArgumentParser:
 
     run_cmd.add_parser(subparsers, common_parser)
     diagnose_cmd.add_parser(subparsers, common_parser)
-    sleep_cmd.add_parser(subparsers, common_parser)
     version_cmd.add_parser(subparsers, common_parser)
 
     return parser

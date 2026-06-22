@@ -1,4 +1,10 @@
-"""Sleep CLI orchestrator — dry-run (default) vs --apply."""
+"""Sleep pass orchestrators — plan → apply → audit, dry-run vs apply.
+
+``execute_sleep`` / ``execute_dream`` wrap plan+apply+audit for both
+the activity-engine lifecycle path and any ad-hoc caller. Tests pin the
+dry-run-never-mutates contract and the crash-safety ordering (F1: the
+run that mutated rows must never be the run with no audit).
+"""
 
 from __future__ import annotations
 
@@ -7,10 +13,10 @@ import json
 import pytest
 
 import familiar_connect.sleep.passes as passes_mod
-from familiar_connect.commands.sleep import execute_dream, execute_sleep
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import is_self_key
+from familiar_connect.sleep.passes import execute_dream, execute_sleep
 from tests.conftest import FakeLLMClient
 
 ARIA = (FactSubject(canonical_key="discord:A", display_at_write="Aria"),)
