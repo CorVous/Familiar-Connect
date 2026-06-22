@@ -10,7 +10,9 @@ def test_fills_known_placeholder() -> None:
 
 
 def test_unknown_placeholder_passes_through() -> None:
-    assert fill_placeholders("hi {name} {other}", name="Sapphire") == "hi Sapphire {other}"
+    assert (
+        fill_placeholders("hi {name} {other}", name="Sapphire") == "hi Sapphire {other}"
+    )
 
 
 def test_missing_placeholder_passes_through() -> None:
