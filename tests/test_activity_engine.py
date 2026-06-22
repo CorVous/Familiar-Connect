@@ -33,6 +33,7 @@ from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author, is_self_key
+from familiar_connect.sleep.maintenance import SleepPromptText
 from familiar_connect.sleep.opinion_formation import OpinionFact, OpinionPlan
 
 from .conftest import FakeLLMClient, build_fake_llm_clients
@@ -155,7 +156,11 @@ def _engine(
     familiar_id: str = _FAMILIAR,
     sleep_passes_enabled: bool = False,
     seed_dream_path: Path | None = None,
+    sleep_prompts: SleepPromptText | None = None,
 ) -> ActivityEngine:
+    kwargs: dict[str, Any] = {}
+    if sleep_prompts is not None:
+        kwargs["sleep_prompts"] = sleep_prompts
     return ActivityEngine(
         store=store,
         config=config or _config(),
@@ -174,6 +179,7 @@ def _engine(
         nudge_tick_seconds=nudge_tick,
         sleep_passes_enabled=sleep_passes_enabled,
         seed_dream_path=seed_dream_path,
+        **kwargs,
     )
 
 
@@ -1799,6 +1805,49 @@ class TestSleepLifecyclePasses:
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task
         assert seen["denylist"] == ("a known bit, retired tonight",)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_configured_sleep_prompts_thread_into_passes(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Engine-held config prompt text reaches the execute kwargs."""
+        clock = _night_clock(0, 45)
+        seen_c: dict[str, Any] = {}
+        seen_o: dict[str, Any] = {}
+
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            seen_c.update(kw)
+            return SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
+
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            seen_o.update(kw)
+            return _opinion_plan()
+
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
+        prompts = SleepPromptText(
+            consolidation_system="CFG consolidation",
+            stance_system="CFG stance {self_name}",
+            synthesis_system="CFG synthesis {self_name}",
+        )
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            sleep_passes_enabled=True,
+            sleep_prompts=prompts,
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task
+        assert seen_c["system"] == "CFG consolidation"
+        assert seen_o["stance_system"] == "CFG stance {self_name}"
+        assert seen_o["synthesis_system"] == "CFG synthesis {self_name}"
         await engine.stop()
 
     @pytest.mark.asyncio
