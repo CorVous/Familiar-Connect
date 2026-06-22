@@ -8,6 +8,7 @@ import pytest
 
 from familiar_connect.history.store import (
     Fact,
+    FactDraft,
     FactSubject,
     HistoryStore,
     _canonical_keys_from_subjects_json,
@@ -469,6 +470,204 @@ class TestRetireFact:
         store.retire_fact(familiar_id="fam", fact_id=f.id)
         assert (
             store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is None
+        )
+
+
+class TestSupersedeUnified:
+    """Unified ``supersede`` — one mutation surface over retire + merge.
+
+    Subsumes ``retire_fact`` (``new_fact=None``) and the apply.py
+    decomposition of merge (``new_fact`` a draft to mint, or an
+    already-minted fact/id). The store owns merge lineage +
+    provenance: obsolete rows point at the replacement (many->one),
+    and the minted fact's ``source_turn_ids`` is the union of the
+    obsolete rows' provenance — the caller never supplies it.
+    """
+
+    def _store(self) -> HistoryStore:
+        store = HistoryStore(":memory:")
+        for i in range(6):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"turn {i}",
+                author=None,
+            )
+        return store
+
+    def test_retire_form_marks_superseded_without_replacement(self) -> None:
+        store = self._store()
+        f = store.append_fact(
+            familiar_id="fam", channel_id=1, text="junk.", source_turn_ids=[1]
+        )
+        store.supersede(familiar_id="fam", obsolete_facts=[f.id], new_fact=None)
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        row = next(r for r in all_facts if r.id == f.id)
+        assert row.superseded_at is not None
+        assert row.superseded_by is None
+
+    def test_merge_points_all_obsolete_at_minted_many_to_one(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="Aria likes A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="Aria likes B.", source_turn_ids=[2]
+        )
+        c = store.append_fact(
+            familiar_id="fam", channel_id=1, text="Aria likes C.", source_turn_ids=[3]
+        )
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id, c.id],
+            new_fact=FactDraft(
+                channel_id=1, text="Aria likes A, B, and C.", subjects=()
+            ),
+        )
+        minted = result.minted
+        assert minted is not None
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[a.id].superseded_by == minted.id
+        assert by_id[b.id].superseded_by == minted.id
+        assert by_id[c.id].superseded_by == minted.id
+        # minted row is current + FTS-searchable
+        current = store.recent_facts(familiar_id="fam", limit=10)
+        assert minted.id in {r.id for r in current}
+        found = store.search_facts(familiar_id="fam", query="Aria", limit=10)
+        assert minted.id in {r.id for r in found}
+
+    def test_store_owns_ancestry_resolution(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        c = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact C.", source_turn_ids=[3]
+        )
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id, c.id],
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        assert result.minted is not None
+        ancestors = store.ancestors_of(
+            familiar_id="fam", fact_id=result.minted.id
+        )
+        assert {f.id for f in ancestors} == {a.id, b.id, c.id}
+
+    def test_store_owns_provenance_union(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1, 2]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2, 3]
+        )
+        c = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact C.", source_turn_ids=[4]
+        )
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id, c.id],
+            # caller supplies NO source_turn_ids — store computes the union
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        assert result.minted is not None
+        assert set(result.minted.source_turn_ids) == {1, 2, 3, 4}
+
+    def test_existing_fact_form_mints_no_new_row(self) -> None:
+        store = self._store()
+        x = store.append_fact(
+            familiar_id="fam", channel_id=1, text="old.", source_turn_ids=[1]
+        )
+        existing = store.append_fact(
+            familiar_id="fam", channel_id=1, text="replacement.", source_turn_ids=[2]
+        )
+        before = store.latest_fact_id(familiar_id="fam")
+        result = store.supersede(
+            familiar_id="fam", obsolete_facts=[x.id], new_fact=existing
+        )
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+        assert result.minted is None
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        row = next(r for r in all_facts if r.id == x.id)
+        assert row.superseded_by == existing.id
+
+    def test_partial_failure_skips_stale_processes_rest(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        # a concurrent writer already retired `a` before our merge runs
+        store.retire_fact(familiar_id="fam", fact_id=a.id)
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id],
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        # b is superseded by the merge; a is skipped (already gone), not fatal
+        assert b.id in result.superseded
+        assert a.id not in result.superseded
+        assert a.id in {sid for sid, _ in result.skipped}
+        # no half-merge stranded: b really points at the minted row
+        assert result.minted is not None
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[b.id].superseded_by == result.minted.id
+
+    def test_invalidates_dossier_per_obsolete_subject(self) -> None:
+        store = self._store()
+        subj_a = (FactSubject(canonical_key="discord:A", display_at_write="Aria"),)
+        subj_b = (FactSubject(canonical_key="discord:B", display_at_write="Boris"),)
+        a = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria thing.",
+            source_turn_ids=[1],
+            subjects=subj_a,
+        )
+        b = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Boris thing.",
+            source_turn_ids=[2],
+            subjects=subj_b,
+        )
+        for key in ("discord:A", "discord:B"):
+            store.put_people_dossier(
+                familiar_id="fam",
+                canonical_key=key,
+                last_fact_id=a.id,
+                dossier_text="baked.",
+            )
+        store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id],
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is None
+        )
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:B")
             is None
         )
 
