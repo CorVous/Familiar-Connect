@@ -153,7 +153,7 @@ def _engine(
     bot_user_id: Callable[[], int | None] = lambda: _BOT_ID,
     nudge_tick: float = 60.0,
     familiar_id: str = _FAMILIAR,
-    sleep_audit_dir: Path | None = None,
+    sleep_passes_enabled: bool = False,
     seed_dream_path: Path | None = None,
 ) -> ActivityEngine:
     return ActivityEngine(
@@ -172,7 +172,7 @@ def _engine(
         now_fn=clock,
         rng=random.Random(7),  # noqa: S311 — deterministic test roll
         nudge_tick_seconds=nudge_tick,
-        sleep_audit_dir=sleep_audit_dir,
+        sleep_passes_enabled=sleep_passes_enabled,
         seed_dream_path=seed_dream_path,
     )
 
@@ -1732,21 +1732,22 @@ class TestSleepLifecyclePasses:
 
         async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             calls.append(("hygiene", kw))
-            return (hplan, tmp_path / "h.json")
+            return hplan
 
         async def fake_dream(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             calls.append(("dream", kw))
-            return (dplan, tmp_path / "d.json")
+            return dplan
 
         monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
         monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
-        engine = _engine(store, clock, config=_sleep_config(), sleep_audit_dir=tmp_path)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task
         assert [c[0] for c in calls] == ["hygiene", "dream"]
         assert calls[0][1]["apply"] is True
-        assert calls[0][1]["audit_dir"] == tmp_path
         assert calls[1][1]["apply"] is True
         assert calls[1][1]["display_tz"] == "UTC"
         # dream plan now flows straight into prose at pass completion —
@@ -1765,7 +1766,6 @@ class TestSleepLifecyclePasses:
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         clock = _night_clock(0, 45)
         fact = store.sync.append_fact(
@@ -1781,15 +1781,17 @@ class TestSleepLifecyclePasses:
 
         async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            return (hplan, tmp_path / "h.json")
+            return hplan
 
         async def fake_dream(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             seen.update(kw)
-            return (_dream_plan(), tmp_path / "d.json")
+            return _dream_plan()
 
         monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
         monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
-        engine = _engine(store, clock, config=_sleep_config(), sleep_audit_dir=tmp_path)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task
@@ -1802,7 +1804,6 @@ class TestSleepLifecyclePasses:
         store: AsyncHistoryStore,
         clock: FakeClock,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         async def fail(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
@@ -1810,13 +1811,15 @@ class TestSleepLifecyclePasses:
             raise AssertionError(msg)
 
         monkeypatch.setattr(engine_mod, "execute_sleep", fail)
-        engine = _engine(store, clock, config=_sleep_config(), sleep_audit_dir=tmp_path)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
         await _start_activity(engine, "walk")
         assert engine._sleep_passes_task is None
         await engine.stop()
 
     @pytest.mark.asyncio
-    async def test_skipped_without_audit_dir(
+    async def test_skipped_when_sleep_passes_disabled(
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
@@ -1829,7 +1832,7 @@ class TestSleepLifecyclePasses:
             calls.append("hygiene")
 
         monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
-        engine = _engine(store, clock, config=_sleep_config())
+        engine = _engine(store, clock, config=_sleep_config(), sleep_passes_enabled=False)
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task
@@ -1841,7 +1844,6 @@ class TestSleepLifecyclePasses:
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         clock = _night_clock(0, 45)
 
@@ -1851,7 +1853,9 @@ class TestSleepLifecyclePasses:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(engine_mod, "execute_sleep", boom)
-        engine = _engine(store, clock, config=_sleep_config(), sleep_audit_dir=tmp_path)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task  # must not raise
@@ -1868,7 +1872,6 @@ class TestSleepLifecyclePasses:
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         """Dream prose produced + persisted right after passes finish."""
         clock = _night_clock(0, 45)
@@ -1877,11 +1880,11 @@ class TestSleepLifecyclePasses:
 
         async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            return (hplan, tmp_path / "h.json")
+            return hplan
 
         async def fake_dream(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            return (dplan, tmp_path / "d.json")
+            return dplan
 
         monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
         monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
@@ -1902,7 +1905,7 @@ class TestSleepLifecyclePasses:
             store,
             clock,
             config=_sleep_config(),
-            sleep_audit_dir=tmp_path,
+            sleep_passes_enabled=True,
             experience="A dream of rain on glass.",
         )
         await engine._sleep_schedule_tick(clock.now)
@@ -1929,7 +1932,6 @@ class TestSleepLifecyclePasses:
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         """Return finished the sleep row mid-passes — late persist no-ops.
 
@@ -1943,13 +1945,13 @@ class TestSleepLifecyclePasses:
 
         async def fake_sleep(**kw: Any) -> Any:  # noqa: ANN401, RUF029
             del kw
-            return (hplan, tmp_path / "h.json")
+            return hplan
 
         engine = _engine(
             store,
             clock,
             config=_sleep_config(),
-            sleep_audit_dir=tmp_path,
+            sleep_passes_enabled=True,
             experience="A dream of rain on glass.",
         )
 
@@ -1957,7 +1959,7 @@ class TestSleepLifecyclePasses:
             del kw
             # side effect: a return finished/cleared the row mid-passes
             engine._active = None
-            return (dplan, tmp_path / "d.json")
+            return dplan
 
         monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
         monkeypatch.setattr(engine_mod, "execute_dream", fake_dream)
