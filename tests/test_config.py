@@ -411,6 +411,54 @@ class TestLoadCharacterConfig:
         with pytest.raises(ConfigError, match="image_description_constraints"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_sleep_prompts_default_from_profile(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """Shipped default profile carries the sleep-pass prompt text."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_consolidation_system.strip()
+        assert "{self_name}" in cfg.sleep_stance_system
+        assert "{self_name}" in cfg.sleep_synthesis_system
+        assert "{self_name}" in cfg.dream_extraction_clause
+        assert "{self_key}" in cfg.dream_extraction_clause
+
+    def test_sleep_consolidation_system_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[prompt]\nsleep_consolidation_system = "custom tidy pass"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_consolidation_system == "custom tidy pass"
+
+    def test_sleep_stance_system_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[prompt]\nsleep_stance_system = "stances for {self_name}"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_stance_system == "stances for {self_name}"
+
+    def test_dream_extraction_clause_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[prompt]\ndream_extraction_clause = '
+            '"dream {self_name} {self_key} {ids}"\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.dream_extraction_clause == "dream {self_name} {self_key} {ids}"
+
+    def test_sleep_prompt_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[prompt]\nsleep_consolidation_system = 42\n")
+        with pytest.raises(ConfigError, match="sleep_consolidation_system"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_history_window_split_parsed(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
