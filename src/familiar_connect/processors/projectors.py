@@ -31,10 +31,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from familiar_connect.config import MemoryProvidersConfig
 from familiar_connect.processors.fact_embedding_worker import FactEmbeddingWorker
-from familiar_connect.processors.fact_extractor import (
-    DREAM_EXTRACTION_CLAUSE_DEFAULT,
-    FactExtractor,
-)
+from familiar_connect.processors.fact_extractor import FactExtractor
 from familiar_connect.processors.fact_supersede_worker import FactSupersedeWorker
 from familiar_connect.processors.people_dossier_worker import PeopleDossierWorker
 from familiar_connect.processors.reflection_worker import ReflectionWorker
@@ -88,7 +85,8 @@ class ProjectorContext:
     # consumers default to title-cased ``familiar_id``.
     familiar_display_name: str | None = None
     # config-sourced static dream-framing clause for the fact extractor
-    # (``[prompt].dream_extraction_clause``). empty → in-code default.
+    # (``[prompt].dream_extraction_clause``; prose ships in ``_default``).
+    # empty → no dream clause.
     dream_extraction_clause: str = ""
 
 
@@ -159,9 +157,7 @@ def _rich_note_factory(ctx: ProjectorContext) -> MemoryProjector:
         batch_size=knobs.batch_size,
         tick_interval_s=knobs.tick_interval_s,
         participants_max=knobs.participants_max,
-        dream_extraction_clause=(
-            ctx.dream_extraction_clause or DREAM_EXTRACTION_CLAUSE_DEFAULT
-        ),
+        dream_extraction_clause=ctx.dream_extraction_clause,
     )
 
 

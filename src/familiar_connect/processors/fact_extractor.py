@@ -24,6 +24,7 @@ from familiar_connect.diagnostics.spans import span
 from familiar_connect.history.store import FactSubject
 from familiar_connect.identity import is_self_key, self_canonical_key
 from familiar_connect.llm import Message
+from familiar_connect.prompt_fill import fill_placeholders
 from familiar_connect.structured_output import coerce_json
 
 if TYPE_CHECKING:
@@ -75,21 +76,6 @@ def _is_self_capability(text: str, name_re: re.Pattern[str] | None = None) -> bo
     return bool(name_re and name_re.match(text))
 
 
-# Static dream-framing clause default — mirrors ``_default/character.toml``
-# ``[prompt].dream_extraction_clause``. Placeholders ``{self_name}``,
-# ``{self_key}``, ``{ids}`` interpolated in :func:`_build_extract_prompt`.
-# The claim-discipline rail (forcing dream-grounded facts to ``self:`` and
-# dream-framing them) is enforced in :meth:`FactExtractor.tick`, not here —
-# an override changes phrasing only.
-DREAM_EXTRACTION_CLAUSE_DEFAULT = (
-    "Dream turns (ids {ids}) are {self_name}'s own dream narration from "
-    "sleep — fiction by definition, never real events. A fact distilled "
-    "from them must be dream-framed ('{self_name} dreamed that …') and "
-    "tagged ONLY with ``{self_key}`` — never recorded as a real event or "
-    "filed under another person's key."
-)
-
-
 class FactExtractor:
     """Distils facts from new turns; forever loop via ``run()``."""
 
@@ -105,7 +91,7 @@ class FactExtractor:
         batch_size: int = 10,
         tick_interval_s: float = 15.0,
         participants_max: int = 30,
-        dream_extraction_clause: str = DREAM_EXTRACTION_CLAUSE_DEFAULT,
+        dream_extraction_clause: str = "",
     ) -> None:
         self._store = store
         self._sync = store.sync
@@ -113,11 +99,10 @@ class FactExtractor:
         self._familiar_id = familiar_id
         # display name for the reserved self-subject; title-cased id when absent
         self._familiar_display_name = familiar_display_name or familiar_id.title()
-        # config-sourced static dream-framing clause (phrasing only;
-        # claim-discipline rail in ``tick`` enforces self-keying/framing)
-        self._dream_extraction_clause = (
-            dream_extraction_clause or DREAM_EXTRACTION_CLAUSE_DEFAULT
-        )
+        # config-sourced static dream-framing clause (phrasing only; prose
+        # ships in ``_default/character.toml``; claim-discipline rail in
+        # ``tick`` enforces self-keying/framing regardless)
+        self._dream_extraction_clause = dream_extraction_clause
         # drop capability statements phrased third-person with the name
         # (e.g. "Sapphire cannot remember names")
         self._self_name_capability_re = re.compile(
@@ -373,16 +358,19 @@ def _build_extract_prompt(
     self_key: str | None = None,
     self_name: str | None = None,
     dream_turn_ids: set[int] | frozenset[int] = frozenset(),
-    dream_clause_template: str = DREAM_EXTRACTION_CLAUSE_DEFAULT,
+    dream_clause_template: str = "",
 ) -> list[Message]:
     dream_clause = ""
     if dream_turn_ids:
         ids = ", ".join(str(i) for i in sorted(dream_turn_ids))
-        # config-sourced static text; dynamic ids/self interpolated here.
-        # claim-discipline rail in ``tick`` enforces self-keying regardless.
-        dream_clause = "\n\n" + (
-            dream_clause_template or DREAM_EXTRACTION_CLAUSE_DEFAULT
-        ).format(self_name=self_name, self_key=self_key, ids=ids)
+        # config-sourced static text; dynamic ids/self filled here (crash-
+        # safe). claim-discipline rail in ``tick`` enforces self-keying
+        # regardless. empty template → no dream clause.
+        filled = fill_placeholders(
+            dream_clause_template, self_name=self_name, self_key=self_key, ids=ids
+        )
+        if filled:
+            dream_clause = "\n\n" + filled
     self_clause = ""
     if self_key and self_name:
         self_clause = (

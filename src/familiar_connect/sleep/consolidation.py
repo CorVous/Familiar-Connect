@@ -171,41 +171,15 @@ async def gather_window(
     )
 
 
-# Static instruction default — mirrors ``_default/character.toml``
-# ``[prompt].sleep_consolidation_system``. Used when no configured text
-# is threaded in (direct callers / tests). The validation rails in
-# :func:`validate` are code-enforced; this string only phrases the ask.
-_SYSTEM = (
-    "You are a memory-consolidation pass run while a character sleeps. You see "
-    "the day's facts at once, so you can catch patterns a turn-by-turn "
-    "extractor misses: near-duplicate restatements, noise minted as fact, "
-    "and claims misfiled under the wrong person (e.g. a running joke about "
-    "someone recorded as a fact about them).\n\n"
-    "Propose only two kinds of change:\n"
-    "- retire: drop a fact that is noise, a duplicate of one you keep, or a "
-    "bit/claim asserted as fact. No replacement.\n"
-    "- rewrite: merge near-duplicates, or re-attribute a misfiled claim, "
-    "into ONE consolidated fact that supersedes the listed old facts.\n\n"
-    "Discipline: never invent a claim the source facts don't support. When "
-    "re-attributing a bit/performance to the character themselves, use the "
-    "self subject key given below. Do NOT introduce a person not already a "
-    "subject of the source facts. Leave a fact alone when unsure — a "
-    "conservative empty plan is correct.\n\n"
-    'Reply with JSON only: {"retire": [{"fact_ids": [<id>...], "reason": '
-    '"..."}], "rewrite": [{"old_fact_ids": [<id>...], "new_text": "...", '
-    '"subject_keys": ["<key>"...], "reason": "..."}]}. '
-    "Use only ids from the Facts list. Empty lists when nothing to do."
-)
-
-
 def build_prompt(
-    window: ConsolidationWindow, *, self_key: str, system: str = _SYSTEM
+    window: ConsolidationWindow, *, self_key: str, system: str = ""
 ) -> list[Message]:
     """Render the window into the consolidation LLM prompt.
 
     ``system`` is the static instruction text — config-sourced per
-    familiar, defaulting to :data:`_SYSTEM`. The dynamic window data
-    (facts, turns, self_key) is assembled here regardless.
+    familiar (prose ships in ``_default/character.toml``; empty Python
+    default keeps that profile the single source of truth). The dynamic
+    window data (facts, turns, self_key) is assembled here regardless.
     """
     lines: list[str] = [
         f"Self subject key (the character): {self_key}",
@@ -221,7 +195,7 @@ def build_prompt(
             who = t.author.label if t.author is not None else t.role
             lines.append(f"- {who}: {t.content}")
     return [
-        Message(role="system", content=system or _SYSTEM),
+        Message(role="system", content=system),
         Message(role="user", content="\n".join(lines)),
     ]
 
@@ -414,12 +388,13 @@ async def plan_consolidation(
     facts_max: int = DEFAULT_FACTS_MAX,
     turns_max: int = DEFAULT_TURNS_MAX,
     cap: int = DEFAULT_RETIRE_CAP,
-    system: str = _SYSTEM,
+    system: str = "",
 ) -> ConsolidationPlan:
     """Gather → prompt → LLM → parse → validate. Touches no fact rows.
 
-    ``system`` is the config-sourced static instruction text; rails in
-    :func:`validate` enforce safety in code regardless of its phrasing.
+    ``system`` is the config-sourced static instruction text (prose ships
+    in ``_default/character.toml``); rails in :func:`validate` enforce
+    safety in code regardless of its phrasing.
     """
     self_key = self_canonical_key(familiar_id)
     window = await gather_window(

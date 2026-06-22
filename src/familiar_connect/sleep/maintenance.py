@@ -38,9 +38,6 @@ from familiar_connect import log_style as ls
 from familiar_connect.identity import self_canonical_key
 from familiar_connect.sleep.apply import apply_consolidation
 from familiar_connect.sleep.consolidation import (
-    _SYSTEM as CONSOLIDATION_SYSTEM_DEFAULT,
-)
-from familiar_connect.sleep.consolidation import (
     DEFAULT_FACTS_MAX,
     DEFAULT_RETIRE_CAP,
     DEFAULT_TURNS_MAX,
@@ -48,8 +45,6 @@ from familiar_connect.sleep.consolidation import (
 )
 from familiar_connect.sleep.opinion_formation import (
     DEFAULT_OPINION_CAP,
-    STANCE_SYSTEM_DEFAULT,
-    SYNTHESIS_SYSTEM_DEFAULT,
     apply_opinions,
     plan_opinions,
 )
@@ -103,14 +98,15 @@ async def execute_consolidation(
     facts_max: int = DEFAULT_FACTS_MAX,
     turns_max: int = DEFAULT_TURNS_MAX,
     cap: int = DEFAULT_RETIRE_CAP,
-    system: str = CONSOLIDATION_SYSTEM_DEFAULT,
+    system: str = "",
 ) -> ConsolidationPlan:
     """Plan (always) → apply (if ``apply``). Return the plan.
 
     Dependency-injected so the orchestration is testable without
     config/network. ``plan_consolidation`` is read-only; only
     ``apply_consolidation`` mutates, so dry-run (``apply=False``) never
-    writes to ``store``. ``system`` is the config-sourced prompt text.
+    writes to ``store``. ``system`` is the config-sourced prompt text
+    (prose ships in ``_default/character.toml``).
     """
     plan = await plan_consolidation(
         store,
@@ -149,15 +145,16 @@ async def execute_opinion_formation(
     apply: bool,
     denylist: tuple[str, ...] = (),
     cap: int = DEFAULT_OPINION_CAP,
-    stance_system: str = STANCE_SYSTEM_DEFAULT,
-    synthesis_system: str = SYNTHESIS_SYSTEM_DEFAULT,
+    stance_system: str = "",
+    synthesis_system: str = "",
 ) -> OpinionPlan:
     """Plan opinions → apply (if ``apply``). Return the plan.
 
     ``plan_opinions`` is read-only; only ``apply_opinions`` records facts,
     so a dry run never writes. ``denylist`` (consolidation's retired-fact
     texts) is fed to the prompt as known-bits context. ``stance_system`` /
-    ``synthesis_system`` are the config-sourced prompt texts.
+    ``synthesis_system`` are the config-sourced prompt texts (prose ships
+    in ``_default/character.toml``).
     """
     self_key = self_canonical_key(familiar_id)
     prior = await store.get_people_dossier(
@@ -191,15 +188,15 @@ class SleepPromptText:
     """Config-sourced static instruction text for the sleep passes.
 
     Built from ``CharacterConfig``'s ``[prompt]`` fields and carried into
-    every pass via :class:`MaintenanceContext`. Empty default falls back
-    to each module's in-code default (the single-source default text
-    lives in ``_default/character.toml``). Rails stay code-enforced — this
-    text is phrasing only.
+    every pass via :class:`MaintenanceContext`. The single-source prose
+    ships in ``_default/character.toml`` (always merged in production);
+    empty default keeps that profile the sole source of truth — no in-code
+    copy. Rails stay code-enforced — this text is phrasing only.
     """
 
-    consolidation_system: str = CONSOLIDATION_SYSTEM_DEFAULT
-    stance_system: str = STANCE_SYSTEM_DEFAULT
-    synthesis_system: str = SYNTHESIS_SYSTEM_DEFAULT
+    consolidation_system: str = ""
+    stance_system: str = ""
+    synthesis_system: str = ""
 
     @classmethod
     def from_config(
@@ -209,15 +206,16 @@ class SleepPromptText:
         stance_system: str,
         synthesis_system: str,
     ) -> SleepPromptText:
-        """Build from ``[prompt]`` strings; empty → in-code default.
+        """Build from ``[prompt]`` strings, relayed verbatim.
 
-        Production text ships in ``_default/character.toml``; empty falls
-        back so minimal / test profiles still get a working prompt.
+        Production text ships in ``_default/character.toml`` (always
+        merged); a per-familiar override replaces it. Mirrors
+        ``post_history_instructions`` — no in-code prose fallback.
         """
         return cls(
-            consolidation_system=consolidation_system or CONSOLIDATION_SYSTEM_DEFAULT,
-            stance_system=stance_system or STANCE_SYSTEM_DEFAULT,
-            synthesis_system=synthesis_system or SYNTHESIS_SYSTEM_DEFAULT,
+            consolidation_system=consolidation_system,
+            stance_system=stance_system,
+            synthesis_system=synthesis_system,
         )
 
 

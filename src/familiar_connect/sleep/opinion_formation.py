@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from familiar_connect.history.store import FactSubject, _normalize_fact_text
 from familiar_connect.identity import self_canonical_key
 from familiar_connect.llm import Message
+from familiar_connect.prompt_fill import fill_placeholders
 from familiar_connect.structured_output import coerce_json, coerce_positive_int_list
 
 if TYPE_CHECKING:
@@ -42,45 +43,6 @@ _logger = logging.getLogger(__name__)
 
 DEFAULT_TURNS_MAX_PER_DAY = 600
 DEFAULT_OPINION_CAP = 60
-
-# Static instruction defaults — mirror ``_default/character.toml``
-# ``[prompt].sleep_stance_system`` / ``sleep_synthesis_system``. Used
-# when no configured text is threaded in (direct callers / tests). Take
-# a ``{self_name}`` placeholder; the conditional denylist / prior-dossier
-# blocks are assembled and appended in code. Grounding rails in
-# :func:`validate_opinions` enforce safety regardless of this phrasing.
-STANCE_SYSTEM_DEFAULT = (
-    "You read one day of chat and surface stance-moments for {self_name}, "
-    "an AI character. A stance-moment is a spot where {self_name} demonstrated "
-    "a feeling, opinion, preference, or reaction — about media, an event, a "
-    "person, a bit, anything. Quote nothing; just name the stance and cite "
-    "the turn ids that show it.\n\n"
-    "Ground every candidate in real turn ids from the transcript below. "
-    "Only turns marked '(you)' are {self_name}'s — never attribute a stance "
-    "to {self_name} from a turn they did not author, even if a user shares "
-    "their name. Prefer turns {self_name} authored (their own words/acts). "
-    "Skip small-talk with no stance. A thin day yields few or zero "
-    "candidates — that is fine."
-)
-SYNTHESIS_SYSTEM_DEFAULT = (
-    "You synthesize {self_name}'s settled opinions from stance-moments "
-    "observed across many days. Merge restatements of the same stance into "
-    "one. Keep stances that genuinely differ (including a view {self_name} "
-    "changed their mind on — record both, they are both true in their time). "
-    "An opinion is {self_name}'s — phrase it about {self_name}. You may "
-    "mention other people in passing, but the opinion is {self_name}'s "
-    "stance, not a claim about them.\n\n"
-    "CRITICAL: every opinion's source_turn_ids MUST be drawn only from the "
-    "ids listed on the candidates below. Invent no ids.\n\n"
-    "Rate each opinion's IMPORTANCE 1-10 by how durable/central it is to "
-    "who {self_name} is, NOT how strongly worded:\n"
-    "- 7-9 = durable core stance about identity, values, or a key "
-    "relationship (would still be true in a month).\n"
-    "- 4-6 = characteristic but situational (recurring tendency tied to a "
-    "context).\n"
-    "- 2-3 = momentary texture, tied to one specific exchange or event.\n"
-    "Reserve 10 for rare bedrock identity; 1 for trivial."
-)
 
 # Suffixes appended in code after the (formatted) static system text —
 # JSON-shape contract + conditional blocks. Kept out of config: they
@@ -224,14 +186,14 @@ def _build_stance_prompt(
     *,
     self_name: str,
     denylist: tuple[str, ...],
-    system: str = STANCE_SYSTEM_DEFAULT,
+    system: str = "",
 ) -> list[Message]:
     """Build the per-day stance prompt.
 
     ``system`` is the config-sourced static instruction (``{self_name}``
-    interpolated here); the known-bits deny block and the JSON reply
-    shape are assembled in code and appended. Grounding rails enforce
-    safety regardless of this text.
+    filled here, crash-safe; prose ships in ``_default/character.toml``);
+    the known-bits deny block and the JSON reply shape are assembled in
+    code and appended. Grounding rails enforce safety regardless of text.
     """
     deny = ""
     if denylist:
@@ -241,7 +203,7 @@ def _build_stance_prompt(
             "joke tedious, but must never treat them as true events):\n"
             + "\n".join(f"- {d}" for d in denylist)
         )
-    instruction = (system or STANCE_SYSTEM_DEFAULT).format(self_name=self_name)
+    instruction = fill_placeholders(system, self_name=self_name)
     body = "\n".join(_render_turn(t, self_name) for t in day.turns)
     return [
         Message(role="system", content=instruction + deny + _STANCE_REPLY_SHAPE),
@@ -255,7 +217,7 @@ async def extract_stance_moments(
     *,
     self_name: str,
     denylist: tuple[str, ...] = (),
-    system: str = STANCE_SYSTEM_DEFAULT,
+    system: str = "",
 ) -> list[StanceMoment]:
     """Stage 1: pull stance-moments for one day, grounding ⊆ the day."""
     reply = await llm.chat(
@@ -296,14 +258,15 @@ def _build_synthesis_prompt(
     *,
     self_name: str,
     prior_self_dossier: str | None,
-    system: str = SYNTHESIS_SYSTEM_DEFAULT,
+    system: str = "",
 ) -> list[Message]:
     """Build the synthesis prompt.
 
     ``system`` is the config-sourced static instruction (``{self_name}``
-    interpolated here); the prior-dossier block and the JSON reply shape
-    are assembled in code and appended. The grounding rail
-    (source ids ⊆ stance-moment ids) enforces safety regardless.
+    filled here, crash-safe; prose ships in ``_default/character.toml``);
+    the prior-dossier block and the JSON reply shape are assembled in
+    code and appended. The grounding rail (source ids ⊆ stance-moment
+    ids) enforces safety regardless.
     """
     prior = ""
     if prior_self_dossier:
@@ -311,7 +274,7 @@ def _build_synthesis_prompt(
             f"\n\n{self_name}'s existing self-understanding (refine/extend, "
             f"do not blindly repeat):\n{prior_self_dossier}"
         )
-    instruction = (system or SYNTHESIS_SYSTEM_DEFAULT).format(self_name=self_name)
+    instruction = fill_placeholders(system, self_name=self_name)
     lines = [f"- ({c.date}) ids={list(c.turn_ids)}: {c.text}" for c in stance_moments]
     body = "Stance-moments:\n" + "\n".join(lines)
     return [
@@ -326,7 +289,7 @@ async def synthesize(
     *,
     self_name: str,
     prior_self_dossier: str | None = None,
-    system: str = SYNTHESIS_SYSTEM_DEFAULT,
+    system: str = "",
 ) -> list[dict[str, Any]]:
     """Stage 2: one call → raw opinion dicts (validated separately)."""
     if not stance_moments:
@@ -467,13 +430,14 @@ async def plan_opinions(
     denylist: tuple[str, ...] = (),
     prior_self_dossier: str | None = None,
     cap: int = DEFAULT_OPINION_CAP,
-    stance_system: str = STANCE_SYSTEM_DEFAULT,
-    synthesis_system: str = SYNTHESIS_SYSTEM_DEFAULT,
+    stance_system: str = "",
+    synthesis_system: str = "",
 ) -> OpinionPlan:
     """Gather days → per-day stance-moments → one synthesis → validate.
 
     ``stance_system`` / ``synthesis_system`` are config-sourced static
-    instructions; grounding rails enforce safety regardless of phrasing.
+    instructions (prose ships in ``_default/character.toml``); grounding
+    rails enforce safety regardless of phrasing.
     """
     window = await gather_days(store, familiar_id=familiar_id, display_tz=display_tz)
     stance_moments: list[StanceMoment] = []

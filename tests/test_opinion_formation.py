@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+from familiar_connect.config import load_character_config
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore, HistoryTurn
 from familiar_connect.identity import Author, is_self_key
@@ -27,6 +29,21 @@ from familiar_connect.sleep.opinion_formation import (
     validate_opinions,
 )
 from tests.conftest import FakeLLMClient
+
+# Real sleep-prompt prose = the merged ``_default`` config (single source
+# of truth); no in-code copy. Mirrors production wiring.
+_DEFAULT_PROFILE = (
+    Path(__file__).resolve().parent.parent
+    / "data"
+    / "familiars"
+    / "_default"
+    / "character.toml"
+)
+
+
+def _default_synthesis_system() -> str:
+    cfg = load_character_config(_DEFAULT_PROFILE, defaults_path=_DEFAULT_PROFILE)
+    return cfg.sleep_synthesis_system
 
 
 def _user_turn(tid: int, display_name: str, content: str = "hi") -> HistoryTurn:
@@ -197,10 +214,13 @@ def _cand(text: str, date: str, turn_ids: tuple[int, ...]) -> StanceMoment:
 
 class TestSynthesisPrompt:
     def test_prompt_instructs_importance_rating(self) -> None:
+        # real prose sourced from the merged ``_default`` config (the
+        # single source of truth) — production threads it the same way.
         msgs = _build_synthesis_prompt(
             [_cand("likes lo-fi", "2026-06-12", (1,))],
             self_name="Sapphire",
             prior_self_dossier=None,
+            system=_default_synthesis_system(),
         )
         system = msgs[0].content
         assert isinstance(system, str)

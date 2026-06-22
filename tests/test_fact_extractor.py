@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,17 +14,25 @@ from familiar_connect.activities import (
     RETURN_TURN_MARKER_PREFIX,
     SLEEP_RETURN_MODE,
 )
+from familiar_connect.config import load_character_config
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, Message
-from familiar_connect.processors.fact_extractor import (
-    DREAM_EXTRACTION_CLAUSE_DEFAULT,
-    FactExtractor,
-)
+from familiar_connect.processors.fact_extractor import FactExtractor
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+# Real dream-framing clause = the merged ``_default`` config value (single
+# source of truth); no in-code copy. Mirrors production wiring.
+_DEFAULT_PROFILE = (
+    Path(__file__).resolve().parent.parent
+    / "data"
+    / "familiars"
+    / "_default"
+    / "character.toml"
+)
 
 
 class _ScriptedLLM(LLMClient):
@@ -1436,11 +1445,17 @@ def _seed_with_dream_turn(store: HistoryStore) -> tuple[list[int], int]:
     return normal_ids, dream.id
 
 
+def _default_dream_clause() -> str:
+    """Real clause sourced from the merged ``_default`` config (no copy)."""
+    cfg = load_character_config(_DEFAULT_PROFILE, defaults_path=_DEFAULT_PROFILE)
+    return cfg.dream_extraction_clause
+
+
 def _dream_extractor(
     store: HistoryStore,
     llm: _ScriptedLLM,
     *,
-    dream_extraction_clause: str = DREAM_EXTRACTION_CLAUSE_DEFAULT,
+    dream_extraction_clause: str | None = None,
 ) -> FactExtractor:
     return FactExtractor(
         store=AsyncHistoryStore(store),
@@ -1448,7 +1463,11 @@ def _dream_extractor(
         familiar_id="fam",
         familiar_display_name="Sapphire",
         batch_size=10,
-        dream_extraction_clause=dream_extraction_clause,
+        dream_extraction_clause=(
+            dream_extraction_clause
+            if dream_extraction_clause is not None
+            else _default_dream_clause()
+        ),
     )
 
 

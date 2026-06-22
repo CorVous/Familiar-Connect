@@ -83,19 +83,26 @@ same `_default` → override deep-merge as every other config field:
 
 | Key | Used by |
 |-----|---------|
-| `sleep_consolidation_system` | hygiene/consolidation system message |
+| `sleep_consolidation_system` | consolidation system message |
 | `sleep_stance_system` | per-day stance-moment pass (`{self_name}`) |
 | `sleep_synthesis_system` | opinion synthesis pass (`{self_name}`) |
 | `dream_extraction_clause` | fact-extractor dream-framing clause (`{self_name}`, `{self_key}`, `{ids}`) |
 
+The prose lives **only** in `_default/character.toml` — there is no
+second in-code copy to drift against (mirrors `post_history_instructions`).
+Production always merges `_default`, so the real text always resolves;
+empty config yields an empty prompt, never a stale duplicate.
+
 Only the *phrasing* is configurable. The dynamic window data (facts,
 turns, cited ids, the known-bits deny-list) is still assembled in code,
 and the machine-parsed JSON reply shape is appended in code, not config.
+Placeholders are filled by literal `{key}` substitution, so a stray
+brace or an unknown / missing placeholder in an override degrades
+gracefully (passes through verbatim) — it never crashes the pass.
 Crucially, **a prompt override can never weaken a rail**: the validation
 rails above (and the fact-extractor's claim-discipline rail forcing
 dream-grounded facts to `self:`, dream-framed) run *after* the model
-replies, regardless of what the prompt said. Empty config falls back to
-each module's in-code default.
+replies, regardless of what the prompt said.
 
 ### Authored facts
 

@@ -35,7 +35,10 @@ from familiar_connect.config import (
     TurnDetectionConfig,
     load_character_config,
 )
+from familiar_connect.processors import fact_extractor as _fact_extractor
 from familiar_connect.processors.projectors import DEFAULT_PROJECTORS
+from familiar_connect.sleep import consolidation as _consolidation
+from familiar_connect.sleep import opinion_formation as _opinion
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -465,14 +468,10 @@ class TestLoadCharacterConfig:
         in the profile). A second in-code copy is a drift hazard #151
         forbids — the constants must not exist.
         """
-        import familiar_connect.processors.fact_extractor as fe
-        import familiar_connect.sleep.consolidation as consolidation
-        import familiar_connect.sleep.opinion_formation as opinion
-
-        assert not hasattr(consolidation, "_SYSTEM")
-        assert not hasattr(opinion, "STANCE_SYSTEM_DEFAULT")
-        assert not hasattr(opinion, "SYNTHESIS_SYSTEM_DEFAULT")
-        assert not hasattr(fe, "DREAM_EXTRACTION_CLAUSE_DEFAULT")
+        assert not hasattr(_consolidation, "_SYSTEM")
+        assert not hasattr(_opinion, "STANCE_SYSTEM_DEFAULT")
+        assert not hasattr(_opinion, "SYNTHESIS_SYSTEM_DEFAULT")
+        assert not hasattr(_fact_extractor, "DREAM_EXTRACTION_CLAUSE_DEFAULT")
 
     def test_default_profile_carries_real_sleep_prompt_prose(
         self, tmp_path: Path, default_profile_path: Path
