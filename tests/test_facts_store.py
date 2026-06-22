@@ -605,7 +605,7 @@ class TestSupersedeUnified:
         row = next(r for r in all_facts if r.id == x.id)
         assert row.superseded_by == existing.id
 
-    def test_partial_failure_skips_stale_processes_rest(self) -> None:
+    def test_merge_declined_atomically_when_any_obsolete_stale(self) -> None:
         store = self._store()
         a = store.append_fact(
             familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
@@ -613,6 +613,7 @@ class TestSupersedeUnified:
         b = store.append_fact(
             familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
         )
+        before = store.latest_fact_id(familiar_id="fam")
         # a concurrent writer already retired `a` before our merge runs
         store.retire_fact(familiar_id="fam", fact_id=a.id)
         result = store.supersede(
@@ -620,17 +621,86 @@ class TestSupersedeUnified:
             obsolete_facts=[a.id, b.id],
             new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
         )
-        # b is superseded by the merge; a is skipped (already gone), not fatal
-        assert b.id in result.superseded
-        assert a.id not in result.superseded
-        assert a.id in {sid for sid, _ in result.skipped}
-        # no half-merge stranded: b really points at the minted row
-        assert result.minted is not None
+        # merge declined whole: no phantom minted, nothing newly superseded
+        assert result.minted is None
+        assert result.superseded == ()
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+        # the still-current `b` is untouched — not superseded by a phantom
         all_facts = store.recent_facts(
             familiar_id="fam", limit=10, include_superseded=True
         )
         by_id = {r.id: r for r in all_facts}
-        assert by_id[b.id].superseded_by == result.minted.id
+        assert by_id[b.id].superseded_at is None
+        assert by_id[b.id].superseded_by is None
+        # the stale `a` is recorded as the reason the merge was declined
+        assert a.id in {sid for sid, _ in result.skipped}
+
+    def test_merge_empty_obsolete_is_noop(self) -> None:
+        store = self._store()
+        before = store.latest_fact_id(familiar_id="fam")
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[],
+            new_fact=FactDraft(channel_id=1, text="orphan merge.", subjects=()),
+        )
+        assert result.minted is None
+        assert result.superseded == ()
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+
+    def test_retire_form_skips_stale_processes_rest(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        # a concurrent writer already retired `a` before our retire runs
+        store.retire_fact(familiar_id="fam", fact_id=a.id)
+        # retire form (new_fact=None) is per-id skip-and-record, NOT atomic
+        result = store.supersede(
+            familiar_id="fam", obsolete_facts=[a.id, b.id], new_fact=None
+        )
+        # b is retired; a is skipped (already gone), not fatal
+        assert b.id in result.superseded
+        assert a.id not in result.superseded
+        assert a.id in {sid for sid, _ in result.skipped}
+        assert result.minted is None
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[b.id].superseded_at is not None
+        assert by_id[b.id].superseded_by is None
+
+    def test_existing_id_form_skips_stale_processes_rest(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        existing = store.append_fact(
+            familiar_id="fam", channel_id=1, text="replacement.", source_turn_ids=[3]
+        )
+        # a concurrent writer already retired `a` before our repoint runs
+        store.retire_fact(familiar_id="fam", fact_id=a.id)
+        before = store.latest_fact_id(familiar_id="fam")
+        # existing-id form is per-id skip-and-record, NOT atomic, mints nothing
+        result = store.supersede(
+            familiar_id="fam", obsolete_facts=[a.id, b.id], new_fact=existing
+        )
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+        assert result.minted is None
+        assert b.id in result.superseded
+        assert a.id not in result.superseded
+        assert a.id in {sid for sid, _ in result.skipped}
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[b.id].superseded_by == existing.id
 
     def test_invalidates_dossier_per_obsolete_subject(self) -> None:
         store = self._store()
