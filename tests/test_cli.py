@@ -18,6 +18,19 @@ def test_create_parser_exists() -> None:
     assert isinstance(parser, argparse.ArgumentParser)
 
 
+def _subcommand_choices(parser: argparse.ArgumentParser) -> set[str]:
+    subparsers = next(
+        a for a in parser._subparsers._group_actions  # noqa: SLF001
+        if isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
+    )
+    return set(subparsers.choices)
+
+
+def test_sleep_not_a_registered_subcommand() -> None:
+    """``sleep`` CLI trigger removed — runtime sleep path stays the only one."""
+    assert "sleep" not in _subcommand_choices(create_parser())
+
+
 def test_parser_has_verbose_argument() -> None:
     """Test that parser has -v/--verbose argument."""
     parser = create_parser()
