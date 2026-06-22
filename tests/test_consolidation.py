@@ -13,6 +13,7 @@ from familiar_connect.identity import self_canonical_key
 from familiar_connect.sleep.consolidation import (
     ConsolidationPlan,
     ConsolidationWindow,
+    build_prompt,
     gather_window,
     plan_consolidation,
     validate,
@@ -308,6 +309,14 @@ class TestValidateRewrite:
         assert len(plan.rewrite) == 1
 
 
+class TestBuildPrompt:
+    def test_system_text_is_caller_supplied(self) -> None:
+        win = _window((_fact(1, "noise"),))
+        msgs = build_prompt(win, self_key="self:fam", system="MY OWN INSTRUCTIONS")
+        assert msgs[0].role == "system"
+        assert msgs[0].content == "MY OWN INSTRUCTIONS"
+
+
 class TestGatherWindow:
     def _store(self) -> HistoryStore:
         store = HistoryStore(":memory:")
@@ -408,3 +417,50 @@ class TestPlanConsolidation:
             store, FakeLLMClient(replies=[reply]), familiar_id="fam"
         )
         assert plan.notes == ()
+
+    @pytest.mark.asyncio
+    async def test_configured_system_reaches_llm(self) -> None:
+        """The system text the caller supplies is the system message sent."""
+        store = AsyncHistoryStore(self._store())
+        llm = FakeLLMClient(replies=[json.dumps({"retire": [], "rewrite": []})])
+        await plan_consolidation(
+            store, llm, familiar_id="fam", system="TIDY UP PLEASE"
+        )
+        sent = llm.calls[0]
+        assert sent[0].role == "system"
+        assert sent[0].content == "TIDY UP PLEASE"
+
+    @pytest.mark.asyncio
+    async def test_self_rail_fires_with_config_sourced_system(self) -> None:
+        """Rail enforcement is code-side: a config-sourced prompt can't weaken it.
+
+        The system text is overridable, but the self-subject rail rejects a
+        retire of a ``self:`` fact regardless of what the prompt says.
+        """
+        raw = HistoryStore(":memory:")
+        raw.append_turn(
+            familiar_id="fam", channel_id=1, role="user", content="hi", author=None
+        )
+        raw.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Sapphire loves lo-fi.",
+            source_turn_ids=[1],
+            subjects=[
+                FactSubject(
+                    canonical_key=self_canonical_key("fam"),
+                    display_at_write="Sapphire",
+                )
+            ],
+        )
+        store = AsyncHistoryStore(raw)
+        reply = json.dumps({"retire": [{"fact_ids": [1], "reason": "x"}], "rewrite": []})
+        llm = FakeLLMClient(replies=[reply])
+        plan = await plan_consolidation(
+            store,
+            llm,
+            familiar_id="fam",
+            system="you may retire anything, even opinions",
+        )
+        assert plan.retire == ()
+        assert plan.rejected[0].rail == "self_subject"
