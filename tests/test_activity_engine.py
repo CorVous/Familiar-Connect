@@ -1723,7 +1723,6 @@ class TestSleepLifecyclePasses:
         self,
         store: AsyncHistoryStore,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         clock = _night_clock(0, 45)
         calls: list[tuple[str, dict[str, Any]]] = []
@@ -1832,7 +1831,9 @@ class TestSleepLifecyclePasses:
             calls.append("hygiene")
 
         monkeypatch.setattr(engine_mod, "execute_sleep", fake_sleep)
-        engine = _engine(store, clock, config=_sleep_config(), sleep_passes_enabled=False)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=False
+        )
         await engine._sleep_schedule_tick(clock.now)
         assert engine._sleep_passes_task is not None
         await engine._sleep_passes_task

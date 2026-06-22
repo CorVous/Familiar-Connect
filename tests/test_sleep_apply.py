@@ -1,4 +1,4 @@
-"""Sleep hygiene — apply path + audit artifact."""
+"""Sleep hygiene — apply path."""
 
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ import pytest
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
 from familiar_connect.identity import self_canonical_key
-from familiar_connect.sleep.apply import apply_hygiene, hygiene_audit, write_audit
+from familiar_connect.sleep.apply import apply_hygiene
 from familiar_connect.sleep.hygiene import (
     HygienePlan,
-    RejectedAction,
     RetireAction,
     RewriteAction,
     plan_hygiene,
@@ -197,51 +196,3 @@ class TestApplyHygiene:
         await apply_hygiene(store, plan)
         current = {f.text for f in raw.recent_facts(familiar_id="fam", limit=10)}
         assert current == {"Aria likes berries."}
-
-
-class TestAudit:
-    def _plan(self) -> HygienePlan:
-        return HygienePlan(
-            familiar_id="fam",
-            retire=(RetireAction(fact_ids=(1,), reason="noise"),),
-            rewrite=(
-                RewriteAction(
-                    old_fact_ids=(2, 3),
-                    new_text="merged",
-                    subject_keys=("discord:A",),
-                    reason="dups",
-                ),
-            ),
-            rejected=(
-                RejectedAction("retire", {"fact_ids": [9]}, "self_subject", "(9,)"),
-            ),
-            new_last_fact_id=3,
-            new_last_turn_id=3,
-            facts_considered=5,
-            facts_truncated=2,
-        )
-
-    def test_audit_is_json_serializable_and_complete(self) -> None:
-        audit = hygiene_audit(self._plan(), applied=False)
-        # round-trips through json
-        blob = json.dumps(audit)
-        back = json.loads(blob)
-        assert back["familiar_id"] == "fam"
-        assert back["applied"] is False
-        assert back["mutated_count"] == 3
-        assert len(back["retire"]) == 1
-        assert len(back["rewrite"]) == 1
-        assert back["rejected"][0]["rail"] == "self_subject"
-        assert back["window"]["facts_truncated"] == 2
-
-    def test_audit_records_applied_flag(self) -> None:
-        audit = hygiene_audit(self._plan(), applied=True)
-        assert audit["applied"] is True
-
-    def test_write_audit_creates_file(self, tmp_path) -> None:  # noqa: ANN001
-        audit = hygiene_audit(self._plan(), applied=False)
-        path = write_audit(audit, audit_dir=tmp_path, familiar_id="fam")
-        assert path.exists()
-        assert path.parent == tmp_path
-        loaded = json.loads(path.read_text())
-        assert loaded["familiar_id"] == "fam"

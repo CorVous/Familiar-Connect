@@ -454,7 +454,7 @@ async def plan_dream(
 
 
 # ---------------------------------------------------------------------------
-# apply + audit
+# apply
 # ---------------------------------------------------------------------------
 
 
@@ -504,47 +504,3 @@ async def apply_dream(
         plan.new_last_turn_id,
     )
     return DreamApplyReport(minted=tuple(minted), watermark=plan.new_last_turn_id)
-
-
-def dream_audit(
-    plan: DreamPlan,
-    *,
-    excerpts: dict[int, str],
-    applied: bool,
-    report: DreamApplyReport | None = None,
-) -> dict[str, Any]:
-    """JSON audit — each opinion with its cited-turn EXCERPTS inline.
-
-    The excerpts turn Cor's dry-run review into a skim: opinion + the
-    actual turns it stands on, no DB lookups. ``flags`` surfaces
-    opinions grounded in no turn she authored.
-    """
-    fact_id_by_text = dict(report.minted) if report is not None else {}
-    return {
-        "familiar_id": plan.familiar_id,
-        "applied": applied,
-        "kind": "dream",
-        "watermark": {"last_turn_id": plan.new_last_turn_id},
-        "days_considered": plan.days_considered,
-        "candidates_considered": plan.candidates_considered,
-        "notes": list(plan.notes),
-        "flags": list(plan.flags),
-        "opinions": [
-            {
-                "text": op.text,
-                "valid_from": op.valid_from_date,
-                "importance": op.importance,
-                "self_grounded": op.self_grounded,
-                "fact_id": fact_id_by_text.get(op.text),
-                "grounding": [
-                    {"turn_id": i, "excerpt": excerpts.get(i, "")}
-                    for i in op.source_turn_ids
-                ],
-            }
-            for op in plan.opinions
-        ],
-        "rejected": [
-            {"rail": r.rail, "detail": r.detail, "payload": r.payload}
-            for r in plan.rejected
-        ],
-    }

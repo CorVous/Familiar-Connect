@@ -185,7 +185,7 @@ class ActivityEngine:
         rng: random.Random | None = None,
         nudge_tick_seconds: float = 60.0,
         familiar_display_name: str | None = None,
-        sleep_audit_dir: Path | None = None,
+        sleep_passes_enabled: bool = False,
         seed_dream_path: Path | None = None,
     ) -> None:
         self._store = store
@@ -198,9 +198,8 @@ class ActivityEngine:
         self._tz = ZoneInfo(display_tz)
         self._display_tz_name = display_tz
         self._display_name = familiar_display_name or familiar_id.title()
-        # sleep lifecycle: passes audit dir (None ⇒ passes skipped) +
-        # one-shot authored first dream
-        self._sleep_audit_dir = sleep_audit_dir
+        # sleep lifecycle: passes on/off switch + one-shot authored first dream
+        self._sleep_passes_enabled = sleep_passes_enabled
         self._seed_dream_path = seed_dream_path
         # late-bound: run.py wires before Discord login fills the real id
         self._bot_user_id_fn = bot_user_id
@@ -685,7 +684,7 @@ class ActivityEngine:
         )
 
     async def _run_sleep_passes(self) -> None:
-        """Hygiene then dream (apply=True); audits land in sleep_audit_dir.
+        """Hygiene then dream (apply=True), gated on ``sleep_passes_enabled``.
 
         Watermark defines each pass's window — a missed night just
         widens the next one (one dream, no catch-up worker). Failures
@@ -705,17 +704,15 @@ class ActivityEngine:
         # capture the sleep activity that kicked these passes — a racing
         # return must not let a late persist mis-target a newer row
         active = self._active
-        audit_dir = self._sleep_audit_dir
-        if audit_dir is None:
+        if not self._sleep_passes_enabled:
             return  # not wired (tests / minimal deployments)
         try:
             llm = self._llm_clients["background"]
-            plan, _ = await execute_sleep(
+            plan = await execute_sleep(
                 store=self._store,
                 llm=llm,
                 familiar_id=self._familiar_id,
                 familiar_display_name=self._display_name,
-                audit_dir=audit_dir,
                 apply=True,
             )
             denylist: tuple[str, ...] = ()
@@ -725,13 +722,12 @@ class ActivityEngine:
                     familiar_id=self._familiar_id, ids=deny_ids
                 )
                 denylist = tuple(f.text for f in facts)
-            dream_plan, _ = await execute_dream(
+            dream_plan = await execute_dream(
                 store=self._store,
                 llm=llm,
                 familiar_id=self._familiar_id,
                 familiar_display_name=self._display_name,
                 display_tz=self._display_tz_name,
-                audit_dir=audit_dir,
                 apply=True,
                 denylist=denylist,
             )

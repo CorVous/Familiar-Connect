@@ -57,7 +57,6 @@ from familiar_connect.processors.projectors import (
     ProjectorContext,
     create_projectors,
 )
-from familiar_connect.sleep.passes import AUDIT_DIRNAME
 from familiar_connect.stt import create_transcriber
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.tools.builtins import build_text_registry, build_voice_registry
@@ -316,9 +315,10 @@ def _build_activity_engine(
         # late-bound: on_ready fills familiar.bot_user_id after login
         bot_user_id=lambda: familiar.bot_user_id,
         voice_active_fn=lambda: bool(handle.voice_runtime),
-        # sleep lifecycle: passes audits + one-shot authored first dream
+        # sleep lifecycle: run the hygiene+dream passes at departure +
+        # one-shot authored first dream
         familiar_display_name=familiar.display_name,
-        sleep_audit_dir=familiar.root / AUDIT_DIRNAME,
+        sleep_passes_enabled=True,
         seed_dream_path=familiar.root / "seed_dream.md",
     )
 

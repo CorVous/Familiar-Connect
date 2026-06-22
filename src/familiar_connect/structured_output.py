@@ -47,7 +47,7 @@ class JsonResult:
     ``None``. A caller wanting an empty container on failure reads e.g.
     ``result.value or []`` — the boolean keeps "model fumbled the JSON"
     distinguishable from "model returned an empty object", which the
-    hygiene pass surfaces as an audit note.
+    hygiene pass surfaces as a plan note.
     """
 
     value: Any = None

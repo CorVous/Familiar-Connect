@@ -63,8 +63,8 @@ class HygieneWindow:
     ``facts_max`` newest. ``turns`` are conversation since the prior
     sleep watermark, capped to ``turns_max`` newest. ``max_fact_id`` /
     ``max_turn_id`` are the true high-water marks (uncapped) the
-    watermark advances to. Truncation counts feed the audit so a cap
-    never reads as full coverage.
+    watermark advances to. Truncation counts are recorded on the plan so
+    a cap never reads as full coverage.
     """
 
     familiar_id: str

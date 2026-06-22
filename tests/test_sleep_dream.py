@@ -20,7 +20,6 @@ from familiar_connect.sleep.dream import (
     _render_turn,
     apply_dream,
     bucket_by_day,
-    dream_audit,
     extract_candidates,
     gather_days,
     plan_dream,
@@ -507,40 +506,3 @@ class TestApplyDream:
         wm = raw.get_sleep_watermark(familiar_id="fam")
         assert wm is not None
         assert (wm.last_fact_id, wm.last_turn_id) == (77, 1)
-
-
-class TestDreamAudit:
-    def test_renders_cited_excerpts_and_flags(self) -> None:
-        plan = DreamPlan(
-            familiar_id="fam",
-            opinions=(_opinion("Sapphire defends lo-fi.", (1,), "2026-06-12"),),
-            rejected=(),
-            flags=("no_self_authored: some take",),
-            new_last_turn_id=1,
-            days_considered=3,
-            candidates_considered=9,
-        )
-        excerpts = {1: "Sapphire: lo-fi is real music"}
-        audit = dream_audit(plan, excerpts=excerpts, applied=False)
-        blob = json.dumps(audit)  # must serialize
-        back = json.loads(blob)
-        assert back["applied"] is False
-        op = back["opinions"][0]
-        assert op["valid_from"] == "2026-06-12"
-        assert op["importance"] == 5
-        assert op["grounding"][0]["turn_id"] == 1
-        assert "lo-fi is real music" in op["grounding"][0]["excerpt"]
-        assert back["flags"] == ["no_self_authored: some take"]
-
-    def test_audit_carries_assigned_importance(self) -> None:
-        plan = DreamPlan(
-            familiar_id="fam",
-            opinions=(
-                _opinion("Sapphire defends lo-fi.", (1,), "2026-06-12", importance=9),
-            ),
-            rejected=(),
-            flags=(),
-            new_last_turn_id=1,
-        )
-        audit = dream_audit(plan, excerpts={1: "x"}, applied=False)
-        assert audit["opinions"][0]["importance"] == 9

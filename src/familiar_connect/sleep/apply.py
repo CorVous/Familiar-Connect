@@ -1,6 +1,6 @@
-"""Apply a validated :class:`HygienePlan` + emit its audit artifact.
+"""Apply a validated :class:`HygienePlan` to the DB.
 
-Separate from planning so a dry run can produce the audit without
+Separate from planning so a dry run can compute the plan without
 touching the DB. Apply is supersede-only: retires drop facts with no
 replacement, rewrites append one consolidated fact then supersede the
 old ones by it. The sleep watermark advances once, to the window's
@@ -11,15 +11,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from familiar_connect.history.store import FactDraft, FactSubject
 from familiar_connect.identity import is_self_key
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.sleep.hygiene import HygienePlan, RewriteAction
 
@@ -125,9 +122,7 @@ async def apply_hygiene(
             # a source raced between plan + apply, so the store declined
             # the merge whole — same outcome as the old pre-flight skip:
             # nothing minted, the action recorded as skipped, no raise.
-            skipped.extend(
-                ("rewrite", fid, reason) for fid, reason in result.skipped
-            )
+            skipped.extend(("rewrite", fid, reason) for fid, reason in result.skipped)
             continue
         rewritten.append((action.old_fact_ids, result.minted.id))
 
@@ -152,84 +147,3 @@ async def apply_hygiene(
         watermark=(plan.new_last_fact_id, plan.new_last_turn_id),
         skipped=tuple(skipped),
     )
-
-
-# ---------------------------------------------------------------------------
-# audit artifact
-# ---------------------------------------------------------------------------
-
-
-def hygiene_audit(
-    plan: HygienePlan,
-    *,
-    applied: bool,
-    report: ApplyReport | None = None,
-) -> dict[str, Any]:
-    """JSON-serializable record of a pass — every change + why.
-
-    Written for every run (dry or applied) so the operator can audit
-    what the pass would do / did. ``report`` (when applied) annotates
-    rewrites with the new fact id minted.
-    """
-    new_id_by_olds = (
-        {tuple(o): n for o, n in report.rewritten} if report is not None else {}
-    )
-    return {
-        "familiar_id": plan.familiar_id,
-        "applied": applied,
-        "mutated_count": plan.mutated_count,
-        "notes": list(plan.notes),
-        "watermark": {
-            "last_fact_id": plan.new_last_fact_id,
-            "last_turn_id": plan.new_last_turn_id,
-        },
-        "window": {
-            "facts_considered": plan.facts_considered,
-            "facts_truncated": plan.facts_truncated,
-            "turns_considered": plan.turns_considered,
-            "turns_truncated": plan.turns_truncated,
-        },
-        "retire": [
-            {"fact_ids": list(a.fact_ids), "reason": a.reason} for a in plan.retire
-        ],
-        "rewrite": [
-            {
-                "old_fact_ids": list(a.old_fact_ids),
-                "new_text": a.new_text,
-                "subject_keys": list(a.subject_keys),
-                "reason": a.reason,
-                "new_fact_id": new_id_by_olds.get(a.old_fact_ids),
-            }
-            for a in plan.rewrite
-        ],
-        "rejected": [
-            {
-                "kind": r.kind,
-                "rail": r.rail,
-                "detail": r.detail,
-                "payload": r.payload,
-            }
-            for r in plan.rejected
-        ],
-        "skipped": [
-            {"kind": k, "fact_id": fid, "reason": reason}
-            for (k, fid, reason) in (report.skipped if report is not None else ())
-        ],
-    }
-
-
-def write_audit(
-    audit: dict[str, Any],
-    *,
-    audit_dir: Path,
-    familiar_id: str,
-    when: datetime | None = None,
-) -> Path:
-    """Write *audit* as timestamped JSON under *audit_dir*; return the path."""
-    import json  # noqa: PLC0415 — keep module import surface light
-
-    audit_dir.mkdir(parents=True, exist_ok=True)
-    stamp = (when or datetime.now(tz=UTC)).strftime("%Y%m%dT%H%M%SZ")
-    path = audit_dir / f"{familiar_id}-{stamp}.json"
-    path.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
-    return path
