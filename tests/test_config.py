@@ -7,6 +7,7 @@ table.
 
 from __future__ import annotations
 
+from datetime import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -58,6 +59,8 @@ class TestCharacterConfigDefaults:
         assert cfg.text_window_size == 200
         assert cfg.llm == {}
         assert isinstance(cfg.tts, TTSConfig)
+        assert cfg.sleep_window is None
+        assert cfg.sleep_grace_minutes == 30
 
 
 class TestLoadCharacterConfig:
@@ -147,6 +150,68 @@ class TestLoadCharacterConfig:
         slot = cfg.llm["prose"]
         assert slot.provider_order == ("z-ai", "deepinfra")
         assert slot.provider_allow_fallbacks is False
+
+    def test_sleep_window_and_grace_parse(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``[sleep]`` window/grace are character-domain time config."""
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "00:00-08:00"\ngrace_minutes = 45\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_window == (time(0, 0), time(8, 0))
+        assert cfg.sleep_grace_minutes == 45
+
+    def test_sleep_window_wraps_midnight(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "23:00-07:00"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_window == (time(23, 0), time(7, 0))
+
+    def test_sleep_grace_defaults_to_30(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "00:00-08:00"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_grace_minutes == 30
+
+    def test_sleep_omitted_means_no_window(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """No ``[sleep]`` table ⇒ window None (schedule disarmed)."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_window is None
+        assert cfg.sleep_grace_minutes == 30
+
+    @pytest.mark.parametrize("value", ["00:00", "midnight", "00:00-00:00"])
+    def test_sleep_bad_window_format_rejected(
+        self, tmp_path: Path, default_profile_path: Path, value: str
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(f'[sleep]\nwindow = "{value}"\n')
+        with pytest.raises(ConfigError, match="window"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    @pytest.mark.parametrize("value", ["0", "-5", "true", '"30"'])
+    def test_sleep_bad_grace_rejected(
+        self, tmp_path: Path, default_profile_path: Path, value: str
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(f'[sleep]\nwindow = "00:00-08:00"\ngrace_minutes = {value}\n')
+        with pytest.raises(ConfigError, match="grace_minutes"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_sleep_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "00:00-08:00"\nbedtime = 5\n')
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
 
     def test_provider_order_omitted_means_none(self, tmp_path: Path) -> None:
         """Slot without ``provider_order`` parses to ``None`` (default routing).
