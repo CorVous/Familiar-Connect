@@ -50,6 +50,7 @@ class SummaryWorker:
         llm_client: LLMClient,
         familiar_id: str,
         turns_threshold: int = 10,
+        batch_size: int = 50,
         cross_channel_map: dict[int, list[int]] | None = None,
         cross_k: int = 5,
         tick_interval_s: float = 5.0,
@@ -58,9 +59,16 @@ class SummaryWorker:
         self._llm = llm_client
         self._familiar_id = familiar_id
         self._turns_threshold = max(1, turns_threshold)
+        self._batch_size = max(1, batch_size)
         self._cross_map = cross_channel_map or {}
         self._cross_k = max(1, cross_k)
         self._tick_interval_s = tick_interval_s
+        # Per-channel drain target. Threshold gates the *start* of a
+        # refresh; once a backlog crosses it, drain fully (incl. the
+        # sub-threshold tail) in batch_size steps so a backlog never
+        # strands. Cleared when the watermark catches the target. A
+        # steady-state trickle below threshold never sets a target.
+        self._drain_target: dict[int, int] = {}
 
     # ------------------------------------------------------------------
     # Public loop
@@ -105,13 +113,25 @@ class SummaryWorker:
             familiar_id=self._familiar_id, channel_id=channel_id
         )
         last_summarised = prior.last_summarised_id if prior is not None else 0
-        if latest - last_summarised < self._turns_threshold:
+        # Open a drain when the backlog crosses the threshold; keep
+        # draining an open one until its target is reached.
+        if latest - last_summarised >= self._turns_threshold:
+            self._drain_target[channel_id] = latest
+        target = self._drain_target.get(channel_id, last_summarised)
+        if target <= last_summarised:
+            self._drain_target.pop(channel_id, None)
             return
 
+        # Cap per-tick window; a backlog drains incrementally across ticks
+        # rather than feeding one oversized prompt (reasoning model returns
+        # empty on huge inputs).
+        capped_max = min(target, last_summarised + self._batch_size)
+        if capped_max >= target:
+            self._drain_target.pop(channel_id, None)
         new_turns = await self._turns_in_range(
             channel_id=channel_id,
             min_id_exclusive=last_summarised,
-            max_id_inclusive=latest,
+            max_id_inclusive=capped_max,
         )
         if not new_turns:
             return
@@ -129,25 +149,25 @@ class SummaryWorker:
             await self._store.put_summary(
                 familiar_id=self._familiar_id,
                 channel_id=channel_id,
-                last_summarised_id=latest,
+                last_summarised_id=capped_max,
                 summary_text=prior_text,
             )
             _logger.warning(
                 f"{ls.tag('Summary', ls.Y)} "
                 f"{ls.kv('channel', str(channel_id), vc=ls.LY)} "
-                f"{ls.kv('empty_skip', str(latest), vc=ls.Y)}"
+                f"{ls.kv('empty_skip', str(capped_max), vc=ls.Y)}"
             )
             return
         await self._store.put_summary(
             familiar_id=self._familiar_id,
             channel_id=channel_id,
-            last_summarised_id=latest,
+            last_summarised_id=capped_max,
             summary_text=text,
         )
         _logger.info(
             f"{ls.tag('Summary', ls.LC)} "
             f"{ls.kv('channel', str(channel_id), vc=ls.LY)} "
-            f"{ls.kv('watermark', str(latest), vc=ls.LC)} "
+            f"{ls.kv('watermark', str(capped_max), vc=ls.LC)} "
             f"{ls.kv('chars', str(len(text)), vc=ls.LW)}"
         )
 

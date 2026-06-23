@@ -135,8 +135,11 @@ Background task on `tick_interval_s` (default 5s). Per tick:
 1. **Per-channel rolling summary** — for each channel with turns,
    compare `latest_id` to `summaries.last_summarised_id`. If the gap
    is `>= turns_threshold` (default 10), build a prompt with
-   `(prior summary, new turns since watermark)`, call `LLMClient.chat`,
-   write to `summaries`.
+   `(prior summary, new turns since watermark)` — capped at
+   `batch_size` (default 50) turns per tick, so a large backlog drains
+   across ticks — call `LLMClient.chat`, write to `summaries`. The
+   watermark always advances, even on an empty reply, so the worker
+   never re-sends the same batch.
 2. **Cross-channel summary** — for each `(viewer_channel, source)`
    pair in `cross_channel_map`, compare `source.latest_id` to
    `cross_context_summaries.source_last_id`. If the gap is `>= cross_k`

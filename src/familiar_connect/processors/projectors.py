@@ -135,6 +135,7 @@ def _summary_factory(ctx: ProjectorContext) -> MemoryProjector:
         llm_client=ctx.llm_clients["background"],
         familiar_id=ctx.familiar_id,
         turns_threshold=knobs.turns_threshold,
+        batch_size=knobs.batch_size,
         cross_k=knobs.cross_k,
         tick_interval_s=knobs.tick_interval_s,
     )

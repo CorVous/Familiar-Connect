@@ -342,6 +342,11 @@ experience seed) lives on the `[[catalog]]` entries — see the
 - **`SummaryWorker.turns_threshold`** (default `10`). New turns
   before the rolling summary regenerates. Constructor arg in
   `commands/run.py`; planned move to TOML.
+- **`SummaryWorker.batch_size`** (default `50`). Cap on turns fed to
+  one rolling-summary tick. The threshold gates the start of a
+  refresh; a larger backlog then drains across ticks in `batch_size`
+  steps rather than one oversized prompt (which a reasoning model can
+  answer with empty content, wedging the worker on a retry loop).
 - **`[budget.<tier>].max_dossier_people`** — was
   `PeopleDossierLayer.max_people`. Hard cap on dossier rows per
   prompt; combined with `dossier_tokens` so count or byte size
@@ -767,6 +772,7 @@ rag_tokens            = 1.5
 | `LorebookLayer.max_tokens` | `300` (voice) | `[budget.<tier>].lorebook_tokens` |
 | `LorebookLayer.recent_window` | matches history window | constructor arg |
 | `SummaryWorker.turns_threshold` | `10` | constructor arg |
+| `SummaryWorker.batch_size` | `50` | constructor arg |
 | `SummaryWorker.cross_k` | `5` | constructor arg |
 | `SummaryWorker.tick_interval_s` | `5.0` | class default |
 | `FactExtractor.batch_size` | `10` | constructor arg |
@@ -950,6 +956,7 @@ toggling a projector keeps its tuning.
 ```toml
 [providers.memory.rolling_summary]
 turns_threshold = 10    # new turns per channel before summary refreshes
+batch_size      = 50    # cap on turns per tick; backlog drains across ticks
 cross_k         = 5     # new source-channel turns before cross refresh
 tick_interval_s = 5.0
 

@@ -276,12 +276,15 @@ class RollingSummaryConfig:
 
     :param turns_threshold: new turns per channel before rolling
         summary refreshes.
+    :param batch_size: cap on turns fed to one rolling-summary tick;
+        backlog beyond this drains across ticks (bounds prompt size).
     :param cross_k: new turns in source channel before cross-channel
         summary refreshes.
     :param tick_interval_s: idle interval between worker ticks.
     """
 
     turns_threshold: int = 10
+    batch_size: int = 50
     cross_k: int = 5
     tick_interval_s: float = 5.0
 
