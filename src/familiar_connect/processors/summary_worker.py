@@ -122,7 +122,21 @@ class SummaryWorker:
         )
         reply = await self._llm.chat(prompt)
         text = reply.content_str.strip()
+        # Always advance watermark, even on empty/bad output, to prevent loops.
+        # Empty reply keeps a prior good summary rather than clobbering it.
         if not text:
+            prior_text = prior.summary_text if prior is not None else ""
+            await self._store.put_summary(
+                familiar_id=self._familiar_id,
+                channel_id=channel_id,
+                last_summarised_id=latest,
+                summary_text=prior_text,
+            )
+            _logger.warning(
+                f"{ls.tag('Summary', ls.Y)} "
+                f"{ls.kv('channel', str(channel_id), vc=ls.LY)} "
+                f"{ls.kv('empty_skip', str(latest), vc=ls.Y)}"
+            )
             return
         await self._store.put_summary(
             familiar_id=self._familiar_id,
