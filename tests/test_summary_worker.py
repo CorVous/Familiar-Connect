@@ -164,6 +164,36 @@ class TestRollingSummary:
         assert summary.summary_text == "Good prior summary."
 
     @pytest.mark.asyncio
+    async def test_batch_size_caps_turns_per_tick(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 25)
+        llm = _ScriptedLLM(replies=["s1", "s2", "s3"])
+
+        worker = SummaryWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=10,
+            batch_size=10,
+        )
+        await worker.tick()
+
+        summary = store.get_summary(familiar_id="fam", channel_id=1)
+        assert summary is not None
+        assert summary.last_summarised_id == 10  # capped, not 25
+        # Prompt carries only the capped window's turn lines
+        last_user = llm.calls[-1][-1].content_str
+        turn_lines = [ln for ln in last_user.splitlines() if ln.startswith("- [")]
+        assert len(turn_lines) == 10
+
+        # Backlog drains incrementally across ticks
+        await worker.tick()
+        await worker.tick()
+        summary = store.get_summary(familiar_id="fam", channel_id=1)
+        assert summary is not None
+        assert summary.last_summarised_id == 25
+
+    @pytest.mark.asyncio
     async def test_multiple_channels_independently(self) -> None:
         store = HistoryStore(":memory:")
         _seed_turns(store, 12, channel_id=1)
