@@ -120,6 +120,50 @@ class TestRollingSummary:
         assert "Round 1 summary" in joined
 
     @pytest.mark.asyncio
+    async def test_empty_reply_advances_watermark_no_loop(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 12)  # 12 > threshold 10
+        llm = _ScriptedLLM(replies=[""])
+
+        worker = SummaryWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=10,
+        )
+        await worker.tick()
+
+        summary = store.get_summary(familiar_id="fam", channel_id=1)
+        assert summary is not None
+        assert summary.last_summarised_id == 12
+        # Second tick: watermark caught up, no further LLM call
+        calls_after_first = len(llm.calls)
+        await worker.tick()
+        assert len(llm.calls) == calls_after_first
+
+    @pytest.mark.asyncio
+    async def test_empty_reply_keeps_prior_summary(self) -> None:
+        store = HistoryStore(":memory:")
+        _seed_turns(store, 12)
+        llm = _ScriptedLLM(replies=["Good prior summary.", ""])
+
+        worker = SummaryWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            turns_threshold=10,
+        )
+        await worker.tick()  # produces "Good prior summary."
+
+        _seed_turns(store, 10)  # now 22 turns; empty reply next tick
+        await worker.tick()
+
+        summary = store.get_summary(familiar_id="fam", channel_id=1)
+        assert summary is not None
+        assert summary.last_summarised_id == 22
+        assert summary.summary_text == "Good prior summary."
+
+    @pytest.mark.asyncio
     async def test_multiple_channels_independently(self) -> None:
         store = HistoryStore(":memory:")
         _seed_turns(store, 12, channel_id=1)
