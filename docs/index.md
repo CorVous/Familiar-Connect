@@ -23,4 +23,5 @@ A Discord bot that reads and speaks in text and voice channels, backed by an eve
   → [voice pipeline](architecture/voice-pipeline.md).
 - **Activities:** [she gets up from the screen](architecture/activities.md).
 - **Every knob, one page:** [Tuning](architecture/tuning.md).
+- **Prompting lessons:** [field findings](architecture/prompting.md).
 - **What's next:** [Roadmap](architecture/roadmap.md).

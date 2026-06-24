@@ -66,6 +66,7 @@ nav:
       - architecture/streaming-bus.md
       - architecture/configuration-model.md
       - architecture/tuning.md
+      - architecture/prompting.md
       - architecture/security.md
       - architecture/decisions.md
       - architecture/roadmap.md
