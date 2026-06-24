@@ -480,9 +480,13 @@ about.
   distinct compaction prompt: it **preserves settled opinions, stances,
   and feelings** (the views the familiar holds consistently) and drops
   only momentary reactions — unlike the person-dossier prompt, which
-  sheds transient feelings wholesale. This makes the self-dossier the
-  substrate for consistently-forming opinions (feeds the planned sleep
-  cycle).
+  sheds transient feelings wholesale. The self-record also drops
+  low-importance "texture" facts, orders the kept facts by importance
+  (descending), and annotates each line with its score. The prompt
+  tells the writer to weight higher-importance stances more heavily
+  when space is tight, so durable core stances win the limited 3-5
+  sentences. This makes the self-dossier the substrate for
+  consistently-forming opinions (feeds the planned sleep cycle).
 - **Layer.** `PeopleDossierLayer` treats the self key as an always-present
   candidate (prepended, exempt from the `max_people` cap), so the
   self-dossier injects **every assemble** even when no one has spoken —
