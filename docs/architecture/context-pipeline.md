@@ -970,8 +970,12 @@ too, so deferred voice-focus shifts apply on the same cadence.
 (`text_focus`, `voice_focus`), each guarded by its own
 `asyncio.Lock`. Shifts are **model-decided and deferred**:
 
-1. The `shift_focus(channel_id)` tool calls `defer_shift` — modality
-   (text/voice) is inferred from the `SubscriptionRegistry`. The
+1. The `shift_focus(channel_id)` tool first **guards the target**: if
+   `channel_id` is not in the `SubscriptionRegistry` the shift is
+   rejected and the tool returns an `available_channels` list (every
+   subscribed channel_id + label) so the model can retry a live target
+   instead of stranding attention on a dead channel. Valid targets call
+   `defer_shift` — modality (text/voice) inferred from the registry. The
    intent is queued, not applied mid-turn. The tool also eagerly
    fetches the target channel's recent turns (≤20) and returns them in
    the tool result, so the agentic loop feeds the channel's content
@@ -988,7 +992,9 @@ too, so deferred voice-focus shifts apply on the same cadence.
 
 Pointers persist in the `focus_pointers` table
 (`familiar_id PK, text_channel_id, voice_channel_id, updated_at`); on
-startup `initialize()` loads them, falling back to the first text and
+startup `initialize()` loads them, **dropping any pointer whose channel
+is no longer subscribed** (a since-removed subscription would otherwise
+strand focus on a dead channel), then falling back to the first text and
 first voice subscription as defaults (`set_focus_immediately`). The
 `channel_names` map (channel_id → display name) is populated from
 Discord on `on_ready` purely for readable logs and the unread digest.

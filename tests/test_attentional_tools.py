@@ -74,6 +74,9 @@ def _make_focus_manager() -> MagicMock:
     fm = MagicMock()
     fm.defer_shift = MagicMock()
     fm.get_focus = MagicMock(return_value=99)
+    fm.is_subscribed = MagicMock(return_value=True)
+    fm.subscribed_channels = MagicMock(return_value=[55, 99])
+    fm.channel_label = MagicMock(side_effect=lambda c: f"#{c}")
     return fm
 
 
@@ -196,6 +199,29 @@ class TestShiftFocusTool:
         result = await _shift_focus_handler({}, ctx)
         parsed = json.loads(result)
         assert "error" in parsed
+
+    @pytest.mark.asyncio
+    async def test_rejects_unsubscribed_channel(self) -> None:
+        # guard: cannot focus a channel the familiar isn't subscribed to
+        fm = _make_focus_manager()
+        fm.is_subscribed = MagicMock(return_value=False)
+        ctx = _make_ctx(focus_manager=fm)
+        result = await _shift_focus_handler({"channel_id": 12345}, ctx)
+        parsed = json.loads(result)
+        assert "error" in parsed
+        fm.defer_shift.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unsubscribed_error_lists_available_channels(self) -> None:
+        # error surfaces valid targets so the model can recover, not stall
+        fm = _make_focus_manager()
+        fm.is_subscribed = MagicMock(return_value=False)
+        fm.subscribed_channels = MagicMock(return_value=[55, 99])
+        ctx = _make_ctx(focus_manager=fm)
+        result = await _shift_focus_handler({"channel_id": 12345}, ctx)
+        parsed = json.loads(result)
+        ids = [c["channel_id"] for c in parsed["available_channels"]]
+        assert ids == [55, 99]
 
     def test_build_shift_focus_tool_name(self) -> None:
         tool = _build_shift_focus_tool_direct()
