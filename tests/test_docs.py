@@ -2,7 +2,7 @@
 
 If a test here fails, documentation and implementation have diverged.
 Fix the mismatch in the same PR — don't ignore the failure. See
-``CLAUDE.md`` for the manual workflow these checks enforce.
+``CONTRIBUTING.md`` for the manual workflow these checks enforce.
 
 The checks are deliberately one-directional: anything a doc names must
 exist in source, but the reverse is not enforced (too many internal

@@ -28,19 +28,21 @@ from familiar_connect.context import (
     CharacterCardLayer,
     RecentHistoryLayer,
 )
+from familiar_connect.focus import FocusManager
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
-from familiar_connect.llm import LLMClient, Message
+from familiar_connect.llm import LLMClient, LLMDelta, Message
 from familiar_connect.processors.text_responder import TextResponder
 from familiar_connect.processors.voice_responder import VoiceResponder
+from familiar_connect.subscriptions import SubscriptionKind, SubscriptionRegistry
+from familiar_connect.tools.registry import ToolContext, ToolRegistry
+from familiar_connect.tools.shift_focus import build_shift_focus_tool
 from familiar_connect.tts_player import MockTTSPlayer
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
-
-    from familiar_connect.focus import FocusManager
 
 
 # ---------------------------------------------------------------------------
@@ -564,3 +566,196 @@ class TestVoiceResponderFocusAware:
         # silent: no TTS, no end_turn
         assert player.calls == []
         fm.end_turn.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Immediate shift_focus (no deferral): peek = real move
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedToolLLM(LLMClient):
+    """LLM stand-in yielding LLMDeltas from a per-call script (tool mode)."""
+
+    def __init__(self, scripts: list[list[LLMDelta]]) -> None:
+        super().__init__(api_key="k", model="m", tool_calling=True)
+        self._scripts = list(scripts)
+        self.calls: list[list[Message]] = []
+
+    async def stream_completion(  # type: ignore[override]
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict] | None = None,  # noqa: ARG002
+    ) -> AsyncIterator[LLMDelta]:
+        self.calls.append(list(messages))
+        script = self._scripts.pop(0) if self._scripts else []
+        for d in script:
+            yield d
+
+
+def _shift_tc(channel_id: int) -> LLMDelta:
+    return LLMDelta(
+        tool_calls=[
+            {
+                "index": 0,
+                "id": "sf-1",
+                "type": "function",
+                "function": {
+                    "name": "shift_focus",
+                    "arguments": f'{{"channel_id": {channel_id}}}',
+                },
+            }
+        ]
+    )
+
+
+def _real_focus_responder(
+    *,
+    tmp_path: Path,
+    llm: LLMClient,
+    send: _CapturingSend,
+) -> tuple[TextResponder, FocusManager, HistoryStore]:
+    """Responder wired to a *real* FocusManager + shift_focus tool.
+
+    Channels 100 + 200 subscribed (text); focus starts on 100.
+    """
+    subs = SubscriptionRegistry(tmp_path / "subscriptions.toml")
+    subs.add(channel_id=100, kind=SubscriptionKind.text, guild_id=99)
+    subs.add(channel_id=200, kind=SubscriptionKind.text, guild_id=99)
+
+    store = HistoryStore(":memory:")
+    async_store = AsyncHistoryStore(store)
+    fm = FocusManager(
+        familiar_id="fam", store=async_store, subscriptions=subs, idle_wake_seconds=0
+    )
+    fm.set_focus_immediately(100, "text")
+
+    card = tmp_path / "character.md"
+    card.write_text("You are a familiar.\n")
+    assembler = Assembler(
+        layers=[
+            CharacterCardLayer(card_path=card),
+            RecentHistoryLayer(store=async_store, window_size=20),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(build_shift_focus_tool())
+
+    def _ctx_factory(
+        channel_id: int, turn_id: str, images: dict | None = None
+    ) -> ToolContext:
+        return ToolContext(
+            familiar_id="fam",
+            channel_id=channel_id,
+            channel_kind="text",
+            turn_id=turn_id,
+            history=async_store,
+            bus=InProcessEventBus(),
+            images=images or {},
+            focus_manager=fm,
+            store=async_store,
+        )
+
+    responder = TextResponder(
+        assembler=assembler,
+        llm_client=llm,
+        send_text=send,
+        history_store=async_store,
+        router=TurnRouter(),
+        familiar_id="fam",
+        focus_manager=fm,
+        tool_registry=registry,
+        tool_context_factory=_ctx_factory,
+    )
+    return responder, fm, store
+
+
+class TestImmediateShiftFocus:
+    @pytest.mark.asyncio
+    async def test_silent_shift_focus_moves_immediately(self, tmp_path: Path) -> None:
+        """shift_focus applies at tool-call time, even on a silent turn.
+
+        Model peeks #200 then stays silent. Because the shift is immediate
+        (not deferred to a reply that never comes), she is now focused on
+        #200 — the peek was a real move.
+        """
+        llm = _ScriptedToolLLM([
+            [_shift_tc(200), LLMDelta(finish_reason="tool_calls")],
+            [LLMDelta(content="<silent>"), LLMDelta(finish_reason="stop")],
+        ])
+        send = _CapturingSend()
+        responder, fm, _ = _real_focus_responder(tmp_path=tmp_path, llm=llm, send=send)
+        bus = InProcessEventBus()
+        await bus.start()
+        try:
+            await responder.handle(_text_event(channel_id=100), bus)
+        finally:
+            await bus.shutdown()
+
+        assert send.calls == []  # silent: nothing posted
+        assert fm.get_focus("text") == 200  # moved at tool-call time
+
+    @pytest.mark.asyncio
+    async def test_silent_peek_then_old_channel_message_stages(
+        self, tmp_path: Path
+    ) -> None:
+        """The #general→#media bug cannot occur under immediate shift.
+
+        Turn 1: peek #200 + silent → she's now in #200. Turn 2: a message
+        in #100 (her *old* channel) is unfocused, so it stages — no reply,
+        no misroute.
+        """
+        llm = _ScriptedToolLLM([
+            [_shift_tc(200), LLMDelta(finish_reason="tool_calls")],
+            [LLMDelta(content="<silent>"), LLMDelta(finish_reason="stop")],
+            # turn 2 should never reach the LLM (message stages)
+            [LLMDelta(content="should not send"), LLMDelta(finish_reason="stop")],
+        ])
+        send = _CapturingSend()
+        responder, fm, store = _real_focus_responder(
+            tmp_path=tmp_path, llm=llm, send=send
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        try:
+            await responder.handle(
+                _text_event(channel_id=100, content="peek", event_id="e-1"), bus
+            )
+            await responder.handle(
+                _text_event(channel_id=100, content="ping", event_id="e-2"), bus
+            )
+        finally:
+            await bus.shutdown()
+
+        assert fm.get_focus("text") == 200
+        assert send.calls == []  # turn 2 staged, not replied/misrouted
+        # the #100 message was staged (consumed_at NULL)
+        raw = store._conn.execute(
+            "SELECT consumed_at FROM turns "
+            "WHERE familiar_id='fam' AND role='user' AND content='ping'"
+        ).fetchone()
+        assert raw is not None
+        assert raw["consumed_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_shift_focus_with_reply_posts_to_new_channel(
+        self, tmp_path: Path
+    ) -> None:
+        """Behavior preserved: shift + actual reply posts to the new channel."""
+        llm = _ScriptedToolLLM([
+            [_shift_tc(200), LLMDelta(finish_reason="tool_calls")],
+            [LLMDelta(content="hello over here"), LLMDelta(finish_reason="stop")],
+        ])
+        send = _CapturingSend()
+        responder, fm, _ = _real_focus_responder(tmp_path=tmp_path, llm=llm, send=send)
+        bus = InProcessEventBus()
+        await bus.start()
+        try:
+            await responder.handle(_text_event(channel_id=100), bus)
+        finally:
+            await bus.shutdown()
+
+        assert fm.get_focus("text") == 200
+        assert len(send.calls) == 1
+        assert send.calls[0][0] == 200
+        assert send.calls[0][1] == "hello over here"

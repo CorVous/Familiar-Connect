@@ -28,8 +28,10 @@ class FocusManager:
     """Per-familiar attentional focus controller.
 
     Two independent focus pointers (text, voice). Focus shifts are
-    model-decided (via shift_focus tool), deferred to end_turn,
-    then applied atomically under per-modality lock.
+    model-decided (via shift_focus tool) and applied immediately at
+    tool-call time under per-modality lock — no deferral. A silent turn
+    therefore still leaves her where she went; there is no pending
+    state to leak into a later turn.
 
     Idle nudge: when the focused channel falls silent for
     ``idle_wake_seconds`` and a non-focused channel gets traffic,
@@ -54,7 +56,6 @@ class FocusManager:
         self._subscriptions = subscriptions
         self._text_focus: int | None = None
         self._voice_focus: int | None = None
-        self._pending_shift: dict[str, int] = {}  # Modality -> channel_id
         self._text_lock = asyncio.Lock()
         self._voice_lock = asyncio.Lock()
         # Idle-nudge state
@@ -67,7 +68,7 @@ class FocusManager:
         self.channel_names: dict[int, str] = {}
         # Channel_id → guild name; populated by bot on_ready
         self.guild_names: dict[int, str] = {}
-        # Called once after end_turn applies ≥1 shift; None disables
+        # Called once after each applied shift; None disables
         self.on_shift: Callable[[], Awaitable[None]] | None = None
 
     async def initialize(self) -> None:
@@ -113,16 +114,41 @@ class FocusManager:
         """Check if channel_id is the active text or voice focus."""
         return channel_id in {self._text_focus, self._voice_focus}
 
-    def defer_shift(self, channel_id: int) -> None:
-        """Register deferred focus shift; modality inferred from subscriptions."""
+    async def shift_now(self, channel_id: int) -> None:
+        """Apply focus shift immediately (at tool-call time).
+
+        Modality inferred from subscriptions. Text shift promotes the
+        target's staged backlog to consumed, moves the pointer, persists,
+        and fires ``on_shift``. No deferral — focus moves now, so a silent
+        turn still leaves her where she went and nothing leaks.
+        """
         kind = self._subscriptions.kind_for(channel_id)
         modality = "voice" if kind is SubscriptionKind.voice else "text"
-        self._pending_shift[modality] = channel_id
-        _logger.debug("defer shift channel=%d modality=%s", channel_id, modality)
-
-    def pending_text_focus(self) -> int | None:
-        """Pending text shift channel_id if deferred; else None."""
-        return self._pending_shift.get("text")
+        lock = self._voice_lock if modality == "voice" else self._text_lock
+        async with lock:
+            if modality == "text":
+                count = await self._store.promote_staged_turns(
+                    familiar_id=self._familiar_id, channel_id=channel_id
+                )
+                self._text_focus = channel_id
+                _logger.info(
+                    f"{ls.tag('🔀 Focus', ls.LC)} "
+                    f"{ls.kv('text', self.channel_label(channel_id), vc=ls.LW)} "
+                    f"{ls.kv('promoted', str(count), vc=ls.LG)}"
+                )
+            else:
+                self._voice_focus = channel_id
+                _logger.info(
+                    f"{ls.tag('🔀 Focus', ls.LC)} "
+                    f"{ls.kv('voice', self.channel_label(channel_id), vc=ls.LW)}"
+                )
+            await self._store.set_focus_pointers(
+                self._familiar_id,
+                text_channel_id=self._text_focus,
+                voice_channel_id=self._voice_focus,
+            )
+        if self.on_shift is not None:
+            await self.on_shift()
 
     def should_wake(self, channel_id: int) -> bool:
         """Whether a non-focused arrival warrants an idle nudge.
@@ -144,37 +170,12 @@ class FocusManager:
         self._last_nudge = self._clock()
 
     async def end_turn(self) -> None:
-        """Apply pending focus shifts; called after each turn completes."""
+        """Per-turn bookkeeping: reset idle clock.
+
+        Focus shifts apply immediately (``shift_now``); nothing is
+        deferred here. Stays async so responders can await it uniformly.
+        """
         self._last_active = self._clock()  # Reset idle clock
-        shifted = False
-        for modality, channel_id in list(self._pending_shift.items()):
-            lock = self._voice_lock if modality == "voice" else self._text_lock
-            async with lock:
-                del self._pending_shift[modality]
-                if modality == "text":
-                    count = await self._store.promote_staged_turns(
-                        familiar_id=self._familiar_id, channel_id=channel_id
-                    )
-                    self._text_focus = channel_id
-                    _logger.info(
-                        f"{ls.tag('🔀 Focus', ls.LC)} "
-                        f"{ls.kv('text', self.channel_label(channel_id), vc=ls.LW)} "
-                        f"{ls.kv('promoted', str(count), vc=ls.LG)}"
-                    )
-                else:
-                    self._voice_focus = channel_id
-                    _logger.info(
-                        f"{ls.tag('🔀 Focus', ls.LC)} "
-                        f"{ls.kv('voice', self.channel_label(channel_id), vc=ls.LW)}"
-                    )
-                await self._store.set_focus_pointers(
-                    self._familiar_id,
-                    text_channel_id=self._text_focus,
-                    voice_channel_id=self._voice_focus,
-                )
-                shifted = True
-        if shifted and self.on_shift is not None:
-            await self.on_shift()
 
     def channel_label(self, channel_id: int | None) -> str:
         """Format channel_id as '#name(id)' or '#id' when name unknown."""
