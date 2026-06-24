@@ -42,6 +42,10 @@ markdown_extensions:
   - toc:
       permalink: true
   - pymdownx.details
+  - pymdownx.snippets:
+      check_paths: true
+      base_path:
+        - .
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -62,6 +66,7 @@ nav:
       - architecture/context-pipeline.md
       - architecture/memory-strategies.md
       - architecture/activities.md
+      - architecture/sleep.md
       - architecture/voice-pipeline.md
       - architecture/streaming-bus.md
       - architecture/configuration-model.md

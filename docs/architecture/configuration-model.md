@@ -30,6 +30,12 @@ Surface today:
 - `display_tz` — IANA timezone (default `"UTC"`) the final-reminder
   clock renders in (e.g. `"It is now: … 2:30PM PDT"`). Invalid names
   (e.g. `"PST"`) fail fast at config load.
+- `[sleep]` — sleep schedule, character-domain wall-clock config
+  localized via `display_tz`. `window = "HH:MM-HH:MM"` (may wrap
+  midnight; bad format fails fast) and `grace_minutes` (default 30)
+  drive the reserved `sleep` activity (catalog entry in
+  `activities.toml`). Omit the table to leave the schedule disarmed.
+  See [Sleep § The window](sleep.md#the-window).
 - `aliases` — names the familiar answers to.
 - `[providers.history].voice_window_size` / `.text_window_size` —
   recent-history layer windows, tiered by responder (defaults
@@ -86,6 +92,15 @@ Surface today:
   The shipped default is a short roleplay-etiquette note nudging the
   familiar to lean on `<silent>`. See
   [Context pipeline — Final reminder](context-pipeline.md#final-reminder).
+- `[prompt].sleep_consolidation_system`, `sleep_stance_system`,
+  `sleep_synthesis_system`, `dream_extraction_clause` — static
+  instruction text for the sleep passes and the fact-extractor's
+  dream-framing clause. Dynamic window data is interpolated in code;
+  only the wording is configurable. Placeholders: the stance / synthesis
+  fields take `{self_name}`; `dream_extraction_clause` takes
+  `{self_name}`, `{self_key}`, `{ids}`. Validation rails stay
+  code-enforced regardless of this text. See
+  [Sleep — Prompt text is config, rails are code](sleep.md#prompt-text-is-config-rails-are-code).
 
 ### Default profile
 

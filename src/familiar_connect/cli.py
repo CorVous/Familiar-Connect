@@ -8,7 +8,11 @@ import sys
 from dotenv import load_dotenv
 
 from familiar_connect import __version__, log_style
-from familiar_connect.commands import diagnose_cmd, run_cmd, version_cmd
+from familiar_connect.commands import (
+    diagnose_cmd,
+    run_cmd,
+    version_cmd,
+)
 from familiar_connect.log_style import StyledFormatter
 
 # Dynamic package name from installed metadata

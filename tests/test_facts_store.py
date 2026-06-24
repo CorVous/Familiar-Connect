@@ -4,14 +4,30 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from familiar_connect.history.store import (
     Fact,
+    FactDraft,
     FactSubject,
     HistoryStore,
     _canonical_keys_from_subjects_json,
+    _placeholders,
 )
+
+
+class TestPlaceholders:
+    """``IN``-clause placeholder list — bound ``?`` marks only."""
+
+    def test_emits_bound_marks(self) -> None:
+        assert _placeholders(3) == "?,?,?"
+        assert _placeholders(1) == "?"
+
+    def test_empty_for_nonpositive(self) -> None:
+        assert not _placeholders(0)
+        assert not _placeholders(-1)
+
+    def test_only_question_marks_never_data(self) -> None:
+        # Safety contract: result is purely ``?`` + ``,`` — no data ever
+        assert set(_placeholders(5)) <= {"?", ","}
 
 
 class TestCanonicalKeysFromSubjectsJson:
@@ -203,7 +219,7 @@ class TestFactSupersession:
             text="Aria is allergic to strawberries now.",
             source_turn_ids=[5],
         )
-        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        store.supersede(familiar_id="fam", obsolete_facts=[1], new_fact=new.id)
         # Reload via recent (include superseded so we can inspect the old row)
         all_facts = store.recent_facts(
             familiar_id="fam", limit=10, include_superseded=True
@@ -220,7 +236,7 @@ class TestFactSupersession:
             text="Aria is allergic to strawberries now.",
             source_turn_ids=[5],
         )
-        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        store.supersede(familiar_id="fam", obsolete_facts=[1], new_fact=new.id)
         current = store.recent_facts(familiar_id="fam", limit=10)
         texts = {f.text for f in current}
         assert "Aria likes strawberries." not in texts
@@ -234,7 +250,7 @@ class TestFactSupersession:
             text="Aria is allergic to strawberries now.",
             source_turn_ids=[5],
         )
-        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        store.supersede(familiar_id="fam", obsolete_facts=[1], new_fact=new.id)
         all_facts = store.recent_facts(
             familiar_id="fam", limit=10, include_superseded=True
         )
@@ -250,29 +266,11 @@ class TestFactSupersession:
             text="Aria is allergic to strawberries now.",
             source_turn_ids=[5],
         )
-        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
+        store.supersede(familiar_id="fam", obsolete_facts=[1], new_fact=new.id)
         found = store.search_facts(familiar_id="fam", query="strawberry", limit=10)
         texts = {f.text for f in found}
         assert "Aria likes strawberries." not in texts
         assert "Aria is allergic to strawberries now." in texts
-
-    def test_supersede_idempotent_raises_on_already_superseded(self) -> None:
-        """Supersession is one-shot — re-superseding signals a bug upstream."""
-        store = _store_with_turns_and_facts()
-        new = store.append_fact(
-            familiar_id="fam",
-            channel_id=1,
-            text="updated.",
-            source_turn_ids=[5],
-        )
-        store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
-        with pytest.raises(ValueError, match="already superseded"):
-            store.supersede_fact(familiar_id="fam", old_id=1, new_id=new.id)
-
-    def test_supersede_unknown_id_raises(self) -> None:
-        store = _store_with_turns_and_facts()
-        with pytest.raises(ValueError, match="unknown fact"):
-            store.supersede_fact(familiar_id="fam", old_id=999, new_id=1)
 
 
 class TestSupersedeInvalidatesDossier:
@@ -318,7 +316,7 @@ class TestSupersedeInvalidatesDossier:
             last_fact_id=old_id,
             dossier_text="Aria loves hiking.",
         )
-        store.supersede_fact(familiar_id="fam", old_id=old_id, new_id=new_id)
+        store.supersede(familiar_id="fam", obsolete_facts=[old_id], new_fact=new_id)
         assert (
             store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
             is None
@@ -352,7 +350,7 @@ class TestSupersedeInvalidatesDossier:
             last_fact_id=1,
             dossier_text="Aria loves hiking.",
         )
-        store.supersede_fact(familiar_id="fam", old_id=old.id, new_id=new.id)
+        store.supersede(familiar_id="fam", obsolete_facts=[old.id], new_fact=new.id)
         assert (
             store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
             is not None
@@ -373,7 +371,7 @@ class TestSupersedeInvalidatesDossier:
             last_fact_id=old_id,
             dossier_text="Boris works nights.",
         )
-        store.supersede_fact(familiar_id="fam", old_id=old_id, new_id=new_id)
+        store.supersede(familiar_id="fam", obsolete_facts=[old_id], new_fact=new_id)
         assert (
             store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
             is None
@@ -398,11 +396,399 @@ class TestSupersedeInvalidatesDossier:
             last_fact_id=old_id,
             dossier_text="Aria, per other familiar.",
         )
-        store.supersede_fact(familiar_id="fam", old_id=old_id, new_id=new_id)
+        store.supersede(familiar_id="fam", obsolete_facts=[old_id], new_fact=new_id)
         assert (
             store.get_people_dossier(familiar_id="other", canonical_key="discord:A")
             is not None
         )
+
+
+class TestRetireForm:
+    """Retire form (``supersede(new_fact=None)``) read + dossier effects.
+
+    Metadata + skip-stale semantics live in ``TestSupersedeUnified``;
+    here we pin the read-path exclusion and dossier invalidation a
+    no-replacement retire triggers.
+    """
+
+    def _store_with_fact(self) -> tuple[HistoryStore, int]:
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam", channel_id=1, role="user", content="hi", author=None
+        )
+        f = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Noise that should not have been minted.",
+            source_turn_ids=[1],
+        )
+        return store, f.id
+
+    def test_retired_fact_excluded_from_current(self) -> None:
+        store, fid = self._store_with_fact()
+        store.supersede(familiar_id="fam", obsolete_facts=[fid], new_fact=None)
+        assert store.recent_facts(familiar_id="fam", limit=10) == []
+
+    def test_retire_invalidates_subject_dossier(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam", channel_id=1, role="user", content="hi", author=None
+        )
+        subjects = (FactSubject(canonical_key="discord:A", display_at_write="Aria"),)
+        f = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria once claimed a thing — bit, not fact.",
+            source_turn_ids=[1],
+            subjects=subjects,
+        )
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:A",
+            last_fact_id=f.id,
+            dossier_text="Aria claimed a thing.",
+        )
+        store.supersede(familiar_id="fam", obsolete_facts=[f.id], new_fact=None)
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is None
+        )
+
+
+class TestSupersedeUnified:
+    """Unified ``supersede`` — one mutation surface over retire + merge.
+
+    Subsumes retire (``new_fact=None``) and the apply.py
+    decomposition of merge (``new_fact`` a draft to mint, or an
+    already-minted fact/id). The store owns merge lineage +
+    provenance: obsolete rows point at the replacement (many->one),
+    and the minted fact's ``source_turn_ids`` is the union of the
+    obsolete rows' provenance — the caller never supplies it.
+    """
+
+    def _store(self) -> HistoryStore:
+        store = HistoryStore(":memory:")
+        for i in range(6):
+            store.append_turn(
+                familiar_id="fam",
+                channel_id=1,
+                role="user",
+                content=f"turn {i}",
+                author=None,
+            )
+        return store
+
+    def test_retire_form_marks_superseded_without_replacement(self) -> None:
+        store = self._store()
+        f = store.append_fact(
+            familiar_id="fam", channel_id=1, text="junk.", source_turn_ids=[1]
+        )
+        store.supersede(familiar_id="fam", obsolete_facts=[f.id], new_fact=None)
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        row = next(r for r in all_facts if r.id == f.id)
+        assert row.superseded_at is not None
+        assert row.superseded_by is None
+
+    def test_merge_points_all_obsolete_at_minted_many_to_one(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="Aria likes A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="Aria likes B.", source_turn_ids=[2]
+        )
+        c = store.append_fact(
+            familiar_id="fam", channel_id=1, text="Aria likes C.", source_turn_ids=[3]
+        )
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id, c.id],
+            new_fact=FactDraft(
+                channel_id=1, text="Aria likes A, B, and C.", subjects=()
+            ),
+        )
+        minted = result.minted
+        assert minted is not None
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[a.id].superseded_by == minted.id
+        assert by_id[b.id].superseded_by == minted.id
+        assert by_id[c.id].superseded_by == minted.id
+        # minted row is current + FTS-searchable
+        current = store.recent_facts(familiar_id="fam", limit=10)
+        assert minted.id in {r.id for r in current}
+        found = store.search_facts(familiar_id="fam", query="Aria", limit=10)
+        assert minted.id in {r.id for r in found}
+
+    def test_store_owns_ancestry_resolution(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        c = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact C.", source_turn_ids=[3]
+        )
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id, c.id],
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        assert result.minted is not None
+        ancestors = store.ancestors_of(familiar_id="fam", fact_id=result.minted.id)
+        assert {f.id for f in ancestors} == {a.id, b.id, c.id}
+
+    def test_store_owns_provenance_union(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1, 2]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2, 3]
+        )
+        c = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact C.", source_turn_ids=[4]
+        )
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id, c.id],
+            # caller supplies NO source_turn_ids — store computes the union
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        assert result.minted is not None
+        assert set(result.minted.source_turn_ids) == {1, 2, 3, 4}
+
+    def test_existing_fact_form_mints_no_new_row(self) -> None:
+        store = self._store()
+        x = store.append_fact(
+            familiar_id="fam", channel_id=1, text="old.", source_turn_ids=[1]
+        )
+        existing = store.append_fact(
+            familiar_id="fam", channel_id=1, text="replacement.", source_turn_ids=[2]
+        )
+        before = store.latest_fact_id(familiar_id="fam")
+        result = store.supersede(
+            familiar_id="fam", obsolete_facts=[x.id], new_fact=existing
+        )
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+        assert result.minted is None
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        row = next(r for r in all_facts if r.id == x.id)
+        assert row.superseded_by == existing.id
+
+    def test_merge_declined_atomically_when_any_obsolete_stale(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        before = store.latest_fact_id(familiar_id="fam")
+        # a concurrent writer already retired `a` before our merge runs
+        store.supersede(familiar_id="fam", obsolete_facts=[a.id], new_fact=None)
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id],
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        # merge declined whole: no phantom minted, nothing newly superseded
+        assert result.minted is None
+        assert result.superseded == ()
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+        # the still-current `b` is untouched — not superseded by a phantom
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[b.id].superseded_at is None
+        assert by_id[b.id].superseded_by is None
+        # the stale `a` is recorded as the reason the merge was declined
+        assert a.id in {sid for sid, _ in result.skipped}
+
+    def test_merge_empty_obsolete_is_noop(self) -> None:
+        store = self._store()
+        before = store.latest_fact_id(familiar_id="fam")
+        result = store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[],
+            new_fact=FactDraft(channel_id=1, text="orphan merge.", subjects=()),
+        )
+        assert result.minted is None
+        assert result.superseded == ()
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+
+    def test_retire_form_skips_stale_processes_rest(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        # a concurrent writer already retired `a` before our retire runs
+        store.supersede(familiar_id="fam", obsolete_facts=[a.id], new_fact=None)
+        # retire form (new_fact=None) is per-id skip-and-record, NOT atomic
+        result = store.supersede(
+            familiar_id="fam", obsolete_facts=[a.id, b.id], new_fact=None
+        )
+        # b is retired; a is skipped (already gone), not fatal
+        assert b.id in result.superseded
+        assert a.id not in result.superseded
+        assert a.id in {sid for sid, _ in result.skipped}
+        assert result.minted is None
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[b.id].superseded_at is not None
+        assert by_id[b.id].superseded_by is None
+
+    def test_existing_id_form_skips_stale_processes_rest(self) -> None:
+        store = self._store()
+        a = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact A.", source_turn_ids=[1]
+        )
+        b = store.append_fact(
+            familiar_id="fam", channel_id=1, text="fact B.", source_turn_ids=[2]
+        )
+        existing = store.append_fact(
+            familiar_id="fam", channel_id=1, text="replacement.", source_turn_ids=[3]
+        )
+        # a concurrent writer already retired `a` before our repoint runs
+        store.supersede(familiar_id="fam", obsolete_facts=[a.id], new_fact=None)
+        before = store.latest_fact_id(familiar_id="fam")
+        # existing-id form is per-id skip-and-record, NOT atomic, mints nothing
+        result = store.supersede(
+            familiar_id="fam", obsolete_facts=[a.id, b.id], new_fact=existing
+        )
+        assert store.latest_fact_id(familiar_id="fam") == before  # no new row
+        assert result.minted is None
+        assert b.id in result.superseded
+        assert a.id not in result.superseded
+        assert a.id in {sid for sid, _ in result.skipped}
+        all_facts = store.recent_facts(
+            familiar_id="fam", limit=10, include_superseded=True
+        )
+        by_id = {r.id: r for r in all_facts}
+        assert by_id[b.id].superseded_by == existing.id
+
+    def test_invalidates_dossier_per_obsolete_subject(self) -> None:
+        store = self._store()
+        subj_a = (FactSubject(canonical_key="discord:A", display_at_write="Aria"),)
+        subj_b = (FactSubject(canonical_key="discord:B", display_at_write="Boris"),)
+        a = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Aria thing.",
+            source_turn_ids=[1],
+            subjects=subj_a,
+        )
+        b = store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            text="Boris thing.",
+            source_turn_ids=[2],
+            subjects=subj_b,
+        )
+        for key in ("discord:A", "discord:B"):
+            store.put_people_dossier(
+                familiar_id="fam",
+                canonical_key=key,
+                last_fact_id=a.id,
+                dossier_text="baked.",
+            )
+        store.supersede(
+            familiar_id="fam",
+            obsolete_facts=[a.id, b.id],
+            new_fact=FactDraft(channel_id=1, text="merged.", subjects=()),
+        )
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:A")
+            is None
+        )
+        assert (
+            store.get_people_dossier(familiar_id="fam", canonical_key="discord:B")
+            is None
+        )
+
+
+class TestFactsByIds:
+    """Exact fetch by id set — used by sleep-apply to snapshot sources."""
+
+    def test_fetches_requested_including_superseded(self) -> None:
+        store = _store_with_turns_and_facts()
+        new = store.append_fact(
+            familiar_id="fam", channel_id=1, text="replacement", source_turn_ids=[5]
+        )
+        store.supersede(familiar_id="fam", obsolete_facts=[1], new_fact=new.id)
+        got = store.facts_by_ids(familiar_id="fam", ids=[1, 2])
+        assert {f.id for f in got} == {1, 2}
+        # superseded row still returned (snapshot must see it)
+        assert next(f for f in got if f.id == 1).superseded_at is not None
+
+    def test_empty_and_unknown(self) -> None:
+        store = _store_with_turns_and_facts()
+        assert store.facts_by_ids(familiar_id="fam", ids=[]) == []
+        assert store.facts_by_ids(familiar_id="fam", ids=[999]) == []
+
+    def test_scoped_to_familiar(self) -> None:
+        store = _store_with_turns_and_facts()
+        store.append_fact(
+            familiar_id="other", channel_id=1, text="x", source_turn_ids=[1]
+        )
+        got = store.facts_by_ids(familiar_id="other", ids=[1, 2, 3])
+        assert all(f.familiar_id == "other" for f in got)
+
+
+class TestSleepWatermark:
+    """Two-axis watermark: hygiene owns fact id, dream owns turn id.
+
+    ``advance_sleep_watermark`` is partial-update — each pass touches
+    only its own axis so neither can clobber the other's progress.
+    """
+
+    def test_get_unset_returns_none(self) -> None:
+        store = HistoryStore(":memory:")
+        assert store.get_sleep_watermark(familiar_id="fam") is None
+
+    def test_advance_inserts_with_zero_for_omitted_axis(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(familiar_id="fam", last_fact_id=42)
+        wm = store.get_sleep_watermark(familiar_id="fam")
+        assert wm is not None
+        assert (wm.last_fact_id, wm.last_turn_id) == (42, 0)
+
+    def test_advance_updates_only_named_axis(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(familiar_id="fam", last_fact_id=42)
+        # dream advances turn axis — fact axis must be untouched
+        store.advance_sleep_watermark(familiar_id="fam", last_turn_id=99)
+        wm = store.get_sleep_watermark(familiar_id="fam")
+        assert wm is not None
+        assert (wm.last_fact_id, wm.last_turn_id) == (42, 99)
+
+    def test_advance_both_axes(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(
+            familiar_id="fam", last_fact_id=10, last_turn_id=20
+        )
+        wm = store.get_sleep_watermark(familiar_id="fam")
+        assert wm is not None
+        assert (wm.last_fact_id, wm.last_turn_id) == (10, 20)
+
+    def test_advance_noop_when_both_none(self) -> None:
+        store = HistoryStore(":memory:")
+        store.advance_sleep_watermark(familiar_id="fam")
+        assert store.get_sleep_watermark(familiar_id="fam") is None
 
 
 class TestFactBiTemporal:
@@ -530,7 +916,7 @@ class TestFactBiTemporal:
             source_turn_ids=[2],
             valid_from=datetime(2025, 6, 1, tzinfo=UTC),
         )
-        store.supersede_fact(familiar_id="fam", old_id=old.id, new_id=new.id)
+        store.supersede(familiar_id="fam", obsolete_facts=[old.id], new_fact=new.id)
         # As of February the world believed Aria liked strawberries.
         feb = datetime(2025, 2, 1, tzinfo=UTC)
         slice_feb = store.recent_facts(familiar_id="fam", limit=10, as_of=feb)
@@ -795,7 +1181,9 @@ class TestFactDedup:
             source_turn_ids=[2],
             subjects=subj,
         )
-        store.supersede_fact(familiar_id="fam", old_id=old.id, new_id=replacement.id)
+        store.supersede(
+            familiar_id="fam", obsolete_facts=[old.id], new_fact=replacement.id
+        )
         # re-stating the retired fact inserts a fresh current row.
         again = store.append_fact(
             familiar_id="fam",
