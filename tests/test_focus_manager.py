@@ -105,7 +105,10 @@ class TestFocusManagerInitialize:
     async def test_initialize_loads_focus_pointers(self, tmp_path: Path) -> None:
 
         store = _make_store(text_channel_id=10, voice_channel_id=20)
-        reg = _make_registry(tmp_path)
+        reg = _make_registry(
+            tmp_path,
+            channel_kind={10: SubscriptionKind.text, 20: SubscriptionKind.voice},
+        )
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.initialize()
         assert fm.get_focus("text") == 10
@@ -121,6 +124,77 @@ class TestFocusManagerInitialize:
         assert fm.get_focus("text") is None
         assert fm.get_focus("voice") is None
 
+    @pytest.mark.asyncio
+    async def test_initialize_drops_unsubscribed_text_focus(
+        self, tmp_path: Path
+    ) -> None:
+        # persisted pointer to a channel no longer subscribed → cleared,
+        # not stranded (startup fallback then re-seeds a live channel)
+        store = _make_store(text_channel_id=10)
+        reg = _make_registry(tmp_path)  # 10 not subscribed
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.get_focus("text") is None
+
+    @pytest.mark.asyncio
+    async def test_initialize_drops_unsubscribed_voice_focus(
+        self, tmp_path: Path
+    ) -> None:
+        store = _make_store(voice_channel_id=20)
+        reg = _make_registry(tmp_path)  # 20 not subscribed
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.get_focus("voice") is None
+
+    @pytest.mark.asyncio
+    async def test_initialize_keeps_subscribed_focus(self, tmp_path: Path) -> None:
+        store = _make_store(text_channel_id=10, voice_channel_id=20)
+        reg = _make_registry(
+            tmp_path,
+            channel_kind={10: SubscriptionKind.text, 20: SubscriptionKind.voice},
+        )
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        await fm.initialize()
+        assert fm.get_focus("text") == 10
+        assert fm.get_focus("voice") == 20
+
+
+# ---------------------------------------------------------------------------
+# FocusManager.is_subscribed / subscribed_channels
+# ---------------------------------------------------------------------------
+
+
+class TestFocusManagerSubscriptionHelpers:
+    def test_is_subscribed_true(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        assert fm.is_subscribed(5) is True
+
+    def test_is_subscribed_false(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        assert fm.is_subscribed(99) is False
+
+    def test_subscribed_channels_lists_text_and_voice(self, tmp_path: Path) -> None:
+        store = _make_store()
+        reg = _make_registry(
+            tmp_path,
+            channel_kind={5: SubscriptionKind.text, 8: SubscriptionKind.voice},
+        )
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        assert fm.subscribed_channels() == [5, 8]
+
+    def test_subscribed_channels_dedups_dual_kind(self, tmp_path: Path) -> None:
+        # channel hosting both text + voice appears once
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        reg.add(channel_id=5, kind=SubscriptionKind.text, guild_id=None)
+        reg.add(channel_id=5, kind=SubscriptionKind.voice, guild_id=1)
+        fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+        assert fm.subscribed_channels() == [5]
+
 
 # ---------------------------------------------------------------------------
 # FocusManager.is_focused
@@ -132,7 +206,7 @@ class TestFocusManagerIsFocused:
     async def test_is_focused_true_for_text_channel(self, tmp_path: Path) -> None:
 
         store = _make_store(text_channel_id=42)
-        reg = _make_registry(tmp_path)
+        reg = _make_registry(tmp_path, channel_kind={42: SubscriptionKind.text})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.initialize()
         assert fm.is_focused(42) is True
@@ -141,7 +215,7 @@ class TestFocusManagerIsFocused:
     async def test_is_focused_true_for_voice_channel(self, tmp_path: Path) -> None:
 
         store = _make_store(voice_channel_id=77)
-        reg = _make_registry(tmp_path)
+        reg = _make_registry(tmp_path, channel_kind={77: SubscriptionKind.voice})
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.initialize()
         assert fm.is_focused(77) is True
@@ -404,7 +478,10 @@ class TestModalitiesIndependent:
     async def test_text_shift_does_not_affect_voice(self, tmp_path: Path) -> None:
 
         store = _make_store(voice_channel_id=99)
-        reg = _make_registry(tmp_path, channel_kind={5: SubscriptionKind.text})
+        reg = _make_registry(
+            tmp_path,
+            channel_kind={5: SubscriptionKind.text, 99: SubscriptionKind.voice},
+        )
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.initialize()
         fm.defer_shift(channel_id=5)
@@ -417,7 +494,10 @@ class TestModalitiesIndependent:
     async def test_voice_shift_does_not_affect_text(self, tmp_path: Path) -> None:
 
         store = _make_store(text_channel_id=11)
-        reg = _make_registry(tmp_path, channel_kind={8: SubscriptionKind.voice})
+        reg = _make_registry(
+            tmp_path,
+            channel_kind={8: SubscriptionKind.voice, 11: SubscriptionKind.text},
+        )
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.initialize()
         fm.defer_shift(channel_id=8)
