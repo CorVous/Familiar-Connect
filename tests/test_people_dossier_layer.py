@@ -237,6 +237,55 @@ class TestPeopleDossierLayer:
         # Channel 1 has no turns ⇒ no candidates ⇒ empty.
         assert not await layer.build(_ctx(channel_id=1))
 
+    @pytest.mark.asyncio
+    async def test_self_dossier_always_injected(self) -> None:
+        """Self-dossier injects even with no channel turns (always present)."""
+        store = HistoryStore(":memory:")
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="self:fam",
+            last_fact_id=7,
+            dossier_text="Sapphire favours sharp, provocative bits.",
+        )
+        layer = PeopleDossierLayer(
+            store=AsyncHistoryStore(store), familiar_display_name="Sapphire"
+        )
+        # channel 1 has no turns → no person candidates at all
+        out = await layer.build(_ctx())
+        assert "Sapphire favours sharp, provocative bits." in out
+        # header reads as the familiar, not the raw key
+        assert "self:fam" not in out
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_injected_alongside_people(self) -> None:
+        store = HistoryStore(":memory:")
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=1,
+            role="user",
+            content="hi",
+            author=_author("1", display="Cass"),
+        )
+        store.upsert_account(_author("1", display="Cass"))
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="discord:1",
+            last_fact_id=5,
+            dossier_text="Cass enjoys pho.",
+        )
+        store.put_people_dossier(
+            familiar_id="fam",
+            canonical_key="self:fam",
+            last_fact_id=7,
+            dossier_text="Sapphire favours sharp bits.",
+        )
+        layer = PeopleDossierLayer(
+            store=AsyncHistoryStore(store), familiar_display_name="Sapphire"
+        )
+        out = await layer.build(_ctx())
+        assert "Cass enjoys pho." in out
+        assert "Sapphire favours sharp bits." in out
+
     def test_invalidation_key_changes_when_new_turn(self) -> None:
         store = HistoryStore(":memory:")
         store.append_turn(

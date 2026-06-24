@@ -18,6 +18,15 @@ turn (``[returned from <label>]`` display prefix; ``turns.mode`` tag
 ``activity_return`` keys the fact-extractor skip), archives long
 absences, promotes staged turns since departure, and wakes the model
 only with cause (missed pings).
+
+The reserved ``sleep`` catalog entry rides the same machinery with an
+engine-owned schedule (tick loop): bedtime nudge at window start,
+force-start past grace, wake fixed at window end. Sleep departure
+fires the consolidation+opinion passes in the background; the return
+turn is the dream prose (``turns.mode`` tag ``sleep_return`` —
+extracted with dream framing, see fact_extractor), also minted as a
+dream-framed ``self:`` fact (journal stopgap). See
+docs/architecture/sleep.md.
 """
 
 from __future__ import annotations
@@ -28,27 +37,43 @@ import inspect
 import logging
 import random
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 from zoneinfo import ZoneInfo
 
 from familiar_connect import log_style as ls
+from familiar_connect.activities.config import SLEEP_TYPE_ID
 from familiar_connect.bus.envelope import Event
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
-from familiar_connect.history.store import ActivityRecord
-from familiar_connect.identity import Author, format_turn_for_transcript
+from familiar_connect.history.store import ActivityRecord, FactSubject
+from familiar_connect.identity import (
+    Author,
+    format_turn_for_transcript,
+    self_canonical_key,
+)
 from familiar_connect.llm import Message
+from familiar_connect.sleep.maintenance import (
+    DEFAULT_PASSES,
+    MaintenanceContext,
+    MaintenanceRun,
+    SleepPromptText,
+    create_passes,
+    run_passes,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from datetime import time
+    from pathlib import Path
 
     from familiar_connect.activities.config import ActivitiesConfig, ActivityType
     from familiar_connect.bus.protocols import EventBus
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.history.store import HistoryTurn
     from familiar_connect.llm import LLMClient
+    from familiar_connect.sleep.opinion_formation import OpinionPlan
 
 _logger = logging.getLogger(__name__)
 
@@ -56,6 +81,9 @@ _logger = logging.getLogger(__name__)
 RETURN_TURN_MARKER_PREFIX = "[returned from "
 # ``turns.mode`` tag on return turns — fact-extractor skip keys on it
 ACTIVITY_RETURN_MODE = "activity_return"
+# ``turns.mode`` tag on sleep-return (dream) turns — extractor processes
+# these with dream framing instead of skipping
+SLEEP_RETURN_MODE = "sleep_return"
 
 # boot recovery: past-due return fires at now+floor, never inline —
 # bus consumers + Discord login must exist before the wake publishes
@@ -69,6 +97,10 @@ _SCAN_LIMIT = 500  # turns scanned since departure
 _MAX_EXCERPTS = 3  # newest pings that get turns_around excerpts
 _EXCERPT_SPAN = 2  # turns each side of the ping anchor (~5 total)
 _VISIBLE_TAIL = 10  # pings within last-few visible turns skip excerpts
+
+# start_activity('sleep') allowed at most this long before the window —
+# the fixed wake at window END would make an earlier call a huge absence
+_EARLY_BED_MINUTES = 60
 
 # model-facing idle-nudge wake content. persists as a synthetic user
 # turn (AlarmWaker shape) so the model sees it in recent history; the
@@ -85,6 +117,24 @@ _PROVENANCE_RAIL = (
     "experience. Experiences are about places, things, and yourself — "
     "NEVER invent claims, conversations, or encounters involving real "
     "people. Plain prose, no quotation marks, no preamble."
+)
+
+# model-facing bedtime-nudge wake content — going to bed willingly is
+# the model's call; the grace backstop puts her to bed regardless
+_BEDTIME_NUDGE_CONTENT = (
+    "[late: your sleep window has begun. Wrap up and head to bed — "
+    "start_activity with 'sleep'. Nobody around: call silent() with it "
+    "to slip away without posting a goodnight. Stay up much longer and "
+    "sleep will claim you anyway.]"
+)
+
+_DREAM_RAIL = (
+    "Write a short first-person dream account (2-4 sentences) — what "
+    "you dreamed last night, told on waking. It is openly a dream: "
+    "vivid, a little strange, woven from the seed and any listed "
+    "stances. NEVER present dream events as real, and never invent "
+    "claims, conversations, or encounters involving real people. "
+    "Plain prose, no quotation marks, no preamble."
 )
 
 
@@ -134,10 +184,16 @@ class ActivityEngine:
         familiar_id: str,
         display_tz: str,
         bot_user_id: Callable[[], int | None],
+        sleep_window: tuple[time, time] | None = None,
+        sleep_grace_minutes: int = 30,
         voice_active_fn: Callable[[], bool] = lambda: False,
         now_fn: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         rng: random.Random | None = None,
         nudge_tick_seconds: float = 60.0,
+        familiar_display_name: str | None = None,
+        sleep_passes_enabled: bool = False,
+        seed_dream_path: Path | None = None,
+        sleep_prompts: SleepPromptText | None = None,
     ) -> None:
         self._store = store
         self._config = config
@@ -147,6 +203,19 @@ class ActivityEngine:
         self._presence_cb = presence_cb
         self._familiar_id = familiar_id
         self._tz = ZoneInfo(display_tz)
+        self._display_tz_name = display_tz
+        # sleep schedule: wall-clock config from character.toml (localized
+        # via display_tz here). window None ⇒ schedule disarmed. The sleep
+        # ACTIVITY still lives in the catalog; only these VALUES relocated.
+        self._sleep_window = sleep_window
+        self._sleep_grace_minutes = sleep_grace_minutes
+        self._display_name = familiar_display_name or familiar_id.title()
+        # sleep lifecycle: passes on/off switch + one-shot authored first dream
+        self._sleep_passes_enabled = sleep_passes_enabled
+        self._seed_dream_path = seed_dream_path
+        # config-sourced static prompt text for the sleep passes (phrasing
+        # only; rails stay code-enforced). default = in-code defaults.
+        self._sleep_prompts = sleep_prompts or SleepPromptText()
         # late-bound: run.py wires before Discord login fills the real id
         self._bot_user_id_fn = bot_user_id
         self._voice_active_fn = voice_active_fn
@@ -170,6 +239,11 @@ class ActivityEngine:
         self._last_nudge: datetime | None = None
         self._last_return: datetime | None = None
         self._nudge_task: asyncio.Task[None] | None = None
+        # sleep-window state: occurrence start already nudged, the
+        # night's opinion-pass result (dream material), the running passes
+        self._bedtime_nudge_occ: datetime | None = None
+        self._last_opinion_plan: OpinionPlan | None = None
+        self._sleep_passes_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -193,6 +267,12 @@ class ActivityEngine:
         self._active = row
         self._departure_channel_id = self._focus.get_focus("text")
         self._departure_turn_id = await self._recover_departure_turn_id(row)
+        # away presence for the reloaded row — dead pre-login (cb ready
+        # guard drops it); prod relies on on_ready → resync_presence.
+        # kept so engine-unit tests exercise the reload path directly
+        await self._set_presence(
+            self._away_status(self._type_for(row.type_id)), row.label
+        )
         _logger.info(
             f"{ls.tag('Activity', ls.G)} reloaded "
             f"{ls.kv('label', row.label, vc=ls.G)} "
@@ -206,12 +286,35 @@ class ActivityEngine:
         else:
             self._arm_return_timer(row.planned_return_at)
 
+    async def resync_presence(self) -> None:
+        """Re-issue away presence for an in-flight activity; idle ⇒ no-op.
+
+        Prod path for restart-mid-activity: engine starts before
+        Discord login, so :meth:`start`'s away call is dropped by the
+        cb's ready guard, and on_ready's focus sync sets online.
+        on_ready calls this after that sync — also covers gateway
+        reconnects, which reset presence.
+        """
+        active = self._active
+        if active is None:
+            return
+        await self._set_presence(
+            self._away_status(self._type_for(active.type_id)), active.label
+        )
+
     async def stop(self) -> None:
-        """Cancel return timer + nudge loop. Doesn't modify DB — restart-safe."""
+        """Cancel return timer + nudge loop + sleep passes.
+
+        Doesn't modify DB — restart-safe (apply is idempotent; the
+        passes re-cover an interrupted window next sleep).
+        """
         await self._cancel_return_timer()
         task = self._nudge_task
         self._nudge_task = None
         await _cancel_task(task)
+        passes = self._sleep_passes_task
+        self._sleep_passes_task = None
+        await _cancel_task(passes)
 
     async def _cancel_return_timer(self) -> None:
         """Cancel pending return task only; nudge loop stays armed."""
@@ -254,8 +357,28 @@ class ActivityEngine:
         if activity_type is None:
             valid = ", ".join(t.id for t in self._config.catalog)
             return {"error": f"unknown activity type {type_id!r}; valid: {valid}"}
-        lo, hi = activity_type.duration_minutes
-        duration = self._rng.randint(lo, hi)
+        window = self._window_for(activity_type)
+        if window is not None:
+            # window-scheduled: alarm-style return at window end
+            start, end = self._window_occurrence(self._now(), window)
+            # early-bed guard: fixed wake at window END would turn a
+            # midday call into a ~20h absence — allow at most an hour
+            # before bedtime
+            if start - self._now() > timedelta(minutes=_EARLY_BED_MINUTES):
+                local_start = start.astimezone(self._tz).strftime("%H:%M")
+                return {
+                    "error": (
+                        f"not bedtime — the sleep window starts at "
+                        f"{local_start}; head to bed within the hour before it"
+                    )
+                }
+            duration = max(1, int((end - self._now()).total_seconds() // 60))
+        elif activity_type.duration_minutes is None:
+            # parser guarantees duration unless window; defensive
+            return {"error": f"activity type {type_id!r} has no duration"}
+        else:
+            lo, hi = activity_type.duration_minutes
+            duration = self._rng.randint(lo, hi)
         self._staged = _StagedStart(
             activity_type=activity_type,
             note=note,
@@ -283,43 +406,14 @@ class ActivityEngine:
         self._staged = None
         try:
             now = self._now()
-            planned_return = now + timedelta(minutes=staged.duration_minutes)
-            activity_id = await self._store.create_activity(
-                familiar_id=self._familiar_id,
-                type_id=staged.activity_type.id,
-                label=staged.activity_type.label,
-                started_at=now,
-                planned_return_at=planned_return,
-                note=staged.note,
-            )
-            # all fields in hand — no re-fetch round trip
-            self._active = ActivityRecord(
-                id=activity_id,
-                familiar_id=self._familiar_id,
-                type_id=staged.activity_type.id,
-                label=staged.activity_type.label,
-                started_at=now,
-                planned_return_at=planned_return,
-                note=staged.note,
-                status=None,
-                actual_return_at=None,
-                experience_text=None,
-            )
-            self._missed_ping_turn_ids.clear()  # fresh absence, no stale ids
-            self._judged_author_keys.clear()  # fresh absence, fresh latch
-            self._departure_channel_id = self._focus.get_focus("text")
-            # global: absence is from the whole screen, archive breaks all
-            # channels at this point (turn ids globally monotonic)
-            self._departure_turn_id = await self._store.latest_id(
-                familiar_id=self._familiar_id
-            )
-            await self._set_presence("idle", staged.activity_type.label)
-            self._arm_return_timer(planned_return)
-            _logger.info(
-                f"{ls.tag('🚶 Activity', ls.G)} departed "
-                f"{ls.kv('label', staged.activity_type.label, vc=ls.G)} "
-                f"{ls.kv('duration_min', str(staged.duration_minutes), vc=ls.LW)} "
-                f"{ls.kv('activity_id', str(activity_id), vc=ls.LW)}"
+            window = self._window_for(staged.activity_type)
+            if window is not None:
+                # fixed wake: window end, never a rolled duration
+                _, planned_return = self._window_occurrence(now, window)
+            else:
+                planned_return = now + timedelta(minutes=staged.duration_minutes)
+            await self._begin_activity(
+                staged.activity_type, staged.note, planned_return
             )
         except Exception as exc:  # noqa: BLE001 — must not kill responder turn
             _logger.error(
@@ -331,6 +425,56 @@ class ActivityEngine:
             # timer still brings her back; row missing ⇒ she never left
             if self._active is not None and not self.return_timer_armed:
                 self._arm_return_timer(self._active.planned_return_at)
+
+    async def _begin_activity(
+        self,
+        activity_type: ActivityType,
+        note: str | None,
+        planned_return_at: datetime,
+    ) -> None:
+        """Commit departure: row, state, presence, timer; sleep kicks passes."""
+        now = self._now()
+        activity_id = await self._store.create_activity(
+            familiar_id=self._familiar_id,
+            type_id=activity_type.id,
+            label=activity_type.label,
+            started_at=now,
+            planned_return_at=planned_return_at,
+            note=note,
+        )
+        # all fields in hand — no re-fetch round trip
+        self._active = ActivityRecord(
+            id=activity_id,
+            familiar_id=self._familiar_id,
+            type_id=activity_type.id,
+            label=activity_type.label,
+            started_at=now,
+            planned_return_at=planned_return_at,
+            note=note,
+            status=None,
+            actual_return_at=None,
+            experience_text=None,
+        )
+        if activity_type.id == SLEEP_TYPE_ID:
+            # lifecycle-coupled: consolidation then opinions run while it sleeps
+            self._kick_sleep_passes()
+        self._missed_ping_turn_ids.clear()  # fresh absence, no stale ids
+        self._judged_author_keys.clear()  # fresh absence, fresh latch
+        self._departure_channel_id = self._focus.get_focus("text")
+        # global: absence is from the whole screen, archive breaks all
+        # channels at this point (turn ids globally monotonic)
+        self._departure_turn_id = await self._store.latest_id(
+            familiar_id=self._familiar_id
+        )
+        await self._set_presence(self._away_status(activity_type), activity_type.label)
+        self._arm_return_timer(planned_return_at)
+        emoji = "🌙" if activity_type.id == SLEEP_TYPE_ID else "🚶"
+        _logger.info(
+            f"{ls.tag(f'{emoji} Activity', ls.G)} departed "
+            f"{ls.kv('label', activity_type.label, vc=ls.G)} "
+            f"{ls.kv('planned_return', planned_return_at.isoformat(), vc=ls.LW)} "
+            f"{ls.kv('activity_id', str(activity_id), vc=ls.LW)}"
+        )
 
     # ------------------------------------------------------------------
     # gate — called by TextResponder before assembly
@@ -436,9 +580,16 @@ class ActivityEngine:
         self._missed_ping_turn_ids.add(turn_id)
 
     async def _nudge_loop(self) -> None:
-        """Periodic eligibility check; publishes idle-nudge wake."""
+        """Periodic tick: sleep-window schedule, then idle-nudge check."""
         while True:
             await asyncio.sleep(self._nudge_tick_seconds)
+            try:
+                await self._sleep_schedule_tick(self._now())
+            except Exception as exc:  # noqa: BLE001 — loop must not die
+                _logger.error(
+                    f"{ls.tag('Activity', ls.G)} sleep tick failed "
+                    f"{ls.kv('error', ls.trunc(str(exc), 120), vc=ls.LW)}"
+                )
             if self.should_nudge(self._now()):
                 await self._publish_nudge()
 
@@ -463,6 +614,198 @@ class ActivityEngine:
         if start < end:
             return start <= local < end
         return local >= start or local < end  # wraps midnight
+
+    # ------------------------------------------------------------------
+    # sleep window — bedtime nudge + grace backstop (engine-owned clock)
+    # ------------------------------------------------------------------
+
+    def _sleep_type(self) -> ActivityType | None:
+        """Catalog's reserved sleep entry, or None when not scheduled.
+
+        Needs both the catalog entry (the activity to run) and a
+        configured ``sleep_window`` (the wall-clock schedule, from
+        character config) — either missing ⇒ schedule disarmed.
+        """
+        if self._sleep_window is None:
+            return None
+        return self._type_for(SLEEP_TYPE_ID)
+
+    def _window_for(self, activity_type: ActivityType) -> tuple[time, time] | None:
+        """Return configured sleep window for *activity_type*, else None.
+
+        Window-scheduling belongs to the reserved sleep activity only;
+        the schedule itself lives in character config, not the entry.
+        """
+        if activity_type.id != SLEEP_TYPE_ID:
+            return None
+        return self._sleep_window
+
+    def _window_occurrence(
+        self, now: datetime, window: tuple[time, time]
+    ) -> tuple[datetime, datetime]:
+        """Bounds of the occurrence containing *now*, else the next one.
+
+        Display_tz local; may wrap midnight. ``start <= now`` means
+        *now* is inside the returned occurrence.
+        """
+        win_start, win_end = window
+        local = now.astimezone(self._tz)
+        length = (
+            datetime.combine(local.date(), win_end)
+            - datetime.combine(local.date(), win_start)
+        ) % timedelta(days=1)
+        for offset in (-1, 0, 1):
+            start = datetime.combine(
+                local.date() + timedelta(days=offset), win_start, tzinfo=self._tz
+            )
+            end = start + length
+            if start <= local < end or start > local:
+                return start, end
+        msg = "window occurrence unreachable"  # offsets always cover now
+        raise RuntimeError(msg)
+
+    async def _sleep_schedule_tick(self, now: datetime) -> None:
+        """Bedtime nudge once per occurrence; force-sleep past grace.
+
+        Skips while out/staged/returning — the backstop fires on the
+        first idle tick after she's back, still inside the window.
+        """
+        entry = self._sleep_type()
+        if entry is None or self._sleep_window is None:
+            return
+        if self._active is not None or self._staged is not None or self._returning:
+            return
+        start, end = self._window_occurrence(now, self._sleep_window)
+        if now < start:
+            return  # before tonight's window
+        if await self._slept_this_window(entry, start):
+            return
+        if now >= start + timedelta(minutes=self._sleep_grace_minutes):
+            await self._force_sleep(entry, end)
+        elif self._bedtime_nudge_occ != start:
+            await self._publish_bedtime_nudge(start)
+
+    async def _slept_this_window(
+        self, entry: ActivityType, occurrence_start: datetime
+    ) -> bool:
+        """Sleep already STARTED this occurrence (active or finished)."""
+        row = await self._store.latest_activity(
+            familiar_id=self._familiar_id, type_id=entry.id
+        )
+        return row is not None and row.started_at >= occurrence_start
+
+    async def _force_sleep(
+        self, entry: ActivityType, planned_return_at: datetime
+    ) -> None:
+        """Grace backstop — start sleep directly, no LLM choice."""
+        await self._begin_activity(entry, None, planned_return_at)
+        _logger.info(
+            f"{ls.tag('🌙 Activity', ls.G)} force sleep "
+            f"{ls.kv('wake', planned_return_at.isoformat(), vc=ls.LW)}"
+        )
+
+    def _kick_sleep_passes(self) -> None:
+        """Spawn consolidation+opinion passes as a background task at sleep."""
+        self._last_opinion_plan = None  # one night's material, never reused
+        self._sleep_passes_task = asyncio.create_task(
+            self._run_sleep_passes(),
+            name=f"sleep-passes-{self._familiar_id}",
+        )
+
+    async def _run_sleep_passes(self) -> None:
+        """Consolidation then opinions (apply=True), gated on the flag.
+
+        Watermark defines each pass's window — a missed night just
+        widens the next one (one dream, no catch-up worker). Failures
+        log and leave ``_last_opinion_plan`` None; wake prose degrades
+        to seed-only. Never raises.
+
+        Dream prose is produced + persisted here, right after the
+        passes finish, so it survives a mid-sleep restart: persisted
+        ``experience_text`` is the single "dream fully produced" signal
+        the return path reuses. An entry guard makes a return that
+        finished before the passes completed a clean no-op (no double
+        journal / stale-row write). Residual window — a crash after the
+        journal append but before persist re-journals seed-only prose
+        next return, or a return that finishes mid-prose-gen (rare
+        possible duplicate); consolidation reconciles.
+        """
+        # capture the sleep activity that kicked these passes — a racing
+        # return must not let a late persist mis-target a newer row
+        active = self._active
+        if not self._sleep_passes_enabled:
+            return  # not wired (tests / minimal deployments)
+        try:
+            # build the maintenance context once, run the registered passes
+            # in order. The registry owns consolidation→opinion sequencing +
+            # the denylist data-flow; the engine no longer hard-codes either.
+            ctx = MaintenanceContext(
+                store=self._store,
+                llm=self._llm_clients["background"],
+                familiar_id=self._familiar_id,
+                display_name=self._display_name,
+                display_tz=self._display_tz_name,
+                apply=True,
+                prompts=self._sleep_prompts,
+            )
+            run: MaintenanceRun = await run_passes(
+                create_passes(names=DEFAULT_PASSES, context=ctx)
+            )
+            opinion_plan = run.opinion_plan
+            self._last_opinion_plan = opinion_plan
+            opinions = 0 if opinion_plan is None else len(opinion_plan.opinions)
+            _logger.info(
+                f"{ls.tag('🌙 Activity', ls.G)} sleep passes done "
+                f"{ls.kv('opinions', str(opinions), vc=ls.LW)}"
+            )
+        except Exception as exc:  # noqa: BLE001 — must not kill the engine
+            _logger.error(
+                f"{ls.tag('Activity', ls.G)} sleep passes failed "
+                f"{ls.kv('error', ls.trunc(str(exc), 120), vc=ls.LW)}"
+            )
+            return
+        # produce + persist the dream now so it's durable within minutes
+        # of bedtime — own guard so prose-gen failure degrades to the
+        # wake fallback rather than killing the passes task
+        if active is None or active.type_id != SLEEP_TYPE_ID:
+            return  # not a sleep row
+        if self._active is None or self._active.id != active.id:
+            return  # a return already finished/replaced this row — late passes no-op
+        try:
+            prose = await self._generate_dream_prose(
+                active, self._type_for(active.type_id)
+            )
+            # journal first — it becomes durable
+            await self._append_dream_journal_fact(active, prose)
+            # persist second — its presence is the "dream produced" signal
+            await self._store.set_activity_experience(
+                activity_id=active.id, experience_text=prose
+            )
+            # mirror into the in-memory record so the no-restart return
+            # path reuses it instead of regenerating
+            if self._active is not None and self._active.id == active.id:
+                self._active = replace(self._active, experience_text=prose)
+            _logger.info(
+                f"{ls.tag('🌙 Activity', ls.G)} dream persisted "
+                f"{ls.kv('activity_id', str(active.id), vc=ls.LW)}"
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to wake fallback
+            _logger.error(
+                f"{ls.tag('Activity', ls.G)} dream persist failed "
+                f"{ls.kv('error', ls.trunc(str(exc), 120), vc=ls.LW)}"
+            )
+
+    async def _publish_bedtime_nudge(self, occurrence_start: datetime) -> None:
+        """Synthetic bedtime wake; debounced once per occurrence."""
+        channel_id = self._focus.get_focus("text")
+        if channel_id is None:
+            return
+        self._bedtime_nudge_occ = occurrence_start
+        await self._publish_synthetic(channel_id, _BEDTIME_NUDGE_CONTENT, "bedtime")
+        _logger.info(
+            f"{ls.tag('🌙 Activity', ls.G)} bedtime nudge "
+            f"{ls.kv('channel', str(channel_id), vc=ls.LW)}"
+        )
 
     # ------------------------------------------------------------------
     # returning — timer + cut-short paths
@@ -503,11 +846,23 @@ class ActivityEngine:
         now = self._now()
         try:
             activity_type = self._type_for(active.type_id)
+            is_sleep = active.type_id == SLEEP_TYPE_ID
             cut_short = status == "cut_short"
             # internally guarded — always yields fallback text
-            experience = await self._generate_experience(
-                active, activity_type, cut_short=cut_short
-            )
+            dream_already_journaled = False
+            if is_sleep:
+                if active.experience_text is not None:
+                    # passes already produced + journaled the dream;
+                    # reuse it (survives a mid-sleep restart)
+                    experience = active.experience_text
+                    dream_already_journaled = True
+                else:
+                    # passes failed / crashed before persist — seed-only
+                    experience = await self._generate_dream_prose(active, activity_type)
+            else:
+                experience = await self._generate_experience(
+                    active, activity_type, cut_short=cut_short
+                )
             # COMMIT — she is back after this line
             await self._store.finish_activity(
                 activity_id=active.id,
@@ -531,7 +886,8 @@ class ActivityEngine:
             if channel_id is not None:
                 try:
                     # experience as marked assistant turn — her own
-                    # narration; mode tag keys the fact-extractor skip
+                    # narration; mode tag keys fact-extractor handling
+                    # (skip for activities, dream framing for sleep)
                     await self._store.append_turn(
                         familiar_id=self._familiar_id,
                         channel_id=channel_id,
@@ -539,10 +895,18 @@ class ActivityEngine:
                         content=(
                             f"{RETURN_TURN_MARKER_PREFIX}{active.label}] {experience}"
                         ),
-                        mode=ACTIVITY_RETURN_MODE,
+                        mode=SLEEP_RETURN_MODE if is_sleep else ACTIVITY_RETURN_MODE,
                     )
                 except Exception as exc:  # noqa: BLE001 — best-effort step
                     self._log_return_step_failed("return_turn", exc)
+            if is_sleep and not dream_already_journaled:
+                try:
+                    # dream-journal STOPGAP — durable self: fact until a
+                    # real dreams table exists. Skipped when passes
+                    # already journaled at completion (no double fact).
+                    await self._append_dream_journal_fact(active, experience)
+                except Exception as exc:  # noqa: BLE001 — best-effort step
+                    self._log_return_step_failed("dream_journal", exc)
             try:
                 # global archive: absence is from the whole screen — one
                 # departure point breaks every channel's window
@@ -588,8 +952,9 @@ class ActivityEngine:
                 except Exception as exc:  # noqa: BLE001 — best-effort step
                     self._log_return_step_failed("wake_publish", exc)
             await self._set_presence("online", None)  # internally guarded
+            emoji = "🌙" if is_sleep else "✨"
             _logger.info(
-                f"{ls.tag('✨ Activity', ls.G)} returned "
+                f"{ls.tag(f'{emoji} Activity', ls.G)} returned "
                 f"{ls.kv('label', active.label, vc=ls.G)} "
                 f"{ls.kv('status', status, vc=ls.LW)} "
                 f"{ls.kv('missed_pings', str(len(missed_pings)), vc=ls.LW)}"
@@ -643,6 +1008,95 @@ class ActivityEngine:
             )
             text = ""
         return text.strip() or f"Back from the {active.label}."
+
+    async def _generate_dream_prose(
+        self,
+        active: ActivityRecord,
+        activity_type: ActivityType | None,
+    ) -> str:
+        """Wake narration: seed-dream verbatim, else LLM from seed + opinions.
+
+        The authored catalog seed RETUNES dream prose — that is its
+        design point. The night's formed opinions (lifecycle passes)
+        are offered as dream material when available; a failed pass
+        degrades to seed-only.
+
+        Wake never joins the passes task — under a short/forced window
+        the timer can fire before passes finish, so seed-only is the
+        expected path there, not a bug (opinions still form on pass
+        completion; they just miss this night's narration).
+        """
+        seeded = self._consume_seed_dream()
+        if seeded is not None:
+            return seeded
+        plan = self._last_opinion_plan
+        self._last_opinion_plan = None  # one night's material, never reused
+        seed = activity_type.seed if activity_type is not None else active.label
+        lines = [f"Dream seed: {seed}"]
+        if plan is not None and plan.opinions:
+            lines.append(
+                "Stances that settled in you tonight (dream material — "
+                "weave them in obliquely):"
+            )
+            lines.extend(f"- {op.text}" for op in plan.opinions)
+        try:
+            reply = await self._llm_clients["background"].chat([
+                Message(role="system", content=_DREAM_RAIL),
+                Message(role="user", content="\n".join(lines)),
+            ])
+            text = reply.content if isinstance(reply.content, str) else ""
+        except Exception as exc:  # noqa: BLE001 — return flow must finish
+            _logger.warning(
+                f"{ls.tag('Activity', ls.G)} "
+                f"{ls.kv('dream_llm_failed', ls.trunc(str(exc), 120), vc=ls.LY)}"
+            )
+            text = ""
+        return text.strip() or (
+            "Slept deep; whatever I dreamed slipped away on waking."
+        )
+
+    def _consume_seed_dream(self) -> str | None:
+        """One-shot authored first dream — verbatim, then renamed consumed.
+
+        Rename (``seed_dream.md`` → ``seed_dream.consumed.md``) keeps
+        the mechanism idempotent, mirroring seed_turns' skip-if-present
+        spirit. Any IO failure degrades to generation.
+        """
+        path = self._seed_dream_path
+        if path is None or not path.exists():
+            return None
+        try:
+            text = path.read_text().strip()
+            path.replace(path.with_name(f"{path.stem}.consumed{path.suffix}"))
+        except OSError as exc:
+            _logger.warning(
+                f"{ls.tag('Activity', ls.G)} "
+                f"{ls.kv('seed_dream_failed', ls.trunc(str(exc), 120), vc=ls.LY)}"
+            )
+            return None
+        _logger.info(f"{ls.tag('🌙 Activity', ls.G)} seed dream consumed")
+        return text or None
+
+    async def _append_dream_journal_fact(
+        self, active: ActivityRecord, prose: str
+    ) -> None:
+        """Mint the dream as a durable, dream-framed ``self:`` fact."""
+        local = active.started_at.astimezone(self._tz)
+        subject = FactSubject(
+            canonical_key=self_canonical_key(self._familiar_id),
+            display_at_write=self._display_name,
+        )
+        await self._store.append_fact(
+            familiar_id=self._familiar_id,
+            channel_id=None,  # dreams are hers, not channel-bound
+            text=(
+                f"{self._display_name} dreamed "
+                f"(night of {local.strftime('%b')} {local.day}): {prose}"
+            ),
+            source_turn_ids=(),
+            subjects=[subject],
+            valid_from=active.started_at,
+        )
 
     def _event_fact_text(self, active: ActivityRecord) -> str:
         local = active.started_at.astimezone(self._tz)
@@ -782,6 +1236,13 @@ class ActivityEngine:
             if entry.id == type_id:
                 return entry
         return None
+
+    @staticmethod
+    def _away_status(activity_type: ActivityType | None) -> str:
+        """``dnd`` while unreachable, ``idle`` otherwise; unknown ⇒ dnd."""
+        if activity_type is None or not activity_type.reachable:
+            return "dnd"
+        return "idle"
 
     def _is_ping(self, content: str) -> bool:
         """Real @mention of the bot in raw content; bare name doesn't count.

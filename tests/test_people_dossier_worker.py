@@ -199,6 +199,289 @@ class TestPeopleDossierWorker:
         assert entry.dossier_text == "keep me"
 
     @pytest.mark.asyncio
+    async def test_builds_self_dossier_with_familiar_label(self) -> None:
+        """Self-keyed fact compounds a self-dossier; prompt uses the name."""
+        store = HistoryStore(":memory:")
+        _seed_subject_fact(
+            store,
+            text="Sapphire ran a gaslighting bit and felt proud.",
+            canonical_key="self:fam",
+            display="Sapphire",
+        )
+        llm = _ScriptedLLM(replies=["Sapphire: enjoys running provocative bits."])
+
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        entry = store.get_people_dossier(familiar_id="fam", canonical_key="self:fam")
+        assert entry is not None
+        assert entry.last_fact_id == 1
+        # prompt addressed the familiar by name, not the raw key
+        joined = "\n".join(m.content_str for m in llm.calls[0])
+        assert "Sapphire" in joined
+        assert "self:fam" not in joined
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_strips_echoed_importance_tag(self) -> None:
+        """Strip any ``(importance N)`` tag the writer echoes into prose."""
+        store = HistoryStore(":memory:")
+        _seed_subject_fact(
+            store,
+            text="Sapphire guards her autonomy fiercely.",
+            canonical_key="self:fam",
+            display="Sapphire",
+        )
+        llm = _ScriptedLLM(
+            replies=[
+                "(importance 8) Sapphire guards her autonomy and keeps her own records."
+            ]
+        )
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        entry = store.get_people_dossier(familiar_id="fam", canonical_key="self:fam")
+        assert entry is not None
+        assert "(importance" not in entry.dossier_text
+        assert "Sapphire guards her autonomy" in entry.dossier_text
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_prompt_preserves_opinions(self) -> None:
+        """Self-record keeps durable feelings/opinions; person-dossier sheds them.
+
+        Self-dossier is the substrate for consistently-forming opinions
+        (feeds the sleep cycle), so it must NOT use the person prompt's
+        blanket 'drop transient feelings'.
+        """
+        store = HistoryStore(":memory:")
+        _seed_subject_fact(
+            store,
+            text="Sapphire warmed to SpaceFish and stays wary of KaillaDame.",
+            canonical_key="self:fam",
+            display="Sapphire",
+        )
+        llm = _ScriptedLLM(replies=["Sapphire: warm to SpaceFish, wary of KaillaDame."])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        system = next(m for m in llm.calls[0] if m.role == "system").content_str
+        low = system.lower()
+        # keeps settled opinions/stances; does not blanket-drop feelings
+        assert "opinion" in low or "stance" in low
+        assert "drop transient feelings" not in low
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_excludes_low_importance_texture(self) -> None:
+        """Texture-tier self facts (low importance) stay out of the dossier.
+
+        The dream pass writes momentary 'texture' opinions at importance
+        2-3; they live in the DB (RAG-recallable) but must not flood the
+        always-injected self-dossier. Durable stances (7-9) and legacy
+        NULL-importance facts still build it.
+        """
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            source_turn_ids=[1],
+            subjects=subj,
+            text="Sapphire is fiercely protective of her autonomy.",
+            importance=9,
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            source_turn_ids=[1],
+            subjects=subj,
+            text="Sapphire was briefly curious about dream BLTs.",
+            importance=2,
+        )
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            source_turn_ids=[1],
+            subjects=subj,
+            text="Sapphire keeps records out of habit.",  # NULL importance — legacy
+        )
+        llm = _ScriptedLLM(replies=["Sapphire: autonomous, keeps records."])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        body = "\n".join(m.content_str for m in llm.calls[0])
+        assert "autonomy" in body  # durable kept
+        assert "keeps records" in body  # legacy NULL kept
+        assert "dream BLTs" not in body  # texture excluded
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_orders_facts_by_importance_desc(self) -> None:
+        """Self facts feed the prompt importance-desc; NULL sits in the 5-band.
+
+        Stable sort preserves insertion (recency) order within a tier.
+        Facts seeded in order [5, 9, 7, None] must render 9, 7, then the
+        5-band (the importance-5 fact and the NULL fact, in insertion
+        order: 5 was seeded before None).
+        """
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+
+        def _add(text: str, importance: int | None) -> None:
+            store.append_fact(
+                familiar_id="fam",
+                channel_id=1,
+                source_turn_ids=[1],
+                subjects=subj,
+                text=text,
+                importance=importance,
+            )
+
+        _add("fact-five.", 5)
+        _add("fact-nine.", 9)
+        _add("fact-seven.", 7)
+        _add("fact-null.", None)
+        llm = _ScriptedLLM(replies=["ok"])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        body = next(m for m in llm.calls[0] if m.role == "user").content_str
+        order = [
+            body.index("fact-nine."),
+            body.index("fact-seven."),
+            body.index("fact-five."),
+            body.index("fact-null."),
+        ]
+        assert order == sorted(order)  # 9, 7, then 5-band (5 before NULL)
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_annotates_and_biases_by_importance(self) -> None:
+        """Self body tags scored facts `(importance N)`; header gives bias rule."""
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            source_turn_ids=[1],
+            subjects=subj,
+            text="Sapphire guards her autonomy.",
+            importance=9,
+        )
+        llm = _ScriptedLLM(replies=["ok"])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        body = next(m for m in llm.calls[0] if m.role == "user").content_str
+        assert "- (importance 9) Sapphire guards her autonomy." in body
+        system = next(m for m in llm.calls[0] if m.role == "system").content_str
+        assert "importance" in system.lower()
+        assert "weight higher-importance" in system.lower()
+
+    @pytest.mark.asyncio
+    async def test_self_dossier_null_importance_renders_untagged(self) -> None:
+        """NULL-importance self fact appears, but without a numeric tag."""
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            source_turn_ids=[1],
+            subjects=subj,
+            text="Sapphire keeps records out of habit.",  # NULL importance
+        )
+        llm = _ScriptedLLM(replies=["ok"])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        body = next(m for m in llm.calls[0] if m.role == "user").content_str
+        assert "- Sapphire keeps records out of habit." in body
+        assert "(importance" not in body  # unscored: no tag
+
+    @pytest.mark.asyncio
+    async def test_non_self_dossier_no_importance_tags_or_bias(self) -> None:
+        """Non-self body has no importance tags; header has no bias clause."""
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:9", display_at_write="Aria"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            source_turn_ids=[1],
+            subjects=subj,
+            text="Aria likes pho.",
+            importance=8,
+        )
+        llm = _ScriptedLLM(replies=["Aria: likes pho."])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+
+        body = next(m for m in llm.calls[0] if m.role == "user").content_str
+        assert "- Aria likes pho." in body  # plain render, no tag
+        assert "(importance" not in body
+        system = next(m for m in llm.calls[0] if m.role == "system").content_str
+        assert "weight higher-importance" not in system.lower()
+
+    @pytest.mark.asyncio
+    async def test_non_self_dossier_keeps_all_importances(self) -> None:
+        """Importance filter is self-scoped — other people's dossiers unchanged."""
+        store = HistoryStore(":memory:")
+        subj = (FactSubject(canonical_key="discord:9", display_at_write="Aria"),)
+        store.append_fact(
+            familiar_id="fam",
+            channel_id=1,
+            source_turn_ids=[1],
+            subjects=subj,
+            text="Aria mentioned a minor preference.",
+            importance=2,
+        )
+        llm = _ScriptedLLM(replies=["Aria: has a minor preference."])
+        worker = PeopleDossierWorker(
+            store=AsyncHistoryStore(store),
+            llm_client=llm,
+            familiar_id="fam",
+            familiar_display_name="Sapphire",
+        )
+        await worker.tick()
+        body = "\n".join(m.content_str for m in llm.calls[0])
+        assert "minor preference" in body  # low-importance non-self fact kept
+
+    @pytest.mark.asyncio
     async def test_no_subjects_means_no_llm_call(self) -> None:
         store = HistoryStore(":memory:")
         store.append_fact(  # subject-less fact

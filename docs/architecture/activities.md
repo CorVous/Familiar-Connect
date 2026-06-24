@@ -29,7 +29,7 @@ start_activity tool call   → ActivityEngine.defer_start(type_id, note)
 
 reply ships                → engine.end_turn()
                                → INSERT INTO activities (...)
-                               → presence: idle + activity label
+                               → presence: idle (dnd if unreachable) + activity label
                                → remember departure turn id
                                → arm return timer
 
@@ -149,7 +149,9 @@ The return timer (or a cut-short reply) drives one flow:
    missed pings the return is silent — no turn, no announcement
    without cause.
 7. **Presence** — status returns to online; while out it was idle
-   (yellow) with the catalog `label` as activity text.
+   (yellow) with the catalog `label` as activity text. Unreachable
+   types (`reachable = false`) show do-not-disturb (red) instead of
+   idle.
 
 ### Restart safety
 
@@ -163,6 +165,14 @@ its missed-ping wake) lands on a live bus and survives a restart.
 The departure turn id is recomputed from turn timestamps (same
 precedent as `AlarmScheduler`).
 
+Away presence survives restarts and reconnects via `on_ready`: the
+engine starts before Discord login, so its own boot-time presence
+call never reaches Discord. After the focus presence sync, `on_ready`
+calls the engine's `resync_presence()`, which re-issues idle/dnd plus
+label when an activity is still in flight (a no-op when idle or when
+activities are disabled). Gateway reconnects re-fire `on_ready`, so a
+presence reset mid-activity heals the same way.
+
 ## Configuration
 
 Catalog sidecar `data/familiars/<id>/activities.toml` (same pattern
@@ -171,19 +181,10 @@ out, i.e. disabled. Missing file or empty catalog disables the
 feature; a present-but-invalid file fails loudly with `ConfigError`
 so a typo never silently drops a knob.
 
-```toml
-archive_after_minutes = 45
-idle_nudge_minutes    = 20
-min_gap_minutes       = 90
-active_hours          = "10:00-23:00"   # display_tz; may wrap midnight
+The shipped skeleton (uncomment and adapt to enable):
 
-[[catalog]]
-id               = "creek_walk"
-label            = "out for a creek walk"
-duration_minutes = [20, 45]
-reachable        = true
-content_source   = "authored"
-seed             = "A short walk along the creek: weather, water, small wildlife, passing thoughts."
+```toml
+--8<-- "data/familiars/_default/activities.toml"
 ```
 
 Top-level knobs (all optional):
@@ -193,18 +194,40 @@ Top-level knobs (all optional):
 | `archive_after_minutes` | `45` | Absence at/above this sets the archive watermark for all channels at the departure turn. |
 | `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge may fire; also the nudge debounce window. |
 | `min_gap_minutes` | `90` | Minimum gap after a return before the next nudge. Gates nudges only — never blocks a `start_activity` call. |
-| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. |
+| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. Keep it disjoint from the sleep `window` — overlap lets an idle "do something" nudge and the bedtime "go to bed" nudge co-fire in the pre-grace stretch (once force-sleep fires, the active state suppresses the idle nudge). |
 
 Catalog entry (`[[catalog]]`, one per activity type):
 
 | Field | Required | Purpose |
 |---|---|---|
-| `id` | yes | Stable identifier; becomes a `start_activity` enum value. Must be unique. |
+| `id` | yes | Stable identifier; becomes a `start_activity` enum value. Must be unique. `sleep` is reserved (below). |
 | `label` | yes | Discord presence text while out; also names the activity in turns and facts. |
-| `duration_minutes` | yes | `[lo, hi]` roll range in minutes, `0 < lo <= hi`. |
+| `duration_minutes` | yes* | `[lo, hi]` roll range in minutes, `0 < lo <= hi`. *Optional and ignored on the scheduled sleep entry — return is fixed at window end. |
 | `reachable` | no (`true`) | A real @ping while out earns a judgment turn; `false` means nothing until return. |
 | `content_source` | no (`"authored"`) | Where experience text comes from. Only `"authored"` is valid today; `"adapter"` is a reserved seam for future adapter-backed types (e.g. actually watching a video and reporting on it) and is rejected with an explicit message until implemented. |
-| `seed` | yes | Authored prompt seed for experience generation. |
+| `seed` | yes | Authored prompt seed for experience generation (dream prose for the sleep entry). |
+
+### The reserved `sleep` entry
+
+The catalog id `sleep` is reserved for the [sleep cycle](sleep.md).
+Its wall-clock schedule — `window = "HH:MM-HH:MM"` (in `display_tz`,
+may wrap midnight) and `grace_minutes` (default 30) — lives in
+`character.toml [sleep]`, not on the catalog entry; the entry only
+marks which activity the schedule drives. While the entry is otherwise
+an ordinary catalog row (the model can `start_activity` into it at the
+bedtime nudge), the engine's tick loop owns its schedule: a
+once-per-occurrence bedtime nudge at window start, a force-start past
+`grace_minutes`, and a wake fixed at the window's end regardless of
+start time. Because the wake is fixed,
+`start_activity("sleep")` is refused more than an hour before the
+window — a midday call would otherwise mean a ~20-hour absence. Sleep
+departure fires the hygiene + dream passes in the background, and the
+return turn carries the dream prose under `mode = "sleep_return"` — see
+[sleep.md](sleep.md) for the full semantics.
+
+The sleep entry in the shipped skeleton above shows the reserved row:
+`reachable = false`, an authored dream `seed`, and a comment pointing at
+`character.toml [sleep]` for the schedule keys.
 
 ## Interaction with the context pipeline
 
@@ -240,6 +263,11 @@ is self-generated fiction — the same claim/fiction discipline that
 keeps in-character narration out of the fact store applies, and the
 mechanical event-fact already records that the activity happened.
 The extractor watermark still advances over skipped turns.
+
+The sleep return turn is the exception: tagged `mode = "sleep_return"`
+(`SLEEP_RETURN_MODE`), it **is** processed — with a code-enforced rail
+that dream-grounded facts land dream-framed under the `self:` subject
+only. See [sleep.md](sleep.md#dream-aware-extraction).
 
 ## Deliberately v1
 

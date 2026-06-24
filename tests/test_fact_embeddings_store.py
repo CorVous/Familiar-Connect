@@ -97,7 +97,7 @@ class TestUnembeddedFacts:
 
     def test_excludes_superseded_facts(self) -> None:
         store = _store_with_facts(2)
-        store.supersede_fact(familiar_id="fam", old_id=1, new_id=2)
+        store.supersede(familiar_id="fam", obsolete_facts=[1], new_fact=2)
         pending = store.unembedded_facts(familiar_id="fam", model="m", limit=10)
         assert [f.id for f in pending] == [2]
 

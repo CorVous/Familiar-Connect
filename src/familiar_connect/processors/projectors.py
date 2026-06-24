@@ -81,6 +81,13 @@ class ProjectorContext:
     familiar_id: str
     embedder: Embedder | None = None
     memory: MemoryProvidersConfig = field(default_factory=MemoryProvidersConfig)
+    # human-readable name for the reserved self-subject; ``None`` →
+    # consumers default to title-cased ``familiar_id``.
+    familiar_display_name: str | None = None
+    # config-sourced static dream-framing clause for the fact extractor
+    # (``[prompt].dream_extraction_clause``; prose ships in ``_default``).
+    # empty → no dream clause.
+    dream_extraction_clause: str = ""
 
 
 ProjectorFactory = Callable[[ProjectorContext], MemoryProjector]
@@ -146,9 +153,11 @@ def _rich_note_factory(ctx: ProjectorContext) -> MemoryProjector:
         store=ctx.store,
         llm_client=ctx.llm_clients["background"],
         familiar_id=ctx.familiar_id,
+        familiar_display_name=ctx.familiar_display_name,
         batch_size=knobs.batch_size,
         tick_interval_s=knobs.tick_interval_s,
         participants_max=knobs.participants_max,
+        dream_extraction_clause=ctx.dream_extraction_clause,
     )
 
 
@@ -157,6 +166,7 @@ def _people_dossier_factory(ctx: ProjectorContext) -> MemoryProjector:
         store=ctx.store,
         llm_client=ctx.llm_clients["background"],
         familiar_id=ctx.familiar_id,
+        familiar_display_name=ctx.familiar_display_name,
         tick_interval_s=ctx.memory.people_dossier.tick_interval_s,
     )
 
@@ -175,7 +185,7 @@ def _reflection_factory(ctx: ProjectorContext) -> MemoryProjector:
     )
 
 
-def _fact_supersede_factory(ctx: ProjectorContext) -> MemoryProjector:
+def _fact_supersede_worker_factory(ctx: ProjectorContext) -> MemoryProjector:
     knobs = ctx.memory.fact_supersede
     return FactSupersedeWorker(
         store=ctx.store,
@@ -206,7 +216,7 @@ register_projector("rolling_summary", _summary_factory)
 register_projector("rich_note", _rich_note_factory)
 register_projector("people_dossier", _people_dossier_factory)
 register_projector("reflection", _reflection_factory)
-register_projector("fact_supersede", _fact_supersede_factory)
+register_projector("fact_supersede", _fact_supersede_worker_factory)
 register_projector("fact_embedding", _fact_embedding_factory)
 
 

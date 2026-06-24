@@ -1471,6 +1471,19 @@ class TestActivities:
         assert row["actual_return_at"] == _T1.isoformat()
         assert row["experience_text"] == "got pinged"
 
+    def test_set_activity_experience_persists_on_active_row(
+        self, tmp_path: Path
+    ) -> None:
+        """Persist prose mid-activity (row stays active — no return stamp)."""
+        s = _store(tmp_path)
+        activity_id = _create(s)
+        s.set_activity_experience(
+            activity_id=activity_id, experience_text="a dream of rain"
+        )
+        rec = s.active_activity(familiar_id=_FAMILIAR)
+        assert rec is not None
+        assert rec.experience_text == "a dream of rain"
+
     def test_finish_rejects_bad_status(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         activity_id = _create(s)
@@ -1506,6 +1519,47 @@ class TestActivities:
         s = _store(tmp_path)
         _create(s, familiar_id="aria")
         assert s.active_activity(familiar_id="bob") is None
+
+    def test_latest_activity_none_when_empty(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert s.latest_activity(familiar_id=_FAMILIAR, type_id="sleep") is None
+
+    def test_latest_activity_filters_type_and_returns_newest(
+        self, tmp_path: Path
+    ) -> None:
+        s = _store(tmp_path)
+        first = _create(s)  # type_id "walk"
+        s.finish_activity(
+            activity_id=first,
+            status="completed",
+            actual_return_at=_T1,
+            experience_text=None,
+        )
+        second = _create(s)
+        rec = s.latest_activity(familiar_id=_FAMILIAR, type_id="walk")
+        assert rec is not None
+        assert rec.id == second
+        assert s.latest_activity(familiar_id=_FAMILIAR, type_id="sleep") is None
+
+    def test_latest_activity_includes_finished_rows(self, tmp_path: Path) -> None:
+        """Window guard checks STARTED, not active — finished rows count."""
+        s = _store(tmp_path)
+        only = _create(s)
+        s.finish_activity(
+            activity_id=only,
+            status="completed",
+            actual_return_at=_T1,
+            experience_text=None,
+        )
+        rec = s.latest_activity(familiar_id=_FAMILIAR, type_id="walk")
+        assert rec is not None
+        assert rec.id == only
+        assert rec.status == "completed"
+
+    def test_latest_activity_isolated_per_familiar(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        _create(s, familiar_id="aria")
+        assert s.latest_activity(familiar_id="bob", type_id="walk") is None
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,22 @@ class _DiscordMemberLike(Protocol):
 
 _SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# reserved platform for the familiar's OWN narrative subject. ``self:``
+# can never collide with ``discord:`` / ``twitch:`` keys — those use a
+# real platform name. one canonical_key per familiar: ``self:<id>``.
+SELF_PLATFORM = "self"
+
+
+def self_canonical_key(familiar_id: str) -> str:
+    """Reserved subject key for *familiar_id*'s own narrative: ``self:<id>``."""
+    return f"{SELF_PLATFORM}:{familiar_id}"
+
+
+def is_self_key(canonical_key: str) -> bool:
+    """Test ``self:<id>`` membership: ``self`` platform + non-empty id."""
+    platform, sep, rest = canonical_key.partition(":")
+    return platform == SELF_PLATFORM and bool(sep) and bool(rest)
+
 
 @dataclass(frozen=True)
 class Author:

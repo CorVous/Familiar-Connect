@@ -18,7 +18,7 @@ git ls-files --stage | while read -r mode _ _ path; do
   if [ "$mode" = "100755" ]; then chmod +x "$path"; else chmod a-x "$path"; fi
 done
 
-uv sync --dev --extra local-turn   # local-turn pulls numpy + hf_hub, imported at test collection
+uv sync --dev --extra local-turn --extra local-embed   # local-turn: numpy + hf_hub (test collection); local-embed: fastembed (live bot shares this .venv)
 uv run ruff check
 uv run ruff format --check
 uv run ty check
