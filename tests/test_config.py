@@ -7,6 +7,7 @@ table.
 
 from __future__ import annotations
 
+from datetime import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -35,7 +36,10 @@ from familiar_connect.config import (
     TurnDetectionConfig,
     load_character_config,
 )
+from familiar_connect.processors import fact_extractor as _fact_extractor
 from familiar_connect.processors.projectors import DEFAULT_PROJECTORS
+from familiar_connect.sleep import consolidation as _consolidation
+from familiar_connect.sleep import opinion_formation as _opinion
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -55,6 +59,8 @@ class TestCharacterConfigDefaults:
         assert cfg.text_window_size == 200
         assert cfg.llm == {}
         assert isinstance(cfg.tts, TTSConfig)
+        assert cfg.sleep_window is None
+        assert cfg.sleep_grace_minutes == 30
 
 
 class TestLoadCharacterConfig:
@@ -144,6 +150,68 @@ class TestLoadCharacterConfig:
         slot = cfg.llm["prose"]
         assert slot.provider_order == ("z-ai", "deepinfra")
         assert slot.provider_allow_fallbacks is False
+
+    def test_sleep_window_and_grace_parse(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``[sleep]`` window/grace are character-domain time config."""
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "00:00-08:00"\ngrace_minutes = 45\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_window == (time(0, 0), time(8, 0))
+        assert cfg.sleep_grace_minutes == 45
+
+    def test_sleep_window_wraps_midnight(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "23:00-07:00"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_window == (time(23, 0), time(7, 0))
+
+    def test_sleep_grace_defaults_to_30(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "00:00-08:00"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_grace_minutes == 30
+
+    def test_sleep_omitted_means_no_window(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """No ``[sleep]`` table ⇒ window None (schedule disarmed)."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_window is None
+        assert cfg.sleep_grace_minutes == 30
+
+    @pytest.mark.parametrize("value", ["00:00", "midnight", "00:00-00:00"])
+    def test_sleep_bad_window_format_rejected(
+        self, tmp_path: Path, default_profile_path: Path, value: str
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(f'[sleep]\nwindow = "{value}"\n')
+        with pytest.raises(ConfigError, match="window"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    @pytest.mark.parametrize("value", ["0", "-5", "true", '"30"'])
+    def test_sleep_bad_grace_rejected(
+        self, tmp_path: Path, default_profile_path: Path, value: str
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(f'[sleep]\nwindow = "00:00-08:00"\ngrace_minutes = {value}\n')
+        with pytest.raises(ConfigError, match="grace_minutes"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_sleep_unknown_key_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[sleep]\nwindow = "00:00-08:00"\nbedtime = 5\n')
+        with pytest.raises(ConfigError, match="unknown"):
+            load_character_config(path, defaults_path=default_profile_path)
 
     def test_provider_order_omitted_means_none(self, tmp_path: Path) -> None:
         """Slot without ``provider_order`` parses to ``None`` (default routing).
@@ -410,6 +478,82 @@ class TestLoadCharacterConfig:
         path.write_text("[prompt]\nimage_description_constraints = 42\n")
         with pytest.raises(ConfigError, match="image_description_constraints"):
             load_character_config(path, defaults_path=default_profile_path)
+
+    def test_sleep_prompts_default_from_profile(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """Shipped default profile carries the sleep-pass prompt text."""
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_consolidation_system.strip()
+        assert "{self_name}" in cfg.sleep_stance_system
+        assert "{self_name}" in cfg.sleep_synthesis_system
+        assert "{self_name}" in cfg.dream_extraction_clause
+        assert "{self_key}" in cfg.dream_extraction_clause
+
+    def test_sleep_consolidation_system_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[prompt]\nsleep_consolidation_system = "custom tidy pass"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_consolidation_system == "custom tidy pass"
+
+    def test_sleep_stance_system_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[prompt]\nsleep_stance_system = "stances for {self_name}"\n')
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.sleep_stance_system == "stances for {self_name}"
+
+    def test_dream_extraction_clause_override(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(
+            '[prompt]\ndream_extraction_clause = "dream {self_name} {self_key} {ids}"\n'
+        )
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.dream_extraction_clause == "dream {self_name} {self_key} {ids}"
+
+    def test_sleep_prompt_must_be_string(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[prompt]\nsleep_consolidation_system = 42\n")
+        with pytest.raises(ConfigError, match="sleep_consolidation_system"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_no_in_code_sleep_prompt_prose_constants(self) -> None:
+        """Sleep-prompt prose lives ONLY in ``_default``; no module copy.
+
+        Mirrors ``post_history_instructions`` (empty Python default, prose
+        in the profile). A second in-code copy is a drift hazard #151
+        forbids — the constants must not exist.
+        """
+        assert not hasattr(_consolidation, "_SYSTEM")
+        assert not hasattr(_opinion, "STANCE_SYSTEM_DEFAULT")
+        assert not hasattr(_opinion, "SYNTHESIS_SYSTEM_DEFAULT")
+        assert not hasattr(_fact_extractor, "DREAM_EXTRACTION_CLAUSE_DEFAULT")
+
+    def test_default_profile_carries_real_sleep_prompt_prose(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """The merged ``_default`` config is the single source of the prose.
+
+        Production always merges ``_default``, so the real consolidation /
+        stance / synthesis / dream text resolves from config — not an
+        in-code copy.
+        """
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert "memory-consolidation pass" in cfg.sleep_consolidation_system
+        assert "stance-moment" in cfg.sleep_stance_system
+        assert "settled opinions" in cfg.sleep_synthesis_system
+        assert "dream narration" in cfg.dream_extraction_clause
 
     def test_history_window_split_parsed(
         self, tmp_path: Path, default_profile_path: Path

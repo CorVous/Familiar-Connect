@@ -28,15 +28,14 @@ hot path.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import operator
-import re
 from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.llm import Message
+from familiar_connect.structured_output import coerce_json
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -46,8 +45,6 @@ if TYPE_CHECKING:
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.reflection_worker")
-
-_JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
 class ReflectionWorker:
@@ -284,15 +281,8 @@ def _build_reflection_prompt(
 
 def _parse_reflections(reply: str) -> list[dict[str, object]]:
     """Permissive JSON-array parser; bad input → ``[]``."""
-    if not reply or not reply.strip():
-        return []
-    cleaned = re.sub(r"```(?:json)?", "", reply, flags=re.IGNORECASE).strip()
-    match = _JSON_ARRAY_RE.search(cleaned)
-    blob = match.group(0) if match else cleaned
-    try:
-        parsed = json.loads(blob)
-    except ValueError:
-        return []
+    parsed = coerce_json(reply, expect="array").value or []
+    # coerce_json only extracts; a non-array payload still degrades.
     if not isinstance(parsed, list):
         return []
     out: list[dict[str, object]] = []

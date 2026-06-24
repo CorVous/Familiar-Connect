@@ -23,6 +23,16 @@
 #                     future adapter-backed types)
 #   seed              authored prompt seed for experience generation
 #
+# Reserved sleep entry (id must be "sleep") — the window-scheduled
+# sleep activity. The wall-clock SCHEDULE lives in character.toml
+# [sleep] (window + grace_minutes), not here; this entry only marks
+# WHICH activity the schedule drives. With a schedule, wake is fixed at
+# the window END (alarm-style), so duration_minutes is optional and
+# ignored. Sleep departure runs the hygiene + dream passes in the
+# background; the seed retunes the dream prose narrated at wake. A
+# one-shot hand-authored first dream can be
+# placed at data/familiars/<id>/seed_dream.md (consumed on first sleep).
+#
 # Ships disabled — uncomment and adapt to enable.
 
 # archive_after_minutes = 45
@@ -37,3 +47,9 @@
 # reachable = true
 # content_source = "authored"
 # seed = "A short walk along the creek: weather, water, small wildlife, passing thoughts. Experiences are about places, things, and yourself — never invented claims about real people."
+
+# [[catalog]]
+# id = "sleep"  # schedule (window/grace_minutes) in character.toml [sleep]
+# label = "asleep"
+# reachable = false
+# seed = "The night's dream, told on waking: vivid, a little strange, woven from the day's leftovers — openly a dream, never reported as real events."

@@ -232,7 +232,9 @@ class TestSupersededFactIds:
             text="replacement fact",
             source_turn_ids=[ids[1]],
         )
-        store.supersede_fact(familiar_id="fam", old_id=ids[1], new_id=replacement.id)
+        store.supersede(
+            familiar_id="fam", obsolete_facts=[ids[1]], new_fact=replacement.id
+        )
         result = store.superseded_fact_ids(familiar_id="fam", fact_ids=ids)
         assert result == {ids[1]}
 
@@ -251,7 +253,7 @@ class TestSupersededFactIds:
             text="replacement",
             source_turn_ids=[1],
         )
-        store.supersede_fact(familiar_id="other", old_id=f1.id, new_id=f2.id)
+        store.supersede(familiar_id="other", obsolete_facts=[f1.id], new_fact=f2.id)
         # Query under "fam" — the superseded row is not visible.
         result = store.superseded_fact_ids(familiar_id="fam", fact_ids=[f1.id, f2.id])
         assert result == set()

@@ -245,3 +245,61 @@ class TestDefaultSkeleton:
         assert skeleton.exists()
         cfg = load_activities_config(skeleton)
         assert not cfg
+
+
+# Sleep schedule (window/grace) lives in character.toml [sleep] now; the
+# catalog entry only marks WHICH activity is window-scheduled. See
+# tests/test_config.py::TestLoadCharacterConfig sleep cases.
+SLEEP_ENTRY = """\
+[[catalog]]
+id = "sleep"
+label = "asleep"
+reachable = false
+seed = "The night's dream, told on waking."
+"""
+
+
+class TestSleepCatalogEntry:
+    """Reserved ``sleep`` catalog id — duration optional (fixed wake)."""
+
+    def test_sleep_entry_parses(self, tmp_path: Path) -> None:
+        path = write_activities(tmp_path, SLEEP_ENTRY)
+        cfg = load_activities_config(path)
+        entry = cfg.catalog[0]
+        assert entry.id == "sleep"
+        assert entry.reachable is False
+
+    def test_duration_minutes_optional_for_sleep_entry(self, tmp_path: Path) -> None:
+        path = write_activities(tmp_path, SLEEP_ENTRY)
+        cfg = load_activities_config(path)
+        assert cfg.catalog[0].duration_minutes is None
+
+    def test_duration_minutes_still_parsed_if_present(self, tmp_path: Path) -> None:
+        content = SLEEP_ENTRY + "duration_minutes = [400, 500]\n"
+        path = write_activities(tmp_path, content)
+        cfg = load_activities_config(path)
+        assert cfg.catalog[0].duration_minutes == (400, 500)
+
+    def test_non_sleep_entry_still_requires_duration(self, tmp_path: Path) -> None:
+        content = VALID_ENTRY.replace("duration_minutes = [20, 45]\n", "")
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError, match="duration_minutes"):
+            load_activities_config(path)
+
+    def test_window_no_longer_a_catalog_key(self, tmp_path: Path) -> None:
+        """Window relocated to character.toml — not a valid catalog key."""
+        content = SLEEP_ENTRY + 'window = "00:00-08:00"\n'
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_activities_config(path)
+
+    def test_grace_no_longer_a_catalog_key(self, tmp_path: Path) -> None:
+        content = SLEEP_ENTRY + "grace_minutes = 30\n"
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_activities_config(path)
+
+    def test_dataclass_has_no_window_or_grace(self) -> None:
+        entry = ActivityType(id="x", label="x", duration_minutes=(1, 2), seed="s")
+        assert not hasattr(entry, "window")
+        assert not hasattr(entry, "grace_minutes")

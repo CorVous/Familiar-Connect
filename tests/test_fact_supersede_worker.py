@@ -128,7 +128,7 @@ class TestFactSupersedeWorkerTick:
     @pytest.mark.asyncio
     async def test_hallucinated_id_outside_candidate_set_ignored(self) -> None:
         store = HistoryStore(":memory:")
-        # 9999 isn't a real fact id; must not crash supersede_fact.
+        # 9999 isn't a real fact id; supersede must skip it, not crash.
         llm = _ScriptedLLM(replies=[_ids_json([9999])])
         worker = FactSupersedeWorker(
             store=AsyncHistoryStore(store), llm_client=llm, familiar_id="fam"

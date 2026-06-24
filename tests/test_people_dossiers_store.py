@@ -211,7 +211,7 @@ class TestFactsForSubject:
             source_turn_ids=[2],
             subjects=(cass,),
         )
-        store.supersede_fact(familiar_id="fam", old_id=old.id, new_id=new.id)
+        store.supersede(familiar_id="fam", obsolete_facts=[old.id], new_fact=new.id)
         out = store.facts_for_subject(familiar_id="fam", canonical_key="discord:1")
         assert [f.text for f in out] == ["Cass is a chef."]
 

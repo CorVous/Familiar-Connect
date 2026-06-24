@@ -10,12 +10,17 @@ precedent), so typos don't silently disable a knob.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time
 from typing import TYPE_CHECKING, cast
 
-from familiar_connect.config import ConfigError, _deep_merge, _read_toml
+from familiar_connect.config import (
+    ConfigError,
+    _deep_merge,
+    _read_toml,
+    parse_hhmm_range,
+)
 
 if TYPE_CHECKING:
+    from datetime import time
     from pathlib import Path
 
 
@@ -26,8 +31,20 @@ CONTENT_SOURCES: frozenset[str] = frozenset({"authored"})
 youtube) — rejected with explicit message until implemented.
 """
 
+SLEEP_TYPE_ID = "sleep"
+"""Reserved catalog id — the window-scheduled sleep activity.
+
+The wall-clock schedule (``window``/``grace_minutes``) lives in
+``character.toml`` ``[sleep]``, not here; this id only marks WHICH
+activity the schedule drives. The sleep entry's ``duration_minutes``
+is optional (return is fixed at window end, never a rolled duration).
+"""
+
 _ENTRY_REQUIRED: frozenset[str] = frozenset({"id", "label", "duration_minutes", "seed"})
-_ENTRY_KEYS: frozenset[str] = _ENTRY_REQUIRED | {"reachable", "content_source"}
+_ENTRY_KEYS: frozenset[str] = _ENTRY_REQUIRED | {
+    "reachable",
+    "content_source",
+}
 _TOP_LEVEL_KEYS: frozenset[str] = frozenset({
     "archive_after_minutes",
     "idle_nudge_minutes",
@@ -43,16 +60,18 @@ class ActivityType:
 
     :param id: stable identifier referenced by ``start_activity`` tool.
     :param label: presence/status text shown while out.
-    :param duration_minutes: ``(lo, hi)`` roll range, ``0 < lo <= hi``.
+    :param duration_minutes: ``(lo, hi)`` roll range, ``0 < lo <= hi``;
+        ``None`` only on the sleep entry (window-scheduled).
     :param reachable: real @ping while out triggers judgment turn.
     :param content_source: experience text origin; see
         :data:`CONTENT_SOURCES`.
-    :param seed: authored prompt seed for experience generation.
+    :param seed: authored prompt seed for experience generation
+        (dream prose for the sleep entry).
     """
 
     id: str
     label: str
-    duration_minutes: tuple[int, int]
+    duration_minutes: tuple[int, int] | None = None
     reachable: bool = True
     content_source: str = "authored"
     seed: str = ""
@@ -124,7 +143,7 @@ def _parse_activities_config(data: dict) -> ActivitiesConfig:
 
     active_hours: tuple[time, time] | None = None
     if "active_hours" in data:
-        active_hours = _parse_active_hours(data["active_hours"])
+        active_hours = parse_hhmm_range(data["active_hours"], key="active_hours")
 
     catalog_raw = data.get("catalog", [])
     if not isinstance(catalog_raw, list):
@@ -161,6 +180,10 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         )
         raise ConfigError(msg)
     missing = _ENTRY_REQUIRED - set(entry)
+    if entry.get("id") == SLEEP_TYPE_ID:
+        # window-scheduled (schedule in character.toml [sleep]): return is
+        # fixed at window end, so duration is unused/optional
+        missing -= {"duration_minutes"}
     if missing:
         msg = f"[[catalog]] entry #{idx} missing required keys: {sorted(missing)}"
         raise ConfigError(msg)
@@ -174,7 +197,9 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         strings[key] = value
     entry_id = strings["id"]
 
-    duration = _parse_duration_minutes(entry["duration_minutes"], entry_id)
+    duration: tuple[int, int] | None = None
+    if "duration_minutes" in entry:
+        duration = _parse_duration_minutes(entry["duration_minutes"], entry_id)
 
     reachable = entry.get("reachable", True)
     if not isinstance(reachable, bool):
@@ -227,28 +252,3 @@ def _parse_duration_minutes(value: object, entry_id: str) -> tuple[int, int]:
     if not 0 < lo <= hi:
         raise ConfigError(msg)
     return (lo, hi)
-
-
-def _parse_active_hours(value: object) -> tuple[time, time]:
-    msg = (
-        f"active_hours must be 'HH:MM-HH:MM' (may wrap midnight, "
-        f"start != end), got {value!r}"
-    )
-    if not isinstance(value, str):
-        raise ConfigError(msg)
-    parts = value.split("-")
-    if len(parts) != 2:
-        raise ConfigError(msg)
-    parsed: list[time] = []
-    for part in parts:
-        pieces = part.split(":")
-        if len(pieces) != 2 or not all(p.isdigit() and len(p) == 2 for p in pieces):
-            raise ConfigError(msg)
-        hour, minute = int(pieces[0]), int(pieces[1])
-        if hour > 23 or minute > 59:
-            raise ConfigError(msg)
-        parsed.append(time(hour, minute))
-    start, end = parsed
-    if start == end:
-        raise ConfigError(msg)
-    return (start, end)

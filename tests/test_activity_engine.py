@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+import familiar_connect.sleep.maintenance as maintenance_mod
 from familiar_connect.activities.config import ActivitiesConfig, ActivityType
 from familiar_connect.activities.engine import (
     ACTIVITY_RETURN_MODE,
+    SLEEP_RETURN_MODE,
     ActivityEngine,
     GateAction,
     GateDecision,
@@ -28,9 +32,11 @@ from familiar_connect.bus.protocols import BackpressurePolicy
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
-from familiar_connect.identity import Author
+from familiar_connect.identity import Author, is_self_key
+from familiar_connect.sleep.maintenance import SleepPromptText
+from familiar_connect.sleep.opinion_formation import OpinionFact, OpinionPlan
 
-from .conftest import build_fake_llm_clients
+from .conftest import FakeLLMClient, build_fake_llm_clients
 from .test_text_responder import (
     _CapturingSend,
     _discord_text_event,
@@ -148,7 +154,15 @@ def _engine(
     bot_user_id: Callable[[], int | None] = lambda: _BOT_ID,
     nudge_tick: float = 60.0,
     familiar_id: str = _FAMILIAR,
+    sleep_passes_enabled: bool = False,
+    seed_dream_path: Path | None = None,
+    sleep_prompts: SleepPromptText | None = None,
+    sleep_window: tuple[time, time] | None = (time(0, 0), time(8, 0)),
+    sleep_grace_minutes: int = 30,
 ) -> ActivityEngine:
+    kwargs: dict[str, Any] = {}
+    if sleep_prompts is not None:
+        kwargs["sleep_prompts"] = sleep_prompts
     return ActivityEngine(
         store=store,
         config=config or _config(),
@@ -160,11 +174,16 @@ def _engine(
         presence_cb=presence or PresenceRecorder(),
         familiar_id=familiar_id,
         display_tz="UTC",
+        sleep_window=sleep_window,
+        sleep_grace_minutes=sleep_grace_minutes,
         bot_user_id=bot_user_id,
         voice_active_fn=lambda: voice_active,
         now_fn=clock,
         rng=random.Random(7),  # noqa: S311 — deterministic test roll
         nudge_tick_seconds=nudge_tick,
+        sleep_passes_enabled=sleep_passes_enabled,
+        seed_dream_path=seed_dream_path,
+        **kwargs,
     )
 
 
@@ -242,6 +261,16 @@ class TestEndTurnAppliesStart:
         assert row.planned_return_at == expected_return
         assert presence.calls == [("idle", "creek walk")]
         assert engine.return_timer_armed
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_unreachable_departure_sets_dnd_presence(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await _start_activity(engine, "hatbox")
+        assert presence.calls == [("dnd", "hatbox tending")]
         await engine.stop()
 
     @pytest.mark.asyncio
@@ -770,7 +799,8 @@ class TestReturnFlow:
         assert store.sync.active_activity(familiar_id=_FAMILIAR) is not None
         assert engine.return_timer_armed
         assert armed == [clock.now + timedelta(seconds=20)]
-        assert presence.calls == []
+        # away presence re-established, but no inline return flip to online
+        assert presence.calls == [("idle", "creek walk")]
         # still absent until the floor timer fires
         assert engine.gate(_payload("hello")).action is GateAction.SUPPRESS
         await engine.stop()
@@ -794,6 +824,74 @@ class TestRestart:
         assert engine.return_timer_armed
         # gate still suppresses while reloaded activity is active
         assert engine.gate(_payload("hello")).action is GateAction.SUPPRESS
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_restores_idle_presence_for_reachable_row(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="walk",
+            label="creek walk",
+            started_at=clock.now - timedelta(minutes=5),
+            planned_return_at=clock.now + timedelta(minutes=25),
+            note=None,
+        )
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        assert presence.calls == [("idle", "creek walk")]
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_restores_dnd_presence_for_unreachable_row(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="hatbox",
+            label="hatbox tending",
+            started_at=clock.now - timedelta(minutes=5),
+            planned_return_at=clock.now + timedelta(minutes=15),
+            note=None,
+        )
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        assert presence.calls == [("dnd", "hatbox tending")]
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_resync_presence_reissues_away_for_active_row(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        """Post-ready resync — boot-reload away call was dropped pre-ready."""
+        store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="hatbox",
+            label="hatbox tending",
+            started_at=clock.now - timedelta(minutes=5),
+            planned_return_at=clock.now + timedelta(minutes=15),
+            note=None,
+        )
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        presence.calls.clear()  # isolate the resync re-issue
+        await engine.resync_presence()
+        assert presence.calls == [("dnd", "hatbox tending")]
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_resync_presence_noop_when_idle(
+        self, store: AsyncHistoryStore, clock: FakeClock
+    ) -> None:
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, presence=presence)
+        await engine.start()
+        await engine.resync_presence()
+        assert presence.calls == []
         await engine.stop()
 
     @pytest.mark.asyncio
@@ -1371,3 +1469,881 @@ class TestResponderInLoop:
             consumer.cancel()
             await engine.stop()
             await bus.shutdown()
+
+
+def _sleep_type() -> ActivityType:
+    return ActivityType(
+        id="sleep",
+        label="asleep",
+        duration_minutes=None,
+        reachable=False,
+        seed="The night's dream, retold on waking.",
+    )
+
+
+def _sleep_config() -> ActivitiesConfig:
+    base = _config()
+    return _config(catalog=(*base.catalog, _sleep_type()))
+
+
+def _night_clock(hour: int, minute: int = 0, day: int = 13) -> FakeClock:
+    return FakeClock(datetime(2026, 6, day, hour, minute, tzinfo=UTC))
+
+
+class TestSleepSchedule:
+    """Behavioral sleep window — bedtime nudge, grace backstop, fixed wake."""
+
+    @pytest.mark.asyncio
+    async def test_defer_start_sleep_returns_at_window_end(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(0, 10)
+        engine = _engine(store, clock, config=_sleep_config())
+        ack = engine.defer_start("sleep", None)
+        assert ack.get("ack") == "ok"
+        assert ack["duration_minutes"] == 470  # 00:10 → 08:00
+        await engine.end_turn()
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.planned_return_at == datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_arms_from_character_config_window(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Window sourced from ctor (character config), not the catalog entry.
+
+        Sleep entry stays in the catalog for identification; the schedule
+        force-sleeps past grace using the ctor-supplied window/grace.
+        """
+        clock = _night_clock(0, 31)  # past 00:00 + 30 grace
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            sleep_window=(time(0, 0), time(8, 0)),
+            sleep_grace_minutes=30,
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.type_id == "sleep"
+        assert row.planned_return_at == datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_window_disarms_schedule(self, store: AsyncHistoryStore) -> None:
+        """``sleep_window=None`` ⇒ schedule never fires even with a sleep entry."""
+        clock = _night_clock(0, 31)
+        engine = _engine(store, clock, config=_sleep_config(), sleep_window=None)
+        await engine._sleep_schedule_tick(clock.now)
+        assert store.sync.active_activity(familiar_id=_FAMILIAR) is None
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_bedtime_nudge_published_once_per_occurrence(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(0, 5)
+        bus = InProcessEventBus()
+        await bus.start()
+        engine = _engine(store, clock, bus=bus, config=_sleep_config())
+        sub = bus.subscribe((TOPIC_DISCORD_TEXT,), policy=BackpressurePolicy.UNBOUNDED)
+        try:
+            await engine._sleep_schedule_tick(clock.now)
+            event = await asyncio.wait_for(anext(sub), timeout=1.0)
+            assert "sleep" in event.payload["content"]
+            assert "start_activity" in event.payload["content"]
+            # nudge only — nothing force-started pre-grace
+            assert store.sync.active_activity(familiar_id=_FAMILIAR) is None
+            # debounced — same occurrence never nudges twice
+            clock.advance(minutes=5)
+            await engine._sleep_schedule_tick(clock.now)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(anext(sub), timeout=0.2)
+        finally:
+            await engine.stop()
+            await bus.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_force_sleep_after_grace(self, store: AsyncHistoryStore) -> None:
+        clock = _night_clock(0, 31)
+        presence = PresenceRecorder()
+        engine = _engine(store, clock, config=_sleep_config(), presence=presence)
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.type_id == "sleep"
+        assert row.planned_return_at == datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        assert presence.calls == [("dnd", "asleep")]
+        assert engine.return_timer_armed
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_fixed_wake_regardless_of_start_time(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(3, 0)
+        engine = _engine(store, clock, config=_sleep_config())
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.planned_return_at == datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_nothing_happens_outside_window(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(12, 0)
+        bus = InProcessEventBus()
+        await bus.start()
+        engine = _engine(store, clock, bus=bus, config=_sleep_config())
+        sub = bus.subscribe((TOPIC_DISCORD_TEXT,), policy=BackpressurePolicy.UNBOUNDED)
+        try:
+            await engine._sleep_schedule_tick(clock.now)
+            assert store.sync.active_activity(familiar_id=_FAMILIAR) is None
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(anext(sub), timeout=0.2)
+        finally:
+            await engine.stop()
+            await bus.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_already_slept_this_window_no_refire(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Cut-short or completed sleep STARTED this window blocks re-entry."""
+        clock = _night_clock(1, 0)
+        slept_id = store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="sleep",
+            label="asleep",
+            started_at=datetime(2026, 6, 13, 0, 5, tzinfo=UTC),
+            planned_return_at=datetime(2026, 6, 13, 8, 0, tzinfo=UTC),
+            note=None,
+        )
+        store.sync.finish_activity(
+            activity_id=slept_id,
+            status="completed",
+            actual_return_at=datetime(2026, 6, 13, 0, 50, tzinfo=UTC),
+            experience_text=None,
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        engine = _engine(store, clock, bus=bus, config=_sleep_config())
+        sub = bus.subscribe((TOPIC_DISCORD_TEXT,), policy=BackpressurePolicy.UNBOUNDED)
+        try:
+            await engine._sleep_schedule_tick(clock.now)
+            assert store.sync.active_activity(familiar_id=_FAMILIAR) is None
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(anext(sub), timeout=0.2)
+        finally:
+            await engine.stop()
+            await bus.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_prior_night_sleep_does_not_block_tonight(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        old_id = store.sync.create_activity(
+            familiar_id=_FAMILIAR,
+            type_id="sleep",
+            label="asleep",
+            started_at=datetime(2026, 6, 12, 0, 10, tzinfo=UTC),
+            planned_return_at=datetime(2026, 6, 12, 8, 0, tzinfo=UTC),
+            note=None,
+        )
+        store.sync.finish_activity(
+            activity_id=old_id,
+            status="completed",
+            actual_return_at=datetime(2026, 6, 12, 8, 0, tzinfo=UTC),
+            experience_text=None,
+        )
+        clock = _night_clock(0, 45)
+        engine = _engine(store, clock, config=_sleep_config())
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.type_id == "sleep"
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_backstop_waits_while_out_on_other_activity(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(0, 0)
+        engine = _engine(store, clock, config=_sleep_config())
+        await _start_activity(engine, "walk")
+        clock.advance(minutes=45)  # past grace, but she's out
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.type_id == "walk"
+        await engine.notify_reply_sent()  # back from the walk
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.type_id == "sleep"
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_wrapped_window_evening_side(self, store: AsyncHistoryStore) -> None:
+        clock = _night_clock(23, 45, day=12)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_window=(time(23, 0), time(7, 0))
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.planned_return_at == datetime(2026, 6, 13, 7, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_wrapped_window_morning_side(self, store: AsyncHistoryStore) -> None:
+        """Occurrence started yesterday 23:00; 01:00 is past grace."""
+        clock = _night_clock(1, 0, day=13)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_window=(time(23, 0), time(7, 0))
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.planned_return_at == datetime(2026, 6, 13, 7, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_boot_mid_window_first_tick_force_sleeps(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(1, 0)
+        engine = _engine(store, clock, config=_sleep_config(), nudge_tick=0.01)
+        await engine.start()
+        try:
+            for _ in range(200):
+                if store.sync.active_activity(familiar_id=_FAMILIAR) is not None:
+                    break
+                await asyncio.sleep(0.01)
+            row = store.sync.active_activity(familiar_id=_FAMILIAR)
+            assert row is not None
+            assert row.type_id == "sleep"
+        finally:
+            await engine.stop()
+
+
+def _opinion_plan(*texts: str) -> OpinionPlan:
+    opinions = tuple(
+        OpinionFact(
+            text=t,
+            source_turn_ids=(1,),
+            valid_from_date="2026-06-12",
+            self_grounded=True,
+            importance=5,
+        )
+        for t in texts
+    )
+    return OpinionPlan(
+        familiar_id=_FAMILIAR,
+        opinions=opinions,
+        rejected=(),
+        flags=(),
+        new_last_turn_id=5,
+    )
+
+
+class TestSleepLifecyclePasses:
+    """Sleep departure fires consolidation then opinions (apply=True)."""
+
+    @pytest.mark.asyncio
+    async def test_consolidation_then_opinion_applied_on_departure(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clock = _night_clock(0, 45)
+        calls: list[tuple[str, dict[str, Any]]] = []
+        cplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=2)
+        dplan = _opinion_plan("Rain is best heard from indoors.")
+
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            calls.append(("consolidation", kw))
+            return cplan
+
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            calls.append(("opinion", kw))
+            return dplan
+
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task
+        assert [c[0] for c in calls] == ["consolidation", "opinion"]
+        assert calls[0][1]["apply"] is True
+        assert calls[1][1]["apply"] is True
+        assert calls[1][1]["display_tz"] == "UTC"
+        # opinion plan now flows straight into prose at pass completion —
+        # formed opinion reaches the prose-gen prompt, prose persisted
+        llm = cast("FakeLLMClient", engine._llm_clients["background"])
+        assert any(
+            "Rain is best heard from indoors." in c[-1].content_str for c in llm.calls
+        )
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.experience_text is not None
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_consolidation_denylist_threaded_into_opinion(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clock = _night_clock(0, 45)
+        fact = store.sync.append_fact(
+            familiar_id=_FAMILIAR,
+            channel_id=None,
+            text="a known bit, retired tonight",
+            source_turn_ids=(),
+        )
+        cplan = SimpleNamespace(
+            retire=[SimpleNamespace(fact_ids=[fact.id])], rewrite=[], mutated_count=1
+        )
+        seen: dict[str, Any] = {}
+
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            return cplan
+
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            seen.update(kw)
+            return _opinion_plan()
+
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task
+        assert seen["denylist"] == ("a known bit, retired tonight",)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_configured_sleep_prompts_thread_into_passes(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Engine-held config prompt text reaches the execute kwargs."""
+        clock = _night_clock(0, 45)
+        seen_c: dict[str, Any] = {}
+        seen_o: dict[str, Any] = {}
+
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            seen_c.update(kw)
+            return SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
+
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            seen_o.update(kw)
+            return _opinion_plan()
+
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
+        prompts = SleepPromptText(
+            consolidation_system="CFG consolidation",
+            stance_system="CFG stance {self_name}",
+            synthesis_system="CFG synthesis {self_name}",
+        )
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            sleep_passes_enabled=True,
+            sleep_prompts=prompts,
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task
+        assert seen_c["system"] == "CFG consolidation"
+        assert seen_o["stance_system"] == "CFG stance {self_name}"
+        assert seen_o["synthesis_system"] == "CFG synthesis {self_name}"
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_not_fired_for_non_sleep_activity(
+        self,
+        store: AsyncHistoryStore,
+        clock: FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def fail(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            msg = "passes must not run for a walk"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(maintenance_mod, "execute_consolidation", fail)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
+        await _start_activity(engine, "walk")
+        assert engine._sleep_passes_task is None
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_sleep_passes_disabled(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clock = _night_clock(0, 45)
+        calls: list[str] = []
+
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            calls.append("consolidation")
+
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=False
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task
+        assert calls == []
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_failure_logged_keeps_none_never_blocks_return(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clock = _night_clock(0, 45)
+
+        async def boom(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            msg = "llm down"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(maintenance_mod, "execute_consolidation", boom)
+        engine = _engine(
+            store, clock, config=_sleep_config(), sleep_passes_enabled=True
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task  # must not raise
+        assert engine._last_opinion_plan is None
+        # return flow still completes
+        await engine._cancel_return_timer()
+        clock.now = datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        await engine._run_return(status="completed")
+        assert store.sync.active_activity(familiar_id=_FAMILIAR) is None
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_passes_persist_dream_prose_and_journal(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dream prose produced + persisted right after passes finish."""
+        clock = _night_clock(0, 45)
+        cplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
+        dplan = _opinion_plan("Rain is best heard from indoors.")
+
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            return cplan
+
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            return dplan
+
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
+        # spy the journal write rather than reading it back: a just-committed
+        # facts INSERT is intermittently invisible to a same-test read through
+        # pyturso 0.5.1 (no intervening fact write to refresh the view), which
+        # flaked this test ~5%. Verifying the engine ISSUES the dream-framed
+        # self: append is deterministic and is the engine's actual contract.
+        appended: list[dict[str, Any]] = []
+        orig_append = store.sync.append_fact
+
+        def spy_append(**kw: Any) -> Any:  # noqa: ANN401
+            appended.append(kw)
+            return orig_append(**kw)
+
+        monkeypatch.setattr(store.sync, "append_fact", spy_append)
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            sleep_passes_enabled=True,
+            experience="A dream of rain on glass.",
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine.active is not None
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task
+        # persisted on the activity row
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.experience_text == "A dream of rain on glass."
+        # in-memory record updated too (no-restart path)
+        assert engine.active is not None
+        assert engine.active.experience_text == "A dream of rain on glass."
+        # dream-journal fact minted at pass completion: dream-framed, carries
+        # the prose, self-subject only
+        dream_appends = [c for c in appended if "dreamed" in c["text"]]
+        assert len(dream_appends) == 1
+        assert "A dream of rain on glass." in dream_appends[0]["text"]
+        assert all(is_self_key(s.canonical_key) for s in dream_appends[0]["subjects"])
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_persist_no_ops_when_return_beat_passes(
+        self,
+        store: AsyncHistoryStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Return finished the sleep row mid-passes — late persist no-ops.
+
+        Simulate return-beats-passes: dream pass clears ``_active`` (as a
+        finishing return would). The persist block must not write
+        experience_text to the already-finished row nor mint a 2nd journal.
+        """
+        clock = _night_clock(0, 45)
+        cplan = SimpleNamespace(retire=[], rewrite=[], mutated_count=0)
+        dplan = _opinion_plan("Rain is best heard from indoors.")
+
+        async def fake_consolidation(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            return cplan
+
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            sleep_passes_enabled=True,
+            experience="A dream of rain on glass.",
+        )
+
+        async def fake_opinion(**kw: Any) -> Any:  # noqa: ANN401, RUF029
+            del kw
+            # side effect: a return finished/cleared the row mid-passes
+            engine._active = None
+            return dplan
+
+        monkeypatch.setattr(
+            maintenance_mod, "execute_consolidation", fake_consolidation
+        )
+        monkeypatch.setattr(maintenance_mod, "execute_opinion_formation", fake_opinion)
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine._sleep_passes_task is not None
+        await engine._sleep_passes_task
+        # sleep row must stay unwritten by the late passes
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.experience_text is None
+        # no dream-journal fact minted by the late path
+        facts = store.sync.recent_facts(familiar_id=_FAMILIAR, limit=10)
+        journal = [f for f in facts if "dreamed" in f.text]
+        assert journal == []
+        await engine.stop()
+
+
+async def _sleep_and_wake(engine: ActivityEngine, clock: FakeClock) -> None:
+    """Force sleep at clock.now, then drive the fixed wake."""
+    await engine._sleep_schedule_tick(clock.now)
+    assert engine.active is not None
+    await engine._cancel_return_timer()
+    clock.now = engine.active.planned_return_at
+    await engine._run_return(status="completed")
+
+
+class TestDreamReturn:
+    """Sleep return narrates the dream; mode + journal fact differ."""
+
+    @pytest.mark.asyncio
+    async def test_return_turn_uses_sleep_return_mode(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(0, 45)
+        engine = _engine(
+            store, clock, config=_sleep_config(), experience="I dreamed of spools."
+        )
+        await _sleep_and_wake(engine, clock)
+        turns = store.sync.recent(familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=10)
+        marked = [t for t in turns if t.content.startswith("[returned from")]
+        assert len(marked) == 1
+        assert marked[0].content == "[returned from asleep] I dreamed of spools."
+        assert marked[0].mode == SLEEP_RETURN_MODE
+        assert marked[0].mode == "sleep_return"
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_prompt_carries_seed_and_minted_opinions(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(0, 45)
+        engine = _engine(store, clock, config=_sleep_config())
+        await engine._sleep_schedule_tick(clock.now)
+        assert engine.active is not None
+        # passes task lands the plan after departure — simulate that
+        engine._last_opinion_plan = _opinion_plan("Rain is best heard from indoors.")
+        await engine._cancel_return_timer()
+        clock.now = engine.active.planned_return_at
+        await engine._run_return(status="completed")
+        llm = cast("FakeLLMClient", engine._llm_clients["background"])
+        assert llm.calls, "dream prose generation never reached the LLM"
+        system, user = llm.calls[-1][0], llm.calls[-1][1]
+        assert "dream" in system.content_str.lower()
+        assert "The night's dream, retold on waking." in user.content_str
+        assert "Rain is best heard from indoors." in user.content_str
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_prose_seed_only_when_no_plan(self, store: AsyncHistoryStore) -> None:
+        clock = _night_clock(0, 45)
+        engine = _engine(store, clock, config=_sleep_config())
+        assert engine._last_opinion_plan is None
+        await _sleep_and_wake(engine, clock)
+        llm = cast("FakeLLMClient", engine._llm_clients["background"])
+        assert llm.calls
+        assert "The night's dream, retold on waking." in llm.calls[-1][1].content_str
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_dream_journal_self_fact_minted(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(0, 45)
+        engine = _engine(
+            store, clock, config=_sleep_config(), experience="I dreamed of spools."
+        )
+        await _sleep_and_wake(engine, clock)
+        facts = store.sync.recent_facts(familiar_id=_FAMILIAR, limit=10)
+        journal = [f for f in facts if "dreamed" in f.text]
+        assert len(journal) == 1
+        assert "I dreamed of spools." in journal[0].text
+        assert any(is_self_key(s.canonical_key) for s in journal[0].subjects)
+        # mechanical event-fact still written alongside
+        assert any("spent" in f.text and "asleep" in f.text for f in facts)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_degrades_to_stock_line(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(0, 45)
+        engine = _engine(store, clock, config=_sleep_config(), experience="")
+        await _sleep_and_wake(engine, clock)
+        turns = store.sync.recent(familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=10)
+        marked = [t for t in turns if t.content.startswith("[returned from asleep]")]
+        assert len(marked) == 1
+        assert len(marked[0].content) > len("[returned from asleep] ")
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_return_reuses_persisted_prose_no_regen(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Prose already on the row: reuse verbatim, no LLM, no 2nd journal."""
+        clock = _night_clock(0, 45)
+        engine = _engine(store, clock, config=_sleep_config())
+        await engine._sleep_schedule_tick(clock.now)
+        active = engine.active
+        assert active is not None
+        # simulate passes having persisted the dream (row + in-memory)
+        engine._active = replace(active, experience_text="Persisted dream.")
+        store.sync.set_activity_experience(
+            activity_id=active.id, experience_text="Persisted dream."
+        )
+        await engine._cancel_return_timer()
+        clock.now = active.planned_return_at
+        await engine._run_return(status="completed")
+        turns = store.sync.recent(familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=10)
+        marked = [t for t in turns if t.content.startswith("[returned from")]
+        assert marked[0].content == "[returned from asleep] Persisted dream."
+        # no prose LLM call at wake
+        llm = cast("FakeLLMClient", engine._llm_clients["background"])
+        assert llm.calls == []
+        # journal not re-appended (it was minted at pass completion)
+        facts = store.sync.recent_facts(familiar_id=_FAMILIAR, limit=10)
+        assert [f for f in facts if "dreamed" in f.text] == []
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_restart_reload_reuses_persisted_prose(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Mid-sleep restart: reloaded row carries prose → reuse, no regen."""
+        clock = _night_clock(0, 45)
+        engine = _engine(store, clock, config=_sleep_config())
+        await engine._sleep_schedule_tick(clock.now)
+        active = engine.active
+        assert active is not None
+        store.sync.set_activity_experience(
+            activity_id=active.id, experience_text="Survived the restart."
+        )
+        await engine.stop()
+        # boot a fresh engine — reloads the active row WITH prose
+        engine2 = _engine(store, clock, config=_sleep_config())
+        await engine2.start()
+        reloaded = engine2.active
+        assert reloaded is not None
+        assert reloaded.experience_text == "Survived the restart."
+        await engine2._cancel_return_timer()
+        clock.now = reloaded.planned_return_at
+        await engine2._run_return(status="completed")
+        turns = store.sync.recent(familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=10)
+        marked = [t for t in turns if t.content.startswith("[returned from")]
+        assert marked[0].content == "[returned from asleep] Survived the restart."
+        assert cast("FakeLLMClient", engine2._llm_clients["background"]).calls == []
+        await engine2.stop()
+
+    @pytest.mark.asyncio
+    async def test_fallback_generates_and_journals_once_when_unpersisted(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Passes never persisted: wake generates seed-only + journals once."""
+        clock = _night_clock(0, 45)
+        engine = _engine(
+            store, clock, config=_sleep_config(), experience="Fallback dream."
+        )
+        await engine._sleep_schedule_tick(clock.now)
+        active = engine.active
+        assert active is not None
+        assert active.experience_text is None
+        await engine._cancel_return_timer()
+        clock.now = active.planned_return_at
+        await engine._run_return(status="completed")
+        llm = cast("FakeLLMClient", engine._llm_clients["background"])
+        assert llm.calls, "fallback should reach the LLM"
+        facts = store.sync.recent_facts(familiar_id=_FAMILIAR, limit=10)
+        journal = [f for f in facts if "dreamed" in f.text]
+        assert len(journal) == 1
+        assert "Fallback dream." in journal[0].text
+        await engine.stop()
+
+
+class TestSeedDreamConsumable:
+    """Authored first dream — verbatim once, then generation."""
+
+    @pytest.mark.asyncio
+    async def test_used_verbatim_then_renamed(
+        self, store: AsyncHistoryStore, tmp_path: Path
+    ) -> None:
+        seed_path = tmp_path / "seed_dream.md"
+        seed_path.write_text("The Spools, hand-authored.")
+        clock = _night_clock(0, 45)
+        engine = _engine(
+            store, clock, config=_sleep_config(), seed_dream_path=seed_path
+        )
+        await _sleep_and_wake(engine, clock)
+        turns = store.sync.recent(familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=10)
+        marked = [t for t in turns if t.content.startswith("[returned from")]
+        assert marked[0].content == "[returned from asleep] The Spools, hand-authored."
+        # generation skipped entirely
+        assert cast("FakeLLMClient", engine._llm_clients["background"]).calls == []
+        # consumed — idempotent on the next night
+        assert not seed_path.exists()
+        consumed = tmp_path / "seed_dream.consumed.md"
+        assert consumed.exists()
+        assert consumed.read_text() == "The Spools, hand-authored."
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_second_night_generates(
+        self, store: AsyncHistoryStore, tmp_path: Path
+    ) -> None:
+        seed_path = tmp_path / "seed_dream.md"
+        seed_path.write_text("The Spools.")
+        clock = _night_clock(0, 45)
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            seed_dream_path=seed_path,
+            experience="A generated second dream.",
+        )
+        await _sleep_and_wake(engine, clock)
+        clock.now = datetime(2026, 6, 14, 0, 45, tzinfo=UTC)
+        await _sleep_and_wake(engine, clock)
+        turns = store.sync.recent(familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=10)
+        marked = [t for t in turns if t.content.startswith("[returned from")]
+        assert len(marked) == 2
+        assert "A generated second dream." in marked[-1].content
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_missing_file_generates(
+        self, store: AsyncHistoryStore, tmp_path: Path
+    ) -> None:
+        clock = _night_clock(0, 45)
+        engine = _engine(
+            store,
+            clock,
+            config=_sleep_config(),
+            seed_dream_path=tmp_path / "seed_dream.md",
+            experience="A generated dream.",
+        )
+        await _sleep_and_wake(engine, clock)
+        turns = store.sync.recent(familiar_id=_FAMILIAR, channel_id=_CHANNEL, limit=10)
+        marked = [t for t in turns if t.content.startswith("[returned from")]
+        assert "A generated dream." in marked[0].content
+        await engine.stop()
+
+
+class TestEarlyBedGuard:
+    """start_activity('sleep') far from the window is refused.
+
+    The fixed wake at window END would otherwise turn a midday tool
+    call into a ~20h absence. Within an hour of bedtime is fine.
+    """
+
+    @pytest.mark.asyncio
+    async def test_midday_sleep_refused(self, store: AsyncHistoryStore) -> None:
+        clock = _night_clock(12, 0)
+        engine = _engine(store, clock, config=_sleep_config())
+        result = engine.defer_start("sleep", None)
+        assert "error" in result
+        assert "window" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_within_hour_before_window_allowed(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        clock = _night_clock(23, 30, day=12)  # window 00:00-08:00 next day
+        engine = _engine(store, clock, config=_sleep_config())
+        ack = engine.defer_start("sleep", None)
+        assert ack.get("ack") == "ok"
+        await engine.end_turn()
+        row = store.sync.active_activity(familiar_id=_FAMILIAR)
+        assert row is not None
+        assert row.planned_return_at == datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_inside_window_allowed(self, store: AsyncHistoryStore) -> None:
+        clock = _night_clock(2, 0)
+        engine = _engine(store, clock, config=_sleep_config())
+        assert engine.defer_start("sleep", None).get("ack") == "ok"
+        await engine.end_turn()
+        await engine.stop()

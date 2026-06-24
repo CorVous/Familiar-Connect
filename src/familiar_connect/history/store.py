@@ -134,6 +134,24 @@ class WatermarkEntry:
 
 
 @dataclass(frozen=True)
+class SleepWatermark:
+    """Highest fact/turn ids the last sleep consolidation pass saw.
+
+    Bounds the *turns* window the next pass covers (re-attribution
+    context above ``last_turn_id``); a missed night widens it. The
+    *facts* window is always the current fact base, not id-bounded —
+    consolidation reasons over all live facts. ``last_fact_id`` is the
+    high-water mark the watermark advances to, recording progress.
+    Distinct from memory-writer/reflection watermarks — sleep runs on
+    its own (nightly) cadence.
+    """
+
+    last_fact_id: int
+    last_turn_id: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class FocusPointers:
     """Current text/voice channel focus for a familiar."""
 
@@ -192,6 +210,40 @@ class FactSubject:
 
     canonical_key: str
     display_at_write: str
+
+
+@dataclass(frozen=True)
+class FactDraft:
+    """Consolidated *content* for a merge, before the store mints it.
+
+    The caller of :meth:`HistoryStore.supersede` supplies only the
+    merged content — text, channel, and resolved subject displays.
+    The store supplies the *lineage* (obsolete rows point at the
+    minted fact) and *provenance* (``source_turn_ids`` = union of the
+    obsolete rows'), so a draft deliberately carries no turn ids.
+    """
+
+    channel_id: int | None
+    text: str
+    subjects: tuple[FactSubject, ...] = ()
+
+
+@dataclass(frozen=True)
+class SupersedeResult:
+    """Outcome of one :meth:`HistoryStore.supersede` call.
+
+    :param minted: the freshly minted replacement when ``new_fact``
+        was a :class:`FactDraft`; ``None`` for retire or when an
+        already-minted fact/id was supplied (nothing new was minted).
+    :param superseded: obsolete ids actually marked this call.
+    :param skipped: ``(id, reason)`` for obsolete rows left untouched
+        — e.g. a concurrent writer already retired them. A skip is
+        tolerated, never fatal: the merge is not rolled back.
+    """
+
+    minted: Fact | None
+    superseded: tuple[int, ...]
+    skipped: tuple[tuple[int, str], ...]
 
 
 @dataclass(frozen=True)
@@ -389,6 +441,16 @@ CREATE TABLE IF NOT EXISTS reflection_watermark (
     updated_at    TEXT    NOT NULL
 );
 
+-- Sleep-consolidation watermark. Highest fact/turn ids the last
+-- nightly hygiene pass saw. Window the next pass covers = ids above
+-- these; a missed night just widens it. One row per familiar.
+CREATE TABLE IF NOT EXISTS sleep_watermark (
+    familiar_id   TEXT    PRIMARY KEY,
+    last_fact_id  INTEGER NOT NULL,
+    last_turn_id  INTEGER NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
+
 -- Identity. One row per (platform, user_id). Last-write wins.
 CREATE TABLE IF NOT EXISTS accounts (
     canonical_key  TEXT PRIMARY KEY,           -- "discord:123" / "twitch:456"
@@ -550,6 +612,23 @@ def _subject_key_set(subjects: Iterable[FactSubject]) -> frozenset[str]:
     return frozenset(s.canonical_key for s in subjects)
 
 
+def _union_provenance(facts: Iterable[Fact | None]) -> list[int]:
+    """Order-preserving union of ``source_turn_ids`` across ``facts``.
+
+    A merged fact's provenance is the union of the rows it consolidates
+    — forever-provenance, no row dropped. ``None`` entries (an obsolete
+    id with no live row) contribute nothing.
+    """
+    out: list[int] = []
+    for fact in facts:
+        if fact is None:
+            continue
+        for tid in fact.source_turn_ids:
+            if tid not in out:
+                out.append(tid)
+    return out
+
+
 def _canonical_keys_from_subjects_json(subjects_json: str | None) -> frozenset[str]:
     """Canonical str keys from a fact row's ``subjects_json``.
 
@@ -572,6 +651,16 @@ def _canonical_keys_from_subjects_json(subjects_json: str | None) -> frozenset[s
         if isinstance(key, str):
             keys.add(key)
     return frozenset(keys)
+
+
+def _placeholders(n: int) -> str:
+    """Build SQL ``IN``-clause placeholder list: ``n`` bound ``?`` marks.
+
+    Emits ONLY bound-parameter placeholders (``"?,?,?"``), never data —
+    so an f-string interpolating the result cannot inject SQL. Caller
+    binds the actual values as query parameters. ``n <= 0`` -> ``""``.
+    """
+    return ",".join("?" * n)
 
 
 def _facts_validity_where(
@@ -1761,6 +1850,67 @@ class HistoryStore:
         )
         self._conn.commit()
 
+    def get_sleep_watermark(
+        self,
+        *,
+        familiar_id: str,
+    ) -> SleepWatermark | None:
+        """Last sleep-consolidation watermark for *familiar_id*, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT last_fact_id, last_turn_id, updated_at
+              FROM sleep_watermark
+             WHERE familiar_id = ?
+            """,
+            (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SleepWatermark(
+            last_fact_id=int(row["last_fact_id"]),
+            last_turn_id=int(row["last_turn_id"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def advance_sleep_watermark(
+        self,
+        *,
+        familiar_id: str,
+        last_fact_id: int | None = None,
+        last_turn_id: int | None = None,
+    ) -> None:
+        """Advance one or both watermark axes; leave omitted axes intact.
+
+        Partial-update by design: hygiene owns ``last_fact_id``, dream
+        owns ``last_turn_id``. Passing only one updates only that column,
+        so neither pass can clobber the other's progress. On first insert
+        an omitted axis defaults to 0. Both ``None`` is a no-op.
+        """
+        if last_fact_id is None and last_turn_id is None:
+            return
+        timestamp = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO sleep_watermark
+                (familiar_id, last_fact_id, last_turn_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (familiar_id)
+            DO UPDATE SET
+                last_fact_id = COALESCE(?, last_fact_id),
+                last_turn_id = COALESCE(?, last_turn_id),
+                updated_at   = excluded.updated_at
+            """,
+            (
+                familiar_id,
+                last_fact_id if last_fact_id is not None else 0,
+                last_turn_id if last_turn_id is not None else 0,
+                timestamp,
+                last_fact_id,
+                last_turn_id,
+            ),
+        )
+        self._conn.commit()
+
     def turns_since_watermark(
         self,
         *,
@@ -2017,6 +2167,7 @@ class HistoryStore:
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
         importance: int | None = None,
+        dedup: bool = True,
     ) -> Fact:
         """Persist one fact. ``source_turn_ids`` + ``subjects`` stored as JSON.
 
@@ -2033,6 +2184,11 @@ class HistoryStore:
         Out-of-range values clamp to ``[1, 10]`` so a stray LLM
         number can't poison rank-time math. ``None`` preserved
         verbatim — downstream consumers treat as neutral midpoint.
+
+        ``dedup`` (default True) gates near-duplicate suppression. The
+        sleep-hygiene merge passes ``dedup=False`` so a consolidated
+        fact whose text equals one of the rows it supersedes still
+        inserts a fresh row (the olds are superseded right after).
         """
         ids = [int(i) for i in source_turn_ids]
         subjects_tuple = tuple(subjects)
@@ -2052,7 +2208,7 @@ class HistoryStore:
         # normalized text (kills alias/nickname restatement pile-up).
         # bypass when valid_to is set — such a fact may close/bound an
         # existing one, not restate it.
-        if valid_to is None:
+        if dedup and valid_to is None:
             existing = self._find_current_dup(
                 familiar_id=familiar_id,
                 norm_text=_normalize_fact_text(text),
@@ -2128,6 +2284,38 @@ class HistoryStore:
             ):
                 return fact
         return None
+
+    def facts_by_ids(
+        self,
+        *,
+        familiar_id: str,
+        ids: Iterable[int],
+    ) -> list[Fact]:
+        """Fetch facts by id, scoped to ``familiar_id``, oldest first.
+
+        Includes superseded rows — callers (sleep-apply) snapshot
+        source facts that a concurrent writer may retire mid-pass.
+        """
+        unique_ids = sorted({int(i) for i in ids})
+        if not unique_ids:
+            return []
+        placeholders = _placeholders(len(unique_ids))
+        rows = self._conn.execute(
+            # S608 safe: only bound `?` placeholders interpolated; ids
+            # are int-coerced above and passed as bound params below.
+            f"""
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to, importance
+              FROM facts
+             WHERE familiar_id = ?
+               AND id IN ({placeholders})
+             ORDER BY id ASC
+            """,  # noqa: S608
+            (familiar_id, *unique_ids),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
 
     def recent_facts(
         self,
@@ -2280,54 +2468,188 @@ class HistoryStore:
         max_id = row["max_id"] if row is not None else None
         return int(max_id) if max_id is not None else 0
 
-    def supersede_fact(
+    def supersede(
         self,
         *,
         familiar_id: str,
-        old_id: int,
-        new_id: int,
-    ) -> None:
-        """Mark ``old_id`` as superseded by ``new_id``.
+        obsolete_facts: Iterable[int],
+        new_fact: FactDraft | Fact | int | None,
+    ) -> SupersedeResult:
+        """Unified mutation: retire, merge, or repoint obsolete facts.
 
-        Both ids must belong to ``familiar_id``. Old row keeps its
-        text and provenance; only ``superseded_at`` (now, UTC) and
-        ``superseded_by`` are written. Re-superseding an already-
-        superseded row raises ``ValueError`` — signals upstream bug
-        (double-write) rather than something to silently absorb.
+        Three replacement shapes, distinguished by ``new_fact``:
+
+        * ``None`` — **retire**: each obsolete row gets ``superseded_at``
+          set, ``superseded_by`` left NULL (nothing replaces it).
+          Per-id skip-and-record: a stale id is recorded, the rest
+          still process.
+        * :class:`FactDraft` — **merge**: ATOMIC / all-or-nothing. Pre-flight
+          every obsolete row; if ANY is unknown or already superseded —
+          or ``obsolete_facts`` is empty — the merge is declined WHOLE
+          (nothing minted, ``minted=None``, every obsolete id recorded in
+          ``skipped``). Only when every row is current do we MINT the
+          replacement (``dedup=False``, so a consolidated text matching an
+          obsolete row still inserts) and point every obsolete row's
+          ``superseded_by`` at the minted id (many->one lineage). A
+          phantom merge that supersedes nothing is impossible by
+          construction.
+        * :class:`Fact` / ``int`` — **repoint at an existing row**: the
+          obsolete rows point at the supplied id; nothing is minted.
+          Per-id skip-and-record like retire.
+
+        The store owns merge lineage + provenance. For a draft, the
+        minted fact's ``source_turn_ids`` is the order-preserving UNION
+        of the obsolete rows' provenance — the caller never supplies it.
+        Ancestry is then resolvable from the store alone via
+        :meth:`ancestors_of` (reverse ``superseded_by`` walk). Because the
+        merge mints only when every ancestor is valid, provenance-union
+        equals ancestry exactly — no partial merge can break the
+        invariant.
         """
-        row = self._conn.execute(
-            "SELECT superseded_at, subjects_json FROM facts "
-            "WHERE id = ? AND familiar_id = ?",
-            (old_id, familiar_id),
-        ).fetchone()
-        if row is None:
-            msg = f"unknown fact id={old_id} for familiar={familiar_id}"
-            raise ValueError(msg)
-        if row["superseded_at"] is not None:
-            msg = f"fact id={old_id} already superseded"
-            raise ValueError(msg)
+        ids = [int(i) for i in obsolete_facts]
+        obsolete_rows = {
+            f.id: f for f in self.facts_by_ids(familiar_id=familiar_id, ids=ids)
+        }
+
+        if isinstance(new_fact, FactDraft):
+            return self._merge_atomically(
+                familiar_id=familiar_id,
+                ids=ids,
+                obsolete_rows=obsolete_rows,
+                draft=new_fact,
+            )
+
+        if new_fact is None:
+            new_id: int | None = None
+        else:
+            new_id = new_fact.id if isinstance(new_fact, Fact) else int(new_fact)
+
+        superseded: list[int] = []
+        skipped: list[tuple[int, str]] = []
         ts = datetime.now(tz=UTC).isoformat()
-        self._conn.execute(
-            """
-            UPDATE facts
-               SET superseded_at = ?, superseded_by = ?
-             WHERE id = ? AND familiar_id = ?
-            """,
-            (ts, new_id, old_id, familiar_id),
+        for fid in ids:
+            row = obsolete_rows.get(fid)
+            if row is None:
+                skipped.append((fid, f"unknown fact id={fid}"))
+                continue
+            if row.superseded_at is not None:
+                skipped.append((fid, f"fact id={fid} already superseded"))
+                continue
+            self._conn.execute(
+                "UPDATE facts SET superseded_at = ?, superseded_by = ? "
+                "WHERE id = ? AND familiar_id = ?",
+                (ts, new_id, fid, familiar_id),
+            )
+            self._invalidate_dossiers_for_keys(
+                familiar_id=familiar_id,
+                keys=_subject_key_set(row.subjects),
+            )
+            superseded.append(fid)
+        self._conn.commit()
+        # retire (new_id None) and existing-id repoint mint nothing.
+        return SupersedeResult(
+            minted=None,
+            superseded=tuple(superseded),
+            skipped=tuple(skipped),
         )
-        # Invalidate this fact's subjects' dossiers so PeopleDossierWorker
-        # rebuilds them from scratch. Worker compounds prior text + only
-        # newer facts; it never un-bakes a superseded fact. Must DELETE the
-        # row (not reset the watermark) — a surviving row re-compounds the
-        # stale/poisoned prose via the "Previous dossier" path. Absent row →
-        # prior=None → clean full rebuild. NULL subjects → no dossier to drop.
-        for key in _canonical_keys_from_subjects_json(row["subjects_json"]):
+
+    def _merge_atomically(
+        self,
+        *,
+        familiar_id: str,
+        ids: list[int],
+        obsolete_rows: dict[int, Fact],
+        draft: FactDraft,
+    ) -> SupersedeResult:
+        """Mint a merge only if EVERY obsolete row is current — else decline.
+
+        All-or-nothing pre-flight (mirrors ``sleep/apply.py``'s rewrite
+        semantics): an empty ``ids`` or any obsolete id that's unknown or
+        already superseded means we mint nothing and supersede nothing —
+        the merge is declined whole, every obsolete id recorded in
+        ``skipped``. This makes a phantom (a minted CURRENT fact that
+        supersedes no ancestor) impossible, so provenance-union always
+        equals ancestry.
+        """
+        stale: list[tuple[int, str]] = []
+        for fid in ids:
+            row = obsolete_rows.get(fid)
+            if row is None:
+                stale.append((fid, f"unknown fact id={fid}"))
+            elif row.superseded_at is not None:
+                stale.append((fid, f"fact id={fid} already superseded"))
+        if not ids or stale:
+            return SupersedeResult(minted=None, superseded=(), skipped=tuple(stale))
+
+        minted = self.append_fact(
+            familiar_id=familiar_id,
+            channel_id=draft.channel_id,
+            text=draft.text,
+            source_turn_ids=_union_provenance(obsolete_rows[fid] for fid in ids),
+            subjects=draft.subjects,
+            dedup=False,
+        )
+        ts = datetime.now(tz=UTC).isoformat()
+        for fid in ids:
+            self._conn.execute(
+                "UPDATE facts SET superseded_at = ?, superseded_by = ? "
+                "WHERE id = ? AND familiar_id = ?",
+                (ts, minted.id, fid, familiar_id),
+            )
+            self._invalidate_dossiers_for_keys(
+                familiar_id=familiar_id,
+                keys=_subject_key_set(obsolete_rows[fid].subjects),
+            )
+        self._conn.commit()
+        return SupersedeResult(minted=minted, superseded=tuple(ids), skipped=())
+
+    def ancestors_of(
+        self,
+        *,
+        familiar_id: str,
+        fact_id: int,
+    ) -> list[Fact]:
+        """Facts directly superseded by ``fact_id`` — its merge ancestors.
+
+        Reverse ``superseded_by`` walk: a merge points every obsolete
+        row at the minted fact (many->one), so "ancestors of X" is
+        exactly the rows whose ``superseded_by = X``. One hop — direct
+        parents, oldest first; chase the chain by re-querying each.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, familiar_id, channel_id, text,
+                   source_turn_ids, created_at,
+                   superseded_at, superseded_by, subjects_json,
+                   valid_from, valid_to, importance
+              FROM facts
+             WHERE familiar_id = ? AND superseded_by = ?
+             ORDER BY id ASC
+            """,
+            (familiar_id, int(fact_id)),
+        ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def _invalidate_dossiers_for_keys(
+        self, *, familiar_id: str, keys: Iterable[str]
+    ) -> None:
+        """DELETE baked dossiers for ``keys`` — authoritative primitive.
+
+        Sole owner of the dossier-drop knowledge; :meth:`supersede`
+        routes here (it holds parsed :class:`FactSubject`s).
+
+        PeopleDossierWorker compounds prior dossier text + only newer
+        facts; never un-bakes a retired fact. DELETE the row (not reset
+        the watermark) — a surviving row re-compounds stale/poisoned
+        prose via the "Previous dossier" path. Absent row → prior=None →
+        clean full rebuild. Empty ``keys`` → no-op. Caller commits.
+        """
+        for key in keys:
             self._conn.execute(
                 "DELETE FROM people_dossiers "
                 "WHERE familiar_id = ? AND canonical_key = ?",
                 (familiar_id, key),
             )
-        self._conn.commit()
 
     # ------------------------------------------------------------------
     # fact embeddings (M6) — semantic recall side-index
@@ -3103,6 +3425,16 @@ class HistoryStore:
         )
         self._conn.commit()
 
+    def set_activity_experience(
+        self, *, activity_id: int, experience_text: str
+    ) -> None:
+        """Persist dream/experience prose on one activity row (idempotent)."""
+        self._conn.execute(
+            "UPDATE activities SET experience_text = ? WHERE id = ?",
+            (experience_text, activity_id),
+        )
+        self._conn.commit()
+
     def active_activity(self, *, familiar_id: str) -> ActivityRecord | None:
         """Newest activity with ``actual_return_at IS NULL``, or ``None``."""
         row = self._conn.execute(
@@ -3116,6 +3448,30 @@ class HistoryStore:
              LIMIT 1
             """,
             (familiar_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_activity(row)
+
+    def latest_activity(
+        self, *, familiar_id: str, type_id: str
+    ) -> ActivityRecord | None:
+        """Newest activity of *type_id* (active or finished), or ``None``.
+
+        Sleep-window guard keys on this: most recent sleep row's
+        ``started_at`` vs the current window occurrence's start.
+        """
+        row = self._conn.execute(
+            """
+            SELECT id, familiar_id, type_id, label,
+                   started_at, planned_return_at, note,
+                   status, actual_return_at, experience_text
+              FROM activities
+             WHERE familiar_id = ? AND type_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (familiar_id, type_id),
         ).fetchone()
         if row is None:
             return None
