@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ctypes
 import datetime
 import json
 import os
@@ -795,8 +796,11 @@ _AZURE_STREAM_CANCELED = object()  # sentinel for StreamStatus.Canceled
 class _FakeAudioDataStream:
     """Fakes ``speechsdk.AudioDataStream``: yields *chunks*, then 0.
 
-    ``read_data(buffer)`` fills the given ``bytearray`` with the next
-    chunk and returns its length, mirroring the blocking SDK reader.
+    Faithful to the SDK contract (``speech.py`` ``read_data``): the
+    buffer must be strictly ``bytes`` — the real C layer fills its memory
+    in place via ctypes and returns the filled size. A ``bytearray`` (or
+    anything not ``bytes``) is rejected with ``ValueError``, exactly as
+    the SDK does; this is the contract a permissive fake must not flatten.
     Returns 0 once all chunks are consumed (end of stream).
 
     ``status`` exposes the terminal stream state — ``AllData`` for a
@@ -823,11 +827,17 @@ class _FakeAudioDataStream:
         self.cancellation_details.error_details = "mid-stream cancel"
         self.read_calls = 0
 
-    def read_data(self, buffer: bytearray) -> int:
+    def read_data(self, audio_buffer: bytes) -> int:
         self.read_calls += 1
+        if not isinstance(audio_buffer, bytes):
+            # Mirror speech.py: the SDK raises this exact type error.
+            msg = f'audio_buffer must be a bytes, is "{audio_buffer}"'
+            raise ValueError(msg)
         if self._chunks:
             chunk = self._chunks.pop(0)
-            buffer[: len(chunk)] = chunk
+            # The C layer writes into the buffer's memory in place; do the
+            # same so reuse of one buffer across reads is exercised.
+            ctypes.memmove(audio_buffer, chunk, len(chunk))
             return len(chunk)
         if self._block_until is not None:
             self._block_until.wait()
