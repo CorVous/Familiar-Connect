@@ -44,6 +44,7 @@ from familiar_connect.tts import (
     create_tts_client,
     get_cached_greeting_audio,
 )
+from familiar_connect.voice.audio import DISCORD_FRAME_SIZE
 
 _TEST_VOICE_ID = "test-voice-id"
 _TEST_MODEL = "sonic-3"
@@ -691,6 +692,17 @@ class TestAzureTTSClientInit:
         assert client.voice_name == DEFAULT_AZURE_VOICE
         assert client.voice_name == DEFAULT_AZURE_TTS_VOICE
         assert client.sample_rate == DEFAULT_SAMPLE_RATE
+
+    def test_exposes_jitter_buffer_params(self) -> None:
+        """Azure's bursty delivery opts into pre-roll + underrun padding.
+
+        The player reads these (duck-typed) to configure
+        ``StreamingPCMSource``; Cartesia lacks them and keeps the defaults.
+        """
+        client = AzureTTSClient(subscription_key="k", region="r")
+        # ~400 ms cushion (20 frames of 20 ms each) for a safe first shot.
+        assert client.stream_prebuffer_bytes == DISCORD_FRAME_SIZE * 20
+        assert client.stream_pad_underrun is True
 
 
 class TestAzureTTSClientSynthesize:
