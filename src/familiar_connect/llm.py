@@ -152,6 +152,38 @@ def build_system_prompt(layers: SystemPromptLayers) -> str:
     return "\n\n".join(sections)
 
 
+def _mark_system_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
+    """Set an Anthropic prompt-caching breakpoint on the system prompt.
+
+    OpenRouter only caches Anthropic-family models when content blocks
+    carry explicit ``cache_control`` markers. The large, stable system
+    prompt is the high-value cacheable chunk, so render its content as a
+    single text block and tag the final block ``ephemeral``.
+
+    Targets the FIRST system message — the stable head (character card +
+    RAG + summary). Live responders append a trailing system message that
+    embeds per-turn-volatile content (timestamp, unread digest, focus);
+    caching that would invalidate the prefix every turn. Leaving the
+    trailing reminder uncached is correct.
+
+    Mutates ``messages`` in place; a no-op when no system message exists.
+    """
+    system = next(
+        (m for m in messages if m.get("role") == "system"),
+        None,
+    )
+    if system is None:
+        return
+    content = system["content"]
+    blocks = (
+        list(content)
+        if isinstance(content, list)
+        else [{"type": "text", "text": content}]
+    )
+    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    system["content"] = blocks
+
+
 class LLMClient:
     """OpenRouter chat-completion client."""
 
@@ -263,6 +295,8 @@ class LLMClient:
             "model": self.model,
             "messages": [m.to_dict() for m in messages],
         }
+        if self.model.startswith("anthropic/"):
+            _mark_system_cache_breakpoint(payload["messages"])
         if self.think_prepend:
             payload["messages"].append({
                 "role": "assistant",
