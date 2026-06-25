@@ -336,6 +336,61 @@ class TestLLMClient:
             assert payload["messages"][1] == messages[1].to_dict()
             assert payload["messages"][2] == messages[2].to_dict()
 
+    def test_payload_caches_head_not_trailing_system(self) -> None:
+        """Breakpoint lands on the stable head system message, not the volatile
+        trailing one.
+
+        Live responders build ``[system(head), ...history, system(trailing)]``
+        where the trailing message embeds per-turn-volatile content (timestamp,
+        unread digest, focus). Caching the trailing message would invalidate the
+        prefix every turn — the breakpoint must mark the head.
+        """
+        client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
+        messages = [
+            Message(role="system", content="Stable head: character + RAG."),
+            Message(role="user", content="Hi", name="Alice"),
+            Message(role="system", content="Volatile trailing: 12:03, 4 unread."),
+        ]
+        payload = client.build_payload(messages)
+        head = payload["messages"][0]
+        trailing = payload["messages"][2]
+        assert isinstance(head["content"], list)
+        assert head["content"][-1]["cache_control"] == {"type": "ephemeral"}
+        assert head["content"][-1]["text"] == "Stable head: character + RAG."
+        assert trailing["content"] == "Volatile trailing: 12:03, 4 unread."
+
+    def test_payload_caching_no_system_message_is_noop(self) -> None:
+        """No system message — breakpoint is a no-op, payload unchanged."""
+        client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
+        messages = [Message(role="user", content="Hi", name="Alice")]
+        payload = client.build_payload(messages)
+        assert payload["messages"][0] == messages[0].to_dict()
+        assert "cache_control" not in json.dumps(payload)
+
+    def test_payload_caching_list_system_content_no_double_wrap(self) -> None:
+        """Already-a-list system content — breakpoint tags the last block,
+        no re-wrapping of existing blocks."""
+        client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
+        messages = [
+            Message(
+                role="system",
+                content=[
+                    {"type": "text", "text": "First block."},
+                    {"type": "text", "text": "Second block."},
+                ],
+            ),
+            Message(role="user", content="Hi", name="Alice"),
+        ]
+        payload = client.build_payload(messages)
+        blocks = payload["messages"][0]["content"]
+        assert len(blocks) == 2
+        assert blocks[0] == {"type": "text", "text": "First block."}
+        assert blocks[1] == {
+            "type": "text",
+            "text": "Second block.",
+            "cache_control": {"type": "ephemeral"},
+        }
+
 
 class TestLLMClientChat:
     @pytest.fixture
