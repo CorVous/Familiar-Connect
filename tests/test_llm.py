@@ -337,8 +337,7 @@ class TestLLMClient:
             assert payload["messages"][2] == messages[2].to_dict()
 
     def test_payload_caches_head_not_trailing_system(self) -> None:
-        """Breakpoint lands on the stable head system message, not the volatile
-        trailing one.
+        """Breakpoint lands on the stable head system message, not trailing.
 
         Live responders build ``[system(head), ...history, system(trailing)]``
         where the trailing message embeds per-turn-volatile content (timestamp,
@@ -368,8 +367,11 @@ class TestLLMClient:
         assert "cache_control" not in json.dumps(payload)
 
     def test_payload_caching_list_system_content_no_double_wrap(self) -> None:
-        """Already-a-list system content — breakpoint tags the last block,
-        no re-wrapping of existing blocks."""
+        """Already-a-list system content tags the last block, no double-wrap.
+
+        Existing content blocks are preserved; only the last gains the
+        breakpoint, with no re-wrapping of the existing blocks.
+        """
         client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
         messages = [
             Message(
