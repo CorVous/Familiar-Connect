@@ -181,3 +181,96 @@ class TestStreamingPCMSource:
         src.feed(b"")
         src.close_input()
         assert src.read() == b""
+
+
+class TestStreamingPCMSourceJitterBuffer:
+    """Opt-in pre-roll + underrun padding for bursty providers (Azure).
+
+    Cartesia's steady cadence keeps the defaults (no pre-roll, block on
+    underrun). Azure delivers in synthesis-paced bursts that starve the
+    buffer; these knobs smooth playback so pycord's 20 ms clock stays
+    monotonic instead of rushing to catch up after a stall.
+    """
+
+    def test_preroll_blocks_until_threshold_met(self) -> None:
+        """First read waits for ``prebuffer_bytes`` before any frame."""
+        src = StreamingPCMSource(prebuffer_bytes=DISCORD_FRAME_SIZE * 2)
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        # Sub-threshold feed: one frame's worth, below the 2-frame gate.
+        src.feed(b"\x11" * DISCORD_FRAME_SIZE)
+        time.sleep(0.05)
+        assert t.is_alive(), "reader should still be pre-roll-blocked"
+        # Cross the threshold; reader unblocks and returns the first frame.
+        src.feed(b"\x11" * DISCORD_FRAME_SIZE)
+        t.join(timeout=1.0)
+        assert results == [b"\x11" * DISCORD_FRAME_SIZE]
+
+    def test_preroll_only_gates_first_read(self) -> None:
+        """Once primed, later reads do not re-apply the pre-roll gate."""
+        src = StreamingPCMSource(prebuffer_bytes=DISCORD_FRAME_SIZE)
+        src.feed(b"\x22" * (DISCORD_FRAME_SIZE * 2))
+        first = src.read()  # primes
+        second = src.read()  # must not block on the gate again
+        assert first == b"\x22" * DISCORD_FRAME_SIZE
+        assert second == b"\x22" * DISCORD_FRAME_SIZE
+
+    def test_eos_overrides_preroll(self) -> None:
+        """A short reply closing below threshold still plays (EOS wins)."""
+        src = StreamingPCMSource(prebuffer_bytes=DISCORD_FRAME_SIZE * 4)
+        partial = b"\x07\x08\x09\x0a"
+        src.feed(partial)
+        src.close_input()
+        out = src.read()
+        assert len(out) == DISCORD_FRAME_SIZE
+        assert out[: len(partial)] == partial
+        assert src.read() == b""
+
+    def test_underrun_pads_silence_without_blocking(self) -> None:
+        """Primed, empty, open + pad_underrun → a silent frame, no block."""
+        src = StreamingPCMSource(pad_underrun=True)
+        src.feed(b"\x33" * DISCORD_FRAME_SIZE)
+        primed = src.read()
+        assert primed == b"\x33" * DISCORD_FRAME_SIZE
+        # Buffer now empty and NOT closed: must return silence, not block.
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join(timeout=1.0)
+        assert not t.is_alive(), "pad_underrun read must not block"
+        assert results == [b"\x00" * DISCORD_FRAME_SIZE]
+
+    def test_eos_overrides_underrun_padding(self) -> None:
+        """Closed + empty returns b\"\" — no infinite silence."""
+        src = StreamingPCMSource(pad_underrun=True)
+        src.feed(b"\x44" * DISCORD_FRAME_SIZE)
+        assert src.read() == b"\x44" * DISCORD_FRAME_SIZE
+        src.close_input()
+        assert src.read() == b""
+
+    def test_default_underrun_still_blocks(self) -> None:
+        """Defaults (pad_underrun=False) keep the block-on-underrun path."""
+        src = StreamingPCMSource()
+        src.feed(b"\x55" * DISCORD_FRAME_SIZE)
+        assert src.read() == b"\x55" * DISCORD_FRAME_SIZE
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        time.sleep(0.05)
+        assert t.is_alive(), "default underrun must block, not pad"
+        src.close_input()  # release the blocked reader for cleanup
+        t.join(timeout=1.0)
+        assert results == [b""]
