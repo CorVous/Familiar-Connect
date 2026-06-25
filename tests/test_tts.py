@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import struct
+import threading
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -778,6 +779,146 @@ class TestAzureTTSClientSynthesize:
             result = await client.synthesize("Hello")
         assert result is expected
         mock_sync.assert_called_once_with("Hello")
+
+
+# ---------------------------------------------------------------------------
+# Helpers for Azure streaming SDK mocking
+# ---------------------------------------------------------------------------
+
+_AZURE_CANCELED = object()  # sentinel for ResultReason.Canceled
+
+
+class _FakeAudioDataStream:
+    """Fakes ``speechsdk.AudioDataStream``: yields *chunks*, then 0.
+
+    ``read_data(buffer)`` fills the given ``bytearray`` with the next
+    chunk and returns its length, mirroring the blocking SDK reader.
+    Returns 0 once all chunks are consumed (end of stream).
+    """
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self.read_calls = 0
+
+    def read_data(self, buffer: bytearray) -> int:
+        self.read_calls += 1
+        if not self._chunks:
+            return 0
+        chunk = self._chunks.pop(0)
+        buffer[: len(chunk)] = chunk
+        return len(chunk)
+
+
+def _make_fake_stream_synth(
+    chunks: list[bytes],
+    *,
+    fail: bool = False,
+) -> tuple[MagicMock, MagicMock, _FakeAudioDataStream]:
+    """Return ``(mock_sdk, mock_synthesizer, fake_stream)`` for streaming.
+
+    ``start_speaking_text_async(text).get()`` returns a result whose
+    ``reason`` is *Canceled* when *fail* is True. ``sdk.AudioDataStream``
+    constructs the returned ``_FakeAudioDataStream``.
+    """
+    sdk = _make_mock_speechsdk()
+    sdk.ResultReason.Canceled = _AZURE_CANCELED
+
+    result = MagicMock()
+    result.reason = _AZURE_CANCELED if fail else _AZURE_COMPLETED
+
+    cancel = MagicMock()
+    cancel.reason = "Error"
+    cancel.error_details = "stream blew up"
+    sdk.CancellationDetails.from_result.return_value = cancel
+
+    fake_stream = _FakeAudioDataStream(chunks)
+    sdk.AudioDataStream.return_value = fake_stream
+
+    synth = MagicMock()
+    synth.start_speaking_text_async.return_value.get.return_value = result
+
+    return sdk, synth, fake_stream
+
+
+# ---------------------------------------------------------------------------
+# Azure streaming
+# ---------------------------------------------------------------------------
+
+
+class TestAzureTTSClientSynthesizeStream:
+    """``synthesize_stream`` yields PCM chunks as Azure produces them.
+
+    Low-latency variant of ``synthesize``: bridges the blocking SDK read
+    loop (worker thread) to an async generator so playback starts on the
+    first chunk. Additive — buffered ``synthesize`` is untouched.
+    """
+
+    def _client(self) -> AzureTTSClient:
+        return AzureTTSClient(subscription_key="sk-az", region="eastus")
+
+    @pytest.mark.asyncio
+    async def test_yields_each_chunk_in_order(self) -> None:
+        chunk_a = b"\x10\x20\x30\x40"
+        chunk_b = b"\x50\x60"
+        sdk, synth, _ = _make_fake_stream_synth([chunk_a, chunk_b])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [chunk_a, chunk_b]
+
+    @pytest.mark.asyncio
+    async def test_uses_start_speaking_not_speak(self) -> None:
+        """Must use the incremental ``start_speaking`` API, not buffered speak."""
+        sdk, synth, _ = _make_fake_stream_synth([b"\x01\x02"])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+        synth.start_speaking_text_async.assert_called_once_with("hi")
+        synth.speak_text_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_synthesis_raises(self) -> None:
+        sdk, synth, _ = _make_fake_stream_synth([], fail=True)
+        client = self._client()
+        with (
+            patch.object(client, "_make_synthesizer", return_value=(sdk, synth)),
+            pytest.raises(RuntimeError, match="Azure TTS"),
+        ):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_terminates(self) -> None:
+        """No chunks (immediate 0) yields nothing and ends cleanly."""
+        sdk, synth, _ = _make_fake_stream_synth([])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == []
+
+    @pytest.mark.asyncio
+    async def test_early_close_stops_reading(self) -> None:
+        """Barge-in: consumer stops early; worker is signalled and joined.
+
+        After ``aclose()`` the worker thread must not keep draining the
+        SDK stream, and the generator must close without leaking a thread.
+        """
+        chunks = [bytes([i]) * 2 for i in range(50)]
+        sdk, synth, fake_stream = _make_fake_stream_synth(chunks)
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            agen = client.synthesize_stream("hi")
+            first = await agen.__anext__()
+            await agen.aclose()
+        assert first == chunks[0]
+        # Worker must have stopped early — not drained all 50 chunks.
+        assert fake_stream.read_calls < len(chunks)
+        # No synthesize_stream worker thread left alive.
+        assert not any(
+            t.name.startswith("azure-tts-stream") and t.is_alive()
+            for t in threading.enumerate()
+        )
 
 
 # ---------------------------------------------------------------------------
