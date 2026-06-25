@@ -175,12 +175,12 @@ def _mark_system_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
     if system is None:
         return
     content = system["content"]
-    blocks = (
-        list(content)
+    blocks: list[dict[str, Any]] = (
+        [dict(b) for b in content]
         if isinstance(content, list)
         else [{"type": "text", "text": content}]
     )
-    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    blocks[-1]["cache_control"] = {"type": "ephemeral"}
     system["content"] = blocks
 
 
