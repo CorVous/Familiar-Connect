@@ -540,6 +540,10 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         member_resolver=handle.resolve_member,
         tool_registry=voice_tool_registry,
         tool_context_factory=_make_tool_context("voice"),
+        # Filler phrases ("hold on…"/"one sec…"/"checking…") disabled
+        # 2026-06-25 — too chatty in voice (spoken on every no-preamble
+        # tool round). Re-enable or wire to character.toml when revisited.
+        tool_filler_phrases=(),
         post_history_instructions=familiar.config.post_history_instructions,
         display_tz=familiar.config.display_tz,
         focus_manager=focus_manager,
