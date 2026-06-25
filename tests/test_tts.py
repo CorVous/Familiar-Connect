@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime
 import json
 import os
 import struct
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -786,6 +788,8 @@ class TestAzureTTSClientSynthesize:
 # ---------------------------------------------------------------------------
 
 _AZURE_CANCELED = object()  # sentinel for ResultReason.Canceled
+_AZURE_STREAM_ALL_DATA = object()  # sentinel for StreamStatus.AllData
+_AZURE_STREAM_CANCELED = object()  # sentinel for StreamStatus.Canceled
 
 
 class _FakeAudioDataStream:
@@ -794,34 +798,64 @@ class _FakeAudioDataStream:
     ``read_data(buffer)`` fills the given ``bytearray`` with the next
     chunk and returns its length, mirroring the blocking SDK reader.
     Returns 0 once all chunks are consumed (end of stream).
+
+    ``status`` exposes the terminal stream state — ``AllData`` for a
+    clean end, ``Canceled`` for a mid-stream failure (the SDK still
+    returns 0 from ``read_data`` in that case).
+
+    When *block_until* is supplied, ``read_data`` blocks on it after the
+    last chunk (simulating the real reader waiting on a never-arriving
+    chunk) until the event is set — exercising the barge-in unblock path.
     """
 
-    def __init__(self, chunks: list[bytes]) -> None:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        status: object = _AZURE_STREAM_ALL_DATA,
+        block_until: threading.Event | None = None,
+    ) -> None:
         self._chunks = list(chunks)
+        self.status = status
+        self._block_until = block_until
+        self.cancellation_details = MagicMock()
+        self.cancellation_details.reason = "Error"
+        self.cancellation_details.error_details = "mid-stream cancel"
         self.read_calls = 0
 
     def read_data(self, buffer: bytearray) -> int:
         self.read_calls += 1
-        if not self._chunks:
-            return 0
-        chunk = self._chunks.pop(0)
-        buffer[: len(chunk)] = chunk
-        return len(chunk)
+        if self._chunks:
+            chunk = self._chunks.pop(0)
+            buffer[: len(chunk)] = chunk
+            return len(chunk)
+        if self._block_until is not None:
+            self._block_until.wait()
+        return 0
 
 
 def _make_fake_stream_synth(
     chunks: list[bytes],
     *,
     fail: bool = False,
+    stream_status: object = _AZURE_STREAM_ALL_DATA,
+    block_until: threading.Event | None = None,
 ) -> tuple[MagicMock, MagicMock, _FakeAudioDataStream]:
     """Return ``(mock_sdk, mock_synthesizer, fake_stream)`` for streaming.
 
     ``start_speaking_text_async(text).get()`` returns a result whose
     ``reason`` is *Canceled* when *fail* is True. ``sdk.AudioDataStream``
-    constructs the returned ``_FakeAudioDataStream``.
+    constructs the returned ``_FakeAudioDataStream``, whose terminal
+    ``status`` is *stream_status* and which blocks on *block_until*
+    (if given) once its chunks are exhausted.
+
+    The fake synthesizer's ``stop_speaking_async`` sets *block_until*,
+    mirroring how the real SDK aborts an in-flight blocking read.
     """
     sdk = _make_mock_speechsdk()
     sdk.ResultReason.Canceled = _AZURE_CANCELED
+    sdk.StreamStatus.AllData = _AZURE_STREAM_ALL_DATA
+    sdk.StreamStatus.Canceled = _AZURE_STREAM_CANCELED
 
     result = MagicMock()
     result.reason = _AZURE_CANCELED if fail else _AZURE_COMPLETED
@@ -831,11 +865,17 @@ def _make_fake_stream_synth(
     cancel.error_details = "stream blew up"
     sdk.CancellationDetails.from_result.return_value = cancel
 
-    fake_stream = _FakeAudioDataStream(chunks)
+    fake_stream = _FakeAudioDataStream(
+        chunks,
+        status=stream_status,
+        block_until=block_until,
+    )
     sdk.AudioDataStream.return_value = fake_stream
 
     synth = MagicMock()
     synth.start_speaking_text_async.return_value.get.return_value = result
+    if block_until is not None:
+        synth.stop_speaking_async.return_value.get.side_effect = block_until.set
 
     return sdk, synth, fake_stream
 
@@ -909,7 +949,7 @@ class TestAzureTTSClientSynthesizeStream:
         client = self._client()
         with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
             agen = client.synthesize_stream("hi")
-            first = await agen.__anext__()
+            first = await anext(agen)
             await agen.aclose()
         assert first == chunks[0]
         # Worker must have stopped early — not drained all 50 chunks.
@@ -919,6 +959,64 @@ class TestAzureTTSClientSynthesizeStream:
             t.name.startswith("azure-tts-stream") and t.is_alive()
             for t in threading.enumerate()
         )
+
+    @pytest.mark.asyncio
+    async def test_early_close_unblocks_in_flight_read(self) -> None:
+        """Barge-in mid-read: ``aclose`` returns promptly, doesn't wedge.
+
+        The real ``read_data`` BLOCKS until the next chunk arrives, so a
+        ``stop`` set during an in-flight read is invisible until the read
+        returns. ``aclose`` must (a) abort the in-flight read via
+        ``stop_speaking_async`` and (b) bound its join so it returns in
+        bounded wall-clock time even if the worker lingers.
+        """
+        gate = threading.Event()  # read_data blocks here after the 1st chunk
+        sdk, synth, _ = _make_fake_stream_synth([b"\xaa\xbb"], block_until=gate)
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            agen = client.synthesize_stream("hi")
+            first = await anext(agen)
+            start = time.monotonic()
+            await asyncio.wait_for(agen.aclose(), timeout=5.0)
+            elapsed = time.monotonic() - start
+        assert first == b"\xaa\xbb"
+        # aclose must not block on the unbounded read.
+        assert elapsed < 2.0
+        # SDK was actively told to abort the in-flight synthesis.
+        synth.stop_speaking_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_cancel_status_raises(self) -> None:
+        """``read_data == 0`` with ``status == Canceled`` is a failure, not EOF.
+
+        A token expiry / network drop after synthesis starts makes the
+        reader return 0 while flagging ``StreamStatus.Canceled``. The
+        consumer must see a ``RuntimeError``, not a silently truncated
+        clean end.
+        """
+        sdk, synth, _ = _make_fake_stream_synth(
+            [b"\x01\x02"],
+            stream_status=_AZURE_STREAM_CANCELED,
+        )
+        client = self._client()
+        with (
+            patch.object(client, "_make_synthesizer", return_value=(sdk, synth)),
+            pytest.raises(RuntimeError, match="Azure TTS"),
+        ):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_clean_eof_status_does_not_raise(self) -> None:
+        """``status == AllData`` after 0 is a normal end — no error."""
+        sdk, synth, _ = _make_fake_stream_synth(
+            [b"\x01\x02"],
+            stream_status=_AZURE_STREAM_ALL_DATA,
+        )
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [b"\x01\x02"]
 
 
 # ---------------------------------------------------------------------------
