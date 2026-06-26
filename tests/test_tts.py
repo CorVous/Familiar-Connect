@@ -38,6 +38,7 @@ from familiar_connect.tts import (
     GeminiTTSClient,
     TTSResult,
     WordTimestamp,
+    _AZURE_STREAM_BUFFER_BYTES,
     _compose_gemini_style_prompt,
     _estimate_word_timestamps,
     _upsample_s16le_2x,
@@ -926,6 +927,25 @@ class TestAzureTTSClientSynthesizeStream:
     async def test_yields_each_chunk_in_order(self) -> None:
         chunk_a = b"\x10\x20\x30\x40"
         chunk_b = b"\x50\x60"
+        sdk, synth, _ = _make_fake_stream_synth([chunk_a, chunk_b])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client._synthesize_stream("hi")]
+        assert collected == [chunk_a, chunk_b]
+
+    @pytest.mark.asyncio
+    async def test_full_buffer_reads_are_copied_not_aliased(self) -> None:
+        """Full-size chunks must be copied out, not aliased to the buffer.
+
+        The reader reuses one ``bytes`` buffer that ``read_data`` mutates
+        in place. A whole-slice ``buffer[:n]`` returns the SAME object when
+        ``n == len(buffer)`` (CPython aliasing trap), so a full-size chunk
+        would be silently overwritten by the next read before the queue
+        consumer sees it. Two distinct full-buffer chunks must arrive
+        intact and distinct.
+        """
+        chunk_a = bytes([0xAA]) * _AZURE_STREAM_BUFFER_BYTES
+        chunk_b = bytes([0xBB]) * _AZURE_STREAM_BUFFER_BYTES
         sdk, synth, _ = _make_fake_stream_synth([chunk_a, chunk_b])
         client = self._client()
         with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):

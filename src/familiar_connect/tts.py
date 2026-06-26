@@ -494,8 +494,13 @@ class AzureTTSClient:
 
         stream = speechsdk.AudioDataStream(result)
         # Must be strictly ``bytes``: the SDK rejects ``bytearray`` and
-        # fills this buffer's memory in place via ctypes. ``buffer[:n]``
-        # yields a fresh ``bytes`` copy, so reusing one buffer is safe.
+        # fills this buffer's memory in place via ctypes. The buffer is
+        # reused across reads, so each chunk must be copied out before the
+        # next read overwrites it. A plain ``buffer[:n]`` is unsafe: a
+        # whole-slice (``n == len(buffer)``, the common mid-stream case)
+        # returns the SAME object, not a copy — the consumer reads it later
+        # off a queue, by which point it has been overwritten. Copy via
+        # ``bytes(memoryview(buffer)[:n])``, which always allocates fresh.
         buffer = bytes(_AZURE_STREAM_BUFFER_BYTES)
         total_bytes = 0
         while not stop.is_set():
@@ -503,7 +508,7 @@ class AzureTTSClient:
             if n == 0:
                 break
             total_bytes += n
-            emit(buffer[:n])
+            emit(bytes(memoryview(buffer)[:n]))
 
         # ``read_data == 0`` is ambiguous: clean EOF *or* a mid-stream
         # failure (token expiry, network drop) the SDK flags via status.
