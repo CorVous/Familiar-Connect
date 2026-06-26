@@ -225,7 +225,7 @@ class DiscordVoicePlayer:
         return total
 
     # ------------------------------------------------------------------
-    # buffered path — Azure/Gemini today (no streaming surface)
+    # buffered path — Gemini today (no streaming surface)
     # ------------------------------------------------------------------
 
     async def _speak_buffered(self, text: str, *, scope: TurnScope) -> None:

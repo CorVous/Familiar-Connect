@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 
 
 from familiar_connect import log_style as ls
-from familiar_connect.voice.audio import DISCORD_FRAME_SIZE
 
 _logger = logging.getLogger(__name__)
 
@@ -51,13 +50,6 @@ _AZURE_TICKS_PER_MS: float = 10_000.0
 
 _AZURE_STREAM_BUFFER_BYTES = 32 * 1024
 """Read-buffer size for incremental ``AudioDataStream`` reads."""
-
-# Azure delivers audio in synthesis-paced bursts that starve the player's
-# ``StreamingPCMSource``. Pre-roll a ~400 ms cushion (20 frames of 20 ms)
-# before playback so a burst gap doesn't underrun the buffer. Tunable.
-_AZURE_STREAM_PREBUFFER_FRAMES = 20
-AZURE_STREAM_PREBUFFER_BYTES = _AZURE_STREAM_PREBUFFER_FRAMES * DISCORD_FRAME_SIZE
-"""Pre-roll cushion for Azure streaming (~400 ms of 48 kHz stereo PCM)."""
 
 _AZURE_STREAM_JOIN_TIMEOUT_S = 2.0
 """Bound on joining the stream worker on early-close — never wedge ``aclose``."""
@@ -386,15 +378,26 @@ class AzureTTSClient:
     executor thread — no locking needed.
 
     Exposes jitter-buffer hints the player duck-types onto
-    ``StreamingPCMSource`` (pre-roll + underrun padding) because Azure's
-    bursty delivery would otherwise starve the steady-cadence buffer.
+    ``StreamingPCMSource`` (pre-roll + underrun padding). Both are off:
+    Azure delivery was measured faster-than-realtime, so streaming runs
+    the plain path; the hints stay for trivial reversal.
     """
 
-    stream_prebuffer_bytes: int = AZURE_STREAM_PREBUFFER_BYTES
-    """Player pre-roll cushion before streaming playback starts."""
+    stream_prebuffer_bytes: int = 0
+    """No pre-roll: Azure delivery was measured faster-than-realtime.
 
-    stream_pad_underrun: bool = True
-    """Pad underruns with silence so pycord's clock stays monotonic."""
+    The whole utterance front-loads in ~1 s with 0 underruns at 0 ms
+    pre-roll, so Azure runs the plain ``StreamingPCMSource`` path (like
+    Cartesia). Kept (at off) for trivial reversal if a live ear-test
+    ever surfaces a transient.
+    """
+
+    stream_pad_underrun: bool = False
+    """No underrun padding — see :attr:`stream_prebuffer_bytes`.
+
+    Kept (at off) for trivial reversal if a live ear-test surfaces a
+    transient that warrants a jitter cushion.
+    """
 
     def __init__(
         self: Self,
@@ -548,20 +551,8 @@ class AzureTTSClient:
         else:
             _put(None)
 
-    async def _synthesize_stream(self: Self, text: str) -> AsyncIterator[bytes]:
+    async def synthesize_stream(self: Self, text: str) -> AsyncIterator[bytes]:
         """Yield raw mono PCM chunks as Azure produces them.
-
-        PARKED — deliberately private so the player's
-        ``hasattr(tts, "synthesize_stream")`` check is False and Azure
-        falls back to the buffered :meth:`synthesize` path. Azure's
-        synthesis-paced bursty delivery could not sustain realtime through
-        the pipeline (bursts plus per-chunk pure-Python ``mono_to_stereo``
-        on the event loop drained the pre-roll and produced audible
-        start/stop). Re-enabling needs an offline throughput investigation
-        — measure end-to-end chunk cadence and likely move mono→stereo off
-        the event loop — before exposing this publicly again. The
-        implementation (and the ``stream_*`` jitter attrs) are kept intact
-        and verified for that follow-up.
 
         Lower-latency variant of :meth:`synthesize`: callers can start
         playback on the first chunk instead of waiting for the full
