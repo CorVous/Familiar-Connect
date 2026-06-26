@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
@@ -295,6 +296,102 @@ class TestLLMClient:
         }
         # original user message still present before the prefill
         assert payload["messages"][-2]["role"] == "user"
+
+    def test_payload_anthropic_caches_system_prompt(self) -> None:
+        """Anthropic models get a cache_control breakpoint on the system block."""
+        client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
+        messages = [
+            Message(role="system", content="You are a wizard familiar."),
+            Message(role="user", content="Hi", name="Alice"),
+        ]
+        payload = client.build_payload(messages)
+        system = payload["messages"][0]
+        assert system["role"] == "system"
+        assert isinstance(system["content"], list)
+        last_block = system["content"][-1]
+        assert last_block["cache_control"] == {"type": "ephemeral"}
+        assert last_block["text"] == "You are a wizard familiar."
+
+    def test_payload_non_anthropic_leaves_system_string(self) -> None:
+        """Non-Anthropic models keep a plain-string system prompt, no caching."""
+        client = LLMClient(api_key="k", model="z-ai/glm-5.1")
+        messages = [
+            Message(role="system", content="You are a wizard familiar."),
+            Message(role="user", content="Hi", name="Alice"),
+        ]
+        payload = client.build_payload(messages)
+        assert payload["messages"][0]["content"] == "You are a wizard familiar."
+        assert "cache_control" not in json.dumps(payload)
+
+    def test_payload_caching_leaves_user_assistant_unchanged(self) -> None:
+        """Cache breakpoint touches only the system message, never user/assistant."""
+        messages = [
+            Message(role="system", content="System prompt."),
+            Message(role="user", content="Hi", name="Alice"),
+            Message(role="assistant", content="Hello!"),
+        ]
+        for model in ("anthropic/claude-haiku-4.5", "z-ai/glm-5.1"):
+            client = LLMClient(api_key="k", model=model)
+            payload = client.build_payload(messages)
+            assert payload["messages"][1] == messages[1].to_dict()
+            assert payload["messages"][2] == messages[2].to_dict()
+
+    def test_payload_caches_head_not_trailing_system(self) -> None:
+        """Breakpoint lands on the stable head system message, not trailing.
+
+        Live responders build ``[system(head), ...history, system(trailing)]``
+        where the trailing message embeds per-turn-volatile content (timestamp,
+        unread digest, focus). Caching the trailing message would invalidate the
+        prefix every turn — the breakpoint must mark the head.
+        """
+        client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
+        messages = [
+            Message(role="system", content="Stable head: character + RAG."),
+            Message(role="user", content="Hi", name="Alice"),
+            Message(role="system", content="Volatile trailing: 12:03, 4 unread."),
+        ]
+        payload = client.build_payload(messages)
+        head = payload["messages"][0]
+        trailing = payload["messages"][2]
+        assert isinstance(head["content"], list)
+        assert head["content"][-1]["cache_control"] == {"type": "ephemeral"}
+        assert head["content"][-1]["text"] == "Stable head: character + RAG."
+        assert trailing["content"] == "Volatile trailing: 12:03, 4 unread."
+
+    def test_payload_caching_no_system_message_is_noop(self) -> None:
+        """No system message — breakpoint is a no-op, payload unchanged."""
+        client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
+        messages = [Message(role="user", content="Hi", name="Alice")]
+        payload = client.build_payload(messages)
+        assert payload["messages"][0] == messages[0].to_dict()
+        assert "cache_control" not in json.dumps(payload)
+
+    def test_payload_caching_list_system_content_no_double_wrap(self) -> None:
+        """Already-a-list system content tags the last block, no double-wrap.
+
+        Existing content blocks are preserved; only the last gains the
+        breakpoint, with no re-wrapping of the existing blocks.
+        """
+        client = LLMClient(api_key="k", model="anthropic/claude-haiku-4.5")
+        messages = [
+            Message(
+                role="system",
+                content=[
+                    {"type": "text", "text": "First block."},
+                    {"type": "text", "text": "Second block."},
+                ],
+            ),
+            Message(role="user", content="Hi", name="Alice"),
+        ]
+        payload = client.build_payload(messages)
+        blocks = payload["messages"][0]["content"]
+        assert len(blocks) == 2
+        assert blocks[0] == {"type": "text", "text": "First block."}
+        assert blocks[1] == {
+            "type": "text",
+            "text": "Second block.",
+            "cache_control": {"type": "ephemeral"},
+        }
 
 
 class TestLLMClientChat:
