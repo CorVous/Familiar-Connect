@@ -6,6 +6,7 @@ import struct
 import threading
 
 import discord
+import numpy as np
 
 # Discord requires 48kHz s16le stereo PCM in 20ms frames.
 # 48000 * 2ch * 2B * 0.020s = 3840 bytes/frame.
@@ -80,13 +81,10 @@ def mono_to_stereo(data: bytes) -> bytes:
         msg = f"PCM data length must be even, got {len(data)}"
         raise ValueError(msg)
 
-    result = bytearray(len(data) * 2)
-    for i in range(0, len(data), 2):
-        sample = data[i : i + 2]
-        out_off = i * 2
-        result[out_off : out_off + 2] = sample  # Left
-        result[out_off + 2 : out_off + 4] = sample  # Right
-    return bytes(result)
+    # Vectorized: int16 view → duplicate each sample into L+R. Little-endian
+    # pinned via "<i2" so output bytes are host-independent. Releases the GIL
+    # over the buffer instead of looping per-sample in Python.
+    return np.frombuffer(data, dtype="<i2").repeat(2).tobytes()
 
 
 class StreamingPCMSource(discord.AudioSource):
