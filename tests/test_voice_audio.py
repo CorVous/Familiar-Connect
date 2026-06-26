@@ -250,7 +250,7 @@ class TestStreamingPCMSourceJitterBuffer:
         assert results == [b"\x00" * DISCORD_FRAME_SIZE]
 
     def test_eos_overrides_underrun_padding(self) -> None:
-        """Closed + empty returns b\"\" — no infinite silence."""
+        """Closed + empty returns empty bytes — no infinite silence."""
         src = StreamingPCMSource(pad_underrun=True)
         src.feed(b"\x44" * DISCORD_FRAME_SIZE)
         assert src.read() == b"\x44" * DISCORD_FRAME_SIZE

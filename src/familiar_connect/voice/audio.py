@@ -103,13 +103,34 @@ class StreamingPCMSource(discord.AudioSource):
     playback (no underrun silence) until next chunk. With Cartesia's
     ~140 ms TTFB, the first ``read`` returns within one or two of
     pycord's 20 ms ticks.
+
+    Two opt-in jitter-buffer knobs smooth bursty producers (Azure, which
+    delivers in synthesis-paced bursts) without touching the steady-cadence
+    default (Cartesia):
+
+    * ``prebuffer_bytes`` — the first ``read`` blocks until at least this
+      many bytes are buffered (or EOS), building a cushion before
+      playback starts. ``0`` (default) starts immediately.
+    * ``pad_underrun`` — in steady state, an empty-but-open buffer returns
+      one frame of silence instead of blocking, so pycord's 20 ms clock
+      never overshoots and rushes to catch up. ``False`` (default) keeps
+      the block-on-underrun behavior. EOS always overrides padding so
+      playback ends instead of emitting silence forever.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        prebuffer_bytes: int = 0,
+        pad_underrun: bool = False,
+    ) -> None:
         self._buf = bytearray()
-        # Condition guards both ``_buf`` and ``_closed``
+        # Condition guards ``_buf``, ``_closed``, and ``_primed``
         self._cond = threading.Condition()
         self._closed = False
+        self._prebuffer_bytes = prebuffer_bytes
+        self._pad_underrun = pad_underrun
+        self._primed = prebuffer_bytes <= 0
 
     def feed(self, data: bytes) -> None:
         """Append ``data`` (stereo s16le); notify reader."""
@@ -127,8 +148,21 @@ class StreamingPCMSource(discord.AudioSource):
 
     def read(self) -> bytes:
         with self._cond:
-            while len(self._buf) < DISCORD_FRAME_SIZE and not self._closed:
-                self._cond.wait()
+            if not self._primed:
+                # Pre-roll: build a cushion before the first frame plays.
+                # EOS overrides so a short reply still plays out.
+                while len(self._buf) < self._prebuffer_bytes and not self._closed:
+                    self._cond.wait()
+                self._primed = True
+
+            if len(self._buf) < DISCORD_FRAME_SIZE and not self._closed:
+                # Underrun while still producing. Pad with silence (opt-in)
+                # to keep pycord's clock monotonic; otherwise block until fed.
+                if self._pad_underrun:
+                    return b"\x00" * DISCORD_FRAME_SIZE
+                while len(self._buf) < DISCORD_FRAME_SIZE and not self._closed:
+                    self._cond.wait()
+
             if len(self._buf) >= DISCORD_FRAME_SIZE:
                 out = bytes(self._buf[:DISCORD_FRAME_SIZE])
                 del self._buf[:DISCORD_FRAME_SIZE]

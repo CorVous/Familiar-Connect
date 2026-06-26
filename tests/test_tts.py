@@ -842,9 +842,10 @@ class _FakeAudioDataStream:
     def read_data(self, audio_buffer: bytes) -> int:
         self.read_calls += 1
         if not isinstance(audio_buffer, bytes):
-            # Mirror speech.py: the SDK raises this exact type error.
+            # Mirror speech.py exactly: the SDK raises ValueError (not
+            # TypeError) here — faithfulness to the contract is the point.
             msg = f'audio_buffer must be a bytes, is "{audio_buffer}"'
-            raise ValueError(msg)
+            raise ValueError(msg)  # noqa: TRY004 — match the SDK's exception type
         if self._chunks:
             chunk = self._chunks.pop(0)
             # The C layer writes into the buffer's memory in place; do the
@@ -908,11 +909,14 @@ def _make_fake_stream_synth(
 
 
 class TestAzureTTSClientSynthesizeStream:
-    """``synthesize_stream`` yields PCM chunks as Azure produces them.
+    """PARKED streaming impl (``_synthesize_stream``) stays verified.
 
-    Low-latency variant of ``synthesize``: bridges the blocking SDK read
-    loop (worker thread) to an async generator so playback starts on the
-    first chunk. Additive — buffered ``synthesize`` is untouched.
+    Azure streaming is deliberately private — it could not sustain
+    realtime through the pipeline, so the player falls back to buffered
+    ``synthesize`` (see ``test_streaming_not_publicly_exposed``). These
+    tests keep the implementation correct for a later re-enable: it
+    bridges the blocking SDK read loop (worker thread) to an async
+    generator. Buffered ``synthesize`` is untouched.
     """
 
     def _client(self) -> AzureTTSClient:
@@ -925,7 +929,7 @@ class TestAzureTTSClientSynthesizeStream:
         sdk, synth, _ = _make_fake_stream_synth([chunk_a, chunk_b])
         client = self._client()
         with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
-            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+            collected = [chunk async for chunk in client._synthesize_stream("hi")]
         assert collected == [chunk_a, chunk_b]
 
     @pytest.mark.asyncio
@@ -934,7 +938,7 @@ class TestAzureTTSClientSynthesizeStream:
         sdk, synth, _ = _make_fake_stream_synth([b"\x01\x02"])
         client = self._client()
         with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
-            async for _ in client.synthesize_stream("hi"):
+            async for _ in client._synthesize_stream("hi"):
                 pass
         synth.start_speaking_text_async.assert_called_once_with("hi")
         synth.speak_text_async.assert_not_called()
@@ -947,7 +951,7 @@ class TestAzureTTSClientSynthesizeStream:
             patch.object(client, "_make_synthesizer", return_value=(sdk, synth)),
             pytest.raises(RuntimeError, match="Azure TTS"),
         ):
-            async for _ in client.synthesize_stream("hi"):
+            async for _ in client._synthesize_stream("hi"):
                 pass
 
     @pytest.mark.asyncio
@@ -956,31 +960,8 @@ class TestAzureTTSClientSynthesizeStream:
         sdk, synth, _ = _make_fake_stream_synth([])
         client = self._client()
         with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
-            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+            collected = [chunk async for chunk in client._synthesize_stream("hi")]
         assert collected == []
-
-    @pytest.mark.asyncio
-    async def test_early_close_stops_reading(self) -> None:
-        """Barge-in: consumer stops early; worker is signalled and joined.
-
-        After ``aclose()`` the worker thread must not keep draining the
-        SDK stream, and the generator must close without leaking a thread.
-        """
-        chunks = [bytes([i]) * 2 for i in range(50)]
-        sdk, synth, fake_stream = _make_fake_stream_synth(chunks)
-        client = self._client()
-        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
-            agen = client.synthesize_stream("hi")
-            first = await anext(agen)
-            await agen.aclose()
-        assert first == chunks[0]
-        # Worker must have stopped early — not drained all 50 chunks.
-        assert fake_stream.read_calls < len(chunks)
-        # No synthesize_stream worker thread left alive.
-        assert not any(
-            t.name.startswith("azure-tts-stream") and t.is_alive()
-            for t in threading.enumerate()
-        )
 
     @pytest.mark.asyncio
     async def test_early_close_unblocks_in_flight_read(self) -> None:
@@ -996,7 +977,7 @@ class TestAzureTTSClientSynthesizeStream:
         sdk, synth, _ = _make_fake_stream_synth([b"\xaa\xbb"], block_until=gate)
         client = self._client()
         with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
-            agen = client.synthesize_stream("hi")
+            agen = client._synthesize_stream("hi")
             first = await anext(agen)
             start = time.monotonic()
             await asyncio.wait_for(agen.aclose(), timeout=5.0)
@@ -1025,7 +1006,7 @@ class TestAzureTTSClientSynthesizeStream:
             patch.object(client, "_make_synthesizer", return_value=(sdk, synth)),
             pytest.raises(RuntimeError, match="Azure TTS"),
         ):
-            async for _ in client.synthesize_stream("hi"):
+            async for _ in client._synthesize_stream("hi"):
                 pass
 
     @pytest.mark.asyncio
@@ -1037,8 +1018,26 @@ class TestAzureTTSClientSynthesizeStream:
         )
         client = self._client()
         with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
-            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+            collected = [chunk async for chunk in client._synthesize_stream("hi")]
         assert collected == [b"\x01\x02"]
+
+    def test_streaming_not_publicly_exposed(self) -> None:
+        """Azure must NOT auto-select streaming — buffered is the live path.
+
+        The Discord player picks the streaming path via
+        ``hasattr(tts, "synthesize_stream")``. Azure's bursty delivery
+        couldn't sustain realtime through the pipeline (pre-roll drained,
+        padding produced start/stop), so the parked stream method lives
+        under a private name; the player falls back to ``_speak_buffered``.
+        The implementation stays present (and verified above) for a later
+        re-enable after offline throughput measurement.
+        """
+        client = self._client()
+        assert not hasattr(client, "synthesize_stream")
+        # Parked implementation + jitter hints are still present, just private.
+        assert hasattr(client, "_synthesize_stream")
+        assert hasattr(client, "stream_prebuffer_bytes")
+        assert hasattr(client, "stream_pad_underrun")
 
 
 # ---------------------------------------------------------------------------
