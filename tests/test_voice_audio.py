@@ -60,6 +60,33 @@ class TestMonoToStereo:
             assert stereo_samples[i * 2] == original  # left
             assert stereo_samples[i * 2 + 1] == original  # right
 
+    @pytest.mark.parametrize(
+        "samples",
+        [
+            [],
+            [0],
+            [-32768],
+            [32767],
+            [0x0102, 0x0304],
+            [100, -200, 32767, -32768, 0],
+            [-1, 1, -32768, 32767, 12345, -12345, 0],
+        ],
+    )
+    def test_byte_identical_to_reference_duplication(
+        self, samples: list[int]
+    ) -> None:
+        """Output is byte-for-byte the per-int16-sample duplication.
+
+        Independent reference: each little-endian 2-byte sample appears
+        twice in order ([s0,s0,s1,s1,...]), built here without touching
+        the implementation under test, across empty/single/edge int16s.
+        """
+        mono = struct.pack(f"<{len(samples)}h", *samples)
+        expected = b"".join(
+            mono[i : i + 2] * 2 for i in range(0, len(mono), 2)
+        )
+        assert mono_to_stereo(mono) == expected
+
 
 class TestStereoToMono:
     def test_halves_length(self) -> None:
