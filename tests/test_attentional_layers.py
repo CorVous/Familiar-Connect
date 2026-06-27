@@ -241,6 +241,123 @@ class TestTurnRenderingChannelTag:
         assert "#msg-99" in user_msg.content_str
 
 
+# Marker prefix pinned by the cross-channel separator increment.
+_MARKER_PREFIX = "—— now in "
+
+
+def _markers(msgs: list) -> list[str]:
+    return [m.content_str for m in msgs if m.content_str.startswith(_MARKER_PREFIX)]
+
+
+def _marker_indices(msgs: list) -> list[int]:
+    return [i for i, m in enumerate(msgs) if m.content_str.startswith(_MARKER_PREFIX)]
+
+
+class TestRecentHistoryChannelMarkers:
+    """Standalone channel/server separator markers in cross-channel history."""
+
+    @staticmethod
+    def _turn(
+        store: HistoryStore, *, channel_id: int, content: str, msg_id: str
+    ) -> None:
+        alice = Author(
+            platform="discord", user_id="1", username="alice", display_name="Alice"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=channel_id,
+            role="user",
+            content=content,
+            author=alice,
+            platform_message_id=msg_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_single_channel_emits_no_markers(self) -> None:
+        """All turns in one channel ⇒ zero separator markers."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="one", msg_id="m1")
+        self._turn(store, channel_id=1, content="two", msg_id="m2")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert _markers(msgs) == []
+        assert len(msgs) == 2
+
+    @pytest.mark.asyncio
+    async def test_multi_channel_leading_and_change_markers(self) -> None:
+        """Channels [A, A, B, A] ⇒ markers at first A, before B, before return."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="a one", msg_id="m1")
+        self._turn(store, channel_id=1, content="a two", msg_id="m2")
+        self._turn(store, channel_id=2, content="b one", msg_id="m3")
+        self._turn(store, channel_id=1, content="a three", msg_id="m4")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        # 7 messages: 3 markers + 4 turns; no marker between the two A turns.
+        assert _marker_indices(msgs) == [0, 3, 5]
+        assert len(msgs) == 7
+        assert msgs[1].content_str.endswith("a one")
+        assert msgs[2].content_str.endswith("a two")
+        assert msgs[4].content_str.endswith("b one")
+        assert msgs[6].content_str.endswith("a three")
+
+    @pytest.mark.asyncio
+    async def test_marker_resolves_channel_and_server_names(self) -> None:
+        """Resolvers present ⇒ marker names the channel and server."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            channel_name_resolver={1: "general", 2: "random"}.get,
+            guild_name_resolver={1: "My Server", 2: "My Server"}.get,
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert '—— now in #general · "My Server" ——' in _markers(msgs)
+
+    @pytest.mark.asyncio
+    async def test_marker_falls_back_to_channel_id_without_resolvers(self) -> None:
+        """No resolvers ⇒ marker uses #<channel_id> and omits server clause."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        markers = _markers(msgs)
+        assert "—— now in #1 ——" in markers
+        assert "—— now in #2 ——" in markers
+
+    @pytest.mark.asyncio
+    async def test_marker_omits_server_when_guild_unknown(self) -> None:
+        """Channel name known but no guild ⇒ marker omits the server clause."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            channel_name_resolver={1: "general", 2: "random"}.get,
+            guild_name_resolver=lambda _cid: None,
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        markers = _markers(msgs)
+        assert "—— now in #general ——" in markers
+        assert all("·" not in m for m in markers)
+
+    @pytest.mark.asyncio
+    async def test_marker_is_distinct_user_message_without_name(self) -> None:
+        """A marker is its own role=user message carrying no name field."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        marker_msg = next(m for m in msgs if m.content_str.startswith(_MARKER_PREFIX))
+        assert marker_msg.role == "user"
+        assert marker_msg.name is None
+
+
 class TestBuildFinalReminderFocusChannel:
     """build_final_reminder with focus_channel_id renders directive."""
 
