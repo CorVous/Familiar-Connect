@@ -624,6 +624,13 @@ class TextResponder:
         # directives buried at top of long context. re-emit as
         # trailing ``system`` message so they sit right before
         # assistant's next turn
+        # Server name for the focus channel — named on the trailing
+        # focus line only; head stays byte-stable for its cache prefix.
+        guild_name = (
+            self._focus_manager.guild_name_for(focus_ch)
+            if self._focus_manager
+            else None
+        )
         trailing = build_final_reminder(
             viewer_mode="text",
             display_tz=self._display_tz,
@@ -632,6 +639,7 @@ class TextResponder:
             focus_channel_id=focus_ch,
             unread_digest=unread_digest,
             channel_names=ch_names,
+            guild_name=guild_name,
         )
         if activity_state_line:
             # judgment-turn state line — this turn only, deepest slot

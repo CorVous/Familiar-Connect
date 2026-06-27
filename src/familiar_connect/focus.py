@@ -184,11 +184,13 @@ class FocusManager:
         name = self.channel_names.get(channel_id)
         return f"#{name}({channel_id})" if name else f"#{channel_id}"
 
+    def guild_name_for(self, channel_id: int | None) -> str | None:
+        """Server name for channel_id; None for None input or unknown channel."""
+        return self.guild_names.get(channel_id) if channel_id is not None else None
+
     def presence_guild(self) -> str | None:
         """Guild name for current text focus channel; None when unset or unknown."""
-        if self._text_focus is None:
-            return None
-        return self.guild_names.get(self._text_focus)
+        return self.guild_name_for(self._text_focus)
 
     def presence_text(self) -> str | None:
         """'#channel-name' for current text focus; None when unset."""
