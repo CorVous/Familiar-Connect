@@ -450,8 +450,8 @@ class TestSpeakStreaming:
         """An Azure-like client's jitter attrs flow into the source."""
         chunks = [b"\x10" * DISCORD_FRAME_SIZE]
         tts = _StreamingStubTTS(chunks)
-        tts.stream_prebuffer_bytes = DISCORD_FRAME_SIZE * 3
-        tts.stream_pad_underrun = True
+        tts.stream_prebuffer_bytes = DISCORD_FRAME_SIZE * 3  # ty: ignore
+        tts.stream_pad_underrun = True  # ty: ignore[unresolved-attribute]
         vc = _streaming_voice_client(play_durations=2)
         player = DiscordVoicePlayer(tts_client=tts, get_voice_client=lambda: vc)
         scope = TurnScope(turn_id="t", session_id="voice:1", started_at=0.0)

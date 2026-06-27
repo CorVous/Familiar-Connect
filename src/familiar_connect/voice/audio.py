@@ -10,7 +10,7 @@ import discord
 try:  # numpy is an optional extra (voice backends); base/docs installs lack it
     import numpy as np
 except ImportError:  # pragma: no cover - exercised only in numpy-less envs
-    np = None  # type: ignore[assignment]
+    np = None  # ty: ignore[invalid-assignment]
 
 # Discord requires 48kHz s16le stereo PCM in 20ms frames.
 # 48000 * 2ch * 2B * 0.020s = 3840 bytes/frame.

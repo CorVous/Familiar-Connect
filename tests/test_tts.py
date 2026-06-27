@@ -852,7 +852,7 @@ class _FakeAudioDataStream:
             chunk = self._chunks.pop(0)
             # The C layer writes into the buffer's memory in place; do the
             # same so reuse of one buffer across reads is exercised.
-            ctypes.memmove(audio_buffer, chunk, len(chunk))
+            ctypes.memmove(audio_buffer, chunk, len(chunk))  # ty: ignore
             return len(chunk)
         if self._block_until is not None:
             self._block_until.wait()
@@ -1002,7 +1002,7 @@ class TestAzureTTSClientSynthesizeStream:
             agen = client.synthesize_stream("hi")
             first = await anext(agen)
             start = time.monotonic()
-            await asyncio.wait_for(agen.aclose(), timeout=5.0)
+            await asyncio.wait_for(agen.aclose(), timeout=5.0)  # ty: ignore
             elapsed = time.monotonic() - start
         assert first == b"\xaa\xbb"
         # aclose must not block on the unbounded read.
