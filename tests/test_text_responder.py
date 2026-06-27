@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 import asyncio
 import time
+from unittest.mock import MagicMock
 
 from familiar_connect.activities.engine import GateAction, GateDecision
 from familiar_connect.bus import InProcessEventBus, TurnRouter
@@ -33,6 +34,7 @@ from familiar_connect.context import (
     RecentHistoryLayer,
 )
 from familiar_connect.context.layers import _turn_to_message_with_context
+from familiar_connect.focus import FocusManager
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore, HistoryTurn
 from familiar_connect.identity import Author
@@ -1091,6 +1093,105 @@ class TestTrailingReminder:
         assert trailing.content_str.index("chatting in a text channel") < (
             trailing.content_str.index("# Etiquette")
         )
+
+
+def _focus_manager(
+    *, channel_id: int, channel_name: str, guild_name: str | None
+) -> FocusManager:
+    """FocusManager focused on ``channel_id`` with names pre-populated."""
+    fm = FocusManager(familiar_id="fam", store=MagicMock(), subscriptions=MagicMock())
+    fm.channel_names[channel_id] = channel_name
+    if guild_name is not None:
+        fm.guild_names[channel_id] = guild_name
+    fm.set_focus_immediately(channel_id, "text")
+    return fm
+
+
+class TestTrailingReminderServerName:
+    """Trailing reminder names the focus channel's Discord server.
+
+    Server clause attaches to the trailing focus line only — the head
+    stays byte-stable so its cache prefix is reusable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trailing_names_server_head_does_not(self, tmp_path: Path) -> None:
+        captured: list[list[Message]] = []
+
+        class _CapturingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:
+                captured.append(list(messages))
+                return Message(role="assistant", content="ok")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                captured.append(list(messages))
+                yield "ok"
+
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_CapturingLLM(), send=send, tmp_path=tmp_path
+        )
+        responder._focus_manager = _focus_manager(
+            channel_id=42, channel_name="general", guild_name="My Server"
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        msgs = captured[0]
+        head = msgs[0].content_str
+        trailing = msgs[-1].content_str
+        # trailing focus line names both channel + server
+        assert "#general" in trailing
+        assert '"My Server" server' in trailing
+        # head keeps the focus channel but never the server
+        assert "#general" in head
+        assert "My Server" not in head
+
+    @pytest.mark.asyncio
+    async def test_no_server_clause_when_guild_unknown(self, tmp_path: Path) -> None:
+        captured: list[list[Message]] = []
+
+        class _CapturingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:
+                captured.append(list(messages))
+                return Message(role="assistant", content="ok")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                captured.append(list(messages))
+                yield "ok"
+
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_CapturingLLM(), send=send, tmp_path=tmp_path
+        )
+        # focus set, guild_names left empty → no server clause
+        responder._focus_manager = _focus_manager(
+            channel_id=42, channel_name="general", guild_name=None
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        trailing = captured[0][-1].content_str
+        assert "Your attention is currently on #general." in trailing
+        assert "server" not in trailing
 
 
 class TestStripLeakedMetadataPrefix:

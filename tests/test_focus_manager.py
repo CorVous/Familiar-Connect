@@ -558,6 +558,30 @@ class TestPresenceGuild:
         assert fm.presence_guild() == "Sapphire"
 
 
+class TestGuildNameFor:
+    """``guild_name_for`` — single lookup point for a channel's server name."""
+
+    def _fm(self, tmp_path: Path) -> FocusManager:
+        store = _make_store()
+        reg = _make_registry(tmp_path)
+        return FocusManager(familiar_id="fam", store=store, subscriptions=reg)
+
+    def test_returns_name_for_known_channel(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.guild_names[42] = "My Server"
+        assert fm.guild_name_for(42) == "My Server"
+
+    def test_returns_none_for_unknown_channel(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.guild_names[42] = "My Server"
+        assert fm.guild_name_for(99) is None
+
+    def test_returns_none_for_none_input(self, tmp_path: Path) -> None:
+        fm = self._fm(tmp_path)
+        fm.guild_names[42] = "My Server"
+        assert fm.guild_name_for(None) is None
+
+
 # ---------------------------------------------------------------------------
 # FocusManager.on_shift
 # ---------------------------------------------------------------------------
