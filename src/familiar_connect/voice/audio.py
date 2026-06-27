@@ -6,7 +6,11 @@ import struct
 import threading
 
 import discord
-import numpy as np
+
+try:  # numpy is an optional extra (voice backends); base/docs installs lack it
+    import numpy as np
+except ImportError:  # pragma: no cover - exercised only in numpy-less envs
+    np = None  # type: ignore[assignment]
 
 # Discord requires 48kHz s16le stereo PCM in 20ms frames.
 # 48000 * 2ch * 2B * 0.020s = 3840 bytes/frame.
@@ -75,16 +79,30 @@ class Resampler48to16:
 def mono_to_stereo(data: bytes) -> bytes:
     """Duplicate each int16 sample into L+R; produces 2x output.
 
+    Uses numpy when available (the voice playback path always installs it);
+    falls back to a byte-identical pure-Python loop so this base-eager module
+    still imports in numpy-less environments (docs build, base-only install).
+
     :raises ValueError: If *data* has odd length.
     """
     if len(data) % 2 != 0:
         msg = f"PCM data length must be even, got {len(data)}"
         raise ValueError(msg)
 
-    # Vectorized: int16 view → duplicate each sample into L+R. Little-endian
-    # pinned via "<i2" so output bytes are host-independent. Releases the GIL
-    # over the buffer instead of looping per-sample in Python.
-    return np.frombuffer(data, dtype="<i2").repeat(2).tobytes()
+    if np is not None:
+        # Vectorized: int16 view → duplicate each sample into L+R. Little-endian
+        # pinned via "<i2" so output bytes are host-independent. Releases the GIL
+        # over the buffer instead of looping per-sample in Python.
+        return np.frombuffer(data, dtype="<i2").repeat(2).tobytes()
+
+    # Pure-Python fallback (numpy-less envs): duplicate each 2-byte sample.
+    result = bytearray(len(data) * 2)
+    for i in range(0, len(data), 2):
+        sample = data[i : i + 2]
+        out_off = i * 2
+        result[out_off : out_off + 2] = sample  # Left
+        result[out_off + 2 : out_off + 4] = sample  # Right
+    return bytes(result)
 
 
 class StreamingPCMSource(discord.AudioSource):

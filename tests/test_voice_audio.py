@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from familiar_connect.voice import audio as audio_mod
 from familiar_connect.voice.audio import (
     DISCORD_FRAME_SIZE,
     StreamingPCMSource,
@@ -72,9 +73,7 @@ class TestMonoToStereo:
             [-1, 1, -32768, 32767, 12345, -12345, 0],
         ],
     )
-    def test_byte_identical_to_reference_duplication(
-        self, samples: list[int]
-    ) -> None:
+    def test_byte_identical_to_reference_duplication(self, samples: list[int]) -> None:
         """Output is byte-for-byte the per-int16-sample duplication.
 
         Independent reference: each little-endian 2-byte sample appears
@@ -82,10 +81,27 @@ class TestMonoToStereo:
         the implementation under test, across empty/single/edge int16s.
         """
         mono = struct.pack(f"<{len(samples)}h", *samples)
-        expected = b"".join(
-            mono[i : i + 2] * 2 for i in range(0, len(mono), 2)
-        )
+        expected = b"".join(mono[i : i + 2] * 2 for i in range(0, len(mono), 2))
         assert mono_to_stereo(mono) == expected
+
+    def test_fallback_matches_numpy_when_numpy_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pure-Python fallback is byte-identical to the numpy path.
+
+        ``voice.audio`` is base-eager (imported via ``voice/__init__``), but
+        numpy is an optional extra — so the module must import and convert
+        without it (docs build, base-only install). Force the numpy-absent
+        branch and confirm it matches the numpy result and still validates.
+        """
+        samples = [-1, 1, -32768, 32767, 12345, -12345, 0, 0x0102]
+        mono = struct.pack(f"<{len(samples)}h", *samples)
+        numpy_result = mono_to_stereo(mono)
+
+        monkeypatch.setattr(audio_mod, "np", None)
+        assert audio_mod.mono_to_stereo(mono) == numpy_result
+        with pytest.raises(ValueError, match="even"):
+            audio_mod.mono_to_stereo(b"\x01")
 
 
 class TestStereoToMono:
