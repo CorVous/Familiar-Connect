@@ -55,6 +55,7 @@ def build_final_reminder(
     focus_channel_id: int | None = None,
     unread_digest: dict[int, int] | None = None,
     channel_names: dict[int, str] | None = None,
+    guild_name: str | None = None,
 ) -> str:
     """Render closing reminder block.
 
@@ -69,7 +70,9 @@ def build_final_reminder(
     empty-content tool_call failure mode — nudges model to speak
     before invoking a tool so user doesn't hear silence mid-turn.
     ``focus_channel_id`` appends a directive naming the active
-    channel and the shift_focus tool. ``unread_digest`` renders a
+    channel and the shift_focus tool; ``guild_name`` (raw display
+    name, caller-resolved) also names the server on that focus line.
+    ``unread_digest`` renders a
     compact unreads summary (channels with count > 0 only).
     ``post_history_instructions`` (per-familiar etiquette) appended
     last — deepest, most recency-biased slot. Blank/None omits it.
@@ -112,11 +115,15 @@ def build_final_reminder(
             n = names.get(cid)
             return f"#{n} (id {cid})" if n else f"#{cid}"
 
-        focus_part = (
-            f"Your attention is currently on {_ch(focus_channel_id)}."
-            if focus_channel_id is not None
-            else ""
-        )
+        if focus_channel_id is not None:
+            # guild_name (pre-resolved by caller) names which server the
+            # conversation is in — the familiar can run in several at once.
+            where = _ch(focus_channel_id)
+            if guild_name:
+                where += f' in the "{guild_name}" server'
+            focus_part = f"Your attention is currently on {where}."
+        else:
+            focus_part = ""
         active = (
             [(cid, cnt) for cid, cnt in unread_digest.items() if cnt > 0]
             if unread_digest
