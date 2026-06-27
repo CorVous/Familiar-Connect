@@ -118,3 +118,67 @@ class TestBuildFinalReminder:
         )
         # whitespace-only must not leave a dangling separator
         assert not out.endswith("\n\n")
+
+
+class TestBuildFinalReminderGuildName:
+    """guild_name names the current server on the focus line (multi-server bot)."""
+
+    def test_guild_name_named_alongside_channel_on_focus_line(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+            guild_name="My Server",
+        )
+        focus_line = next(
+            ln for ln in out.splitlines() if "attention is currently on" in ln
+        )
+        assert "#general" in focus_line
+        assert "My Server" in focus_line
+
+    def test_no_guild_name_output_byte_for_byte_unchanged(self) -> None:
+        """Regression guard: omitting guild_name must reproduce today's output."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+        )
+        expected = (
+            "---\n"
+            "\n"
+            "It is now: 2026-05-04 2:30PM UTC\n"
+            "\n"
+            "Special input:\n"
+            "\n"
+            "* `[@DisplayName]` - ping user\n"
+            "* `[↩ <message_id>]` - reply to message\n"
+            "\n"
+            "Your attention is currently on #general."
+        )
+        assert out == expected
+        assert "server" not in out
+
+    def test_guild_name_none_keeps_plain_focus_line(self) -> None:
+        """DM / unknown server: guild_name=None renders the unchanged focus line."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+            guild_name=None,
+        )
+        assert "Your attention is currently on #general." in out
+        assert "server" not in out
+
+    def test_guild_name_without_focus_channel_leaks_no_server_text(self) -> None:
+        """Boundary: server name attaches to the focus line; no focus line, no server."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=None,
+            guild_name="My Server",
+        )
+        assert "My Server" not in out
+        assert "server" not in out
