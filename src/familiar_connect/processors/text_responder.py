@@ -336,6 +336,7 @@ class TextResponder:
                 platform_message_id=message_id,
                 reply_to_message_id=reply_to_message_id,
                 consumed=focused and not suppressed,  # Staged when unfocused/absent
+                pings_bot=payload.get("pings_bot") is True,
             )
             if mentions:
                 await self._history.record_mentions(
