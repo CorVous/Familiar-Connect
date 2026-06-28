@@ -243,7 +243,11 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
 
     active_hours: tuple[time, time] | None = None
     if "active_hours" in entry:
-        active_hours = parse_hhmm_range(entry["active_hours"], key="active_hours")
+        try:
+            active_hours = parse_hhmm_range(entry["active_hours"], key="active_hours")
+        except ConfigError as exc:
+            msg = f"[[catalog]] {entry_id!r}: {exc}"
+            raise ConfigError(msg) from exc
 
     return ActivityType(
         id=entry_id,
@@ -267,13 +271,13 @@ def _parse_active_days(value: object, entry_id: str) -> frozenset[int]:
         raise ConfigError(msg)
     days: set[int] = set()
     for token in value:
-        if not isinstance(token, str) or token.lower() not in _WEEKDAY_TOKENS:
+        if not isinstance(token, str) or token not in _WEEKDAY_TOKENS:
             msg = (
                 f"[[catalog]] {entry_id!r}: active_days has unknown weekday "
                 f"token {token!r}; valid tokens: {valid}"
             )
             raise ConfigError(msg)
-        days.add(_WEEKDAY_TOKENS[token.lower()])
+        days.add(_WEEKDAY_TOKENS[token])
     return frozenset(days)
 
 
