@@ -160,6 +160,7 @@ def _engine(
     sleep_window: tuple[time, time] | None = (time(0, 0), time(8, 0)),
     sleep_grace_minutes: int = 30,
     display_tz: str = "UTC",
+    rng: random.Random | None = None,
 ) -> ActivityEngine:
     kwargs: dict[str, Any] = {}
     if sleep_prompts is not None:
@@ -180,7 +181,7 @@ def _engine(
         bot_user_id=bot_user_id,
         voice_active_fn=lambda: voice_active,
         now_fn=clock,
-        rng=random.Random(7),  # noqa: S311 — deterministic test roll
+        rng=rng if rng is not None else random.Random(7),  # noqa: S311 — deterministic test roll
         nudge_tick_seconds=nudge_tick,
         sleep_passes_enabled=sleep_passes_enabled,
         seed_dream_path=seed_dream_path,
@@ -364,6 +365,152 @@ class TestScheduleGate:
         assert "error" not in ack
         assert ack.get("ack") == "ok"
         assert engine._staged is not None
+
+
+class _HighRollRandom(random.Random):  # noqa: S311 — test stub, not cryptographic
+    """``randint`` always returns the high bound — makes the clamped hi visible."""
+
+    def randint(self, a: int, b: int) -> int:  # noqa: ARG002 — low bound unused by design
+        return b
+
+
+def _clamp_entry() -> ActivityType:
+    """Weekday 09:00-17:00 entry with a wide roll (mirrors shrine_rounds)."""
+    return ActivityType(
+        id="shrine",
+        label="shrine rounds",
+        duration_minutes=(90, 180),
+        reachable=True,
+        seed="Walking the shrine rounds.",
+        active_days=frozenset({0, 1, 2, 3, 4}),
+        active_hours=(time(9, 0), time(17, 0)),
+    )
+
+
+def _days_only_entry() -> ActivityType:
+    """Days set, no hours: a schedule with no window end to clamp against."""
+    return ActivityType(
+        id="daysonly",
+        label="weekday wander",
+        duration_minutes=(90, 180),
+        reachable=True,
+        seed="A weekday wander.",
+        active_days=frozenset({0, 1, 2, 3, 4}),
+        active_hours=None,
+    )
+
+
+def _wrap_entry() -> ActivityType:
+    """Tuesday 22:00-02:00 (midnight-wrap) — clamp must use the next-day end."""
+    return ActivityType(
+        id="nightwatch",
+        label="night watch",
+        duration_minutes=(90, 300),
+        reachable=True,
+        seed="The night watch.",
+        active_days=frozenset({1}),  # Tue — the evening side is one clean day
+        active_hours=(time(22, 0), time(2, 0)),
+    )
+
+
+def _clamp_config() -> ActivitiesConfig:
+    base = _config()
+    return _config(
+        catalog=(*base.catalog, _clamp_entry(), _days_only_entry(), _wrap_entry())
+    )
+
+
+_TUE_1500 = datetime(2026, 6, 16, 15, 0, tzinfo=UTC)  # room 135
+_TUE_1545 = datetime(2026, 6, 16, 15, 45, tzinfo=UTC)  # room 90 == lo
+_TUE_1600 = datetime(2026, 6, 16, 16, 0, tzinfo=UTC)  # room 75 < lo
+_TUE_0930 = datetime(2026, 6, 16, 9, 30, tzinfo=UTC)  # room ample
+_TUE_2300 = datetime(2026, 6, 16, 23, 0, tzinfo=UTC)  # wrap evening side
+_WORK_END = datetime(2026, 6, 16, 17, 0, tzinfo=UTC)
+_GRACE = timedelta(minutes=15)
+
+
+class TestScheduleDurationClamp:
+    """Clamp the rolled duration so a scheduled return stays near window end."""
+
+    @pytest.mark.asyncio
+    async def test_clamps_high_bound_near_window_end(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        engine = _engine(
+            store, FakeClock(_TUE_1500), config=_clamp_config(), rng=_HighRollRandom()
+        )
+        ack = engine.defer_start("shrine", None)
+        assert ack.get("ack") == "ok"
+        assert ack["duration_minutes"] == 135  # 180 trimmed to room
+        assert (
+            _TUE_1500 + timedelta(minutes=ack["duration_minutes"]) <= _WORK_END + _GRACE
+        )
+
+    @pytest.mark.asyncio
+    async def test_boundary_room_equals_lo_stages(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        engine = _engine(
+            store, FakeClock(_TUE_1545), config=_clamp_config(), rng=_HighRollRandom()
+        )
+        ack = engine.defer_start("shrine", None)
+        assert ack.get("ack") == "ok"
+        assert ack["duration_minutes"] == 90  # randint(90, 90); reject is strict <
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_room_below_lo(self, store: AsyncHistoryStore) -> None:
+        engine = _engine(
+            store, FakeClock(_TUE_1600), config=_clamp_config(), rng=_HighRollRandom()
+        )
+        result = engine.defer_start("shrine", None)
+        assert "error" in result
+        assert "shrine rounds" in result["error"]  # from the label
+        assert "not enough time" in result["error"]
+        assert engine.active is None
+        assert engine._staged is None
+
+    @pytest.mark.asyncio
+    async def test_no_clamp_when_ample_room(self, store: AsyncHistoryStore) -> None:
+        engine = _engine(
+            store, FakeClock(_TUE_0930), config=_clamp_config(), rng=_HighRollRandom()
+        )
+        ack = engine.defer_start("shrine", None)
+        assert ack.get("ack") == "ok"
+        assert ack["duration_minutes"] == 180  # full natural hi preserved
+
+    @pytest.mark.asyncio
+    async def test_days_only_entry_never_clamped(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Clamp keys on active_hours; a days-only schedule rolls plainly."""
+        engine = _engine(
+            store, FakeClock(_TUE_1600), config=_clamp_config(), rng=_HighRollRandom()
+        )
+        ack = engine.defer_start("daysonly", None)
+        assert ack.get("ack") == "ok"
+        assert ack["duration_minutes"] == 180
+
+    @pytest.mark.asyncio
+    async def test_wrap_window_room_against_next_day_end(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """RISKY: midnight-wrap window clamps to the post-midnight (next-day) end.
+
+        Tue 23:00 sits in the Tue 22:00 → Wed 02:00 occurrence. Room is
+        measured to Wed 02:00 (+195 min), not Tue 02:00 (which is in the
+        past, -1260 min). The 300 roll clamps to 195 without inverting
+        lo/hi or going negative.
+        """
+        engine = _engine(
+            store, FakeClock(_TUE_2300), config=_clamp_config(), rng=_HighRollRandom()
+        )
+        ack = engine.defer_start("nightwatch", None)
+        assert ack.get("ack") == "ok"
+        assert ack["duration_minutes"] == 195
+        wrap_end = datetime(2026, 6, 17, 2, 0, tzinfo=UTC)
+        assert (
+            _TUE_2300 + timedelta(minutes=ack["duration_minutes"]) <= wrap_end + _GRACE
+        )
 
 
 class TestEndTurnAppliesStart:
