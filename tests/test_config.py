@@ -1351,12 +1351,21 @@ class TestDiscordDmAllowlist:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.dm_allowlist == ()
 
+    def test_empty_list_is_valid(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[discord]\ndm_allowlist = []\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.dm_allowlist == ()
+
     @pytest.mark.parametrize(
         "value",
         [
             'dm_allowlist = "x"',  # non-list
             "dm_allowlist = [\"a\"]",  # list with non-int element
             "dm_allowlist = [true]",  # list with bool (int subclass)
+            "dm_allowlist = [1.5]",  # list with float element
         ],
     )
     def test_invalid_rejected(
