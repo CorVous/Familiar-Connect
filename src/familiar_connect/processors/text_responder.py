@@ -243,8 +243,8 @@ class TextResponder:
             return
         channel_id = payload.get("channel_id")
         content = payload.get("content") or ""
-        # Idle nudge: synthetic wake event has no real user content —
-        # it just earns the model a focused turn (see _emit_idle_nudge)
+        # Unread nudge: synthetic wake event has no real user content —
+        # it just earns the model a focused turn (see _emit_unread_nudge)
         is_wake = payload.get("wake") is True
         if not isinstance(channel_id, int):
             return
@@ -374,7 +374,7 @@ class TextResponder:
                 if self._focus_manager is not None and self._focus_manager.should_wake(
                     channel_id
                 ):
-                    await self._emit_idle_nudge(bus)
+                    await self._emit_unread_nudge(bus)
                 return
         elif suppressed:
             # wake event while absent — carries no user content, drop
@@ -520,7 +520,7 @@ class TextResponder:
         srv = f"{ls.kv('srv', guild, vc=ls.LM)} " if guild else ""
         return ch, srv
 
-    async def _emit_idle_nudge(self, bus: EventBus) -> None:
+    async def _emit_unread_nudge(self, bus: EventBus) -> None:
         """Publish a synthetic wake event for the focused text channel.
 
         Earns the model one focused turn so it sees the unread digest
@@ -537,7 +537,7 @@ class TextResponder:
         await bus.publish(
             Event(
                 event_id=synth_id,
-                turn_id=f"idle-wake-{synth_id}",
+                turn_id=f"unread-wake-{synth_id}",
                 session_id=str(focus_ch),
                 parent_event_ids=(),
                 topic=TOPIC_DISCORD_TEXT,
@@ -546,7 +546,7 @@ class TextResponder:
                 payload={
                     "familiar_id": self._familiar_id,
                     "channel_id": focus_ch,
-                    "content": "[idle: unread messages waiting elsewhere]",
+                    "content": "[unread messages waiting elsewhere]",
                     "author": None,
                     "wake": True,
                 },

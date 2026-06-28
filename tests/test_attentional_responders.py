@@ -396,7 +396,7 @@ class TestTextResponderFocusAware:
 
 class TestTextResponderIdleNudge:
     @pytest.mark.asyncio
-    async def test_idle_unfocused_publishes_wake_to_focused_channel(
+    async def test_unfocused_arrival_publishes_wake_to_focused_channel(
         self, tmp_path: Path
     ) -> None:
         """should_wake → publish wake event routed at the focused channel."""
@@ -424,7 +424,7 @@ class TestTextResponderIdleNudge:
         assert wakes[0].payload["channel_id"] == 555
 
     @pytest.mark.asyncio
-    async def test_not_idle_unfocused_publishes_nothing(self, tmp_path: Path) -> None:
+    async def test_unfocused_arrival_publishes_nothing(self, tmp_path: Path) -> None:
         """should_wake False → no nudge, plain staging."""
         fm = _unfocused_focus_manager()  # should_wake defaults False
         responder, _ = _make_text_responder(tmp_path=tmp_path, focus_manager=fm)

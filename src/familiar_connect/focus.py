@@ -33,7 +33,7 @@ class FocusManager:
 
     Unread nudge: when a non-focused channel gets traffic, ``should_wake``
     flags that the model deserves a turn (the responder fires a synthetic
-    wake) — the arrival itself fires it, with no idle-silence requirement.
+    wake) — the arrival itself fires it, with no quiet-period requirement.
     ``unread_nudge_enabled`` gates the behavior on/off; the debounce window
     is the sole throttle. The nudge never moves focus — only the model's
     shift_focus does. Rapid arrivals within ``nudge_debounce_seconds`` are
