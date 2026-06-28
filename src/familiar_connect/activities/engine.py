@@ -102,6 +102,11 @@ _VISIBLE_TAIL = 10  # pings within last-few visible turns skip excerpts
 # the fixed wake at window END would make an earlier call a huge absence
 _EARLY_BED_MINUTES = 60
 
+# scheduled-activity roll clamp: a rolled return may overrun the entry's
+# active_hours end by at most this much before the roll's high bound is
+# trimmed; a start is refused outright when even the low bound won't fit
+_SCHEDULE_OVERFLOW_GRACE_MINUTES = 15
+
 # model-facing idle-nudge wake content. persists as a synthetic user
 # turn (AlarmWaker shape) so the model sees it in recent history; the
 # model decides via start_activity — the nudge never starts anything
@@ -380,7 +385,26 @@ class ActivityEngine:
             # parser guarantees duration unless window; defensive
             return {"error": f"activity type {type_id!r} has no duration"}
         else:
+            now = self._now()
             lo, hi = activity_type.duration_minutes
+            hours = activity_type.active_hours
+            if hours is not None:
+                # scheduled entry: the gate above guaranteed now is inside
+                # the occurrence, so _window_occurrence returns the window
+                # enclosing it (wrap-aware). Clamp the roll so the return
+                # overruns the window end by at most the grace; refuse when
+                # even the low bound won't fit.
+                _, win_end = self._window_occurrence(now, hours)
+                grace = timedelta(minutes=_SCHEDULE_OVERFLOW_GRACE_MINUTES)
+                room = int(((win_end + grace) - now).total_seconds() // 60)
+                if room < lo:
+                    return {
+                        "error": (
+                            f"not enough time before the {activity_type.label} "
+                            f"window closes — head out earlier"
+                        )
+                    }
+                hi = min(hi, room)
             duration = self._rng.randint(lo, hi)
         self._staged = _StagedStart(
             activity_type=activity_type,
