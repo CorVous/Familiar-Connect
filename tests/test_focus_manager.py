@@ -359,6 +359,17 @@ class TestFocusManagerIdleWake:
         assert fm.should_wake(99) is True
 
     @pytest.mark.asyncio
+    async def test_should_wake_true_on_arrival_when_focused_channel_active(
+        self, tmp_path: Path
+    ) -> None:
+        # arrival nudges immediately, even though the focused channel was
+        # just active (clock not advanced) — debounce is the sole throttle
+        clock = _FakeClock()
+        fm = self._fm(tmp_path, clock=clock, text_focus=1)
+        await fm.initialize()
+        assert fm.should_wake(99) is True
+
+    @pytest.mark.asyncio
     async def test_should_wake_false_for_focused_channel(self, tmp_path: Path) -> None:
         clock = _FakeClock()
         fm = self._fm(tmp_path, clock=clock, text_focus=1)
