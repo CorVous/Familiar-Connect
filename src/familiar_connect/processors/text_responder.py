@@ -368,9 +368,9 @@ class TextResponder:
                     f"{ls.kv('from', author_label, vc=ls.LW)} "
                     f"{ls.kv('text', content, vc=ls.LW)}"
                 )
-                # Focused channel idle long enough → nudge the model so
-                # stranded unreads don't starve. model decides via
-                # shift_focus; the nudge never moves focus itself.
+                # Unfocused arrival nudges the model (debounced) so
+                # stranded unreads surface promptly; the model decides
+                # via shift_focus — the nudge never moves focus itself.
                 if self._focus_manager is not None and self._focus_manager.should_wake(
                     channel_id
                 ):

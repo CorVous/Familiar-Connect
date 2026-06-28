@@ -18,9 +18,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Unread-nudge enable sentinel: > 0 enables nudges on unfocused arrivals,
-# <= 0 disables them. The magnitude is no longer a silence threshold.
-_DEFAULT_IDLE_WAKE_S = 120.0
 # Debounce window: rapid arrivals within this window share one nudge
 _DEFAULT_NUDGE_DEBOUNCE_S = 30.0
 
@@ -37,11 +34,10 @@ class FocusManager:
     Unread nudge: when a non-focused channel gets traffic, ``should_wake``
     flags that the model deserves a turn (the responder fires a synthetic
     wake) — the arrival itself fires it, with no idle-silence requirement.
-    ``idle_wake_seconds`` is only an enable sentinel (> 0 enables, <= 0
-    disables); the debounce window is the sole throttle. The nudge never
-    moves focus — only the model's shift_focus does. Rapid arrivals within
-    ``nudge_debounce_seconds`` are grouped into one nudge; the next unread
-    after the window fires again.
+    ``unread_nudge_enabled`` gates the behavior on/off; the debounce window
+    is the sole throttle. The nudge never moves focus — only the model's
+    shift_focus does. Rapid arrivals within ``nudge_debounce_seconds`` are
+    grouped into one nudge; the next unread after the window fires again.
     """
 
     def __init__(
@@ -51,7 +47,7 @@ class FocusManager:
         store: AsyncHistoryStore,
         subscriptions: SubscriptionRegistry,
         clock: Callable[[], float] = time.monotonic,
-        idle_wake_seconds: float = _DEFAULT_IDLE_WAKE_S,
+        unread_nudge_enabled: bool = True,
         nudge_debounce_seconds: float = _DEFAULT_NUDGE_DEBOUNCE_S,
     ) -> None:
         self._familiar_id = familiar_id
@@ -61,11 +57,10 @@ class FocusManager:
         self._voice_focus: int | None = None
         self._text_lock = asyncio.Lock()
         self._voice_lock = asyncio.Lock()
-        # Idle-nudge state
+        # Unread-nudge state
         self._clock = clock
-        self._idle_wake_seconds = idle_wake_seconds
+        self._unread_nudge_enabled = unread_nudge_enabled
         self._nudge_debounce_seconds = nudge_debounce_seconds
-        self._last_active = clock()
         self._last_nudge: float = float("-inf")  # Never nudged initially
         # Channel_id → display name; populated by bot on_ready
         self.channel_names: dict[int, str] = {}
@@ -161,7 +156,7 @@ class FocusManager:
         nudge, regardless of how recently the focused channel was active.
         Debounce is the sole throttle: rapid arrivals share one nudge.
         """
-        if self._idle_wake_seconds <= 0:
+        if not self._unread_nudge_enabled:
             return False
         if self.is_focused(channel_id):
             return False
@@ -175,12 +170,14 @@ class FocusManager:
         self._last_nudge = self._clock()
 
     async def end_turn(self) -> None:
-        """Per-turn bookkeeping: reset idle clock.
+        """Responder end-of-turn hook — intentionally a no-op.
 
-        Focus shifts apply immediately (``shift_now``); nothing is
-        deferred here. Stays async so responders can await it uniformly.
+        Focus shifts apply immediately (``shift_now``), so there is no
+        per-turn focus state to reset. Retained because both responders
+        call it as their end-of-turn signal; stays async so they can
+        await it uniformly.
         """
-        self._last_active = self._clock()  # Reset idle clock
+        return
 
     def channel_label(self, channel_id: int | None) -> str:
         """Format channel_id as '#name(id)' or '#id' when name unknown."""

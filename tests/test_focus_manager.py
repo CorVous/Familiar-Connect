@@ -327,7 +327,7 @@ class TestFocusManagerIdleWake:
         tmp_path: Path,
         *,
         clock: _FakeClock,
-        idle_wake_seconds: float = 60.0,
+        unread_nudge_enabled: bool = True,
         nudge_debounce_seconds: float = 10.0,
         text_focus: int = 1,
     ) -> FocusManager:
@@ -338,7 +338,7 @@ class TestFocusManagerIdleWake:
             store=store,
             subscriptions=reg,
             clock=clock,
-            idle_wake_seconds=idle_wake_seconds,
+            unread_nudge_enabled=unread_nudge_enabled,
             nudge_debounce_seconds=nudge_debounce_seconds,
         )
 
@@ -365,7 +365,7 @@ class TestFocusManagerIdleWake:
     @pytest.mark.asyncio
     async def test_should_wake_false_when_disabled(self, tmp_path: Path) -> None:
         clock = _FakeClock()
-        fm = self._fm(tmp_path, clock=clock, idle_wake_seconds=0.0)
+        fm = self._fm(tmp_path, clock=clock, unread_nudge_enabled=False)
         await fm.initialize()
         clock.advance(10_000.0)
         assert fm.should_wake(99) is False
