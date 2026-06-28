@@ -259,6 +259,52 @@ seed = "The night's dream, told on waking."
 """
 
 
+class TestPerEntrySchedule:
+    """Optional per-entry ``active_days`` / ``active_hours`` (parse only)."""
+
+    def test_both_fields_parsed(self, tmp_path: Path) -> None:
+        content = VALID_ENTRY + (
+            'active_days = ["mon", "tue", "wed", "thu", "fri"]\n'
+            'active_hours = "09:00-17:00"\n'
+        )
+        path = write_activities(tmp_path, content)
+        cfg = load_activities_config(path)
+        entry = cfg.catalog[0]
+        assert entry.active_days == frozenset({0, 1, 2, 3, 4})
+        assert entry.active_hours == (time(9, 0), time(17, 0))
+
+    def test_absent_fields_default_to_none(self, tmp_path: Path) -> None:
+        path = write_activities(tmp_path, VALID_ENTRY)
+        entry = load_activities_config(path).catalog[0]
+        assert entry.active_days is None
+        assert entry.active_hours is None
+
+    def test_unknown_weekday_token_rejected(self, tmp_path: Path) -> None:
+        content = VALID_ENTRY + 'active_days = ["funday"]\n'
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError) as excinfo:
+            load_activities_config(path)
+        assert "creek_walk" in str(excinfo.value)
+        assert "active_days" in str(excinfo.value)
+
+    def test_empty_active_days_rejected(self, tmp_path: Path) -> None:
+        content = VALID_ENTRY + "active_days = []\n"
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError) as excinfo:
+            load_activities_config(path)
+        assert "creek_walk" in str(excinfo.value)
+        assert "active_days" in str(excinfo.value)
+
+    @pytest.mark.parametrize("value", ["9am-5pm", "17:00-17:00"])
+    def test_malformed_active_hours_rejected(
+        self, tmp_path: Path, value: str
+    ) -> None:
+        content = VALID_ENTRY + f'active_hours = "{value}"\n'
+        path = write_activities(tmp_path, content)
+        with pytest.raises(ConfigError, match="active_hours"):
+            load_activities_config(path)
+
+
 class TestSleepCatalogEntry:
     """Reserved ``sleep`` catalog id — duration optional (fixed wake)."""
 
