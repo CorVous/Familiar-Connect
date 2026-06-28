@@ -245,11 +245,11 @@ class TestOnReadyPresenceResync:
 
 
 def _dm_message(
-    *, author_id: int, channel_id: int, guild: object | None
+    *, author_id: int, channel_id: int, guild: object | None, bot: bool = False
 ) -> SimpleNamespace:
     """Fake ``discord.Message`` carrying only the fields ``on_message`` reads."""
     return SimpleNamespace(
-        author=SimpleNamespace(id=author_id, bot=False, name="x", display_name="X"),
+        author=SimpleNamespace(id=author_id, bot=bot, name="x", display_name="X"),
         channel=SimpleNamespace(id=channel_id),
         guild=guild,
         content="hi",
@@ -319,6 +319,38 @@ class TestOnMessageDmAllowlist:
     async def test_non_allowlisted_dm_ignored(self, tmp_path: Path) -> None:
         events, familiar, text_source, fm = self._setup(tmp_path)
         msg = _dm_message(author_id=999, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is None
+        )
+        assert fm.guild_names == {}
+
+    @pytest.mark.asyncio
+    async def test_bot_authored_dm_ignored_even_if_allowlisted(
+        self, tmp_path: Path
+    ) -> None:
+        # author.bot guard precedes the allowlist branch — a bot whose id
+        # collides with the allowlist must never be admitted (no DM loops).
+        events, familiar, text_source, fm = self._setup(tmp_path, allowlist=(123,))
+        msg = _dm_message(author_id=123, channel_id=555, guild=None, bot=True)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is None
+        )
+        assert fm.guild_names == {}
+
+    @pytest.mark.asyncio
+    async def test_own_dm_echo_ignored_even_if_allowlisted(
+        self, tmp_path: Path
+    ) -> None:
+        # bot-self guard (author.id == bot_user_id, which is 99) precedes the
+        # allowlist branch — the familiar must not answer its own DM echo.
+        events, familiar, text_source, fm = self._setup(tmp_path, allowlist=(99,))
+        msg = _dm_message(author_id=99, channel_id=555, guild=None)
         await events["on_message"](cast("discord.Message", msg))
         text_source.publish_text.assert_not_awaited()
         assert (
