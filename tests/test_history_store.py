@@ -936,6 +936,119 @@ class TestModeColumn:
 
 
 # ---------------------------------------------------------------------------
+# pings_bot column on turns
+# ---------------------------------------------------------------------------
+
+
+class TestPingsBotColumn:
+    def test_append_turn_persists_pings_bot_true(self, tmp_path: Path) -> None:
+        """``pings_bot=True`` is stored as ``1`` and set on the return."""
+        s = _store(tmp_path)
+        turn = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="hey @bot",
+            author=_ALICE,
+            pings_bot=True,
+        )
+        assert turn.pings_bot is True
+        row = s._conn.execute(
+            "SELECT pings_bot FROM turns WHERE id = ?", (turn.id,)
+        ).fetchone()
+        assert row["pings_bot"] == 1
+
+    def test_pings_bot_round_trips_through_select(self, tmp_path: Path) -> None:
+        """A reloaded turn reports ``pings_bot is True`` (cast back to bool)."""
+        s = _store(tmp_path)
+        appended = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="hey @bot",
+            author=_ALICE,
+            pings_bot=True,
+        )
+        reloaded = s.recent(channel_id=_CHANNEL, familiar_id=_FAMILIAR, limit=1)[0]
+        assert reloaded.id == appended.id
+        assert reloaded.pings_bot is True
+
+    def test_append_turn_defaults_pings_bot_false(self, tmp_path: Path) -> None:
+        """Omitting ``pings_bot`` stores ``0`` and reloads as ``False``."""
+        s = _store(tmp_path)
+        turn = s.append_turn(
+            channel_id=_CHANNEL,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="hello",
+        )
+        assert turn.pings_bot is False
+        row = s._conn.execute(
+            "SELECT pings_bot FROM turns WHERE id = ?", (turn.id,)
+        ).fetchone()
+        assert row["pings_bot"] == 0
+        reloaded = s.recent(channel_id=_CHANNEL, familiar_id=_FAMILIAR, limit=1)[0]
+        assert reloaded.pings_bot is False
+
+    def test_legacy_db_gains_pings_bot_column_with_default_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """A pre-``pings_bot`` DB gains the column; legacy rows read ``0``.
+
+        Mirrors the ``arrived_at``/``consumed_at`` migration: hand-build a
+        legacy ``turns`` table lacking the column, insert a row, then open
+        through :class:`HistoryStore`. The migration adds ``pings_bot``
+        with ``DEFAULT 0`` so the legacy row reads ``False``, and a second
+        open is a no-op.
+        """
+        import turso  # noqa: PLC0415
+
+        from familiar_connect.history.store import HistoryStore  # noqa: PLC0415
+
+        db_path = tmp_path / "history.db"
+        c = turso.connect(str(db_path), experimental_features="index_method")
+        c.executescript(
+            """
+            CREATE TABLE turns (
+                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                familiar_id            TEXT    NOT NULL,
+                channel_id             INTEGER NOT NULL,
+                guild_id               INTEGER,
+                role                   TEXT    NOT NULL,
+                author_platform        TEXT,
+                author_user_id         TEXT,
+                author_username        TEXT,
+                author_display_name    TEXT,
+                content                TEXT    NOT NULL,
+                timestamp              TEXT    NOT NULL,
+                mode                   TEXT,
+                platform_message_id    TEXT,
+                reply_to_message_id    TEXT,
+                tool_calls_json        TEXT,
+                tool_call_id           TEXT
+            );
+            INSERT INTO turns (familiar_id, channel_id, role, content, timestamp)
+            VALUES ('aria', 200, 'user', 'legacy ping', '2026-06-13T09:00:00+00:00');
+            """
+        )
+        c.commit()
+        c.close()
+
+        reopened = HistoryStore(db_path)
+        row = reopened._conn.execute(
+            "SELECT pings_bot FROM turns WHERE id = 1"
+        ).fetchone()
+        assert row["pings_bot"] == 0
+        reloaded = reopened.recent(channel_id=200, familiar_id="aria", limit=1)[0]
+        assert reloaded.pings_bot is False
+        reopened.close()
+
+        # Second open must not raise (idempotent ALTER).
+        again = HistoryStore(db_path)
+        again.close()
+
+
+# ---------------------------------------------------------------------------
 # Per-channel summary scope
 # ---------------------------------------------------------------------------
 
