@@ -11,6 +11,7 @@ import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -34,6 +35,7 @@ from familiar_connect.diagnostics.collector import (
     reset_span_collector,
 )
 from familiar_connect.diagnostics.voice_budget import reset_voice_budget_recorder
+from familiar_connect.focus import FocusManager
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
@@ -142,6 +144,21 @@ def _make_responder(
         post_history_instructions=post_history_instructions,
     )
     return responder, router, store
+
+
+def _focus_manager(
+    *, channel_id: int, channel_name: str, guild_name: str | None
+) -> FocusManager:
+    """FocusManager with the voice channel's name + server pre-populated.
+
+    The voice reminder/logs key off the live ``channel_id``, not a focus
+    pointer, so only ``channel_names``/``guild_names`` need seeding.
+    """
+    fm = FocusManager(familiar_id="fam", store=MagicMock(), subscriptions=MagicMock())
+    fm.channel_names[channel_id] = channel_name
+    if guild_name is not None:
+        fm.guild_names[channel_id] = guild_name
+    return fm
 
 
 class TestActivityStart:
@@ -1111,3 +1128,168 @@ class TestDispatchLoop:
             dispatch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await dispatch_task
+
+
+class _CapturingLLM(LLMClient):
+    """Records every message list handed to the LLM; replies ``ok``."""
+
+    def __init__(self, captured: list[list[Message]]) -> None:
+        super().__init__(api_key="k", model="m")
+        self._captured = captured
+
+    async def chat(self, messages: list[Message]) -> Message:
+        self._captured.append(list(messages))
+        return Message(role="assistant", content="ok")
+
+    async def chat_stream(  # type: ignore[override]
+        self,
+        messages: list[Message],
+    ) -> AsyncIterator[str]:
+        self._captured.append(list(messages))
+        yield "ok"
+
+
+class TestTrailingReminderServerName:
+    """Voice trailing reminder names the live channel's Discord server.
+
+    Mirrors the text path: the server clause attaches to the trailing
+    focus line only (the head stays byte-stable for its cache prefix),
+    and is wired only when a focus manager is present.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trailing_names_server_and_channel(self, tmp_path: Path) -> None:
+        captured: list[list[Message]] = []
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, _ = _make_responder(
+            llm=_CapturingLLM(captured), player=player, tmp_path=tmp_path
+        )
+        responder._focus_manager = _focus_manager(
+            channel_id=1, channel_name="voice-chan", guild_name="My Server"
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+        await responder.handle(_mk_final("hi there", turn_id="t-1"), bus)
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        trailing = captured[0][-1].content_str
+        assert "#voice-chan" in trailing
+        assert '"My Server" server' in trailing
+
+    @pytest.mark.asyncio
+    async def test_trailing_omits_focus_without_focus_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward-compat: no focus manager → no focus/server line at all."""
+        captured: list[list[Message]] = []
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, _ = _make_responder(
+            llm=_CapturingLLM(captured), player=player, tmp_path=tmp_path
+        )
+        assert responder._focus_manager is None
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+        await responder.handle(_mk_final("hi there", turn_id="t-1"), bus)
+        await responder.wait_until_idle()
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        trailing = captured[0][-1].content_str
+        assert "Your attention is currently on" not in trailing
+
+
+class TestPerTurnOriginLogging:
+    """Per-turn voice decision logs name the turn's server + channel.
+
+    ``ch`` renders ``#name(id)`` and ``srv`` names the Discord server —
+    both resolved from the live voice ``channel_id``, omitted gracefully
+    when there's no focus manager or the guild is unknown.
+    """
+
+    @staticmethod
+    def _decision_record(
+        caplog: pytest.LogCaptureFixture, decision: str
+    ) -> logging.LogRecord:
+        records = [
+            r
+            for r in caplog.records
+            if "decision" in r.getMessage() and decision in r.getMessage()
+        ]
+        assert len(records) == 1, [r.getMessage() for r in caplog.records]
+        return records[0]
+
+    @pytest.mark.asyncio
+    async def test_respond_log_names_server_and_channel(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        llm = _ScriptedLLM(deltas=["Hello", ", ", "world", "."])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, _ = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        responder._focus_manager = _focus_manager(
+            channel_id=1, channel_name="voice-chan", guild_name="My Server"
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.voice_responder"
+        ):
+            await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+            await responder.handle(_mk_final("hi there", turn_id="t-1"), bus)
+            await responder.wait_until_idle()
+        await bus.shutdown()
+
+        msg = self._decision_record(caplog, "respond").getMessage()
+        # ``ls.kv`` interleaves ANSI between key and value; match the
+        # channel label and server name as independent substrings.
+        assert "#voice-chan" in msg
+        assert "My Server" in msg
+
+    @pytest.mark.asyncio
+    async def test_respond_log_omits_server_without_focus_manager(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        llm = _ScriptedLLM(deltas=["Hello", ", ", "world", "."])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, _ = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        assert responder._focus_manager is None
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.voice_responder"
+        ):
+            await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+            await responder.handle(_mk_final("hi there", turn_id="t-1"), bus)
+            await responder.wait_until_idle()
+        await bus.shutdown()
+
+        msg = self._decision_record(caplog, "respond").getMessage()
+        assert "#1" in msg  # graceful fallback to raw channel id
+        assert "srv=" not in msg  # never log srv=None
+
+    @pytest.mark.asyncio
+    async def test_silent_log_names_server_and_channel(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        llm = _ScriptedLLM(deltas=["<silent>"])
+        player = MockTTSPlayer(ms_per_word=5)
+        responder, _, _ = _make_responder(llm=llm, player=player, tmp_path=tmp_path)
+        responder._focus_manager = _focus_manager(
+            channel_id=1, channel_name="voice-chan", guild_name="My Server"
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.voice_responder"
+        ):
+            await responder.handle(_mk_activity_start(turn_id="t-1"), bus)
+            await responder.handle(_mk_final("hi nobody", turn_id="t-1"), bus)
+            await responder.wait_until_idle()
+        await bus.shutdown()
+
+        msg = self._decision_record(caplog, "silent").getMessage()
+        assert "#voice-chan" in msg
+        assert "My Server" in msg

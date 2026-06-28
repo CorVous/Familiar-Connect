@@ -1502,6 +1502,47 @@ class TestActivityGate:
         assert engine.traffic_notes == 2
 
     @pytest.mark.asyncio
+    async def test_suppressed_log_names_server_and_channel(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``Activity suppressed`` log carries the turn's server + channel.
+
+        Increment 3 wired ``ch``/``srv`` into this line but only tested
+        the reply + staged logs; this closes that coverage gap.
+        """
+        engine = _FakeActivityEngine(GateDecision(action=GateAction.SUPPRESS))
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["should not stream"]),
+            send=send,
+            tmp_path=tmp_path,
+            activity_engine=engine,
+        )
+        responder._focus_manager = _focus_manager(
+            channel_id=42, channel_name="general", guild_name="My Server"
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.text_responder"
+        ):
+            await responder.handle(_discord_text_event(content="anyone home?"), bus)
+        await bus.shutdown()
+
+        assert send.calls == []  # suppressed, no reply
+        suppressed = [
+            r
+            for r in caplog.records
+            if "Activity" in r.getMessage() and "suppressed" in r.getMessage()
+        ]
+        assert len(suppressed) == 1, [r.getMessage() for r in caplog.records]
+        msg = suppressed[0].getMessage()
+        # ``ls.kv`` interleaves ANSI between key and value; match the
+        # channel label and server name as independent substrings.
+        assert "#general" in msg
+        assert "My Server" in msg
+
+    @pytest.mark.asyncio
     async def test_judgment_injects_state_line_for_this_turn(
         self, tmp_path: Path
     ) -> None:
