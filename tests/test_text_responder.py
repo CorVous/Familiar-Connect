@@ -370,6 +370,55 @@ class TestReply:
         assert ("assistant", "Hello, world.") in roles_contents
 
     @pytest.mark.asyncio
+    async def test_persists_pings_bot_on_user_turn(self, tmp_path: Path) -> None:
+        """A ping in the payload is recorded on the persisted user turn.
+
+        Guards the ``pings_bot=payload.get("pings_bot") is True`` wiring on
+        the user-turn append — reverting it to a bare ``append_turn`` makes
+        this fail.
+        """
+        send = _CapturingSend()
+        responder, _, store = _make_responder(
+            llm=_ScriptedLLM(deltas=["ok"]), send=send, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(
+            _discord_text_event(content="you there @bot?", pings_bot=True), bus
+        )
+        await bus.shutdown()
+
+        user_turns = [
+            t
+            for t in store.recent(familiar_id="fam", channel_id=42, limit=10)
+            if t.role == "user"
+        ]
+        assert len(user_turns) == 1
+        assert user_turns[0].pings_bot is True
+
+    @pytest.mark.asyncio
+    async def test_user_turn_pings_bot_false_without_ping(
+        self, tmp_path: Path
+    ) -> None:
+        """No ping in the payload leaves the persisted user turn at False."""
+        send = _CapturingSend()
+        responder, _, store = _make_responder(
+            llm=_ScriptedLLM(deltas=["ok"]), send=send, tmp_path=tmp_path
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="just chatting"), bus)
+        await bus.shutdown()
+
+        user_turns = [
+            t
+            for t in store.recent(familiar_id="fam", channel_id=42, limit=10)
+            if t.role == "user"
+        ]
+        assert len(user_turns) == 1
+        assert user_turns[0].pings_bot is False
+
+    @pytest.mark.asyncio
     async def test_skips_when_payload_missing_content(self, tmp_path: Path) -> None:
         llm = _ScriptedLLM(deltas=["nope"])
         send = _CapturingSend()
