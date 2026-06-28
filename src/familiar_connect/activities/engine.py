@@ -391,9 +391,12 @@ class ActivityEngine:
             if hours is not None:
                 # scheduled entry: the gate above guaranteed now is inside
                 # the occurrence, so _window_occurrence returns the window
-                # enclosing it (wrap-aware). Clamp the roll so the return
-                # overruns the window end by at most the grace; refuse when
-                # even the low bound won't fit.
+                # enclosing it (wrap-aware). Clamp the roll so that, measured
+                # from now, the return overruns the window end by at most the
+                # grace; refuse when even the low bound won't fit. Note the
+                # bound is taken at defer-now but the roll is applied at
+                # end_turn-now (a fresh now), so the real return can overrun
+                # by grace + the (seconds-scale) deferral gap.
                 _, win_end = self._window_occurrence(now, hours)
                 grace = timedelta(minutes=_SCHEDULE_OVERFLOW_GRACE_MINUTES)
                 room = int(((win_end + grace) - now).total_seconds() // 60)
