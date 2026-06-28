@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Default focused-channel silence before a non-focused arrival nudges the model
+# Unread-nudge enable sentinel: > 0 enables nudges on unfocused arrivals,
+# <= 0 disables them. The magnitude is no longer a silence threshold.
 _DEFAULT_IDLE_WAKE_S = 120.0
 # Debounce window: rapid arrivals within this window share one nudge
 _DEFAULT_NUDGE_DEBOUNCE_S = 30.0
@@ -33,12 +34,14 @@ class FocusManager:
     therefore still leaves her where she went; there is no pending
     state to leak into a later turn.
 
-    Idle nudge: when the focused channel falls silent for
-    ``idle_wake_seconds`` and a non-focused channel gets traffic,
-    ``should_wake`` flags that the model deserves a turn (the responder
-    fires a synthetic wake). The nudge never moves focus — only the
-    model's shift_focus does. Rapid arrivals within ``nudge_debounce_seconds``
-    are grouped into one nudge; the next unread after the window fires again.
+    Unread nudge: when a non-focused channel gets traffic, ``should_wake``
+    flags that the model deserves a turn (the responder fires a synthetic
+    wake) — the arrival itself fires it, with no idle-silence requirement.
+    ``idle_wake_seconds`` is only an enable sentinel (> 0 enables, <= 0
+    disables); the debounce window is the sole throttle. The nudge never
+    moves focus — only the model's shift_focus does. Rapid arrivals within
+    ``nudge_debounce_seconds`` are grouped into one nudge; the next unread
+    after the window fires again.
     """
 
     def __init__(
@@ -151,10 +154,12 @@ class FocusManager:
             await self.on_shift()
 
     def should_wake(self, channel_id: int) -> bool:
-        """Whether a non-focused arrival warrants an idle nudge.
+        """Whether a non-focused arrival warrants a nudge.
 
-        True when nudges enabled, channel unfocused, focused channel
-        silent ≥ threshold, and outside the debounce window.
+        True when nudges are enabled, the channel is unfocused, and we
+        are outside the debounce window — the arrival itself fires the
+        nudge, regardless of how recently the focused channel was active.
+        Debounce is the sole throttle: rapid arrivals share one nudge.
         """
         if self._idle_wake_seconds <= 0:
             return False
@@ -163,7 +168,7 @@ class FocusManager:
         now = self._clock()
         if (now - self._last_nudge) < self._nudge_debounce_seconds:
             return False
-        return (now - self._last_active) >= self._idle_wake_seconds
+        return True
 
     def mark_nudge_pending(self) -> None:
         """Record nudge timestamp to start debounce window."""
