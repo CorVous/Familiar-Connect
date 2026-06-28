@@ -628,7 +628,10 @@ def _real_focus_responder(
     store = HistoryStore(":memory:")
     async_store = AsyncHistoryStore(store)
     fm = FocusManager(
-        familiar_id="fam", store=async_store, subscriptions=subs, unread_nudge_enabled=False
+        familiar_id="fam",
+        store=async_store,
+        subscriptions=subs,
+        unread_nudge_enabled=False,
     )
     fm.set_focus_immediately(100, "text")
 

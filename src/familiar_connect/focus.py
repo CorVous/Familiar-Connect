@@ -161,9 +161,7 @@ class FocusManager:
         if self.is_focused(channel_id):
             return False
         now = self._clock()
-        if (now - self._last_nudge) < self._nudge_debounce_seconds:
-            return False
-        return True
+        return (now - self._last_nudge) >= self._nudge_debounce_seconds
 
     def mark_nudge_pending(self) -> None:
         """Record nudge timestamp to start debounce window."""

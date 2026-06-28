@@ -397,9 +397,7 @@ class TestReply:
         assert user_turns[0].pings_bot is True
 
     @pytest.mark.asyncio
-    async def test_user_turn_pings_bot_false_without_ping(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_user_turn_pings_bot_false_without_ping(self, tmp_path: Path) -> None:
         """No ping in the payload leaves the persisted user turn at False."""
         send = _CapturingSend()
         responder, _, store = _make_responder(
