@@ -1332,6 +1332,42 @@ class TestDiscordTextConfig:
             load_character_config(path, defaults_path=default_profile_path)
 
 
+class TestDiscordDmAllowlist:
+    """``[discord].dm_allowlist`` — user IDs whose DMs the familiar engages."""
+
+    def test_parsed_into_tuple_of_ints(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[discord]\ndm_allowlist = [111, 222]\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.dm_allowlist == (111, 222)
+
+    def test_absent_defaults_to_empty(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.dm_allowlist == ()
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            'dm_allowlist = "x"',  # non-list
+            "dm_allowlist = [\"a\"]",  # list with non-int element
+            "dm_allowlist = [true]",  # list with bool (int subclass)
+        ],
+    )
+    def test_invalid_rejected(
+        self, tmp_path: Path, default_profile_path: Path, value: str
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text(f"[discord]\n{value}\n")
+        with pytest.raises(ConfigError, match="dm_allowlist"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+
 class TestImageToolConfig:
     def test_llm_slot_parses_image_tools_and_multimodal(
         self, tmp_path: Path, default_profile_path: Path
