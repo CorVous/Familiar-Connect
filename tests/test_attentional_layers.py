@@ -529,6 +529,50 @@ class TestBuildFinalReminderUnreadDigest:
         assert "attention is currently on #3" in out
         assert "#10 (4)" in out
 
+    def test_ping_subset_with_higher_unread_count(self) -> None:
+        """Mixed channel renders ``(unread, N ping)``."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (3, 1)},
+        )
+        assert "#10 (3, 1 ping)" in out
+        assert "shift_focus" in out
+
+    def test_all_unreads_are_pings_singular(self) -> None:
+        """When every unread is a ping, count isn't repeated."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (1, 1)},
+        )
+        assert "#10 (1 ping)" in out
+
+    def test_mixed_unread_with_multiple_pings_plural(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (3, 2)},
+        )
+        assert "#10 (3, 2 pings)" in out
+
+    def test_no_pings_renders_count_only(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (2, 0)},
+        )
+        assert "#10 (2)" in out
+
+    def test_single_unread_no_ping_has_no_suffix(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (1, 0)},
+        )
+        assert "#10 —" in out
+        assert "#10 (" not in out
+
     def test_named_unread_channel_surfaces_numeric_id(self) -> None:
         """Named unread channel still exposes its id so shift_focus can target it.
 

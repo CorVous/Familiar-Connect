@@ -25,6 +25,7 @@ import pytest
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import (
     ActivityRecord,
+    ChannelUnread,
     HistoryStore,
     HistoryTurn,
     SummaryEntry,
@@ -1926,3 +1927,29 @@ class TestAsyncStoreActivityWrappers:
         )
         assert n == 1
         store.close()
+
+
+class TestStagedChannelsPingTally:
+    def test_tally_counts_unread_and_ping_subset(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        for i in range(3):
+            s.append_turn(
+                channel_id=10,
+                familiar_id=_FAMILIAR,
+                role="user",
+                content=f"a{i}",
+                consumed=False,
+                pings_bot=(i == 0),
+            )
+        s.append_turn(
+            channel_id=20,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="b",
+            consumed=False,
+            pings_bot=False,
+        )
+        assert s.staged_channels(familiar_id=_FAMILIAR) == {
+            10: ChannelUnread(3, 1),
+            20: ChannelUnread(1, 0),
+        }

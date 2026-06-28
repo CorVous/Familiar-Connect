@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from familiar_connect import log_style as ls
 from familiar_connect.history.fts import FtsIndex
@@ -81,6 +81,18 @@ class HistoryTurn:
     arrived_at: datetime | None = None  # Immutable ingest time; None on legacy rows
     consumed_at: datetime | None = None  # None = staged
     pings_bot: bool = False  # Did the incoming message ping the bot? legacy rows: False
+
+
+class ChannelUnread(NamedTuple):
+    """Staged-turn tally for one channel: total unread + bot-ping subset.
+
+    Subclasses ``tuple``, so it unpacks structurally as
+    ``(unread, pings)`` — the digest renderer consumes it as a plain
+    2-tuple and stays decoupled from this store type.
+    """
+
+    unread: int
+    pings: int
 
 
 @dataclass(frozen=True)
