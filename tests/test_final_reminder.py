@@ -203,15 +203,19 @@ class TestBuildFinalReminderGuildName:
 
     def test_empty_guild_name_identical_to_none(self) -> None:
         """Falsy contract: guild_name="" behaves exactly like guild_name=None."""
-        common = {
-            "viewer_mode": "text",
-            "now": _at(2026, 5, 4, 14, 30),
-            "focus_channel_id": 123,
-            "channel_names": {123: "general"},
-        }
-        assert build_final_reminder(**common, guild_name="") == build_final_reminder(
-            **common, guild_name=None
-        )
+
+        # Explicit kwargs (not **dict) so the type checker sees concrete arg
+        # types; only guild_name varies between the two renders.
+        def _render(guild_name: str | None) -> str:
+            return build_final_reminder(
+                viewer_mode="text",
+                now=_at(2026, 5, 4, 14, 30),
+                focus_channel_id=123,
+                channel_names={123: "general"},
+                guild_name=guild_name,
+            )
+
+        assert _render("") == _render(None)
 
     def test_server_clause_exact_wording(self) -> None:
         """AC1 tightened: the quotes and "the" in the server clause are pinned."""
