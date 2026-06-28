@@ -622,7 +622,7 @@ class _FakeActivityEngine:
     """Canned catalog + defer_start recorder; satisfies StartActivityEngine."""
 
     def __init__(self, result: dict | None = None) -> None:
-        self.catalog = (
+        self.catalog: tuple[ActivityType, ...] = (
             ActivityType(
                 id="creek_walk",
                 label="a creek walk",
@@ -776,9 +776,10 @@ class TestStartActivityTool:
         shrine_seg = next(s for s in segments if "shrine_rounds" in s)
         creek_seg = next(s for s in segments if "creek_walk" in s)
 
-        # 1. scheduled entry carries its window: Mon=0-indexed days + hours
-        assert "Mon" in shrine_seg
-        assert "Fri" in shrine_seg
+        # 1. scheduled entry carries its window: Mon=0-indexed days + hours.
+        # Pin order (not just membership) so a transposition in _WEEKDAY_ABBR
+        # or a dropped sorted() is caught.
+        assert "Mon Tue Wed Thu Fri" in shrine_seg
         assert "Sun" not in shrine_seg  # Mon-Fri set guards Mon=0 rendering
         assert "09:00-17:00" in shrine_seg
 
@@ -793,6 +794,46 @@ class TestStartActivityTool:
         ]
         assert "'shrine_rounds' = tending the shrines" in desc
         assert "'creek_walk' = a creek walk" in desc
+
+    def test_active_days_only_renders_days_without_hours(self) -> None:
+        # all-day-but-weekdays config: days clause, no time clause.
+        # Guards against gating the whole clause on BOTH fields being set.
+        engine = _FakeActivityEngine()
+        engine.catalog = (
+            ActivityType(
+                id="market_day",
+                label="the saturday market",
+                duration_minutes=(20, 40),
+                seed="x",
+                active_days=frozenset({5}),
+            ),
+        )
+        desc = build_start_activity_tool(engine).parameters["properties"]["activity"][
+            "description"
+        ]
+        # closing bracket right after the day means no hours were appended
+        assert "[Sat]" in desc
+
+    def test_active_hours_only_renders_hours_without_days(self) -> None:
+        # every-day-but-certain-hours config: time clause, no day tokens.
+        # Guards against gating the whole clause on BOTH fields being set.
+        engine = _FakeActivityEngine()
+        engine.catalog = (
+            ActivityType(
+                id="quiet_hours",
+                label="winding down",
+                duration_minutes=(20, 40),
+                seed="x",
+                active_hours=(time(9, 0), time(17, 0)),
+            ),
+        )
+        desc = build_start_activity_tool(engine).parameters["properties"]["activity"][
+            "description"
+        ]
+        # opening bracket right before the time means no day prefix
+        assert "[09:00-17:00]" in desc
+        for abbr in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
+            assert abbr not in desc
 
 
 # ---------------------------------------------------------------------------
