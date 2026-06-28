@@ -135,3 +135,84 @@ class TestPersistence:
 
         reloaded = SubscriptionRegistry(path)
         assert reloaded.get(channel_id=42, kind=SubscriptionKind.text) is None
+
+
+# ---------------------------------------------------------------------------
+# Ephemeral (in-memory-only) subscriptions
+# ---------------------------------------------------------------------------
+
+
+class TestEphemeralSubscriptions:
+    def test_ephemeral_add_is_queryable_but_not_written(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "subs.toml"
+        reg = SubscriptionRegistry(path)
+        reg.add(
+            channel_id=42,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            persist=False,
+        )
+
+        assert reg.get(channel_id=42, kind=SubscriptionKind.text) is not None
+        assert reg.kind_for(42) is SubscriptionKind.text
+        assert not path.exists()
+
+    def test_persisted_mutation_excludes_ephemeral_row(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "subs.toml"
+        reg = SubscriptionRegistry(path)
+        reg.add(
+            channel_id=42,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            persist=False,
+        )
+        reg.add(channel_id=77, kind=SubscriptionKind.text, guild_id=None)
+
+        # Live registry still sees both the ephemeral and persisted rows.
+        assert len(list(reg.all())) == 2
+
+        reloaded = SubscriptionRegistry(path)
+        assert reloaded.get(channel_id=77, kind=SubscriptionKind.text) is not None
+        assert reloaded.get(channel_id=42, kind=SubscriptionKind.text) is None
+        assert len(list(reloaded.all())) == 1
+
+    def test_persist_true_promotes_previously_ephemeral_row(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "subs.toml"
+        reg = SubscriptionRegistry(path)
+        reg.add(
+            channel_id=42,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            persist=False,
+        )
+        reg.add(channel_id=42, kind=SubscriptionKind.text, guild_id=None)
+
+        reloaded = SubscriptionRegistry(path)
+        assert reloaded.get(channel_id=42, kind=SubscriptionKind.text) is not None
+
+    def test_persisted_remove_does_not_resurrect_ephemeral_row(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "subs.toml"
+        reg = SubscriptionRegistry(path)
+        reg.add(channel_id=77, kind=SubscriptionKind.text, guild_id=None)
+        reg.add(
+            channel_id=42,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            persist=False,
+        )
+        reg.remove(channel_id=77, kind=SubscriptionKind.text)
+
+        reloaded = SubscriptionRegistry(path)
+        assert reloaded.get(channel_id=42, kind=SubscriptionKind.text) is None
