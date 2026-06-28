@@ -159,6 +159,7 @@ def _engine(
     sleep_prompts: SleepPromptText | None = None,
     sleep_window: tuple[time, time] | None = (time(0, 0), time(8, 0)),
     sleep_grace_minutes: int = 30,
+    display_tz: str = "UTC",
 ) -> ActivityEngine:
     kwargs: dict[str, Any] = {}
     if sleep_prompts is not None:
@@ -173,7 +174,7 @@ def _engine(
         focus_manager=FakeFocus(focused),
         presence_cb=presence or PresenceRecorder(),
         familiar_id=familiar_id,
-        display_tz="UTC",
+        display_tz=display_tz,
         sleep_window=sleep_window,
         sleep_grace_minutes=sleep_grace_minutes,
         bot_user_id=bot_user_id,
@@ -266,6 +267,13 @@ def _scheduled_config() -> ActivitiesConfig:
 _SATURDAY_1400 = datetime(2026, 6, 13, 14, 0, tzinfo=UTC)  # weekday 5
 _TUESDAY_2000 = datetime(2026, 6, 16, 20, 0, tzinfo=UTC)  # weekday 1, after-hours
 _TUESDAY_1400 = datetime(2026, 6, 16, 14, 0, tzinfo=UTC)  # weekday 1, in-hours
+_TUESDAY_0900 = datetime(2026, 6, 16, 9, 0, tzinfo=UTC)  # weekday 1, window start
+_TUESDAY_1700 = datetime(2026, 6, 16, 17, 0, tzinfo=UTC)  # weekday 1, window end
+# Sun 23:30 UTC = Mon 09:30 in Sydney (AEST, UTC+10): localizing this instant
+# moves it from Sun/23:30 (rejected) to Mon/09:30 (in days + hours, staged).
+# Diverges on BOTH weekday and hour, so dropping either .astimezone fails it.
+_SUN_NIGHT_UTC = datetime(2026, 6, 14, 23, 30, tzinfo=UTC)
+_SYDNEY = "Australia/Sydney"
 
 
 class TestScheduleGate:
@@ -276,7 +284,11 @@ class TestScheduleGate:
         engine = _engine(store, FakeClock(_SATURDAY_1400), config=_scheduled_config())
         result = engine.defer_start("errands", None)
         assert "error" in result
-        assert "errands run" in result["error"]  # message from the entry
+        # message rendered from the entry's own schedule, not hardcoded —
+        # pins the label, the Mon=0 day rendering, and the hour window
+        assert "errands run" in result["error"]
+        assert "Mon Tue Wed Thu Fri" in result["error"]
+        assert "09:00-17:00" in result["error"]
         assert engine.active is None
         assert engine._staged is None
 
@@ -294,6 +306,51 @@ class TestScheduleGate:
     @pytest.mark.asyncio
     async def test_staged_when_inside_schedule(self, store: AsyncHistoryStore) -> None:
         engine = _engine(store, FakeClock(_TUESDAY_1400), config=_scheduled_config())
+        ack = engine.defer_start("errands", None)
+        assert "error" not in ack
+        assert ack.get("ack") == "ok"
+        assert engine._staged is not None
+
+    @pytest.mark.asyncio
+    async def test_hour_window_start_is_inclusive(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Half-open window: local == start (09:00) is inside → staged."""
+        engine = _engine(store, FakeClock(_TUESDAY_0900), config=_scheduled_config())
+        ack = engine.defer_start("errands", None)
+        assert "error" not in ack
+        assert ack.get("ack") == "ok"
+        assert engine._staged is not None
+
+    @pytest.mark.asyncio
+    async def test_hour_window_end_is_exclusive(self, store: AsyncHistoryStore) -> None:
+        """Half-open window: local == end (17:00) is outside → rejected.
+
+        Off-by-one matters: Inc 3's duration clamp reads the same window,
+        so an inclusive end would leak a zero-length slot at the boundary.
+        """
+        engine = _engine(store, FakeClock(_TUESDAY_1700), config=_scheduled_config())
+        result = engine.defer_start("errands", None)
+        assert "error" in result
+        assert engine.active is None
+        assert engine._staged is None
+
+    @pytest.mark.asyncio
+    async def test_schedule_evaluated_in_display_tz(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """The gate localizes 'now' to display_tz before the day/hour test.
+
+        Sun 23:30 UTC is out of schedule read raw, but is Mon 09:30 in
+        Sydney — inside both the day and hour windows. Localizing stages
+        it; reading the bare UTC instant would reject it.
+        """
+        engine = _engine(
+            store,
+            FakeClock(_SUN_NIGHT_UTC),
+            config=_scheduled_config(),
+            display_tz=_SYDNEY,
+        )
         ack = engine.defer_start("errands", None)
         assert "error" not in ack
         assert ack.get("ack") == "ok"

@@ -1259,6 +1259,12 @@ class ActivityEngine:
         if days is None and hours is None:
             return None
         now = self._now()
+        # KNOWN LIMITATION: the weekday is taken from the calendar day of
+        # *now*, while a midnight-wrapping hours window can match the tail
+        # belonging to the prior evening (e.g. 22:00-02:00 — the 00:30
+        # slot's "day" is tomorrow). Correct for the only current use
+        # (non-wrapping work-hours schedules); revisit before shipping a
+        # per-activity schedule whose hours wrap midnight.
         in_days = days is None or now.astimezone(self._tz).weekday() in days
         in_hours = hours is None or self._local_time_in_window(now, hours)
         if in_days and in_hours:
