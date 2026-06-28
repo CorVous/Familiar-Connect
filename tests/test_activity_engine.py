@@ -245,6 +245,76 @@ class TestDeferStart:
         assert "voice" in result["error"]
 
 
+def _scheduled_entry() -> ActivityType:
+    """Weekday 09:00–17:00 entry — drives the per-activity gate tests."""
+    return ActivityType(
+        id="errands",
+        label="errands run",
+        duration_minutes=(20, 40),
+        reachable=True,
+        seed="Out running errands.",
+        active_days=frozenset({0, 1, 2, 3, 4}),  # Mon–Fri
+        active_hours=(time(9, 0), time(17, 0)),
+    )
+
+
+def _scheduled_config() -> ActivitiesConfig:
+    base = _config()
+    return _config(catalog=(*base.catalog, _scheduled_entry()))
+
+
+_SATURDAY_1400 = datetime(2026, 6, 13, 14, 0, tzinfo=UTC)  # weekday 5
+_TUESDAY_2000 = datetime(2026, 6, 16, 20, 0, tzinfo=UTC)  # weekday 1, after-hours
+_TUESDAY_1400 = datetime(2026, 6, 16, 14, 0, tzinfo=UTC)  # weekday 1, in-hours
+
+
+class TestScheduleGate:
+    """Per-activity availability gate in ``defer_start``."""
+
+    @pytest.mark.asyncio
+    async def test_rejected_outside_active_days(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        engine = _engine(store, FakeClock(_SATURDAY_1400), config=_scheduled_config())
+        result = engine.defer_start("errands", None)
+        assert "error" in result
+        assert "errands run" in result["error"]  # message from the entry
+        assert engine.active is None
+        assert engine._staged is None
+
+    @pytest.mark.asyncio
+    async def test_rejected_outside_active_hours(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        engine = _engine(store, FakeClock(_TUESDAY_2000), config=_scheduled_config())
+        result = engine.defer_start("errands", None)
+        assert "error" in result
+        assert "errands run" in result["error"]
+        assert engine.active is None
+        assert engine._staged is None
+
+    @pytest.mark.asyncio
+    async def test_staged_when_inside_schedule(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        engine = _engine(store, FakeClock(_TUESDAY_1400), config=_scheduled_config())
+        ack = engine.defer_start("errands", None)
+        assert "error" not in ack
+        assert ack.get("ack") == "ok"
+        assert engine._staged is not None
+
+    @pytest.mark.asyncio
+    async def test_unscheduled_entry_unaffected(
+        self, store: AsyncHistoryStore
+    ) -> None:
+        """Both schedule fields None ⇒ stages at any time (regression)."""
+        engine = _engine(store, FakeClock(_SATURDAY_1400), config=_scheduled_config())
+        ack = engine.defer_start("walk", None)
+        assert "error" not in ack
+        assert ack.get("ack") == "ok"
+        assert engine._staged is not None
+
+
 class TestEndTurnAppliesStart:
     @pytest.mark.asyncio
     async def test_creates_row_sets_presence_arms_timer(
