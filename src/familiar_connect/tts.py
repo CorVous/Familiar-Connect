@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import struct
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +24,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from datetime import timedelta
 
     from google.genai import Client as _GenaiClient
@@ -45,6 +47,12 @@ DEFAULT_AZURE_VOICE = "en-US-AmberNeural"
 
 _AZURE_TICKS_PER_MS: float = 10_000.0
 """100-nanosecond ticks per millisecond — Azure SDK offset unit."""
+
+_AZURE_STREAM_BUFFER_BYTES = 32 * 1024
+"""Read-buffer size for incremental ``AudioDataStream`` reads."""
+
+_AZURE_STREAM_JOIN_TIMEOUT_S = 2.0
+"""Bound on joining the stream worker on early-close — never wedge ``aclose``."""
 
 GEMINI_SAMPLE_RATE = 24000
 """Gemini TTS native rate (24 kHz); upsampled to 48 kHz before use."""
@@ -348,12 +356,47 @@ async def get_cached_greeting_audio(
 # ---------------------------------------------------------------------------
 
 
+def _azure_error_from_details(cancellation: Any) -> RuntimeError:  # noqa: ANN401
+    """Build the ``RuntimeError`` from Azure cancellation details."""
+    msg = (
+        f"Azure TTS synthesis failed: {cancellation.reason}"
+        f" — {cancellation.error_details}"
+    )
+    return RuntimeError(msg)
+
+
+def _azure_cancellation_error(speechsdk: Any, result: Any) -> RuntimeError:  # noqa: ANN401
+    """Build the ``RuntimeError`` for a cancelled/failed Azure result."""
+    return _azure_error_from_details(speechsdk.CancellationDetails.from_result(result))
+
+
 class AzureTTSClient:
     """Azure Cognitive Services TTS client.
 
     Runs blocking Speech SDK call in thread-pool executor so asyncio
     event loop stays free. Word-boundary events collected on same
     executor thread — no locking needed.
+
+    Exposes jitter-buffer hints the player duck-types onto
+    ``StreamingPCMSource`` (pre-roll + underrun padding). Both are off:
+    Azure delivery was measured faster-than-realtime, so streaming runs
+    the plain path; the hints stay for trivial reversal.
+    """
+
+    stream_prebuffer_bytes: int = 0
+    """No pre-roll: Azure delivery was measured faster-than-realtime.
+
+    The whole utterance front-loads in ~1 s with 0 underruns at 0 ms
+    pre-roll, so Azure runs the plain ``StreamingPCMSource`` path (like
+    Cartesia). Kept (at off) for trivial reversal if a live ear-test
+    ever surfaces a transient.
+    """
+
+    stream_pad_underrun: bool = False
+    """No underrun padding — see :attr:`stream_prebuffer_bytes`.
+
+    Kept (at off) for trivial reversal if a live ear-test surfaces a
+    transient that warrants a jitter cushion.
     """
 
     def __init__(
@@ -409,30 +452,168 @@ class AzureTTSClient:
         synthesizer.synthesis_word_boundary.connect(_on_word_boundary)
         result = synthesizer.speak_text_async(text).get()
 
-        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            audio: bytes = result.audio_data
-            start_ms = word_timestamps[0].start_ms if word_timestamps else 0.0
-            end_ms = word_timestamps[-1].end_ms if word_timestamps else 0.0
-            _logger.info(
-                f"{ls.tag('🔉 TTS', ls.C)} "
-                f"{ls.word('Azure', ls.C)} "
-                f"{ls.kv('words', str(len(word_timestamps)), vc=ls.LW)} "
-                f"{ls.kv('audio', f'{len(audio)}b', vc=ls.LW)} "
-                f"{ls.kv('timing', f'{start_ms:.0f}ms→{end_ms:.0f}ms', vc=ls.LW)}"
-            )
-            return TTSResult(audio=audio, timestamps=word_timestamps)
+        if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+            raise _azure_cancellation_error(speechsdk, result)
 
-        cancellation = speechsdk.CancellationDetails.from_result(result)
-        msg = (
-            f"Azure TTS synthesis failed: {cancellation.reason}"
-            f" — {cancellation.error_details}"
+        audio: bytes = result.audio_data
+        start_ms = word_timestamps[0].start_ms if word_timestamps else 0.0
+        end_ms = word_timestamps[-1].end_ms if word_timestamps else 0.0
+        _logger.info(
+            f"{ls.tag('🔉 TTS', ls.C)} "
+            f"{ls.word('Azure', ls.C)} "
+            f"{ls.kv('words', str(len(word_timestamps)), vc=ls.LW)} "
+            f"{ls.kv('audio', f'{len(audio)}b', vc=ls.LW)} "
+            f"{ls.kv('timing', f'{start_ms:.0f}ms→{end_ms:.0f}ms', vc=ls.LW)}"
         )
-        raise RuntimeError(msg)
+        return TTSResult(audio=audio, timestamps=word_timestamps)
 
     async def synthesize(self: Self, text: str) -> TTSResult:
         """Synthesize *text* in thread executor; return audio + word timestamps."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._synthesize_sync, text)
+
+    def _read_stream_chunks(
+        self: Self,
+        text: str,
+        emit: Callable[[bytes], None],
+        stop: threading.Event,
+        on_synthesizer: Callable[[Any], None],
+    ) -> None:
+        """Drive Azure's incremental reader, passing each chunk to *emit*.
+
+        Blocking; runs on a worker thread. *on_synthesizer* is called with
+        the live synthesizer so an early-close abort can reach it. Stops
+        early when *stop* is set (consumer closed).
+
+        :raises RuntimeError: when synthesis is cancelled at start, or
+            mid-stream (``read_data`` returns 0 while the stream status is
+            ``Canceled`` — a failure the SDK reports without an exception).
+        """
+        speechsdk, synthesizer = self._make_synthesizer()
+        on_synthesizer(synthesizer)
+        result = synthesizer.start_speaking_text_async(text).get()
+        if result.reason == speechsdk.ResultReason.Canceled:
+            raise _azure_cancellation_error(speechsdk, result)
+
+        stream = speechsdk.AudioDataStream(result)
+        # Must be strictly ``bytes``: the SDK rejects ``bytearray`` and
+        # fills this buffer's memory in place via ctypes. The buffer is
+        # reused across reads, so each chunk must be copied out before the
+        # next read overwrites it. A plain ``buffer[:n]`` is unsafe: a
+        # whole-slice (``n == len(buffer)``, the common mid-stream case)
+        # returns the SAME object, not a copy — the consumer reads it later
+        # off a queue, by which point it has been overwritten. Copy via
+        # ``bytes(memoryview(buffer)[:n])``, which always allocates fresh.
+        buffer = bytes(_AZURE_STREAM_BUFFER_BYTES)
+        total_bytes = 0
+        while not stop.is_set():
+            n = stream.read_data(buffer)
+            if n == 0:
+                break
+            total_bytes += n
+            emit(bytes(memoryview(buffer)[:n]))
+
+        # ``read_data == 0`` is ambiguous: clean EOF *or* a mid-stream
+        # failure (token expiry, network drop) the SDK flags via status.
+        # Only inspect on a natural end — a consumer-driven stop is not
+        # an error. Don't surface Canceled when we never got that far.
+        if not stop.is_set() and stream.status == speechsdk.StreamStatus.Canceled:
+            raise _azure_error_from_details(stream.cancellation_details)
+
+        _logger.info(
+            f"{ls.tag('🔉 TTS', ls.C)} "
+            f"{ls.word('Azure/stream', ls.C)} "
+            f"{ls.kv('audio', f'{total_bytes}b', vc=ls.LW)}"
+        )
+
+    def _stream_sync(
+        self: Self,
+        text: str,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue[bytes | BaseException | None],
+        stop: threading.Event,
+        on_synthesizer: Callable[[Any], None],
+    ) -> None:
+        """Run the blocking reader, bridging results to *queue*.
+
+        Runs on a worker thread. Puts each PCM chunk on *queue*; on
+        completion puts ``None`` (sentinel); on failure puts the
+        exception for the async generator to re-raise.
+        """
+
+        def _put(item: bytes | BaseException | None) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+
+        try:
+            self._read_stream_chunks(text, _put, stop, on_synthesizer)
+        except BaseException as exc:  # noqa: BLE001 — surface to consumer
+            _put(exc)
+        else:
+            _put(None)
+
+    async def synthesize_stream(self: Self, text: str) -> AsyncIterator[bytes]:
+        """Yield raw mono PCM chunks as Azure produces them.
+
+        Lower-latency variant of :meth:`synthesize`: callers can start
+        playback on the first chunk instead of waiting for the full
+        utterance. Uses Azure's incremental ``start_speaking_text_async``
+        + ``AudioDataStream`` reader, run on a worker thread and bridged
+        to this generator via an :class:`asyncio.Queue`. Word timestamps
+        are dropped on this path (streaming consumers take audio only).
+
+        On early close (barge-in: consumer stops iterating mid-utterance),
+        the in-flight blocking ``read_data`` is aborted via the SDK's
+        ``stop_speaking_async``, then the worker is joined with a bounded
+        timeout — so ``aclose`` returns promptly and never wedges on a
+        read that is still waiting on Azure. The daemon worker exits once
+        its read returns. Cancellation (at start or mid-stream) surfaces
+        as ``RuntimeError`` through the bridge queue, like :meth:`synthesize`.
+
+        Yields:
+            bytes: raw mono ``pcm_s16le`` chunks at 48 kHz.
+
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
+        stop = threading.Event()
+        synthesizer_box: list[Any] = []
+        worker = threading.Thread(
+            target=self._stream_sync,
+            args=(text, loop, queue, stop, synthesizer_box.append),
+            name="azure-tts-stream",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            stop.set()
+            await loop.run_in_executor(
+                None,
+                self._abort_and_join,
+                worker,
+                synthesizer_box,
+            )
+
+    @staticmethod
+    def _abort_and_join(worker: threading.Thread, synthesizer_box: list[Any]) -> None:
+        """Abort an in-flight read, then join the worker with a bound.
+
+        Calling ``stop_speaking_async`` unblocks a ``read_data`` that is
+        waiting on Azure so the worker can observe ``stop`` and exit. The
+        join is bounded so a misbehaving SDK can never pin this thread;
+        the worker is a daemon, so a rare lingering read won't block exit.
+        """
+        if synthesizer_box:
+            with contextlib.suppress(Exception):
+                synthesizer_box[0].stop_speaking_async().get()
+        worker.join(timeout=_AZURE_STREAM_JOIN_TIMEOUT_S)
 
 
 # ---------------------------------------------------------------------------

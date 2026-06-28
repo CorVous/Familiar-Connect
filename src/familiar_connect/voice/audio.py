@@ -7,6 +7,11 @@ import threading
 
 import discord
 
+try:  # numpy is an optional extra (voice backends); base/docs installs lack it
+    import numpy as np
+except ImportError:  # pragma: no cover - exercised only in numpy-less envs
+    np = None  # ty: ignore[invalid-assignment]
+
 # Discord requires 48kHz s16le stereo PCM in 20ms frames.
 # 48000 * 2ch * 2B * 0.020s = 3840 bytes/frame.
 DISCORD_FRAME_SIZE = 3840
@@ -74,12 +79,23 @@ class Resampler48to16:
 def mono_to_stereo(data: bytes) -> bytes:
     """Duplicate each int16 sample into L+R; produces 2x output.
 
+    Uses numpy when available (the voice playback path always installs it);
+    falls back to a byte-identical pure-Python loop so this base-eager module
+    still imports in numpy-less environments (docs build, base-only install).
+
     :raises ValueError: If *data* has odd length.
     """
     if len(data) % 2 != 0:
         msg = f"PCM data length must be even, got {len(data)}"
         raise ValueError(msg)
 
+    if np is not None:
+        # Vectorized: int16 view → duplicate each sample into L+R. Little-endian
+        # pinned via "<i2" so output bytes are host-independent. Releases the GIL
+        # over the buffer instead of looping per-sample in Python.
+        return np.frombuffer(data, dtype="<i2").repeat(2).tobytes()
+
+    # Pure-Python fallback (numpy-less envs): duplicate each 2-byte sample.
     result = bytearray(len(data) * 2)
     for i in range(0, len(data), 2):
         sample = data[i : i + 2]
@@ -103,13 +119,34 @@ class StreamingPCMSource(discord.AudioSource):
     playback (no underrun silence) until next chunk. With Cartesia's
     ~140 ms TTFB, the first ``read`` returns within one or two of
     pycord's 20 ms ticks.
+
+    Two opt-in jitter-buffer knobs smooth bursty producers (Azure, which
+    delivers in synthesis-paced bursts) without touching the steady-cadence
+    default (Cartesia):
+
+    * ``prebuffer_bytes`` — the first ``read`` blocks until at least this
+      many bytes are buffered (or EOS), building a cushion before
+      playback starts. ``0`` (default) starts immediately.
+    * ``pad_underrun`` — in steady state, an empty-but-open buffer returns
+      one frame of silence instead of blocking, so pycord's 20 ms clock
+      never overshoots and rushes to catch up. ``False`` (default) keeps
+      the block-on-underrun behavior. EOS always overrides padding so
+      playback ends instead of emitting silence forever.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        prebuffer_bytes: int = 0,
+        pad_underrun: bool = False,
+    ) -> None:
         self._buf = bytearray()
-        # Condition guards both ``_buf`` and ``_closed``
+        # Condition guards ``_buf``, ``_closed``, and ``_primed``
         self._cond = threading.Condition()
         self._closed = False
+        self._prebuffer_bytes = prebuffer_bytes
+        self._pad_underrun = pad_underrun
+        self._primed = prebuffer_bytes <= 0
 
     def feed(self, data: bytes) -> None:
         """Append ``data`` (stereo s16le); notify reader."""
@@ -127,8 +164,21 @@ class StreamingPCMSource(discord.AudioSource):
 
     def read(self) -> bytes:
         with self._cond:
-            while len(self._buf) < DISCORD_FRAME_SIZE and not self._closed:
-                self._cond.wait()
+            if not self._primed:
+                # Pre-roll: build a cushion before the first frame plays.
+                # EOS overrides so a short reply still plays out.
+                while len(self._buf) < self._prebuffer_bytes and not self._closed:
+                    self._cond.wait()
+                self._primed = True
+
+            if len(self._buf) < DISCORD_FRAME_SIZE and not self._closed:
+                # Underrun while still producing. Pad with silence (opt-in)
+                # to keep pycord's clock monotonic; otherwise block until fed.
+                if self._pad_underrun:
+                    return b"\x00" * DISCORD_FRAME_SIZE
+                while len(self._buf) < DISCORD_FRAME_SIZE and not self._closed:
+                    self._cond.wait()
+
             if len(self._buf) >= DISCORD_FRAME_SIZE:
                 out = bytes(self._buf[:DISCORD_FRAME_SIZE])
                 del self._buf[:DISCORD_FRAME_SIZE]

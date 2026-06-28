@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import ctypes
 import datetime
 import json
 import os
 import struct
+import threading
+import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -34,6 +38,7 @@ from familiar_connect.tts import (
     GeminiTTSClient,
     TTSResult,
     WordTimestamp,
+    _AZURE_STREAM_BUFFER_BYTES,
     _compose_gemini_style_prompt,
     _estimate_word_timestamps,
     _upsample_s16le_2x,
@@ -688,6 +693,19 @@ class TestAzureTTSClientInit:
         assert client.voice_name == DEFAULT_AZURE_TTS_VOICE
         assert client.sample_rate == DEFAULT_SAMPLE_RATE
 
+    def test_streaming_uses_plain_path_zero_preroll(self) -> None:
+        """Azure runs the plain streaming path: zero pre-roll, no padding.
+
+        Delivery was measured faster-than-realtime (whole utterance
+        front-loaded in ~1 s; 0 underruns at 0 ms pre-roll), so Azure
+        configures ``StreamingPCMSource`` like Cartesia — no jitter
+        cushion. The attrs stay (at off) for trivial reversal if a live
+        ear-test ever shows a transient.
+        """
+        client = AzureTTSClient(subscription_key="k", region="r")
+        assert client.stream_prebuffer_bytes == 0
+        assert client.stream_pad_underrun is False
+
 
 class TestAzureTTSClientSynthesize:
     """Tests for _synthesize_sync logic via _make_synthesizer mock."""
@@ -778,6 +796,268 @@ class TestAzureTTSClientSynthesize:
             result = await client.synthesize("Hello")
         assert result is expected
         mock_sync.assert_called_once_with("Hello")
+
+
+# ---------------------------------------------------------------------------
+# Helpers for Azure streaming SDK mocking
+# ---------------------------------------------------------------------------
+
+_AZURE_CANCELED = object()  # sentinel for ResultReason.Canceled
+_AZURE_STREAM_ALL_DATA = object()  # sentinel for StreamStatus.AllData
+_AZURE_STREAM_CANCELED = object()  # sentinel for StreamStatus.Canceled
+
+
+class _FakeAudioDataStream:
+    """Fakes ``speechsdk.AudioDataStream``: yields *chunks*, then 0.
+
+    Faithful to the SDK contract (``speech.py`` ``read_data``): the
+    buffer must be strictly ``bytes`` — the real C layer fills its memory
+    in place via ctypes and returns the filled size. A ``bytearray`` (or
+    anything not ``bytes``) is rejected with ``ValueError``, exactly as
+    the SDK does; this is the contract a permissive fake must not flatten.
+    Returns 0 once all chunks are consumed (end of stream).
+
+    ``status`` exposes the terminal stream state — ``AllData`` for a
+    clean end, ``Canceled`` for a mid-stream failure (the SDK still
+    returns 0 from ``read_data`` in that case).
+
+    When *block_until* is supplied, ``read_data`` blocks on it after the
+    last chunk (simulating the real reader waiting on a never-arriving
+    chunk) until the event is set — exercising the barge-in unblock path.
+    """
+
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        status: object = _AZURE_STREAM_ALL_DATA,
+        block_until: threading.Event | None = None,
+    ) -> None:
+        self._chunks = list(chunks)
+        self.status = status
+        self._block_until = block_until
+        self.cancellation_details = MagicMock()
+        self.cancellation_details.reason = "Error"
+        self.cancellation_details.error_details = "mid-stream cancel"
+        self.read_calls = 0
+
+    def read_data(self, audio_buffer: bytes) -> int:
+        self.read_calls += 1
+        if not isinstance(audio_buffer, bytes):
+            # Mirror speech.py exactly: the SDK raises ValueError (not
+            # TypeError) here — faithfulness to the contract is the point.
+            msg = f'audio_buffer must be a bytes, is "{audio_buffer}"'
+            raise ValueError(msg)  # noqa: TRY004 — match the SDK's exception type
+        if self._chunks:
+            chunk = self._chunks.pop(0)
+            # The C layer writes into the buffer's memory in place; do the
+            # same so reuse of one buffer across reads is exercised.
+            ctypes.memmove(audio_buffer, chunk, len(chunk))  # ty: ignore
+            return len(chunk)
+        if self._block_until is not None:
+            self._block_until.wait()
+        return 0
+
+
+def _make_fake_stream_synth(
+    chunks: list[bytes],
+    *,
+    fail: bool = False,
+    stream_status: object = _AZURE_STREAM_ALL_DATA,
+    block_until: threading.Event | None = None,
+) -> tuple[MagicMock, MagicMock, _FakeAudioDataStream]:
+    """Return ``(mock_sdk, mock_synthesizer, fake_stream)`` for streaming.
+
+    ``start_speaking_text_async(text).get()`` returns a result whose
+    ``reason`` is *Canceled* when *fail* is True. ``sdk.AudioDataStream``
+    constructs the returned ``_FakeAudioDataStream``, whose terminal
+    ``status`` is *stream_status* and which blocks on *block_until*
+    (if given) once its chunks are exhausted.
+
+    The fake synthesizer's ``stop_speaking_async`` sets *block_until*,
+    mirroring how the real SDK aborts an in-flight blocking read.
+    """
+    sdk = _make_mock_speechsdk()
+    sdk.ResultReason.Canceled = _AZURE_CANCELED
+    sdk.StreamStatus.AllData = _AZURE_STREAM_ALL_DATA
+    sdk.StreamStatus.Canceled = _AZURE_STREAM_CANCELED
+
+    result = MagicMock()
+    result.reason = _AZURE_CANCELED if fail else _AZURE_COMPLETED
+
+    cancel = MagicMock()
+    cancel.reason = "Error"
+    cancel.error_details = "stream blew up"
+    sdk.CancellationDetails.from_result.return_value = cancel
+
+    fake_stream = _FakeAudioDataStream(
+        chunks,
+        status=stream_status,
+        block_until=block_until,
+    )
+    sdk.AudioDataStream.return_value = fake_stream
+
+    synth = MagicMock()
+    synth.start_speaking_text_async.return_value.get.return_value = result
+    if block_until is not None:
+        synth.stop_speaking_async.return_value.get.side_effect = block_until.set
+
+    return sdk, synth, fake_stream
+
+
+# ---------------------------------------------------------------------------
+# Azure streaming
+# ---------------------------------------------------------------------------
+
+
+class TestAzureTTSClientSynthesizeStream:
+    """Active streaming path (``synthesize_stream``).
+
+    Azure auto-selects streaming via the player's
+    ``hasattr(tts, "synthesize_stream")`` check (see
+    ``test_streaming_publicly_exposed``). Measured delivery is
+    faster-than-realtime with zero underruns at zero pre-roll, so Azure
+    runs the plain ``StreamingPCMSource`` path. These tests verify the
+    bridge from the blocking SDK read loop (worker thread) to an async
+    generator. Buffered ``synthesize`` is untouched.
+    """
+
+    def _client(self) -> AzureTTSClient:
+        return AzureTTSClient(subscription_key="sk-az", region="eastus")
+
+    @pytest.mark.asyncio
+    async def test_yields_each_chunk_in_order(self) -> None:
+        chunk_a = b"\x10\x20\x30\x40"
+        chunk_b = b"\x50\x60"
+        sdk, synth, _ = _make_fake_stream_synth([chunk_a, chunk_b])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [chunk_a, chunk_b]
+
+    @pytest.mark.asyncio
+    async def test_full_buffer_reads_are_copied_not_aliased(self) -> None:
+        """Full-size chunks must be copied out, not aliased to the buffer.
+
+        The reader reuses one ``bytes`` buffer that ``read_data`` mutates
+        in place. A whole-slice ``buffer[:n]`` returns the SAME object when
+        ``n == len(buffer)`` (CPython aliasing trap), so a full-size chunk
+        would be silently overwritten by the next read before the queue
+        consumer sees it. Two distinct full-buffer chunks must arrive
+        intact and distinct.
+        """
+        chunk_a = bytes([0xAA]) * _AZURE_STREAM_BUFFER_BYTES
+        chunk_b = bytes([0xBB]) * _AZURE_STREAM_BUFFER_BYTES
+        sdk, synth, _ = _make_fake_stream_synth([chunk_a, chunk_b])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [chunk_a, chunk_b]
+
+    @pytest.mark.asyncio
+    async def test_uses_start_speaking_not_speak(self) -> None:
+        """Must use the incremental ``start_speaking`` API, not buffered speak."""
+        sdk, synth, _ = _make_fake_stream_synth([b"\x01\x02"])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+        synth.start_speaking_text_async.assert_called_once_with("hi")
+        synth.speak_text_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_synthesis_raises(self) -> None:
+        sdk, synth, _ = _make_fake_stream_synth([], fail=True)
+        client = self._client()
+        with (
+            patch.object(client, "_make_synthesizer", return_value=(sdk, synth)),
+            pytest.raises(RuntimeError, match="Azure TTS"),
+        ):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_terminates(self) -> None:
+        """No chunks (immediate 0) yields nothing and ends cleanly."""
+        sdk, synth, _ = _make_fake_stream_synth([])
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == []
+
+    @pytest.mark.asyncio
+    async def test_early_close_unblocks_in_flight_read(self) -> None:
+        """Barge-in mid-read: ``aclose`` returns promptly, doesn't wedge.
+
+        The real ``read_data`` BLOCKS until the next chunk arrives, so a
+        ``stop`` set during an in-flight read is invisible until the read
+        returns. ``aclose`` must (a) abort the in-flight read via
+        ``stop_speaking_async`` and (b) bound its join so it returns in
+        bounded wall-clock time even if the worker lingers.
+        """
+        gate = threading.Event()  # read_data blocks here after the 1st chunk
+        sdk, synth, _ = _make_fake_stream_synth([b"\xaa\xbb"], block_until=gate)
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            agen = client.synthesize_stream("hi")
+            first = await anext(agen)
+            start = time.monotonic()
+            await asyncio.wait_for(agen.aclose(), timeout=5.0)  # ty: ignore
+            elapsed = time.monotonic() - start
+        assert first == b"\xaa\xbb"
+        # aclose must not block on the unbounded read.
+        assert elapsed < 2.0
+        # SDK was actively told to abort the in-flight synthesis.
+        synth.stop_speaking_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_cancel_status_raises(self) -> None:
+        """``read_data == 0`` with ``status == Canceled`` is a failure, not EOF.
+
+        A token expiry / network drop after synthesis starts makes the
+        reader return 0 while flagging ``StreamStatus.Canceled``. The
+        consumer must see a ``RuntimeError``, not a silently truncated
+        clean end.
+        """
+        sdk, synth, _ = _make_fake_stream_synth(
+            [b"\x01\x02"],
+            stream_status=_AZURE_STREAM_CANCELED,
+        )
+        client = self._client()
+        with (
+            patch.object(client, "_make_synthesizer", return_value=(sdk, synth)),
+            pytest.raises(RuntimeError, match="Azure TTS"),
+        ):
+            async for _ in client.synthesize_stream("hi"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_clean_eof_status_does_not_raise(self) -> None:
+        """``status == AllData`` after 0 is a normal end — no error."""
+        sdk, synth, _ = _make_fake_stream_synth(
+            [b"\x01\x02"],
+            stream_status=_AZURE_STREAM_ALL_DATA,
+        )
+        client = self._client()
+        with patch.object(client, "_make_synthesizer", return_value=(sdk, synth)):
+            collected = [chunk async for chunk in client.synthesize_stream("hi")]
+        assert collected == [b"\x01\x02"]
+
+    def test_streaming_publicly_exposed(self) -> None:
+        """Azure auto-selects streaming — the public method is live.
+
+        The Discord player picks the streaming path via
+        ``hasattr(tts, "synthesize_stream")``. The aliasing bug that made
+        Azure streaming play silence is fixed, and measured delivery is
+        faster-than-realtime, so the method is public and Azure runs the
+        plain ``StreamingPCMSource`` path. The old private name is gone.
+        """
+        client = self._client()
+        assert hasattr(client, "synthesize_stream")
+        assert not hasattr(client, "_synthesize_stream")
+        # Jitter hints remain (kept at off for trivial reversal).
+        assert hasattr(client, "stream_prebuffer_bytes")
+        assert hasattr(client, "stream_pad_underrun")
 
 
 # ---------------------------------------------------------------------------

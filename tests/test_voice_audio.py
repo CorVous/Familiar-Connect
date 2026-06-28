@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from familiar_connect.voice import audio as audio_mod
 from familiar_connect.voice.audio import (
     DISCORD_FRAME_SIZE,
     StreamingPCMSource,
@@ -59,6 +60,48 @@ class TestMonoToStereo:
         for i, original in enumerate(samples):
             assert stereo_samples[i * 2] == original  # left
             assert stereo_samples[i * 2 + 1] == original  # right
+
+    @pytest.mark.parametrize(
+        "samples",
+        [
+            [],
+            [0],
+            [-32768],
+            [32767],
+            [0x0102, 0x0304],
+            [100, -200, 32767, -32768, 0],
+            [-1, 1, -32768, 32767, 12345, -12345, 0],
+        ],
+    )
+    def test_byte_identical_to_reference_duplication(self, samples: list[int]) -> None:
+        """Output is byte-for-byte the per-int16-sample duplication.
+
+        Independent reference: each little-endian 2-byte sample appears
+        twice in order ([s0,s0,s1,s1,...]), built here without touching
+        the implementation under test, across empty/single/edge int16s.
+        """
+        mono = struct.pack(f"<{len(samples)}h", *samples)
+        expected = b"".join(mono[i : i + 2] * 2 for i in range(0, len(mono), 2))
+        assert mono_to_stereo(mono) == expected
+
+    def test_fallback_matches_numpy_when_numpy_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pure-Python fallback is byte-identical to the numpy path.
+
+        ``voice.audio`` is base-eager (imported via ``voice/__init__``), but
+        numpy is an optional extra — so the module must import and convert
+        without it (docs build, base-only install). Force the numpy-absent
+        branch and confirm it matches the numpy result and still validates.
+        """
+        samples = [-1, 1, -32768, 32767, 12345, -12345, 0, 0x0102]
+        mono = struct.pack(f"<{len(samples)}h", *samples)
+        numpy_result = mono_to_stereo(mono)
+
+        monkeypatch.setattr(audio_mod, "np", None)
+        assert audio_mod.mono_to_stereo(mono) == numpy_result
+        with pytest.raises(ValueError, match="even"):
+            audio_mod.mono_to_stereo(b"\x01")
 
 
 class TestStereoToMono:
@@ -181,3 +224,96 @@ class TestStreamingPCMSource:
         src.feed(b"")
         src.close_input()
         assert src.read() == b""
+
+
+class TestStreamingPCMSourceJitterBuffer:
+    """Opt-in pre-roll + underrun padding for bursty providers (Azure).
+
+    Cartesia's steady cadence keeps the defaults (no pre-roll, block on
+    underrun). Azure delivers in synthesis-paced bursts that starve the
+    buffer; these knobs smooth playback so pycord's 20 ms clock stays
+    monotonic instead of rushing to catch up after a stall.
+    """
+
+    def test_preroll_blocks_until_threshold_met(self) -> None:
+        """First read waits for ``prebuffer_bytes`` before any frame."""
+        src = StreamingPCMSource(prebuffer_bytes=DISCORD_FRAME_SIZE * 2)
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        # Sub-threshold feed: one frame's worth, below the 2-frame gate.
+        src.feed(b"\x11" * DISCORD_FRAME_SIZE)
+        time.sleep(0.05)
+        assert t.is_alive(), "reader should still be pre-roll-blocked"
+        # Cross the threshold; reader unblocks and returns the first frame.
+        src.feed(b"\x11" * DISCORD_FRAME_SIZE)
+        t.join(timeout=1.0)
+        assert results == [b"\x11" * DISCORD_FRAME_SIZE]
+
+    def test_preroll_only_gates_first_read(self) -> None:
+        """Once primed, later reads do not re-apply the pre-roll gate."""
+        src = StreamingPCMSource(prebuffer_bytes=DISCORD_FRAME_SIZE)
+        src.feed(b"\x22" * (DISCORD_FRAME_SIZE * 2))
+        first = src.read()  # primes
+        second = src.read()  # must not block on the gate again
+        assert first == b"\x22" * DISCORD_FRAME_SIZE
+        assert second == b"\x22" * DISCORD_FRAME_SIZE
+
+    def test_eos_overrides_preroll(self) -> None:
+        """A short reply closing below threshold still plays (EOS wins)."""
+        src = StreamingPCMSource(prebuffer_bytes=DISCORD_FRAME_SIZE * 4)
+        partial = b"\x07\x08\x09\x0a"
+        src.feed(partial)
+        src.close_input()
+        out = src.read()
+        assert len(out) == DISCORD_FRAME_SIZE
+        assert out[: len(partial)] == partial
+        assert src.read() == b""
+
+    def test_underrun_pads_silence_without_blocking(self) -> None:
+        """Primed, empty, open + pad_underrun → a silent frame, no block."""
+        src = StreamingPCMSource(pad_underrun=True)
+        src.feed(b"\x33" * DISCORD_FRAME_SIZE)
+        primed = src.read()
+        assert primed == b"\x33" * DISCORD_FRAME_SIZE
+        # Buffer now empty and NOT closed: must return silence, not block.
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join(timeout=1.0)
+        assert not t.is_alive(), "pad_underrun read must not block"
+        assert results == [b"\x00" * DISCORD_FRAME_SIZE]
+
+    def test_eos_overrides_underrun_padding(self) -> None:
+        """Closed + empty returns empty bytes — no infinite silence."""
+        src = StreamingPCMSource(pad_underrun=True)
+        src.feed(b"\x44" * DISCORD_FRAME_SIZE)
+        assert src.read() == b"\x44" * DISCORD_FRAME_SIZE
+        src.close_input()
+        assert src.read() == b""
+
+    def test_default_underrun_still_blocks(self) -> None:
+        """Defaults (pad_underrun=False) keep the block-on-underrun path."""
+        src = StreamingPCMSource()
+        src.feed(b"\x55" * DISCORD_FRAME_SIZE)
+        assert src.read() == b"\x55" * DISCORD_FRAME_SIZE
+        results: list[bytes] = []
+
+        def reader() -> None:
+            results.append(src.read())
+
+        t = threading.Thread(target=reader)
+        t.start()
+        time.sleep(0.05)
+        assert t.is_alive(), "default underrun must block, not pad"
+        src.close_input()  # release the blocked reader for cleanup
+        t.join(timeout=1.0)
+        assert results == [b""]

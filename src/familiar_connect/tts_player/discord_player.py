@@ -111,7 +111,12 @@ class DiscordVoicePlayer:
     # ------------------------------------------------------------------
 
     async def _speak_streaming(self, text: str, *, scope: TurnScope) -> None:
-        source = StreamingPCMSource()
+        # Bursty providers (Azure) opt into pre-roll + underrun padding via
+        # these attrs; steady-cadence ones (Cartesia) lack them → defaults.
+        source = StreamingPCMSource(
+            prebuffer_bytes=getattr(self._tts, "stream_prebuffer_bytes", 0),
+            pad_underrun=getattr(self._tts, "stream_pad_underrun", False),
+        )
         feed_task: asyncio.Task[int] | None = None
         async with self._play_lock:
             if scope.is_cancelled():
@@ -220,7 +225,7 @@ class DiscordVoicePlayer:
         return total
 
     # ------------------------------------------------------------------
-    # buffered path — Azure/Gemini today (no streaming surface)
+    # buffered path — Gemini today (no streaming surface)
     # ------------------------------------------------------------------
 
     async def _speak_buffered(self, text: str, *, scope: TurnScope) -> None:
