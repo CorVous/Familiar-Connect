@@ -351,18 +351,20 @@ class TextResponder:
                 ):
                     self._activity_engine.note_missed_ping(user_turn.id)
                 author_label = author.display_name if author else "unknown"
+                ch_fld, srv_fld = self._origin_log_fields(channel_id)
                 _logger.info(
                     f"{ls.tag('Activity', ls.G)} suppressed "
-                    f"{ls.kv('ch', str(channel_id), vc=ls.LW)} "
+                    f"{ch_fld}{srv_fld}"
                     f"{ls.kv('from', author_label, vc=ls.LW)} "
                     f"{ls.kv('text', ls.trunc(content, 200), vc=ls.LW)}"
                 )
                 return
             if not focused:
                 author_label = author.display_name if author else "unknown"
+                ch_fld, srv_fld = self._origin_log_fields(channel_id)
                 _logger.info(
                     f"{ls.tag('📥 Staged', ls.Y)} "
-                    f"{ls.kv('ch', str(channel_id), vc=ls.LW)} "
+                    f"{ch_fld}{srv_fld}"
                     f"{ls.kv('from', author_label, vc=ls.LW)} "
                     f"{ls.kv('text', content, vc=ls.LW)}"
                 )
@@ -466,8 +468,10 @@ class TextResponder:
             if self._activity_engine is not None:
                 await self._activity_engine.end_turn()
             return
+        ch_fld, srv_fld = self._origin_log_fields(channel_id)
         _logger.info(
             f"{ls.tag('💬 Text', ls.G)} "
+            f"{ch_fld}{srv_fld}"
             f"{ls.kv('turn', scope.turn_id, vc=ls.LC)} "
             f"{ls.kv('chars', str(len(rewritten)), vc=ls.LW)} "
             f"{ls.kv('thread', '1' if wants_thread else '0', vc=ls.LB)} "
@@ -499,6 +503,22 @@ class TextResponder:
                 await self._activity_engine.notify_reply_sent()
             # applies any tool-deferred activity start
             await self._activity_engine.end_turn()
+
+    def _origin_log_fields(self, channel_id: int) -> tuple[str, str]:
+        """Render ``ch=`` + ``srv=`` kv fragments for the turn's origin.
+
+        Resolved from the *current* turn's channel (where this turn
+        happened), not the focus channel. ``srv`` is the empty fragment
+        when there's no focus manager or the guild is unknown — logs
+        never carry ``srv=None``. Both fragments carry a trailing space
+        for inline interpolation.
+        """
+        fm = self._focus_manager
+        ch_label = fm.channel_label(channel_id) if fm is not None else f"#{channel_id}"
+        guild = fm.guild_name_for(channel_id) if fm is not None else None
+        ch = f"{ls.kv('ch', ch_label, vc=ls.LW)} "
+        srv = f"{ls.kv('srv', guild, vc=ls.LM)} " if guild else ""
+        return ch, srv
 
     async def _emit_idle_nudge(self, bus: EventBus) -> None:
         """Publish a synthetic wake event for the focused text channel.
