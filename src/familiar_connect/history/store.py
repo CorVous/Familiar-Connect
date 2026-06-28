@@ -3199,18 +3199,29 @@ class HistoryStore:
         ).fetchone()
         return int(row["n"])
 
-    def staged_channels(self, *, familiar_id: str) -> dict[int, int]:
-        """Map channel_id → staged_count for all channels with staged turns."""
+    def staged_channels(self, *, familiar_id: str) -> dict[int, ChannelUnread]:
+        """Map channel_id → :class:`ChannelUnread` for staged channels.
+
+        ``unread`` counts staged turns; ``pings`` is the subset whose
+        incoming message @-mentioned the bot (``pings_bot``).
+        """
         rows = self._conn.execute(
             """
-            SELECT channel_id, COUNT(*) AS n
+            SELECT channel_id,
+                   COUNT(*) AS n,
+                   COALESCE(SUM(pings_bot), 0) AS pings
               FROM turns
              WHERE familiar_id = ? AND consumed_at IS NULL
              GROUP BY channel_id
             """,
             (familiar_id,),
         ).fetchall()
-        return {int(r["channel_id"]): int(r["n"]) for r in rows}
+        return {
+            int(r["channel_id"]): ChannelUnread(
+                unread=int(r["n"]), pings=int(r["pings"])
+            )
+            for r in rows
+        }
 
     def recent_cross_channel(
         self,

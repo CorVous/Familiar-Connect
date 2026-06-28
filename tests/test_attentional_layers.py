@@ -474,7 +474,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={10: 3, 20: 1},
+            unread_digest={10: (3, 0), 20: (1, 0)},
         )
         assert "new message" in out
         assert "#10" in out
@@ -495,7 +495,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={10: 5, 20: 0, 30: 2},
+            unread_digest={10: (5, 0), 20: (0, 0), 30: (2, 0)},
         )
         assert "#10" in out
         assert "#30" in out
@@ -514,7 +514,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={5: 2},
+            unread_digest={5: (2, 0)},
             post_history_instructions="TAIL_MARKER",
         )
         assert out.index("new message") < out.index("TAIL_MARKER")
@@ -524,7 +524,7 @@ class TestBuildFinalReminderUnreadDigest:
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
             focus_channel_id=3,
-            unread_digest={10: 4},
+            unread_digest={10: (4, 0)},
         )
         assert "attention is currently on #3" in out
         assert "#10 (4)" in out
@@ -583,7 +583,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={422137955130408970: 2},
+            unread_digest={422137955130408970: (2, 0)},
             channel_names={422137955130408970: "the-annex"},
         )
         assert "#the-annex" in out

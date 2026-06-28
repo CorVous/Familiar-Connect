@@ -618,7 +618,7 @@ class TextResponder:
         focus_ch = (
             self._focus_manager.get_focus("text") if self._focus_manager else None
         )
-        unread_digest: dict[int, int] | None = None
+        unread_digest: dict[int, tuple[int, int]] | None = None
         if self._focus_manager is not None:
             unread_digest = await self._history.staged_channels(
                 familiar_id=self._familiar_id

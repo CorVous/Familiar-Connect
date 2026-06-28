@@ -30,7 +30,7 @@ from familiar_connect.context import (
 )
 from familiar_connect.focus import FocusManager
 from familiar_connect.history.async_store import AsyncHistoryStore
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.history.store import ChannelUnread, HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, LLMDelta, Message
 from familiar_connect.processors.text_responder import TextResponder
@@ -323,7 +323,9 @@ class TestTextResponderFocusAware:
 
         # staged_channels should be called and its result forwarded
         async_mock_store = MagicMock()
-        async_mock_store.staged_channels = AsyncMock(return_value={200: 3})
+        async_mock_store.staged_channels = AsyncMock(
+            return_value={200: ChannelUnread(3, 0)}
+        )
         async_mock_store.sync = MagicMock()
 
         responder, _ = _make_text_responder(

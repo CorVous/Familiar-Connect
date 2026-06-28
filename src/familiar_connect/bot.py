@@ -1088,7 +1088,8 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
             )
             if staged:
                 unreads = ", ".join(
-                    f"#{ch_id} ({count})" for ch_id, count in sorted(staged.items())
+                    f"#{ch_id} ({entry.unread})"
+                    for ch_id, entry in sorted(staged.items())
                 )
                 focus_line += f"\nUnreads: {unreads}"
             text += focus_line

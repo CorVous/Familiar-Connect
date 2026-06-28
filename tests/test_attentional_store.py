@@ -17,6 +17,7 @@ import pytest
 
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import (
+    ChannelUnread,
     HistoryStore,
     HistoryTurn,
 )
@@ -206,13 +207,13 @@ class TestStagedChannels:
         _append(store, channel_id=10, consumed=False)
         _append(store, channel_id=20, consumed=False)
         result = store.staged_channels(familiar_id="fam")
-        assert result == {10: 2, 20: 1}
+        assert result == {10: ChannelUnread(2, 0), 20: ChannelUnread(1, 0)}
 
     def test_familiar_scoped(self) -> None:
         store = _store()
         _append(store, familiar_id="fam", channel_id=1, consumed=False)
         _append(store, familiar_id="other", channel_id=1, consumed=False)
-        assert store.staged_channels(familiar_id="fam") == {1: 1}
+        assert store.staged_channels(familiar_id="fam") == {1: ChannelUnread(1, 0)}
 
 
 # ---------------------------------------------------------------------------
