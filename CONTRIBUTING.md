@@ -3,11 +3,18 @@
 <!-- agent-facts
 test: uv run --extra local-turn --extra local-embed pytest -q
 lint: uv run ruff check
+type: uv run ty check
 -->
 
 The block above is read by the orchestrator hooks: `SessionStart` injects it as
 context, and the `Stop`/verdict hook runs the `test:` line to decide "done".
 Keep it accurate.
+
+Run `type` repo-wide as written — no file argument. `ty` is whole-program, so
+`ty check <file>` can pass while a cross-file or test-file type error stays
+hidden until the pre-push gate rejects it. (Provenance: that exact gap bit the
+multi-server work — a `**dict`-unpack type error in a test slipped every
+per-file check and only the repo-wide gate caught it.)
 
 This file is the working contributor + agent reference — hot commands, the
 post-change checklist, and code conventions. The pages under
