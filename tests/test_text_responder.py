@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from familiar_connect.activities.engine import ActivityEngine
 
 import asyncio
+import logging
 import time
 from unittest.mock import MagicMock
 
@@ -1192,6 +1193,131 @@ class TestTrailingReminderServerName:
         trailing = captured[0][-1].content_str
         assert "Your attention is currently on #general." in trailing
         assert "server" not in trailing
+
+
+class TestPerTurnOriginLogging:
+    """Per-turn responder logs name the turn's server + channel.
+
+    Across multiple servers the bare numeric channel id (or no channel
+    at all) makes logs ambiguous. ``ch`` renders ``#name(id)`` and
+    ``srv`` names the Discord server — both resolved from the *current
+    turn's* channel, omitted gracefully when unknown.
+    """
+
+    @staticmethod
+    def _reply_record(
+        caplog: pytest.LogCaptureFixture,
+    ) -> logging.LogRecord:
+        records = [r for r in caplog.records if "💬 Text" in r.getMessage()]
+        assert len(records) == 1, [r.getMessage() for r in caplog.records]
+        return records[0]
+
+    @pytest.mark.asyncio
+    async def test_reply_log_names_server_and_channel(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Primary: ``💬 Text`` carries both the channel label and server."""
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["hello"]), send=send, tmp_path=tmp_path
+        )
+        responder._focus_manager = _focus_manager(
+            channel_id=42, channel_name="general", guild_name="My Server"
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.text_responder"
+        ):
+            await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        msg = self._reply_record(caplog).getMessage()
+        # ``ls.kv`` interleaves ANSI between key and value; match the
+        # channel label and server name as independent substrings.
+        assert "#general" in msg
+        assert "My Server" in msg
+
+    @pytest.mark.asyncio
+    async def test_reply_log_omits_server_without_focus_manager(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No focus manager → ``ch`` falls back to ``#id``, ``srv`` omitted."""
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["hello"]), send=send, tmp_path=tmp_path
+        )
+        # _make_responder leaves focus_manager unset (None).
+        assert responder._focus_manager is None
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.text_responder"
+        ):
+            await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        msg = self._reply_record(caplog).getMessage()
+        assert "#42" in msg  # graceful fallback to raw id
+        assert "srv=" not in msg  # never log srv=None
+
+    @pytest.mark.asyncio
+    async def test_reply_log_omits_server_when_guild_unknown(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Focus manager present but guild unknown → channel shown, ``srv`` omitted."""
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["hello"]), send=send, tmp_path=tmp_path
+        )
+        responder._focus_manager = _focus_manager(
+            channel_id=42, channel_name="general", guild_name=None
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.text_responder"
+        ):
+            await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        msg = self._reply_record(caplog).getMessage()
+        assert "#general" in msg
+        assert "srv=" not in msg
+
+    @pytest.mark.asyncio
+    async def test_staged_log_names_server_and_channel(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``📥 Staged`` (unfocused channel) also names server + channel."""
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_ScriptedLLM(deltas=["should not stream"]),
+            send=send,
+            tmp_path=tmp_path,
+        )
+        # Focus is on a different channel, so the turn on 42 is staged.
+        fm = FocusManager(
+            familiar_id="fam", store=MagicMock(), subscriptions=MagicMock()
+        )
+        fm.channel_names[42] = "general"
+        fm.guild_names[42] = "My Server"
+        fm.set_focus_immediately(7, "text")
+        responder._focus_manager = fm
+        bus = InProcessEventBus()
+        await bus.start()
+        with caplog.at_level(
+            logging.INFO, logger="familiar_connect.processors.text_responder"
+        ):
+            await responder.handle(_discord_text_event(content="psst"), bus)
+        await bus.shutdown()
+
+        assert send.calls == []  # staged, not replied
+        staged = [r for r in caplog.records if "📥 Staged" in r.getMessage()]
+        assert len(staged) == 1, [r.getMessage() for r in caplog.records]
+        msg = staged[0].getMessage()
+        assert "#general" in msg
+        assert "My Server" in msg
 
 
 class TestStripLeakedMetadataPrefix:
