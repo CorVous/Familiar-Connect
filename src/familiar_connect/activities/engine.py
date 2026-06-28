@@ -357,6 +357,9 @@ class ActivityEngine:
         if activity_type is None:
             valid = ", ".join(t.id for t in self._config.catalog)
             return {"error": f"unknown activity type {type_id!r}; valid: {valid}"}
+        unavailable = self._schedule_violation(activity_type)
+        if unavailable is not None:
+            return {"error": unavailable}
         window = self._window_for(activity_type)
         if window is not None:
             # window-scheduled: alarm-style return at window end
@@ -609,7 +612,14 @@ class ActivityEngine:
         hours = self._config.active_hours
         if hours is None:
             return True
-        start, end = hours
+        return self._local_time_in_window(now, hours)
+
+    def _local_time_in_window(self, now: datetime, window: tuple[time, time]) -> bool:
+        """Is *now*'s display-tz clock time within *window* (wrap-aware).
+
+        ``start > end`` means the window wraps midnight (e.g. 22:00-02:00).
+        """
+        start, end = window
         local = now.astimezone(self._tz).time()
         if start < end:
             return start <= local < end
@@ -1237,6 +1247,24 @@ class ActivityEngine:
                 return entry
         return None
 
+    def _schedule_violation(self, activity_type: ActivityType) -> str | None:
+        """Reason *activity_type* is unavailable now, or None when it's open.
+
+        Entries carrying neither ``active_days`` nor ``active_hours`` have
+        no schedule and are always available. Day/hour math is in the
+        display tz, honoring midnight-wrapped hour windows.
+        """
+        days = activity_type.active_days
+        hours = activity_type.active_hours
+        if days is None and hours is None:
+            return None
+        now = self._now()
+        in_days = days is None or now.astimezone(self._tz).weekday() in days
+        in_hours = hours is None or self._local_time_in_window(now, hours)
+        if in_days and in_hours:
+            return None
+        return _schedule_message(activity_type)
+
     @staticmethod
     def _away_status(activity_type: ActivityType | None) -> str:
         """``dnd`` while unreachable, ``idle`` otherwise; unknown ⇒ dnd."""
@@ -1297,6 +1325,23 @@ async def _cancel_task(task: asyncio.Task[None] | None) -> None:
 def _author_label(author: Author | None) -> str:
     """:attr:`Author.label`; "someone" only when author missing."""
     return author.label if author is not None else "someone"
+
+
+# weekday abbreviations indexed by datetime.weekday() (Mon=0 .. Sun=6)
+_WEEKDAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _schedule_message(activity_type: ActivityType) -> str:
+    """Render an entry's schedule as a model-facing unavailability message."""
+    parts: list[str] = []
+    days = activity_type.active_days
+    if days is not None:
+        parts.append(" ".join(_WEEKDAY_ABBR[d] for d in sorted(days)))
+    hours = activity_type.active_hours
+    if hours is not None:
+        start, end = hours
+        parts.append(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}")
+    return f"{activity_type.label} is only available {', '.join(parts)}"
 
 
 def _daypart(hour: int) -> str:

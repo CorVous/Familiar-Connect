@@ -246,14 +246,14 @@ class TestDeferStart:
 
 
 def _scheduled_entry() -> ActivityType:
-    """Weekday 09:00–17:00 entry — drives the per-activity gate tests."""
+    """Weekday 09:00-17:00 entry; drives the per-activity gate tests."""
     return ActivityType(
         id="errands",
         label="errands run",
         duration_minutes=(20, 40),
         reachable=True,
         seed="Out running errands.",
-        active_days=frozenset({0, 1, 2, 3, 4}),  # Mon–Fri
+        active_days=frozenset({0, 1, 2, 3, 4}),  # Mon-Fri
         active_hours=(time(9, 0), time(17, 0)),
     )
 
@@ -272,9 +272,7 @@ class TestScheduleGate:
     """Per-activity availability gate in ``defer_start``."""
 
     @pytest.mark.asyncio
-    async def test_rejected_outside_active_days(
-        self, store: AsyncHistoryStore
-    ) -> None:
+    async def test_rejected_outside_active_days(self, store: AsyncHistoryStore) -> None:
         engine = _engine(store, FakeClock(_SATURDAY_1400), config=_scheduled_config())
         result = engine.defer_start("errands", None)
         assert "error" in result
@@ -294,9 +292,7 @@ class TestScheduleGate:
         assert engine._staged is None
 
     @pytest.mark.asyncio
-    async def test_staged_when_inside_schedule(
-        self, store: AsyncHistoryStore
-    ) -> None:
+    async def test_staged_when_inside_schedule(self, store: AsyncHistoryStore) -> None:
         engine = _engine(store, FakeClock(_TUESDAY_1400), config=_scheduled_config())
         ack = engine.defer_start("errands", None)
         assert "error" not in ack
@@ -304,9 +300,7 @@ class TestScheduleGate:
         assert engine._staged is not None
 
     @pytest.mark.asyncio
-    async def test_unscheduled_entry_unaffected(
-        self, store: AsyncHistoryStore
-    ) -> None:
+    async def test_unscheduled_entry_unaffected(self, store: AsyncHistoryStore) -> None:
         """Both schedule fields None ⇒ stages at any time (regression)."""
         engine = _engine(store, FakeClock(_SATURDAY_1400), config=_scheduled_config())
         ack = engine.defer_start("walk", None)
