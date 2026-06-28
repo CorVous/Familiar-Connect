@@ -44,7 +44,14 @@ _ENTRY_REQUIRED: frozenset[str] = frozenset({"id", "label", "duration_minutes", 
 _ENTRY_KEYS: frozenset[str] = _ENTRY_REQUIRED | {
     "reachable",
     "content_source",
+    "active_days",
+    "active_hours",
 }
+_WEEKDAY_TOKENS: dict[str, int] = {
+    name: idx
+    for idx, name in enumerate(("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
+}
+"""Weekday token → ``datetime.weekday()`` index (Mon=0 .. Sun=6)."""
 _TOP_LEVEL_KEYS: frozenset[str] = frozenset({
     "archive_after_minutes",
     "idle_nudge_minutes",
@@ -67,6 +74,10 @@ class ActivityType:
         :data:`CONTENT_SOURCES`.
     :param seed: authored prompt seed for experience generation
         (dream prose for the sleep entry).
+    :param active_days: allowed weekdays as ``datetime.weekday()``
+        ints (Mon=0 .. Sun=6); ``None`` = any day.
+    :param active_hours: ``(start, end)`` clock window; may wrap
+        midnight; ``None`` = any time.
     """
 
     id: str
@@ -75,6 +86,8 @@ class ActivityType:
     reachable: bool = True
     content_source: str = "authored"
     seed: str = ""
+    active_days: frozenset[int] | None = None
+    active_hours: tuple[time, time] | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +237,14 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         )
         raise ConfigError(msg)
 
+    active_days: frozenset[int] | None = None
+    if "active_days" in entry:
+        active_days = _parse_active_days(entry["active_days"], entry_id)
+
+    active_hours: tuple[time, time] | None = None
+    if "active_hours" in entry:
+        active_hours = parse_hhmm_range(entry["active_hours"], key="active_hours")
+
     return ActivityType(
         id=entry_id,
         label=strings["label"],
@@ -231,7 +252,29 @@ def _parse_catalog_entry(raw: object, idx: int) -> ActivityType:
         reachable=reachable,
         content_source=content_source,
         seed=strings["seed"],
+        active_days=active_days,
+        active_hours=active_hours,
     )
+
+
+def _parse_active_days(value: object, entry_id: str) -> frozenset[int]:
+    valid = ", ".join(_WEEKDAY_TOKENS)
+    if not isinstance(value, list) or not value:
+        msg = (
+            f"[[catalog]] {entry_id!r}: active_days must be a non-empty list "
+            f"of weekday tokens ({valid})"
+        )
+        raise ConfigError(msg)
+    days: set[int] = set()
+    for token in value:
+        if not isinstance(token, str) or token.lower() not in _WEEKDAY_TOKENS:
+            msg = (
+                f"[[catalog]] {entry_id!r}: active_days has unknown weekday "
+                f"token {token!r}; valid tokens: {valid}"
+            )
+            raise ConfigError(msg)
+        days.add(_WEEKDAY_TOKENS[token.lower()])
+    return frozenset(days)
 
 
 def _parse_duration_minutes(value: object, entry_id: str) -> tuple[int, int]:

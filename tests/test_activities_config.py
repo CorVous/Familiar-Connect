@@ -296,9 +296,7 @@ class TestPerEntrySchedule:
         assert "active_days" in str(excinfo.value)
 
     @pytest.mark.parametrize("value", ["9am-5pm", "17:00-17:00"])
-    def test_malformed_active_hours_rejected(
-        self, tmp_path: Path, value: str
-    ) -> None:
+    def test_malformed_active_hours_rejected(self, tmp_path: Path, value: str) -> None:
         content = VALID_ENTRY + f'active_hours = "{value}"\n'
         path = write_activities(tmp_path, content)
         with pytest.raises(ConfigError, match="active_hours"):
