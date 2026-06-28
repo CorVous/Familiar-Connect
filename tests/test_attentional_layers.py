@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from familiar_connect.budget import estimate_message_tokens
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.final_reminder import build_final_reminder
 from familiar_connect.context.layers import RecentHistoryLayer
@@ -356,6 +357,73 @@ class TestRecentHistoryChannelMarkers:
         marker_msg = next(m for m in msgs if m.content_str.startswith(_MARKER_PREFIX))
         assert marker_msg.role == "user"
         assert marker_msg.name is None
+
+    @staticmethod
+    async def _per_turn_cost(store: HistoryStore) -> int:
+        """Token cost of one rendered turn (all seeded turns are equal-cost)."""
+        probe = await RecentHistoryLayer(
+            store=AsyncHistoryStore(store), window_size=20
+        ).recent_messages(_ctx(channel_id=1))
+        return next(
+            estimate_message_tokens(m)
+            for m in probe
+            if not m.content_str.startswith(_MARKER_PREFIX)
+        )
+
+    @pytest.mark.asyncio
+    async def test_token_trim_realigns_markers_to_surviving_window(self) -> None:
+        """Markers track the post-trim tail, not the pre-trim head.
+
+        Channels [9, 9, 1, 2] with a cap that keeps only the last 2
+        turns ([1, 2]). The surviving window must emit a leading anchor
+        + an A→B change marker naming the *surviving* channels. A
+        head-slice (``turns[:len(rendered)]``) would pair the dropped
+        [9, 9] head with the kept messages — a single channel, zero
+        markers — so this locks the tail-slice realignment.
+        """
+        store = HistoryStore(":memory:")
+        # Equal-cost turns (identical body/author; same-width ids).
+        self._turn(store, channel_id=9, content="same body", msg_id="m1")
+        self._turn(store, channel_id=9, content="same body", msg_id="m2")
+        self._turn(store, channel_id=1, content="same body", msg_id="m3")
+        self._turn(store, channel_id=2, content="same body", msg_id="m4")
+        cost = await self._per_turn_cost(store)
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            max_tokens=2 * cost,  # keeps exactly the last 2 turns
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        # 2 surviving turns + 2 markers; markers name the survivors (#1, #2),
+        # never the trimmed #9 head.
+        assert len(msgs) == 4
+        assert _marker_indices(msgs) == [0, 2]
+        assert _markers(msgs) == ["—— now in #1 ——", "—— now in #2 ——"]
+        assert "#1" in msgs[1].content_str
+        assert "#2" in msgs[3].content_str
+
+    @pytest.mark.asyncio
+    async def test_multi_before_trim_single_after_trim_emits_no_markers(self) -> None:
+        """Multi-channel detection runs on post-trim survivors only.
+
+        Channels [1, 1, 2, 2] but the cap keeps only the last 2 ([2, 2]):
+        a single-channel surviving window ⇒ zero markers, even though the
+        pre-trim window spanned two channels.
+        """
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="same body", msg_id="m1")
+        self._turn(store, channel_id=1, content="same body", msg_id="m2")
+        self._turn(store, channel_id=2, content="same body", msg_id="m3")
+        self._turn(store, channel_id=2, content="same body", msg_id="m4")
+        cost = await self._per_turn_cost(store)
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            max_tokens=2 * cost,  # keeps exactly the last 2 turns ([2, 2])
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert _markers(msgs) == []
+        assert len(msgs) == 2
 
 
 class TestBuildFinalReminderFocusChannel:
