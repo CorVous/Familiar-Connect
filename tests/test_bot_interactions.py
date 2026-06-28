@@ -29,6 +29,7 @@ from familiar_connect.bot import (
 from familiar_connect.bus.bus import InProcessEventBus
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.subscriptions import SubscriptionKind, SubscriptionRegistry
 
 from .conftest import build_fake_llm_clients
 
@@ -241,3 +242,113 @@ class TestOnReadyPresenceResync:
         calls = bot.change_presence.await_args_list
         assert len(calls) == 1
         assert calls[0].kwargs["status"] is discord.Status.online
+
+
+def _dm_message(
+    *, author_id: int, channel_id: int, guild: object | None
+) -> SimpleNamespace:
+    """Fake ``discord.Message`` carrying only the fields ``on_message`` reads."""
+    return SimpleNamespace(
+        author=SimpleNamespace(id=author_id, bot=False, name="x", display_name="X"),
+        channel=SimpleNamespace(id=channel_id),
+        guild=guild,
+        content="hi",
+        mentions=[],
+        attachments=[],
+        embeds=[],
+        reference=None,
+        id=42,
+    )
+
+
+class TestOnMessageDmAllowlist:
+    """DM allowlist gate in ``on_message``.
+
+    Allowlisted DMs become ephemeral text subscriptions (never written
+    to the sidecar) so the normal focus/respond machinery handles them;
+    guild channels keep their existing subscription gate.
+    """
+
+    @staticmethod
+    def _setup(
+        tmp_path: Path, *, allowlist: tuple[int, ...] = (123,)
+    ) -> tuple[
+        dict[str, Callable[..., Coroutine[None, None, None]]],
+        Familiar,
+        MagicMock,
+        MagicMock,
+    ]:
+        events: dict[str, Callable[..., Coroutine[None, None, None]]] = {}
+        bot = MagicMock(name="bot")
+        bot.event.side_effect = lambda coro: events.setdefault(coro.__name__, coro)
+        text_source = MagicMock(name="text_source")
+        text_source.publish_text = AsyncMock()
+        fm = MagicMock(name="focus_manager")
+        fm.guild_names = {}
+        fm.get_focus.return_value = None
+        handle = BotHandle(bot=bot, send_text=AsyncMock(), focus_manager=fm)
+        familiar = cast(
+            "Familiar",
+            SimpleNamespace(
+                bot_user_id=99,
+                subscriptions=SubscriptionRegistry(tmp_path / "subs.toml"),
+                config=SimpleNamespace(dm_allowlist=allowlist),
+            ),
+        )
+        _register_events(bot, familiar, text_source, handle)
+        return events, familiar, text_source, fm
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_dm_registers_ephemeral_and_ingests(
+        self, tmp_path: Path
+    ) -> None:
+        events, familiar, text_source, fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_awaited_once()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is not None
+        )
+        assert fm.guild_names[555] == "Private Message"
+        fm.set_focus_immediately.assert_called_once_with(555, "text")
+        # ephemeral row must never touch the sidecar
+        assert not (tmp_path / "subs.toml").exists()
+
+    @pytest.mark.asyncio
+    async def test_non_allowlisted_dm_ignored(self, tmp_path: Path) -> None:
+        events, familiar, text_source, fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=999, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is None
+        )
+        assert fm.guild_names == {}
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_dm_keeps_existing_focus(self, tmp_path: Path) -> None:
+        events, _familiar, text_source, fm = self._setup(tmp_path)
+        fm.get_focus.return_value = 777
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        fm.set_focus_immediately.assert_not_called()
+        text_source.publish_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_subscribed_guild_channel_ingests(self, tmp_path: Path) -> None:
+        events, familiar, text_source, _fm = self._setup(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=888, kind=SubscriptionKind.text, guild_id=7
+        )
+        msg = _dm_message(author_id=123, channel_id=888, guild=SimpleNamespace(id=7))
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unsubscribed_guild_channel_ignored(self, tmp_path: Path) -> None:
+        events, _familiar, text_source, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=888, guild=SimpleNamespace(id=7))
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
