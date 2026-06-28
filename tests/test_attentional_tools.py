@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -749,6 +749,50 @@ class TestStartActivityTool:
         # for an in-character goodbye
         tool = build_start_activity_tool(_FakeActivityEngine())
         assert "in-character goodbye" in tool.description
+
+    def test_scheduled_entry_appends_availability_window(self) -> None:
+        # capability hint: a scheduled entry advertises WHEN it's choosable;
+        # an unscheduled entry stays clean
+        engine = _FakeActivityEngine()
+        engine.catalog = (
+            ActivityType(
+                id="shrine_rounds",
+                label="tending the shrines",
+                duration_minutes=(20, 40),
+                seed="x",
+                active_days=frozenset({0, 1, 2, 3, 4}),
+                active_hours=(time(9, 0), time(17, 0)),
+            ),
+            ActivityType(
+                id="creek_walk",
+                label="a creek walk",
+                duration_minutes=(20, 40),
+                seed="y",
+            ),
+        )
+        tool = build_start_activity_tool(engine)
+        desc = tool.parameters["properties"]["activity"]["description"]
+        segments = desc.split("; ")
+        shrine_seg = next(s for s in segments if "shrine_rounds" in s)
+        creek_seg = next(s for s in segments if "creek_walk" in s)
+
+        # 1. scheduled entry carries its window: Mon=0-indexed days + hours
+        assert "Mon" in shrine_seg
+        assert "Fri" in shrine_seg
+        assert "Sun" not in shrine_seg  # Mon-Fri set guards Mon=0 rendering
+        assert "09:00-17:00" in shrine_seg
+
+        # 2. unscheduled entry carries no schedule clause
+        assert "[" not in creek_seg
+        assert ":" not in creek_seg
+
+        # 3. regression: enum lists every id, base 'id' = label text intact
+        assert tool.parameters["properties"]["activity"]["enum"] == [
+            "shrine_rounds",
+            "creek_walk",
+        ]
+        assert "'shrine_rounds' = tending the shrines" in desc
+        assert "'creek_walk' = a creek walk" in desc
 
 
 # ---------------------------------------------------------------------------
