@@ -34,12 +34,12 @@ temperature = 0.7
 reasoning   = "off"
 
 [llm.prose]
-model       = "z-ai/glm-5.1"
+model       = "z-ai/glm-5.2"
 temperature = 0.7
 reasoning   = "medium"
 
 [llm.background]
-model        = "z-ai/glm-5.1"
+model        = "z-ai/glm-5.2"
 temperature  = 0.7
 reasoning    = "medium"
 tool_calling = true

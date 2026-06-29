@@ -73,15 +73,20 @@ display_tz = "UTC"
 aliases    = []
 
 [providers.history]
-voice_window_size = 100   # safety net — Budgeter usually trims first
+voice_window_size = 100   # safety net — per-section token caps trim first
 text_window_size  = 200
 
+# Per-section caps (each enforced independently; no combined cap).
+# The whole-prompt total is the sum of these — see § Prompt assembly budget.
 [budget.voice]
-total_tokens = 3000       # voice models perform well up to ~3 k
+recent_history_tokens = 3000
+rag_tokens            = 900   # ...plus the other per-section caps
 [budget.text]
-total_tokens = 8000       # thoughtful replies — room for context
+recent_history_tokens = 8000
+rag_tokens            = 2400
 [budget.background]
-total_tokens = 24000      # offline workers — summary, dossier, facts
+recent_history_tokens = 24000
+rag_tokens            = 8000
 
 [memory.retrieval]
 bm25_weight       = 1.0
@@ -136,7 +141,7 @@ reasoning    = "off"        # "off" | "low" | "medium" | "high" | "default" | om
 tool_calling = false
 
 [llm.prose]
-model                    = "z-ai/glm-5.1"
+model                    = "z-ai/glm-5.2"
 temperature              = 0.7
 provider_order           = ["z-ai"]   # optional — pin OpenRouter routing
 provider_allow_fallbacks = true       # optional — default true
@@ -144,7 +149,7 @@ reasoning                = "medium"
 tool_calling             = false
 
 [llm.background]
-model          = "z-ai/glm-5.1"
+model          = "z-ai/glm-5.2"
 temperature    = 0.7
 provider_order = ["z-ai"]
 reasoning      = "medium"
@@ -203,7 +208,7 @@ Pin a provider in `[llm.<slot>]`:
 
 ```toml
 [llm.prose]
-model                    = "z-ai/glm-5.1"
+model                    = "z-ai/glm-5.2"
 provider_order           = ["z-ai"]      # first-party — best caching
 provider_allow_fallbacks = true          # default: fall back if pinned is down
 ```
@@ -331,13 +336,15 @@ experience seed) lives on the `[[catalog]]` entries — see the
 
 ### Better long-term memory
 
-- **`[budget.<tier>].total_tokens`** — primary knob. Lift to give
-  the model more room; sub-caps (recent history, RAG, dossiers,
-  summary, cross-channel) derive from the total unless overridden.
-  See [Prompt assembly budget](#prompt-assembly-budget).
+- **`[budget.<tier>].recent_history_tokens` and the other per-section
+  caps** — primary knobs. Each section (recent history, RAG, dossiers,
+  summary, cross-channel, reflections, lorebook) has its own
+  independent cap; lift the ones you want to give the model more room.
+  There is no combined cap — the prompt total is just their sum. See
+  [Prompt assembly budget](#prompt-assembly-budget).
 - **`[providers.history].voice_window_size` / `.text_window_size`** —
   hard upper bound on history turns per tier. Safety net: the
-  Budgeter's token caps usually bite first. Lower only to force a
+  per-section token caps usually bite first. Lower only to force a
   tighter absolute cap on prompt size.
 - **`SummaryWorker.turns_threshold`** (default `10`). New turns
   before the rolling summary regenerates. Constructor arg in
@@ -570,7 +577,7 @@ image_description_model  = ""              # shared; empty = disabled
 max_concurrent_requests  = 4               # shared; process-wide cap
 
 [llm.<slot>]
-model                    = "z-ai/glm-5.1"   # required
+model                    = "z-ai/glm-5.2"   # required
 temperature              = 0.7              # optional, [0, 2]
 top_p                    = 0.95             # optional, [0, 1]
 top_k                    = 20               # optional, positive int
@@ -669,76 +676,72 @@ Set this only for slots backed by vision-capable models.
 
 ## Prompt assembly budget
 
-The :class:`Budgeter` enforces a per-tier token envelope across the
-assembled prompt. Each dynamic layer self-truncates to its own
-`max_tokens` allocation; the Budgeter then drops oldest history
-turns until the combined `system_prompt + recent_history` fits
-`total_tokens`. Token estimates use a fast `len(text) / 4`
-heuristic — no real tokenizer on the hot path; sub-microsecond per
-message.
+Each assembly layer self-truncates to its own per-section
+`max_tokens` cap while the prompt is built — recent history, RAG,
+dossiers, summary, cross-channel, reflections, lorebook. There is no
+separate combined cap and no post-assembly trim step: the assembled
+prompt is bounded by the **sum** of the per-section caps. That sum is
+exposed in code as the derived `TierBudget.total_tokens` for
+reporting only — nothing trims against it. Token estimates use a fast
+`len(text) / 4` heuristic — no real tokenizer on the hot path;
+sub-microsecond per message.
 
-Every cap is a hard number. No "auto-fill from total" — the source
+Every cap is a hard number. No "auto-fill from a total" — the source
 of truth is `data/familiars/_default/character.toml`, which spells
 out each value per tier. Per-familiar overrides deep-merge over
 those defaults, so changing one knob leaves the rest in place.
 
 ```toml
 [budget.voice]
-total_tokens          = 3000   # post-assembly trim cap
-recent_history_tokens = 1500   # cap on recent-history layer
-rag_tokens            = 450
-dossier_tokens        = 450
-summary_tokens        = 300
-cross_channel_tokens  = 300
-reflection_tokens     = 300
-lorebook_tokens       = 300
-max_history_turns     = 100    # safety net behind recent_history_tokens
-max_rag_turns         = 5
-max_rag_facts         = 3
-max_dossier_people    = 8
-max_reflections       = 3
-max_lorebook_entries  = 6
+recent_history_tokens = 3000   # cap on recent-history layer
+rag_tokens            = 900
+dossier_tokens        = 900
+summary_tokens        = 600
+cross_channel_tokens  = 600
+reflection_tokens     = 600
+lorebook_tokens       = 600
+max_history_turns     = 200    # safety net behind recent_history_tokens
+max_rag_turns         = 10
+max_rag_facts         = 6
+max_dossier_people    = 16
+max_reflections       = 6
+max_lorebook_entries  = 12
 
 [budget.text]      # same shape, larger envelope
-total_tokens       = 8000
+recent_history_tokens = 8000
 # …
 
 [budget.background]
-total_tokens       = 24000
+recent_history_tokens = 24000
 # …
 ```
 
-| Tier | Shipped `total_tokens` | Sized for |
+| Tier | Derived total (sum of caps) | Sized for |
 |---|---|---|
-| `voice` | `3000` | Voice models hold up to this well; latency budget. |
-| `text` | `8000` | Thoughtful replies; raise toward 16–32 k for capable models. |
-| `background` | `24000` | Offline summary / fact / dossier workers. |
+| `voice` | ~`7200` | Voice replies; tightest tier to protect first-token latency. |
+| `text` | ~`19200` | Thoughtful replies; raise further for very long-context models. |
+| `background` | ~`56000` | Offline summary / fact / dossier workers. |
 
 Override one knob in your familiar's `character.toml`:
 
 ```toml
 # data/familiars/aria/character.toml
 [budget.voice]
-total_tokens = 5000   # rest of the voice envelope inherits from _default
+recent_history_tokens = 4000   # rest of the voice envelope inherits from _default
 ```
 
-### Per-channel and per-model overrides
-
-`[channels.<id>].total_tokens` overrides the tier's post-assembly trim
-cap for one channel — tighten a high-traffic channel without touching
-the global tier default. `Budgeter.trim()` selects the channel cap when
-`channel_id` matches.
+### Per-model overrides
 
 `[budget.model_curves."<model-name>"]` registers per-section float
-multipliers for a model; all 14 `TierBudget` fields are valid keys,
-unset fields default to `1.0`. `CharacterConfig.budget_for()` applies
-the curve when the tier's active slot uses that model (tier→slot:
-`voice→fast`, `text→prose`, `background→background`). Channel
-`total_tokens` overrides take precedence over the curve-scaled value.
+multipliers for a model; all per-section `TierBudget` caps are valid
+keys, unset fields default to `1.0`. `CharacterConfig.budget_for()`
+applies the curve when the tier's active slot uses that model
+(tier→slot: `voice→fast`, `text→prose`, `background→background`).
+There is no `total_tokens` multiplier — the derived total scales
+automatically when the per-section caps scale.
 
 ```toml
 [budget.model_curves."claude-opus-4-7"]
-total_tokens          = 2.0
 recent_history_tokens = 2.5
 rag_tokens            = 1.5
 ```

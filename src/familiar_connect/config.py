@@ -452,7 +452,6 @@ class ChannelOverrides:
     history_window_size: int | None = None
     prompt_layers: tuple[str, ...] | None = None
     message_rendering: str | None = None
-    total_tokens: int | None = None
 
 
 def _default_budgets() -> dict[str, TierBudget]:
@@ -494,9 +493,9 @@ class CharacterConfig:
     channels: dict[int, ChannelOverrides] = field(default_factory=dict)
     turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
     stt: STTConfig = field(default_factory=STTConfig)
-    # Per-tier token envelopes for Budgeter. operators tune
-    # ``total_tokens`` per tier; sub-caps derive from it unless
-    # explicitly overridden.
+    # Per-tier token envelopes. Each per-section cap is independent and
+    # enforced by its own assembly layer; there is no combined cap.
+    # ``TierBudget.total_tokens`` is a derived sum, for reporting only.
     budgets: dict[str, TierBudget] = field(default_factory=_default_budgets)
     # Per-model multipliers keyed by model name (e.g. "claude-opus-4-7").
     # Applied in :meth:`budget_for` when tier's LLM slot uses that model.
@@ -562,14 +561,13 @@ class CharacterConfig:
         override = self.for_channel(channel_id).history_window_size
         return override if override is not None else self.text_window_size
 
-    def budget_for(self, tier: str, channel_id: int | None) -> TierBudget:
-        """Effective budget: model curve scaled, then channel total_tokens applied.
+    def budget_for(self, tier: str) -> TierBudget:
+        """Effective budget for *tier*, with the model curve applied.
 
         Resolution order:
         1. Start from tier's base :class:`TierBudget`.
         2. Apply :class:`ModelBudgetCurve` for tier's active model if
            registered under ``budget_curves``.
-        3. Override ``total_tokens`` with per-channel value if set.
         """
         base = self.budgets[tier]
         slot = _TIER_TO_SLOT.get(tier)
@@ -579,9 +577,6 @@ class CharacterConfig:
                 curve = self.budget_curves.get(slot_cfg.model)
                 if curve is not None:
                     base = base.apply_curve(curve)
-        channel_total = self.for_channel(channel_id).total_tokens
-        if channel_total is not None:
-            base = replace(base, total_tokens=channel_total)
         return base
 
 
@@ -1021,7 +1016,6 @@ def _parse_budgets(raw: dict) -> dict[str, TierBudget]:
 
 
 _BUDGET_FIELDS: tuple[str, ...] = (
-    "total_tokens",
     "recent_history_tokens",
     "rag_tokens",
     "dossier_tokens",
@@ -1453,32 +1447,10 @@ def _parse_channel_overrides(raw: dict) -> dict[int, ChannelOverrides]:
                 )
                 raise ConfigError(msg)
 
-        total_tokens_raw = section.get("total_tokens")
-        total_tokens: int | None
-        if total_tokens_raw is None:
-            total_tokens = None
-        elif isinstance(total_tokens_raw, int) and not isinstance(
-            total_tokens_raw, bool
-        ):
-            if total_tokens_raw <= 0:
-                msg = (
-                    f"[channels.{key}].total_tokens must be positive, "
-                    f"got {total_tokens_raw}"
-                )
-                raise ConfigError(msg)
-            total_tokens = total_tokens_raw
-        else:
-            msg = (
-                f"[channels.{key}].total_tokens must be an integer, "
-                f"got {type(total_tokens_raw).__name__}"
-            )
-            raise ConfigError(msg)
-
         out[channel_id] = ChannelOverrides(
             history_window_size=window,
             prompt_layers=layers,
             message_rendering=rendering,
-            total_tokens=total_tokens,
         )
     return out
 

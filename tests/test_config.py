@@ -641,16 +641,17 @@ class TestBudgets:
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         v = cfg.budgets["voice"]
-        assert v.total_tokens == 3000
-        assert v.recent_history_tokens == 1500
-        assert v.rag_tokens == 450
-        assert v.dossier_tokens == 450
-        assert v.summary_tokens == 300
-        assert v.cross_channel_tokens == 300
-        assert v.max_history_turns == 100
-        assert v.max_rag_turns == 5
-        assert v.max_rag_facts == 3
-        assert v.max_dossier_people == 8
+        assert v.recent_history_tokens == 3000
+        assert v.rag_tokens == 900
+        assert v.dossier_tokens == 900
+        assert v.summary_tokens == 600
+        assert v.cross_channel_tokens == 600
+        assert v.max_history_turns == 200
+        assert v.max_rag_turns == 10
+        assert v.max_rag_facts == 6
+        assert v.max_dossier_people == 16
+        # total_tokens is derived (sum of the per-section token caps).
+        assert v.total_tokens == 3000 + 900 + 900 + 600 + 600 + 600 + 600
 
     def test_shipped_default_text_and_background(
         self, tmp_path: Path, default_profile_path: Path
@@ -658,24 +659,28 @@ class TestBudgets:
         path = tmp_path / "character.toml"
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.budgets["text"].total_tokens == 8000
-        assert cfg.budgets["background"].total_tokens == 24000
+        text = cfg.budgets["text"]
+        assert text.recent_history_tokens == 8000
+        assert text.total_tokens == 8000 + 2400 + 2400 + 1600 + 1600 + 1600 + 1600
+        bg = cfg.budgets["background"]
+        assert bg.recent_history_tokens == 24000
+        assert bg.total_tokens == 24000 + 8000 + 8000 + 4000 + 4000 + 4000 + 4000
 
     def test_partial_override_keeps_other_subcaps(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         """Override one knob; the rest inherit from ``_default``."""
         path = tmp_path / "character.toml"
-        path.write_text("[budget.voice]\ntotal_tokens = 5000\n")
+        path.write_text("[budget.voice]\nrag_tokens = 5000\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         v = cfg.budgets["voice"]
-        assert v.total_tokens == 5000
+        assert v.rag_tokens == 5000
         # Untouched — TOML deep-merge over the default.
-        assert v.recent_history_tokens == 1500
-        assert v.rag_tokens == 450
-        assert v.max_dossier_people == 8
+        assert v.recent_history_tokens == 3000
+        assert v.dossier_tokens == 900
+        assert v.max_dossier_people == 16
         # Other tiers untouched.
-        assert cfg.budgets["text"].total_tokens == 8000
+        assert cfg.budgets["text"].recent_history_tokens == 8000
 
     def test_subcap_overrides_parsed(
         self, tmp_path: Path, default_profile_path: Path
@@ -683,14 +688,12 @@ class TestBudgets:
         path = tmp_path / "character.toml"
         path.write_text(
             "[budget.text]\n"
-            "total_tokens = 10000\n"
             "recent_history_tokens = 4000\n"
             "rag_tokens = 1000\n"
             "max_dossier_people = 12\n"
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         b = cfg.budgets["text"]
-        assert b.total_tokens == 10000
         assert b.recent_history_tokens == 4000
         assert b.rag_tokens == 1000
         assert b.max_dossier_people == 12
@@ -699,7 +702,7 @@ class TestBudgets:
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[budget.mystery]\ntotal_tokens = 100\n")
+        path.write_text("[budget.mystery]\nrecent_history_tokens = 100\n")
         with pytest.raises(ConfigError, match="unknown budget tier"):
             load_character_config(path, defaults_path=default_profile_path)
 
@@ -711,19 +714,28 @@ class TestBudgets:
         with pytest.raises(ConfigError, match="unknown keys"):
             load_character_config(path, defaults_path=default_profile_path)
 
-    def test_negative_total_rejected(
+    def test_total_tokens_key_rejected_as_unknown(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """``total_tokens`` is derived now — no longer a configurable cap."""
+        path = tmp_path / "character.toml"
+        path.write_text("[budget.voice]\ntotal_tokens = 5000\n")
+        with pytest.raises(ConfigError, match="unknown keys"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_negative_cap_rejected(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[budget.voice]\ntotal_tokens = -1\n")
-        with pytest.raises(ConfigError, match="total_tokens"):
+        path.write_text("[budget.voice]\nrecent_history_tokens = -1\n")
+        with pytest.raises(ConfigError, match="recent_history_tokens"):
             load_character_config(path, defaults_path=default_profile_path)
 
     def test_dataclass_default_is_voice_tier(self) -> None:
         """Programmatic ``TierBudget()`` matches the voice envelope."""
         b = TierBudget()
-        assert b.total_tokens == 3000
-        assert b.recent_history_tokens == 1500
+        assert b.recent_history_tokens == 3000
+        assert b.total_tokens == 3000 + 900 + 900 + 600 + 600 + 600 + 600
 
 
 class TestMemoryRetrieval:
@@ -952,69 +964,25 @@ class TestChannelOverrides:
         assert over.history_window_size is None
         assert over.prompt_layers is None
         assert over.message_rendering is None
-        assert over.total_tokens is None
 
-    def test_channel_total_tokens_parsed(
+    def test_channel_total_tokens_key_ignored(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
+        """Per-channel ``total_tokens`` is gone — a stray key is ignored."""
         path = tmp_path / "character.toml"
         path.write_text("[channels.12345]\ntotal_tokens = 2000\n")
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.channels[12345].total_tokens == 2000
+        assert 12345 in cfg.channels
+        assert not hasattr(cfg.channels[12345], "total_tokens")
 
-    def test_channel_total_tokens_must_be_positive(
-        self, tmp_path: Path, default_profile_path: Path
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text("[channels.12345]\ntotal_tokens = 0\n")
-        with pytest.raises(ConfigError, match="total_tokens"):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_channel_total_tokens_must_be_integer(
-        self, tmp_path: Path, default_profile_path: Path
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text("[channels.12345]\ntotal_tokens = 1.5\n")
-        with pytest.raises(ConfigError, match="total_tokens"):
-            load_character_config(path, defaults_path=default_profile_path)
-
-    def test_budget_for_returns_base_when_no_channel_override(
+    def test_budget_for_returns_tier_base(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         base = cfg.budgets["text"]
-        assert cfg.budget_for("text", 99999).total_tokens == base.total_tokens
-
-    def test_budget_for_applies_channel_total_tokens(
-        self, tmp_path: Path, default_profile_path: Path
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        b = cfg.budget_for("text", 12345)
-        assert b.total_tokens == 1234
-        # other caps unchanged from tier default
-        assert b.rag_tokens == cfg.budgets["text"].rag_tokens
-
-    def test_budget_for_ignores_other_channel(
-        self, tmp_path: Path, default_profile_path: Path
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        b = cfg.budget_for("text", 99999)
-        assert b.total_tokens == cfg.budgets["text"].total_tokens
-
-    def test_budget_for_none_channel_returns_base(
-        self, tmp_path: Path, default_profile_path: Path
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text("[channels.12345]\ntotal_tokens = 1234\n")
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        b = cfg.budget_for("text", None)
-        assert b.total_tokens == cfg.budgets["text"].total_tokens
+        assert cfg.budget_for("text") == base
 
 
 class TestBudgetCurves:
@@ -1030,14 +998,14 @@ class TestBudgetCurves:
         path = tmp_path / "character.toml"
         path.write_text(
             '[budget.model_curves."claude-opus-4-7"]\n'
-            "total_tokens = 2.0\n"
+            "recent_history_tokens = 2.0\n"
             "rag_tokens = 1.5\n"
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         curve = cfg.budget_curves["claude-opus-4-7"]
-        assert curve.total_tokens == pytest.approx(2.0)
+        assert curve.recent_history_tokens == pytest.approx(2.0)
         assert curve.rag_tokens == pytest.approx(1.5)
-        assert curve.recent_history_tokens == pytest.approx(1.0)  # default
+        assert curve.dossier_tokens == pytest.approx(1.0)  # default
 
     def test_unknown_curve_field_rejected(
         self, tmp_path: Path, default_profile_path: Path
@@ -1049,12 +1017,21 @@ class TestBudgetCurves:
         with pytest.raises(ConfigError, match="no_such_field"):
             load_character_config(path, defaults_path=default_profile_path)
 
+    def test_total_tokens_curve_field_rejected(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        """The derived total has no multiplier — ``total_tokens`` is unknown."""
+        path = tmp_path / "character.toml"
+        path.write_text('[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n')
+        with pytest.raises(ConfigError, match="total_tokens"):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_non_positive_multiplier_rejected(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text('[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 0.0\n')
-        with pytest.raises(ConfigError, match="total_tokens"):
+        path.write_text('[budget.model_curves."claude-opus-4-7"]\nrag_tokens = 0.0\n')
+        with pytest.raises(ConfigError, match="rag_tokens"):
             load_character_config(path, defaults_path=default_profile_path)
 
     def test_non_numeric_multiplier_rejected(
@@ -1062,9 +1039,9 @@ class TestBudgetCurves:
     ) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = "big"\n'
+            '[budget.model_curves."claude-opus-4-7"]\nrag_tokens = "big"\n'
         )
-        with pytest.raises(ConfigError, match="total_tokens"):
+        with pytest.raises(ConfigError, match="rag_tokens"):
             load_character_config(path, defaults_path=default_profile_path)
 
     def test_budget_for_applies_curve_when_model_matches(
@@ -1074,14 +1051,16 @@ class TestBudgetCurves:
         path = tmp_path / "character.toml"
         path.write_text(
             '[llm.fast]\nmodel = "claude-opus-4-7"\napi_key_env = "X"\n\n'
-            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n'
+            '[budget.model_curves."claude-opus-4-7"]\nrecent_history_tokens = 2.0\n'
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         base = cfg.budgets["voice"]
-        b = cfg.budget_for("voice", None)
-        assert b.total_tokens == round(base.total_tokens * 2.0)
-        # Sub-caps unaffected by a curve that only sets total_tokens.
+        b = cfg.budget_for("voice")
+        assert b.recent_history_tokens == round(base.recent_history_tokens * 2.0)
+        # Sub-caps unaffected by a curve that only sets recent_history_tokens.
         assert b.rag_tokens == base.rag_tokens
+        # Derived total reflects the scaled section.
+        assert b.total_tokens == base.total_tokens + base.recent_history_tokens
 
     def test_budget_for_no_curve_returns_base(
         self, tmp_path: Path, default_profile_path: Path
@@ -1090,22 +1069,7 @@ class TestBudgetCurves:
         path.write_text("")
         cfg = load_character_config(path, defaults_path=default_profile_path)
         base = cfg.budgets["voice"]
-        b = cfg.budget_for("voice", None)
-        assert b.total_tokens == base.total_tokens
-
-    def test_budget_for_channel_override_wins_over_curve(
-        self, tmp_path: Path, default_profile_path: Path
-    ) -> None:
-        path = tmp_path / "character.toml"
-        path.write_text(
-            '[llm.fast]\nmodel = "claude-opus-4-7"\napi_key_env = "X"\n\n'
-            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n\n'
-            "[channels.99]\ntotal_tokens = 1234\n"
-        )
-        cfg = load_character_config(path, defaults_path=default_profile_path)
-        b = cfg.budget_for("voice", 99)
-        # Explicit channel value wins over the scaled value.
-        assert b.total_tokens == 1234
+        assert cfg.budget_for("voice") == base
 
     def test_budget_for_curve_not_applied_for_different_model(
         self, tmp_path: Path, default_profile_path: Path
@@ -1113,13 +1077,13 @@ class TestBudgetCurves:
         path = tmp_path / "character.toml"
         path.write_text(
             '[llm.fast]\nmodel = "claude-sonnet-4-6"\napi_key_env = "X"\n\n'
-            '[budget.model_curves."claude-opus-4-7"]\ntotal_tokens = 2.0\n'
+            '[budget.model_curves."claude-opus-4-7"]\nrecent_history_tokens = 2.0\n'
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         base = cfg.budgets["voice"]
-        b = cfg.budget_for("voice", None)
+        b = cfg.budget_for("voice")
         # Sonnet is active; opus curve should not be applied.
-        assert b.total_tokens == base.total_tokens
+        assert b == base
 
 
 class TestTurnDetectionConfig:
