@@ -1038,9 +1038,7 @@ class TestBudgetCurves:
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
         path = tmp_path / "character.toml"
-        path.write_text(
-            '[budget.model_curves."claude-opus-4-7"]\nrag_tokens = "big"\n'
-        )
+        path.write_text('[budget.model_curves."claude-opus-4-7"]\nrag_tokens = "big"\n')
         with pytest.raises(ConfigError, match="rag_tokens"):
             load_character_config(path, defaults_path=default_profile_path)
 
