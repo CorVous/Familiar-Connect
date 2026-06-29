@@ -92,7 +92,7 @@ context re-run `build` only for layers whose key changed.
 |---|---|---|
 | `ConversationSummaryLayer` | `summaries` table — the single per-familiar focus-stream row at `FOCUS_STREAM_CHANNEL_ID` (`ctx.channel_id` ignored) | `focus:<last_consumed_at>:<last_summarised_id>` |
 | `CrossChannelContextLayer` | **retired** — `build` always returns `""` (attentional stream replaced it; see [below](#attentional-stream)) | unchanged (still keyed; never rendered) |
-| `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `self:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
+| `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `ego:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
 | `RagContextLayer` | `fts/turns/` + `fts/facts/` tantivy search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent_cross_channel(window_size)` — all **consumed** turns across all channels, ordered by `arrived_at, id` | not cached — it *is* the query |
@@ -305,7 +305,7 @@ silently mislead the model long after they stopped being true.
 The capability ban is **narrow**: it drops *capabilities/limitations*,
 not the familiar's *narrative*. The familiar's own bits/performances,
 choices, and relational stances/feelings get a home — the
-[self-dossier](#self-dossier) — keyed to a reserved `self:<familiar_id>`
+[self-dossier](#self-dossier) — keyed to a reserved `ego:<familiar_id>`
 subject instead of poisoning whichever person the bit was about. The
 distinction the extractor is taught: *capabilities/limits → dropped;
 narrative/feelings/choices → self-subject*.
@@ -434,7 +434,7 @@ turns newest-first. For each turn it appends the author's
 list, deduping on first sight (most-recent occurrence wins). The
 people list is truncated to `max_people` — same hard-count budgeting
 style as `RecentHistoryLayer.window_size`. The familiar's own
-[`self:<id>`](#self-dossier) subject always leads the candidate list
+[`ego:<id>`](#self-dossier) subject always leads the candidate list
 and is exempt from the `max_people` cap. Candidates without a stored
 dossier are skipped silently; the worker fills them in within one tick.
 
@@ -475,8 +475,8 @@ flip `latest_id` (changing the candidate set); a worker refresh flips
 
 The familiar is a subject too. Its own narrative — bits/performances,
 choices, relational stances/feelings — is recorded under a reserved
-`self:<familiar_id>` canonical key (`identity.self_canonical_key` /
-`identity.is_self_key`; the `self:` platform can never collide with
+`ego:<familiar_id>` canonical key (`identity.ego_canonical_key` /
+`identity.is_ego_key`; the `ego:` platform can never collide with
 `discord:` / `twitch:` keys). This gives the familiar a home for its
 narrative instead of misfiling it under whichever person the bit was
 about.
@@ -487,7 +487,7 @@ about.
   Self-*capability* statements stay dropped (see
   [No self-capability statements](#no-self-capability-statements)) — the
   exception is narrative only.
-- **Worker.** A `self:`-keyed fact yields a dossier automatically (the
+- **Worker.** An `ego:`-keyed fact yields a dossier automatically (the
   worker already iterates every subject with facts). `resolve_label` has
   no account row for the self key, so the worker substitutes the
   familiar's display name for the dossier header. The self-record uses a

@@ -22,7 +22,7 @@ from familiar_connect.budget import (
     estimate_tokens,
 )
 from familiar_connect.history.store import FOCUS_STREAM_CHANNEL_ID, HistoryTurn
-from familiar_connect.identity import is_self_key, self_canonical_key
+from familiar_connect.identity import ego_canonical_key, is_ego_key
 from familiar_connect.llm import Message, sanitize_name
 
 if TYPE_CHECKING:
@@ -981,8 +981,8 @@ class PeopleDossierLayer:
         # from ctx.familiar_id at build time.
         self._familiar_display_name = familiar_display_name
 
-    def _self_key(self, ctx: AssemblyContext) -> str:
-        return self_canonical_key(ctx.familiar_id)
+    def _ego_key(self, ctx: AssemblyContext) -> str:
+        return ego_canonical_key(ctx.familiar_id)
 
     def _candidate_keys(self, ctx: AssemblyContext) -> list[str]:
         """Ordered, deduped canonical keys for the active channel.
@@ -1003,7 +1003,7 @@ class PeopleDossierLayer:
             ordered.append(key)
 
         # always-present self-subject leads, exempt from the people cap
-        _add(self._self_key(ctx))
+        _add(self._ego_key(ctx))
 
         if ctx.channel_id is None:
             return ordered
@@ -1044,7 +1044,7 @@ class PeopleDossierLayer:
             )
             if entry is None or not entry.dossier_text.strip():
                 continue
-            if is_self_key(key):
+            if is_ego_key(key):
                 # no account row for the self-subject; use familiar's name
                 # and skip the profile (username/pronouns/bio) lookup.
                 display = self._familiar_display_name or ctx.familiar_id.title()

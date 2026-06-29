@@ -32,7 +32,7 @@ from familiar_connect.bus.protocols import BackpressurePolicy
 from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
-from familiar_connect.identity import Author, is_self_key
+from familiar_connect.identity import Author, is_ego_key
 from familiar_connect.sleep.maintenance import SleepPromptText
 from familiar_connect.sleep.opinion_formation import OpinionFact, OpinionPlan
 
@@ -2281,7 +2281,7 @@ class TestSleepLifecyclePasses:
         dream_appends = [c for c in appended if "dreamed" in c["text"]]
         assert len(dream_appends) == 1
         assert "A dream of rain on glass." in dream_appends[0]["text"]
-        assert all(is_self_key(s.canonical_key) for s in dream_appends[0]["subjects"])
+        assert all(is_ego_key(s.canonical_key) for s in dream_appends[0]["subjects"])
         await engine.stop()
 
     @pytest.mark.asyncio
@@ -2410,7 +2410,7 @@ class TestDreamReturn:
         journal = [f for f in facts if "dreamed" in f.text]
         assert len(journal) == 1
         assert "I dreamed of spools." in journal[0].text
-        assert any(is_self_key(s.canonical_key) for s in journal[0].subjects)
+        assert any(is_ego_key(s.canonical_key) for s in journal[0].subjects)
         # mechanical event-fact still written alongside
         assert any("spent" in f.text and "asleep" in f.text for f in facts)
         await engine.stop()

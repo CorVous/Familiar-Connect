@@ -757,6 +757,79 @@ class TestMigrationBackfillScope:
         assert row["consumed_at"] is None  # still staged, not promoted
 
 
+class TestEgoKeyMigration:
+    """Issue #154: legacy ``self:`` subject keys rewrite to ``ego:`` on open."""
+
+    def test_self_keys_rewritten_to_ego_on_reopen(self, tmp_path: Path) -> None:
+        """Facts + dossiers written under the old ``self:`` prefix migrate.
+
+        Pre-rename installs persisted the familiar's own narrative under
+        ``self:<id>``; the rename to ``ego:`` must not orphan that data.
+        """
+        path = tmp_path / "history.db"
+        s = HistoryStore(path)
+        # Inject pre-rename rows directly: facts.subjects_json carries the
+        # JSON shape ``append_fact`` writes, dossier keys the column form.
+        s._conn.execute(
+            "INSERT INTO facts (familiar_id, channel_id, text, source_turn_ids, "
+            "created_at, subjects_json, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "Aria felt proud of the bit.",
+                "[]",
+                "2026-06-19T00:00:00+00:00",
+                '[{"canonical_key": "self:aria", "display_at_write": "Aria"}]',
+                "2026-06-19T00:00:00+00:00",
+            ),
+        )
+        s._conn.execute(
+            "INSERT INTO people_dossiers (familiar_id, canonical_key, last_fact_id, "
+            "dossier_text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                _FAMILIAR,
+                "self:aria",
+                1,
+                "Aria's self-record.",
+                "2026-06-19T00:00:00+00:00",
+            ),
+        )
+        s._conn.commit()
+        s.close()
+
+        reopened = HistoryStore(path)
+        fact_subjects = reopened._conn.execute(
+            "SELECT subjects_json FROM facts WHERE familiar_id = ?", (_FAMILIAR,)
+        ).fetchone()["subjects_json"]
+        dossier_key = reopened._conn.execute(
+            "SELECT canonical_key FROM people_dossiers WHERE familiar_id = ?",
+            (_FAMILIAR,),
+        ).fetchone()["canonical_key"]
+        assert "ego:aria" in fact_subjects
+        assert "self:aria" not in fact_subjects
+        assert dossier_key == "ego:aria"
+
+    def test_migration_is_idempotent(self, tmp_path: Path) -> None:
+        """A second open over already-migrated rows is a no-op, not a corrupt."""
+        path = tmp_path / "history.db"
+        s = HistoryStore(path)
+        s._conn.execute(
+            "INSERT INTO people_dossiers (familiar_id, canonical_key, last_fact_id, "
+            "dossier_text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (_FAMILIAR, "self:aria", 1, "x", "2026-06-19T00:00:00+00:00"),
+        )
+        s._conn.commit()
+        s.close()
+
+        HistoryStore(path).close()  # first reopen migrates self: -> ego:
+        reopened = HistoryStore(path)  # second reopen must leave ego: intact
+        key = reopened._conn.execute(
+            "SELECT canonical_key FROM people_dossiers WHERE familiar_id = ?",
+            (_FAMILIAR,),
+        ).fetchone()["canonical_key"]
+        assert key == "ego:aria"
+
+
 # ---------------------------------------------------------------------------
 # Mode column on turns
 # ---------------------------------------------------------------------------

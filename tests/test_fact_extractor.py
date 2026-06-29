@@ -642,11 +642,11 @@ class TestFactExtractorSelfSubject:
         await extractor.tick()
 
         prompt_text = "\n".join(m.content_str for m in llm.calls[0])
-        assert "self:fam" in prompt_text
+        assert "ego:fam" in prompt_text
         assert "Sapphire" in prompt_text
         lower = prompt_text.lower()
         # routes narrative/feelings to self key
-        assert "self:fam" in prompt_text
+        assert "ego:fam" in prompt_text
         # still forbids self-capability
         assert "self-capability" in lower or "your own" in lower
 
@@ -660,7 +660,7 @@ class TestFactExtractorSelfSubject:
                     {
                         "text": "Sapphire ran a bit and privately felt proud.",
                         "source_turn_ids": [1],
-                        "subject_keys": ["self:fam"],
+                        "subject_keys": ["ego:fam"],
                     }
                 ])
             ]
@@ -677,7 +677,7 @@ class TestFactExtractorSelfSubject:
         facts = store.recent_facts(familiar_id="fam", limit=10)
         assert len(facts) == 1
         assert facts[0].subjects == (
-            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+            FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),
         )
 
     @pytest.mark.asyncio
@@ -695,7 +695,7 @@ class TestFactExtractorSelfSubject:
                     {
                         "text": "Sapphire chose to disengage.",
                         "source_turn_ids": [3],
-                        "subject_keys": ["self:fam"],
+                        "subject_keys": ["ego:fam"],
                     }
                 ])
             ]
@@ -711,7 +711,7 @@ class TestFactExtractorSelfSubject:
 
         # fact still carries the self subject, but the turn is not mention-tagged
         assert store.recent_facts(familiar_id="fam", limit=10)[0].subjects == (
-            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+            FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),
         )
         assert store.mentions_for_turn(turn_id=3) == ()
 
@@ -726,12 +726,12 @@ class TestFactExtractorSelfSubject:
                     {
                         "text": "I cannot remember names.",
                         "source_turn_ids": [1],
-                        "subject_keys": ["self:fam"],
+                        "subject_keys": ["ego:fam"],
                     },
                     {
                         "text": "Sapphire chose to walk away from the argument.",
                         "source_turn_ids": [2],
-                        "subject_keys": ["self:fam"],
+                        "subject_keys": ["ego:fam"],
                     },
                 ])
             ]
@@ -764,12 +764,12 @@ class TestFactExtractorSelfSubject:
                     {
                         "text": "Sapphire cannot remember names.",
                         "source_turn_ids": [1],
-                        "subject_keys": ["self:fam"],
+                        "subject_keys": ["ego:fam"],
                     },
                     {
                         "text": "Sapphire chose to walk away.",
                         "source_turn_ids": [2],
-                        "subject_keys": ["self:fam"],
+                        "subject_keys": ["ego:fam"],
                     },
                 ])
             ]
@@ -812,7 +812,7 @@ class TestFactExtractorSelfSubject:
         llm = _ScriptedLLM(
             replies=[
                 _facts_json([
-                    {"text": t, "source_turn_ids": [1], "subject_keys": ["self:fam"]}
+                    {"text": t, "source_turn_ids": [1], "subject_keys": ["ego:fam"]}
                     for t in keep + drop
                 ])
             ]
@@ -1509,7 +1509,7 @@ class TestSleepReturnDreamExtraction:
         clause = "DREAM-MARKER {self_name} keyed {self_key} ids {ids}"
         await _dream_extractor(store, llm, dream_extraction_clause=clause).tick()
         system = llm.calls[0][0].content_str
-        assert "DREAM-MARKER Sapphire keyed self:fam" in system
+        assert "DREAM-MARKER Sapphire keyed ego:fam" in system
         assert str(dream_id) in system
 
     @pytest.mark.asyncio
@@ -1559,7 +1559,7 @@ class TestSleepReturnDreamExtraction:
             "Sapphire dreamed that Cor fought a dragon in the rafters."
         )
         assert facts[0].subjects == (
-            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+            FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),
         )
 
     @pytest.mark.asyncio
@@ -1585,7 +1585,7 @@ class TestSleepReturnDreamExtraction:
             "Sapphire dreamed that Cor fought a dragon in the rafters."
         )
         assert facts[0].subjects == (
-            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+            FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),
         )
         # forced-self facts never enter turn_mentions
         assert store.mentions_for_turn(turn_id=dream_id) == ()
@@ -1600,7 +1600,7 @@ class TestSleepReturnDreamExtraction:
                     {
                         "text": "Sapphire dreamed the archive sang to her.",
                         "source_turn_ids": [dream_id],
-                        "subject_keys": ["self:fam"],
+                        "subject_keys": ["ego:fam"],
                     }
                 ])
             ]
@@ -1627,7 +1627,7 @@ class TestSleepReturnDreamExtraction:
         await _dream_extractor(store, llm).tick()
         facts = store.recent_facts(familiar_id="fam", limit=10)
         assert facts[0].subjects == (
-            FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),
+            FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),
         )
 
     @pytest.mark.asyncio

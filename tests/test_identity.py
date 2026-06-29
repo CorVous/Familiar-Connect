@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from familiar_connect.identity import (
-    SELF_PLATFORM,
+    EGO_PLATFORM,
     Author,
-    is_self_key,
-    self_canonical_key,
+    ego_canonical_key,
+    is_ego_key,
 )
 
 
@@ -209,26 +209,26 @@ class TestFromDiscordMember:
         assert a.bio is None
 
 
-class TestSelfKey:
-    """Reserved ``self:<familiar_id>`` subject for the familiar's own narrative."""
+class TestEgoKey:
+    """Reserved ``ego:<familiar_id>`` subject for the familiar's own narrative."""
 
-    def test_builds_self_prefixed_key(self) -> None:
-        assert self_canonical_key("sapphire") == "self:sapphire"
-        assert self_canonical_key("sapphire").startswith(f"{SELF_PLATFORM}:")
+    def test_builds_ego_prefixed_key(self) -> None:
+        assert ego_canonical_key("sapphire") == "ego:sapphire"
+        assert ego_canonical_key("sapphire").startswith(f"{EGO_PLATFORM}:")
 
     def test_round_trips_membership(self) -> None:
-        key = self_canonical_key("fam")
-        assert is_self_key(key)
+        key = ego_canonical_key("fam")
+        assert is_ego_key(key)
 
-    def test_discord_keys_are_not_self(self) -> None:
-        assert not is_self_key("discord:123")
-        assert not is_self_key("twitch:abc")
-        assert not is_self_key("")
-        assert not is_self_key("self")  # bare prefix, no id portion
+    def test_discord_keys_are_not_ego(self) -> None:
+        assert not is_ego_key("discord:123")
+        assert not is_ego_key("twitch:abc")
+        assert not is_ego_key("")
+        assert not is_ego_key("ego")  # bare prefix, no id portion
 
-    def test_self_key_does_not_collide_with_discord(self) -> None:
-        # discord user_id "self" must not be mistaken for the self subject
-        assert self_canonical_key("123") != "discord:123"
+    def test_ego_key_does_not_collide_with_discord(self) -> None:
+        # discord user_id "ego" must not be mistaken for the ego subject
+        assert ego_canonical_key("123") != "discord:123"
 
 
 class TestFromTwitch:

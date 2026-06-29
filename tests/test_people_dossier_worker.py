@@ -205,7 +205,7 @@ class TestPeopleDossierWorker:
         _seed_subject_fact(
             store,
             text="Sapphire ran a gaslighting bit and felt proud.",
-            canonical_key="self:fam",
+            canonical_key="ego:fam",
             display="Sapphire",
         )
         llm = _ScriptedLLM(replies=["Sapphire: enjoys running provocative bits."])
@@ -218,13 +218,13 @@ class TestPeopleDossierWorker:
         )
         await worker.tick()
 
-        entry = store.get_people_dossier(familiar_id="fam", canonical_key="self:fam")
+        entry = store.get_people_dossier(familiar_id="fam", canonical_key="ego:fam")
         assert entry is not None
         assert entry.last_fact_id == 1
         # prompt addressed the familiar by name, not the raw key
         joined = "\n".join(m.content_str for m in llm.calls[0])
         assert "Sapphire" in joined
-        assert "self:fam" not in joined
+        assert "ego:fam" not in joined
 
     @pytest.mark.asyncio
     async def test_self_dossier_strips_echoed_importance_tag(self) -> None:
@@ -233,7 +233,7 @@ class TestPeopleDossierWorker:
         _seed_subject_fact(
             store,
             text="Sapphire guards her autonomy fiercely.",
-            canonical_key="self:fam",
+            canonical_key="ego:fam",
             display="Sapphire",
         )
         llm = _ScriptedLLM(
@@ -249,7 +249,7 @@ class TestPeopleDossierWorker:
         )
         await worker.tick()
 
-        entry = store.get_people_dossier(familiar_id="fam", canonical_key="self:fam")
+        entry = store.get_people_dossier(familiar_id="fam", canonical_key="ego:fam")
         assert entry is not None
         assert "(importance" not in entry.dossier_text
         assert "Sapphire guards her autonomy" in entry.dossier_text
@@ -266,7 +266,7 @@ class TestPeopleDossierWorker:
         _seed_subject_fact(
             store,
             text="Sapphire warmed to SpaceFish and stays wary of KaillaDame.",
-            canonical_key="self:fam",
+            canonical_key="ego:fam",
             display="Sapphire",
         )
         llm = _ScriptedLLM(replies=["Sapphire: warm to SpaceFish, wary of KaillaDame."])
@@ -294,7 +294,7 @@ class TestPeopleDossierWorker:
         NULL-importance facts still build it.
         """
         store = HistoryStore(":memory:")
-        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+        subj = (FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),)
         store.append_fact(
             familiar_id="fam",
             channel_id=1,
@@ -342,7 +342,7 @@ class TestPeopleDossierWorker:
         order: 5 was seeded before None).
         """
         store = HistoryStore(":memory:")
-        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+        subj = (FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),)
 
         def _add(text: str, importance: int | None) -> None:
             store.append_fact(
@@ -380,7 +380,7 @@ class TestPeopleDossierWorker:
     async def test_self_dossier_annotates_and_biases_by_importance(self) -> None:
         """Self body tags scored facts `(importance N)`; header gives bias rule."""
         store = HistoryStore(":memory:")
-        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+        subj = (FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),)
         store.append_fact(
             familiar_id="fam",
             channel_id=1,
@@ -408,7 +408,7 @@ class TestPeopleDossierWorker:
     async def test_self_dossier_null_importance_renders_untagged(self) -> None:
         """NULL-importance self fact appears, but without a numeric tag."""
         store = HistoryStore(":memory:")
-        subj = (FactSubject(canonical_key="self:fam", display_at_write="Sapphire"),)
+        subj = (FactSubject(canonical_key="ego:fam", display_at_write="Sapphire"),)
         store.append_fact(
             familiar_id="fam",
             channel_id=1,

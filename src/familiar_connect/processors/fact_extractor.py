@@ -22,7 +22,7 @@ from familiar_connect import log_style as ls
 from familiar_connect.activities import ACTIVITY_RETURN_MODE, SLEEP_RETURN_MODE
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.history.store import FactSubject
-from familiar_connect.identity import is_self_key, self_canonical_key
+from familiar_connect.identity import ego_canonical_key, is_ego_key
 from familiar_connect.llm import Message
 from familiar_connect.prompt_fill import fill_placeholders
 from familiar_connect.structured_output import coerce_json
@@ -150,7 +150,7 @@ class FactExtractor:
         # self subject and dream-framed (claim-discipline rail in code)
         dream_ids = {t.id for t in batch if t.mode == SLEEP_RETURN_MODE}
 
-        self_key = self_canonical_key(self._familiar_id)
+        self_key = ego_canonical_key(self._familiar_id)
         facts: list[dict[str, object]] = []
         participants: dict[str, str] = {}
         if batch:
@@ -240,7 +240,7 @@ class FactExtractor:
             # always-injected by PeopleDossierLayer, so mirroring it only
             # pollutes turn_mentions and would consume a max_people slot.
             keys = [
-                s.canonical_key for s in subjects if not is_self_key(s.canonical_key)
+                s.canonical_key for s in subjects if not is_ego_key(s.canonical_key)
             ]
             if keys:
                 for tid in source_ids:

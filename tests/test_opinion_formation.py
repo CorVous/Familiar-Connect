@@ -11,7 +11,7 @@ import pytest
 from familiar_connect.config import load_character_config
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore, HistoryTurn
-from familiar_connect.identity import Author, is_self_key
+from familiar_connect.identity import Author, is_ego_key
 from familiar_connect.sleep.opinion_formation import (
     DayBatch,
     OpinionFact,
@@ -606,7 +606,7 @@ class TestApplyOpinions:
         assert len(report.recorded) == 1
         fact = raw.recent_facts(familiar_id="fam", limit=10)[0]
         assert fact.source_turn_ids == (1,)
-        assert is_self_key(fact.subjects[0].canonical_key)
+        assert is_ego_key(fact.subjects[0].canonical_key)
         assert fact.subjects[0].display_at_write == "Sapphire"
         assert fact.valid_from is not None
         assert fact.valid_from.date().isoformat() == "2026-06-12"

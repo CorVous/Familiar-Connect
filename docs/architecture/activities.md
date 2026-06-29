@@ -266,7 +266,7 @@ The extractor watermark still advances over skipped turns.
 
 The sleep return turn is the exception: tagged `mode = "sleep_return"`
 (`SLEEP_RETURN_MODE`), it **is** processed — with a code-enforced rail
-that dream-grounded facts land dream-framed under the `self:` subject
+that dream-grounded facts land dream-framed under the `ego:` subject
 only. See [sleep.md](sleep.md#dream-aware-extraction).
 
 ## Deliberately v1

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from familiar_connect.llm import sanitize_name
 
@@ -37,21 +37,28 @@ class _DiscordMemberLike(Protocol):
 
 _SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
-# reserved platform for the familiar's OWN narrative subject. ``self:``
+# Platform key namespace for an :class:`Author`: the real chat platforms
+# (``discord`` / ``twitch``) plus the reserved ``ego`` platform for the
+# familiar's own narrative subject (see :data:`EGO_PLATFORM`).
+Platform = Literal["discord", "twitch", "ego"]
+
+# reserved platform for the familiar's OWN narrative subject. ``ego:``
 # can never collide with ``discord:`` / ``twitch:`` keys — those use a
-# real platform name. one canonical_key per familiar: ``self:<id>``.
-SELF_PLATFORM = "self"
+# real platform name. one canonical_key per familiar: ``ego:<id>``.
+# Named ``ego`` rather than ``self`` so it never shadows Python's ``self``
+# parameter in the surrounding code (see issue #154).
+EGO_PLATFORM: Platform = "ego"
 
 
-def self_canonical_key(familiar_id: str) -> str:
-    """Reserved subject key for *familiar_id*'s own narrative: ``self:<id>``."""
-    return f"{SELF_PLATFORM}:{familiar_id}"
+def ego_canonical_key(familiar_id: str) -> str:
+    """Reserved subject key for *familiar_id*'s own narrative: ``ego:<id>``."""
+    return f"{EGO_PLATFORM}:{familiar_id}"
 
 
-def is_self_key(canonical_key: str) -> bool:
-    """Test ``self:<id>`` membership: ``self`` platform + non-empty id."""
+def is_ego_key(canonical_key: str) -> bool:
+    """Test ``ego:<id>`` membership: ``ego`` platform + non-empty id."""
     platform, sep, rest = canonical_key.partition(":")
-    return platform == SELF_PLATFORM and bool(sep) and bool(rest)
+    return platform == EGO_PLATFORM and bool(sep) and bool(rest)
 
 
 @dataclass(frozen=True)
@@ -63,7 +70,7 @@ class Author:
     aliases + on-disk index: map many display names / nicknames → one Author.
     """
 
-    platform: str
+    platform: Platform
     user_id: str
     username: str | None
     display_name: str | None

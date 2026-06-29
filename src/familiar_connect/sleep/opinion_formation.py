@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from familiar_connect.history.store import FactSubject, _normalize_fact_text
-from familiar_connect.identity import self_canonical_key
+from familiar_connect.identity import ego_canonical_key
 from familiar_connect.llm import Message
 from familiar_connect.prompt_fill import fill_placeholders
 from familiar_connect.structured_output import coerce_json, coerce_positive_int_list
@@ -485,7 +485,7 @@ async def apply_opinions(
     """Record opinions as ``self:`` facts; advance the turn watermark."""
     fam = plan.familiar_id
     subj = FactSubject(
-        canonical_key=self_canonical_key(fam),
+        canonical_key=ego_canonical_key(fam),
         display_at_write=familiar_display_name or fam,
     )
     recorded: list[tuple[str, int]] = []
