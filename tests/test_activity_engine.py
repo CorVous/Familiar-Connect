@@ -375,13 +375,13 @@ class _HighRollRandom(random.Random):  # noqa: S311 — test stub, not cryptogra
 
 
 def _clamp_entry() -> ActivityType:
-    """Weekday 09:00-17:00 entry with a wide roll (mirrors shrine_rounds)."""
+    """Weekday 09:00-17:00 entry with a wide roll (a scheduled weekday entry)."""
     return ActivityType(
-        id="shrine",
-        label="shrine rounds",
+        id="weekday_rounds",
+        label="weekday rounds",
         duration_minutes=(90, 180),
         reachable=True,
-        seed="Walking the shrine rounds.",
+        seed="Walking the weekday rounds.",
         active_days=frozenset({0, 1, 2, 3, 4}),
         active_hours=(time(9, 0), time(17, 0)),
     )
@@ -439,7 +439,7 @@ class TestScheduleDurationClamp:
         engine = _engine(
             store, FakeClock(_TUE_1500), config=_clamp_config(), rng=_HighRollRandom()
         )
-        ack = engine.defer_start("shrine", None)
+        ack = engine.defer_start("weekday_rounds", None)
         assert ack.get("ack") == "ok"
         assert ack["duration_minutes"] == 135  # 180 trimmed to room
         assert (
@@ -453,7 +453,7 @@ class TestScheduleDurationClamp:
         engine = _engine(
             store, FakeClock(_TUE_1545), config=_clamp_config(), rng=_HighRollRandom()
         )
-        ack = engine.defer_start("shrine", None)
+        ack = engine.defer_start("weekday_rounds", None)
         assert ack.get("ack") == "ok"
         assert ack["duration_minutes"] == 90  # randint(90, 90); reject is strict <
 
@@ -462,9 +462,9 @@ class TestScheduleDurationClamp:
         engine = _engine(
             store, FakeClock(_TUE_1600), config=_clamp_config(), rng=_HighRollRandom()
         )
-        result = engine.defer_start("shrine", None)
+        result = engine.defer_start("weekday_rounds", None)
         assert "error" in result
-        assert "shrine rounds" in result["error"]  # from the label
+        assert "weekday rounds" in result["error"]  # from the label
         assert "not enough time" in result["error"]
         assert engine.active is None
         assert engine._staged is None
@@ -474,7 +474,7 @@ class TestScheduleDurationClamp:
         engine = _engine(
             store, FakeClock(_TUE_0930), config=_clamp_config(), rng=_HighRollRandom()
         )
-        ack = engine.defer_start("shrine", None)
+        ack = engine.defer_start("weekday_rounds", None)
         assert ack.get("ack") == "ok"
         assert ack["duration_minutes"] == 180  # full natural hi preserved
 

@@ -756,8 +756,8 @@ class TestStartActivityTool:
         engine = _FakeActivityEngine()
         engine.catalog = (
             ActivityType(
-                id="shrine_rounds",
-                label="tending the shrines",
+                id="weekday_rounds",
+                label="weekday rounds",
                 duration_minutes=(20, 40),
                 seed="x",
                 active_days=frozenset({0, 1, 2, 3, 4}),
@@ -773,15 +773,15 @@ class TestStartActivityTool:
         tool = build_start_activity_tool(engine)
         desc = tool.parameters["properties"]["activity"]["description"]
         segments = desc.split("; ")
-        shrine_seg = next(s for s in segments if "shrine_rounds" in s)
+        weekday_seg = next(s for s in segments if "weekday_rounds" in s)
         creek_seg = next(s for s in segments if "creek_walk" in s)
 
         # 1. scheduled entry carries its window: Mon=0-indexed days + hours.
         # Pin order (not just membership) so a transposition in _WEEKDAY_ABBR
         # or a dropped sorted() is caught.
-        assert "Mon Tue Wed Thu Fri" in shrine_seg
-        assert "Sun" not in shrine_seg  # Mon-Fri set guards Mon=0 rendering
-        assert "09:00-17:00" in shrine_seg
+        assert "Mon Tue Wed Thu Fri" in weekday_seg
+        assert "Sun" not in weekday_seg  # Mon-Fri set guards Mon=0 rendering
+        assert "09:00-17:00" in weekday_seg
 
         # 2. unscheduled entry carries no schedule clause
         assert "[" not in creek_seg
@@ -789,10 +789,10 @@ class TestStartActivityTool:
 
         # 3. regression: enum lists every id, base 'id' = label text intact
         assert tool.parameters["properties"]["activity"]["enum"] == [
-            "shrine_rounds",
+            "weekday_rounds",
             "creek_walk",
         ]
-        assert "'shrine_rounds' = tending the shrines" in desc
+        assert "'weekday_rounds' = weekday rounds" in desc
         assert "'creek_walk' = a creek walk" in desc
 
     def test_active_days_only_renders_days_without_hours(self) -> None:
