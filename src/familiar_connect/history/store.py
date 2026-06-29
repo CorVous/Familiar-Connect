@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from familiar_connect import log_style as ls
 from familiar_connect.history.fts import FtsIndex
@@ -80,6 +80,19 @@ class HistoryTurn:
     guild_id: int | None = None
     arrived_at: datetime | None = None  # Immutable ingest time; None on legacy rows
     consumed_at: datetime | None = None  # None = staged
+    pings_bot: bool = False  # Did the incoming message ping the bot? legacy rows: False
+
+
+class ChannelUnread(NamedTuple):
+    """Staged-turn tally for one channel: total unread + bot-ping subset.
+
+    Subclasses ``tuple``, so it unpacks structurally as
+    ``(unread, pings)`` — the digest renderer consumes it as a plain
+    2-tuple and stays decoupled from this store type.
+    """
+
+    unread: int
+    pings: int
 
 
 @dataclass(frozen=True)
@@ -337,7 +350,8 @@ CREATE TABLE IF NOT EXISTS turns (
     platform_message_id    TEXT,
     reply_to_message_id    TEXT,
     tool_calls_json        TEXT,
-    tool_call_id           TEXT
+    tool_call_id           TEXT,
+    pings_bot              INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -590,7 +604,7 @@ _TURN_COLS = (
     "id, timestamp, role, author_platform, author_user_id, "
     "author_username, author_display_name, content, channel_id, "
     "mode, platform_message_id, reply_to_message_id, guild_id, "
-    "arrived_at, consumed_at"
+    "arrived_at, consumed_at, pings_bot"
 )
 
 
@@ -755,6 +769,15 @@ class HistoryStore:
                 self._conn.commit()
             except Exception:  # noqa: BLE001, S110  # column already exists
                 pass
+        # Did the incoming message ping the bot? DEFAULT 0 backfills
+        # legacy rows to 0 (lossy by design — staged turns are transient).
+        try:
+            self._conn.execute(
+                "ALTER TABLE turns ADD COLUMN pings_bot INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
+        except Exception:  # noqa: BLE001, S110  # column already exists
+            pass
         # Focus-stream summary composite watermark; NULL = cold start
         try:
             self._conn.execute("ALTER TABLE summaries ADD COLUMN last_consumed_at TEXT")
@@ -829,6 +852,7 @@ class HistoryStore:
         tool_call_id: str | None = None,
         arrived_at: datetime | None = None,
         consumed: bool = True,
+        pings_bot: bool = False,
     ) -> HistoryTurn:
         """Append a single turn; return persisted form.
 
@@ -858,8 +882,8 @@ class HistoryStore:
                  content, timestamp, mode,
                  platform_message_id, reply_to_message_id,
                  tool_calls_json, tool_call_id,
-                 arrived_at, consumed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 arrived_at, consumed_at, pings_bot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 familiar_id,
@@ -879,6 +903,7 @@ class HistoryStore:
                 tool_call_id,
                 arrived_at_eff.isoformat(),
                 consumed_at_eff.isoformat() if consumed_at_eff is not None else None,
+                1 if pings_bot else 0,
             ),
         )
         self._conn.commit()
@@ -894,6 +919,7 @@ class HistoryStore:
             mode=mode,
             arrived_at=arrived_at_eff,
             consumed_at=consumed_at_eff,
+            pings_bot=pings_bot,
         )
 
     def lookup_turn_by_platform_message_id(
@@ -3173,18 +3199,29 @@ class HistoryStore:
         ).fetchone()
         return int(row["n"])
 
-    def staged_channels(self, *, familiar_id: str) -> dict[int, int]:
-        """Map channel_id → staged_count for all channels with staged turns."""
+    def staged_channels(self, *, familiar_id: str) -> dict[int, ChannelUnread]:
+        """Map channel_id → :class:`ChannelUnread` for staged channels.
+
+        ``unread`` counts staged turns; ``pings`` is the subset whose
+        incoming message @-mentioned the bot (``pings_bot``).
+        """
         rows = self._conn.execute(
             """
-            SELECT channel_id, COUNT(*) AS n
+            SELECT channel_id,
+                   COUNT(*) AS n,
+                   COALESCE(SUM(pings_bot), 0) AS pings
               FROM turns
              WHERE familiar_id = ? AND consumed_at IS NULL
              GROUP BY channel_id
             """,
             (familiar_id,),
         ).fetchall()
-        return {int(r["channel_id"]): int(r["n"]) for r in rows}
+        return {
+            int(r["channel_id"]): ChannelUnread(
+                unread=int(r["n"]), pings=int(r["pings"])
+            )
+            for r in rows
+        }
 
     def recent_cross_channel(
         self,
@@ -3740,6 +3777,10 @@ def _row_to_turn(row: Row) -> HistoryTurn:
         consumed_at_raw = row["consumed_at"]
     except (IndexError, KeyError):
         consumed_at_raw = None
+    try:
+        pings_bot_raw = row["pings_bot"]
+    except (IndexError, KeyError):
+        pings_bot_raw = None
     return HistoryTurn(
         id=int(row["id"]),
         timestamp=datetime.fromisoformat(row["timestamp"]),
@@ -3765,4 +3806,5 @@ def _row_to_turn(row: Row) -> HistoryTurn:
             if consumed_at_raw is not None
             else None
         ),
+        pings_bot=bool(pings_bot_raw),
     )

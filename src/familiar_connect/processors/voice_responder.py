@@ -360,14 +360,32 @@ class VoiceResponder:
         # directive ("You are speaking aloud…") so format gate lives
         # at tail of context, where recency-biased models are more
         # likely to honor it. end-placed tool nudge piggybacks on
-        # trailing copy so it lands closest to next assistant turn
-        trailing = build_final_reminder(
-            viewer_mode="voice",
-            display_tz=self._display_tz,
-            include_mode_instruction=True,
-            tools_enabled=tool_mode,
-            post_history_instructions=self._post_history_instructions,
-        )
+        # trailing copy so it lands closest to next assistant turn.
+        # Focus manager (when wired) names the live voice channel + its
+        # server on the trailing focus line only — head stays untouched
+        # so its cache prefix is reusable (mirrors text). focus-less
+        # voice keeps its byte-stable reminder by not passing the focus
+        # kwargs at all.
+        fm = self._focus_manager
+        if fm is not None:
+            trailing = build_final_reminder(
+                viewer_mode="voice",
+                display_tz=self._display_tz,
+                include_mode_instruction=True,
+                tools_enabled=tool_mode,
+                post_history_instructions=self._post_history_instructions,
+                focus_channel_id=channel_id,
+                channel_names=fm.channel_names,
+                guild_name=fm.guild_name_for(channel_id),
+            )
+        else:
+            trailing = build_final_reminder(
+                viewer_mode="voice",
+                display_tz=self._display_tz,
+                include_mode_instruction=True,
+                tools_enabled=tool_mode,
+                post_history_instructions=self._post_history_instructions,
+            )
         messages.append(Message(role="system", content=trailing))
 
         if tool_mode:
@@ -402,15 +420,17 @@ class VoiceResponder:
                 if not gate_open:
                     decision = silent.feed(delta)
                     if decision is True:
+                        ch_fld, srv_fld = self._origin_log_fields(channel_id)
                         _logger.info(
                             f"{ls.tag('💤 Voice', ls.B)} "
+                            f"{ch_fld}{srv_fld}"
                             f"{ls.kv('decision', 'silent', vc=ls.LB)} "
                             f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
                         )
                         return None
                     if decision is False:
                         gate_open = True
-                        self._log_respond(scope.turn_id)
+                        self._log_respond(scope.turn_id, channel_id)
                         decision_logged = True
 
                 pending.extend(streamer.feed(delta))
@@ -431,7 +451,7 @@ class VoiceResponder:
                 and silent.decided is None
                 and "".join(accumulated).strip()
             ):
-                self._log_respond(scope.turn_id)
+                self._log_respond(scope.turn_id, channel_id)
                 decision_logged = True
                 gate_open = True
 
@@ -506,8 +526,10 @@ class VoiceResponder:
             if not gate_open:
                 decision = silent.feed(delta.content)
                 if decision is True:
+                    ch_fld, srv_fld = self._origin_log_fields(channel_id)
                     _logger.info(
                         f"{ls.tag('💤 Voice', ls.B)} "
+                        f"{ch_fld}{srv_fld}"
                         f"{ls.kv('decision', 'silent', vc=ls.LB)} "
                         f"{ls.kv('turn', scope.turn_id, vc=ls.LC)}"
                     )
@@ -515,7 +537,7 @@ class VoiceResponder:
                     return
                 if decision is False:
                     gate_open = True
-                    self._log_respond(scope.turn_id)
+                    self._log_respond(scope.turn_id, channel_id)
                     decision_logged = True
             pending.extend(streamer.feed(delta.content))
             if gate_open:
@@ -596,7 +618,7 @@ class VoiceResponder:
         # Short / whitespace-only terminal content: still mark respond
         # so empty-reply log doesn't double-fire
         if not gate_open and silent.decided is None and "".join(accumulated).strip():
-            self._log_respond(scope.turn_id)
+            self._log_respond(scope.turn_id, channel_id)
             decision_logged = True
         if scope.is_cancelled() and not decision_logged:
             self._log_preempted(scope.turn_id)
@@ -613,13 +635,32 @@ class VoiceResponder:
         self._tool_filler_idx += 1
         return phrase
 
-    def _log_respond(self, turn_id: str) -> None:
+    def _log_respond(self, turn_id: str, channel_id: int) -> None:
         """One ``decision=respond`` line per turn; matches silent log."""
+        ch_fld, srv_fld = self._origin_log_fields(channel_id)
         _logger.info(
             f"{ls.tag('Voice', ls.G)} "
+            f"{ch_fld}{srv_fld}"
             f"{ls.kv('decision', 'respond', vc=ls.LG)} "
             f"{ls.kv('turn', turn_id, vc=ls.LC)}"
         )
+
+    def _origin_log_fields(self, channel_id: int) -> tuple[str, str]:
+        """Render ``ch=`` + ``srv=`` kv fragments for the turn's origin.
+
+        Resolved from the live voice channel (where this turn happened).
+        ``srv`` is the empty fragment when there's no focus manager or
+        the guild is unknown — logs never carry ``srv=None``. Both
+        fragments carry a trailing space for inline interpolation.
+        Mirrors ``TextResponder._origin_log_fields`` (kept local rather
+        than shared: the text source is out of this increment's surface).
+        """
+        fm = self._focus_manager
+        ch_label = fm.channel_label(channel_id) if fm is not None else f"#{channel_id}"
+        guild = fm.guild_name_for(channel_id) if fm is not None else None
+        ch = f"{ls.kv('ch', ch_label, vc=ls.LW)} "
+        srv = f"{ls.kv('srv', guild, vc=ls.LM)} " if guild else ""
+        return ch, srv
 
     def _log_preempted(self, turn_id: str) -> None:
         """Cancel-before-decision marker.

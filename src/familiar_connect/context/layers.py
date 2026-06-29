@@ -26,6 +26,7 @@ from familiar_connect.identity import is_self_key, self_canonical_key
 from familiar_connect.llm import Message, sanitize_name
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from familiar_connect.context.assembler import AssemblyContext
@@ -148,6 +149,8 @@ class RecentHistoryLayer:
         coalesce_max_gap_seconds: float = 45.0,
         silence_gap_fold_seconds: float = 0.0,
         display_tz: str = "UTC",
+        channel_name_resolver: Callable[[int], str | None] | None = None,
+        guild_name_resolver: Callable[[int], str | None] | None = None,
     ) -> None:
         self._store = store
         self._sync = store.sync
@@ -161,6 +164,10 @@ class RecentHistoryLayer:
         # 0 disables; otherwise turns before the last gap >= this
         # threshold are folded out to stabilise the cache prefix.
         self._silence_gap_fold_seconds = silence_gap_fold_seconds
+        # channel_id → name / server name; None falls back to id-based
+        # markers. Bound over FocusManager's live maps in production.
+        self._channel_name_resolver = channel_name_resolver
+        self._guild_name_resolver = guild_name_resolver
 
     async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
         return ""
@@ -238,9 +245,73 @@ class RecentHistoryLayer:
             )
             for turn in turns
         ]
-        if self._max_tokens is None:
-            return rendered
-        return _trim_messages_to_token_cap(rendered, self._max_tokens)
+        if self._max_tokens is not None:
+            rendered = _trim_messages_to_token_cap(rendered, self._max_tokens)
+            # Token cap drops oldest turns; realign so markers track only
+            # the surviving (contiguous tail) sequence the model sees.
+            turns = turns[len(turns) - len(rendered) :]
+        return _insert_channel_markers(
+            turns,
+            rendered,
+            channel_name_resolver=self._channel_name_resolver,
+            guild_name_resolver=self._guild_name_resolver,
+        )
+
+
+# Standalone channel-change separator: `My Server/#general` (server/channel),
+# or the bare channel (`#general`) when no guild name resolves (DM / unknown).
+def _format_channel_marker(
+    channel_id: int,
+    *,
+    channel_name_resolver: Callable[[int], str | None] | None,
+    guild_name_resolver: Callable[[int], str | None] | None,
+) -> str:
+    """Render a channel-change separator as ``{server}/{channel}``.
+
+    Channel falls back to ``#{channel_id}`` when no name resolves; the
+    ``{server}/`` prefix is dropped entirely for DMs / unknown guilds,
+    leaving the bare channel.
+    """
+    name = channel_name_resolver(channel_id) if channel_name_resolver else None
+    channel = f"#{name}" if name else f"#{channel_id}"
+    guild = guild_name_resolver(channel_id) if guild_name_resolver else None
+    return f"{guild}/{channel}" if guild else channel
+
+
+def _insert_channel_markers(
+    turns: list[HistoryTurn],
+    rendered: list[Message],
+    *,
+    channel_name_resolver: Callable[[int], str | None] | None,
+    guild_name_resolver: Callable[[int], str | None] | None,
+) -> list[Message]:
+    """Interleave channel markers when the window spans >1 channel.
+
+    Single-channel windows pass through byte-for-byte. Otherwise a
+    leading marker anchors the first group and a marker precedes any
+    turn whose ``channel_id`` differs from the previous rendered turn.
+    Markers are their own ``role="user"`` messages (no ``name``),
+    mirroring how synthetic ``[tool result]`` narration is injected.
+    """
+    if len({t.channel_id for t in turns}) <= 1:
+        return rendered
+    out: list[Message] = []
+    prev_channel: int | None = None
+    for turn, msg in zip(turns, rendered, strict=True):
+        if turn.channel_id != prev_channel:
+            out.append(
+                Message(
+                    role="user",
+                    content=_format_channel_marker(
+                        turn.channel_id,
+                        channel_name_resolver=channel_name_resolver,
+                        guild_name_resolver=guild_name_resolver,
+                    ),
+                )
+            )
+            prev_channel = turn.channel_id
+        out.append(msg)
+    return out
 
 
 def _silence_fold_index(turns: list[HistoryTurn], *, min_gap_seconds: float) -> int:

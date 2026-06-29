@@ -118,3 +118,115 @@ class TestBuildFinalReminder:
         )
         # whitespace-only must not leave a dangling separator
         assert not out.endswith("\n\n")
+
+
+class TestBuildFinalReminderGuildName:
+    """guild_name names the current server on the focus line (multi-server bot)."""
+
+    def test_guild_name_named_alongside_channel_on_focus_line(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+            guild_name="My Server",
+        )
+        focus_line = next(
+            ln for ln in out.splitlines() if "attention is currently on" in ln
+        )
+        assert "#general" in focus_line
+        assert "My Server" in focus_line
+
+    def test_no_guild_name_output_byte_for_byte_unchanged(self) -> None:
+        """Regression guard: omitting guild_name must reproduce today's output."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+        )
+        expected = (
+            "---\n"
+            "\n"
+            "It is now: 2026-05-04 2:30PM UTC\n"
+            "\n"
+            "Special input:\n"
+            "\n"
+            "* `[@DisplayName]` - ping user\n"
+            "* `[↩ <message_id>]` - reply to message\n"
+            "\n"
+            "Your attention is currently on #general."
+        )
+        assert out == expected
+        assert "server" not in out
+
+    def test_guild_name_none_keeps_plain_focus_line(self) -> None:
+        """DM / unknown server: guild_name=None renders the unchanged focus line."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+            guild_name=None,
+        )
+        assert "Your attention is currently on #general." in out
+        assert "server" not in out
+
+    def test_guild_name_without_focus_channel_leaks_no_server_text(self) -> None:
+        """Boundary: server name rides the focus line; no focus line, no server."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=None,
+            guild_name="My Server",
+        )
+        assert "My Server" not in out
+        assert "server" not in out
+
+    def test_server_clause_stays_on_focus_sentence_not_unread(self) -> None:
+        """Server clause stays on the focus sentence, not the unread one.
+
+        With focus + unread + guild all set, the server text must attach to
+        the focus sentence and not tangle into the unread sentence.
+        """
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            unread_digest={20: (2, 0)},
+            channel_names={123: "general", 20: "random"},
+            guild_name="My Server",
+        )
+        # focus sentence ends at "server." then the unread sentence begins
+        assert "server. There " in out
+        assert out.index("My Server") < out.index("There are")
+
+    def test_empty_guild_name_identical_to_none(self) -> None:
+        """Falsy contract: guild_name="" behaves exactly like guild_name=None."""
+
+        # Explicit kwargs (not **dict) so the type checker sees concrete arg
+        # types; only guild_name varies between the two renders.
+        def _render(guild_name: str | None) -> str:
+            return build_final_reminder(
+                viewer_mode="text",
+                now=_at(2026, 5, 4, 14, 30),
+                focus_channel_id=123,
+                channel_names={123: "general"},
+                guild_name=guild_name,
+            )
+
+        assert _render("") == _render(None)
+
+    def test_server_clause_exact_wording(self) -> None:
+        """AC1 tightened: the quotes and "the" in the server clause are pinned."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+            guild_name="My Server",
+        )
+        focus_line = next(
+            ln for ln in out.splitlines() if "attention is currently on" in ln
+        )
+        assert 'in the "My Server" server.' in focus_line

@@ -243,8 +243,8 @@ class TextResponder:
             return
         channel_id = payload.get("channel_id")
         content = payload.get("content") or ""
-        # Idle nudge: synthetic wake event has no real user content —
-        # it just earns the model a focused turn (see _emit_idle_nudge)
+        # Unread nudge: synthetic wake event has no real user content —
+        # it just earns the model a focused turn (see _emit_unread_nudge)
         is_wake = payload.get("wake") is True
         if not isinstance(channel_id, int):
             return
@@ -336,6 +336,7 @@ class TextResponder:
                 platform_message_id=message_id,
                 reply_to_message_id=reply_to_message_id,
                 consumed=focused and not suppressed,  # Staged when unfocused/absent
+                pings_bot=payload.get("pings_bot") is True,
             )
             if mentions:
                 await self._history.record_mentions(
@@ -351,28 +352,30 @@ class TextResponder:
                 ):
                     self._activity_engine.note_missed_ping(user_turn.id)
                 author_label = author.display_name if author else "unknown"
+                ch_fld, srv_fld = self._origin_log_fields(channel_id)
                 _logger.info(
                     f"{ls.tag('Activity', ls.G)} suppressed "
-                    f"{ls.kv('ch', str(channel_id), vc=ls.LW)} "
+                    f"{ch_fld}{srv_fld}"
                     f"{ls.kv('from', author_label, vc=ls.LW)} "
                     f"{ls.kv('text', ls.trunc(content, 200), vc=ls.LW)}"
                 )
                 return
             if not focused:
                 author_label = author.display_name if author else "unknown"
+                ch_fld, srv_fld = self._origin_log_fields(channel_id)
                 _logger.info(
                     f"{ls.tag('📥 Staged', ls.Y)} "
-                    f"{ls.kv('ch', str(channel_id), vc=ls.LW)} "
+                    f"{ch_fld}{srv_fld}"
                     f"{ls.kv('from', author_label, vc=ls.LW)} "
                     f"{ls.kv('text', content, vc=ls.LW)}"
                 )
-                # Focused channel idle long enough → nudge the model so
-                # stranded unreads don't starve. model decides via
-                # shift_focus; the nudge never moves focus itself.
+                # Unfocused arrival nudges the model (debounced) so
+                # stranded unreads surface promptly; the model decides
+                # via shift_focus — the nudge never moves focus itself.
                 if self._focus_manager is not None and self._focus_manager.should_wake(
                     channel_id
                 ):
-                    await self._emit_idle_nudge(bus)
+                    await self._emit_unread_nudge(bus)
                 return
         elif suppressed:
             # wake event while absent — carries no user content, drop
@@ -466,8 +469,10 @@ class TextResponder:
             if self._activity_engine is not None:
                 await self._activity_engine.end_turn()
             return
+        ch_fld, srv_fld = self._origin_log_fields(channel_id)
         _logger.info(
             f"{ls.tag('💬 Text', ls.G)} "
+            f"{ch_fld}{srv_fld}"
             f"{ls.kv('turn', scope.turn_id, vc=ls.LC)} "
             f"{ls.kv('chars', str(len(rewritten)), vc=ls.LW)} "
             f"{ls.kv('thread', '1' if wants_thread else '0', vc=ls.LB)} "
@@ -500,7 +505,23 @@ class TextResponder:
             # applies any tool-deferred activity start
             await self._activity_engine.end_turn()
 
-    async def _emit_idle_nudge(self, bus: EventBus) -> None:
+    def _origin_log_fields(self, channel_id: int) -> tuple[str, str]:
+        """Render ``ch=`` + ``srv=`` kv fragments for the turn's origin.
+
+        Resolved from the *current* turn's channel (where this turn
+        happened), not the focus channel. ``srv`` is the empty fragment
+        when there's no focus manager or the guild is unknown — logs
+        never carry ``srv=None``. Both fragments carry a trailing space
+        for inline interpolation.
+        """
+        fm = self._focus_manager
+        ch_label = fm.channel_label(channel_id) if fm is not None else f"#{channel_id}"
+        guild = fm.guild_name_for(channel_id) if fm is not None else None
+        ch = f"{ls.kv('ch', ch_label, vc=ls.LW)} "
+        srv = f"{ls.kv('srv', guild, vc=ls.LM)} " if guild else ""
+        return ch, srv
+
+    async def _emit_unread_nudge(self, bus: EventBus) -> None:
         """Publish a synthetic wake event for the focused text channel.
 
         Earns the model one focused turn so it sees the unread digest
@@ -517,7 +538,7 @@ class TextResponder:
         await bus.publish(
             Event(
                 event_id=synth_id,
-                turn_id=f"idle-wake-{synth_id}",
+                turn_id=f"unread-wake-{synth_id}",
                 session_id=str(focus_ch),
                 parent_event_ids=(),
                 topic=TOPIC_DISCORD_TEXT,
@@ -526,7 +547,7 @@ class TextResponder:
                 payload={
                     "familiar_id": self._familiar_id,
                     "channel_id": focus_ch,
-                    "content": "[idle: unread messages waiting elsewhere]",
+                    "content": "[unread messages waiting elsewhere]",
                     "author": None,
                     "wake": True,
                 },
@@ -597,7 +618,7 @@ class TextResponder:
         focus_ch = (
             self._focus_manager.get_focus("text") if self._focus_manager else None
         )
-        unread_digest: dict[int, int] | None = None
+        unread_digest: dict[int, tuple[int, int]] | None = None
         if self._focus_manager is not None:
             unread_digest = await self._history.staged_channels(
                 familiar_id=self._familiar_id
@@ -624,6 +645,13 @@ class TextResponder:
         # directives buried at top of long context. re-emit as
         # trailing ``system`` message so they sit right before
         # assistant's next turn
+        # Server name for the focus channel — named on the trailing
+        # focus line only; head stays byte-stable for its cache prefix.
+        guild_name = (
+            self._focus_manager.guild_name_for(focus_ch)
+            if self._focus_manager
+            else None
+        )
         trailing = build_final_reminder(
             viewer_mode="text",
             display_tz=self._display_tz,
@@ -632,6 +660,7 @@ class TextResponder:
             focus_channel_id=focus_ch,
             unread_digest=unread_digest,
             channel_names=ch_names,
+            guild_name=guild_name,
         )
         if activity_state_line:
             # judgment-turn state line — this turn only, deepest slot

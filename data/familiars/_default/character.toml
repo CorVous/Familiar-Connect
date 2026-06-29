@@ -509,14 +509,14 @@ typing_backoff_max_s     = 30.0
 
 # --- Attentional focus -------------------------------------------------------
 #
-# idle_wake_seconds: focused-channel silence before traffic in a
-# non-focused channel nudges the model awake (the nudge never moves
-# focus — only the model's shift_focus tool does).
+# unread_nudge_enabled: when true, an unfocused-channel arrival nudges
+# the model so unreads surface promptly (the nudge never moves focus —
+# only the model's shift_focus tool does); false disables it.
 # nudge_debounce_seconds: rapid arrivals within this window share one
 # nudge.
 
 [focus]
-idle_wake_seconds      = 120.0
+unread_nudge_enabled   = true
 nudge_debounce_seconds = 30.0
 
 # --- Tools -------------------------------------------------------------------

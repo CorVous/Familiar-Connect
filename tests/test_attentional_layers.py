@@ -11,15 +11,20 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 
+from familiar_connect.budget import estimate_message_tokens
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.final_reminder import build_final_reminder
 from familiar_connect.context.layers import RecentHistoryLayer
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
+
+if TYPE_CHECKING:
+    from familiar_connect.llm import Message
 
 
 def _ctx(*, channel_id: int = 1, viewer_mode: str = "voice") -> AssemblyContext:
@@ -241,6 +246,187 @@ class TestTurnRenderingChannelTag:
         assert "#msg-99" in user_msg.content_str
 
 
+def _is_marker(msg: Message) -> bool:
+    """Channel-change separators are bare lines; rendered turns are bracketed."""
+    return not msg.content_str.startswith("[")
+
+
+def _markers(msgs: list) -> list[str]:
+    return [m.content_str for m in msgs if _is_marker(m)]
+
+
+def _marker_indices(msgs: list) -> list[int]:
+    return [i for i, m in enumerate(msgs) if _is_marker(m)]
+
+
+class TestRecentHistoryChannelMarkers:
+    """Standalone channel/server separator markers in cross-channel history."""
+
+    @staticmethod
+    def _turn(
+        store: HistoryStore, *, channel_id: int, content: str, msg_id: str
+    ) -> None:
+        alice = Author(
+            platform="discord", user_id="1", username="alice", display_name="Alice"
+        )
+        store.append_turn(
+            familiar_id="fam",
+            channel_id=channel_id,
+            role="user",
+            content=content,
+            author=alice,
+            platform_message_id=msg_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_single_channel_emits_no_markers(self) -> None:
+        """All turns in one channel ⇒ zero separator markers."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="one", msg_id="m1")
+        self._turn(store, channel_id=1, content="two", msg_id="m2")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert _markers(msgs) == []
+        assert len(msgs) == 2
+
+    @pytest.mark.asyncio
+    async def test_multi_channel_leading_and_change_markers(self) -> None:
+        """Channels [A, A, B, A] ⇒ markers at first A, before B, before return."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="a one", msg_id="m1")
+        self._turn(store, channel_id=1, content="a two", msg_id="m2")
+        self._turn(store, channel_id=2, content="b one", msg_id="m3")
+        self._turn(store, channel_id=1, content="a three", msg_id="m4")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        # 7 messages: 3 markers + 4 turns; no marker between the two A turns.
+        assert _marker_indices(msgs) == [0, 3, 5]
+        assert len(msgs) == 7
+        assert msgs[1].content_str.endswith("a one")
+        assert msgs[2].content_str.endswith("a two")
+        assert msgs[4].content_str.endswith("b one")
+        assert msgs[6].content_str.endswith("a three")
+
+    @pytest.mark.asyncio
+    async def test_marker_resolves_channel_and_server_names(self) -> None:
+        """Resolvers present ⇒ marker names the channel and server."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            channel_name_resolver={1: "general", 2: "random"}.get,
+            guild_name_resolver={1: "My Server", 2: "My Server"}.get,
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert "My Server/#general" in _markers(msgs)
+
+    @pytest.mark.asyncio
+    async def test_marker_falls_back_to_channel_id_without_resolvers(self) -> None:
+        """No resolvers ⇒ marker uses #<channel_id> and omits server clause."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        markers = _markers(msgs)
+        assert "#1" in markers
+        assert "#2" in markers
+
+    @pytest.mark.asyncio
+    async def test_marker_omits_server_when_guild_unknown(self) -> None:
+        """Channel name known but no guild ⇒ marker omits the server clause."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            channel_name_resolver={1: "general", 2: "random"}.get,
+            guild_name_resolver=lambda _cid: None,
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        markers = _markers(msgs)
+        assert "#general" in markers
+        assert all("/" not in m for m in markers)
+
+    @pytest.mark.asyncio
+    async def test_marker_is_distinct_user_message_without_name(self) -> None:
+        """A marker is its own role=user message carrying no name field."""
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="hi", msg_id="m1")
+        self._turn(store, channel_id=2, content="yo", msg_id="m2")
+        layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        marker_msg = next(m for m in msgs if _is_marker(m))
+        assert marker_msg.role == "user"
+        assert marker_msg.name is None
+
+    @staticmethod
+    async def _per_turn_cost(store: HistoryStore) -> int:
+        """Token cost of one rendered turn (all seeded turns are equal-cost)."""
+        probe = await RecentHistoryLayer(
+            store=AsyncHistoryStore(store), window_size=20
+        ).recent_messages(_ctx(channel_id=1))
+        return next(estimate_message_tokens(m) for m in probe if not _is_marker(m))
+
+    @pytest.mark.asyncio
+    async def test_token_trim_realigns_markers_to_surviving_window(self) -> None:
+        """Markers track the post-trim tail, not the pre-trim head.
+
+        Channels [9, 9, 1, 2] with a cap that keeps only the last 2
+        turns ([1, 2]). The surviving window must emit a leading anchor
+        + an A→B change marker naming the *surviving* channels. A
+        head-slice (``turns[:len(rendered)]``) would pair the dropped
+        [9, 9] head with the kept messages — a single channel, zero
+        markers — so this locks the tail-slice realignment.
+        """
+        store = HistoryStore(":memory:")
+        # Equal-cost turns (identical body/author; same-width ids).
+        self._turn(store, channel_id=9, content="same body", msg_id="m1")
+        self._turn(store, channel_id=9, content="same body", msg_id="m2")
+        self._turn(store, channel_id=1, content="same body", msg_id="m3")
+        self._turn(store, channel_id=2, content="same body", msg_id="m4")
+        cost = await self._per_turn_cost(store)
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            max_tokens=2 * cost,  # keeps exactly the last 2 turns
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        # 2 surviving turns + 2 markers; markers name the survivors (#1, #2),
+        # never the trimmed #9 head.
+        assert len(msgs) == 4
+        assert _marker_indices(msgs) == [0, 2]
+        assert _markers(msgs) == ["#1", "#2"]
+        assert "#1" in msgs[1].content_str
+        assert "#2" in msgs[3].content_str
+
+    @pytest.mark.asyncio
+    async def test_multi_before_trim_single_after_trim_emits_no_markers(self) -> None:
+        """Multi-channel detection runs on post-trim survivors only.
+
+        Channels [1, 1, 2, 2] but the cap keeps only the last 2 ([2, 2]):
+        a single-channel surviving window ⇒ zero markers, even though the
+        pre-trim window spanned two channels.
+        """
+        store = HistoryStore(":memory:")
+        self._turn(store, channel_id=1, content="same body", msg_id="m1")
+        self._turn(store, channel_id=1, content="same body", msg_id="m2")
+        self._turn(store, channel_id=2, content="same body", msg_id="m3")
+        self._turn(store, channel_id=2, content="same body", msg_id="m4")
+        cost = await self._per_turn_cost(store)
+        layer = RecentHistoryLayer(
+            store=AsyncHistoryStore(store),
+            window_size=20,
+            max_tokens=2 * cost,  # keeps exactly the last 2 turns ([2, 2])
+        )
+        msgs = await layer.recent_messages(_ctx(channel_id=1))
+        assert _markers(msgs) == []
+        assert len(msgs) == 2
+
+
 class TestBuildFinalReminderFocusChannel:
     """build_final_reminder with focus_channel_id renders directive."""
 
@@ -289,7 +475,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={10: 3, 20: 1},
+            unread_digest={10: (3, 0), 20: (1, 0)},
         )
         assert "new message" in out
         assert "#10" in out
@@ -310,7 +496,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={10: 5, 20: 0, 30: 2},
+            unread_digest={10: (5, 0), 20: (0, 0), 30: (2, 0)},
         )
         assert "#10" in out
         assert "#30" in out
@@ -329,7 +515,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={5: 2},
+            unread_digest={5: (2, 0)},
             post_history_instructions="TAIL_MARKER",
         )
         assert out.index("new message") < out.index("TAIL_MARKER")
@@ -339,10 +525,54 @@ class TestBuildFinalReminderUnreadDigest:
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
             focus_channel_id=3,
-            unread_digest={10: 4},
+            unread_digest={10: (4, 0)},
         )
         assert "attention is currently on #3" in out
         assert "#10 (4)" in out
+
+    def test_ping_subset_with_higher_unread_count(self) -> None:
+        """Mixed channel renders ``(unread, N ping)``."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (3, 1)},
+        )
+        assert "#10 (3, 1 ping)" in out
+        assert "shift_focus" in out
+
+    def test_all_unreads_are_pings_singular(self) -> None:
+        """When every unread is a ping, count isn't repeated."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (1, 1)},
+        )
+        assert "#10 (1 ping)" in out
+
+    def test_mixed_unread_with_multiple_pings_plural(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (3, 2)},
+        )
+        assert "#10 (3, 2 pings)" in out
+
+    def test_no_pings_renders_count_only(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (2, 0)},
+        )
+        assert "#10 (2)" in out
+
+    def test_single_unread_no_ping_has_no_suffix(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={10: (1, 0)},
+        )
+        assert "#10 —" in out
+        assert "#10 (" not in out
 
     def test_named_unread_channel_surfaces_numeric_id(self) -> None:
         """Named unread channel still exposes its id so shift_focus can target it.
@@ -354,7 +584,7 @@ class TestBuildFinalReminderUnreadDigest:
         out = build_final_reminder(
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
-            unread_digest={422137955130408970: 2},
+            unread_digest={422137955130408970: (2, 0)},
             channel_names={422137955130408970: "the-annex"},
         )
         assert "#the-annex" in out

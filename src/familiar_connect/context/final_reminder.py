@@ -33,6 +33,22 @@ _MODE_INSTRUCTIONS: dict[str, str] = {
 }
 
 
+def _unread_suffix(unread: int, pings: int) -> str:
+    """Parenthetical count/ping suffix for one channel in the unread digest.
+
+    - no pings: bare count, and only when ``unread > 1`` (a lone
+      unread reads cleanly without a ``(1)``).
+    - all unreads are pings: ``(N ping[s])`` — the count isn't repeated.
+    - mixed: ``(unread, N ping[s])``.
+    """
+    if pings == 0:
+        return f" ({unread})" if unread > 1 else ""
+    ping_word = "ping" if pings == 1 else "pings"
+    if unread == pings:
+        return f" ({pings} {ping_word})"
+    return f" ({unread}, {pings} {ping_word})"
+
+
 def _fmt_when(now: datetime, display_tz: str = "UTC") -> str:
     """Render as ``YYYY-MM-DD H:MMpm TZ`` in *display_tz* (no leading zero on hour).
 
@@ -53,8 +69,9 @@ def build_final_reminder(
     tools_enabled: bool = False,
     post_history_instructions: str | None = None,
     focus_channel_id: int | None = None,
-    unread_digest: dict[int, int] | None = None,
+    unread_digest: dict[int, tuple[int, int]] | None = None,
     channel_names: dict[int, str] | None = None,
+    guild_name: str | None = None,
 ) -> str:
     """Render closing reminder block.
 
@@ -69,8 +86,11 @@ def build_final_reminder(
     empty-content tool_call failure mode — nudges model to speak
     before invoking a tool so user doesn't hear silence mid-turn.
     ``focus_channel_id`` appends a directive naming the active
-    channel and the shift_focus tool. ``unread_digest`` renders a
-    compact unreads summary (channels with count > 0 only).
+    channel and the shift_focus tool; ``guild_name`` (raw display
+    name, caller-resolved) also names the server on that focus line.
+    ``unread_digest`` maps channel_id → ``(unread, pings)`` and renders
+    a compact unreads summary (channels with unread > 0 only); the ping
+    subset is surfaced per channel (see :func:`_unread_suffix`).
     ``post_history_instructions`` (per-familiar etiquette) appended
     last — deepest, most recency-biased slot. Blank/None omits it.
     """
@@ -112,21 +132,26 @@ def build_final_reminder(
             n = names.get(cid)
             return f"#{n} (id {cid})" if n else f"#{cid}"
 
-        focus_part = (
-            f"Your attention is currently on {_ch(focus_channel_id)}."
-            if focus_channel_id is not None
-            else ""
-        )
+        if focus_channel_id is not None:
+            # guild_name (pre-resolved by caller) names which server the
+            # conversation is in — the familiar can run in several at once.
+            where = _ch(focus_channel_id)
+            if guild_name:
+                where += f' in the "{guild_name}" server'
+            focus_part = f"Your attention is currently on {where}."
+        else:
+            focus_part = ""
         active = (
-            [(cid, cnt) for cid, cnt in unread_digest.items() if cnt > 0]
+            [(cid, entry) for cid, entry in unread_digest.items() if entry[0] > 0]
             if unread_digest
             else []
         )
         if active:
             ch_list = ", ".join(
-                _ch_id(cid) + (f" ({cnt})" if cnt > 1 else "") for cid, cnt in active
+                _ch_id(cid) + _unread_suffix(entry[0], entry[1])
+                for cid, entry in active
             )
-            total = sum(c for _, c in active)
+            total = sum(entry[0] for _, entry in active)
             verb = "is" if total == 1 else "are"
             noun = "a new message" if total == 1 else "new messages"
             unread_part = (

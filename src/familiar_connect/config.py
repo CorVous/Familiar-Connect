@@ -383,15 +383,16 @@ class MemoryProvidersConfig:
 
 @dataclass(frozen=True)
 class FocusConfig:
-    """``[focus]`` knobs — attentional idle-nudge timing.
+    """``[focus]`` knobs — attentional unread-nudge controls.
 
-    :param idle_wake_seconds: focused-channel silence before a
-        non-focused arrival nudges the model.
+    :param unread_nudge_enabled: when ``true``, an unfocused-channel
+        arrival nudges the model so unreads surface promptly; ``false``
+        disables the nudge entirely.
     :param nudge_debounce_seconds: rapid arrivals within this window
         share one nudge.
     """
 
-    idle_wake_seconds: float = 120.0
+    unread_nudge_enabled: bool = True
     nudge_debounce_seconds: float = 30.0
 
 
@@ -541,7 +542,7 @@ class CharacterConfig:
     # Process-wide cap on concurrent LLM requests (shared [llm] level);
     # bottleneck is the OpenRouter key's rate limit, not one slot.
     llm_max_concurrent_requests: int = 4
-    # Attentional idle-nudge timing — see :class:`FocusConfig`.
+    # Attentional unread-nudge controls — see :class:`FocusConfig`.
     focus: FocusConfig = field(default_factory=FocusConfig)
     # Agentic tool-loop knobs — see :class:`ToolsConfig`.
     tools: ToolsConfig = field(default_factory=ToolsConfig)
@@ -893,13 +894,13 @@ def _prompt_str(raw: dict, key: str) -> str:
 
 
 _FOCUS_FIELDS: frozenset[str] = frozenset({
-    "idle_wake_seconds",
+    "unread_nudge_enabled",
     "nudge_debounce_seconds",
 })
 
 
 def _parse_focus_config(raw: dict) -> FocusConfig:
-    """Validate ``[focus]``; positive numbers only."""
+    """Validate ``[focus]``; bool enable flag + positive debounce."""
     unknown = set(raw) - _FOCUS_FIELDS
     if unknown:
         bad = ", ".join(sorted(unknown))
@@ -917,9 +918,16 @@ def _parse_focus_config(raw: dict) -> FocusConfig:
             raise ConfigError(msg)
         return float(v)
 
+    def _bool(key: str, *, default: bool) -> bool:
+        v = raw.get(key, default)
+        if not isinstance(v, bool):
+            msg = f"[focus].{key} must be a bool, got {type(v).__name__}"
+            raise ConfigError(msg)
+        return v
+
     return FocusConfig(
-        idle_wake_seconds=_positive_float(
-            "idle_wake_seconds", defaults.idle_wake_seconds
+        unread_nudge_enabled=_bool(
+            "unread_nudge_enabled", default=defaults.unread_nudge_enabled
         ),
         nudge_debounce_seconds=_positive_float(
             "nudge_debounce_seconds", defaults.nudge_debounce_seconds

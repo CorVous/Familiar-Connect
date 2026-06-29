@@ -36,7 +36,7 @@ tune per host without a rebuild.
 | Voice pipeline mode | cascaded + sentence streaming | `[providers.voice_pipeline]` (V5 only — sentence streaming shipped) |
 | Embedding backend (M6) | `[providers.embedding]` | unchanged |
 | RAG / fact retrieval ranking | `[memory.retrieval]` (M2 + M6) | unchanged |
-| Attentional idle-nudge timing | `[focus]` | unchanged |
+| Attentional unread-nudge controls | `[focus]` | unchanged |
 | Agentic tool-loop cap | `[tools]` | unchanged |
 | LLM request concurrency | `[llm].max_concurrent_requests` | unchanged |
 | Activities catalog + cadence | `data/familiars/<id>/activities.toml` | unchanged |
@@ -161,7 +161,7 @@ typing_backoff_initial_s = 1.0    # first pause when another bot is typing
 typing_backoff_max_s     = 30.0   # ceiling after exponential doubling
 
 [focus]
-idle_wake_seconds      = 120.0    # focused-channel silence before a nudge
+unread_nudge_enabled   = true     # nudge the model when unreads arrive
 nudge_debounce_seconds = 30.0     # rapid arrivals share one nudge
 
 [tools]
@@ -254,22 +254,22 @@ counts via `/diagnostics` (`Focus: text=#… voice=#…`,
 `Unreads: #… (N)`). See
 [Attentional stream](context-pipeline.md#attentional-stream).
 
-Idle-nudge timing lives in `[focus]`:
+Unread-nudge controls live in `[focus]`:
 
 ```toml
 [focus]
-idle_wake_seconds      = 120.0
+unread_nudge_enabled   = true
 nudge_debounce_seconds = 30.0
 ```
 
 | Field | Default | Purpose |
 |---|---|---|
-| `idle_wake_seconds` | `120.0` | Focused-channel silence before traffic in a non-focused channel nudges the model awake. The nudge never moves focus — only the model's `shift_focus` does. |
+| `unread_nudge_enabled` | `true` | When true, an unfocused-channel arrival nudges the model so unreads surface promptly. The nudge never moves focus — only the model's `shift_focus` does. Set false to disable. |
 | `nudge_debounce_seconds` | `30.0` | Rapid arrivals within this window share one nudge; the next unread after the window fires again. |
 
-Lower `idle_wake_seconds` for a more responsive familiar across
-channels; raise it to keep attention pinned during active
-conversations.
+Set `unread_nudge_enabled = false` to keep attention pinned to the
+focused channel and never nudge for backgrounded traffic; when enabled,
+`nudge_debounce_seconds` is the sole throttle.
 
 ## Discord text channel knobs
 

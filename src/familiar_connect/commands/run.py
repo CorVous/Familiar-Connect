@@ -157,6 +157,7 @@ def _default_assembler(
     channel_total_tokens: dict[int, int] | None = None,
     silence_gap_fold_seconds: float = 0.0,
     embedder: Embedder | None = None,
+    focus_manager: FocusManager | None = None,
 ) -> Assembler:
     """Build full layer stack with token-aware per-section caps.
 
@@ -262,6 +263,14 @@ def _default_assembler(
                 ),
                 silence_gap_fold_seconds=silence_gap_fold_seconds,
                 display_tz=familiar.config.display_tz,
+                # Bound over FocusManager's live maps (populated at
+                # on_ready); names a cross-channel window's separators.
+                channel_name_resolver=(
+                    focus_manager.channel_names.get if focus_manager else None
+                ),
+                guild_name_resolver=(
+                    focus_manager.guild_name_for if focus_manager else None
+                ),
             ),
         ],
         budgeter=Budgeter(budget, channel_total_tokens=channel_total_tokens),
@@ -420,7 +429,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         familiar_id=familiar.id,
         store=familiar.history_store,
         subscriptions=familiar.subscriptions,
-        idle_wake_seconds=familiar.config.focus.idle_wake_seconds,
+        unread_nudge_enabled=familiar.config.focus.unread_nudge_enabled,
         nudge_debounce_seconds=familiar.config.focus.nudge_debounce_seconds,
     )
     await focus_manager.initialize()
@@ -453,6 +462,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         budget=familiar.config.budget_for("voice", None),
         channel_total_tokens=channel_total_tokens or None,
         embedder=embedder,
+        focus_manager=focus_manager,
     )
     text_assembler = _default_assembler(
         familiar,
@@ -461,6 +471,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         channel_total_tokens=channel_total_tokens or None,
         silence_gap_fold_seconds=familiar.config.text_silence_gap_fold_seconds,
         embedder=embedder,
+        focus_manager=focus_manager,
     )
     tts_player: TTSPlayer
     if familiar.tts_client is not None:
