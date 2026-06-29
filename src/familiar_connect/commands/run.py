@@ -430,6 +430,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         subscriptions=familiar.subscriptions,
         unread_nudge_enabled=familiar.config.focus.unread_nudge_enabled,
         nudge_debounce_seconds=familiar.config.focus.nudge_debounce_seconds,
+        catch_up_limit=familiar.config.focus.catch_up_limit,
     )
     await focus_manager.initialize()
 

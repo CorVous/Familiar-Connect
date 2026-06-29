@@ -259,22 +259,31 @@ counts via `/diagnostics` (`Focus: text=#… voice=#…`,
 `Unreads: #… (N)`). See
 [Attentional stream](context-pipeline.md#attentional-stream).
 
-Unread-nudge controls live in `[focus]`:
+Unread-nudge and catch-up controls live in `[focus]`:
 
 ```toml
 [focus]
 unread_nudge_enabled   = true
 nudge_debounce_seconds = 30.0
+catch_up_limit         = 20
 ```
 
 | Field | Default | Purpose |
 |---|---|---|
 | `unread_nudge_enabled` | `true` | When true, an unfocused-channel arrival nudges the model so unreads surface promptly. The nudge never moves focus — only the model's `shift_focus` does. Set false to disable. |
 | `nudge_debounce_seconds` | `30.0` | Rapid arrivals within this window share one nudge; the next unread after the window fires again. |
+| `catch_up_limit` | `20` | How many staged turns she actually catches up on when attention lands on a channel — the `shift_focus` preview size and the per-channel cap on activity-return promotion. Staged backlog beyond this is **missed** (dropped from her window and rolling summary), not silently consumed. Direct @-mentions/replies-to-her are always caught regardless of age. |
 
 Set `unread_nudge_enabled = false` to keep attention pinned to the
 focused channel and never nudge for backgrounded traffic; when enabled,
 `nudge_debounce_seconds` is the sole throttle.
+
+`catch_up_limit` makes perception match consumption: she only takes in
+the last *N* staged turns she actually previews on a focus swap (or per
+channel on activity return), so a long backlog she was away for is
+genuinely **missed** rather than folded into her summary as if read.
+Raise it so she catches up on more; lower it so she misses more of what
+piled up while away.
 
 ## Discord text channel knobs
 

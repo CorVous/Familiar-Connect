@@ -72,11 +72,18 @@ class FakeClock:
 class FakeFocus:
     """Minimal focus stand-in: fixed text focus."""
 
-    def __init__(self, channel_id: int | None = _CHANNEL) -> None:
+    def __init__(
+        self, channel_id: int | None = _CHANNEL, *, catch_up_limit: int = 20
+    ) -> None:
         self.channel_id = channel_id
+        self._catch_up_limit = catch_up_limit
 
     def get_focus(self, modality: str) -> int | None:
         return self.channel_id if modality == "text" else None
+
+    @property
+    def catch_up_limit(self) -> int:
+        return self._catch_up_limit
 
 
 class PresenceRecorder:

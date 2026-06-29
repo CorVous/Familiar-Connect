@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from familiar_connect.focus import FocusManager
-from familiar_connect.history.store import FocusPointers
+from familiar_connect.history.store import FocusPointers, Promotion
 from familiar_connect.subscriptions import (
     SubscriptionKind,
     SubscriptionRegistry,
@@ -78,7 +78,9 @@ def _make_store(
         fp = None
     store.get_focus_pointers = AsyncMock(return_value=fp)
     store.set_focus_pointers = AsyncMock(return_value=None)
-    store.promote_staged_turns = AsyncMock(return_value=promote_count)
+    store.promote_staged_turns = AsyncMock(
+        return_value=Promotion(consumed=promote_count, missed=0)
+    )
     return store
 
 
@@ -253,7 +255,7 @@ class TestFocusManagerShiftNow:
         fm = FocusManager(familiar_id="fam", store=store, subscriptions=reg)
         await fm.shift_now(channel_id=5)
         store.promote_staged_turns.assert_awaited_once_with(
-            familiar_id="fam", channel_id=5
+            familiar_id="fam", channel_id=5, catch_up_limit=20
         )
 
     @pytest.mark.asyncio

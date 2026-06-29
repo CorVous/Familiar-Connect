@@ -940,14 +940,21 @@ voice channel at a time, and only the focused channel's traffic flows
 through the normal reply loop. Everything else is **staged** — stored
 but not yet consumed — until the model deliberately shifts focus.
 
-### Turn lifecycle (staged → consumed)
+### Turn lifecycle (staged → consumed / missed)
 
-Two `turns` columns drive it:
+Three `turns` columns drive it:
 
 - `arrived_at` — immutable ingest timestamp.
 - `consumed_at` — `NULL` while staged; set when the turn enters the
   familiar's attention. `recent_cross_channel` returns consumed turns
   only, ordered by `arrived_at, id`.
+- `missed_at` — terminal "she never saw it" state, set at promotion
+  when a staged turn falls **outside** the catch-up window. It keeps
+  `consumed_at` `NULL`, so every `consumed_at IS NOT NULL` read path
+  (visible window + rolling focus-stream summary) excludes it, and
+  `count_staged` / `staged_channels` add `AND missed_at IS NULL` so it
+  no longer counts as pending. This is what lets the familiar genuinely
+  **miss** messages instead of silently absorbing a whole backlog.
 
 `TextResponder` checks `FocusManager.is_focused(channel_id)` per
 inbound message:
@@ -977,16 +984,19 @@ too.
    subscribed channel_id + label) so the model can retry a live target
    instead of stranding attention on a dead channel. Valid targets call
    `shift_now` — modality (text/voice) inferred from the registry. The
-   tool also eagerly fetches the target channel's recent turns (≤20) and
+   tool also eagerly fetches the target channel's recent turns (the `[focus].catch_up_limit` preview, default 20) and
    returns them in the tool result, so the agentic loop feeds the
    channel's content back into the same turn — the model sees the
    channel before it responds rather than narrating one it can't see.
    Voice/empty channels yield an empty list.
 2. `shift_now` applies the move **at tool-call time**, under the
    per-modality lock. For a text shift it calls
-   `promote_staged_turns(channel_id)` — flipping that channel's staged
-   turns to consumed (`consumed_at = now`) so the backlog interleaves
-   into the next cross-channel window — then moves the pointer, persists
+   `promote_staged_turns(channel_id, catch_up_limit)` — flipping only
+   the last `catch_up_limit` staged turns (the preview she actually
+   saw), plus any that @-mention her, to consumed (`consumed_at = now`)
+   so they interleave into the next cross-channel window, while older
+   staged backlog is marked `missed_at` and dropped (**perception
+   matches consumption**) — then moves the pointer, persists
    both pointers via `set_focus_pointers`, and fires `on_shift`
    (presence). Because the move is immediate, any reply later in the
    same turn posts to the **new** channel (the responder sends to the
@@ -1011,8 +1021,8 @@ first voice subscription as defaults (`set_focus_immediately`). The
 `channel_names` map (channel_id → display name) is populated from
 Discord on `on_ready` purely for readable logs and the unread digest.
 
-Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N`
-on a text shift, `[👁️ Focus]` once names are known on ready.
+Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N
+missed=N` on a text shift, `[👁️ Focus]` once names are known on ready.
 
 #### Unread nudge
 

@@ -148,6 +148,9 @@ class FocusLike(Protocol):
 
     def get_focus(self, modality: str) -> int | None: ...
 
+    @property
+    def catch_up_limit(self) -> int: ...
+
 
 class GateAction(Enum):
     """What TextResponder should do with an inbound text event."""
@@ -958,16 +961,19 @@ class ActivityEngine:
                 self._log_return_step_failed("archive_watermark", exc)
             if departure_turn_id is not None:
                 try:
-                    # she reads the screen when she gets back — staged
-                    # turns from the absence join the visible window
-                    promoted = await self._store.promote_staged_turns_since(
+                    # she reads the screen when she gets back — but only
+                    # the last catch_up_limit per channel join the visible
+                    # window; older absence backlog is missed, not consumed
+                    promo = await self._store.promote_staged_turns_since(
                         familiar_id=self._familiar_id,
                         after_turn_id=departure_turn_id,
+                        catch_up_limit=self._focus.catch_up_limit,
                     )
-                    if promoted:
+                    if promo.consumed or promo.missed:
                         _logger.info(
                             f"{ls.tag('Activity', ls.G)} promoted staged "
-                            f"{ls.kv('turns', str(promoted), vc=ls.LW)}"
+                            f"{ls.kv('turns', str(promo.consumed), vc=ls.LW)} "
+                            f"{ls.kv('missed', str(promo.missed), vc=ls.LY)}"
                         )
                 except Exception as exc:  # noqa: BLE001 — best-effort step
                     self._log_return_step_failed("staged_promotion", exc)
