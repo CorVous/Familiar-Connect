@@ -157,9 +157,7 @@ class SubscriptionRegistry:
         )
         lines: list[str] = [header]
         persisted = (
-            sub
-            for key, sub in self._rows.items()
-            if key not in self._ephemeral
+            sub for key, sub in self._rows.items() if key not in self._ephemeral
         )
         for sub in sorted(
             persisted,

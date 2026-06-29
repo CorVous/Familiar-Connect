@@ -1363,7 +1363,7 @@ class TestDiscordDmAllowlist:
         "value",
         [
             'dm_allowlist = "x"',  # non-list
-            "dm_allowlist = [\"a\"]",  # list with non-int element
+            'dm_allowlist = ["a"]',  # list with non-int element
             "dm_allowlist = [true]",  # list with bool (int subclass)
             "dm_allowlist = [1.5]",  # list with float element
         ],
