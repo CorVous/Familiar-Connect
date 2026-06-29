@@ -256,7 +256,9 @@ class TestReflectionWorker:
     async def test_watermark_advances_when_malformed_reply(self) -> None:
         store = HistoryStore(":memory:")
         _seed_turns(store, 25)
-        llm = _ScriptedLLM(replies=["not json", "not json"])
+        # Enough bad replies to outlast the structured-output retries on
+        # the first tick (the malformed reply degrades to an empty batch).
+        llm = _ScriptedLLM(replies=["not json", "not json", "not json", "not json"])
         worker = ReflectionWorker(
             store=AsyncHistoryStore(store),
             llm_client=llm,
@@ -264,11 +266,12 @@ class TestReflectionWorker:
             turns_threshold=20,
         )
         await worker.tick()
+        calls_after_first_tick = len(llm.calls)
         _seed_turns(store, 5)
         await worker.tick()
-        # Second tick should be a noop — watermark advanced even though
-        # the first LLM reply was garbage.
-        assert len(llm.calls) == 1
+        # Second tick is a noop — watermark advanced even though the first
+        # tick's reply was garbage — so it makes no further LLM calls.
+        assert len(llm.calls) == calls_after_first_tick
 
     @pytest.mark.asyncio
     async def test_caps_turn_window_per_tick(self) -> None:

@@ -21,14 +21,34 @@ from typing import TYPE_CHECKING
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.llm import Message
-from familiar_connect.structured_output import coerce_json
+from familiar_connect.structured_output import coerce_positive_int_list
+from familiar_connect.structured_request import (
+    Field,
+    Schema,
+    render_contract,
+    request_structured,
+)
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.history.store import Fact
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.fact_supersede_worker")
+
+# Reply-shape contract for "which priors does this new fact retire" —
+# declared, rendered + parsed via :mod:`familiar_connect.structured_request`
+# (#167) instead of a hand-typed JSON string in the prompt builder.
+_SUPERSEDE_SCHEMA = Schema(
+    fields=(Field("superseded_ids", "[<id>...]"),),
+    root="object",
+    empty_note="Empty list when nothing is retired.",
+    constraints=(
+        "Only include ids from the Prior facts list below — do not invent ids.",
+    ),
+)
 
 
 class FactSupersedeWorker:
@@ -144,11 +164,10 @@ class FactSupersedeWorker:
             seen_priors.update(p.id for p in unique)
 
             prompt = _build_supersede_prompt(f_new=f_new, priors=unique)
-            reply = await self._llm.chat(prompt)
-            ids = _parse_superseded_ids(
-                reply.content_str,
-                valid={p.id for p in unique},
+            result = await request_structured(
+                self._llm, messages=prompt, schema=_SUPERSEDE_SCHEMA
             )
+            ids = _superseded_ids(result.value, valid={p.id for p in unique})
             if not ids:
                 continue
             # Existing-id form: repoint each old row at f_new (mints
@@ -165,17 +184,15 @@ class FactSupersedeWorker:
 
 def _build_supersede_prompt(*, f_new: Fact, priors: list[Fact]) -> list[Message]:
     """LLM prompt: which priors does ``f_new`` replace."""
-    header = (
+    persona = (
         "You decide whether a new fact retires earlier facts about the "
         "same person. A fact is *retired* when the new one contradicts "
         "or directly replaces it (e.g., 'Alice loves hiking' is retired "
         'by "Alice now hates hiking"). A fact is NOT retired just '
         "because it's older or differently worded — facts about "
-        "independent topics coexist.\n\n"
-        'Reply with JSON: ``{"superseded_ids": [<id>, ...]}``. '
-        "Empty list when nothing is retired. Only include ids from the "
-        "Prior facts list below — do not invent ids."
+        "independent topics coexist."
     )
+    header = f"{persona}\n\n{render_contract(_SUPERSEDE_SCHEMA)}"
     lines: list[str] = [
         f"New fact (id={f_new.id}): {f_new.text}",
         "",
@@ -188,29 +205,15 @@ def _build_supersede_prompt(*, f_new: Fact, priors: list[Fact]) -> list[Message]
     ]
 
 
-def _parse_superseded_ids(reply: str, *, valid: set[int]) -> list[int]:
-    """Extract ``superseded_ids`` from LLM reply; filter to *valid*.
+def _superseded_ids(value: Any, *, valid: set[int]) -> list[int]:  # noqa: ANN401 — parsed JSON
+    """Distinct prior ids the model marked superseded, filtered to *valid*.
 
-    Permissive: bad JSON, missing key, non-list value, non-int items
-    all degrade to ``[]`` rather than raising.
+    *value* is the parsed reply object from
+    :func:`familiar_connect.structured_request.request_structured`; a
+    non-object, missing key, or non-list value all degrade to ``[]``.
     """
-    parsed = coerce_json(reply, expect="object").value or {}
-    # coerce_json only extracts; a non-object payload still degrades.
-    if not isinstance(parsed, dict):
+    if not isinstance(value, dict):
         return []
-    raw = parsed.get("superseded_ids")
-    if not isinstance(raw, list):
-        return []
-    out: list[int] = []
-    for item in raw:
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, int):
-            candidate = item
-        elif isinstance(item, str) and item.strip().lstrip("-").isdigit():
-            candidate = int(item.strip())
-        else:
-            continue
-        if candidate in valid:
-            out.append(candidate)
-    return out
+    return [
+        i for i in coerce_positive_int_list(value.get("superseded_ids")) if i in valid
+    ]

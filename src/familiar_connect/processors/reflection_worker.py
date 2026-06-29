@@ -35,10 +35,16 @@ from typing import TYPE_CHECKING
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
 from familiar_connect.llm import Message
-from familiar_connect.structured_output import coerce_json
+from familiar_connect.structured_request import (
+    Field,
+    Schema,
+    render_contract,
+    request_structured,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Any
 
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.history.store import Fact, HistoryTurn
@@ -141,13 +147,14 @@ class ReflectionWorker:
             familiar_id=self._familiar_id, limit=self._recent_facts_limit
         )
 
+        schema = _reflection_schema(self._max_per_tick)
         prompt = _build_reflection_prompt(
             new_turns=new_turns,
             recent_facts=recent_facts,
-            max_reflections=self._max_per_tick,
+            schema=schema,
         )
-        reply = await self._llm.chat(prompt)
-        items = _parse_reflections(reply.content_str)
+        result = await request_structured(self._llm, messages=prompt, schema=schema)
+        items = _normalize_reflection_items(result.value)
 
         valid_turn_ids = {t.id for t in new_turns}
         valid_fact_ids = {f.id for f in recent_facts}
@@ -243,28 +250,53 @@ def _dominant_channel(turns: Iterable[HistoryTurn]) -> int | None:
 # ---------------------------------------------------------------------------
 
 
+def _reflection_schema(max_reflections: int) -> Schema:
+    """Reply-shape contract for a reflection batch, capped at *max_reflections*.
+
+    Per-call (the cap is dynamic) but declared, not hand-typed — rendered
+    + parsed through :mod:`familiar_connect.structured_request` (#167).
+    """
+    return Schema(
+        fields=(
+            Field("text", '"<one or two sentences>"', desc="one or two sentences"),
+            Field(
+                "cited_turn_ids",
+                "[<id>...]",
+                desc=(
+                    "turn ids the reflection draws from; pick the most "
+                    "representative, not all of them"
+                ),
+            ),
+            Field(
+                "cited_fact_ids",
+                "[<id>...]",
+                desc="fact ids if the reflection leans on stored facts; may be empty",
+                required=False,
+            ),
+        ),
+        root="array",
+        constraints=(
+            f"Reply with at most {max_reflections} items.",
+            "Cite at least one turn id or fact id per reflection.",
+        ),
+        empty_note="If nothing of substance is happening, reply with [].",
+    )
+
+
 def _build_reflection_prompt(
     *,
     new_turns: Iterable[HistoryTurn],
     recent_facts: Iterable[Fact],
-    max_reflections: int,
+    schema: Schema,
 ) -> list[Message]:
-    header = (
+    persona = (
         "You write short, high-level reflections over recent chat "
         "history — patterns, recurring tensions, open questions, "
         "themes the participants keep circling back to. Skip blow-by-"
         "blow recaps; that's what summaries are for. Each reflection "
-        "is one or two sentences.\n\n"
-        f"Reply with a JSON array of at most {max_reflections} items. "
-        "Each item has:\n"
-        "- ``text`` (one or two sentences)\n"
-        "- ``cited_turn_ids`` (list of turn ids the reflection draws "
-        "from; pick the most representative, not all of them)\n"
-        "- ``cited_fact_ids`` (list of fact ids if the reflection "
-        "leans on stored facts; may be empty)\n\n"
-        "Cite at least one turn id or fact id per reflection. If "
-        "nothing of substance is happening, reply with []."
+        "is one or two sentences."
     )
+    header = f"{persona}\n\n{render_contract(schema)}"
     lines: list[str] = ["Recent turns (id prefixed):"]
     for t in new_turns:
         who = t.author.display_name if t.author is not None else t.role
@@ -279,10 +311,13 @@ def _build_reflection_prompt(
     ]
 
 
-def _parse_reflections(reply: str) -> list[dict[str, object]]:
-    """Permissive JSON-array parser; bad input → ``[]``."""
-    parsed = coerce_json(reply, expect="array").value or []
-    # coerce_json only extracts; a non-array payload still degrades.
+def _normalize_reflection_items(parsed: Any) -> list[dict[str, object]]:  # noqa: ANN401 — parsed JSON
+    """Normalize parsed reflection items; bad / non-array input → ``[]``.
+
+    *parsed* is the value from
+    :func:`familiar_connect.structured_request.request_structured`
+    (``None`` on a fumbled reply, the JSON array otherwise).
+    """
     if not isinstance(parsed, list):
         return []
     out: list[dict[str, object]] = []
