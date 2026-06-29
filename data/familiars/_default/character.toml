@@ -502,6 +502,9 @@ tool_calling   = true
 # initial doubles up to max — so two bots don't pingpong on each
 # other's typing indicators.
 
+[discord]
+# dm_allowlist = [123456789012345678]  # user IDs whose DMs the familiar will engage
+
 [discord.text]
 respond_to_typing        = true
 typing_backoff_initial_s = 1.0

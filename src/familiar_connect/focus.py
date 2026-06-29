@@ -21,6 +21,10 @@ _logger = logging.getLogger(__name__)
 # Debounce window: rapid arrivals within this window share one nudge
 _DEFAULT_NUDGE_DEBOUNCE_S = 30.0
 
+# Server label for DM channels admitted via the allowlist; this module
+# owns ``guild_names``/``guild_name_for``, so the constant lives here.
+PRIVATE_MESSAGE_GUILD_NAME = "Private Message"
+
 
 class FocusManager:
     """Per-familiar attentional focus controller.

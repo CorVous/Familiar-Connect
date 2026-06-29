@@ -42,6 +42,7 @@ class SubscriptionRegistry:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._rows: dict[tuple[int, SubscriptionKind], Subscription] = {}
+        self._ephemeral: set[tuple[int, SubscriptionKind]] = set()
         self._load()
 
     # ------------------------------------------------------------------
@@ -88,19 +89,30 @@ class SubscriptionRegistry:
         channel_id: int,
         kind: SubscriptionKind,
         guild_id: int | None,
+        persist: bool = True,
     ) -> Subscription:
         """Add or replace ``(channel_id, kind)``; idempotent.
 
-        Re-add updates ``guild_id``.
+        Re-add updates ``guild_id``. With ``persist=False`` the row is
+        registered in memory only and never written to the sidecar — even
+        when a later persisted mutation rewrites the file. A subsequent
+        ``persist=True`` add of the same key promotes it to persisted.
         """
+        key = (channel_id, kind)
         sub = Subscription(channel_id=channel_id, kind=kind, guild_id=guild_id)
-        self._rows[channel_id, kind] = sub
-        self._save()
+        self._rows[key] = sub
+        if persist:
+            self._ephemeral.discard(key)
+            self._save()
+        else:
+            self._ephemeral.add(key)
         return sub
 
     def remove(self, *, channel_id: int, kind: SubscriptionKind) -> None:
         """Remove ``(channel_id, kind)``; no-op if absent."""
-        if self._rows.pop((channel_id, kind), None) is not None:
+        key = (channel_id, kind)
+        if self._rows.pop(key, None) is not None:
+            self._ephemeral.discard(key)
             self._save()
 
     # ------------------------------------------------------------------
@@ -144,8 +156,11 @@ class SubscriptionRegistry:
             "safe to hand-edit while the bot is stopped.\n"
         )
         lines: list[str] = [header]
+        persisted = (
+            sub for key, sub in self._rows.items() if key not in self._ephemeral
+        )
         for sub in sorted(
-            self._rows.values(),
+            persisted,
             key=lambda s: (s.channel_id, s.kind.value),
         ):
             row_lines = [

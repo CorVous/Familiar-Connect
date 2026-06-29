@@ -29,6 +29,7 @@ from familiar_connect.bot import (
 from familiar_connect.bus.bus import InProcessEventBus
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
+from familiar_connect.subscriptions import SubscriptionKind, SubscriptionRegistry
 
 from .conftest import build_fake_llm_clients
 
@@ -241,3 +242,203 @@ class TestOnReadyPresenceResync:
         calls = bot.change_presence.await_args_list
         assert len(calls) == 1
         assert calls[0].kwargs["status"] is discord.Status.online
+
+
+# Verbatim first-DM disclaimer the reviewer (PR #176) requested. The test
+# pins the exact wording here; the bot's constant must match it byte-for-byte.
+_DM_DISCLAIMER = (
+    "⚠ This is a bot, and content may not be isolated solely to this channel- "
+    "treat messages in this conversation as if they were public."
+)
+
+
+def _dm_message(
+    *, author_id: int, channel_id: int, guild: object | None, bot: bool = False
+) -> SimpleNamespace:
+    """Fake ``discord.Message`` carrying only the fields ``on_message`` reads."""
+    return SimpleNamespace(
+        author=SimpleNamespace(id=author_id, bot=bot, name="x", display_name="X"),
+        channel=SimpleNamespace(id=channel_id, send=AsyncMock()),
+        guild=guild,
+        content="hi",
+        mentions=[],
+        attachments=[],
+        embeds=[],
+        reference=None,
+        id=42,
+    )
+
+
+class TestOnMessageDmAllowlist:
+    """DM allowlist gate in ``on_message``.
+
+    Allowlisted DMs become ephemeral text subscriptions (never written
+    to the sidecar) so the normal focus/respond machinery handles them;
+    guild channels keep their existing subscription gate.
+    """
+
+    @staticmethod
+    def _setup(
+        tmp_path: Path, *, allowlist: tuple[int, ...] = (123,)
+    ) -> tuple[
+        dict[str, Callable[..., Coroutine[None, None, None]]],
+        Familiar,
+        MagicMock,
+        MagicMock,
+    ]:
+        events: dict[str, Callable[..., Coroutine[None, None, None]]] = {}
+        bot = MagicMock(name="bot")
+        bot.event.side_effect = lambda coro: events.setdefault(coro.__name__, coro)
+        text_source = MagicMock(name="text_source")
+        text_source.publish_text = AsyncMock()
+        fm = MagicMock(name="focus_manager")
+        fm.guild_names = {}
+        fm.get_focus.return_value = None
+        handle = BotHandle(bot=bot, send_text=AsyncMock(), focus_manager=fm)
+        familiar = cast(
+            "Familiar",
+            SimpleNamespace(
+                bot_user_id=99,
+                subscriptions=SubscriptionRegistry(tmp_path / "subs.toml"),
+                config=SimpleNamespace(dm_allowlist=allowlist),
+            ),
+        )
+        _register_events(bot, familiar, text_source, handle)
+        return events, familiar, text_source, fm
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_dm_registers_ephemeral_and_ingests(
+        self, tmp_path: Path
+    ) -> None:
+        events, familiar, text_source, fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_awaited_once()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is not None
+        )
+        assert fm.guild_names[555] == "Private Message"
+        fm.set_focus_immediately.assert_called_once_with(555, "text")
+        # ephemeral row must never touch the sidecar
+        assert not (tmp_path / "subs.toml").exists()
+
+    @pytest.mark.asyncio
+    async def test_non_allowlisted_dm_ignored(self, tmp_path: Path) -> None:
+        events, familiar, text_source, fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=999, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is None
+        )
+        assert fm.guild_names == {}
+
+    @pytest.mark.asyncio
+    async def test_bot_authored_dm_ignored_even_if_allowlisted(
+        self, tmp_path: Path
+    ) -> None:
+        # author.bot guard precedes the allowlist branch — a bot whose id
+        # collides with the allowlist must never be admitted (no DM loops).
+        events, familiar, text_source, fm = self._setup(tmp_path, allowlist=(123,))
+        msg = _dm_message(author_id=123, channel_id=555, guild=None, bot=True)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is None
+        )
+        assert fm.guild_names == {}
+
+    @pytest.mark.asyncio
+    async def test_own_dm_echo_ignored_even_if_allowlisted(
+        self, tmp_path: Path
+    ) -> None:
+        # bot-self guard (author.id == bot_user_id, which is 99) precedes the
+        # allowlist branch — the familiar must not answer its own DM echo.
+        events, familiar, text_source, fm = self._setup(tmp_path, allowlist=(99,))
+        msg = _dm_message(author_id=99, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is None
+        )
+        assert fm.guild_names == {}
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_dm_keeps_existing_focus(self, tmp_path: Path) -> None:
+        events, _familiar, text_source, fm = self._setup(tmp_path)
+        fm.get_focus.return_value = 777
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        fm.set_focus_immediately.assert_not_called()
+        text_source.publish_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_subscribed_guild_channel_ingests(self, tmp_path: Path) -> None:
+        events, familiar, text_source, _fm = self._setup(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=888, kind=SubscriptionKind.text, guild_id=7
+        )
+        msg = _dm_message(author_id=123, channel_id=888, guild=SimpleNamespace(id=7))
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unsubscribed_guild_channel_ignored(self, tmp_path: Path) -> None:
+        events, _familiar, text_source, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=888, guild=SimpleNamespace(id=7))
+        await events["on_message"](cast("discord.Message", msg))
+        text_source.publish_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_first_allowlisted_dm_sends_disclaimer_once(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_awaited_once_with(_DM_DISCLAIMER)
+
+    @pytest.mark.asyncio
+    async def test_second_dm_same_user_does_not_resend_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        first = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", first))
+        first.channel.send.assert_awaited_once_with(_DM_DISCLAIMER)
+        second = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", second))
+        second.channel.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_allowlisted_dm_never_sends_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=999, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bot_authored_dm_does_not_send_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        # bot-author guard precedes admission — a bot whose id collides with
+        # the allowlist must never trigger the disclaimer (no DM loop).
+        events, _familiar, _ts, _fm = self._setup(tmp_path, allowlist=(123,))
+        msg = _dm_message(author_id=123, channel_id=555, guild=None, bot=True)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_own_echo_dm_does_not_send_disclaimer(self, tmp_path: Path) -> None:
+        # bot-self guard precedes admission — the familiar's own disclaimer
+        # echo (author.id == bot_user_id) must not re-trigger a disclaimer.
+        events, _familiar, _ts, _fm = self._setup(tmp_path, allowlist=(99,))
+        msg = _dm_message(author_id=99, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_not_awaited()

@@ -17,6 +17,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+from familiar_connect.focus import PRIVATE_MESSAGE_GUILD_NAME
+
 # Per-viewer-mode operating directive in the trailing reminder.
 # Intentionally duplicates strings ``OperatingModeLayer`` is
 # configured with in ``commands/run.py``: head copy primes system
@@ -136,7 +138,9 @@ def build_final_reminder(
             # guild_name (pre-resolved by caller) names which server the
             # conversation is in — the familiar can run in several at once.
             where = _ch(focus_channel_id)
-            if guild_name:
+            if guild_name == PRIVATE_MESSAGE_GUILD_NAME:
+                where += " in a private message"
+            elif guild_name:
                 where += f' in the "{guild_name}" server'
             focus_part = f"Your attention is currently on {where}."
         else:

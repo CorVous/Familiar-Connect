@@ -30,6 +30,7 @@ import discord
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.collector import get_span_collector
 from familiar_connect.diagnostics.report import render_summary_table
+from familiar_connect.focus import PRIVATE_MESSAGE_GUILD_NAME
 from familiar_connect.identity import Author
 from familiar_connect.sources import DiscordTextSource
 from familiar_connect.sources.discord_embed_text import format_embeds
@@ -69,6 +70,13 @@ if TYPE_CHECKING:
     ResolveMember = Callable[[int, int], "Author | None"]
 
 _logger = logging.getLogger(__name__)
+
+# One-time warning sent to the DM channel on a user's first admitted DM.
+# Verbatim per reviewer request (PR #176) — do not reword.
+DM_BOT_DISCLAIMER = (
+    "⚠ This is a bot, and content may not be isolated solely to this channel- "
+    "treat messages in this conversation as if they were public."
+)
 
 
 async def _defer_interaction(ctx: discord.ApplicationContext) -> bool:
@@ -1142,12 +1150,43 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _register_dm_channel(
+    handle: BotHandle,
+    familiar: Familiar,
+    channel_id: int,
+) -> None:
+    """Register a DM channel as an ephemeral text subscription.
+
+    Idempotent — safe to call on every DM. The row is in-memory only
+    (``persist=False``) and never written to the sidecar. The focus seed
+    mirrors the startup default in ``commands/run.py`` so a DM-only
+    familiar doesn't stage its first message forever; it seeds only when
+    no text focus exists and never steals an existing one.
+    """
+    familiar.subscriptions.add(
+        channel_id=channel_id,
+        kind=SubscriptionKind.text,
+        guild_id=None,
+        persist=False,
+    )
+    fm = handle.focus_manager
+    if fm is not None:
+        fm.guild_names[channel_id] = PRIVATE_MESSAGE_GUILD_NAME
+        if fm.get_focus("text") is None:
+            fm.set_focus_immediately(channel_id, "text")
+
+
 def _register_events(
     bot: discord.Bot,
     familiar: Familiar,
     text_source: DiscordTextSource,
     handle: BotHandle,
 ) -> None:
+    # Users already shown the first-DM disclaimer this process. In-memory
+    # only (mirrors #176's ephemeral DM subscriptions) — a restart may
+    # re-send it; we deliberately don't persist.
+    disclaimed_dm_users: set[int] = set()
+
     @bot.event
     async def on_ready() -> None:
         user = bot.user
@@ -1197,7 +1236,20 @@ def _register_events(
             return
         if message.author.bot:
             return
-        if (
+        if message.guild is None:
+            # DM: admit only allowlisted users, then register the channel
+            # as an ephemeral text subscription so the normal machinery
+            # treats it as any other subscribed channel.
+            if message.author.id not in familiar.config.dm_allowlist:
+                return
+            # First admitted DM from this user: warn that DMs aren't
+            # private. Guarded by the bot-author / own-echo returns above,
+            # so the disclaimer can never re-trigger itself.
+            if message.author.id not in disclaimed_dm_users:
+                disclaimed_dm_users.add(message.author.id)
+                await message.channel.send(DM_BOT_DISCLAIMER)
+            _register_dm_channel(handle, familiar, message.channel.id)
+        elif (
             familiar.subscriptions.get(
                 channel_id=message.channel.id,
                 kind=SubscriptionKind.text,

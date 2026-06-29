@@ -503,6 +503,9 @@ class CharacterConfig:
     # Applied in :meth:`budget_for` when tier's LLM slot uses that model.
     budget_curves: dict[str, ModelBudgetCurve] = field(default_factory=dict)
     discord_text: DiscordTextConfig = field(default_factory=DiscordTextConfig)
+    # Discord user IDs whose direct messages the familiar engages with.
+    # empty = engage no DMs. lives under ``[discord]`` in character.toml.
+    dm_allowlist: tuple[int, ...] = ()
     # Free-text block appended to the *trailing* reminder (after
     # recent history), per familiar. empty = omitted. default text
     # lives in ``_default/character.toml`` ``[prompt]`` — no Python
@@ -748,6 +751,22 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         raise ConfigError(msg)
     discord_text = _parse_discord_text_config(discord_text_raw)
 
+    dm_allowlist_raw = discord_raw.get("dm_allowlist", [])
+    if not isinstance(dm_allowlist_raw, list):
+        msg = (
+            "[discord].dm_allowlist must be a list of integer user IDs, "
+            f"got {type(dm_allowlist_raw).__name__}"
+        )
+        raise ConfigError(msg)
+    for uid in dm_allowlist_raw:
+        if isinstance(uid, bool) or not isinstance(uid, int):
+            msg = (
+                "[discord].dm_allowlist entries must be integer user IDs, "
+                f"got {type(uid).__name__}"
+            )
+            raise ConfigError(msg)
+    dm_allowlist = tuple(dm_allowlist_raw)
+
     prompt_raw = data.get("prompt", {})
     if not isinstance(prompt_raw, dict):
         msg = f"[prompt] must be a table, got {type(prompt_raw).__name__}"
@@ -795,6 +814,7 @@ def _parse_character_config(data: dict) -> CharacterConfig:
         budgets=budgets,
         budget_curves=budget_curves,
         discord_text=discord_text,
+        dm_allowlist=dm_allowlist,
         **prompt_fields,
         memory_retrieval=memory_retrieval,
         memory_providers=memory_providers,

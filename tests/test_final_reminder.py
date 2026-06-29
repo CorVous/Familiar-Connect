@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from familiar_connect.context.final_reminder import build_final_reminder
+from familiar_connect.focus import PRIVATE_MESSAGE_GUILD_NAME
 
 
 def _at(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
@@ -230,3 +231,41 @@ class TestBuildFinalReminderGuildName:
             ln for ln in out.splitlines() if "attention is currently on" in ln
         )
         assert 'in the "My Server" server.' in focus_line
+
+
+class TestBuildFinalReminderPrivateMessage:
+    """DM channels read naturally instead of '"Private Message" server'."""
+
+    def test_dm_focus_line_reads_as_private_message(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "dm"},
+            guild_name=PRIVATE_MESSAGE_GUILD_NAME,
+        )
+        assert "in a private message" in out
+        # old awkward phrasing must not leak through
+        assert '"Private Message" server' not in out
+
+    def test_guild_focus_line_unchanged(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+            guild_name="Aetheria",
+        )
+        assert 'in the "Aetheria" server' in out
+
+    def test_no_guild_focus_line_has_neither_clause(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            focus_channel_id=123,
+            channel_names={123: "general"},
+            guild_name=None,
+        )
+        assert "Your attention is currently on #general." in out
+        assert " server" not in out
+        assert "private message" not in out
