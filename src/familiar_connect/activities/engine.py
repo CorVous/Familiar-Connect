@@ -102,6 +102,11 @@ _VISIBLE_TAIL = 10  # pings within last-few visible turns skip excerpts
 # the fixed wake at window END would make an earlier call a huge absence
 _EARLY_BED_MINUTES = 60
 
+# scheduled-activity roll clamp: a rolled return may overrun the entry's
+# active_hours end by at most this much before the roll's high bound is
+# trimmed; a start is refused outright when even the low bound won't fit
+_SCHEDULE_OVERFLOW_GRACE_MINUTES = 15
+
 # model-facing idle-nudge wake content. persists as a synthetic user
 # turn (AlarmWaker shape) so the model sees it in recent history; the
 # model decides via start_activity — the nudge never starts anything
@@ -357,6 +362,9 @@ class ActivityEngine:
         if activity_type is None:
             valid = ", ".join(t.id for t in self._config.catalog)
             return {"error": f"unknown activity type {type_id!r}; valid: {valid}"}
+        unavailable = self._schedule_violation(activity_type)
+        if unavailable is not None:
+            return {"error": unavailable}
         window = self._window_for(activity_type)
         if window is not None:
             # window-scheduled: alarm-style return at window end
@@ -377,7 +385,29 @@ class ActivityEngine:
             # parser guarantees duration unless window; defensive
             return {"error": f"activity type {type_id!r} has no duration"}
         else:
+            now = self._now()
             lo, hi = activity_type.duration_minutes
+            hours = activity_type.active_hours
+            if hours is not None:
+                # scheduled entry: the gate above guaranteed now is inside
+                # the occurrence, so _window_occurrence returns the window
+                # enclosing it (wrap-aware). Clamp the roll so that, measured
+                # from now, the return overruns the window end by at most the
+                # grace; refuse when even the low bound won't fit. Note the
+                # bound is taken at defer-now but the roll is applied at
+                # end_turn-now (a fresh now), so the real return can overrun
+                # by grace + the (seconds-scale) deferral gap.
+                _, win_end = self._window_occurrence(now, hours)
+                grace = timedelta(minutes=_SCHEDULE_OVERFLOW_GRACE_MINUTES)
+                room = int(((win_end + grace) - now).total_seconds() // 60)
+                if room < lo:
+                    return {
+                        "error": (
+                            f"not enough time before the {activity_type.label} "
+                            f"window closes — head out earlier"
+                        )
+                    }
+                hi = min(hi, room)
             duration = self._rng.randint(lo, hi)
         self._staged = _StagedStart(
             activity_type=activity_type,
@@ -609,7 +639,14 @@ class ActivityEngine:
         hours = self._config.active_hours
         if hours is None:
             return True
-        start, end = hours
+        return self._local_time_in_window(now, hours)
+
+    def _local_time_in_window(self, now: datetime, window: tuple[time, time]) -> bool:
+        """Is *now*'s display-tz clock time within *window* (wrap-aware).
+
+        ``start > end`` means the window wraps midnight (e.g. 22:00-02:00).
+        """
+        start, end = window
         local = now.astimezone(self._tz).time()
         if start < end:
             return start <= local < end
@@ -1237,6 +1274,30 @@ class ActivityEngine:
                 return entry
         return None
 
+    def _schedule_violation(self, activity_type: ActivityType) -> str | None:
+        """Reason *activity_type* is unavailable now, or None when it's open.
+
+        Entries carrying neither ``active_days`` nor ``active_hours`` have
+        no schedule and are always available. Day/hour math is in the
+        display tz, honoring midnight-wrapped hour windows.
+        """
+        days = activity_type.active_days
+        hours = activity_type.active_hours
+        if days is None and hours is None:
+            return None
+        now = self._now()
+        # KNOWN LIMITATION: the weekday is taken from the calendar day of
+        # *now*, while a midnight-wrapping hours window can match the tail
+        # belonging to the prior evening (e.g. 22:00-02:00 — the 00:30
+        # slot's "day" is tomorrow). Correct for the only current use
+        # (non-wrapping work-hours schedules); revisit before shipping a
+        # per-activity schedule whose hours wrap midnight.
+        in_days = days is None or now.astimezone(self._tz).weekday() in days
+        in_hours = hours is None or self._local_time_in_window(now, hours)
+        if in_days and in_hours:
+            return None
+        return _schedule_message(activity_type)
+
     @staticmethod
     def _away_status(activity_type: ActivityType | None) -> str:
         """``dnd`` while unreachable, ``idle`` otherwise; unknown ⇒ dnd."""
@@ -1297,6 +1358,23 @@ async def _cancel_task(task: asyncio.Task[None] | None) -> None:
 def _author_label(author: Author | None) -> str:
     """:attr:`Author.label`; "someone" only when author missing."""
     return author.label if author is not None else "someone"
+
+
+# weekday abbreviations indexed by datetime.weekday() (Mon=0 .. Sun=6)
+_WEEKDAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _schedule_message(activity_type: ActivityType) -> str:
+    """Render an entry's schedule as a model-facing unavailability message."""
+    parts: list[str] = []
+    days = activity_type.active_days
+    if days is not None:
+        parts.append(" ".join(_WEEKDAY_ABBR[d] for d in sorted(days)))
+    hours = activity_type.active_hours
+    if hours is not None:
+        start, end = hours
+        parts.append(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}")
+    return f"{activity_type.label} is only available {', '.join(parts)}"
 
 
 def _daypart(hour: int) -> str:

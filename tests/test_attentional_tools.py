@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -622,7 +622,7 @@ class _FakeActivityEngine:
     """Canned catalog + defer_start recorder; satisfies StartActivityEngine."""
 
     def __init__(self, result: dict | None = None) -> None:
-        self.catalog = (
+        self.catalog: tuple[ActivityType, ...] = (
             ActivityType(
                 id="creek_walk",
                 label="a creek walk",
@@ -749,6 +749,91 @@ class TestStartActivityTool:
         # for an in-character goodbye
         tool = build_start_activity_tool(_FakeActivityEngine())
         assert "in-character goodbye" in tool.description
+
+    def test_scheduled_entry_appends_availability_window(self) -> None:
+        # capability hint: a scheduled entry advertises WHEN it's choosable;
+        # an unscheduled entry stays clean
+        engine = _FakeActivityEngine()
+        engine.catalog = (
+            ActivityType(
+                id="shrine_rounds",
+                label="tending the shrines",
+                duration_minutes=(20, 40),
+                seed="x",
+                active_days=frozenset({0, 1, 2, 3, 4}),
+                active_hours=(time(9, 0), time(17, 0)),
+            ),
+            ActivityType(
+                id="creek_walk",
+                label="a creek walk",
+                duration_minutes=(20, 40),
+                seed="y",
+            ),
+        )
+        tool = build_start_activity_tool(engine)
+        desc = tool.parameters["properties"]["activity"]["description"]
+        segments = desc.split("; ")
+        shrine_seg = next(s for s in segments if "shrine_rounds" in s)
+        creek_seg = next(s for s in segments if "creek_walk" in s)
+
+        # 1. scheduled entry carries its window: Mon=0-indexed days + hours.
+        # Pin order (not just membership) so a transposition in _WEEKDAY_ABBR
+        # or a dropped sorted() is caught.
+        assert "Mon Tue Wed Thu Fri" in shrine_seg
+        assert "Sun" not in shrine_seg  # Mon-Fri set guards Mon=0 rendering
+        assert "09:00-17:00" in shrine_seg
+
+        # 2. unscheduled entry carries no schedule clause
+        assert "[" not in creek_seg
+        assert ":" not in creek_seg
+
+        # 3. regression: enum lists every id, base 'id' = label text intact
+        assert tool.parameters["properties"]["activity"]["enum"] == [
+            "shrine_rounds",
+            "creek_walk",
+        ]
+        assert "'shrine_rounds' = tending the shrines" in desc
+        assert "'creek_walk' = a creek walk" in desc
+
+    def test_active_days_only_renders_days_without_hours(self) -> None:
+        # all-day-but-weekdays config: days clause, no time clause.
+        # Guards against gating the whole clause on BOTH fields being set.
+        engine = _FakeActivityEngine()
+        engine.catalog = (
+            ActivityType(
+                id="market_day",
+                label="the saturday market",
+                duration_minutes=(20, 40),
+                seed="x",
+                active_days=frozenset({5}),
+            ),
+        )
+        desc = build_start_activity_tool(engine).parameters["properties"]["activity"][
+            "description"
+        ]
+        # closing bracket right after the day means no hours were appended
+        assert "[Sat]" in desc
+
+    def test_active_hours_only_renders_hours_without_days(self) -> None:
+        # every-day-but-certain-hours config: time clause, no day tokens.
+        # Guards against gating the whole clause on BOTH fields being set.
+        engine = _FakeActivityEngine()
+        engine.catalog = (
+            ActivityType(
+                id="quiet_hours",
+                label="winding down",
+                duration_minutes=(20, 40),
+                seed="x",
+                active_hours=(time(9, 0), time(17, 0)),
+            ),
+        )
+        desc = build_start_activity_tool(engine).parameters["properties"]["activity"][
+            "description"
+        ]
+        # opening bracket right before the time means no day prefix
+        assert "[09:00-17:00]" in desc
+        for abbr in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
+            assert abbr not in desc
 
 
 # ---------------------------------------------------------------------------

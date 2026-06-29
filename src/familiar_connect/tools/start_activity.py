@@ -39,6 +39,29 @@ class StartActivityEngine(Protocol):
     def defer_start(self, type_id: str, note: str | None = None) -> dict[str, Any]: ...
 
 
+_WEEKDAY_ABBR: tuple[str, ...] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+"""Weekday index (Mon=0 .. Sun=6) → abbreviation for availability hints."""
+
+
+def _entry_description(activity: ActivityType) -> str:
+    """``'id' = label`` plus a ``[days hours]`` clause when scheduled.
+
+    Capability hint: tells the model WHEN a scheduled entry is choosable.
+    Rendered locally (distinct audience from the engine's rejection
+    message); the schedule data itself is single-sourced in the config.
+    """
+    base = f"'{activity.id}' = {activity.label}"
+    parts: list[str] = []
+    if activity.active_days is not None:
+        parts.append(" ".join(_WEEKDAY_ABBR[d] for d in sorted(activity.active_days)))
+    if activity.active_hours is not None:
+        start, end = activity.active_hours
+        parts.append(f"{start:%H:%M}-{end:%H:%M}")
+    if not parts:
+        return base
+    return f"{base} [{' '.join(parts)}]"
+
+
 _DESCRIPTION = (
     "Head out and do something away from the screen for a while. Use "
     "when the current scene has wrapped up or the channel has gone "
@@ -94,7 +117,7 @@ def build_start_activity_tool(engine: StartActivityEngine) -> Tool:
                     "enum": [t.id for t in catalog],
                     "description": (
                         "What to go do: "
-                        + "; ".join(f"'{t.id}' = {t.label}" for t in catalog)
+                        + "; ".join(_entry_description(t) for t in catalog)
                         + "."
                     ),
                 },
