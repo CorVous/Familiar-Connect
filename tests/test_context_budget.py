@@ -83,11 +83,10 @@ class TestTierBudgetDerivedTotal:
             rag_tokens=200,
             dossier_tokens=200,
             summary_tokens=100,
-            cross_channel_tokens=100,
             reflection_tokens=100,
             lorebook_tokens=100,
         )
-        assert b.total_tokens == 1000 + 200 + 200 + 100 + 100 + 100 + 100
+        assert b.total_tokens == 1000 + 200 + 200 + 100 + 100 + 100
 
     def test_total_excludes_count_caps(self) -> None:
         """Count caps (max_*) are not token figures; they don't feed total."""
@@ -151,7 +150,6 @@ class TestTierBudgetApplyCurve:
             rag_tokens=400,
             dossier_tokens=400,
             summary_tokens=200,
-            cross_channel_tokens=200,
             reflection_tokens=200,
             lorebook_tokens=200,
         )
@@ -160,7 +158,6 @@ class TestTierBudgetApplyCurve:
             rag_tokens=1.5,
             dossier_tokens=1.5,
             summary_tokens=1.5,
-            cross_channel_tokens=1.5,
             reflection_tokens=1.5,
             lorebook_tokens=1.5,
         )
@@ -169,7 +166,7 @@ class TestTierBudgetApplyCurve:
         assert scaled.rag_tokens == 600
         assert scaled.dossier_tokens == 600
         # Derived total reflects the scaled constituents.
-        assert scaled.total_tokens == 4000 + 600 + 600 + 300 + 300 + 300 + 300
+        assert scaled.total_tokens == 4000 + 600 + 600 + 300 + 300 + 300
 
     def test_scale_count_fields(self) -> None:
         b = TierBudget(max_rag_turns=5, max_rag_facts=3, max_reflections=3)

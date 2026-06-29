@@ -136,15 +136,6 @@ class OtherChannelInfo:
 
 
 @dataclass(frozen=True)
-class CrossContextEntry:
-    """Cached cross-context summary for one source channel."""
-
-    source_last_id: int
-    summary_text: str
-    created_at: datetime
-
-
-@dataclass(frozen=True)
 class WatermarkEntry:
     """Last turn id written to long-term memory by the memory writer."""
 
@@ -398,16 +389,6 @@ CREATE TABLE IF NOT EXISTS summaries (
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
     PRIMARY KEY (familiar_id, channel_id)
-);
-
-CREATE TABLE IF NOT EXISTS cross_context_summaries (
-    familiar_id        TEXT    NOT NULL,
-    viewer_mode        TEXT    NOT NULL,
-    source_channel_id  INTEGER NOT NULL,
-    source_last_id     INTEGER NOT NULL,
-    summary_text       TEXT    NOT NULL,
-    created_at         TEXT    NOT NULL,
-    PRIMARY KEY (familiar_id, viewer_mode, source_channel_id)
 );
 
 CREATE TABLE IF NOT EXISTS memory_writer_watermark (
@@ -1788,66 +1769,6 @@ class HistoryStore:
             (familiar_id,),
         ).fetchall()
         return {int(r["id"]) for r in rows}
-
-    def get_cross_context(
-        self,
-        *,
-        familiar_id: str,
-        viewer_mode: str,
-        source_channel_id: int,
-    ) -> CrossContextEntry | None:
-        """Fetch cached cross-context summary, or ``None``."""
-        row = self._conn.execute(
-            """
-            SELECT source_last_id, summary_text, created_at
-              FROM cross_context_summaries
-             WHERE familiar_id = ?
-               AND viewer_mode = ?
-               AND source_channel_id = ?
-            """,
-            (familiar_id, viewer_mode, source_channel_id),
-        ).fetchone()
-        if row is None:
-            return None
-        return CrossContextEntry(
-            source_last_id=int(row["source_last_id"]),
-            summary_text=str(row["summary_text"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-
-    def put_cross_context(
-        self,
-        *,
-        familiar_id: str,
-        viewer_mode: str,
-        source_channel_id: int,
-        source_last_id: int,
-        summary_text: str,
-    ) -> None:
-        """Insert or replace a cross-context summary."""
-        timestamp = datetime.now(tz=UTC).isoformat()
-        self._conn.execute(
-            """
-            INSERT INTO cross_context_summaries
-                (familiar_id, viewer_mode, source_channel_id,
-                 source_last_id, summary_text, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (familiar_id, viewer_mode, source_channel_id)
-            DO UPDATE SET
-                source_last_id = excluded.source_last_id,
-                summary_text   = excluded.summary_text,
-                created_at     = excluded.created_at
-            """,
-            (
-                familiar_id,
-                viewer_mode,
-                source_channel_id,
-                source_last_id,
-                summary_text,
-                timestamp,
-            ),
-        )
-        self._conn.commit()
 
     # ------------------------------------------------------------------
     # memory-writer watermark
