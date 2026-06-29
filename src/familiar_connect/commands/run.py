@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
+    from familiar_connect.budget import TierBudget
     from familiar_connect.embedding.protocol import Embedder
 
 import discord
@@ -24,7 +25,6 @@ from familiar_connect import log_style as ls
 from familiar_connect.activities.config import load_activities_config
 from familiar_connect.activities.engine import ActivityEngine
 from familiar_connect.bot import BotHandle, build_activity_presence_cb, create_bot
-from familiar_connect.budget import Budgeter, TierBudget
 from familiar_connect.bus.topics import (
     TOPIC_DISCORD_TEXT,
     TOPIC_TWITCH_EVENT,
@@ -154,7 +154,6 @@ def _default_assembler(
     *,
     window_size: int,
     budget: TierBudget,
-    channel_total_tokens: dict[int, int] | None = None,
     silence_gap_fold_seconds: float = 0.0,
     embedder: Embedder | None = None,
     focus_manager: FocusManager | None = None,
@@ -187,8 +186,9 @@ def _default_assembler(
     [Voice pipeline § Prompt cache friendliness](
     ../../docs/architecture/voice-pipeline.md#prompt-cache-friendliness).
 
-    ``window_size`` is hard upper bound on history turns;
-    :class:`Budgeter`'s token caps usually bite first.
+    ``window_size`` is a hard upper bound on history turns; the
+    per-section token caps in ``budget`` usually bite first (each
+    layer self-truncates to its own cap).
     """
     root = familiar.root
     card_path = root / "character.md"
@@ -273,7 +273,6 @@ def _default_assembler(
                 ),
             ),
         ],
-        budgeter=Budgeter(budget, channel_total_tokens=channel_total_tokens),
     )
 
 
@@ -451,24 +450,17 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     handle = create_bot(familiar, focus_manager=focus_manager)
 
     embedder = create_embedder(familiar.config.embedding)
-    channel_total_tokens: dict[int, int] = {
-        ch_id: over.total_tokens
-        for ch_id, over in familiar.config.channels.items()
-        if over.total_tokens is not None
-    }
     voice_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.voice_window_size,
-        budget=familiar.config.budget_for("voice", None),
-        channel_total_tokens=channel_total_tokens or None,
+        budget=familiar.config.budget_for("voice"),
         embedder=embedder,
         focus_manager=focus_manager,
     )
     text_assembler = _default_assembler(
         familiar,
         window_size=familiar.config.text_window_size,
-        budget=familiar.config.budget_for("text", None),
-        channel_total_tokens=channel_total_tokens or None,
+        budget=familiar.config.budget_for("text"),
         silence_gap_fold_seconds=familiar.config.text_silence_gap_fold_seconds,
         embedder=embedder,
         focus_manager=focus_manager,

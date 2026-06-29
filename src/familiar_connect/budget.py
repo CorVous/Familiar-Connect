@@ -3,8 +3,12 @@
 Token caps for prompt assembler. Each cap is a hard number — no
 proportional derivation, no "auto-fill from total". Operator sets
 each value (or accepts shipped default from
-``data/familiars/_default/character.toml``); Budgeter and layers
-consume values directly.
+``data/familiars/_default/character.toml``); the assembly layers
+consume values directly, each self-truncating to its own cap.
+
+There is no separate *combined* cap. The whole-prompt ``total_tokens``
+is a derived figure (sum of the per-section caps) exposed for
+reporting only — see :attr:`TierBudget.total_tokens`.
 
 Token accounting uses fast ``len(text)/4`` heuristic — no real
 tokenizer on hot path. Slightly over-counts (safer for budgets);
@@ -18,7 +22,7 @@ context package — that would trip a circular import through
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -64,15 +68,17 @@ class ModelBudgetCurve:
     only sections differing from tier default; unset fields stay at
     base value.
 
-    Field names mirror :class:`TierBudget` exactly so config parsing
-    validates keys via simple set comparison.
+    Field names mirror :class:`TierBudget`'s configurable caps exactly
+    so config parsing validates keys via simple set comparison. There
+    is no ``total_tokens`` multiplier: the whole-prompt total is
+    derived from the per-section caps, so it scales implicitly when
+    those caps scale.
 
     Multipliers must be positive (> 0). Applied via
     :meth:`TierBudget.apply_curve`; each int field scaled + rounded,
     floor of 1.
     """
 
-    total_tokens: float = 1.0
     recent_history_tokens: float = 1.0
     rag_tokens: float = 1.0
     dossier_tokens: float = 1.0
@@ -96,19 +102,22 @@ def _scale(base: int, multiplier: float) -> int:
 class TierBudget:
     """Token budget for one assembly tier (voice / text / background).
 
-    Every cap is explicit int. Shipped per-tier defaults live in
+    Every cap is an explicit int and is enforced *independently*: each
+    assembly layer self-truncates to its own ``*_tokens`` cap while
+    building. There is no separate combined cap — the prompt's overall
+    size is simply the sum of the section caps, surfaced as the derived
+    :attr:`total_tokens` for reporting.
+
+    Shipped per-tier defaults live in
     ``data/familiars/_default/character.toml`` —
     :mod:`familiar_connect.config` deep-merges per-familiar overrides
-    on top, so operator can change one cap without restating rest.
+    on top, so an operator can change one cap without restating rest.
 
-    Dataclass-level defaults below are programmatic fallback for code
+    Dataclass-level defaults below are a programmatic fallback for code
     paths constructing ``CharacterConfig()`` without TOML (mostly
     tests). Match voice tier; tests needing other tiers construct
     explicit instance.
 
-    :param total_tokens: post-assembly trim cap (system prompt +
-        recent history). :class:`Budgeter` drops oldest history turns
-        to stay under.
     :param recent_history_tokens: cap on recent-history block during
         build.
     :param rag_tokens: cap on RAG-context block.
@@ -126,25 +135,48 @@ class TierBudget:
     :param max_lorebook_entries: hard cap on rendered lorebook entries (M4).
     """
 
-    total_tokens: int = 3000
-    recent_history_tokens: int = 1500
-    rag_tokens: int = 450
-    dossier_tokens: int = 450
-    summary_tokens: int = 300
-    cross_channel_tokens: int = 300
-    reflection_tokens: int = 300
-    lorebook_tokens: int = 300
-    max_history_turns: int = 100
-    max_rag_turns: int = 5
-    max_rag_facts: int = 3
-    max_dossier_people: int = 8
-    max_reflections: int = 3
-    max_lorebook_entries: int = 6
+    recent_history_tokens: int = 3000
+    rag_tokens: int = 900
+    dossier_tokens: int = 900
+    summary_tokens: int = 600
+    cross_channel_tokens: int = 600
+    reflection_tokens: int = 600
+    lorebook_tokens: int = 600
+    max_history_turns: int = 200
+    max_rag_turns: int = 10
+    max_rag_facts: int = 6
+    max_dossier_people: int = 16
+    max_reflections: int = 6
+    max_lorebook_entries: int = 12
+
+    @property
+    def total_tokens(self) -> int:
+        """Derived sum of the per-section token caps.
+
+        Not a configurable knob — the prompt has no separate combined
+        cap, and nothing trims against this value. It is the budgeted
+        prompt ceiling (excluding the unbudgeted static layers such as
+        the character card and core instructions), exposed purely for
+        reporting and for eyeballing headroom against a model's context
+        window.
+        """
+        return (
+            self.recent_history_tokens
+            + self.rag_tokens
+            + self.dossier_tokens
+            + self.summary_tokens
+            + self.cross_channel_tokens
+            + self.reflection_tokens
+            + self.lorebook_tokens
+        )
 
     def apply_curve(self, curve: ModelBudgetCurve) -> TierBudget:
-        """Return new budget with each field scaled by curve multiplier."""
+        """Return new budget with each field scaled by curve multiplier.
+
+        ``total_tokens`` is derived, so it follows automatically once
+        the constituent caps are scaled.
+        """
         return TierBudget(
-            total_tokens=_scale(self.total_tokens, curve.total_tokens),
             recent_history_tokens=_scale(
                 self.recent_history_tokens, curve.recent_history_tokens
             ),
@@ -167,66 +199,3 @@ class TierBudget:
                 self.max_lorebook_entries, curve.max_lorebook_entries
             ),
         )
-
-
-class Budgeter:
-    """Total-cap enforcer applied after layer assembly.
-
-    Layers self-truncate to per-section caps while building. Budgeter
-    then trims oldest history turns until combined ``system_prompt +
-    history`` fits under :attr:`TierBudget.total_tokens`.
-
-    System prompt *never* truncated here — static layers (core
-    instructions, character card) carry bot identity; silent truncation
-    would change behaviour. When they exceed budget alone, that's
-    operator-visible misconfiguration; still return them and let LLM
-    decide.
-    """
-
-    def __init__(
-        self,
-        budget: TierBudget,
-        channel_total_tokens: dict[int, int] | None = None,
-    ) -> None:
-        self._budget = budget
-        self._channel_total_tokens: dict[int, int] = channel_total_tokens or {}
-
-    @property
-    def budget(self) -> TierBudget:
-        return self._budget
-
-    def with_overrides(self, **overrides: object) -> Budgeter:
-        """Return new Budgeter with select fields replaced (for tests)."""
-        return Budgeter(replace(self._budget, **overrides))  # type: ignore[arg-type]
-
-    def trim(
-        self,
-        *,
-        system_prompt: str,
-        history: list[Message],
-        channel_id: int | None = None,
-    ) -> tuple[str, list[Message]]:
-        """Drop oldest turns until total token count fits.
-
-        Returns ``(system_prompt, trimmed_history)``. Newest turns
-        retained — immediate conversational context model needs most.
-        ``system_prompt`` returned unchanged.
-
-        Per-channel ``total_tokens`` overrides tier cap when set.
-        """
-        sys_tokens = estimate_tokens(system_prompt)
-        cap = (
-            self._channel_total_tokens[channel_id]
-            if channel_id is not None and channel_id in self._channel_total_tokens
-            else self._budget.total_tokens
-        )
-        kept_reversed: list[Message] = []
-        used = sys_tokens
-        for msg in reversed(history):
-            cost = estimate_message_tokens(msg)
-            if used + cost > cap and kept_reversed:
-                break
-            kept_reversed.append(msg)
-            used += cost
-        kept = list(reversed(kept_reversed))
-        return system_prompt, kept

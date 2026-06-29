@@ -2,8 +2,9 @@
 
 Each dynamic layer accepts a ``max_tokens`` cap and should drop
 trailing items / truncate body text rather than blow past the cap.
-The Budgeter applies a final overall trim, but per-layer caps keep
-each section's contribution proportional to its allocation.
+These per-section caps are the only token enforcement — there is no
+whole-prompt trim step, so the assembled prompt is bounded by their
+sum.
 """
 
 from __future__ import annotations

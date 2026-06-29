@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from familiar_connect.budget import Budgeter, TierBudget
 from familiar_connect.context import (
     Assembler,
     AssemblyContext,
@@ -836,30 +835,14 @@ class TestAssembler:
         assert calls == 1  # second call hit the cache
 
     @pytest.mark.asyncio
-    async def test_budgeter_trims_history_to_total_cap(self) -> None:
-        """Total-cap enforcement drops oldest history turns."""
-        store = HistoryStore(":memory:")
-        for i in range(20):
-            store.append_turn(
-                familiar_id="fam",
-                channel_id=1,
-                role="user",
-                content=f"turn {i:02d} blah blah",
-                author=None,
-            )
-        asm = Assembler(
-            layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)],
-            budgeter=Budgeter(TierBudget(total_tokens=30)),
-        )
-        prompt = await asm.assemble(_ctx(channel_id=1))
-        # Newest survives.
-        assert prompt.recent_history[-1].content_str.endswith("19 blah blah")
-        # Aggressively trimmed.
-        assert len(prompt.recent_history) < 20
+    async def test_recent_history_returned_as_layer_provides(self) -> None:
+        """No whole-prompt trim step — history is whatever the layer yields.
 
-    @pytest.mark.asyncio
-    async def test_no_budgeter_passthrough(self) -> None:
-        """Without a Budgeter, history is returned uncapped."""
+        The recent-history layer self-truncates to its own
+        ``recent_history_tokens`` cap (tested in
+        :mod:`tests.test_context_budget_layers`); the assembler adds no
+        further combined cap.
+        """
         store = HistoryStore(":memory:")
         for i in range(5):
             store.append_turn(
@@ -898,53 +881,3 @@ class TestAssembler:
         out2 = await asm.assemble(_ctx())
         assert calls == 2
         assert out1.system_prompt != out2.system_prompt
-
-    @pytest.mark.asyncio
-    async def test_budgeter_uses_channel_id_override(self) -> None:
-        """Per-channel total_tokens tightens trim for that channel only."""
-        store = HistoryStore(":memory:")
-        for i in range(10):
-            store.append_turn(
-                familiar_id="fam",
-                channel_id=1,
-                role="user",
-                content=f"turn {i:02d} blah blah",
-                author=None,
-            )
-        # Channel 1 has tight override; base budget would keep all 10.
-        bud = Budgeter(
-            TierBudget(total_tokens=10_000),
-            channel_total_tokens={1: 30},
-        )
-        asm = Assembler(
-            layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)],
-            budgeter=bud,
-        )
-        prompt = await asm.assemble(_ctx(channel_id=1))
-        # Newest survives; most dropped due to tight channel cap.
-        assert prompt.recent_history[-1].content_str.endswith("09 blah blah")
-        assert len(prompt.recent_history) < 10
-
-    @pytest.mark.asyncio
-    async def test_budgeter_channel_override_does_not_affect_other_channel(
-        self,
-    ) -> None:
-        store = HistoryStore(":memory:")
-        for i in range(5):
-            store.append_turn(
-                familiar_id="fam",
-                channel_id=2,
-                role="user",
-                content=f"m{i}",
-                author=None,
-            )
-        bud = Budgeter(
-            TierBudget(total_tokens=10_000),
-            channel_total_tokens={1: 5},  # tight for channel 1 only
-        )
-        asm = Assembler(
-            layers=[RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)],
-            budgeter=bud,
-        )
-        prompt = await asm.assemble(_ctx(channel_id=2))
-        assert len(prompt.recent_history) == 5  # base budget fits all

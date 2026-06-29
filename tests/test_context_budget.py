@@ -1,18 +1,19 @@
-"""Tests for the prompt-assembly budgeter.
+"""Tests for the prompt-assembly budget.
 
-Covers token estimation and the post-assembly history trimmer.
-Per-tier defaults live in ``data/familiars/_default/character.toml``;
-:mod:`tests.test_config` exercises that path.
+Covers token estimation, the independent per-section caps, and the
+derived whole-prompt total. Per-tier defaults live in
+``data/familiars/_default/character.toml``; :mod:`tests.test_config`
+exercises that path.
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import fields
 
 import pytest
 
 from familiar_connect.budget import (
-    Budgeter,
     ModelBudgetCurve,
     TierBudget,
     estimate_message_tokens,
@@ -61,11 +62,11 @@ class TestTierBudgetFields:
     def test_overriding_one_field_leaves_others_at_default(self) -> None:
         """Each cap is independent — no proportional auto-derivation."""
         a = TierBudget()
-        b = TierBudget(total_tokens=9999)
-        assert b.total_tokens == 9999
+        b = TierBudget(rag_tokens=9999)
+        assert b.rag_tokens == 9999
         # Other fields untouched.
         assert b.recent_history_tokens == a.recent_history_tokens
-        assert b.rag_tokens == a.rag_tokens
+        assert b.dossier_tokens == a.dossier_tokens
         assert b.max_dossier_people == a.max_dossier_people
 
     def test_explicit_subcap_used_directly(self) -> None:
@@ -73,57 +74,35 @@ class TestTierBudgetFields:
         assert b.recent_history_tokens == 500
 
 
-class TestBudgeterTrim:
-    def test_under_budget_passthrough(self) -> None:
-        bud = Budgeter(TierBudget(total_tokens=1000))
-        sys = "short prompt"
-        msgs = [
-            Message(role="user", content="hi"),
-            Message(role="assistant", content="yo"),
-        ]
-        sys_out, msgs_out = bud.trim(system_prompt=sys, history=msgs)
-        assert sys_out == sys
-        assert msgs_out == msgs
+class TestTierBudgetDerivedTotal:
+    """``total_tokens`` is a derived sum, not a configurable cap."""
 
-    def test_drops_oldest_when_over_budget(self) -> None:
-        # Tiny budget forces eviction.
-        bud = Budgeter(TierBudget(total_tokens=20))
-        sys = ""  # no static cost
-        msgs = [
-            Message(role="user", content="A" * 40),  # ~10 tokens content + 4 overhead
-            Message(role="user", content="B" * 40),
-            Message(role="user", content="C" * 40),
-        ]
-        _, kept = bud.trim(system_prompt=sys, history=msgs)
-        # Newest survives; oldest is dropped first.
-        assert kept[-1].content == "C" * 40
-        assert "A" * 40 not in [m.content for m in kept]
+    def test_total_is_sum_of_section_caps(self) -> None:
+        b = TierBudget(
+            recent_history_tokens=1000,
+            rag_tokens=200,
+            dossier_tokens=200,
+            summary_tokens=100,
+            cross_channel_tokens=100,
+            reflection_tokens=100,
+            lorebook_tokens=100,
+        )
+        assert b.total_tokens == 1000 + 200 + 200 + 100 + 100 + 100 + 100
 
-    def test_keeps_at_least_newest_turn_even_if_oversize(self) -> None:
-        """A single huge turn isn't dropped — the user's last message is sacred."""
-        bud = Budgeter(TierBudget(total_tokens=10))
-        msgs = [Message(role="user", content="Z" * 10000)]
-        _, kept = bud.trim(system_prompt="", history=msgs)
-        assert len(kept) == 1
+    def test_total_excludes_count_caps(self) -> None:
+        """Count caps (max_*) are not token figures; they don't feed total."""
+        base = TierBudget()
+        bumped = TierBudget(max_history_turns=base.max_history_turns + 50)
+        assert bumped.total_tokens == base.total_tokens
 
-    def test_system_prompt_eats_into_history_budget(self) -> None:
-        sys = "S" * 4000  # ~1000 tokens
-        bud = Budgeter(TierBudget(total_tokens=1100))
-        msgs = [
-            Message(role="user", content="A" * 200),  # ~50 tokens + overhead
-            Message(role="user", content="B" * 200),
-            Message(role="user", content="C" * 200),
-            Message(role="user", content="D" * 200),
-        ]
-        _, kept = bud.trim(system_prompt=sys, history=msgs)
-        # Some turns dropped because static prompt ate most of the budget.
-        assert len(kept) < len(msgs)
-        assert kept[-1].content == "D" * 200
+    def test_total_tracks_a_section_cap_change(self) -> None:
+        base = TierBudget()
+        bumped = TierBudget(rag_tokens=base.rag_tokens + 500)
+        assert bumped.total_tokens == base.total_tokens + 500
 
-    def test_system_prompt_returned_unchanged(self) -> None:
-        bud = Budgeter(TierBudget(total_tokens=10))
-        sys_out, _ = bud.trim(system_prompt="LONG " * 1000, history=[])
-        assert sys_out == "LONG " * 1000
+    def test_total_is_a_derived_property_not_a_field(self) -> None:
+        """``total_tokens`` is computed, so it is not a dataclass field."""
+        assert "total_tokens" not in {f.name for f in fields(TierBudget)}
 
 
 class TestModelBudgetCurve:
@@ -133,38 +112,41 @@ class TestModelBudgetCurve:
             assert field_val == pytest.approx(1.0)
 
     def test_partial_override_leaves_others_at_one(self) -> None:
-        c = ModelBudgetCurve(total_tokens=2.0, rag_tokens=1.5)
-        assert c.total_tokens == pytest.approx(2.0)
+        c = ModelBudgetCurve(recent_history_tokens=2.0, rag_tokens=1.5)
+        assert c.recent_history_tokens == pytest.approx(2.0)
         assert c.rag_tokens == pytest.approx(1.5)
-        assert c.recent_history_tokens == pytest.approx(1.0)
         assert c.dossier_tokens == pytest.approx(1.0)
+        assert c.summary_tokens == pytest.approx(1.0)
+
+    def test_has_no_total_tokens_field(self) -> None:
+        """Total is derived, so there is no multiplier for it."""
+        assert "total_tokens" not in {f.name for f in fields(ModelBudgetCurve)}
 
 
 class TestTierBudgetApplyCurve:
     def test_identity_curve_returns_equivalent_budget(self) -> None:
-        b = TierBudget(total_tokens=4000, rag_tokens=500)
+        b = TierBudget(recent_history_tokens=4000, rag_tokens=500)
         assert b.apply_curve(ModelBudgetCurve()) == b
 
-    def test_scale_total_tokens(self) -> None:
-        b = TierBudget(total_tokens=1000)
-        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=2.0))
-        assert scaled.total_tokens == 2000
+    def test_scale_recent_history(self) -> None:
+        b = TierBudget(recent_history_tokens=1000)
+        scaled = b.apply_curve(ModelBudgetCurve(recent_history_tokens=2.0))
+        assert scaled.recent_history_tokens == 2000
         assert scaled.rag_tokens == b.rag_tokens  # unchanged
 
     def test_scale_rounds_to_nearest_int(self) -> None:
-        b = TierBudget(total_tokens=1000)
-        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=1.5))
-        assert scaled.total_tokens == 1500
+        b = TierBudget(rag_tokens=1000)
+        scaled = b.apply_curve(ModelBudgetCurve(rag_tokens=1.5))
+        assert scaled.rag_tokens == 1500
 
     def test_scale_minimum_is_one(self) -> None:
         # Near-zero multiplier must not produce 0 or negative tokens.
-        b = TierBudget(total_tokens=1)
-        scaled = b.apply_curve(ModelBudgetCurve(total_tokens=0.001))
-        assert scaled.total_tokens >= 1
+        b = TierBudget(rag_tokens=1)
+        scaled = b.apply_curve(ModelBudgetCurve(rag_tokens=0.001))
+        assert scaled.rag_tokens >= 1
 
-    def test_scale_all_token_fields(self) -> None:
+    def test_derived_total_follows_scaled_sections(self) -> None:
         b = TierBudget(
-            total_tokens=8000,
             recent_history_tokens=2000,
             rag_tokens=400,
             dossier_tokens=400,
@@ -174,7 +156,6 @@ class TestTierBudgetApplyCurve:
             lorebook_tokens=200,
         )
         c = ModelBudgetCurve(
-            total_tokens=2.0,
             recent_history_tokens=2.0,
             rag_tokens=1.5,
             dossier_tokens=1.5,
@@ -184,10 +165,11 @@ class TestTierBudgetApplyCurve:
             lorebook_tokens=1.5,
         )
         scaled = b.apply_curve(c)
-        assert scaled.total_tokens == 16000
         assert scaled.recent_history_tokens == 4000
         assert scaled.rag_tokens == 600
         assert scaled.dossier_tokens == 600
+        # Derived total reflects the scaled constituents.
+        assert scaled.total_tokens == 4000 + 600 + 600 + 300 + 300 + 300 + 300
 
     def test_scale_count_fields(self) -> None:
         b = TierBudget(max_rag_turns=5, max_rag_facts=3, max_reflections=3)
@@ -197,45 +179,7 @@ class TestTierBudgetApplyCurve:
         assert scaled.max_reflections == b.max_reflections  # unchanged
 
 
-class TestBudgeterChannelOverride:
-    """Per-channel total_tokens override wired through trim()."""
-
-    def _msgs(self, n: int = 3) -> list[Message]:
-        return [Message(role="user", content="A" * 40) for _ in range(n)]
-
-    def test_channel_override_tightens_budget(self) -> None:
-        # base budget fits all 3; channel override is tight → only newest kept
-        bud = Budgeter(
-            TierBudget(total_tokens=1000),
-            channel_total_tokens={99: 20},
-        )
-        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=99)
-        assert len(kept) < 3
-        assert kept[-1].content == "A" * 40
-
-    def test_other_channel_uses_base_budget(self) -> None:
-        bud = Budgeter(
-            TierBudget(total_tokens=1000),
-            channel_total_tokens={99: 20},
-        )
-        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=55)
-        assert len(kept) == 3  # base budget fits all
-
-    def test_none_channel_uses_base_budget(self) -> None:
-        bud = Budgeter(
-            TierBudget(total_tokens=1000),
-            channel_total_tokens={99: 20},
-        )
-        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=None)
-        assert len(kept) == 3
-
-    def test_no_overrides_dict_behaves_as_before(self) -> None:
-        bud = Budgeter(TierBudget(total_tokens=1000))
-        _, kept = bud.trim(system_prompt="", history=self._msgs(), channel_id=99)
-        assert len(kept) == 3
-
-
-class TestBudgeterPerf:
+class TestEstimatorPerf:
     """Hot-path sanity check — ensure the estimator stays microsecond-class."""
 
     def test_estimate_messages_under_one_ms(self) -> None:

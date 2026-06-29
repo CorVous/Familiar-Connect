@@ -31,7 +31,7 @@ aliases    = []
 [providers.history]
 # Hard upper bounds on history turns per tier — safety nets behind
 # the token-aware budget below. Lower these only to force a tighter
-# absolute cap on prompt size; the Budgeter's token cap usually
+# absolute cap on prompt size; the recent-history token cap usually
 # bites first.
 voice_window_size = 100
 text_window_size  = 200
@@ -47,11 +47,17 @@ coalesce_max_gap_seconds = 45.0
 # --- Prompt assembly budget ------------------------------------------------
 #
 # Per-tier token caps for the prompt assembler. Each cap is a hard
-# number — no proportional / "auto" derivation. Override one knob in
-# a per-familiar character.toml and the rest stay put (TOML deep-merge).
+# number — no proportional / "auto" derivation, and there is NO
+# separate combined cap. Every section self-truncates to its own cap
+# while the prompt is built; the assembled prompt is simply bounded by
+# the sum of these caps. Override one knob in a per-familiar
+# character.toml and the rest stay put (TOML deep-merge).
 #
-# total_tokens          post-assembly trim cap; Budgeter drops oldest
-#                       history turns to fit.
+# (There is no `total_tokens` knob. The whole-prompt total is a
+# derived figure — the sum of the per-section caps below — exposed in
+# code as `TierBudget.total_tokens` for reporting only. Nothing trims
+# against it.)
+#
 # recent_history_tokens cap on the recent-history block while building.
 # rag_tokens            cap on the RAG-context block.
 # dossier_tokens        cap on people-dossier block.
@@ -67,56 +73,55 @@ coalesce_max_gap_seconds = 45.0
 # max_reflections       hard cap on rendered reflection rows (M3).
 # max_lorebook_entries  hard cap on rendered lorebook entries (M4).
 #
-# Defaults sized for: voice models hold up to ~3 k well; thoughtful
-# (text) replies fine up to ~8 k; offline workers absorb ~24 k.
+# Defaults give breathing room while staying comfortably inside model
+# context windows (Haiku 200 k voice, GLM-5.2 1 M text/background):
+# derived totals land around ~7 k voice, ~19 k text, ~56 k background.
+# Voice stays the tightest of the three to protect first-token latency.
 
 [budget.voice]
-total_tokens          = 3000
-recent_history_tokens = 1500
-rag_tokens            = 450
-dossier_tokens        = 450
-summary_tokens        = 300
-cross_channel_tokens  = 300
-reflection_tokens     = 300
-lorebook_tokens       = 300
-max_history_turns     = 100
-max_rag_turns         = 5
-max_rag_facts         = 3
-max_dossier_people    = 8
-max_reflections       = 3
-max_lorebook_entries  = 6
+recent_history_tokens = 3000
+rag_tokens            = 900
+dossier_tokens        = 900
+summary_tokens        = 600
+cross_channel_tokens  = 600
+reflection_tokens     = 600
+lorebook_tokens       = 600
+max_history_turns     = 200
+max_rag_turns         = 10
+max_rag_facts         = 6
+max_dossier_people    = 16
+max_reflections       = 6
+max_lorebook_entries  = 12
 
 [budget.text]
-total_tokens          = 8000
-recent_history_tokens = 4000
-rag_tokens            = 1200
-dossier_tokens        = 1200
-summary_tokens        = 800
-cross_channel_tokens  = 800
-reflection_tokens     = 800
-lorebook_tokens       = 800
-max_history_turns     = 200
-max_rag_turns         = 8
-max_rag_facts         = 5
-max_dossier_people    = 12
-max_reflections       = 5
-max_lorebook_entries  = 10
+recent_history_tokens = 8000
+rag_tokens            = 2400
+dossier_tokens        = 2400
+summary_tokens        = 1600
+cross_channel_tokens  = 1600
+reflection_tokens     = 1600
+lorebook_tokens       = 1600
+max_history_turns     = 400
+max_rag_turns         = 16
+max_rag_facts         = 10
+max_dossier_people    = 24
+max_reflections       = 10
+max_lorebook_entries  = 20
 
 [budget.background]
-total_tokens          = 24000
-recent_history_tokens = 12000
-rag_tokens            = 4000
-dossier_tokens        = 4000
-summary_tokens        = 2000
-cross_channel_tokens  = 2000
-reflection_tokens     = 2000
-lorebook_tokens       = 2000
-max_history_turns     = 500
-max_rag_turns         = 12
-max_rag_facts         = 8
-max_dossier_people    = 16
-max_reflections       = 8
-max_lorebook_entries  = 16
+recent_history_tokens = 24000
+rag_tokens            = 8000
+dossier_tokens        = 8000
+summary_tokens        = 4000
+cross_channel_tokens  = 4000
+reflection_tokens     = 4000
+lorebook_tokens       = 4000
+max_history_turns     = 1000
+max_rag_turns         = 24
+max_rag_facts         = 16
+max_dossier_people    = 32
+max_reflections       = 16
+max_lorebook_entries  = 32
 
 # --- Retrieval ranking -----------------------------------------------------
 #
@@ -442,7 +447,7 @@ person's key.
 # background — summaries / fact extraction / dossiers. Reasoning + tools.
 #
 # reasoning: "off" | "low" | "medium" | "high" | omit (model default).
-#   GLM 5.1 reasons by default — set "off" to suppress; Haiku 4.5
+#   GLM 5.2 reasons by default — set "off" to suppress; Haiku 4.5
 #   never reasons regardless. OpenRouter maps to its `reasoning`
 #   parameter (effort levels, or `exclude=true` for "off").
 #
@@ -476,7 +481,7 @@ tool_calling = false
 # multimodal = false
 
 [llm.prose]
-model          = "z-ai/glm-5.1"
+model          = "z-ai/glm-5.2"
 temperature    = 0.7
 provider_order = ["z-ai"]            # first-party — best caching for GLM
 reasoning      = "medium"
@@ -485,7 +490,7 @@ tool_calling   = false
 # multimodal = false   # set true when prose model supports vision
 
 [llm.background]
-model          = "z-ai/glm-5.1"
+model          = "z-ai/glm-5.2"
 temperature    = 0.7
 provider_order = ["z-ai"]
 reasoning      = "medium"

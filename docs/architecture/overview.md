@@ -251,7 +251,7 @@ fallback channel map (out of scope for the initial cut).
 
 ## Per-channel and per-model tuning
 
-`[channels.<id>]` overrides (`history_window_size`, `total_tokens`,
-`prompt_layers`, `message_rendering`) and `[budget.model_curves]`
+`[channels.<id>]` overrides (`history_window_size`, `prompt_layers`,
+`message_rendering`) and `[budget.model_curves]`
 per-model multipliers live in
 [Tuning — prompt assembly budget](tuning.md#prompt-assembly-budget).
