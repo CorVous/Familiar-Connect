@@ -1,38 +1,20 @@
 # Contributing
 
-<!-- agent-facts
-test: uv run --extra local-turn --extra local-embed pytest -q
-lint: uv run ruff check
-type: uv run ty check
--->
-
-The block above is read by the orchestrator hooks: `SessionStart` injects it as
-context, and the `Stop`/verdict hook runs the `test:` line to decide "done".
-Keep it accurate.
-
-Run `type` repo-wide as written — no file argument. `ty` is whole-program, so
-`ty check <file>` can pass while a cross-file or test-file type error stays
-hidden until the pre-push gate rejects it. (Provenance: that exact gap bit the
-multi-server work — a `**dict`-unpack type error in a test slipped every
-per-file check and only the repo-wide gate caught it.)
-
-This file is the working contributor + agent reference — hot commands, the
+This file is the working contributor reference — hot commands, the
 post-change checklist, and code conventions. The pages under
 [`docs/`](docs/index.md) are the authoritative deep dive:
 [`docs/contributing.md`](docs/contributing.md) for the full human workflow,
 [`docs/architecture/overview.md`](docs/architecture/overview.md) for the system.
-TDD discipline and review standards live in the orchestrator constitution
-(`~/.claude/CLAUDE.md`), not here.
 
 ## Project specifics
 
 - This is a **`uv`** project. Run everything through `uv run` — there is no bare
   `python` on `PATH`. Update `uv` first: `uv self update`.
 - Test collection imports the `local-turn` (numpy, huggingface_hub) and
-  `local-embed` (fastembed) extras unconditionally, so they ride along in the
-  `test:` command above. The live bot also runs from this repo's `.venv` and
-  crashes at startup without `local-embed`, so keep both extras synced:
-  `uv sync --dev --extra local-turn --extra local-embed`.
+  `local-embed` (fastembed) extras unconditionally, so run tests with both:
+  `uv run --extra local-turn --extra local-embed pytest -q`. The live bot also
+  runs from this repo's `.venv` and crashes at startup without `local-embed`, so
+  keep both extras synced: `uv sync --dev --extra local-turn --extra local-embed`.
 
 ## After every change
 
@@ -41,10 +23,9 @@ Run `scripts/ci-local.sh` — it mirrors the CI `lint-and-test` job exactly (syn
 re-syncs disk exec bits to git's modes first so `ruff` doesn't fire spurious
 `EXE002`. Run the steps by hand when you need finer control.
 
-Red / green TDD per the constitution. One project nuance: **import errors don't
-count as red** — a test failing on `ImportError` / `ModuleNotFoundError` is not a
-valid red; the module or function must exist before the test can fail for the
-right reason.
+Red / green TDD. One project nuance: **import errors don't count as red** — a
+test failing on `ImportError` / `ModuleNotFoundError` is not a valid red; the
+module or function must exist before the test can fail for the right reason.
 
 If the change touched **env vars / config keys**, **on-disk layout under
 `data/familiars/`**, or **architecture** (providers, processors, pipeline,
