@@ -71,6 +71,13 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+# One-time warning sent to the DM channel on a user's first admitted DM.
+# Verbatim per reviewer request (PR #176) — do not reword.
+DM_BOT_DISCLAIMER = (
+    "⚠ This is a bot, and content may not be isolated solely to this channel- "
+    "treat messages in this conversation as if they were public."
+)
+
 
 async def _defer_interaction(ctx: discord.ApplicationContext) -> bool:
     """ACK interaction ASAP to claim Discord's 3s response window.
@@ -1175,6 +1182,11 @@ def _register_events(
     text_source: DiscordTextSource,
     handle: BotHandle,
 ) -> None:
+    # Users already shown the first-DM disclaimer this process. In-memory
+    # only (mirrors #176's ephemeral DM subscriptions) — a restart may
+    # re-send it; we deliberately don't persist.
+    disclaimed_dm_users: set[int] = set()
+
     @bot.event
     async def on_ready() -> None:
         user = bot.user
@@ -1230,6 +1242,12 @@ def _register_events(
             # treats it as any other subscribed channel.
             if message.author.id not in familiar.config.dm_allowlist:
                 return
+            # First admitted DM from this user: warn that DMs aren't
+            # private. Guarded by the bot-author / own-echo returns above,
+            # so the disclaimer can never re-trigger itself.
+            if message.author.id not in disclaimed_dm_users:
+                disclaimed_dm_users.add(message.author.id)
+                await message.channel.send(DM_BOT_DISCLAIMER)
             _register_dm_channel(handle, familiar, message.channel.id)
         elif (
             familiar.subscriptions.get(
