@@ -9,6 +9,7 @@ exercises that path.
 from __future__ import annotations
 
 import time
+from dataclasses import fields
 
 import pytest
 
@@ -99,9 +100,9 @@ class TestTierBudgetDerivedTotal:
         bumped = TierBudget(rag_tokens=base.rag_tokens + 500)
         assert bumped.total_tokens == base.total_tokens + 500
 
-    def test_total_is_not_a_constructor_arg(self) -> None:
-        with pytest.raises(TypeError):
-            TierBudget(total_tokens=3000)  # type: ignore[call-arg]
+    def test_total_is_a_derived_property_not_a_field(self) -> None:
+        """``total_tokens`` is computed, so it is not a dataclass field."""
+        assert "total_tokens" not in {f.name for f in fields(TierBudget)}
 
 
 class TestModelBudgetCurve:
@@ -119,8 +120,7 @@ class TestModelBudgetCurve:
 
     def test_has_no_total_tokens_field(self) -> None:
         """Total is derived, so there is no multiplier for it."""
-        with pytest.raises(TypeError):
-            ModelBudgetCurve(total_tokens=2.0)  # type: ignore[call-arg]
+        assert "total_tokens" not in {f.name for f in fields(ModelBudgetCurve)}
 
 
 class TestTierBudgetApplyCurve:
