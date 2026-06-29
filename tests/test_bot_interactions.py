@@ -244,13 +244,21 @@ class TestOnReadyPresenceResync:
         assert calls[0].kwargs["status"] is discord.Status.online
 
 
+# Verbatim first-DM disclaimer the reviewer (PR #176) requested. The test
+# pins the exact wording here; the bot's constant must match it byte-for-byte.
+_DM_DISCLAIMER = (
+    "⚠ This is a bot, and content may not be isolated solely to this channel- "
+    "treat messages in this conversation as if they were public."
+)
+
+
 def _dm_message(
     *, author_id: int, channel_id: int, guild: object | None, bot: bool = False
 ) -> SimpleNamespace:
     """Fake ``discord.Message`` carrying only the fields ``on_message`` reads."""
     return SimpleNamespace(
         author=SimpleNamespace(id=author_id, bot=bot, name="x", display_name="X"),
-        channel=SimpleNamespace(id=channel_id),
+        channel=SimpleNamespace(id=channel_id, send=AsyncMock()),
         guild=guild,
         content="hi",
         mentions=[],
@@ -384,3 +392,53 @@ class TestOnMessageDmAllowlist:
         msg = _dm_message(author_id=123, channel_id=888, guild=SimpleNamespace(id=7))
         await events["on_message"](cast("discord.Message", msg))
         text_source.publish_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_first_allowlisted_dm_sends_disclaimer_once(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_awaited_once_with(_DM_DISCLAIMER)
+
+    @pytest.mark.asyncio
+    async def test_second_dm_same_user_does_not_resend_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        first = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", first))
+        first.channel.send.assert_awaited_once_with(_DM_DISCLAIMER)
+        second = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", second))
+        second.channel.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_allowlisted_dm_never_sends_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=999, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bot_authored_dm_does_not_send_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        # bot-author guard precedes admission — a bot whose id collides with
+        # the allowlist must never trigger the disclaimer (no DM loop).
+        events, _familiar, _ts, _fm = self._setup(tmp_path, allowlist=(123,))
+        msg = _dm_message(author_id=123, channel_id=555, guild=None, bot=True)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_own_echo_dm_does_not_send_disclaimer(self, tmp_path: Path) -> None:
+        # bot-self guard precedes admission — the familiar's own disclaimer
+        # echo (author.id == bot_user_id) must not re-trigger a disclaimer.
+        events, _familiar, _ts, _fm = self._setup(tmp_path, allowlist=(99,))
+        msg = _dm_message(author_id=99, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        msg.channel.send.assert_not_awaited()
