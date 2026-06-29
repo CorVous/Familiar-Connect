@@ -1382,11 +1382,11 @@ class TestImageToolConfig:
 
 
 class TestFocusConfig:
-    """``[focus]`` knobs — attentional idle-nudge timing."""
+    """``[focus]`` knobs — attentional unread-nudge controls."""
 
     def test_defaults(self) -> None:
         cfg = FocusConfig()
-        assert cfg.idle_wake_seconds == pytest.approx(120.0)
+        assert cfg.unread_nudge_enabled is True
         assert cfg.nudge_debounce_seconds == pytest.approx(30.0)
 
     def test_present_on_character_config(self) -> None:
@@ -1396,16 +1396,16 @@ class TestFocusConfig:
     def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            "[focus]\nidle_wake_seconds = 45.0\nnudge_debounce_seconds = 10\n"
+            "[focus]\nunread_nudge_enabled = false\nnudge_debounce_seconds = 10\n"
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
-        assert cfg.focus.idle_wake_seconds == pytest.approx(45.0)
+        assert cfg.focus.unread_nudge_enabled is False
         assert cfg.focus.nudge_debounce_seconds == pytest.approx(10.0)
 
-    def test_must_be_positive(self, tmp_path: Path, default_profile_path: Path) -> None:
+    def test_must_be_bool(self, tmp_path: Path, default_profile_path: Path) -> None:
         path = tmp_path / "character.toml"
-        path.write_text("[focus]\nidle_wake_seconds = -1\n")
-        with pytest.raises(ConfigError, match="idle_wake_seconds"):
+        path.write_text("[focus]\nunread_nudge_enabled = 1\n")
+        with pytest.raises(ConfigError, match="unread_nudge_enabled"):
             load_character_config(path, defaults_path=default_profile_path)
 
     def test_unknown_key_rejected(

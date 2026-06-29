@@ -193,7 +193,7 @@ class TestBuildFinalReminderGuildName:
             viewer_mode="text",
             now=_at(2026, 5, 4, 14, 30),
             focus_channel_id=123,
-            unread_digest={20: 2},
+            unread_digest={20: (2, 0)},
             channel_names={123: "general", 20: "random"},
             guild_name="My Server",
         )

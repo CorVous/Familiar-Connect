@@ -79,7 +79,7 @@ Surface today:
   See [Tool calling](overview.md#tool-calling) and
   [Image viewing](overview.md#image-viewing).
 - `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
-- `[focus]` — attentional idle-nudge timing (`idle_wake_seconds`,
+- `[focus]` — attentional unread-nudge controls (`unread_nudge_enabled`,
   `nudge_debounce_seconds`). See
   [Tuning — Attentional focus](tuning.md#attentional-focus).
 - `[tools]` — agentic loop bounds (`loop_max_iterations`, default

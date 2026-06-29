@@ -30,7 +30,7 @@ from familiar_connect.context import (
 )
 from familiar_connect.focus import FocusManager
 from familiar_connect.history.async_store import AsyncHistoryStore
-from familiar_connect.history.store import HistoryStore
+from familiar_connect.history.store import ChannelUnread, HistoryStore
 from familiar_connect.identity import Author
 from familiar_connect.llm import LLMClient, LLMDelta, Message
 from familiar_connect.processors.text_responder import TextResponder
@@ -323,7 +323,9 @@ class TestTextResponderFocusAware:
 
         # staged_channels should be called and its result forwarded
         async_mock_store = MagicMock()
-        async_mock_store.staged_channels = AsyncMock(return_value={200: 3})
+        async_mock_store.staged_channels = AsyncMock(
+            return_value={200: ChannelUnread(3, 0)}
+        )
         async_mock_store.sync = MagicMock()
 
         responder, _ = _make_text_responder(
@@ -396,7 +398,7 @@ class TestTextResponderFocusAware:
 
 class TestTextResponderIdleNudge:
     @pytest.mark.asyncio
-    async def test_idle_unfocused_publishes_wake_to_focused_channel(
+    async def test_unfocused_arrival_publishes_wake_to_focused_channel(
         self, tmp_path: Path
     ) -> None:
         """should_wake → publish wake event routed at the focused channel."""
@@ -424,7 +426,7 @@ class TestTextResponderIdleNudge:
         assert wakes[0].payload["channel_id"] == 555
 
     @pytest.mark.asyncio
-    async def test_not_idle_unfocused_publishes_nothing(self, tmp_path: Path) -> None:
+    async def test_unfocused_arrival_publishes_nothing(self, tmp_path: Path) -> None:
         """should_wake False → no nudge, plain staging."""
         fm = _unfocused_focus_manager()  # should_wake defaults False
         responder, _ = _make_text_responder(tmp_path=tmp_path, focus_manager=fm)
@@ -626,7 +628,10 @@ def _real_focus_responder(
     store = HistoryStore(":memory:")
     async_store = AsyncHistoryStore(store)
     fm = FocusManager(
-        familiar_id="fam", store=async_store, subscriptions=subs, idle_wake_seconds=0
+        familiar_id="fam",
+        store=async_store,
+        subscriptions=subs,
+        unread_nudge_enabled=False,
     )
     fm.set_focus_immediately(100, "text")
 

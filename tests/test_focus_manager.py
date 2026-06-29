@@ -327,7 +327,7 @@ class TestFocusManagerIdleWake:
         tmp_path: Path,
         *,
         clock: _FakeClock,
-        idle_wake_seconds: float = 60.0,
+        unread_nudge_enabled: bool = True,
         nudge_debounce_seconds: float = 10.0,
         text_focus: int = 1,
     ) -> FocusManager:
@@ -338,24 +338,19 @@ class TestFocusManagerIdleWake:
             store=store,
             subscriptions=reg,
             clock=clock,
-            idle_wake_seconds=idle_wake_seconds,
+            unread_nudge_enabled=unread_nudge_enabled,
             nudge_debounce_seconds=nudge_debounce_seconds,
         )
 
     @pytest.mark.asyncio
-    async def test_should_wake_false_before_threshold(self, tmp_path: Path) -> None:
+    async def test_should_wake_true_on_arrival_when_focused_channel_active(
+        self, tmp_path: Path
+    ) -> None:
+        # arrival nudges immediately, even though the focused channel was
+        # just active (clock not advanced) — debounce is the sole throttle
         clock = _FakeClock()
-        fm = self._fm(tmp_path, clock=clock)
+        fm = self._fm(tmp_path, clock=clock, text_focus=1)
         await fm.initialize()
-        clock.advance(30.0)  # < 60s threshold
-        assert fm.should_wake(99) is False
-
-    @pytest.mark.asyncio
-    async def test_should_wake_true_after_threshold(self, tmp_path: Path) -> None:
-        clock = _FakeClock()
-        fm = self._fm(tmp_path, clock=clock)
-        await fm.initialize()
-        clock.advance(90.0)  # >= 60s threshold
         assert fm.should_wake(99) is True
 
     @pytest.mark.asyncio
@@ -370,19 +365,9 @@ class TestFocusManagerIdleWake:
     @pytest.mark.asyncio
     async def test_should_wake_false_when_disabled(self, tmp_path: Path) -> None:
         clock = _FakeClock()
-        fm = self._fm(tmp_path, clock=clock, idle_wake_seconds=0.0)
+        fm = self._fm(tmp_path, clock=clock, unread_nudge_enabled=False)
         await fm.initialize()
         clock.advance(10_000.0)
-        assert fm.should_wake(99) is False
-
-    @pytest.mark.asyncio
-    async def test_end_turn_refreshes_last_active(self, tmp_path: Path) -> None:
-        clock = _FakeClock()
-        fm = self._fm(tmp_path, clock=clock)
-        await fm.initialize()
-        clock.advance(90.0)
-        assert fm.should_wake(99) is True
-        await fm.end_turn()  # focused turn completed → resets idle clock
         assert fm.should_wake(99) is False
 
     @pytest.mark.asyncio
@@ -426,18 +411,6 @@ class TestFocusManagerIdleWake:
         fm.mark_nudge_pending()
         clock.advance(5.0)  # within second debounce window
         assert fm.should_wake(99) is False
-
-    @pytest.mark.asyncio
-    async def test_end_turn_still_refreshes_idle_clock(self, tmp_path: Path) -> None:
-        # end_turn resets idle clock so focused reply silences nudges
-        clock = _FakeClock()
-        fm = self._fm(tmp_path, clock=clock)
-        await fm.initialize()
-        clock.advance(90.0)
-        fm.mark_nudge_pending()
-        await fm.end_turn()
-        clock.advance(90.0)  # idle again after end_turn reset
-        assert fm.should_wake(99) is True
 
     @pytest.mark.asyncio
     async def test_wake_does_not_move_focus(self, tmp_path: Path) -> None:
