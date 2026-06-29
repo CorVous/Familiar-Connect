@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -21,6 +22,9 @@ from familiar_connect.context.layers import RecentHistoryLayer
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore
 from familiar_connect.identity import Author
+
+if TYPE_CHECKING:
+    from familiar_connect.llm import Message
 
 
 def _ctx(*, channel_id: int = 1, viewer_mode: str = "voice") -> AssemblyContext:
@@ -242,16 +246,17 @@ class TestTurnRenderingChannelTag:
         assert "#msg-99" in user_msg.content_str
 
 
-# Marker prefix pinned by the cross-channel separator increment.
-_MARKER_PREFIX = "—— now in "
+def _is_marker(msg: Message) -> bool:
+    """Channel-change separators are bare lines; rendered turns are bracketed."""
+    return not msg.content_str.startswith("[")
 
 
 def _markers(msgs: list) -> list[str]:
-    return [m.content_str for m in msgs if m.content_str.startswith(_MARKER_PREFIX)]
+    return [m.content_str for m in msgs if _is_marker(m)]
 
 
 def _marker_indices(msgs: list) -> list[int]:
-    return [i for i, m in enumerate(msgs) if m.content_str.startswith(_MARKER_PREFIX)]
+    return [i for i, m in enumerate(msgs) if _is_marker(m)]
 
 
 class TestRecentHistoryChannelMarkers:
@@ -315,7 +320,7 @@ class TestRecentHistoryChannelMarkers:
             guild_name_resolver={1: "My Server", 2: "My Server"}.get,
         )
         msgs = await layer.recent_messages(_ctx(channel_id=1))
-        assert '—— now in #general · "My Server" ——' in _markers(msgs)
+        assert "My Server/#general" in _markers(msgs)
 
     @pytest.mark.asyncio
     async def test_marker_falls_back_to_channel_id_without_resolvers(self) -> None:
@@ -326,8 +331,8 @@ class TestRecentHistoryChannelMarkers:
         layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         markers = _markers(msgs)
-        assert "—— now in #1 ——" in markers
-        assert "—— now in #2 ——" in markers
+        assert "#1" in markers
+        assert "#2" in markers
 
     @pytest.mark.asyncio
     async def test_marker_omits_server_when_guild_unknown(self) -> None:
@@ -343,8 +348,8 @@ class TestRecentHistoryChannelMarkers:
         )
         msgs = await layer.recent_messages(_ctx(channel_id=1))
         markers = _markers(msgs)
-        assert "—— now in #general ——" in markers
-        assert all("·" not in m for m in markers)
+        assert "#general" in markers
+        assert all("/" not in m for m in markers)
 
     @pytest.mark.asyncio
     async def test_marker_is_distinct_user_message_without_name(self) -> None:
@@ -354,7 +359,7 @@ class TestRecentHistoryChannelMarkers:
         self._turn(store, channel_id=2, content="yo", msg_id="m2")
         layer = RecentHistoryLayer(store=AsyncHistoryStore(store), window_size=20)
         msgs = await layer.recent_messages(_ctx(channel_id=1))
-        marker_msg = next(m for m in msgs if m.content_str.startswith(_MARKER_PREFIX))
+        marker_msg = next(m for m in msgs if _is_marker(m))
         assert marker_msg.role == "user"
         assert marker_msg.name is None
 
@@ -364,11 +369,7 @@ class TestRecentHistoryChannelMarkers:
         probe = await RecentHistoryLayer(
             store=AsyncHistoryStore(store), window_size=20
         ).recent_messages(_ctx(channel_id=1))
-        return next(
-            estimate_message_tokens(m)
-            for m in probe
-            if not m.content_str.startswith(_MARKER_PREFIX)
-        )
+        return next(estimate_message_tokens(m) for m in probe if not _is_marker(m))
 
     @pytest.mark.asyncio
     async def test_token_trim_realigns_markers_to_surviving_window(self) -> None:
@@ -398,7 +399,7 @@ class TestRecentHistoryChannelMarkers:
         # never the trimmed #9 head.
         assert len(msgs) == 4
         assert _marker_indices(msgs) == [0, 2]
-        assert _markers(msgs) == ["—— now in #1 ——", "—— now in #2 ——"]
+        assert _markers(msgs) == ["#1", "#2"]
         assert "#1" in msgs[1].content_str
         assert "#2" in msgs[3].content_str
 
