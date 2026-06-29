@@ -258,28 +258,24 @@ class RecentHistoryLayer:
         )
 
 
-# Standalone channel-change separator: `—— now in #general · "Server" ——`.
-# Server clause omitted when no guild name resolves (DM / unknown).
-_CHANNEL_MARKER_PREFIX = "—— now in "
-_CHANNEL_MARKER_SUFFIX = " ——"
-
-
+# Standalone channel-change separator: `My Server/#general` (server/channel),
+# or the bare channel (`#general`) when no guild name resolves (DM / unknown).
 def _format_channel_marker(
     channel_id: int,
     *,
     channel_name_resolver: Callable[[int], str | None] | None,
     guild_name_resolver: Callable[[int], str | None] | None,
 ) -> str:
-    """Render a channel-change separator naming the channel and (when known) server.
+    """Render a channel-change separator as ``{server}/{channel}``.
 
     Channel falls back to ``#{channel_id}`` when no name resolves; the
-    ``· "{server}"`` clause is dropped entirely for DMs / unknown guilds.
+    ``{server}/`` prefix is dropped entirely for DMs / unknown guilds,
+    leaving the bare channel.
     """
     name = channel_name_resolver(channel_id) if channel_name_resolver else None
     channel = f"#{name}" if name else f"#{channel_id}"
     guild = guild_name_resolver(channel_id) if guild_name_resolver else None
-    body = f'{channel} · "{guild}"' if guild else channel
-    return f"{_CHANNEL_MARKER_PREFIX}{body}{_CHANNEL_MARKER_SUFFIX}"
+    return f"{guild}/{channel}" if guild else channel
 
 
 def _insert_channel_markers(
