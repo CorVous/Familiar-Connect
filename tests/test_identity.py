@@ -61,11 +61,22 @@ class TestCanonicalKeyAndSlug:
         assert a.canonical_key == "discord:42"
 
     def test_slug_replaces_colon_and_lowercases(self) -> None:
-        a = Author(platform="Discord", user_id="42", username=None, display_name=None)
+        # arbitrary platform casing exercises slug normalization, not a real key
+        a = Author(
+            platform="Discord",  # ty: ignore[invalid-argument-type]
+            user_id="42",
+            username=None,
+            display_name=None,
+        )
         assert a.slug == "discord-42"
 
     def test_slug_strips_surrounding_dashes(self) -> None:
-        a = Author(platform=":x:", user_id=":7:", username=None, display_name=None)
+        a = Author(
+            platform=":x:",  # ty: ignore[invalid-argument-type]
+            user_id=":7:",
+            username=None,
+            display_name=None,
+        )
         assert a.slug == "x-7"
 
     def test_slug_collapses_runs_of_non_alphanumerics(self) -> None:
