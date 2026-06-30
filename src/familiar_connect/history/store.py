@@ -1344,7 +1344,7 @@ class HistoryStore:
         ).fetchall()
         return [
             Author(
-                platform=cast(Platform, str(row["author_platform"])),
+                platform=cast("Platform", str(row["author_platform"])),
                 user_id=str(row["author_user_id"]),
                 username=row["author_username"],
                 display_name=row["author_display_name"],
