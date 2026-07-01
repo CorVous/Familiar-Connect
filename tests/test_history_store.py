@@ -715,7 +715,7 @@ class TestConsumedTurnsAfter:
         watermark = (c.consumed_at.isoformat(), c.id)
         # focus shifts to channel 300 -> promote staged turn (consumed_at=NOW)
         promoted = s.promote_staged_turns(familiar_id=_FAMILIAR, channel_id=300)
-        assert promoted == 1
+        assert promoted.consumed == 1
         out = s.consumed_turns_after(
             familiar_id=_FAMILIAR,
             after_consumed_at=watermark[0],
@@ -1434,10 +1434,11 @@ class TestPromoteStagedTurnsSince:
         )
         self._stage(s, channel_id=100, content="a during")
         self._stage(s, channel_id=101, content="b during")
-        n = s.promote_staged_turns_since(
+        promo = s.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=departure.id
         )
-        assert n == 2
+        assert promo.consumed == 2
+        assert promo.missed == 0
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 0
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
 
@@ -1445,17 +1446,17 @@ class TestPromoteStagedTurnsSince:
         s = _store(tmp_path)
         pre_absence = self._stage(s, channel_id=100, content="never attended")
         during = self._stage(s, channel_id=101, content="during")
-        n = s.promote_staged_turns_since(
+        promo = s.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=pre_absence.id
         )
-        assert n == 1
+        assert promo.consumed == 1
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 1
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
         # boundary: turn at exactly after_turn_id stays staged
-        n2 = s.promote_staged_turns_since(
+        promo2 = s.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=during.id
         )
-        assert n2 == 0
+        assert promo2.consumed == 0
 
     def test_leaves_consumed_turns_untouched(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
@@ -1469,13 +1470,61 @@ class TestPromoteStagedTurnsSince:
             "SELECT consumed_at FROM turns WHERE id = ?",
             (consumed.id,),
         ).fetchone()["consumed_at"]
-        n = s.promote_staged_turns_since(familiar_id=_FAMILIAR, after_turn_id=0)
-        assert n == 0
+        promo = s.promote_staged_turns_since(familiar_id=_FAMILIAR, after_turn_id=0)
+        assert promo.consumed == 0
         after = s._conn.execute(
             "SELECT consumed_at FROM turns WHERE id = ?",
             (consumed.id,),
         ).fetchone()["consumed_at"]
         assert after == before
+
+    def test_catch_up_limit_capped_per_channel(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        departure = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="departure",
+        )
+        # 4 in each of two channels during the absence
+        for i in range(4):
+            self._stage(s, channel_id=100, content=f"a{i}")
+            self._stage(s, channel_id=101, content=f"b{i}")
+        promo = s.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=departure.id, catch_up_limit=2
+        )
+        # cap is per channel: 2 consumed + 2 missed in each of 2 channels
+        assert promo.consumed == 4
+        assert promo.missed == 4
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 0
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
+
+    def test_catch_up_limit_pings_always_caught(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        departure = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="departure",
+        )
+        ping = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="<@bot> you there?",
+            consumed=False,
+            pings_bot=True,
+        )
+        for i in range(3):
+            self._stage(s, channel_id=100, content=f"chatter{i}")
+        promo = s.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=departure.id, catch_up_limit=1
+        )
+        # window (1 newest) + older ping = 2 consumed; 2 missed
+        assert promo.consumed == 2
+        assert promo.missed == 2
+        got = s.recent_cross_channel(familiar_id=_FAMILIAR, limit=10)
+        assert ping.id in {t.id for t in got}
 
     def test_promoted_turns_appear_in_recent_cross_channel(
         self, tmp_path: Path
@@ -1866,10 +1915,10 @@ class TestAsyncStoreActivityWrappers:
             role="user",
             content="during",
         )
-        n = await store.promote_staged_turns_since(
+        promo = await store.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=departure.id
         )
-        assert n == 1
+        assert promo.consumed == 1
         store.close()
 
 

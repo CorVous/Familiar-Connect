@@ -21,6 +21,10 @@ _logger = logging.getLogger(__name__)
 # Debounce window: rapid arrivals within this window share one nudge
 _DEFAULT_NUDGE_DEBOUNCE_S = 30.0
 
+# Default catch-up window — staged turns she takes in on a shift; the
+# canonical knob is ``[focus].catch_up_limit`` (see :class:`FocusConfig`).
+_DEFAULT_CATCH_UP_LIMIT = 20
+
 # Server label for DM channels admitted via the allowlist; this module
 # owns ``guild_names``/``guild_name_for``, so the constant lives here.
 PRIVATE_MESSAGE_GUILD_NAME = "Private Message"
@@ -53,6 +57,7 @@ class FocusManager:
         clock: Callable[[], float] = time.monotonic,
         unread_nudge_enabled: bool = True,
         nudge_debounce_seconds: float = _DEFAULT_NUDGE_DEBOUNCE_S,
+        catch_up_limit: int = _DEFAULT_CATCH_UP_LIMIT,
     ) -> None:
         self._familiar_id = familiar_id
         self._store = store
@@ -65,6 +70,9 @@ class FocusManager:
         self._clock = clock
         self._unread_nudge_enabled = unread_nudge_enabled
         self._nudge_debounce_seconds = nudge_debounce_seconds
+        # Catch-up window: staged turns she actually takes in on a shift;
+        # also the shift_focus preview size, so perception == consumption.
+        self._catch_up_limit = catch_up_limit
         self._last_nudge: float = float("-inf")  # Never nudged initially
         # Channel_id → display name; populated by bot on_ready
         self.channel_names: dict[int, str] = {}
@@ -100,6 +108,11 @@ class FocusManager:
         )
         return None
 
+    @property
+    def catch_up_limit(self) -> int:
+        """Staged-turn catch-up window — also the shift_focus preview size."""
+        return self._catch_up_limit
+
     def get_focus(self, modality: str) -> int | None:
         """Return current focus channel_id for modality."""
         return self._text_focus if modality == "text" else self._voice_focus
@@ -129,14 +142,17 @@ class FocusManager:
         lock = self._voice_lock if modality == "voice" else self._text_lock
         async with lock:
             if modality == "text":
-                count = await self._store.promote_staged_turns(
-                    familiar_id=self._familiar_id, channel_id=channel_id
+                promo = await self._store.promote_staged_turns(
+                    familiar_id=self._familiar_id,
+                    channel_id=channel_id,
+                    catch_up_limit=self._catch_up_limit,
                 )
                 self._text_focus = channel_id
                 _logger.info(
                     f"{ls.tag('🔀 Focus', ls.LC)} "
                     f"{ls.kv('text', self.channel_label(channel_id), vc=ls.LW)} "
-                    f"{ls.kv('promoted', str(count), vc=ls.LG)}"
+                    f"{ls.kv('promoted', str(promo.consumed), vc=ls.LG)} "
+                    f"{ls.kv('missed', str(promo.missed), vc=ls.LY)}"
                 )
             else:
                 self._voice_focus = channel_id

@@ -517,10 +517,16 @@ typing_backoff_max_s     = 30.0
 # only the model's shift_focus tool does); false disables it.
 # nudge_debounce_seconds: rapid arrivals within this window share one
 # nudge.
+# catch_up_limit: how many staged turns she actually catches up on when
+# attention lands on a channel — the shift_focus preview size and the
+# per-channel cap on activity-return promotion. Staged backlog beyond
+# this is *missed* (dropped from her window + summary), not silently
+# consumed; direct @-mentions are always caught regardless of age.
 
 [focus]
 unread_nudge_enabled   = true
 nudge_debounce_seconds = 30.0
+catch_up_limit         = 20
 
 # --- Tools -------------------------------------------------------------------
 #

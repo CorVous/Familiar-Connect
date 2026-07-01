@@ -25,8 +25,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-_PREVIEW_LIMIT = 20
-
 
 async def _shift_focus_handler(args: dict[str, Any], ctx: ToolContext) -> str:
     fm = ctx.focus_manager
@@ -62,12 +60,14 @@ async def _shift_focus_handler(args: dict[str, Any], ctx: ToolContext) -> str:
 
     payload: dict[str, Any] = {"ok": True, "channel_id": channel_id}
     # Eager content fetch — voice/empty channels yield [] (model learns
-    # it's empty). store may be absent in fm-only contexts → bare ack
+    # it's empty). store may be absent in fm-only contexts → bare ack.
+    # Preview size == the focus catch-up window so what she sees here is
+    # exactly what shift_now promotes to consumed (the rest is missed).
     if ctx.store is not None:
         turns = await ctx.store.recent(
             familiar_id=ctx.familiar_id,
             channel_id=channel_id,
-            limit=_PREVIEW_LIMIT,
+            limit=fm.catch_up_limit,
         )
         payload["messages"] = serialize_turns(turns)
 

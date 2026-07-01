@@ -1394,6 +1394,7 @@ class TestFocusConfig:
         cfg = FocusConfig()
         assert cfg.unread_nudge_enabled is True
         assert cfg.nudge_debounce_seconds == pytest.approx(30.0)
+        assert cfg.catch_up_limit == 20
 
     def test_present_on_character_config(self) -> None:
         cfg = CharacterConfig()
@@ -1402,11 +1403,29 @@ class TestFocusConfig:
     def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            "[focus]\nunread_nudge_enabled = false\nnudge_debounce_seconds = 10\n"
+            "[focus]\nunread_nudge_enabled = false\n"
+            "nudge_debounce_seconds = 10\ncatch_up_limit = 50\n"
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.focus.unread_nudge_enabled is False
         assert cfg.focus.nudge_debounce_seconds == pytest.approx(10.0)
+        assert cfg.focus.catch_up_limit == 50
+
+    def test_catch_up_limit_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[focus]\ncatch_up_limit = 0\n")
+        with pytest.raises(ConfigError, match="catch_up_limit"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_catch_up_limit_rejects_non_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[focus]\ncatch_up_limit = 2.5\n")
+        with pytest.raises(ConfigError, match="catch_up_limit"):
+            load_character_config(path, defaults_path=default_profile_path)
 
     def test_must_be_bool(self, tmp_path: Path, default_profile_path: Path) -> None:
         path = tmp_path / "character.toml"

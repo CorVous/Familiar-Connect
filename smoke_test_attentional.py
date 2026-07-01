@@ -94,7 +94,7 @@ async def run_smoke_tests() -> None:
     promoted = store.promote_staged_turns(
         familiar_id=FAMILIAR_ID, channel_id=OTHER_CHANNEL
     )
-    check("promote_staged_turns", promoted == 1, f"promoted={promoted}")
+    check("promote_staged_turns", promoted.consumed == 1, f"promoted={promoted}")
 
     cross2 = store.recent_cross_channel(familiar_id=FAMILIAR_ID, limit=10)
     check(

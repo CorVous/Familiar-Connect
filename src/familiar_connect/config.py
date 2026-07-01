@@ -387,10 +387,16 @@ class FocusConfig:
         disables the nudge entirely.
     :param nudge_debounce_seconds: rapid arrivals within this window
         share one nudge.
+    :param catch_up_limit: how many staged turns she actually catches
+        up on when attention lands on a channel — the focus-swap preview
+        size and the per-channel cap on activity-return promotion. Staged
+        backlog beyond this (bar direct pings, always caught) is *missed*,
+        not silently consumed.
     """
 
     unread_nudge_enabled: bool = True
     nudge_debounce_seconds: float = 30.0
+    catch_up_limit: int = 20
 
 
 @dataclass(frozen=True)
@@ -908,6 +914,7 @@ def _prompt_str(raw: dict, key: str) -> str:
 _FOCUS_FIELDS: frozenset[str] = frozenset({
     "unread_nudge_enabled",
     "nudge_debounce_seconds",
+    "catch_up_limit",
 })
 
 
@@ -937,6 +944,16 @@ def _parse_focus_config(raw: dict) -> FocusConfig:
             raise ConfigError(msg)
         return v
 
+    def _positive_int(key: str, fallback: int) -> int:
+        v = raw.get(key, fallback)
+        if isinstance(v, bool) or not isinstance(v, int):
+            msg = f"[focus].{key} must be an integer, got {type(v).__name__}"
+            raise ConfigError(msg)
+        if v <= 0:
+            msg = f"[focus].{key} must be positive, got {v}"
+            raise ConfigError(msg)
+        return v
+
     return FocusConfig(
         unread_nudge_enabled=_bool(
             "unread_nudge_enabled", default=defaults.unread_nudge_enabled
@@ -944,6 +961,7 @@ def _parse_focus_config(raw: dict) -> FocusConfig:
         nudge_debounce_seconds=_positive_float(
             "nudge_debounce_seconds", defaults.nudge_debounce_seconds
         ),
+        catch_up_limit=_positive_int("catch_up_limit", defaults.catch_up_limit),
     )
 
 

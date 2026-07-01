@@ -39,6 +39,7 @@ def _append(
     content: str = "hello",
     consumed: bool = True,
     arrived_at: datetime | None = None,
+    pings_bot: bool = False,
 ) -> HistoryTurn:
     return store.append_turn(
         familiar_id=familiar_id,
@@ -47,7 +48,16 @@ def _append(
         content=content,
         consumed=consumed,
         arrived_at=arrived_at,
+        pings_bot=pings_bot,
     )
+
+
+def _missed_at(store: HistoryStore, turn_id: int) -> str | None:
+    """Raw ``missed_at`` for a turn (not surfaced on HistoryTurn)."""
+    row = store._conn.execute(
+        "SELECT missed_at FROM turns WHERE id = ?", (turn_id,)
+    ).fetchone()
+    return row["missed_at"]
 
 
 # ---------------------------------------------------------------------------
@@ -161,15 +171,16 @@ class TestPromoteStagedTurns:
         store = _store()
         _append(store, channel_id=1, consumed=False)
         _append(store, channel_id=1, consumed=False)
-        count = store.promote_staged_turns(familiar_id="fam", channel_id=1)
-        assert count == 2
+        promo = store.promote_staged_turns(familiar_id="fam", channel_id=1)
+        assert promo.consumed == 2
+        assert promo.missed == 0
         assert store.count_staged(familiar_id="fam", channel_id=1) == 0
 
     def test_does_not_promote_already_consumed(self) -> None:
         store = _store()
         _append(store, consumed=True)
-        count = store.promote_staged_turns(familiar_id="fam", channel_id=1)
-        assert count == 0
+        promo = store.promote_staged_turns(familiar_id="fam", channel_id=1)
+        assert promo.consumed == 0
 
     def test_channel_scoped_promotion(self) -> None:
         store = _store()
@@ -188,6 +199,80 @@ class TestPromoteStagedTurns:
         matching = [t for t in turns if t.id == turn.id]
         assert len(matching) == 1
         assert matching[0].consumed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# promote_staged_turns — catch-up window (she can miss messages)
+# ---------------------------------------------------------------------------
+
+
+class TestPromoteStagedTurnsCatchUpWindow:
+    def test_consumes_only_window_misses_rest(self) -> None:
+        store = _store()
+        staged = [_append(store, channel_id=1, consumed=False) for _ in range(5)]
+        promo = store.promote_staged_turns(
+            familiar_id="fam", channel_id=1, catch_up_limit=2
+        )
+        # the last 2 (newest) consumed; the 3 older missed
+        assert promo.consumed == 2
+        assert promo.missed == 3
+        consumed_at = store.recent(familiar_id="fam", channel_id=1, limit=10)
+        by_id = {t.id: t for t in consumed_at}
+        # newest two have consumed_at; older three are missed (no consumed_at)
+        assert by_id[staged[-1].id].consumed_at is not None
+        assert by_id[staged[-2].id].consumed_at is not None
+        for t in staged[:3]:
+            assert by_id[t.id].consumed_at is None
+            assert _missed_at(store, t.id) is not None
+
+    def test_missed_turns_excluded_from_count_staged(self) -> None:
+        store = _store()
+        for _ in range(5):
+            _append(store, channel_id=1, consumed=False)
+        store.promote_staged_turns(familiar_id="fam", channel_id=1, catch_up_limit=2)
+        # neither consumed nor missed turns count as still-staged
+        assert store.count_staged(familiar_id="fam", channel_id=1) == 0
+
+    def test_missed_turns_excluded_from_staged_channels(self) -> None:
+        store = _store()
+        for _ in range(5):
+            _append(store, channel_id=7, consumed=False)
+        store.promote_staged_turns(familiar_id="fam", channel_id=7, catch_up_limit=2)
+        assert store.staged_channels(familiar_id="fam") == {}
+
+    def test_missed_turns_excluded_from_recent_cross_channel(self) -> None:
+        store = _store()
+        staged = [_append(store, channel_id=1, consumed=False) for _ in range(5)]
+        store.promote_staged_turns(familiar_id="fam", channel_id=1, catch_up_limit=2)
+        got = store.recent_cross_channel(familiar_id="fam", limit=10)
+        # only the consumed window surfaces; missed turns never appear
+        assert {t.id for t in got} == {staged[-1].id, staged[-2].id}
+
+    def test_pings_always_caught_even_outside_window(self) -> None:
+        store = _store()
+        ping = _append(store, channel_id=1, consumed=False, pings_bot=True)
+        # newer non-ping chatter fills the window past the ping
+        for _ in range(4):
+            _append(store, channel_id=1, consumed=False)
+        promo = store.promote_staged_turns(
+            familiar_id="fam", channel_id=1, catch_up_limit=2
+        )
+        # window (2 newest) + the older ping = 3 consumed; 2 missed
+        assert promo.consumed == 3
+        assert promo.missed == 2
+        assert _missed_at(store, ping.id) is None
+        got = store.recent_cross_channel(familiar_id="fam", limit=10)
+        assert ping.id in {t.id for t in got}
+
+    def test_within_window_consumes_all(self) -> None:
+        store = _store()
+        for _ in range(3):
+            _append(store, channel_id=1, consumed=False)
+        promo = store.promote_staged_turns(
+            familiar_id="fam", channel_id=1, catch_up_limit=20
+        )
+        assert promo.consumed == 3
+        assert promo.missed == 0
 
 
 # ---------------------------------------------------------------------------
@@ -437,8 +522,8 @@ class TestAsyncStoreWrappers:
             role="user",
             content="staged",
         )
-        count = await store.promote_staged_turns(familiar_id="fam", channel_id=1)
-        assert count == 1
+        promo = await store.promote_staged_turns(familiar_id="fam", channel_id=1)
+        assert promo.consumed == 1
         store.close()
 
     @pytest.mark.asyncio
