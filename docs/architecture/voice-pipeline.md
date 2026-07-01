@@ -162,8 +162,9 @@ it forces the turn to end:
   (0.5 s), flushing whatever Deepgram has buffered.
 - **Local turn detection** — calls
   `UtteranceEndpointer.force_complete_if_pending()` after
-  `_LOCAL_TURN_FALLBACK_S` (1.5 s, longer so a natural pause doesn't
-  defeat Smart Turn's hold-through-pause). It drains a turn stranded in
+  `[providers.turn_detection.local].idle_fallback_s` (1.5 s default,
+  longer so a natural pause doesn't defeat Smart Turn's
+  hold-through-pause). It drains a turn stranded in
   `SPEAKING` (burst stopped before the silence streak classified) or
   `POST_INCOMPLETE` (a Smart Turn `incomplete` misfire), firing
   `on_turn_complete` on state rather than buffered bytes.

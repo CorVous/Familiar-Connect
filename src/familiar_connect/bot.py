@@ -72,13 +72,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Idle window before the per-user audio pump forces a turn flush when
-# local turn detection (TEN-VAD + Smart Turn) owns endpointing. Longer
-# than the plain-Deepgram ``DEFAULT_IDLE_FINALIZE_S`` so a natural pause
-# doesn't defeat Smart Turn's hold-through-pause behaviour; this only
-# rescues an utterance Smart Turn already stranded. See ``_user_pump``.
-_LOCAL_TURN_FALLBACK_S: float = 1.5
-
 # One-time warning sent to the DM channel on a user's first admitted DM.
 # Verbatim per reviewer request (PR #176) — do not reword.
 DM_BOT_DISCLAIMER = (
@@ -426,10 +419,14 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             user_audio_queues.pop(user_id, None)
             return
         # Endpointer (if any) is created inside ``_ensure_transcriber``
-        # above; capture once for the pump's lifetime.
+        # above; capture once for the pump's lifetime. Local turn detection
+        # sets a longer fallback window (``[providers.turn_detection.local]
+        # .idle_fallback_s``) so a natural pause doesn't defeat Smart Turn.
         ep = endpointers.get(user_id)
         idle_flush_s = (
-            _LOCAL_TURN_FALLBACK_S if ep is not None else DEFAULT_IDLE_FINALIZE_S
+            detector.idle_fallback_s
+            if ep is not None and detector is not None
+            else DEFAULT_IDLE_FINALIZE_S
         )
         # ``dirty`` = audio buffered downstream since the last flush; arm
         # the idle timer only then so long silences block on ``get()``.

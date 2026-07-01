@@ -546,6 +546,7 @@ class TestLocalTurnDetection:
             return ep
 
         detector = MagicMock()
+        detector.idle_fallback_s = 1.5
         detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
 
         familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
@@ -581,6 +582,7 @@ class TestLocalTurnDetection:
             return ep
 
         detector = MagicMock()
+        detector.idle_fallback_s = 1.5
         detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
         familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
         vc = MagicMock()
@@ -627,6 +629,7 @@ class TestLocalTurnDetection:
             return ep
 
         detector = MagicMock()
+        detector.idle_fallback_s = 1.5
         detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
         familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
         vc = MagicMock()
@@ -737,17 +740,17 @@ class TestIdleFinalizeFallback:
         await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
 
     @pytest.mark.asyncio
-    async def test_local_turn_uses_endpointer_fallback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_local_turn_uses_endpointer_fallback(self) -> None:
         """Detector set → idle gap drives the endpointer's stranded-turn drain.
 
         The pump must call ``force_complete_if_pending`` (which routes
         through the endpointer's on-complete → ``finalize``), not fire
         ``finalize`` directly, so Smart Turn's hold-through-pause logic
         stays authoritative.
+
+        Uses the detector-configured ``idle_fallback_s`` (0.05 s here) so
+        the pump's idle timer fires quickly.
         """
-        monkeypatch.setattr(bot_module, "_LOCAL_TURN_FALLBACK_S", 0.05)
         handle = _make_handle()
         template, clones = _template_with_finalize()
         endpointers: list[MagicMock] = []
@@ -762,6 +765,7 @@ class TestIdleFinalizeFallback:
             return ep
 
         detector = MagicMock()
+        detector.idle_fallback_s = 0.05
         detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
         familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
         vc = MagicMock()
