@@ -1,7 +1,6 @@
 """Tests for Phase-3 context layers.
 
-Covers :class:`ConversationSummaryLayer`,
-:class:`CrossChannelContextLayer`, and :class:`RagContextLayer`.
+Covers :class:`ConversationSummaryLayer` and :class:`RagContextLayer`.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import pytest
 from familiar_connect.context.assembler import AssemblyContext
 from familiar_connect.context.layers import (
     ConversationSummaryLayer,
-    CrossChannelContextLayer,
     RagContextLayer,
     RecentHistoryLayer,
 )
@@ -101,55 +99,6 @@ class TestConversationSummaryLayer:
         k2 = layer.invalidation_key(_ctx())
         assert k1 != k2
         assert k1 != "none"
-
-
-class TestCrossChannelContextLayer:
-    """CrossChannelContextLayer is retired — build() always returns "".
-
-    The class remains importable for backward compat (run.py wires it
-    in) but the attentional stream supersedes per-channel summaries.
-    """
-
-    @pytest.mark.asyncio
-    async def test_build_always_returns_empty(self) -> None:
-        """Retired layer opts out unconditionally."""
-        store = HistoryStore(":memory:")
-        store.put_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-            source_last_id=5,
-            summary_text="In #general: banter about pumpkins.",
-        )
-        layer = CrossChannelContextLayer(
-            store=AsyncHistoryStore(store), viewer_map={1: [100]}, ttl_seconds=300
-        )
-        out = await layer.build(_ctx(channel_id=1, viewer_mode="voice"))
-        assert not out
-
-    @pytest.mark.asyncio
-    async def test_build_empty_regardless_of_config(self) -> None:
-        """Empty even when viewer_map is populated and data exists."""
-        store = HistoryStore(":memory:")
-        store.put_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-            source_last_id=5,
-            summary_text="From #general: apples.",
-        )
-        store.put_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=200,
-            source_last_id=8,
-            summary_text="From #alerts: a service restart.",
-        )
-        layer = CrossChannelContextLayer(
-            store=AsyncHistoryStore(store), viewer_map={1: [100, 200]}, ttl_seconds=300
-        )
-        out = await layer.build(_ctx(channel_id=1))
-        assert not out
 
 
 class TestRagContextLayer:
