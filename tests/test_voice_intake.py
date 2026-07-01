@@ -657,6 +657,131 @@ class TestLocalTurnDetection:
         await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
 
 
+def _template_with_finalize() -> tuple[MagicMock, list[MagicMock]]:
+    """Template whose clones carry a ``finalize`` AsyncMock."""
+    template, clones = _make_template_transcriber()
+    base_factory = template.clone.side_effect
+
+    def _make_clone_with_finalize() -> MagicMock:
+        c = base_factory()
+        c.finalize = AsyncMock()
+        return c
+
+    template.clone = MagicMock(side_effect=_make_clone_with_finalize)
+    return template, clones
+
+
+class TestIdleFinalizeFallback:
+    """Pump forces a flush after an idle gap — the turn-end fallback.
+
+    Discord's client VAD halts RTP during silence, so neither Deepgram's
+    hosted endpointer nor the local TEN-VAD chain sees the trailing
+    silence that ends a turn; the transcript would otherwise wait for the
+    next speech burst. The per-user pump arms an idle timer after each
+    chunk and forces the flush when it expires.
+    """
+
+    @pytest.mark.asyncio
+    async def test_plain_deepgram_finalizes_after_idle_gap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No detector → idle gap fires ``clone.finalize()`` once per turn."""
+        monkeypatch.setattr(bot_module, "DEFAULT_IDLE_FINALIZE_S", 0.05)
+        handle = _make_handle()
+        template, clones = _template_with_finalize()
+        familiar = _make_familiar(transcriber=template, local_turn_detector=None)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        await rt.audio_queue.put((1, b"\x00\x01"))
+        # Wait past the idle window so the pump's wait_for times out.
+        await asyncio.sleep(0.15)
+        assert len(clones) == 1
+        clones[0].finalize.assert_awaited_once()
+
+        # A fresh chunk re-arms; a second idle gap flushes again — the turn
+        # boundary isn't a one-shot.
+        await rt.audio_queue.put((1, b"\x02\x03"))
+        await asyncio.sleep(0.15)
+        assert clones[0].finalize.await_count == 2
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
+    async def test_no_finalize_while_audio_flows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Continuous chunks keep the idle timer disarmed — no premature flush."""
+        monkeypatch.setattr(bot_module, "DEFAULT_IDLE_FINALIZE_S", 0.05)
+        handle = _make_handle()
+        template, clones = _template_with_finalize()
+        familiar = _make_familiar(transcriber=template, local_turn_detector=None)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        # Feed faster than the idle window; the timer must never expire.
+        for i in range(6):
+            await rt.audio_queue.put((1, bytes([i])))
+            await asyncio.sleep(0.01)
+        assert len(clones) == 1
+        clones[0].finalize.assert_not_awaited()
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+    @pytest.mark.asyncio
+    async def test_local_turn_uses_endpointer_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Detector set → idle gap drives the endpointer's stranded-turn drain.
+
+        The pump must call ``force_complete_if_pending`` (which routes
+        through the endpointer's on-complete → ``finalize``), not fire
+        ``finalize`` directly, so Smart Turn's hold-through-pause logic
+        stays authoritative.
+        """
+        monkeypatch.setattr(bot_module, "_LOCAL_TURN_FALLBACK_S", 0.05)
+        handle = _make_handle()
+        template, clones = _template_with_finalize()
+        endpointers: list[MagicMock] = []
+
+        def _make_endpointer(*, on_turn_complete: object) -> MagicMock:
+            del on_turn_complete
+            ep = MagicMock()
+            ep.feed_audio = AsyncMock()
+            ep.force_complete_if_pending = AsyncMock(return_value=False)
+            ep.reset = MagicMock()
+            endpointers.append(ep)
+            return ep
+
+        detector = MagicMock()
+        detector.make_endpointer = MagicMock(side_effect=_make_endpointer)
+        familiar = _make_familiar(transcriber=template, local_turn_detector=detector)
+        vc = MagicMock()
+
+        rt = await _start_voice_intake(
+            handle=handle, familiar=familiar, voice_client=vc, channel_id=10
+        )
+        assert isinstance(rt, VoiceRuntime)
+
+        await rt.audio_queue.put((7, b"\x00\x01"))
+        await asyncio.sleep(0.15)
+
+        assert len(endpointers) == 1
+        endpointers[0].force_complete_if_pending.assert_awaited()
+        # Pump must not short-circuit the endpointer by finalizing directly.
+        clones[0].finalize.assert_not_awaited()
+
+        await _stop_voice_intake(handle=handle, familiar=familiar, channel_id=10)
+
+
 class TestVoiceMemberCache:
     """Voice-only members aren't in the guild member cache.
 

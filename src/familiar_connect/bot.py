@@ -35,6 +35,7 @@ from familiar_connect.identity import Author
 from familiar_connect.sources import DiscordTextSource
 from familiar_connect.sources.discord_embed_text import format_embeds
 from familiar_connect.sources.voice import VoiceSource
+from familiar_connect.stt.deepgram import DEFAULT_IDLE_FINALIZE_S
 from familiar_connect.subscriptions import SubscriptionKind
 from familiar_connect.typing_interrupt import TypingInterruptHandler
 from familiar_connect.voice import DaveVoiceClient
@@ -70,6 +71,13 @@ if TYPE_CHECKING:
     ResolveMember = Callable[[int, int], "Author | None"]
 
 _logger = logging.getLogger(__name__)
+
+# Idle window before the per-user audio pump forces a turn flush when
+# local turn detection (TEN-VAD + Smart Turn) owns endpointing. Longer
+# than the plain-Deepgram ``DEFAULT_IDLE_FINALIZE_S`` so a natural pause
+# doesn't defeat Smart Turn's hold-through-pause behaviour; this only
+# rescues an utterance Smart Turn already stranded. See ``_user_pump``.
+_LOCAL_TURN_FALLBACK_S: float = 1.5
 
 # One-time warning sent to the DM channel on a user's first admitted DM.
 # Verbatim per reviewer request (PR #176) — do not reword.
@@ -396,6 +404,15 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
         Exceptions on inner awaits swallowed (matching prior
         ``feed_audio`` behaviour); broken transcriber recovered by
         idle watchdog reopening stream after silence.
+
+        Idle-flush fallback: Discord's client VAD halts RTP during
+        silence, so the turn-end signal — Deepgram's hosted endpointer
+        or the local TEN-VAD chain — never sees the trailing silence and
+        holds the transcript until the *next* speech burst ("transcript
+        doesn't go through until the next sound"). After an idle gap with
+        audio buffered, force the flush: ``finalize()`` on the plain
+        Deepgram path, or the endpointer's stranded-utterance fallback
+        when local turn detection owns endpointing.
         """
         try:
             clone = await _ensure_transcriber(user_id)
@@ -408,11 +425,32 @@ async def _start_voice_intake(  # noqa: RUF029 — called from async slash-comma
             user_pump_tasks.pop(user_id, None)
             user_audio_queues.pop(user_id, None)
             return
+        # Endpointer (if any) is created inside ``_ensure_transcriber``
+        # above; capture once for the pump's lifetime.
+        ep = endpointers.get(user_id)
+        idle_flush_s = (
+            _LOCAL_TURN_FALLBACK_S if ep is not None else DEFAULT_IDLE_FINALIZE_S
+        )
+        # ``dirty`` = audio buffered downstream since the last flush; arm
+        # the idle timer only then so long silences block on ``get()``.
+        dirty = False
         while True:
-            pcm = await q.get()
+            if dirty:
+                try:
+                    pcm = await asyncio.wait_for(q.get(), timeout=idle_flush_s)
+                except TimeoutError:
+                    with contextlib.suppress(Exception):
+                        if ep is not None:
+                            await ep.force_complete_if_pending()
+                        else:
+                            await clone.finalize()
+                    dirty = False
+                    continue
+            else:
+                pcm = await q.get()
             with contextlib.suppress(Exception):
                 await clone.send_audio(pcm)
-            ep = endpointers.get(user_id)
+            dirty = True
             if ep is not None:
                 with contextlib.suppress(Exception):
                     await ep.feed_audio(pcm)

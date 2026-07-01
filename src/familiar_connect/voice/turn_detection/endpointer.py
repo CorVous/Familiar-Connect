@@ -88,6 +88,44 @@ class UtteranceEndpointer:
         self._silence_streak = 0
         self._vad.reset()
 
+    async def force_complete_if_pending(self) -> bool:
+        """Emit buffered speech as a complete turn — external idle fallback.
+
+        The state machine only advances on :meth:`feed_audio` frames, but
+        Discord's client VAD halts RTP during silence, so trailing silence
+        delivers no frames to re-trigger classification. Two stranding
+        cases follow: a Smart Turn ``incomplete`` misfire (we sit in
+        ``POST_INCOMPLETE`` awaiting fresh speech that ends the call), or a
+        burst that stopped before the silence streak reached ``silence_ms``
+        (still ``SPEAKING``, never classified). Either way the buffered
+        audio waits for the speaker's *next* utterance to flush.
+
+        The audio pump calls this after an idle gap: if speech is buffered,
+        fire ``on_turn_complete`` with it and reset rather than hold the
+        transcript indefinitely. Audio has stopped, so the turn is treated
+        as over without re-running Smart Turn.
+
+        Fires on the *state* (``SPEAKING`` or ``POST_INCOMPLETE``), not on
+        buffered bytes: after an ``incomplete`` verdict the memory-bounding
+        idle-clear can drain ``_utterance`` while the turn is still stranded,
+        and ``on_turn_complete`` consumers key off the turn ending — the STT
+        finalize — not the audio payload.
+
+        Returns ``True`` when a turn was emitted, ``False`` when nothing was
+        pending (pure idle, or already drained by normal classification).
+        """
+        if not (self._speaking or self._post_incomplete):
+            return False
+        audio = bytes(self._utterance)
+        self._utterance.clear()
+        self._speaking = False
+        self._post_incomplete = False
+        self._speech_streak = 0
+        self._silence_streak = 0
+        self._vad.reset()
+        await self._on_complete(audio)
+        return True
+
     async def feed_audio(self, pcm_48k: bytes) -> None:
         """Resample, frame into 16 ms VAD windows, advance state machine."""
         if not pcm_48k:

@@ -144,6 +144,33 @@ messages from the local chain. Strategy + tuning live in
 Default is **off** (`strategy = "deepgram"`): the bot uses Deepgram's
 hosted endpointer.
 
+### Idle-finalize fallback
+
+Both endpointing strategies share a failure mode: Discord's client VAD
+halts RTP during silence, so neither Deepgram's hosted endpointer nor
+the local TEN-VAD chain ever *sees* the trailing silence that ends a
+turn. Without a backstop the buffered final sits until the speaker's
+**next** utterance — the "transcript doesn't come through until the next
+sound" symptom.
+
+The per-user audio pump (`bot._user_pump`) is that backstop. After each
+chunk it arms an idle timer; when no audio arrives for the flush window
+it forces the turn to end:
+
+- **Plain Deepgram** (`detector is None`) — sends `Finalize`
+  (`DeepgramTranscriber.finalize`) after `DEFAULT_IDLE_FINALIZE_S`
+  (0.5 s), flushing whatever Deepgram has buffered.
+- **Local turn detection** — calls
+  `UtteranceEndpointer.force_complete_if_pending()` after
+  `_LOCAL_TURN_FALLBACK_S` (1.5 s, longer so a natural pause doesn't
+  defeat Smart Turn's hold-through-pause). It drains a turn stranded in
+  `SPEAKING` (burst stopped before the silence streak classified) or
+  `POST_INCOMPLETE` (a Smart Turn `incomplete` misfire), firing
+  `on_turn_complete` on state rather than buffered bytes.
+
+The timer only arms while the buffer is dirty, so a long silence blocks
+on the queue rather than re-finalizing every window.
+
 See [Roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
 
 #### Test coverage
