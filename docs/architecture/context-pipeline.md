@@ -7,7 +7,7 @@ sync with the raw source of truth.
 
 The `turns` table in `data/familiars/<id>/history.db` (Turso) is the
 durable, append-only source of truth. Every derived artifact —
-summaries, cross-channel briefings, FTS indexes (sibling `fts/turns/`
+summaries, FTS indexes (sibling `fts/turns/`
 and `fts/facts/` tantivy dirs on disk) — is **regenerable from
 `turns` alone**. Deleting any side-index row (or the whole table) is
 safe; the next worker tick rebuilds it. Tantivy indexes auto-rebuild
@@ -21,7 +21,6 @@ flowchart TB
 
     subgraph Indices["Side-indices (regenerable)"]
         summaries[(summaries)]
-        cross[(cross_context_summaries)]
         fts[(fts/turns/ tantivy)]
         facts[(facts)]
         fts_facts[(fts/facts/ tantivy)]
@@ -31,7 +30,6 @@ flowchart TB
 
     turns -->|sync write| fts
     turns -->|SummaryWorker| summaries
-    turns -->|SummaryWorker| cross
     turns -->|FactExtractor| facts
     facts -->|FactSupersedeWorker| facts
     facts -->|sync write| fts_facts
@@ -43,7 +41,6 @@ flowchart TB
         card[CharacterCardLayer]
         mode[OperatingModeLayer]
         lore[LorebookLayer]
-        xc[CrossChannelContextLayer]
         sum[ConversationSummaryLayer]
         ref[ReflectionLayer]
         ppl[PeopleDossierLayer]
@@ -51,7 +48,6 @@ flowchart TB
         hist[RecentHistoryLayer]
     end
 
-    cross --> xc
     summaries --> sum
     dossiers --> ppl
     reflections --> ref
@@ -91,7 +87,6 @@ context re-run `build` only for layers whose key changed.
 | Layer | Source | Invalidation |
 |---|---|---|
 | `ConversationSummaryLayer` | `summaries` table — the single per-familiar focus-stream row at `FOCUS_STREAM_CHANNEL_ID` (`ctx.channel_id` ignored) | `focus:<last_consumed_at>:<last_summarised_id>` |
-| `CrossChannelContextLayer` | **retired** — `build` always returns `""` (attentional stream replaced it; see [below](#attentional-stream)) | unchanged (still keyed; never rendered) |
 | `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `self:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
 | `RagContextLayer` | `fts/turns/` + `fts/facts/` tantivy search | `(current_cue, latest_fts_id, latest_fact_id)` |
@@ -147,14 +142,8 @@ Background task on `tick_interval_s` (default 5s). Per tick:
    then compounds forward. This tiles with `RecentHistoryLayer`: both
    describe the same consumed attentional thread (summary = older turns,
    recent history = the tail).
-2. **Cross-channel summary** — for each `(viewer_channel, source)`
-   pair in `cross_channel_map`, compare `source.latest_id` to
-   `cross_context_summaries.source_last_id`. If the gap is `>= cross_k`
-   (default 5), build a briefing-style prompt with
-   `(prior summary, new turns in source)` and write to
-   `cross_context_summaries`.
 
-Both strategies compound: new summaries build on prior ones rather
+The summary compounds: each new summary builds on the prior one rather
 than recomputing from raw turns each time. Bounds token cost. A
 periodic full recompute (every *M* compounding cycles) is reserved
 for later refinement once drift data demands it.
@@ -831,32 +820,6 @@ Open work the current retrieval doesn't address:
   Pulling named entities or topic words out of the turn first would
   improve precision without embeddings.
 
-## Expiry semantics for cross-channel summaries
-
-> **Retired.** The [attentional stream](#attentional-stream) replaced
-> cross-channel summaries — `CrossChannelContextLayer.build` always
-> returns `""`, so nothing reaches the prompt regardless of TTL.
-> `SummaryWorker` still writes `cross_context_summaries` (the index
-> stays regenerable and the layer's invalidation key still reads it),
-> but the read path is dead. The mechanics below describe the prior
-> design; kept for context on the side-index that still exists.
-
-Cross-channel summaries could go stale in two ways:
-
-1. **Turn-count watermark** — source channel has gained `cross_k`
-   turns since the last cached summary. `SummaryWorker` regenerates.
-2. **Wall-clock TTL** — summary is older than `ttl_seconds`
-   (default 600 s) at assembly time. `CrossChannelContextLayer`
-   suppressed the stale summary in its `build` output (layer opts
-   out); the row stays in SQLite and is replaced on the next worker
-   tick.
-
-TTL was enforced on the *read* path so a long-idle familiar didn't
-leak stale cross-channel content into a fresh prompt while the worker
-hadn't ticked. The watermark is enforced on the *write* path so the
-worker doesn't wake up and rebuild summaries that haven't meaningfully
-changed.
-
 ## Cold-cache signals (research-phase)
 
 `familiar_connect.diagnostics.cold_cache` provides three detectors:
@@ -933,7 +896,7 @@ gates the agentic path.
 ## Attentional stream
 
 Earlier designs gave each channel its own recent-history window and
-stitched *other* channels in through `CrossChannelContextLayer`
+stitched *other* channels in through per-channel cross-channel
 summaries. The attentional stream replaces that with a single
 **focus** model: the familiar attends to one text channel and one
 voice channel at a time, and only the focused channel's traffic flows
@@ -1077,7 +1040,6 @@ Voice transcript final on channel C (voice:C)
       seeds RagContextLayer cue = text
       Assembler.assemble(ctx)
         → cached CharacterCard / OperatingMode
-        → CrossChannelContextLayer: retired — emits nothing
         → ConversationSummaryLayer: read focus-stream summary (sentinel)
         → PeopleDossierLayer: read from people_dossiers, capped at max_people
         → RagContextLayer: FTS search on cue
@@ -1089,7 +1051,6 @@ Voice transcript final on channel C (voice:C)
 
 Background: SummaryWorker tick (every 5 s)
   → maybe regenerate focus-stream summary (consumed cross-channel stream)
-  → for each viewer×source: maybe regenerate cross-channel summary
 
 Background: PeopleDossierWorker tick (every 20 s)
   → subjects_with_facts(familiar_id) → {canonical_key: max_fact_id}

@@ -891,55 +891,6 @@ class ConversationSummaryLayer:
         return f"focus:{entry.last_consumed_at}:{entry.last_summarised_id}"
 
 
-class CrossChannelContextLayer:
-    """Other-channel summary block rendered into viewer's prompt.
-
-    ``viewer_map`` maps viewer channel id → list of source channel
-    ids whose cross-context summary should appear. Summaries older
-    than ``ttl_seconds`` suppressed (layer opts out); still present
-    in SQLite — next :class:`SummaryWorker` tick replaces them.
-    """
-
-    name: str = "cross_channel_context"
-
-    def __init__(
-        self,
-        *,
-        store: AsyncHistoryStore,
-        viewer_map: dict[int, list[int]],
-        ttl_seconds: int = 600,
-        max_tokens: int | None = None,
-    ) -> None:
-        self._store = store
-        self._sync = store.sync
-        self._viewer_map = {k: list(v) for k, v in viewer_map.items()}
-        self._ttl_seconds = ttl_seconds
-        self._max_tokens = max_tokens
-
-    def _viewer_key(self, ctx: AssemblyContext) -> str:
-        return f"{ctx.viewer_mode}:{ctx.channel_id}"
-
-    async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
-        return ""  # Retired — attentional stream replaces cross-channel summaries
-
-    def invalidation_key(self, ctx: AssemblyContext) -> str:
-        sources = self._viewer_map.get(ctx.channel_id or -1, [])
-        if not sources:
-            return "none"
-        parts: list[str] = []
-        for source_id in sources:
-            entry = self._sync.get_cross_context(
-                familiar_id=ctx.familiar_id,
-                viewer_mode=self._viewer_key(ctx),
-                source_channel_id=source_id,
-            )
-            if entry is None:
-                parts.append(f"{source_id}:none")
-            else:
-                parts.append(f"{source_id}:wm{entry.source_last_id}")
-        return "|".join(parts)
-
-
 class PeopleDossierLayer:
     """Per-person dossier block for people active in this channel.
 

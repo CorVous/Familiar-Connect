@@ -83,7 +83,6 @@ class ModelBudgetCurve:
     rag_tokens: float = 1.0
     dossier_tokens: float = 1.0
     summary_tokens: float = 1.0
-    cross_channel_tokens: float = 1.0
     reflection_tokens: float = 1.0
     lorebook_tokens: float = 1.0
     max_history_turns: float = 1.0
@@ -123,7 +122,6 @@ class TierBudget:
     :param rag_tokens: cap on RAG-context block.
     :param dossier_tokens: cap on people-dossier block.
     :param summary_tokens: cap on conversation-summary block.
-    :param cross_channel_tokens: cap on cross-channel context.
     :param reflection_tokens: cap on reflections block (M3).
     :param lorebook_tokens: cap on lorebook block (M4).
     :param max_history_turns: hard upper bound on recent-history turns
@@ -139,7 +137,6 @@ class TierBudget:
     rag_tokens: int = 900
     dossier_tokens: int = 900
     summary_tokens: int = 600
-    cross_channel_tokens: int = 600
     reflection_tokens: int = 600
     lorebook_tokens: int = 600
     max_history_turns: int = 200
@@ -165,7 +162,6 @@ class TierBudget:
             + self.rag_tokens
             + self.dossier_tokens
             + self.summary_tokens
-            + self.cross_channel_tokens
             + self.reflection_tokens
             + self.lorebook_tokens
         )
@@ -183,9 +179,6 @@ class TierBudget:
             rag_tokens=_scale(self.rag_tokens, curve.rag_tokens),
             dossier_tokens=_scale(self.dossier_tokens, curve.dossier_tokens),
             summary_tokens=_scale(self.summary_tokens, curve.summary_tokens),
-            cross_channel_tokens=_scale(
-                self.cross_channel_tokens, curve.cross_channel_tokens
-            ),
             reflection_tokens=_scale(self.reflection_tokens, curve.reflection_tokens),
             lorebook_tokens=_scale(self.lorebook_tokens, curve.lorebook_tokens),
             max_history_turns=_scale(self.max_history_turns, curve.max_history_turns),

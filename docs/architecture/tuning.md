@@ -697,7 +697,6 @@ recent_history_tokens = 3000   # cap on recent-history layer
 rag_tokens            = 900
 dossier_tokens        = 900
 summary_tokens        = 600
-cross_channel_tokens  = 600
 reflection_tokens     = 600
 lorebook_tokens       = 600
 max_history_turns     = 200    # safety net behind recent_history_tokens
@@ -762,15 +761,12 @@ rag_tokens            = 1.5
 | `PeopleDossierLayer.max_people` | `8` (voice) | `[budget.<tier>].max_dossier_people` |
 | `PeopleDossierLayer.max_tokens` | `450` (voice) | `[budget.<tier>].dossier_tokens` |
 | `ConversationSummaryLayer.max_tokens` | `300` (voice) | `[budget.<tier>].summary_tokens` |
-| `CrossChannelContextLayer.max_tokens` | `300` (voice) | `[budget.<tier>].cross_channel_tokens` |
-| `CrossChannelContextLayer.ttl_seconds` | `600` | constructor arg |
 | `ReflectionLayer.max_reflections` | `3` (voice) | `[budget.<tier>].max_reflections` |
 | `ReflectionLayer.max_tokens` | `300` (voice) | `[budget.<tier>].reflection_tokens` |
 | `LorebookLayer.max_entries` | `6` (voice) | `[budget.<tier>].max_lorebook_entries` |
 | `LorebookLayer.max_tokens` | `300` (voice) | `[budget.<tier>].lorebook_tokens` |
 | `LorebookLayer.recent_window` | matches history window | constructor arg |
 | `SummaryWorker.turns_threshold` | `10` | constructor arg |
-| `SummaryWorker.cross_k` | `5` | constructor arg |
 | `SummaryWorker.tick_interval_s` | `5.0` | class default |
 | `FactExtractor.batch_size` | `10` | constructor arg |
 | `FactExtractor.tick_interval_s` | `15.0` | class default |
@@ -929,7 +925,7 @@ projectors = [
 
 | Name | Class | Side-index produced |
 |---|---|---|
-| `rolling_summary` | `SummaryWorker` | `summaries`, `cross_context_summaries` |
+| `rolling_summary` | `SummaryWorker` | `summaries` |
 | `rich_note` | `FactExtractor` | `facts` |
 | `people_dossier` | `PeopleDossierWorker` | `people_dossiers` |
 | `reflection` | `ReflectionWorker` | `reflections` |
@@ -953,7 +949,6 @@ toggling a projector keeps its tuning.
 ```toml
 [providers.memory.rolling_summary]
 turns_threshold = 10    # new turns per channel before summary refreshes
-cross_k         = 5     # new source-channel turns before cross refresh
 tick_interval_s = 5.0
 
 [providers.memory.rich_note]

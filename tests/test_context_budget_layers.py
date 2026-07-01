@@ -15,7 +15,6 @@ from familiar_connect.budget import estimate_tokens
 from familiar_connect.context import (
     AssemblyContext,
     ConversationSummaryLayer,
-    CrossChannelContextLayer,
     PeopleDossierLayer,
     RagContextLayer,
     RecentHistoryLayer,
@@ -158,26 +157,3 @@ class TestConversationSummaryLayerMaxTokens:
         layer = ConversationSummaryLayer(store=AsyncHistoryStore(store), max_tokens=50)
         out = await layer.build(_ctx())
         assert estimate_tokens(out) <= 80  # cap + header overhead
-
-
-class TestCrossChannelContextLayerMaxTokens:
-    @pytest.mark.asyncio
-    async def test_truncates_total_cross_channel_block(self) -> None:
-        store = HistoryStore(":memory:")
-        viewer_channel = 1
-        for src in (10, 20, 30):
-            store.put_cross_context(
-                familiar_id="fam",
-                viewer_mode="voice:1",
-                source_channel_id=src,
-                summary_text="cross summary text " * 100,
-                source_last_id=1,
-            )
-        layer = CrossChannelContextLayer(
-            store=AsyncHistoryStore(store),
-            viewer_map={viewer_channel: [10, 20, 30]},
-            ttl_seconds=600,
-            max_tokens=80,
-        )
-        out = await layer.build(_ctx(channel_id=viewer_channel))
-        assert estimate_tokens(out) <= 120  # cap + section header overhead
