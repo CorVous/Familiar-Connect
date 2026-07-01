@@ -62,6 +62,7 @@ class TestCreateLocalTurnDetector:
         assert result.vad_threshold == pytest.approx(0.5)
         assert result.smart_turn_threshold == pytest.approx(0.5)
         assert result.vad_hop_size == 256
+        assert result.idle_fallback_s == pytest.approx(1.5)
 
     def test_passes_config_through(self, tmp_path: Path) -> None:
         model = tmp_path / "smart-turn-v3.2-gpu.onnx"
@@ -74,6 +75,7 @@ class TestCreateLocalTurnDetector:
             vad_threshold=0.7,
             smart_turn_threshold=0.6,
             vad_hop_size=160,
+            idle_fallback_s=2.5,
         )
         with patch(_HF_DOWNLOAD, return_value=str(model)) as mock_dl:
             result = create_local_turn_detector(cfg)
@@ -83,6 +85,7 @@ class TestCreateLocalTurnDetector:
         assert result.vad_threshold == pytest.approx(0.7)
         assert result.smart_turn_threshold == pytest.approx(0.6)
         assert result.vad_hop_size == 160
+        assert result.idle_fallback_s == pytest.approx(2.5)
         mock_dl.assert_called_once_with(
             repo_id="pipecat-ai/smart-turn-v3",
             filename="smart-turn-v3.2-gpu.onnx",

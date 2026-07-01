@@ -52,6 +52,11 @@ class LocalTurnDetector:
     smart_turn_threshold: float = 0.5
     vad_threshold: float = 0.5
     vad_hop_size: int = 256
+    # Idle gap before the audio pump force-completes a stranded turn. Read
+    # by ``bot._user_pump``; the endpointer itself is frame-driven and
+    # can't time out during silence (Discord halts RTP), so the pump owns
+    # this fallback window.
+    idle_fallback_s: float = 1.5
     _smart_turn: SmartTurnDetector | None = field(default=None, init=False, repr=False)
 
     def make_endpointer(
@@ -131,6 +136,7 @@ def create_local_turn_detector(config: LocalTurnConfig) -> LocalTurnDetector | N
         vad_threshold=config.vad_threshold,
         smart_turn_threshold=config.smart_turn_threshold,
         vad_hop_size=config.vad_hop_size,
+        idle_fallback_s=config.idle_fallback_s,
     )
     _logger.info(
         f"{ls.tag('🎙️  Voice', ls.G)} "

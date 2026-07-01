@@ -1112,6 +1112,31 @@ class TestTurnDetectionConfig:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.turn_detection.strategy == "deepgram"
 
+    def test_idle_fallback_s_default(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.local.idle_fallback_s == pytest.approx(1.5)
+
+    def test_idle_fallback_s_parsed(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[providers.turn_detection.local]\nidle_fallback_s = 2.5\n")
+        cfg = load_character_config(path, defaults_path=default_profile_path)
+        assert cfg.turn_detection.local.idle_fallback_s == pytest.approx(2.5)
+
+    def test_idle_fallback_s_must_be_number(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text('[providers.turn_detection.local]\nidle_fallback_s = "soon"\n')
+        match = r"\[providers\.turn_detection\.local\]\.idle_fallback_s"
+        with pytest.raises(ConfigError, match=match):
+            load_character_config(path, defaults_path=default_profile_path)
+
     def test_unknown_strategy_rejected(
         self, tmp_path: Path, default_profile_path: Path
     ) -> None:
