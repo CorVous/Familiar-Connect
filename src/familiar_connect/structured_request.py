@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from familiar_connect.llm import LLMClient
+    from familiar_connect.structured_output import JsonResult
 
 _logger = logging.getLogger(__name__)
 
@@ -199,10 +200,9 @@ async def request_structured(
         reply = await llm.chat(convo)
         attempts += 1
         content = reply.content_str
-        problem = _shape_problem(content, schema)
+        problem, result = _shape_problem(content, schema)
         if problem is None:
-            value = coerce_json(content, expect=schema.root).value
-            return StructuredReply(value=value, ok=True, attempts=attempts)
+            return StructuredReply(value=result.value, ok=True, attempts=attempts)
         last_problem = problem
         if attempt < retries:
             convo = [
@@ -215,20 +215,24 @@ async def request_structured(
     return StructuredReply(value=None, ok=False, attempts=attempts)
 
 
-def _shape_problem(reply: str, schema: Schema) -> str | None:
-    """Return why *reply* doesn't satisfy *schema*'s root, or ``None`` if it does.
+def _shape_problem(reply: str, schema: Schema) -> tuple[str | None, JsonResult]:
+    """Return why *reply* fails *schema*'s root (or ``None``) + the parse.
 
-    The string doubles as the model-facing correction reason, so it names
-    the expected shape plainly.
+    The parsed :class:`JsonResult` is handed back alongside the problem so
+    the success path reuses it instead of re-parsing (the fence-strip
+    regex, bracket search, and ``json.loads`` run once per call). The
+    problem string is ``None`` when the reply satisfies the root; it
+    doubles as the model-facing correction reason, so it names the
+    expected shape plainly.
     """
     result = coerce_json(reply, expect=schema.root)
     if not result.parsed_ok:
-        return "the reply was not valid JSON"
+        return "the reply was not valid JSON", result
     if schema.root == "object" and not isinstance(result.value, dict):
-        return "the top-level value must be a JSON object ({...})"
+        return "the top-level value must be a JSON object ({...})", result
     if schema.root == "array" and not isinstance(result.value, list):
-        return "the top-level value must be a JSON array ([...])"
-    return None
+        return "the top-level value must be a JSON array ([...])", result
+    return None, result
 
 
 def _correction(problem: str, schema: Schema) -> str:
