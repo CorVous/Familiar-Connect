@@ -19,6 +19,8 @@ import pytest
 from familiar_connect.activities.config import ActivitiesConfig, ActivityType
 from familiar_connect.activities.engine import ActivityEngine
 from familiar_connect.bot import (
+    DM_BOT_DISCLAIMER_DELETE_EMOJI,
+    DM_BOT_DISCLAIMER_DISMISS_HINT,
     BotHandle,
     _defer_interaction,
     _register_events,
@@ -255,10 +257,16 @@ _DM_DISCLAIMER = (
 def _dm_message(
     *, author_id: int, channel_id: int, guild: object | None, bot: bool = False
 ) -> SimpleNamespace:
-    """Fake ``discord.Message`` carrying only the fields ``on_message`` reads."""
+    """Fake ``discord.Message`` carrying only the fields ``on_message`` reads.
+
+    ``channel.send`` returns a stub disclaimer message (id 777) whose
+    ``add_reaction`` / ``delete`` are awaitable so the checkmark-to-dismiss
+    flow can be exercised.
+    """
+    sent = SimpleNamespace(id=777, add_reaction=AsyncMock(), delete=AsyncMock())
     return SimpleNamespace(
         author=SimpleNamespace(id=author_id, bot=bot, name="x", display_name="X"),
-        channel=SimpleNamespace(id=channel_id, send=AsyncMock()),
+        channel=SimpleNamespace(id=channel_id, send=AsyncMock(return_value=sent)),
         guild=guild,
         content="hi",
         mentions=[],
@@ -266,6 +274,18 @@ def _dm_message(
         embeds=[],
         reference=None,
         id=42,
+    )
+
+
+def _reaction_payload(
+    *, user_id: int, message_id: int, channel_id: int, emoji_name: str
+) -> SimpleNamespace:
+    """Fake ``discord.RawReactionActionEvent`` for ``on_raw_reaction_add``."""
+    return SimpleNamespace(
+        user_id=user_id,
+        message_id=message_id,
+        channel_id=channel_id,
+        emoji=discord.PartialEmoji(name=emoji_name),
     )
 
 
@@ -301,6 +321,8 @@ class TestOnMessageDmAllowlist:
                 bot_user_id=99,
                 subscriptions=SubscriptionRegistry(tmp_path / "subs.toml"),
                 config=SimpleNamespace(dm_allowlist=allowlist),
+                id="fam",
+                history_store=SimpleNamespace(sync=MagicMock()),
             ),
         )
         _register_events(bot, familiar, text_source, handle)
@@ -400,7 +422,14 @@ class TestOnMessageDmAllowlist:
         events, _familiar, _ts, _fm = self._setup(tmp_path)
         msg = _dm_message(author_id=123, channel_id=555, guild=None)
         await events["on_message"](cast("discord.Message", msg))
-        msg.channel.send.assert_awaited_once_with(_DM_DISCLAIMER)
+        # Verbatim core + dismissal hint, and the checkmark is pre-seeded so
+        # dismissing is a single click.
+        msg.channel.send.assert_awaited_once_with(
+            _DM_DISCLAIMER + DM_BOT_DISCLAIMER_DISMISS_HINT
+        )
+        msg.channel.send.return_value.add_reaction.assert_awaited_once_with(
+            DM_BOT_DISCLAIMER_DELETE_EMOJI
+        )
 
     @pytest.mark.asyncio
     async def test_second_dm_same_user_does_not_resend_disclaimer(
@@ -409,7 +438,9 @@ class TestOnMessageDmAllowlist:
         events, _familiar, _ts, _fm = self._setup(tmp_path)
         first = _dm_message(author_id=123, channel_id=555, guild=None)
         await events["on_message"](cast("discord.Message", first))
-        first.channel.send.assert_awaited_once_with(_DM_DISCLAIMER)
+        first.channel.send.assert_awaited_once_with(
+            _DM_DISCLAIMER + DM_BOT_DISCLAIMER_DISMISS_HINT
+        )
         second = _dm_message(author_id=123, channel_id=555, guild=None)
         await events["on_message"](cast("discord.Message", second))
         second.channel.send.assert_not_awaited()
@@ -442,3 +473,108 @@ class TestOnMessageDmAllowlist:
         msg = _dm_message(author_id=99, channel_id=555, guild=None)
         await events["on_message"](cast("discord.Message", msg))
         msg.channel.send.assert_not_awaited()
+
+    async def _send_disclaimer(
+        self, tmp_path: Path
+    ) -> tuple[
+        dict[str, Callable[..., Coroutine[None, None, None]]],
+        MagicMock,
+        SimpleNamespace,
+    ]:
+        """Trigger a first DM; return (events, bump-reaction mock, sent stub).
+
+        The mock is ``familiar.history_store.sync.bump_reaction`` — the delta
+        write the reaction handlers must *not* perform for a disclaimer.
+        """
+        events, familiar, _ts, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        store = cast("MagicMock", familiar.history_store.sync)
+        return events, store.bump_reaction, msg.channel.send.return_value
+
+    @pytest.mark.asyncio
+    async def test_user_checkmark_deletes_disclaimer(self, tmp_path: Path) -> None:
+        events, bump, sent = await self._send_disclaimer(tmp_path)
+        payload = _reaction_payload(
+            user_id=123,
+            message_id=sent.id,
+            channel_id=555,
+            emoji_name=DM_BOT_DISCLAIMER_DELETE_EMOJI,
+        )
+        await events["on_raw_reaction_add"](
+            cast("discord.RawReactionActionEvent", payload)
+        )
+        sent.delete.assert_awaited_once()
+        # Dismissal is not a history reaction — never written to the store.
+        bump.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bot_own_checkmark_does_not_delete_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        # The bot pre-seeds the checkmark (user_id == bot_user_id); that must
+        # not self-delete the disclaimer, nor write an orphan reaction row for
+        # a message id that was never ingested as a history turn.
+        events, bump, sent = await self._send_disclaimer(tmp_path)
+        payload = _reaction_payload(
+            user_id=99,
+            message_id=sent.id,
+            channel_id=555,
+            emoji_name=DM_BOT_DISCLAIMER_DELETE_EMOJI,
+        )
+        await events["on_raw_reaction_add"](
+            cast("discord.RawReactionActionEvent", payload)
+        )
+        sent.delete.assert_not_awaited()
+        bump.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_checkmark_reaction_does_not_delete_disclaimer(
+        self, tmp_path: Path
+    ) -> None:
+        events, bump, sent = await self._send_disclaimer(tmp_path)
+        payload = _reaction_payload(
+            user_id=123, message_id=sent.id, channel_id=555, emoji_name="👍"
+        )
+        await events["on_raw_reaction_add"](
+            cast("discord.RawReactionActionEvent", payload)
+        )
+        sent.delete.assert_not_awaited()
+        # A non-checkmark on the disclaimer is ignored, not recorded.
+        bump.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unreacting_disclaimer_writes_no_history(
+        self, tmp_path: Path
+    ) -> None:
+        # Un-reacting the pre-seeded checkmark must not write a -1 orphan row.
+        events, bump, sent = await self._send_disclaimer(tmp_path)
+        payload = _reaction_payload(
+            user_id=123,
+            message_id=sent.id,
+            channel_id=555,
+            emoji_name=DM_BOT_DISCLAIMER_DELETE_EMOJI,
+        )
+        await events["on_raw_reaction_remove"](
+            cast("discord.RawReactionActionEvent", payload)
+        )
+        bump.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_checkmark_on_unknown_message_does_not_delete(
+        self, tmp_path: Path
+    ) -> None:
+        # A checkmark on any other message must fall through to the normal
+        # reaction-delta path: the disclaimer is untouched, the delta is recorded.
+        events, bump, sent = await self._send_disclaimer(tmp_path)
+        payload = _reaction_payload(
+            user_id=123,
+            message_id=999_999,
+            channel_id=555,
+            emoji_name=DM_BOT_DISCLAIMER_DELETE_EMOJI,
+        )
+        await events["on_raw_reaction_add"](
+            cast("discord.RawReactionActionEvent", payload)
+        )
+        sent.delete.assert_not_awaited()
+        bump.assert_called_once()
