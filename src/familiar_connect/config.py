@@ -277,13 +277,10 @@ class RollingSummaryConfig:
 
     :param turns_threshold: new turns per channel before rolling
         summary refreshes.
-    :param cross_k: new turns in source channel before cross-channel
-        summary refreshes.
     :param tick_interval_s: idle interval between worker ticks.
     """
 
     turns_threshold: int = 10
-    cross_k: int = 5
     tick_interval_s: float = 5.0
 
 
@@ -1066,7 +1063,6 @@ _BUDGET_FIELDS: tuple[str, ...] = (
     "rag_tokens",
     "dossier_tokens",
     "summary_tokens",
-    "cross_channel_tokens",
     "reflection_tokens",
     "lorebook_tokens",
     "max_history_turns",

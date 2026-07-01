@@ -1,7 +1,7 @@
 """Tests for :class:`familiar_connect.processors.summary_worker.SummaryWorker`.
 
 Watermark-driven regeneration of the focus-stream rolling summary
-(consumed cross-channel stream) and the retired cross-channel summaries.
+(the consumed cross-channel stream the familiar attended to).
 """
 
 from __future__ import annotations
@@ -233,87 +233,3 @@ class TestFocusStreamSummary:
 
         assert store.get_summary(familiar_id="fam", channel_id=1) is None
         assert _focus_summary(store) is not None
-
-
-class TestCrossChannelSummary:
-    @pytest.mark.asyncio
-    async def test_generates_when_viewer_wants_other_channel(self) -> None:
-        store = HistoryStore(":memory:")
-        _seed_turns(store, 6, channel_id=100)  # source (e.g. #general)
-        llm = _ScriptedLLM(replies=["In #general: chit-chat."])
-
-        worker = SummaryWorker(
-            store=AsyncHistoryStore(store),
-            llm_client=llm,
-            familiar_id="fam",
-            turns_threshold=10,
-            cross_channel_map={1: [100]},  # viewer channel 1 watches source 100
-            cross_k=3,
-        )
-        await worker.tick()
-
-        cross = store.get_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-        )
-        assert cross is not None
-        assert "chit-chat" in cross.summary_text
-        assert cross.source_last_id == 6
-
-    @pytest.mark.asyncio
-    async def test_cross_noop_when_source_below_k(self) -> None:
-        store = HistoryStore(":memory:")
-        _seed_turns(store, 2, channel_id=100)
-        llm = _ScriptedLLM(replies=["unused"])
-
-        worker = SummaryWorker(
-            store=AsyncHistoryStore(store),
-            llm_client=llm,
-            familiar_id="fam",
-            turns_threshold=10,
-            cross_channel_map={1: [100]},
-            cross_k=5,
-        )
-        await worker.tick()
-
-        cross = store.get_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-        )
-        assert cross is None
-
-    @pytest.mark.asyncio
-    async def test_cross_refreshes_after_k_more_turns(self) -> None:
-        store = HistoryStore(":memory:")
-        _seed_turns(store, 5, channel_id=100)
-        llm = _ScriptedLLM(replies=["first cross", "second cross"])
-
-        worker = SummaryWorker(
-            store=AsyncHistoryStore(store),
-            llm_client=llm,
-            familiar_id="fam",
-            turns_threshold=10,
-            cross_channel_map={1: [100]},
-            cross_k=3,
-        )
-        await worker.tick()
-        first = store.get_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-        )
-        assert first is not None
-        assert first.source_last_id == 5
-
-        _seed_turns(store, 4, channel_id=100)  # now source at 9
-        await worker.tick()
-        second = store.get_cross_context(
-            familiar_id="fam",
-            viewer_mode="voice:1",
-            source_channel_id=100,
-        )
-        assert second is not None
-        assert second.source_last_id == 9
-        assert "second cross" in second.summary_text

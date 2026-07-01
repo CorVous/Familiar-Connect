@@ -262,16 +262,13 @@ class TestWorkerKnobThreading:
 
     def test_rolling_summary_knobs(self) -> None:
         memory = MemoryProvidersConfig(
-            rolling_summary=RollingSummaryConfig(
-                turns_threshold=3, cross_k=2, tick_interval_s=1.5
-            )
+            rolling_summary=RollingSummaryConfig(turns_threshold=3, tick_interval_s=1.5)
         )
         [w] = create_projectors(
             names=["rolling_summary"], context=self._ctx_with(memory)
         )
         assert isinstance(w, SummaryWorker)
         assert w._turns_threshold == 3
-        assert w._cross_k == 2
         assert w._tick_interval_s == pytest.approx(1.5)
 
     def test_rich_note_knobs(self) -> None:

@@ -1191,62 +1191,6 @@ class TestDistinctOtherChannels:
         assert others == []
 
 
-class TestCrossContextCache:
-    def test_put_and_get_round_trip(self, tmp_path: Path) -> None:
-        s = _store(tmp_path)
-        s.put_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-            source_last_id=42,
-            summary_text="Meanwhile in chat...",
-        )
-        entry = s.get_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-        )
-        assert entry is not None
-        assert entry.source_last_id == 42
-        assert entry.summary_text == "Meanwhile in chat..."
-
-    def test_get_missing_returns_none(self, tmp_path: Path) -> None:
-        s = _store(tmp_path)
-        assert (
-            s.get_cross_context(
-                familiar_id=_FAMILIAR,
-                viewer_mode="full_rp",
-                source_channel_id=999,
-            )
-            is None
-        )
-
-    def test_upsert_overwrites(self, tmp_path: Path) -> None:
-        s = _store(tmp_path)
-        s.put_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-            source_last_id=10,
-            summary_text="old",
-        )
-        s.put_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-            source_last_id=20,
-            summary_text="new",
-        )
-        entry = s.get_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-        )
-        assert entry is not None
-        assert entry.source_last_id == 20
-        assert entry.summary_text == "new"
-
-
 # ---------------------------------------------------------------------------
 # Memory-writer watermark
 # ---------------------------------------------------------------------------
