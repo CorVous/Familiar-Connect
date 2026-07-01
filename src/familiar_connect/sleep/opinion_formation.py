@@ -32,7 +32,13 @@ from familiar_connect.history.store import FactSubject, _normalize_fact_text
 from familiar_connect.identity import self_canonical_key
 from familiar_connect.llm import Message
 from familiar_connect.prompt_fill import fill_placeholders
-from familiar_connect.structured_output import coerce_json, coerce_positive_int_list
+from familiar_connect.structured_output import coerce_positive_int_list
+from familiar_connect.structured_request import (
+    Field,
+    Schema,
+    render_contract,
+    request_structured,
+)
 
 if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
@@ -44,17 +50,28 @@ _logger = logging.getLogger(__name__)
 DEFAULT_TURNS_MAX_PER_DAY = 600
 DEFAULT_OPINION_CAP = 60
 
-# Suffixes appended in code after the (formatted) static system text —
-# JSON-shape contract + conditional blocks. Kept out of config: they
-# describe the machine-parsed reply shape, not persona phrasing.
-_STANCE_REPLY_SHAPE = (
-    '\n\nReply JSON only: {"candidates": [{"text": "<stance>", '
-    '"turn_ids": [<id>...]}]}. Empty list when nothing stands out.'
+# Reply-shape contracts, declared not hand-typed: the machine-parsed shape
+# lives here (appended in code after the formatted persona text), while the
+# persona prose ships in ``_default/character.toml``. Rendered + parsed
+# through :mod:`familiar_connect.structured_request` — see #167.
+_STANCE_SCHEMA = Schema(
+    fields=(
+        Field("text", '"<stance>"'),
+        Field("turn_ids", "[<id>...]"),
+    ),
+    root="object",
+    container="candidates",
+    empty_note="Empty list when nothing stands out.",
 )
-_SYNTHESIS_REPLY_SHAPE = (
-    '\n\nReply JSON only: {"opinions": [{"text": "<their stance>", '
-    '"source_turn_ids": [<id>...], "importance": <1-10>, '
-    '"reason": "<why>"}]}.'
+_SYNTHESIS_SCHEMA = Schema(
+    fields=(
+        Field("text", '"<their stance>"'),
+        Field("source_turn_ids", "[<id>...]"),
+        Field("importance", "<1-10>"),
+        Field("reason", '"<why>"'),
+    ),
+    root="object",
+    container="opinions",
 )
 
 
@@ -172,15 +189,6 @@ def _coerce_importance(raw: Any) -> int:  # noqa: ANN401
     return max(1, min(10, val))
 
 
-def _extract_object(reply: str) -> dict[str, Any] | None:
-    """Permissive: pull the first JSON object from an LLM reply, or None."""
-    result = coerce_json(reply, expect="object")
-    if not result.parsed_ok:
-        return None
-    # coerce_json only extracts; a non-object payload still degrades.
-    return result.value if isinstance(result.value, dict) else None
-
-
 def _build_stance_prompt(
     day: DayBatch,
     *,
@@ -205,8 +213,9 @@ def _build_stance_prompt(
         )
     instruction = fill_placeholders(system, self_name=self_name)
     body = "\n".join(_render_turn(t, self_name) for t in day.turns)
+    contract = render_contract(_STANCE_SCHEMA)
     return [
-        Message(role="system", content=instruction + deny + _STANCE_REPLY_SHAPE),
+        Message(role="system", content=f"{instruction}{deny}\n\n{contract}"),
         Message(role="user", content=f"Day {day.date}:\n{body}"),
     ]
 
@@ -220,10 +229,11 @@ async def extract_stance_moments(
     system: str = "",
 ) -> list[StanceMoment]:
     """Stage 1: pull stance-moments for one day, grounding ⊆ the day."""
-    reply = await llm.chat(
-        _build_stance_prompt(day, self_name=self_name, denylist=denylist, system=system)
+    messages = _build_stance_prompt(
+        day, self_name=self_name, denylist=denylist, system=system
     )
-    obj = _extract_object(reply.content_str)
+    result = await request_structured(llm, messages=messages, schema=_STANCE_SCHEMA)
+    obj = result.value if isinstance(result.value, dict) else None
     if obj is None:
         return []
     raw = obj.get("candidates")
@@ -277,8 +287,9 @@ def _build_synthesis_prompt(
     instruction = fill_placeholders(system, self_name=self_name)
     lines = [f"- ({c.date}) ids={list(c.turn_ids)}: {c.text}" for c in stance_moments]
     body = "Stance-moments:\n" + "\n".join(lines)
+    contract = render_contract(_SYNTHESIS_SCHEMA)
     return [
-        Message(role="system", content=instruction + prior + _SYNTHESIS_REPLY_SHAPE),
+        Message(role="system", content=f"{instruction}{prior}\n\n{contract}"),
         Message(role="user", content=body),
     ]
 
@@ -294,15 +305,14 @@ async def synthesize(
     """Stage 2: one call → raw opinion dicts (validated separately)."""
     if not stance_moments:
         return []
-    reply = await llm.chat(
-        _build_synthesis_prompt(
-            stance_moments,
-            self_name=self_name,
-            prior_self_dossier=prior_self_dossier,
-            system=system,
-        )
+    messages = _build_synthesis_prompt(
+        stance_moments,
+        self_name=self_name,
+        prior_self_dossier=prior_self_dossier,
+        system=system,
     )
-    obj = _extract_object(reply.content_str)
+    result = await request_structured(llm, messages=messages, schema=_SYNTHESIS_SCHEMA)
+    obj = result.value if isinstance(result.value, dict) else None
     if obj is None:
         return []
     raw = obj.get("opinions")

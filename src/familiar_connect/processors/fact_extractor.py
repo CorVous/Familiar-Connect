@@ -25,16 +25,87 @@ from familiar_connect.history.store import FactSubject
 from familiar_connect.identity import is_self_key, self_canonical_key
 from familiar_connect.llm import Message
 from familiar_connect.prompt_fill import fill_placeholders
-from familiar_connect.structured_output import coerce_json
+from familiar_connect.structured_request import (
+    Field,
+    Schema,
+    render_contract,
+    request_structured,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Any
 
     from familiar_connect.history.async_store import AsyncHistoryStore
     from familiar_connect.history.store import HistoryStore, HistoryTurn
     from familiar_connect.llm import LLMClient
 
 _logger = logging.getLogger("familiar_connect.processors.fact_extractor")
+
+# Reply-shape contract for fact extraction — declared, rendered + parsed
+# through :mod:`familiar_connect.structured_request` (#167) instead of a
+# hand-typed JSON skeleton inside the prompt builder. The persona prose,
+# the events-vs-assertions discipline, and the per-batch participant
+# manifest stay in the builder; only the machine-parsed shape lives here.
+_FACT_SCHEMA = Schema(
+    fields=(
+        Field("text", '"<one sentence>"', desc="one sentence"),
+        Field(
+            "source_turn_ids",
+            "[<id>...]",
+            desc="list of turn ids the fact was distilled from",
+        ),
+        Field(
+            "subject_keys",
+            "[<key>...]",
+            desc=(
+                "list of canonical keys from the Participants block, "
+                "identifying which people the fact is about. Use this "
+                "whenever the fact mentions someone by name and you can "
+                "match that name to a participant. Leave it out or empty "
+                "if you can't tell."
+            ),
+            required=False,
+        ),
+        Field(
+            "valid_from",
+            '"<ISO-8601 timestamp>"',
+            desc=(
+                "only set when the speaker explicitly anchors the fact to "
+                "a different moment than 'now' (e.g., 'as of last June', "
+                "'back in 2019'). Otherwise omit; the source turn's "
+                "timestamp is used."
+            ),
+            required=False,
+        ),
+        Field(
+            "valid_to",
+            '"<ISO-8601 timestamp>"',
+            desc=(
+                "world-time end only. Set this when the speaker explicitly "
+                "anchors the end of the fact in real time (e.g., 'until "
+                "last June', 'ended in 2019', 'no longer lives there as of "
+                "March'). Do NOT use valid_to to mark a fact as outdated, "
+                "replaced, or superseded by something newer in this "
+                "conversation — supersession is tracked separately. When "
+                "in doubt, omit."
+            ),
+            required=False,
+        ),
+        Field(
+            "importance",
+            "<1-10>",
+            desc=(
+                "integer 1-10 — how much this fact should influence future "
+                "replies. 1 = throwaway aside, 5 = ordinary detail, 10 = "
+                "safety-critical / identity-defining (allergies, names, "
+                "long-standing preferences, life events). Omit when unsure."
+            ),
+            required=False,
+        ),
+    ),
+    root="array",
+)
 
 # Patterns marking "facts" that are really self-capability statements
 # (e.g., "I cannot remember names"). belong in system prompt or
@@ -171,8 +242,10 @@ class FactExtractor:
                 dream_turn_ids=dream_ids,
                 dream_clause_template=self._dream_extraction_clause,
             )
-            reply = await self._llm.chat(prompt)
-            facts = _parse_facts(reply.content_str)
+            result = await request_structured(
+                self._llm, messages=prompt, schema=_FACT_SCHEMA
+            )
+            facts = _normalize_fact_items(result.value)
         valid_ids = {t.id for t in batch}
         channel_ids: dict[int, int] = {t.id: t.channel_id for t in batch}
         ts_by_id: dict[int, datetime] = {t.id: t.timestamp for t in batch}
@@ -387,34 +460,12 @@ def _build_extract_prompt(
             "names', 'as an AI…') are still NOT facts — drop them "
             "entirely; they belong in the system prompt."
         )
-    header = (
+    intro = (
         "Extract a short list of atomic facts about the people and "
         "events in the chat turns below — observations about the "
-        "world, not about you." + self_clause + dream_clause + "\n\n"
-        "Reply with a JSON array. Each item has:\n"
-        "- ``text`` (one sentence)\n"
-        "- ``source_turn_ids`` (list of turn ids the fact was distilled from)\n"
-        "- ``subject_keys`` (optional list of canonical keys from the "
-        "Participants block, identifying which people the fact is "
-        "about). Use this whenever the fact mentions someone by name "
-        "and you can match that name to a participant. Leave it out "
-        "or empty if you can't tell.\n"
-        "- ``valid_from`` (optional ISO-8601 timestamp) — only set "
-        "when the speaker explicitly anchors the fact to a different "
-        "moment than 'now' (e.g., 'as of last June', 'back in 2019'). "
-        "Otherwise omit; the source turn's timestamp is used.\n"
-        "- ``valid_to`` (optional ISO-8601 timestamp) — world-time end "
-        "only. Set this when the speaker explicitly anchors the end of "
-        "the fact in real time (e.g., 'until last June', 'ended in "
-        "2019', 'no longer lives there as of March'). Do NOT use "
-        "``valid_to`` to mark a fact as outdated, replaced, or "
-        "superseded by something newer in this conversation — "
-        "supersession is tracked separately. When in doubt, omit.\n"
-        "- ``importance`` (optional integer 1-10) - how much this "
-        "fact should influence future replies. 1 = throwaway aside, "
-        "5 = ordinary detail, 10 = safety-critical / identity-defining "
-        "(allergies, names, long-standing preferences, life events). "
-        "Omit when unsure.\n\n"
+        "world, not about you."
+    )
+    guidance = (
         "Distinguish events from assertions:\n"
         "- What a speaker asserts about ANOTHER person — their body, "
         "health, medication, preferences, relationships, or state of "
@@ -452,6 +503,11 @@ def _build_extract_prompt(
         "prompt, not the facts store — they expire the moment a "
         "capability changes."
     )
+    header = (
+        f"{intro}{self_clause}{dream_clause}\n\n"
+        f"{render_contract(_FACT_SCHEMA)}\n\n"
+        f"{guidance}"
+    )
     lines: list[str] = []
     if participants:
         lines.append("Participants (canonical_key — current display name):")
@@ -468,15 +524,14 @@ def _build_extract_prompt(
     ]
 
 
-def _parse_facts(reply: str) -> list[dict[str, object]]:
-    """Permissive JSON-array parser.
+def _normalize_fact_items(parsed: Any) -> list[dict[str, object]]:  # noqa: ANN401 — parsed JSON
+    """Normalize parsed fact items into the worker's dict shape.
 
-    Defers fence-stripping + balanced-``[...]`` extraction to
-    :func:`familiar_connect.structured_output.coerce_json`; malformed
-    input returns ``[]`` rather than raising.
+    *parsed* is the value from
+    :func:`familiar_connect.structured_request.request_structured`
+    (``None`` on a fumbled reply, the JSON array otherwise); a non-array
+    degrades to ``[]`` rather than raising.
     """
-    parsed = coerce_json(reply, expect="array").value or []
-    # coerce_json only extracts; a non-array payload still degrades.
     if not isinstance(parsed, list):
         return []
     out: list[dict[str, object]] = []
