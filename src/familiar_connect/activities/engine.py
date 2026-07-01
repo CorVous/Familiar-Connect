@@ -50,8 +50,8 @@ from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.history.store import ActivityRecord, FactSubject
 from familiar_connect.identity import (
     Author,
+    ego_canonical_key,
     format_turn_for_transcript,
-    self_canonical_key,
 )
 from familiar_connect.llm import Message
 from familiar_connect.sleep.maintenance import (
@@ -1126,7 +1126,7 @@ class ActivityEngine:
         """Mint the dream as a durable, dream-framed ``self:`` fact."""
         local = active.started_at.astimezone(self._tz)
         subject = FactSubject(
-            canonical_key=self_canonical_key(self._familiar_id),
+            canonical_key=ego_canonical_key(self._familiar_id),
             display_at_write=self._display_name,
         )
         await self._store.append_fact(

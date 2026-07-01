@@ -60,9 +60,9 @@ one of its facts is retired or superseded.
 | Rail | Meaning |
 |------|---------|
 | `unknown_id` | Every referenced id must be a current fact in the window. |
-| `self_subject` | A fact under the familiar's own `self:` key (an opinion) is never touched. Hygiene does not adjudicate feelings; an opinion changes only through the dream pass, never the janitor. |
+| `self_subject` | A fact under the familiar's own `ego:` key (an opinion) is never touched. Hygiene does not adjudicate feelings; an opinion changes only through the dream pass, never the janitor. |
 | `duplicate_target` | A fact may be targeted by at most one action. |
-| `subject_introduced` | A rewrite may not introduce a person-subject absent from its source facts; the only exception is the `self:` key. A bit about a person can be re-attributed to the familiar, never minted as a new fact about the person. |
+| `subject_introduced` | A rewrite may not introduce a person-subject absent from its source facts; the only exception is the `ego:` key. A bit about a person can be re-attributed to the familiar, never minted as a new fact about the person. |
 | `subject_lost` | A rewrite of facts that *had* subjects may not drop them all, which would orphan the fact and rebuild the sources' dossiers without its content. |
 | `noop` | A single-source rewrite that restates the fact unchanged is rejected. |
 | `empty_text` | A rewrite must carry non-empty new text. |
@@ -186,7 +186,7 @@ recoverable from the fact store (`superseded_at`/`superseded_by`,
 
 The dream pass forms the familiar's opinions — her own stances — from
 the conversation log, so she stays consistent with how she acts. An
-opinion is a fact routed to her `self:` subject (always injected via the
+opinion is a fact routed to her `ego:` subject (always injected via the
 self-dossier), grounded in her log through `source_turn_ids` pointing at
 the turns that demonstrate it. The model proposes; code decides, as in
 hygiene.
@@ -283,7 +283,7 @@ return or crashes the engine.
 
 Right after the passes finish, the engine produces and persists the
 dream prose: it generates the narration from the seed plus freshly minted
-opinions, mints the dream-journal `self:` fact, then writes the prose
+opinions, mints the dream-journal `ego:` fact, then writes the prose
 onto the sleep row's `experience_text`. That column's presence is the
 single "dream fully produced" signal, so the dream is durable within
 minutes of bedtime and survives a mid-sleep restart — the reloaded active
@@ -305,7 +305,7 @@ A one-shot hand-authored first dream can be placed at
 `data/familiars/<id>/seed_dream.md`: used verbatim instead of
 generation, then renamed `seed_dream.consumed.md`.
 
-The prose is also minted as a durable, dream-framed `self:` fact — the
+The prose is also minted as a durable, dream-framed `ego:` fact — the
 dream-journal stopgap; a real `dreams` table is deferred. It is journaled
 once: at pass-completion on the normal path, or at wake on the fallback
 path. The mechanical event-fact ("spent … night asleep") is written as
@@ -317,7 +317,7 @@ The sleep return turn carries `mode = "sleep_return"`
 (`SLEEP_RETURN_MODE`), not `activity_return`. `FactExtractor` keeps
 skipping `activity_return` but processes `sleep_return` turns with dream
 framing, and the claim-discipline rail is enforced in code, not just
-prompt: any fact grounded in a dream turn is forced to the `self:`
+prompt: any fact grounded in a dream turn is forced to the `ego:`
 subject and dream-framed ("she dreamed that …"), so dream content never
 lands under a person's key. Unsourced facts fall back to the batch *minus*
 dream turns, so real facts about people stay person-attributable.
@@ -325,7 +325,7 @@ dream turns, so real facts about people stay person-attributable.
 ## Not yet built
 
 A real `dreams` table (the journal currently rides the fact store as
-dream-framed `self:` facts), and retiring the rolling summary in favor of
+dream-framed `ego:` facts), and retiring the rolling summary in favor of
 facts + RAG as the continuity bridge. See the roadmap.
 
 [KaillaDame disengagement]: memory-strategies.md

@@ -19,7 +19,7 @@ import pytest
 import familiar_connect.sleep.maintenance as maintenance_mod
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
-from familiar_connect.identity import is_self_key
+from familiar_connect.identity import is_ego_key
 from familiar_connect.sleep.maintenance import (
     CONSOLIDATION_PASS,
     DEFAULT_PASSES,
@@ -166,6 +166,6 @@ class TestDefaultRunApplies:
         opinions = [
             f
             for f in raw.recent_facts(familiar_id="fam", limit=10)
-            if f.subjects and is_self_key(f.subjects[0].canonical_key)
+            if f.subjects and is_ego_key(f.subjects[0].canonical_key)
         ]
         assert len(opinions) == 1

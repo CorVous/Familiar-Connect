@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from familiar_connect import log_style as ls
 from familiar_connect.diagnostics.spans import span
-from familiar_connect.identity import is_self_key
+from familiar_connect.identity import is_ego_key
 from familiar_connect.llm import Message
 
 if TYPE_CHECKING:
@@ -141,7 +141,7 @@ class PeopleDossierWorker:
         if not new_facts:
             return
 
-        is_self = is_self_key(canonical_key)
+        is_self = is_ego_key(canonical_key)
         dossier_facts = _dossier_facts(new_facts, is_self=is_self)
         if not dossier_facts:
             # window held only low-importance texture — advance the watermark

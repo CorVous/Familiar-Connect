@@ -30,12 +30,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from familiar_connect import log_style as ls
 from familiar_connect.history.fts import FtsIndex
 from familiar_connect.history.turso_compat import TursoConnection
-from familiar_connect.identity import Author
+from familiar_connect.identity import Author, Platform
 
 _logger = logging.getLogger(__name__)
 
@@ -796,6 +796,23 @@ class HistoryStore:
             """
         )
         self._conn.commit()
+        # issue #154: the reserved subject platform "self" was renamed to
+        # "ego" (it shadowed Python's ``self``). Rewrite persisted
+        # ``self:<id>`` subject keys in place so pre-rename dossiers/facts
+        # stay reachable by ``ego_canonical_key`` / ``is_ego_key``.
+        # Idempotent: the LIKE guards match nothing once migrated (or when
+        # never self-keyed), so re-running on every open is a cheap no-op.
+        self._conn.execute(
+            "UPDATE people_dossiers "
+            "SET canonical_key = 'ego:' || substr(canonical_key, 6) "
+            "WHERE canonical_key LIKE 'self:%'"
+        )
+        self._conn.execute(
+            "UPDATE facts SET subjects_json = replace("
+            'subjects_json, \'"canonical_key": "self:\', \'"canonical_key": "ego:\') '
+            'WHERE subjects_json LIKE \'%"canonical_key": "self:%\''
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # FTS write helper
@@ -1331,7 +1348,7 @@ class HistoryStore:
         ).fetchall()
         return [
             Author(
-                platform=str(row["author_platform"]),
+                platform=cast("Platform", str(row["author_platform"])),
                 user_id=str(row["author_user_id"]),
                 username=row["author_username"],
                 display_name=row["author_display_name"],
@@ -1534,7 +1551,7 @@ class HistoryStore:
         if row is None:
             return None
         return Author(
-            platform=str(row["author_platform"]),
+            platform=cast("Platform", str(row["author_platform"])),
             user_id=str(row["author_user_id"]),
             username=row["author_username"],
             display_name=row["author_display_name"],
@@ -3777,7 +3794,7 @@ def _row_to_turn(row: Row) -> HistoryTurn:
     user_id = row["author_user_id"]
     if platform is not None and user_id is not None:
         author: Author | None = Author(
-            platform=str(platform),
+            platform=cast("Platform", str(platform)),
             user_id=str(user_id),
             username=row["author_username"],
             display_name=row["author_display_name"],

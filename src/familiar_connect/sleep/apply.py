@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from familiar_connect.history.store import FactDraft, FactSubject
-from familiar_connect.identity import is_self_key
+from familiar_connect.identity import is_ego_key
 
 if TYPE_CHECKING:
     from familiar_connect.history.async_store import AsyncHistoryStore
@@ -60,7 +60,7 @@ def _subjects_for_rewrite(
     for key in action.subject_keys:
         if key in display_by_key:
             display = display_by_key[key]
-        elif is_self_key(key):
+        elif is_ego_key(key):
             display = familiar_display_name or key.split(":", 1)[-1]
         else:
             display = key.split(":", 1)[-1]

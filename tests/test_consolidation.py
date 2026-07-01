@@ -11,7 +11,7 @@ import pytest
 from familiar_connect.config import load_character_config
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import Fact, FactSubject, HistoryStore
-from familiar_connect.identity import self_canonical_key
+from familiar_connect.identity import ego_canonical_key
 from familiar_connect.sleep.consolidation import (
     ConsolidationPlan,
     ConsolidationWindow,
@@ -76,7 +76,7 @@ class TestValidateRetire:
             win,
             retire_raw=[{"fact_ids": [1], "reason": "junk"}],
             rewrite_raw=[],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert len(plan.retire) == 1
@@ -90,7 +90,7 @@ class TestValidateRetire:
             win,
             retire_raw=[{"fact_ids": [999], "reason": "x"}],
             rewrite_raw=[],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert plan.retire == ()
@@ -102,7 +102,7 @@ class TestValidateRetire:
             win,
             retire_raw=[{"fact_ids": [i], "reason": "j"} for i in range(1, 6)],
             rewrite_raw=[],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=3,
         )
         assert len(plan.retire) == 3
@@ -118,7 +118,7 @@ class TestValidateRetire:
                 {"fact_ids": [1], "reason": "b"},
             ],
             rewrite_raw=[],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert len(plan.retire) == 1
@@ -126,7 +126,7 @@ class TestValidateRetire:
 
 
 SELF = (
-    FactSubject(canonical_key=self_canonical_key("fam"), display_at_write="Sapphire"),
+    FactSubject(canonical_key=ego_canonical_key("fam"), display_at_write="Sapphire"),
 )
 
 
@@ -139,7 +139,7 @@ class TestSelfSubjectRail:
             win,
             retire_raw=[{"fact_ids": [1], "reason": "dup"}],
             rewrite_raw=[],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert plan.retire == ()
@@ -157,11 +157,11 @@ class TestSelfSubjectRail:
                 {
                     "old_fact_ids": [1, 2],
                     "new_text": "Sapphire loves lo-fi.",
-                    "subject_keys": [self_canonical_key("fam")],
+                    "subject_keys": [ego_canonical_key("fam")],
                     "reason": "merge",
                 }
             ],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert plan.rewrite == ()
@@ -173,7 +173,7 @@ class TestSelfSubjectRail:
             win,
             retire_raw=[{"fact_ids": [1], "reason": "junk"}],
             rewrite_raw=[],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert len(plan.retire) == 1
@@ -196,7 +196,7 @@ class TestValidateRewrite:
                     "reason": "merged dups",
                 }
             ],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert len(plan.rewrite) == 1
@@ -217,7 +217,7 @@ class TestValidateRewrite:
                     "reason": "x",
                 }
             ],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert plan.rewrite == ()
@@ -225,7 +225,7 @@ class TestValidateRewrite:
 
     def test_allows_self_subject(self) -> None:
         """Re-attributing a bit to the familiar's own narrative is allowed."""
-        self_key = self_canonical_key("fam")
+        self_key = ego_canonical_key("fam")
         win = _window((_fact(1, "Cor wears no pants.", subjects=ARIA),))
         plan = validate(
             win,
@@ -257,7 +257,7 @@ class TestValidateRewrite:
                     "reason": "x",
                 }
             ],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert plan.rewrite == ()
@@ -276,7 +276,7 @@ class TestValidateRewrite:
                     "reason": "x",
                 }
             ],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert plan.rewrite == ()
@@ -296,7 +296,7 @@ class TestValidateRewrite:
                     "reason": "x",
                 }
             ],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert plan.rewrite == ()
@@ -316,7 +316,7 @@ class TestValidateRewrite:
                     "reason": "x",
                 }
             ],
-            self_key=self_canonical_key("fam"),
+            self_key=ego_canonical_key("fam"),
             cap=50,
         )
         assert len(plan.rewrite) == 1
@@ -325,7 +325,7 @@ class TestValidateRewrite:
 class TestBuildPrompt:
     def test_system_text_is_caller_supplied(self) -> None:
         win = _window((_fact(1, "noise"),))
-        msgs = build_prompt(win, self_key="self:fam", system="MY OWN INSTRUCTIONS")
+        msgs = build_prompt(win, self_key="ego:fam", system="MY OWN INSTRUCTIONS")
         assert msgs[0].role == "system"
         assert msgs[0].content == "MY OWN INSTRUCTIONS"
 
@@ -346,7 +346,7 @@ class TestBuildPrompt:
         )
         win = _window((_fact(1, "noise"),))
         msgs = build_prompt(
-            win, self_key="self:fam", system=prompts.consolidation_system
+            win, self_key="ego:fam", system=prompts.consolidation_system
         )
         system = msgs[0].content
         assert isinstance(system, str)
@@ -483,7 +483,7 @@ class TestPlanConsolidation:
             source_turn_ids=[1],
             subjects=[
                 FactSubject(
-                    canonical_key=self_canonical_key("fam"),
+                    canonical_key=ego_canonical_key("fam"),
                     display_at_write="Sapphire",
                 )
             ],

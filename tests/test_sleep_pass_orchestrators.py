@@ -16,7 +16,7 @@ import pytest
 
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
-from familiar_connect.identity import is_self_key
+from familiar_connect.identity import is_ego_key
 from familiar_connect.sleep.maintenance import (
     execute_consolidation,
     execute_opinion_formation,
@@ -172,7 +172,7 @@ class TestExecuteOpinionFormation:
         )
         facts = raw.recent_facts(familiar_id="fam", limit=10)
         assert len(facts) == 1
-        assert is_self_key(facts[0].subjects[0].canonical_key)
+        assert is_ego_key(facts[0].subjects[0].canonical_key)
         wm = raw.get_sleep_watermark(familiar_id="fam")
         assert wm is not None
         assert wm.last_turn_id == 1

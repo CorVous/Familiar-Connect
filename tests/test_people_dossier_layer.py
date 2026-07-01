@@ -243,7 +243,7 @@ class TestPeopleDossierLayer:
         store = HistoryStore(":memory:")
         store.put_people_dossier(
             familiar_id="fam",
-            canonical_key="self:fam",
+            canonical_key="ego:fam",
             last_fact_id=7,
             dossier_text="Sapphire favours sharp, provocative bits.",
         )
@@ -254,7 +254,7 @@ class TestPeopleDossierLayer:
         out = await layer.build(_ctx())
         assert "Sapphire favours sharp, provocative bits." in out
         # header reads as the familiar, not the raw key
-        assert "self:fam" not in out
+        assert "ego:fam" not in out
 
     @pytest.mark.asyncio
     async def test_self_dossier_injected_alongside_people(self) -> None:
@@ -275,7 +275,7 @@ class TestPeopleDossierLayer:
         )
         store.put_people_dossier(
             familiar_id="fam",
-            canonical_key="self:fam",
+            canonical_key="ego:fam",
             last_fact_id=7,
             dossier_text="Sapphire favours sharp bits.",
         )

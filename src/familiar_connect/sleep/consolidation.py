@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from familiar_connect.history.store import _normalize_fact_text, _subject_key_set
-from familiar_connect.identity import self_canonical_key
+from familiar_connect.identity import ego_canonical_key
 from familiar_connect.llm import Message
 from familiar_connect.structured_output import (
     coerce_json,
@@ -399,7 +399,7 @@ async def plan_consolidation(
     in ``_default/character.toml``); rails in :func:`validate` enforce
     safety in code regardless of its phrasing.
     """
-    self_key = self_canonical_key(familiar_id)
+    self_key = ego_canonical_key(familiar_id)
     window = await gather_window(
         store, familiar_id=familiar_id, facts_max=facts_max, turns_max=turns_max
     )
