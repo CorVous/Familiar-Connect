@@ -78,6 +78,19 @@ DM_BOT_DISCLAIMER = (
     "treat messages in this conversation as if they were public."
 )
 
+# Unicode checkmark the user reacts with to dismiss the disclaimer. The bot
+# pre-seeds this reaction so dismissing is a single click. (True Discord
+# ephemeral messages aren't available here — they require an interaction, and
+# this is posted in reaction to a plain DM — so reaction-to-delete is the way
+# to keep the disclaimer from living forever in the DM history.)
+DM_BOT_DISCLAIMER_DELETE_EMOJI = "✅"
+
+# Dismissal hint appended below the verbatim core. Kept separate so PR #176's
+# wording stays byte-for-byte intact (do not fold into ``DM_BOT_DISCLAIMER``).
+DM_BOT_DISCLAIMER_DISMISS_HINT = (
+    f"\n\n_React {DM_BOT_DISCLAIMER_DELETE_EMOJI} to delete this disclaimer._"
+)
+
 
 async def _defer_interaction(ctx: discord.ApplicationContext) -> bool:
     """ACK interaction ASAP to claim Discord's 3s response window.
@@ -1186,6 +1199,10 @@ def _register_events(
     # only (mirrors #176's ephemeral DM subscriptions) — a restart may
     # re-send it; we deliberately don't persist.
     disclaimed_dm_users: set[int] = set()
+    # Live disclaimer messages awaiting a checkmark-to-dismiss reaction,
+    # keyed by message id. In-memory only (same rationale) — a restart drops
+    # the handles, so a pre-restart disclaimer just stops being self-deletable.
+    disclaimer_messages: dict[int, discord.Message] = {}
 
     @bot.event
     async def on_ready() -> None:
@@ -1247,7 +1264,13 @@ def _register_events(
             # so the disclaimer can never re-trigger itself.
             if message.author.id not in disclaimed_dm_users:
                 disclaimed_dm_users.add(message.author.id)
-                await message.channel.send(DM_BOT_DISCLAIMER)
+                sent = await message.channel.send(
+                    DM_BOT_DISCLAIMER + DM_BOT_DISCLAIMER_DISMISS_HINT
+                )
+                # Track it so a user checkmark can delete it, and pre-seed the
+                # checkmark so dismissing is a single click.
+                disclaimer_messages[sent.id] = sent
+                await sent.add_reaction(DM_BOT_DISCLAIMER_DELETE_EMOJI)
             _register_dm_channel(handle, familiar, message.channel.id)
         elif (
             familiar.subscriptions.get(
@@ -1348,9 +1371,20 @@ def _register_events(
         )
 
     @bot.event
-    async def on_raw_reaction_add(  # noqa: RUF029 — Discord event handler contract
+    async def on_raw_reaction_add(
         payload: discord.RawReactionActionEvent,
     ) -> None:
+        # A disclaimer message is never an ingested history turn, so reactions
+        # on it must never reach the delta path (that would write orphan rows).
+        # A user's checkmark dismisses it; the bot's own pre-seeded reaction and
+        # any other emoji are simply ignored.
+        if payload.message_id in disclaimer_messages:
+            if (
+                payload.user_id != familiar.bot_user_id
+                and _emoji_repr(payload.emoji) == DM_BOT_DISCLAIMER_DELETE_EMOJI
+            ):
+                await disclaimer_messages.pop(payload.message_id).delete()
+            return
         apply_reaction_delta(
             store=familiar.history_store.sync,
             familiar_id=familiar.id,
@@ -1365,6 +1399,10 @@ def _register_events(
     async def on_raw_reaction_remove(  # noqa: RUF029 — Discord event handler contract
         payload: discord.RawReactionActionEvent,
     ) -> None:
+        # See ``on_raw_reaction_add``: disclaimer reactions never carry a
+        # history turn, so un-reacting the pre-seeded checkmark writes nothing.
+        if payload.message_id in disclaimer_messages:
+            return
         apply_reaction_delta(
             store=familiar.history_store.sync,
             familiar_id=familiar.id,
