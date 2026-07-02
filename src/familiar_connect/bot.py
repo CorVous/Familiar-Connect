@@ -1167,6 +1167,7 @@ def _register_dm_channel(
     handle: BotHandle,
     familiar: Familiar,
     channel_id: int,
+    peer_name: str,
 ) -> None:
     """Register a DM channel as an ephemeral text subscription.
 
@@ -1174,7 +1175,9 @@ def _register_dm_channel(
     (``persist=False``) and never written to the sidecar. The focus seed
     mirrors the startup default in ``commands/run.py`` so a DM-only
     familiar doesn't stage its first message forever; it seeds only when
-    no text focus exists and never steals an existing one.
+    no text focus exists and never steals an existing one. The peer's
+    display name is recorded in ``channel_names`` so the digest has a name
+    to show for the DM.
     """
     familiar.subscriptions.add(
         channel_id=channel_id,
@@ -1185,6 +1188,7 @@ def _register_dm_channel(
     fm = handle.focus_manager
     if fm is not None:
         fm.guild_names[channel_id] = PRIVATE_MESSAGE_GUILD_NAME
+        fm.channel_names[channel_id] = peer_name
         if fm.get_focus("text") is None:
             fm.set_focus_immediately(channel_id, "text")
 
@@ -1271,7 +1275,12 @@ def _register_events(
                 # checkmark so dismissing is a single click.
                 disclaimer_messages[sent.id] = sent
                 await sent.add_reaction(DM_BOT_DISCLAIMER_DELETE_EMOJI)
-            _register_dm_channel(handle, familiar, message.channel.id)
+            _register_dm_channel(
+                handle,
+                familiar,
+                message.channel.id,
+                peer_name=message.author.display_name,
+            )
         elif (
             familiar.subscriptions.get(
                 channel_id=message.channel.id,

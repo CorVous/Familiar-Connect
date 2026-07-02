@@ -317,6 +317,7 @@ class TestOnMessageDmAllowlist:
         text_source.publish_text = AsyncMock()
         fm = MagicMock(name="focus_manager")
         fm.guild_names = {}
+        fm.channel_names = {}
         fm.get_focus.return_value = None
         handle = BotHandle(bot=bot, send_text=AsyncMock(), focus_manager=fm)
         familiar = cast(
@@ -345,6 +346,7 @@ class TestOnMessageDmAllowlist:
             is not None
         )
         assert fm.guild_names[555] == "Private Message"
+        assert fm.channel_names[555] == "X"
         fm.set_focus_immediately.assert_called_once_with(555, "text")
         # ephemeral row must never touch the sidecar
         assert not (tmp_path / "subs.toml").exists()
