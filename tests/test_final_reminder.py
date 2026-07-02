@@ -269,3 +269,89 @@ class TestBuildFinalReminderPrivateMessage:
         assert "Your attention is currently on #general." in out
         assert " server" not in out
         assert "private message" not in out
+
+
+class TestBuildFinalReminderDmDigest:
+    """Unread digest labels off-focus DM channels as ``DM from <name>``."""
+
+    def test_dm_unread_named_renders_dm_from(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={123: (1, 0)},
+            channel_names={123: "Cor"},
+            guild_names={123: PRIVATE_MESSAGE_GUILD_NAME},
+        )
+        assert "DM from Cor (id 123)" in out
+        assert "#123" not in out
+        assert "#Cor" not in out
+
+    def test_dm_unread_unnamed_falls_back_to_dm_id(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={123: (1, 0)},
+            channel_names={},
+            guild_names={123: PRIVATE_MESSAGE_GUILD_NAME},
+        )
+        assert "DM (id 123)" in out
+
+    def test_guild_unread_entry_unchanged(self) -> None:
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={20: (2, 0)},
+            channel_names={20: "general"},
+            guild_names={20: "My Server"},
+        )
+        assert "#general (id 20)" in out
+        assert "DM from" not in out
+
+    def test_dm_unread_with_pings_keeps_suffix(self) -> None:
+        """DM label composes with ``_unread_suffix`` — id and pings coexist.
+
+        Guards the ``_ch_id`` / ``_unread_suffix`` boundary: the suffix is
+        appended outside ``_ch_id``, so the DM branch must not swallow or
+        duplicate the ``(N ping[s])`` count.
+        """
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={123: (2, 2)},
+            channel_names={123: "Cor"},
+            guild_names={123: PRIVATE_MESSAGE_GUILD_NAME},
+        )
+        assert "DM from Cor (id 123) (2 pings)" in out
+
+    def test_mixed_guild_and_dm_in_one_digest(self) -> None:
+        """Per-cid branch selection: guild and DM each keep their own form."""
+        out = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={20: (2, 0), 123: (1, 1)},
+            channel_names={20: "general", 123: "Cor"},
+            guild_names={20: "My Server", 123: PRIVATE_MESSAGE_GUILD_NAME},
+        )
+        assert "#general (id 20) (2)" in out
+        assert "DM from Cor (id 123) (1 ping)" in out
+
+    def test_omitting_guild_names_preserves_todays_output(self) -> None:
+        """New param defaults safely: no ``guild_names`` == today's behavior."""
+        named = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={20: (2, 0)},
+            channel_names={20: "general"},
+        )
+        assert "#general (id 20)" in named
+        assert "DM from" not in named
+        # A DM channel with no guild_names map falls through to the old
+        # no-name ``#{cid}`` rendering.
+        fallback = build_final_reminder(
+            viewer_mode="text",
+            now=_at(2026, 5, 4, 14, 30),
+            unread_digest={123: (1, 0)},
+            channel_names={},
+        )
+        assert "#123" in fallback
+        assert "DM" not in fallback
