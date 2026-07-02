@@ -629,12 +629,14 @@ class TextResponder:
         # restates current time + special inputs so model doesn't
         # drift on long-lived caches
         ch_names = self._focus_manager.channel_names if self._focus_manager else {}
+        gn_names = self._focus_manager.guild_names if self._focus_manager else {}
         reminder = build_final_reminder(
             viewer_mode="text",
             include_time=False,
             focus_channel_id=focus_ch,
             unread_digest=unread_digest,
             channel_names=ch_names,
+            guild_names=gn_names,
         )
         system = "\n\n".join(
             s for s in (prompt.system_prompt, _BOT_OUTPUT_INSTRUCTIONS, reminder) if s
@@ -660,6 +662,7 @@ class TextResponder:
             focus_channel_id=focus_ch,
             unread_digest=unread_digest,
             channel_names=ch_names,
+            guild_names=gn_names,
             guild_name=guild_name,
         )
         if activity_state_line:
