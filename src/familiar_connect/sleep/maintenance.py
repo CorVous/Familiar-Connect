@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from familiar_connect import log_style as ls
-from familiar_connect.identity import self_canonical_key
+from familiar_connect.identity import ego_canonical_key
 from familiar_connect.sleep.apply import apply_consolidation
 from familiar_connect.sleep.consolidation import (
     DEFAULT_FACTS_MAX,
@@ -156,7 +156,7 @@ async def execute_opinion_formation(
     ``synthesis_system`` are the config-sourced prompt texts (prose ships
     in ``_default/character.toml``).
     """
-    self_key = self_canonical_key(familiar_id)
+    self_key = ego_canonical_key(familiar_id)
     prior = await store.get_people_dossier(
         familiar_id=familiar_id, canonical_key=self_key
     )

@@ -77,6 +77,7 @@ def _make_focus_manager() -> MagicMock:
     fm.is_subscribed = MagicMock(return_value=True)
     fm.subscribed_channels = MagicMock(return_value=[55, 99])
     fm.channel_label = MagicMock(side_effect=lambda c: f"#{c}")
+    fm.catch_up_limit = 20
     return fm
 
 
@@ -173,6 +174,18 @@ class TestShiftFocusTool:
         ctx = _make_ctx(focus_manager=fm, store=store)
         await _shift_focus_handler({"channel_id": 55}, ctx)
         assert store.recent.call_args.kwargs.get("channel_id") == 55
+
+    @pytest.mark.asyncio
+    async def test_preview_limit_matches_catch_up_window(self) -> None:
+        # perception == consumption: the preview she sees is exactly the
+        # catch-up window shift_now promotes (rest is missed)
+        store = MagicMock()
+        store.recent = AsyncMock(return_value=[])
+        fm = _make_focus_manager()
+        fm.catch_up_limit = 7
+        ctx = _make_ctx(focus_manager=fm, store=store)
+        await _shift_focus_handler({"channel_id": 55}, ctx)
+        assert store.recent.call_args.kwargs.get("limit") == 7
 
     @pytest.mark.asyncio
     async def test_empty_channel_returns_empty_messages(self) -> None:

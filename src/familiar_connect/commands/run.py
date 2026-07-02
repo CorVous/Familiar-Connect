@@ -36,7 +36,6 @@ from familiar_connect.context import (
     Assembler,
     CharacterCardLayer,
     ConversationSummaryLayer,
-    CrossChannelContextLayer,
     LorebookLayer,
     OperatingModeLayer,
     PeopleDossierLayer,
@@ -170,9 +169,6 @@ def _default_assembler(
       an activation key; otherwise stable.
     * ``ConversationSummaryLayer`` — every ``turns_threshold`` turns
       (default 10), slowest of the dynamic block.
-    * ``CrossChannelContextLayer`` — when *any* other channel's
-      summary is rewritten; per-channel rate bounded by same
-      threshold, but multiple sources fan in.
     * ``ReflectionLayer`` — when :class:`ReflectionWorker` writes a
       new reflection (default every ~20 turns); slower than dossiers,
       faster than rolling summaries.
@@ -220,12 +216,6 @@ def _default_assembler(
             ConversationSummaryLayer(
                 store=store,
                 max_tokens=budget.summary_tokens,
-            ),
-            CrossChannelContextLayer(
-                store=store,
-                viewer_map={},  # Populated by per-channel config when present
-                ttl_seconds=600,
-                max_tokens=budget.cross_channel_tokens,
             ),
             ReflectionLayer(
                 store=store,
@@ -430,6 +420,7 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         subscriptions=familiar.subscriptions,
         unread_nudge_enabled=familiar.config.focus.unread_nudge_enabled,
         nudge_debounce_seconds=familiar.config.focus.nudge_debounce_seconds,
+        catch_up_limit=familiar.config.focus.catch_up_limit,
     )
     await focus_manager.initialize()
 

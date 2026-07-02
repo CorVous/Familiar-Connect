@@ -645,13 +645,12 @@ class TestBudgets:
         assert v.rag_tokens == 900
         assert v.dossier_tokens == 900
         assert v.summary_tokens == 600
-        assert v.cross_channel_tokens == 600
         assert v.max_history_turns == 200
         assert v.max_rag_turns == 10
         assert v.max_rag_facts == 6
         assert v.max_dossier_people == 16
         # total_tokens is derived (sum of the per-section token caps).
-        assert v.total_tokens == 3000 + 900 + 900 + 600 + 600 + 600 + 600
+        assert v.total_tokens == 3000 + 900 + 900 + 600 + 600 + 600
 
     def test_shipped_default_text_and_background(
         self, tmp_path: Path, default_profile_path: Path
@@ -661,10 +660,10 @@ class TestBudgets:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         text = cfg.budgets["text"]
         assert text.recent_history_tokens == 8000
-        assert text.total_tokens == 8000 + 2400 + 2400 + 1600 + 1600 + 1600 + 1600
+        assert text.total_tokens == 8000 + 2400 + 2400 + 1600 + 1600 + 1600
         bg = cfg.budgets["background"]
         assert bg.recent_history_tokens == 24000
-        assert bg.total_tokens == 24000 + 8000 + 8000 + 4000 + 4000 + 4000 + 4000
+        assert bg.total_tokens == 24000 + 8000 + 8000 + 4000 + 4000 + 4000
 
     def test_partial_override_keeps_other_subcaps(
         self, tmp_path: Path, default_profile_path: Path
@@ -735,7 +734,7 @@ class TestBudgets:
         """Programmatic ``TierBudget()`` matches the voice envelope."""
         b = TierBudget()
         assert b.recent_history_tokens == 3000
-        assert b.total_tokens == 3000 + 900 + 900 + 600 + 600 + 600 + 600
+        assert b.total_tokens == 3000 + 900 + 900 + 600 + 600 + 600
 
 
 class TestMemoryRetrieval:
@@ -1395,6 +1394,7 @@ class TestFocusConfig:
         cfg = FocusConfig()
         assert cfg.unread_nudge_enabled is True
         assert cfg.nudge_debounce_seconds == pytest.approx(30.0)
+        assert cfg.catch_up_limit == 20
 
     def test_present_on_character_config(self) -> None:
         cfg = CharacterConfig()
@@ -1403,11 +1403,29 @@ class TestFocusConfig:
     def test_loads_from_toml(self, tmp_path: Path, default_profile_path: Path) -> None:
         path = tmp_path / "character.toml"
         path.write_text(
-            "[focus]\nunread_nudge_enabled = false\nnudge_debounce_seconds = 10\n"
+            "[focus]\nunread_nudge_enabled = false\n"
+            "nudge_debounce_seconds = 10\ncatch_up_limit = 50\n"
         )
         cfg = load_character_config(path, defaults_path=default_profile_path)
         assert cfg.focus.unread_nudge_enabled is False
         assert cfg.focus.nudge_debounce_seconds == pytest.approx(10.0)
+        assert cfg.focus.catch_up_limit == 50
+
+    def test_catch_up_limit_must_be_positive_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[focus]\ncatch_up_limit = 0\n")
+        with pytest.raises(ConfigError, match="catch_up_limit"):
+            load_character_config(path, defaults_path=default_profile_path)
+
+    def test_catch_up_limit_rejects_non_int(
+        self, tmp_path: Path, default_profile_path: Path
+    ) -> None:
+        path = tmp_path / "character.toml"
+        path.write_text("[focus]\ncatch_up_limit = 2.5\n")
+        with pytest.raises(ConfigError, match="catch_up_limit"):
+            load_character_config(path, defaults_path=default_profile_path)
 
     def test_must_be_bool(self, tmp_path: Path, default_profile_path: Path) -> None:
         path = tmp_path / "character.toml"
@@ -1491,7 +1509,7 @@ class TestMemoryWorkerConfigs:
 
     def test_dataclass_defaults_match_legacy_hardcodes(self) -> None:
         assert RollingSummaryConfig() == RollingSummaryConfig(
-            turns_threshold=10, cross_k=5, tick_interval_s=5.0
+            turns_threshold=10, tick_interval_s=5.0
         )
         assert RichNoteConfig() == RichNoteConfig(
             batch_size=10, tick_interval_s=15.0, participants_max=30
@@ -1521,7 +1539,6 @@ class TestMemoryWorkerConfigs:
         path.write_text(
             "[providers.memory.rolling_summary]\n"
             "turns_threshold = 4\n"
-            "cross_k = 2\n"
             "tick_interval_s = 1.5\n"
             "[providers.memory.rich_note]\n"
             "batch_size = 3\n"
@@ -1543,7 +1560,7 @@ class TestMemoryWorkerConfigs:
         cfg = load_character_config(path, defaults_path=default_profile_path)
         mem = cfg.memory_providers
         assert mem.rolling_summary == RollingSummaryConfig(
-            turns_threshold=4, cross_k=2, tick_interval_s=1.5
+            turns_threshold=4, tick_interval_s=1.5
         )
         assert mem.rich_note == RichNoteConfig(
             batch_size=3, tick_interval_s=7.0, participants_max=12

@@ -30,12 +30,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from familiar_connect import log_style as ls
 from familiar_connect.history.fts import FtsIndex
 from familiar_connect.history.turso_compat import TursoConnection
-from familiar_connect.identity import Author
+from familiar_connect.identity import Author, Platform
 
 _logger = logging.getLogger(__name__)
 
@@ -95,6 +95,18 @@ class ChannelUnread(NamedTuple):
     pings: int
 
 
+class Promotion(NamedTuple):
+    """Outcome of a staged-turn promotion: what she took in vs. missed.
+
+    ``consumed`` turns gained ``consumed_at`` (they enter her visible
+    window + rolling summary); ``missed`` turns gained ``missed_at`` (a
+    terminal state — dropped from every read path, genuinely unseen).
+    """
+
+    consumed: int
+    missed: int
+
+
 @dataclass(frozen=True)
 class ActivityRecord:
     """One activity row (append-only log).
@@ -133,15 +145,6 @@ class OtherChannelInfo:
     mode: str | None
     latest_id: int
     latest_timestamp: datetime
-
-
-@dataclass(frozen=True)
-class CrossContextEntry:
-    """Cached cross-context summary for one source channel."""
-
-    source_last_id: int
-    summary_text: str
-    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -398,16 +401,6 @@ CREATE TABLE IF NOT EXISTS summaries (
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
     PRIMARY KEY (familiar_id, channel_id)
-);
-
-CREATE TABLE IF NOT EXISTS cross_context_summaries (
-    familiar_id        TEXT    NOT NULL,
-    viewer_mode        TEXT    NOT NULL,
-    source_channel_id  INTEGER NOT NULL,
-    source_last_id     INTEGER NOT NULL,
-    summary_text       TEXT    NOT NULL,
-    created_at         TEXT    NOT NULL,
-    PRIMARY KEY (familiar_id, viewer_mode, source_channel_id)
 );
 
 CREATE TABLE IF NOT EXISTS memory_writer_watermark (
@@ -784,12 +777,40 @@ class HistoryStore:
             self._conn.commit()
         except Exception:  # noqa: BLE001, S110  # column already exists
             pass
+        # Terminal "missed" state — staged turns dropped at promotion
+        # because they fell outside the catch-up window (she never
+        # perceived them). NULL = not missed; non-NULL keeps consumed_at
+        # NULL so every ``consumed_at IS NOT NULL`` read path excludes it.
+        # No backfill: legacy rows are either consumed or intentionally
+        # staged, never missed.
+        try:
+            self._conn.execute("ALTER TABLE turns ADD COLUMN missed_at TEXT")
+            self._conn.commit()
+        except Exception:  # noqa: BLE001, S110  # column already exists
+            pass
         # Create cross-channel ordering index after columns exist
         self._conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_turns_consumed
                 ON turns (familiar_id, consumed_at, arrived_at, id)
             """
+        )
+        self._conn.commit()
+        # issue #154: the reserved subject platform "self" was renamed to
+        # "ego" (it shadowed Python's ``self``). Rewrite persisted
+        # ``self:<id>`` subject keys in place so pre-rename dossiers/facts
+        # stay reachable by ``ego_canonical_key`` / ``is_ego_key``.
+        # Idempotent: the LIKE guards match nothing once migrated (or when
+        # never self-keyed), so re-running on every open is a cheap no-op.
+        self._conn.execute(
+            "UPDATE people_dossiers "
+            "SET canonical_key = 'ego:' || substr(canonical_key, 6) "
+            "WHERE canonical_key LIKE 'self:%'"
+        )
+        self._conn.execute(
+            "UPDATE facts SET subjects_json = replace("
+            'subjects_json, \'"canonical_key": "self:\', \'"canonical_key": "ego:\') '
+            'WHERE subjects_json LIKE \'%"canonical_key": "self:%\''
         )
         self._conn.commit()
 
@@ -1327,7 +1348,7 @@ class HistoryStore:
         ).fetchall()
         return [
             Author(
-                platform=str(row["author_platform"]),
+                platform=cast("Platform", str(row["author_platform"])),
                 user_id=str(row["author_user_id"]),
                 username=row["author_username"],
                 display_name=row["author_display_name"],
@@ -1530,7 +1551,7 @@ class HistoryStore:
         if row is None:
             return None
         return Author(
-            platform=str(row["author_platform"]),
+            platform=cast("Platform", str(row["author_platform"])),
             user_id=str(row["author_user_id"]),
             username=row["author_username"],
             display_name=row["author_display_name"],
@@ -1788,66 +1809,6 @@ class HistoryStore:
             (familiar_id,),
         ).fetchall()
         return {int(r["id"]) for r in rows}
-
-    def get_cross_context(
-        self,
-        *,
-        familiar_id: str,
-        viewer_mode: str,
-        source_channel_id: int,
-    ) -> CrossContextEntry | None:
-        """Fetch cached cross-context summary, or ``None``."""
-        row = self._conn.execute(
-            """
-            SELECT source_last_id, summary_text, created_at
-              FROM cross_context_summaries
-             WHERE familiar_id = ?
-               AND viewer_mode = ?
-               AND source_channel_id = ?
-            """,
-            (familiar_id, viewer_mode, source_channel_id),
-        ).fetchone()
-        if row is None:
-            return None
-        return CrossContextEntry(
-            source_last_id=int(row["source_last_id"]),
-            summary_text=str(row["summary_text"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-
-    def put_cross_context(
-        self,
-        *,
-        familiar_id: str,
-        viewer_mode: str,
-        source_channel_id: int,
-        source_last_id: int,
-        summary_text: str,
-    ) -> None:
-        """Insert or replace a cross-context summary."""
-        timestamp = datetime.now(tz=UTC).isoformat()
-        self._conn.execute(
-            """
-            INSERT INTO cross_context_summaries
-                (familiar_id, viewer_mode, source_channel_id,
-                 source_last_id, summary_text, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (familiar_id, viewer_mode, source_channel_id)
-            DO UPDATE SET
-                source_last_id = excluded.source_last_id,
-                summary_text   = excluded.summary_text,
-                created_at     = excluded.created_at
-            """,
-            (
-                familiar_id,
-                viewer_mode,
-                source_channel_id,
-                source_last_id,
-                summary_text,
-                timestamp,
-            ),
-        )
-        self._conn.commit()
 
     # ------------------------------------------------------------------
     # memory-writer watermark
@@ -3142,58 +3103,143 @@ class HistoryStore:
             consumed=False,
         )
 
+    # Fallback catch-up window when a caller omits one; the canonical
+    # knob is ``[focus].catch_up_limit`` (see :class:`FocusConfig`),
+    # threaded through :class:`FocusManager` / :class:`ActivityEngine`.
+    _DEFAULT_CATCH_UP_LIMIT = 20
+
     def promote_staged_turns(
         self,
         *,
         familiar_id: str,
         channel_id: int,
-    ) -> int:
-        """Set consumed_at = NOW() for all staged turns in channel.
+        catch_up_limit: int = _DEFAULT_CATCH_UP_LIMIT,
+    ) -> Promotion:
+        """Promote the catch-up window of staged turns; miss the rest.
 
-        Returns count of promoted rows.
+        Focus-swap promotion. She only perceives the channel's last
+        ``catch_up_limit`` staged turns — the preview ``shift_focus``
+        shows her — so only those (plus any that @-mention her, which
+        are always caught) get ``consumed_at``. Older staged backlog
+        gets ``missed_at``: a terminal state leaving ``consumed_at``
+        NULL, so every ``consumed_at IS NOT NULL`` read path excludes
+        it. Perception now matches consumption — she genuinely misses
+        what scrolled past unseen.
+
+        Returns a :class:`Promotion` ``(consumed, missed)`` tally.
         """
-        now = datetime.now(tz=UTC).isoformat()
-        cur = self._conn.execute(
+        rows = self._conn.execute(
             """
-            UPDATE turns SET consumed_at = ?
-             WHERE familiar_id = ? AND channel_id = ? AND consumed_at IS NULL
+            SELECT id, pings_bot
+              FROM turns
+             WHERE familiar_id = ? AND channel_id = ?
+               AND consumed_at IS NULL AND missed_at IS NULL
+             ORDER BY arrived_at DESC, id DESC
             """,
-            (now, familiar_id, channel_id),
-        )
-        self._conn.commit()
-        return int(cur.rowcount or 0)
+            (familiar_id, channel_id),
+        ).fetchall()
+        return self._resolve_promotion(rows, catch_up_limit=catch_up_limit)
 
     def promote_staged_turns_since(
         self,
         *,
         familiar_id: str,
         after_turn_id: int,
-    ) -> int:
-        """Set consumed_at = NOW() for staged turns with id > after_turn_id.
+        catch_up_limit: int = _DEFAULT_CATCH_UP_LIMIT,
+    ) -> Promotion:
+        """Promote a per-channel catch-up window of absence backlog.
 
-        All channels — return-from-absence promotion ("she reads the
-        screen when she gets back"). Pre-absence staged turns
-        (id <= after_turn_id) keep their attentional semantics.
-        Returns count of promoted rows.
+        Activity-return promotion across all channels ("she reads the
+        screen when she gets back"). Mirrors :meth:`promote_staged_turns`
+        but ranks the window *per channel*: within each channel the last
+        ``catch_up_limit`` staged turns that arrived during the absence
+        — plus any that @-mention her — get ``consumed_at``; older
+        absence backlog gets ``missed_at`` and drops out of every read
+        path.
+
+        Scope is ``id > after_turn_id`` only: pre-absence staged turns
+        (id <= after_turn_id) keep their attentional semantics,
+        untouched. Returns a :class:`Promotion` ``(consumed, missed)``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, channel_id, pings_bot
+              FROM turns
+             WHERE familiar_id = ? AND consumed_at IS NULL
+               AND missed_at IS NULL AND id > ?
+             ORDER BY channel_id ASC, arrived_at DESC, id DESC
+            """,
+            (familiar_id, after_turn_id),
+        ).fetchall()
+        return self._resolve_promotion(
+            rows, catch_up_limit=catch_up_limit, per_channel=True
+        )
+
+    def _resolve_promotion(
+        self,
+        rows: list[Any],
+        *,
+        catch_up_limit: int,
+        per_channel: bool = False,
+    ) -> Promotion:
+        """Split staged ``rows`` into consume/miss sets and stamp them.
+
+        ``rows`` are newest-first (per channel when ``per_channel``).
+        The first ``catch_up_limit`` of each window — plus any pinging
+        the bot, always caught regardless of age — are consumed; the
+        remainder are missed. Selection runs in Python rather than SQL
+        so it stays correct on engines without window-function /
+        correlated-UPDATE support.
         """
         now = datetime.now(tz=UTC).isoformat()
-        cur = self._conn.execute(
-            """
-            UPDATE turns SET consumed_at = ?
-             WHERE familiar_id = ? AND consumed_at IS NULL AND id > ?
-            """,
-            (now, familiar_id, after_turn_id),
-        )
+        consume_ids: list[int] = []
+        miss_ids: list[int] = []
+        seen_per_channel: dict[int, int] = {}
+        for row in rows:
+            if per_channel:
+                channel_id = int(row["channel_id"])
+                rank = seen_per_channel.get(channel_id, 0)
+                seen_per_channel[channel_id] = rank + 1
+            else:
+                rank = len(consume_ids) + len(miss_ids)
+            within_window = rank < catch_up_limit
+            is_ping = int(row["pings_bot"]) == 1
+            (consume_ids if within_window or is_ping else miss_ids).append(
+                int(row["id"])
+            )
+        self._stamp_turns("consumed_at", consume_ids, now)
+        self._stamp_turns("missed_at", miss_ids, now)
         self._conn.commit()
-        return int(cur.rowcount or 0)
+        return Promotion(consumed=len(consume_ids), missed=len(miss_ids))
+
+    def _stamp_turns(self, column: str, ids: list[int], value: str) -> None:
+        """Set ``column = value`` for ``ids``, chunked under the param cap.
+
+        ``column`` is a caller-controlled literal (``consumed_at`` /
+        ``missed_at``), never user input.
+        """
+        chunk = 500
+        for start in range(0, len(ids), chunk):
+            batch = ids[start : start + chunk]
+            placeholders = ",".join("?" for _ in batch)
+            self._conn.execute(
+                f"UPDATE turns SET {column} = ? WHERE id IN ({placeholders})",  # noqa: S608
+                (value, *batch),
+            )
 
     def count_staged(self, *, familiar_id: str, channel_id: int) -> int:
-        """Count turns with consumed_at IS NULL for familiar + channel."""
+        """Count still-staged turns for familiar + channel.
+
+        Staged = ``consumed_at IS NULL AND missed_at IS NULL``: missed
+        turns are terminal, not pending, so they must not masquerade as
+        unread here.
+        """
         row = self._conn.execute(
             """
             SELECT COUNT(*) AS n
               FROM turns
-             WHERE familiar_id = ? AND channel_id = ? AND consumed_at IS NULL
+             WHERE familiar_id = ? AND channel_id = ?
+               AND consumed_at IS NULL AND missed_at IS NULL
             """,
             (familiar_id, channel_id),
         ).fetchone()
@@ -3203,7 +3249,9 @@ class HistoryStore:
         """Map channel_id → :class:`ChannelUnread` for staged channels.
 
         ``unread`` counts staged turns; ``pings`` is the subset whose
-        incoming message @-mentioned the bot (``pings_bot``).
+        incoming message @-mentioned the bot (``pings_bot``). Missed
+        turns (``missed_at`` set) are terminal and excluded — they are
+        no longer pending.
         """
         rows = self._conn.execute(
             """
@@ -3212,6 +3260,7 @@ class HistoryStore:
                    COALESCE(SUM(pings_bot), 0) AS pings
               FROM turns
              WHERE familiar_id = ? AND consumed_at IS NULL
+               AND missed_at IS NULL
              GROUP BY channel_id
             """,
             (familiar_id,),
@@ -3745,7 +3794,7 @@ def _row_to_turn(row: Row) -> HistoryTurn:
     user_id = row["author_user_id"]
     if platform is not None and user_id is not None:
         author: Author | None = Author(
-            platform=str(platform),
+            platform=cast("Platform", str(platform)),
             user_id=str(user_id),
             username=row["author_username"],
             display_name=row["author_display_name"],

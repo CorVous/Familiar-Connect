@@ -7,7 +7,7 @@ sync with the raw source of truth.
 
 The `turns` table in `data/familiars/<id>/history.db` (Turso) is the
 durable, append-only source of truth. Every derived artifact —
-summaries, cross-channel briefings, FTS indexes (sibling `fts/turns/`
+summaries, FTS indexes (sibling `fts/turns/`
 and `fts/facts/` tantivy dirs on disk) — is **regenerable from
 `turns` alone**. Deleting any side-index row (or the whole table) is
 safe; the next worker tick rebuilds it. Tantivy indexes auto-rebuild
@@ -21,7 +21,6 @@ flowchart TB
 
     subgraph Indices["Side-indices (regenerable)"]
         summaries[(summaries)]
-        cross[(cross_context_summaries)]
         fts[(fts/turns/ tantivy)]
         facts[(facts)]
         fts_facts[(fts/facts/ tantivy)]
@@ -31,7 +30,6 @@ flowchart TB
 
     turns -->|sync write| fts
     turns -->|SummaryWorker| summaries
-    turns -->|SummaryWorker| cross
     turns -->|FactExtractor| facts
     facts -->|FactSupersedeWorker| facts
     facts -->|sync write| fts_facts
@@ -43,7 +41,6 @@ flowchart TB
         card[CharacterCardLayer]
         mode[OperatingModeLayer]
         lore[LorebookLayer]
-        xc[CrossChannelContextLayer]
         sum[ConversationSummaryLayer]
         ref[ReflectionLayer]
         ppl[PeopleDossierLayer]
@@ -51,7 +48,6 @@ flowchart TB
         hist[RecentHistoryLayer]
     end
 
-    cross --> xc
     summaries --> sum
     dossiers --> ppl
     reflections --> ref
@@ -91,8 +87,7 @@ context re-run `build` only for layers whose key changed.
 | Layer | Source | Invalidation |
 |---|---|---|
 | `ConversationSummaryLayer` | `summaries` table — the single per-familiar focus-stream row at `FOCUS_STREAM_CHANNEL_ID` (`ctx.channel_id` ignored) | `focus:<last_consumed_at>:<last_summarised_id>` |
-| `CrossChannelContextLayer` | **retired** — `build` always returns `""` (attentional stream replaced it; see [below](#attentional-stream)) | unchanged (still keyed; never rendered) |
-| `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `self:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
+| `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `ego:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
 | `RagContextLayer` | `fts/turns/` + `fts/facts/` tantivy search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent_cross_channel(window_size)` — all **consumed** turns across all channels, ordered by `arrived_at, id` | not cached — it *is* the query |
@@ -147,14 +142,8 @@ Background task on `tick_interval_s` (default 5s). Per tick:
    then compounds forward. This tiles with `RecentHistoryLayer`: both
    describe the same consumed attentional thread (summary = older turns,
    recent history = the tail).
-2. **Cross-channel summary** — for each `(viewer_channel, source)`
-   pair in `cross_channel_map`, compare `source.latest_id` to
-   `cross_context_summaries.source_last_id`. If the gap is `>= cross_k`
-   (default 5), build a briefing-style prompt with
-   `(prior summary, new turns in source)` and write to
-   `cross_context_summaries`.
 
-Both strategies compound: new summaries build on prior ones rather
+The summary compounds: each new summary builds on the prior one rather
 than recomputing from raw turns each time. Bounds token cost. A
 periodic full recompute (every *M* compounding cycles) is reserved
 for later refinement once drift data demands it.
@@ -305,7 +294,7 @@ silently mislead the model long after they stopped being true.
 The capability ban is **narrow**: it drops *capabilities/limitations*,
 not the familiar's *narrative*. The familiar's own bits/performances,
 choices, and relational stances/feelings get a home — the
-[self-dossier](#self-dossier) — keyed to a reserved `self:<familiar_id>`
+[self-dossier](#self-dossier) — keyed to a reserved `ego:<familiar_id>`
 subject instead of poisoning whichever person the bit was about. The
 distinction the extractor is taught: *capabilities/limits → dropped;
 narrative/feelings/choices → self-subject*.
@@ -434,7 +423,7 @@ turns newest-first. For each turn it appends the author's
 list, deduping on first sight (most-recent occurrence wins). The
 people list is truncated to `max_people` — same hard-count budgeting
 style as `RecentHistoryLayer.window_size`. The familiar's own
-[`self:<id>`](#self-dossier) subject always leads the candidate list
+[`ego:<id>`](#self-dossier) subject always leads the candidate list
 and is exempt from the `max_people` cap. Candidates without a stored
 dossier are skipped silently; the worker fills them in within one tick.
 
@@ -475,8 +464,8 @@ flip `latest_id` (changing the candidate set); a worker refresh flips
 
 The familiar is a subject too. Its own narrative — bits/performances,
 choices, relational stances/feelings — is recorded under a reserved
-`self:<familiar_id>` canonical key (`identity.self_canonical_key` /
-`identity.is_self_key`; the `self:` platform can never collide with
+`ego:<familiar_id>` canonical key (`identity.ego_canonical_key` /
+`identity.is_ego_key`; the `ego:` platform can never collide with
 `discord:` / `twitch:` keys). This gives the familiar a home for its
 narrative instead of misfiling it under whichever person the bit was
 about.
@@ -487,7 +476,7 @@ about.
   Self-*capability* statements stay dropped (see
   [No self-capability statements](#no-self-capability-statements)) — the
   exception is narrative only.
-- **Worker.** A `self:`-keyed fact yields a dossier automatically (the
+- **Worker.** An `ego:`-keyed fact yields a dossier automatically (the
   worker already iterates every subject with facts). `resolve_label` has
   no account row for the self key, so the worker substitutes the
   familiar's display name for the dossier header. The self-record uses a
@@ -831,32 +820,6 @@ Open work the current retrieval doesn't address:
   Pulling named entities or topic words out of the turn first would
   improve precision without embeddings.
 
-## Expiry semantics for cross-channel summaries
-
-> **Retired.** The [attentional stream](#attentional-stream) replaced
-> cross-channel summaries — `CrossChannelContextLayer.build` always
-> returns `""`, so nothing reaches the prompt regardless of TTL.
-> `SummaryWorker` still writes `cross_context_summaries` (the index
-> stays regenerable and the layer's invalidation key still reads it),
-> but the read path is dead. The mechanics below describe the prior
-> design; kept for context on the side-index that still exists.
-
-Cross-channel summaries could go stale in two ways:
-
-1. **Turn-count watermark** — source channel has gained `cross_k`
-   turns since the last cached summary. `SummaryWorker` regenerates.
-2. **Wall-clock TTL** — summary is older than `ttl_seconds`
-   (default 600 s) at assembly time. `CrossChannelContextLayer`
-   suppressed the stale summary in its `build` output (layer opts
-   out); the row stays in SQLite and is replaced on the next worker
-   tick.
-
-TTL was enforced on the *read* path so a long-idle familiar didn't
-leak stale cross-channel content into a fresh prompt while the worker
-hadn't ticked. The watermark is enforced on the *write* path so the
-worker doesn't wake up and rebuild summaries that haven't meaningfully
-changed.
-
 ## Cold-cache signals (research-phase)
 
 `familiar_connect.diagnostics.cold_cache` provides three detectors:
@@ -933,21 +896,28 @@ gates the agentic path.
 ## Attentional stream
 
 Earlier designs gave each channel its own recent-history window and
-stitched *other* channels in through `CrossChannelContextLayer`
+stitched *other* channels in through per-channel cross-channel
 summaries. The attentional stream replaces that with a single
 **focus** model: the familiar attends to one text channel and one
 voice channel at a time, and only the focused channel's traffic flows
 through the normal reply loop. Everything else is **staged** — stored
 but not yet consumed — until the model deliberately shifts focus.
 
-### Turn lifecycle (staged → consumed)
+### Turn lifecycle (staged → consumed / missed)
 
-Two `turns` columns drive it:
+Three `turns` columns drive it:
 
 - `arrived_at` — immutable ingest timestamp.
 - `consumed_at` — `NULL` while staged; set when the turn enters the
   familiar's attention. `recent_cross_channel` returns consumed turns
   only, ordered by `arrived_at, id`.
+- `missed_at` — terminal "she never saw it" state, set at promotion
+  when a staged turn falls **outside** the catch-up window. It keeps
+  `consumed_at` `NULL`, so every `consumed_at IS NOT NULL` read path
+  (visible window + rolling focus-stream summary) excludes it, and
+  `count_staged` / `staged_channels` add `AND missed_at IS NULL` so it
+  no longer counts as pending. This is what lets the familiar genuinely
+  **miss** messages instead of silently absorbing a whole backlog.
 
 `TextResponder` checks `FocusManager.is_focused(channel_id)` per
 inbound message:
@@ -977,16 +947,19 @@ too.
    subscribed channel_id + label) so the model can retry a live target
    instead of stranding attention on a dead channel. Valid targets call
    `shift_now` — modality (text/voice) inferred from the registry. The
-   tool also eagerly fetches the target channel's recent turns (≤20) and
+   tool also eagerly fetches the target channel's recent turns (the `[focus].catch_up_limit` preview, default 20) and
    returns them in the tool result, so the agentic loop feeds the
    channel's content back into the same turn — the model sees the
    channel before it responds rather than narrating one it can't see.
    Voice/empty channels yield an empty list.
 2. `shift_now` applies the move **at tool-call time**, under the
    per-modality lock. For a text shift it calls
-   `promote_staged_turns(channel_id)` — flipping that channel's staged
-   turns to consumed (`consumed_at = now`) so the backlog interleaves
-   into the next cross-channel window — then moves the pointer, persists
+   `promote_staged_turns(channel_id, catch_up_limit)` — flipping only
+   the last `catch_up_limit` staged turns (the preview she actually
+   saw), plus any that @-mention her, to consumed (`consumed_at = now`)
+   so they interleave into the next cross-channel window, while older
+   staged backlog is marked `missed_at` and dropped (**perception
+   matches consumption**) — then moves the pointer, persists
    both pointers via `set_focus_pointers`, and fires `on_shift`
    (presence). Because the move is immediate, any reply later in the
    same turn posts to the **new** channel (the responder sends to the
@@ -1011,8 +984,8 @@ first voice subscription as defaults (`set_focus_immediately`). The
 `channel_names` map (channel_id → display name) is populated from
 Discord on `on_ready` purely for readable logs and the unread digest.
 
-Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N`
-on a text shift, `[👁️ Focus]` once names are known on ready.
+Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N
+missed=N` on a text shift, `[👁️ Focus]` once names are known on ready.
 
 #### Unread nudge
 
@@ -1077,7 +1050,6 @@ Voice transcript final on channel C (voice:C)
       seeds RagContextLayer cue = text
       Assembler.assemble(ctx)
         → cached CharacterCard / OperatingMode
-        → CrossChannelContextLayer: retired — emits nothing
         → ConversationSummaryLayer: read focus-stream summary (sentinel)
         → PeopleDossierLayer: read from people_dossiers, capped at max_people
         → RagContextLayer: FTS search on cue
@@ -1089,7 +1061,6 @@ Voice transcript final on channel C (voice:C)
 
 Background: SummaryWorker tick (every 5 s)
   → maybe regenerate focus-stream summary (consumed cross-channel stream)
-  → for each viewer×source: maybe regenerate cross-channel summary
 
 Background: PeopleDossierWorker tick (every 20 s)
   → subjects_with_facts(familiar_id) → {canonical_key: max_fact_id}

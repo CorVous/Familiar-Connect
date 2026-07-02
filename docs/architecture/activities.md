@@ -135,10 +135,13 @@ The return timer (or a cut-short reply) drives one flow:
    scrollback does not (see
    [Context interaction](#interaction-with-the-context-pipeline)).
 5. **Staged promotion** — staged turns stored since departure are
-   promoted (marked consumed) across **all** channels: she reads the
-   screen when she gets back, so the cross-channel window shows what
-   she missed. Pre-absence staged turns in never-attended channels
-   keep their attentional semantics.
+   promoted across **all** channels, but capped: only the last
+   `[focus].catch_up_limit` (default 20) turns *per channel* — plus any
+   that @-mention her, always caught — are marked consumed; older
+   absence backlog is marked `missed_at` and dropped from her window
+   and rolling summary. She reads the top of the screen when she gets
+   back, not an unbounded scroll. Pre-absence staged turns in
+   never-attended channels keep their attentional semantics.
 6. **Missed-ping wake** — live-noted pings are merged (deduped) with
    a content scan of turns stored since departure in the focused
    channel. If any exist, a synthetic `discord.text` wake event fires
@@ -266,7 +269,7 @@ The extractor watermark still advances over skipped turns.
 
 The sleep return turn is the exception: tagged `mode = "sleep_return"`
 (`SLEEP_RETURN_MODE`), it **is** processed — with a code-enforced rail
-that dream-grounded facts land dream-framed under the `self:` subject
+that dream-grounded facts land dream-framed under the `ego:` subject
 only. See [sleep.md](sleep.md#dream-aware-extraction).
 
 ## Deliberately v1

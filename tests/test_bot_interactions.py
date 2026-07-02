@@ -164,6 +164,10 @@ class _NoFocus:
         del modality
         return None
 
+    @property
+    def catch_up_limit(self) -> int:
+        return 20
+
 
 class TestOnReadyPresenceResync:
     """on_ready must end with away presence when mid-activity.

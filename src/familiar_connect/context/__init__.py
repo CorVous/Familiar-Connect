@@ -16,7 +16,6 @@ from familiar_connect.context.assembler import (
 from familiar_connect.context.layers import (
     CharacterCardLayer,
     ConversationSummaryLayer,
-    CrossChannelContextLayer,
     Layer,
     LorebookEntry,
     LorebookLayer,
@@ -33,7 +32,6 @@ __all__ = [
     "AssemblyContext",
     "CharacterCardLayer",
     "ConversationSummaryLayer",
-    "CrossChannelContextLayer",
     "Layer",
     "LorebookEntry",
     "LorebookLayer",

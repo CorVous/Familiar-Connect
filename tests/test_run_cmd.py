@@ -28,10 +28,10 @@ from familiar_connect.commands.run import (
 )
 from familiar_connect.context.layers import (
     ConversationSummaryLayer,
-    CrossChannelContextLayer,
     PeopleDossierLayer,
     RagContextLayer,
     RecentHistoryLayer,
+    ReflectionLayer,
 )
 
 if TYPE_CHECKING:
@@ -988,11 +988,11 @@ class TestDefaultAssemblerLayerOrder:
         asm = _default_assembler(familiar, window_size=20, budget=TierBudget())
         return [type(layer).__name__ for layer in asm._layers]
 
-    def test_conversation_summary_precedes_cross_channel(self, tmp_path: Path) -> None:
-        """ConvSummary refreshes every N turns; cross-channel fans across sources."""
+    def test_conversation_summary_precedes_reflection(self, tmp_path: Path) -> None:
+        """ConvSummary refreshes every N turns; reflections refresh faster."""
         order = self._layer_order(tmp_path)
         assert order.index(ConversationSummaryLayer.__name__) < order.index(
-            CrossChannelContextLayer.__name__
+            ReflectionLayer.__name__
         )
 
     def test_people_dossier_precedes_rag(self, tmp_path: Path) -> None:

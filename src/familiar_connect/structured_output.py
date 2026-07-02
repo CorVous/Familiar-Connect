@@ -1,24 +1,23 @@
 """Structured-output coercion — parse possibly-fenced LLM JSON, tolerate garbage.
 
 Chat-tuned models wrap JSON in ``` / ```json fences and pad it with
-prose. Three call sites already each reimplement the same "strip the
-fence, pull the balanced blob, ``json.loads``, degrade to empty on any
-failure" idiom — but each parses one SHAPE, and a faithful superset has
-to honour that so a reply containing both shapes can't flip to the wrong
-one. ``coerce_json`` takes a required ``expect`` keyword for this:
+prose. Several call sites reimplemented the same "strip the fence, pull
+the balanced blob, ``json.loads``, degrade to empty on any failure"
+idiom — but each parses one SHAPE, and a faithful superset has to honour
+that so a reply containing both shapes can't flip to the wrong one.
+``coerce_json`` takes a required ``expect`` keyword for this (object,
+array, or first-blob ``any``).
 
-  * :func:`familiar_connect.sleep.consolidation.parse_actions` — object only.
-  * :func:`familiar_connect.sleep.opinion_formation._extract_object` —
-    object only.
-  * :func:`familiar_connect.processors.fact_extractor._parse_facts` —
-    array only.
+This is the PARSE half of structured output. The REQUEST half — declaring
+the wanted shape, rendering its reply-shape contract, and re-asking on a
+fumble — lives in :mod:`familiar_connect.structured_request`, which builds
+on ``coerce_json`` here. Direct consumers parse a raw reply str
+themselves (e.g. :func:`...sleep.consolidation.parse_actions`); the
+worker call sites go through ``structured_request`` instead.
 
-This module is the single authoritative version of that idiom (the
-Rule-of-Three case), plus the two id/key coercers those sites share.
-Every function here DEGRADES on bad input and NEVER raises — a model
-that fumbles its JSON must not crash the worker reading it.
-
-Stdlib only by design: no LLM-client coupling, just the raw reply str.
+Every function here DEGRADES on bad input and NEVER raises — a model that
+fumbles its JSON must not crash the worker reading it. Stdlib only by
+design: no LLM-client coupling, just the raw reply str.
 """
 
 from __future__ import annotations

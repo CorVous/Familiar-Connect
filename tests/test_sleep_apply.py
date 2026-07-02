@@ -8,7 +8,7 @@ import pytest
 
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import FactSubject, HistoryStore
-from familiar_connect.identity import self_canonical_key
+from familiar_connect.identity import ego_canonical_key
 from familiar_connect.sleep.apply import apply_consolidation
 from familiar_connect.sleep.consolidation import (
     ConsolidationPlan,
@@ -104,7 +104,7 @@ class TestApplyConsolidation:
     async def test_rewrite_to_self_subject(self) -> None:
         raw, _, d1, _ = _store_with_facts()
         store = AsyncHistoryStore(raw)
-        self_key = self_canonical_key("fam")
+        self_key = ego_canonical_key("fam")
         plan = ConsolidationPlan(
             familiar_id="fam",
             retire=(),

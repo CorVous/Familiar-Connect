@@ -62,7 +62,6 @@ coalesce_max_gap_seconds = 45.0
 # rag_tokens            cap on the RAG-context block.
 # dossier_tokens        cap on people-dossier block.
 # summary_tokens        cap on the conversation-summary block.
-# cross_channel_tokens  cap on cross-channel context.
 # reflection_tokens     cap on reflections block (M3).
 # lorebook_tokens       cap on lorebook block (M4).
 # max_history_turns     hard upper bound on history turn count
@@ -75,7 +74,7 @@ coalesce_max_gap_seconds = 45.0
 #
 # Defaults give breathing room while staying comfortably inside model
 # context windows (Haiku 200 k voice, GLM-5.2 1 M text/background):
-# derived totals land around ~7 k voice, ~19 k text, ~56 k background.
+# derived totals land around ~6.5 k voice, ~18 k text, ~52 k background.
 # Voice stays the tightest of the three to protect first-token latency.
 
 [budget.voice]
@@ -83,7 +82,6 @@ recent_history_tokens = 3000
 rag_tokens            = 900
 dossier_tokens        = 900
 summary_tokens        = 600
-cross_channel_tokens  = 600
 reflection_tokens     = 600
 lorebook_tokens       = 600
 max_history_turns     = 200
@@ -98,7 +96,6 @@ recent_history_tokens = 8000
 rag_tokens            = 2400
 dossier_tokens        = 2400
 summary_tokens        = 1600
-cross_channel_tokens  = 1600
 reflection_tokens     = 1600
 lorebook_tokens       = 1600
 max_history_turns     = 400
@@ -113,7 +110,6 @@ recent_history_tokens = 24000
 rag_tokens            = 8000
 dossier_tokens        = 8000
 summary_tokens        = 4000
-cross_channel_tokens  = 4000
 reflection_tokens     = 4000
 lorebook_tokens       = 4000
 max_history_turns     = 1000
@@ -179,7 +175,6 @@ projectors = [
 
 [providers.memory.rolling_summary]
 turns_threshold = 10    # new turns per channel before summary refreshes
-cross_k         = 5     # new source-channel turns before cross-channel refresh
 tick_interval_s = 5.0
 
 [providers.memory.rich_note]
@@ -522,10 +517,16 @@ typing_backoff_max_s     = 30.0
 # only the model's shift_focus tool does); false disables it.
 # nudge_debounce_seconds: rapid arrivals within this window share one
 # nudge.
+# catch_up_limit: how many staged turns she actually catches up on when
+# attention lands on a channel — the shift_focus preview size and the
+# per-channel cap on activity-return promotion. Staged backlog beyond
+# this is *missed* (dropped from her window + summary), not silently
+# consumed; direct @-mentions are always caught regardless of age.
 
 [focus]
 unread_nudge_enabled   = true
 nudge_debounce_seconds = 30.0
+catch_up_limit         = 20
 
 # --- Tools -------------------------------------------------------------------
 #

@@ -22,7 +22,7 @@ from familiar_connect.budget import (
     estimate_tokens,
 )
 from familiar_connect.history.store import FOCUS_STREAM_CHANNEL_ID, HistoryTurn
-from familiar_connect.identity import is_self_key, self_canonical_key
+from familiar_connect.identity import ego_canonical_key, is_ego_key
 from familiar_connect.llm import Message, sanitize_name
 
 if TYPE_CHECKING:
@@ -891,55 +891,6 @@ class ConversationSummaryLayer:
         return f"focus:{entry.last_consumed_at}:{entry.last_summarised_id}"
 
 
-class CrossChannelContextLayer:
-    """Other-channel summary block rendered into viewer's prompt.
-
-    ``viewer_map`` maps viewer channel id → list of source channel
-    ids whose cross-context summary should appear. Summaries older
-    than ``ttl_seconds`` suppressed (layer opts out); still present
-    in SQLite — next :class:`SummaryWorker` tick replaces them.
-    """
-
-    name: str = "cross_channel_context"
-
-    def __init__(
-        self,
-        *,
-        store: AsyncHistoryStore,
-        viewer_map: dict[int, list[int]],
-        ttl_seconds: int = 600,
-        max_tokens: int | None = None,
-    ) -> None:
-        self._store = store
-        self._sync = store.sync
-        self._viewer_map = {k: list(v) for k, v in viewer_map.items()}
-        self._ttl_seconds = ttl_seconds
-        self._max_tokens = max_tokens
-
-    def _viewer_key(self, ctx: AssemblyContext) -> str:
-        return f"{ctx.viewer_mode}:{ctx.channel_id}"
-
-    async def build(self, ctx: AssemblyContext) -> str:  # noqa: ARG002
-        return ""  # Retired — attentional stream replaces cross-channel summaries
-
-    def invalidation_key(self, ctx: AssemblyContext) -> str:
-        sources = self._viewer_map.get(ctx.channel_id or -1, [])
-        if not sources:
-            return "none"
-        parts: list[str] = []
-        for source_id in sources:
-            entry = self._sync.get_cross_context(
-                familiar_id=ctx.familiar_id,
-                viewer_mode=self._viewer_key(ctx),
-                source_channel_id=source_id,
-            )
-            if entry is None:
-                parts.append(f"{source_id}:none")
-            else:
-                parts.append(f"{source_id}:wm{entry.source_last_id}")
-        return "|".join(parts)
-
-
 class PeopleDossierLayer:
     """Per-person dossier block for people active in this channel.
 
@@ -981,8 +932,8 @@ class PeopleDossierLayer:
         # from ctx.familiar_id at build time.
         self._familiar_display_name = familiar_display_name
 
-    def _self_key(self, ctx: AssemblyContext) -> str:
-        return self_canonical_key(ctx.familiar_id)
+    def _ego_key(self, ctx: AssemblyContext) -> str:
+        return ego_canonical_key(ctx.familiar_id)
 
     def _candidate_keys(self, ctx: AssemblyContext) -> list[str]:
         """Ordered, deduped canonical keys for the active channel.
@@ -1003,7 +954,7 @@ class PeopleDossierLayer:
             ordered.append(key)
 
         # always-present self-subject leads, exempt from the people cap
-        _add(self._self_key(ctx))
+        _add(self._ego_key(ctx))
 
         if ctx.channel_id is None:
             return ordered
@@ -1044,7 +995,7 @@ class PeopleDossierLayer:
             )
             if entry is None or not entry.dossier_text.strip():
                 continue
-            if is_self_key(key):
+            if is_ego_key(key):
                 # no account row for the self-subject; use familiar's name
                 # and skip the profile (username/pronouns/bio) lookup.
                 display = self._familiar_display_name or ctx.familiar_id.title()

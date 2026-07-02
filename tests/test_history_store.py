@@ -715,7 +715,7 @@ class TestConsumedTurnsAfter:
         watermark = (c.consumed_at.isoformat(), c.id)
         # focus shifts to channel 300 -> promote staged turn (consumed_at=NOW)
         promoted = s.promote_staged_turns(familiar_id=_FAMILIAR, channel_id=300)
-        assert promoted == 1
+        assert promoted.consumed == 1
         out = s.consumed_turns_after(
             familiar_id=_FAMILIAR,
             after_consumed_at=watermark[0],
@@ -755,6 +755,79 @@ class TestMigrationBackfillScope:
             "SELECT consumed_at FROM turns WHERE id = ?", (turn.id,)
         ).fetchone()
         assert row["consumed_at"] is None  # still staged, not promoted
+
+
+class TestEgoKeyMigration:
+    """Issue #154: legacy ``self:`` subject keys rewrite to ``ego:`` on open."""
+
+    def test_self_keys_rewritten_to_ego_on_reopen(self, tmp_path: Path) -> None:
+        """Facts + dossiers written under the old ``self:`` prefix migrate.
+
+        Pre-rename installs persisted the familiar's own narrative under
+        ``self:<id>``; the rename to ``ego:`` must not orphan that data.
+        """
+        path = tmp_path / "history.db"
+        s = HistoryStore(path)
+        # Inject pre-rename rows directly: facts.subjects_json carries the
+        # JSON shape ``append_fact`` writes, dossier keys the column form.
+        s._conn.execute(
+            "INSERT INTO facts (familiar_id, channel_id, text, source_turn_ids, "
+            "created_at, subjects_json, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                _FAMILIAR,
+                _CHANNEL,
+                "Aria felt proud of the bit.",
+                "[]",
+                "2026-06-19T00:00:00+00:00",
+                '[{"canonical_key": "self:aria", "display_at_write": "Aria"}]',
+                "2026-06-19T00:00:00+00:00",
+            ),
+        )
+        s._conn.execute(
+            "INSERT INTO people_dossiers (familiar_id, canonical_key, last_fact_id, "
+            "dossier_text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                _FAMILIAR,
+                "self:aria",
+                1,
+                "Aria's self-record.",
+                "2026-06-19T00:00:00+00:00",
+            ),
+        )
+        s._conn.commit()
+        s.close()
+
+        reopened = HistoryStore(path)
+        fact_subjects = reopened._conn.execute(
+            "SELECT subjects_json FROM facts WHERE familiar_id = ?", (_FAMILIAR,)
+        ).fetchone()["subjects_json"]
+        dossier_key = reopened._conn.execute(
+            "SELECT canonical_key FROM people_dossiers WHERE familiar_id = ?",
+            (_FAMILIAR,),
+        ).fetchone()["canonical_key"]
+        assert "ego:aria" in fact_subjects
+        assert "self:aria" not in fact_subjects
+        assert dossier_key == "ego:aria"
+
+    def test_migration_is_idempotent(self, tmp_path: Path) -> None:
+        """A second open over already-migrated rows is a no-op, not a corrupt."""
+        path = tmp_path / "history.db"
+        s = HistoryStore(path)
+        s._conn.execute(
+            "INSERT INTO people_dossiers (familiar_id, canonical_key, last_fact_id, "
+            "dossier_text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (_FAMILIAR, "self:aria", 1, "x", "2026-06-19T00:00:00+00:00"),
+        )
+        s._conn.commit()
+        s.close()
+
+        HistoryStore(path).close()  # first reopen migrates self: -> ego:
+        reopened = HistoryStore(path)  # second reopen must leave ego: intact
+        key = reopened._conn.execute(
+            "SELECT canonical_key FROM people_dossiers WHERE familiar_id = ?",
+            (_FAMILIAR,),
+        ).fetchone()["canonical_key"]
+        assert key == "ego:aria"
 
 
 # ---------------------------------------------------------------------------
@@ -1191,62 +1264,6 @@ class TestDistinctOtherChannels:
         assert others == []
 
 
-class TestCrossContextCache:
-    def test_put_and_get_round_trip(self, tmp_path: Path) -> None:
-        s = _store(tmp_path)
-        s.put_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-            source_last_id=42,
-            summary_text="Meanwhile in chat...",
-        )
-        entry = s.get_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-        )
-        assert entry is not None
-        assert entry.source_last_id == 42
-        assert entry.summary_text == "Meanwhile in chat..."
-
-    def test_get_missing_returns_none(self, tmp_path: Path) -> None:
-        s = _store(tmp_path)
-        assert (
-            s.get_cross_context(
-                familiar_id=_FAMILIAR,
-                viewer_mode="full_rp",
-                source_channel_id=999,
-            )
-            is None
-        )
-
-    def test_upsert_overwrites(self, tmp_path: Path) -> None:
-        s = _store(tmp_path)
-        s.put_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-            source_last_id=10,
-            summary_text="old",
-        )
-        s.put_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-            source_last_id=20,
-            summary_text="new",
-        )
-        entry = s.get_cross_context(
-            familiar_id=_FAMILIAR,
-            viewer_mode="full_rp",
-            source_channel_id=200,
-        )
-        assert entry is not None
-        assert entry.source_last_id == 20
-        assert entry.summary_text == "new"
-
-
 # ---------------------------------------------------------------------------
 # Memory-writer watermark
 # ---------------------------------------------------------------------------
@@ -1490,10 +1507,11 @@ class TestPromoteStagedTurnsSince:
         )
         self._stage(s, channel_id=100, content="a during")
         self._stage(s, channel_id=101, content="b during")
-        n = s.promote_staged_turns_since(
+        promo = s.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=departure.id
         )
-        assert n == 2
+        assert promo.consumed == 2
+        assert promo.missed == 0
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 0
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
 
@@ -1501,17 +1519,17 @@ class TestPromoteStagedTurnsSince:
         s = _store(tmp_path)
         pre_absence = self._stage(s, channel_id=100, content="never attended")
         during = self._stage(s, channel_id=101, content="during")
-        n = s.promote_staged_turns_since(
+        promo = s.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=pre_absence.id
         )
-        assert n == 1
+        assert promo.consumed == 1
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 1
         assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
         # boundary: turn at exactly after_turn_id stays staged
-        n2 = s.promote_staged_turns_since(
+        promo2 = s.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=during.id
         )
-        assert n2 == 0
+        assert promo2.consumed == 0
 
     def test_leaves_consumed_turns_untouched(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
@@ -1525,13 +1543,61 @@ class TestPromoteStagedTurnsSince:
             "SELECT consumed_at FROM turns WHERE id = ?",
             (consumed.id,),
         ).fetchone()["consumed_at"]
-        n = s.promote_staged_turns_since(familiar_id=_FAMILIAR, after_turn_id=0)
-        assert n == 0
+        promo = s.promote_staged_turns_since(familiar_id=_FAMILIAR, after_turn_id=0)
+        assert promo.consumed == 0
         after = s._conn.execute(
             "SELECT consumed_at FROM turns WHERE id = ?",
             (consumed.id,),
         ).fetchone()["consumed_at"]
         assert after == before
+
+    def test_catch_up_limit_capped_per_channel(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        departure = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="departure",
+        )
+        # 4 in each of two channels during the absence
+        for i in range(4):
+            self._stage(s, channel_id=100, content=f"a{i}")
+            self._stage(s, channel_id=101, content=f"b{i}")
+        promo = s.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=departure.id, catch_up_limit=2
+        )
+        # cap is per channel: 2 consumed + 2 missed in each of 2 channels
+        assert promo.consumed == 4
+        assert promo.missed == 4
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=100) == 0
+        assert s.count_staged(familiar_id=_FAMILIAR, channel_id=101) == 0
+
+    def test_catch_up_limit_pings_always_caught(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        departure = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="assistant",
+            content="departure",
+        )
+        ping = s.append_turn(
+            channel_id=100,
+            familiar_id=_FAMILIAR,
+            role="user",
+            content="<@bot> you there?",
+            consumed=False,
+            pings_bot=True,
+        )
+        for i in range(3):
+            self._stage(s, channel_id=100, content=f"chatter{i}")
+        promo = s.promote_staged_turns_since(
+            familiar_id=_FAMILIAR, after_turn_id=departure.id, catch_up_limit=1
+        )
+        # window (1 newest) + older ping = 2 consumed; 2 missed
+        assert promo.consumed == 2
+        assert promo.missed == 2
+        got = s.recent_cross_channel(familiar_id=_FAMILIAR, limit=10)
+        assert ping.id in {t.id for t in got}
 
     def test_promoted_turns_appear_in_recent_cross_channel(
         self, tmp_path: Path
@@ -1922,10 +1988,10 @@ class TestAsyncStoreActivityWrappers:
             role="user",
             content="during",
         )
-        n = await store.promote_staged_turns_since(
+        promo = await store.promote_staged_turns_since(
             familiar_id=_FAMILIAR, after_turn_id=departure.id
         )
-        assert n == 1
+        assert promo.consumed == 1
         store.close()
 
 

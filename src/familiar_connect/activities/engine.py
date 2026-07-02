@@ -50,8 +50,8 @@ from familiar_connect.bus.topics import TOPIC_DISCORD_TEXT
 from familiar_connect.history.store import ActivityRecord, FactSubject
 from familiar_connect.identity import (
     Author,
+    ego_canonical_key,
     format_turn_for_transcript,
-    self_canonical_key,
 )
 from familiar_connect.llm import Message
 from familiar_connect.sleep.maintenance import (
@@ -147,6 +147,9 @@ class FocusLike(Protocol):
     """Subset of FocusManager the engine needs."""
 
     def get_focus(self, modality: str) -> int | None: ...
+
+    @property
+    def catch_up_limit(self) -> int: ...
 
 
 class GateAction(Enum):
@@ -958,16 +961,19 @@ class ActivityEngine:
                 self._log_return_step_failed("archive_watermark", exc)
             if departure_turn_id is not None:
                 try:
-                    # she reads the screen when she gets back — staged
-                    # turns from the absence join the visible window
-                    promoted = await self._store.promote_staged_turns_since(
+                    # she reads the screen when she gets back — but only
+                    # the last catch_up_limit per channel join the visible
+                    # window; older absence backlog is missed, not consumed
+                    promo = await self._store.promote_staged_turns_since(
                         familiar_id=self._familiar_id,
                         after_turn_id=departure_turn_id,
+                        catch_up_limit=self._focus.catch_up_limit,
                     )
-                    if promoted:
+                    if promo.consumed or promo.missed:
                         _logger.info(
                             f"{ls.tag('Activity', ls.G)} promoted staged "
-                            f"{ls.kv('turns', str(promoted), vc=ls.LW)}"
+                            f"{ls.kv('turns', str(promo.consumed), vc=ls.LW)} "
+                            f"{ls.kv('missed', str(promo.missed), vc=ls.LY)}"
                         )
                 except Exception as exc:  # noqa: BLE001 — best-effort step
                     self._log_return_step_failed("staged_promotion", exc)
@@ -1120,7 +1126,7 @@ class ActivityEngine:
         """Mint the dream as a durable, dream-framed ``self:`` fact."""
         local = active.started_at.astimezone(self._tz)
         subject = FactSubject(
-            canonical_key=self_canonical_key(self._familiar_id),
+            canonical_key=ego_canonical_key(self._familiar_id),
             display_at_write=self._display_name,
         )
         await self._store.append_fact(
