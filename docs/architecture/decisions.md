@@ -70,6 +70,15 @@ The *open-source library* underneath Zep — Graphiti — is a different proposi
 
 **Revisit when** a Mimi-based S2S model gains an external-LLM-brain seam. Tracked in [roadmap V5](roadmap.md#v5-full-duplex-s2s-as-a-research-branch).
 
+**2026-07 update — OpenAI GPT-Live.** GPT-Live (full-duplex front-end that
+delegates reasoning/search to GPT-5.5 in the background) validates the
+external-brain-seam thesis directionally, but clears none of the four
+rejections: the delegated brain is OpenAI-internal (not OpenRouter-swappable),
+weights are closed (not Mimi/self-hostable), it wants to own the transport
+(not a Discord Opus stream), and the developer API is a signup form, not
+shippable. Stay cascaded; no trigger. Revisit if the API ships *with* a
+bring-your-own-brain seam.
+
 ## Heavy turn-detection LLM (TEN Turn Detection's 7B classifier)
 
 **The idea:** Replace silence-based endpointing with a fine-tuned 7B LLM (TEN Turn Detection's Qwen 2.5-7B) classifying transcript chunks `finished` / `unfinished` / `wait`.
