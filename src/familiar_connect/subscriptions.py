@@ -30,6 +30,7 @@ class Subscription:
     channel_id: int
     kind: SubscriptionKind
     guild_id: int | None = None
+    dm_user_id: int | None = None
 
 
 class SubscriptionRegistry:
@@ -89,17 +90,23 @@ class SubscriptionRegistry:
         channel_id: int,
         kind: SubscriptionKind,
         guild_id: int | None,
+        dm_user_id: int | None = None,
         persist: bool = True,
     ) -> Subscription:
         """Add or replace ``(channel_id, kind)``; idempotent.
 
-        Re-add updates ``guild_id``. With ``persist=False`` the row is
-        registered in memory only and never written to the sidecar — even
+        Re-add updates ``guild_id`` and ``dm_user_id``. With ``persist=False``
+        the row is registered in memory only and never written to the sidecar — even
         when a later persisted mutation rewrites the file. A subsequent
         ``persist=True`` add of the same key promotes it to persisted.
         """
         key = (channel_id, kind)
-        sub = Subscription(channel_id=channel_id, kind=kind, guild_id=guild_id)
+        sub = Subscription(
+            channel_id=channel_id,
+            kind=kind,
+            guild_id=guild_id,
+            dm_user_id=dm_user_id,
+        )
         self._rows[key] = sub
         if persist:
             self._ephemeral.discard(key)
@@ -134,6 +141,7 @@ class SubscriptionRegistry:
             channel_id_raw = row_dict.get("channel_id")
             kind_raw = row_dict.get("kind")
             guild_id_raw = row_dict.get("guild_id")
+            dm_user_id_raw = row_dict.get("dm_user_id")
             if not isinstance(channel_id_raw, int) or not isinstance(kind_raw, str):
                 continue
             try:
@@ -141,10 +149,12 @@ class SubscriptionRegistry:
             except ValueError:
                 continue
             guild_id = guild_id_raw if isinstance(guild_id_raw, int) else None
+            dm_user_id = dm_user_id_raw if isinstance(dm_user_id_raw, int) else None
             sub = Subscription(
                 channel_id=channel_id_raw,
                 kind=kind,
                 guild_id=guild_id,
+                dm_user_id=dm_user_id,
             )
             self._rows[channel_id_raw, kind] = sub
 
@@ -170,6 +180,8 @@ class SubscriptionRegistry:
             ]
             if sub.guild_id is not None:
                 row_lines.append(f"guild_id = {sub.guild_id}")
+            if sub.dm_user_id is not None:
+                row_lines.append(f"dm_user_id = {sub.dm_user_id}")
             row_lines.append("")
             lines.append("\n".join(row_lines))
         self._path.write_text("\n".join(lines))
