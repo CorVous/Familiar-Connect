@@ -1195,7 +1195,6 @@ def _register_dm_channel(
         kind=SubscriptionKind.text,
         guild_id=None,
         dm_user_id=peer_user_id,
-        persist=True,
     )
     fm = handle.focus_manager
     if fm is not None:

@@ -43,7 +43,6 @@ class SubscriptionRegistry:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._rows: dict[tuple[int, SubscriptionKind], Subscription] = {}
-        self._ephemeral: set[tuple[int, SubscriptionKind]] = set()
         self._load()
 
     # ------------------------------------------------------------------
@@ -91,35 +90,24 @@ class SubscriptionRegistry:
         kind: SubscriptionKind,
         guild_id: int | None,
         dm_user_id: int | None = None,
-        persist: bool = True,
     ) -> Subscription:
         """Add or replace ``(channel_id, kind)``; idempotent.
 
-        Re-add updates ``guild_id`` and ``dm_user_id``. With ``persist=False``
-        the row is registered in memory only and never written to the sidecar — even
-        when a later persisted mutation rewrites the file. A subsequent
-        ``persist=True`` add of the same key promotes it to persisted.
+        Re-add updates ``guild_id`` and ``dm_user_id``.
         """
-        key = (channel_id, kind)
         sub = Subscription(
             channel_id=channel_id,
             kind=kind,
             guild_id=guild_id,
             dm_user_id=dm_user_id,
         )
-        self._rows[key] = sub
-        if persist:
-            self._ephemeral.discard(key)
-            self._save()
-        else:
-            self._ephemeral.add(key)
+        self._rows[channel_id, kind] = sub
+        self._save()
         return sub
 
     def remove(self, *, channel_id: int, kind: SubscriptionKind) -> None:
         """Remove ``(channel_id, kind)``; no-op if absent."""
-        key = (channel_id, kind)
-        if self._rows.pop(key, None) is not None:
-            self._ephemeral.discard(key)
+        if self._rows.pop((channel_id, kind), None) is not None:
             self._save()
 
     # ------------------------------------------------------------------
@@ -162,15 +150,12 @@ class SubscriptionRegistry:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         header = (
             "# Persistent subscription registry.\n"
-            "# Managed by /subscribe-* slash commands; "
+            "# Managed by /subscribe-* slash commands and DM auto-registration; "
             "safe to hand-edit while the bot is stopped.\n"
         )
         lines: list[str] = [header]
-        persisted = (
-            sub for key, sub in self._rows.items() if key not in self._ephemeral
-        )
         for sub in sorted(
-            persisted,
+            self._rows.values(),
             key=lambda s: (s.channel_id, s.kind.value),
         ):
             row_lines = [
