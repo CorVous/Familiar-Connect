@@ -191,6 +191,138 @@ class TestExtendedSilenceAfterIncomplete:
         assert calls == []
 
 
+class TestForceCompleteIfPending:
+    """External idle fallback — flush stranded audio when frames stop.
+
+    Discord halts RTP on silence, so a Smart Turn ``incomplete`` misfire
+    (or a burst that stopped before the silence streak classified) leaves
+    buffered audio waiting for the *next* utterance. The audio pump calls
+    ``force_complete_if_pending`` on an idle gap to drain it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_emits_buffer_after_incomplete_verdict(self) -> None:
+        """``incomplete`` then RTP halt (no more frames) → fallback fires."""
+        calls: list[bytes] = []
+        # Exactly enough silence to classify once (12 frames ≈ 200 ms), then
+        # frames stop — as Discord's client VAD halts RTP on real silence.
+        pattern = [True] * 3 + [False] * 12
+        vad = _make_vad(pattern)
+        st = _make_smart_turn([False])  # incomplete → callback held
+        ep = UtteranceEndpointer(
+            vad=vad,
+            smart_turn=st,
+            on_turn_complete=_capture_callback(calls),
+            silence_ms=200,
+            speech_start_ms=32,
+        )
+        for _ in range(len(pattern)):
+            await ep.feed_audio(_input_chunk(1500))
+        # Held by the incomplete verdict — nothing emitted yet.
+        assert calls == []
+
+        fired = await ep.force_complete_if_pending()
+
+        assert fired is True
+        assert len(calls) == 1
+        assert len(calls[0]) > 0
+
+    @pytest.mark.asyncio
+    async def test_fires_on_post_incomplete_even_if_buffer_drained(self) -> None:
+        """Hangover silence after ``incomplete`` drains the buffer; still fires.
+
+        The consumer keys off the turn ending (STT finalize), not the audio
+        payload, so a stranded ``POST_INCOMPLETE`` must still flush.
+        """
+        calls: list[bytes] = []
+        # Trailing silence past the classify edge drains ``_utterance`` via the
+        # memory-bounding idle-clear, but state stays POST_INCOMPLETE.
+        pattern = [True] * 3 + [False] * 20
+        vad = _make_vad(pattern)
+        st = _make_smart_turn([False])
+        ep = UtteranceEndpointer(
+            vad=vad,
+            smart_turn=st,
+            on_turn_complete=_capture_callback(calls),
+            silence_ms=200,
+            speech_start_ms=32,
+        )
+        for _ in range(len(pattern)):
+            await ep.feed_audio(_input_chunk(1500))
+
+        fired = await ep.force_complete_if_pending()
+
+        assert fired is True
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_emits_buffer_when_speech_never_classified(self) -> None:
+        """Burst that stopped before the silence streak → fallback still drains it."""
+        calls: list[bytes] = []
+        vad = _make_vad([True] * 4)  # speaking, no silence edge reached
+        st = _make_smart_turn([])
+        ep = UtteranceEndpointer(
+            vad=vad,
+            smart_turn=st,
+            on_turn_complete=_capture_callback(calls),
+            silence_ms=200,
+            speech_start_ms=32,
+        )
+        for _ in range(4):
+            await ep.feed_audio(_input_chunk(1500))
+        st.is_complete.assert_not_called()
+
+        fired = await ep.force_complete_if_pending()
+
+        assert fired is True
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_noop_when_nothing_pending(self) -> None:
+        """Pure idle (no buffered speech) → fallback is a no-op."""
+        calls: list[bytes] = []
+        vad = _make_vad([False])
+        st = _make_smart_turn([])
+        ep = UtteranceEndpointer(
+            vad=vad,
+            smart_turn=st,
+            on_turn_complete=_capture_callback(calls),
+            silence_ms=200,
+        )
+        for _ in range(8):
+            await ep.feed_audio(_input_chunk(0))
+
+        fired = await ep.force_complete_if_pending()
+
+        assert fired is False
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_does_not_refire_after_normal_completion(self) -> None:
+        """A completed turn clears the buffer → later fallback is a no-op."""
+        calls: list[bytes] = []
+        # Exactly 12 silence frames → completes on the last frame, so no
+        # post-reset frames re-arm speech (the VAD mock rewinds on reset).
+        pattern = [True] * 5 + [False] * 12
+        vad = _make_vad(pattern)
+        st = _make_smart_turn([True])  # complete → fires normally
+        ep = UtteranceEndpointer(
+            vad=vad,
+            smart_turn=st,
+            on_turn_complete=_capture_callback(calls),
+            silence_ms=200,
+            speech_start_ms=32,
+        )
+        for _ in range(len(pattern)):
+            await ep.feed_audio(_input_chunk(1000))
+        assert len(calls) == 1
+
+        fired = await ep.force_complete_if_pending()
+
+        assert fired is False
+        assert len(calls) == 1  # no duplicate emission
+
+
 class TestReset:
     @pytest.mark.asyncio
     async def test_reset_drops_buffer_and_state(self) -> None:

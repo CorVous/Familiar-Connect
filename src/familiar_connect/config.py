@@ -119,6 +119,13 @@ class LocalTurnConfig:
     vad_threshold: float = 0.5
     smart_turn_threshold: float = 0.5
     vad_hop_size: int = 256
+    # Idle gap (no audio) before the pump force-completes a turn stranded
+    # in the endpointer — a Smart Turn ``incomplete`` misfire or a burst
+    # that stopped before the silence streak classified. Longer than the
+    # plain-Deepgram idle-finalize so a natural pause doesn't defeat Smart
+    # Turn's hold-through-pause. FOLLOW-UP: field-tune against real Discord
+    # RTP-hangover timings via ``/diagnostics`` voice.vad_to_stt spans.
+    idle_fallback_s: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -1829,6 +1836,7 @@ def _parse_local_turn_config(raw: dict) -> LocalTurnConfig:
             "smart_turn_threshold", defaults.smart_turn_threshold
         ),
         vad_hop_size=_int("vad_hop_size", defaults.vad_hop_size),
+        idle_fallback_s=_float("idle_fallback_s", defaults.idle_fallback_s),
     )
 
 
