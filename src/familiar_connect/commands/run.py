@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from familiar_connect.budget import TierBudget
     from familiar_connect.embedding.protocol import Embedder
+    from familiar_connect.subscriptions import SubscriptionRegistry
 
 import discord
 
@@ -406,6 +407,26 @@ def _install_shutdown_handlers(stop: asyncio.Event) -> Callable[[], None]:
     return _remove
 
 
+def _prune_deallowlisted_dm_subscriptions(
+    subscriptions: SubscriptionRegistry,
+    dm_allowlist: tuple[int, ...],
+) -> None:
+    """Drop persisted DM subscription rows whose peer left the allowlist.
+
+    Guild rows (``dm_user_id is None``) are untouched. Removal rewrites the
+    sidecar, so a de-allowlisted peer's row cannot resurface on restart.
+    """
+    for sub in list(subscriptions.all()):
+        if sub.dm_user_id is not None and sub.dm_user_id not in dm_allowlist:
+            _logger.info(
+                f"{ls.tag('Subscriptions', ls.Y)} pruned DM row "
+                f"{ls.kv('channel', str(sub.channel_id), vc=ls.LY)} "
+                f"{ls.kv('peer', str(sub.dm_user_id), vc=ls.LY)} — "
+                f"peer no longer allowlisted"
+            )
+            subscriptions.remove(channel_id=sub.channel_id, kind=sub.kind)
+
+
 async def _async_main(token: str, familiar: Familiar) -> None:
     """Asyncio entry point: bring up bus, responders, bot.
 
@@ -413,6 +434,12 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     :param familiar: loaded :class:`Familiar` bundle.
     """
     await familiar.bus.start()
+
+    # De-allowlisted DM peers must not influence boot — drop their persisted
+    # rows before focus seeding below can read them.
+    _prune_deallowlisted_dm_subscriptions(
+        familiar.subscriptions, familiar.config.dm_allowlist
+    )
 
     focus_manager = FocusManager(
         familiar_id=familiar.id,
