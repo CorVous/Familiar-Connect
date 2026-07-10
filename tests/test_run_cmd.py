@@ -21,6 +21,7 @@ from familiar_connect.commands.run import (
     _default_assembler,
     _GracefulShutdown,
     _install_shutdown_handlers,
+    _prune_deallowlisted_dm_subscriptions,
     _resolve_familiar_root,
     _wait_for_shutdown,
     load_opus,
@@ -33,6 +34,7 @@ from familiar_connect.context.layers import (
     RecentHistoryLayer,
     ReflectionLayer,
 )
+from familiar_connect.subscriptions import SubscriptionKind, SubscriptionRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -920,6 +922,148 @@ class TestGracefulShutdown:
         familiar.bus.shutdown.assert_awaited_once()
         scheduler_mock.shutdown.assert_awaited_once()
         familiar.router.shutdown.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# DM allowlist validation at boot
+# ---------------------------------------------------------------------------
+
+
+class TestPruneDeallowlistedDmSubscriptions:
+    """Persisted DM rows whose peer left the allowlist are dropped at boot."""
+
+    def test_removes_dm_row_whose_peer_left_allowlist(self, tmp_path: Path) -> None:
+        sidecar = tmp_path / "subscriptions.toml"
+        registry = SubscriptionRegistry(sidecar)
+        registry.add(
+            channel_id=555,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            dm_user_id=999,
+        )
+
+        _prune_deallowlisted_dm_subscriptions(registry, dm_allowlist=())
+
+        assert registry.get(channel_id=555, kind=SubscriptionKind.text) is None
+        assert "channel_id = 555" not in sidecar.read_text()
+
+    def test_keeps_dm_row_whose_peer_is_allowlisted(self, tmp_path: Path) -> None:
+        sidecar = tmp_path / "subscriptions.toml"
+        registry = SubscriptionRegistry(sidecar)
+        registry.add(
+            channel_id=555,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            dm_user_id=999,
+        )
+
+        _prune_deallowlisted_dm_subscriptions(registry, dm_allowlist=(999,))
+
+        sub = registry.get(channel_id=555, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.dm_user_id == 999
+        assert "dm_user_id = 999" in sidecar.read_text()
+
+    def test_guild_rows_survive_any_allowlist(self, tmp_path: Path) -> None:
+        registry = SubscriptionRegistry(tmp_path / "subscriptions.toml")
+        registry.add(channel_id=42, kind=SubscriptionKind.text, guild_id=1)
+        registry.add(channel_id=43, kind=SubscriptionKind.voice, guild_id=1)
+
+        _prune_deallowlisted_dm_subscriptions(registry, dm_allowlist=())
+
+        assert registry.get(channel_id=42, kind=SubscriptionKind.text) is not None
+        assert registry.get(channel_id=43, kind=SubscriptionKind.voice) is not None
+
+
+@pytest.mark.filterwarnings("ignore:coroutine '_hang' was never awaited:RuntimeWarning")
+class TestBootDmAllowlistValidation:
+    """``_async_main`` prunes de-allowlisted DM rows *before* seeding focus."""
+
+    @pytest.mark.asyncio
+    async def test_deallowlisted_dm_sub_cannot_win_focus_seed(
+        self, tmp_path: Path
+    ) -> None:
+        """A stale DM row inserted first must not become the seeded text focus."""
+        familiar = _fake_familiar_for_async_main()
+        familiar.transcriber = None
+        sidecar = tmp_path / "subscriptions.toml"
+        registry = SubscriptionRegistry(sidecar)
+        # DM row first: without pre-seed validation it would win the seed
+        registry.add(
+            channel_id=555,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            dm_user_id=999,
+        )
+        registry.add(channel_id=42, kind=SubscriptionKind.text, guild_id=1)
+        familiar.subscriptions = registry
+        familiar.config.dm_allowlist = ()
+
+        bot = MagicMock(name="bot")
+        bot.start = AsyncMock(side_effect=RuntimeError("stop boot"))
+        bot.close = AsyncMock()
+        handle = MagicMock(bot=bot)
+
+        proj = MagicMock(name="projector")
+        proj.run = AsyncMock(side_effect=_hang)
+        proj.name = "stub-projector"
+
+        scheduler_mock = MagicMock(name="alarm_scheduler")
+        scheduler_mock.start = AsyncMock()
+        scheduler_mock.shutdown = AsyncMock()
+
+        fm_mock = MagicMock(name="focus_manager")
+        fm_mock.initialize = AsyncMock()
+        fm_mock.get_focus = MagicMock(return_value=None)
+
+        with (
+            patch(
+                "familiar_connect.commands.run.FocusManager",
+                return_value=fm_mock,
+            ),
+            patch("familiar_connect.commands.run.create_bot", return_value=handle),
+            patch("familiar_connect.commands.run._default_assembler"),
+            patch(
+                "familiar_connect.commands.run._run_debug_processor",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_voice_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_text_responder",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch(
+                "familiar_connect.commands.run._run_alarm_waker",
+                side_effect=lambda *_a, **_kw: _hang(),
+            ),
+            patch("familiar_connect.commands.run.VoiceResponder"),
+            patch("familiar_connect.commands.run.TextResponder"),
+            patch(
+                "familiar_connect.commands.run.AlarmScheduler",
+                return_value=scheduler_mock,
+            ),
+            patch("familiar_connect.commands.run.AlarmWaker"),
+            patch(
+                "familiar_connect.commands.run.create_projectors",
+                return_value=[proj],
+            ),
+            patch("familiar_connect.commands.run.create_embedder", return_value=None),
+            patch(
+                "familiar_connect.commands.run._install_shutdown_handlers",
+                return_value=lambda: None,
+            ),
+            pytest.raises(BaseExceptionGroup),
+        ):
+            await _async_main("fake-token", familiar)
+
+        seeded = [c.args for c in fm_mock.set_focus_immediately.call_args_list]
+        assert (555, "text") not in seeded  # de-allowlisted row never seeds
+        assert (42, "text") in seeded  # surviving guild row does
+        assert registry.get(channel_id=555, kind=SubscriptionKind.text) is None
+        assert "dm_user_id = 999" not in sidecar.read_text()
 
 
 class TestRunKeyboardInterruptFallback:
