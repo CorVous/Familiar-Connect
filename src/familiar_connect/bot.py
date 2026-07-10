@@ -1028,6 +1028,15 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
         if ctx.channel_id is None:
             await _reply(ctx, "No channel in context.")
             return
+        if ctx.guild_id is None:
+            # Global command, so invocable inside a DM — where add() would
+            # replace the persisted DM row and wipe its dm_user_id.
+            await _reply(
+                ctx,
+                "DM subscriptions are managed automatically via the DM "
+                "allowlist — no need to subscribe here.",
+            )
+            return
         familiar.subscriptions.add(
             channel_id=ctx.channel_id,
             kind=SubscriptionKind.text,
