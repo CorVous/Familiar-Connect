@@ -1078,7 +1078,7 @@ class TestBootDmAllowlistValidation:
 
 
 def _dm_peer_author() -> Author:
-    """Author row for the DM peer (user 123) as history recorded it."""
+    """Build the DM peer's (user 123) author row as history recorded it."""
     return Author(
         platform="discord",
         user_id="123",
@@ -1125,9 +1125,7 @@ class TestRehydrateDmNaming:
         assert fm.channel_names[555] == "Cor"
 
     @pytest.mark.asyncio
-    async def test_dm_row_without_history_sets_guild_only(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_dm_row_without_history_sets_guild_only(self, tmp_path: Path) -> None:
         """No history for the peer → digest falls back to ``DM (id <cid>)``."""
         registry, store, fm = self._fixture(tmp_path)
         registry.add(
