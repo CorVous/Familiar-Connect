@@ -64,6 +64,8 @@ existing surface. `PiperTTSClient` is a smaller intermediate step.
 Not adopting. Rejection captured in
 [Decisions](decisions.md#full-duplex-speech-to-speech-pipelines-moshi-sesame-csm).
 Revisit if a Mimi-based S2S model exposes an external-LLM-brain seam.
+OpenAI's GPT-Live (2026-07) is directional confirmation, not a trigger —
+see the dated update in Decisions.
 
 ## Architecture / experimentation seams
 
