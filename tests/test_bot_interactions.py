@@ -296,9 +296,10 @@ def _reaction_payload(
 class TestOnMessageDmAllowlist:
     """DM allowlist gate in ``on_message``.
 
-    Allowlisted DMs become ephemeral text subscriptions (never written
-    to the sidecar) so the normal focus/respond machinery handles them;
-    guild channels keep their existing subscription gate.
+    Allowlisted DMs become persisted text subscriptions carrying the
+    peer's user id so the normal focus/respond machinery handles them
+    and the row survives restart; guild channels keep their existing
+    subscription gate.
     """
 
     @staticmethod
@@ -334,9 +335,7 @@ class TestOnMessageDmAllowlist:
         return events, familiar, text_source, fm
 
     @pytest.mark.asyncio
-    async def test_allowlisted_dm_registers_ephemeral_and_ingests(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_allowlisted_dm_registers_and_ingests(self, tmp_path: Path) -> None:
         events, familiar, text_source, fm = self._setup(tmp_path)
         msg = _dm_message(author_id=123, channel_id=555, guild=None)
         await events["on_message"](cast("discord.Message", msg))
@@ -348,8 +347,21 @@ class TestOnMessageDmAllowlist:
         assert fm.guild_names[555] == "Private Message"
         assert fm.channel_names[555] == "X"
         fm.set_focus_immediately.assert_called_once_with(555, "text")
-        # ephemeral row must never touch the sidecar
-        assert not (tmp_path / "subs.toml").exists()
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_dm_persists_subscription_with_peer_user_id(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        # A fresh registry on the same path must see the row — i.e. it
+        # survives restart — carrying the peer's user id for the digest.
+        reloaded = SubscriptionRegistry(tmp_path / "subs.toml")
+        sub = reloaded.get(channel_id=555, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.dm_user_id == 123
+        assert sub.guild_id is None
 
     @pytest.mark.asyncio
     async def test_non_allowlisted_dm_ignored(self, tmp_path: Path) -> None:
