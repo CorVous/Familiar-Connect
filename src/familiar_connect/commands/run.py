@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from familiar_connect.budget import TierBudget
     from familiar_connect.embedding.protocol import Embedder
+    from familiar_connect.history.async_store import AsyncHistoryStore
+    from familiar_connect.subscriptions import SubscriptionRegistry
 
 import discord
 
@@ -45,7 +47,7 @@ from familiar_connect.context import (
 )
 from familiar_connect.embedding import create_embedder
 from familiar_connect.familiar import Familiar
-from familiar_connect.focus import FocusManager
+from familiar_connect.focus import PRIVATE_MESSAGE_GUILD_NAME, FocusManager
 from familiar_connect.llm import create_llm_clients
 from familiar_connect.processors import (
     DebugLoggerProcessor,
@@ -406,6 +408,67 @@ def _install_shutdown_handlers(stop: asyncio.Event) -> Callable[[], None]:
     return _remove
 
 
+def _prune_deallowlisted_dm_subscriptions(
+    subscriptions: SubscriptionRegistry,
+    dm_allowlist: tuple[int, ...],
+) -> None:
+    """Drop persisted DM subscription rows whose peer left the allowlist.
+
+    Guild rows (``dm_user_id is None``) are untouched. Removal rewrites the
+    sidecar, so a de-allowlisted peer's row cannot resurface on restart.
+    """
+    for sub in list(subscriptions.all()):
+        if sub.dm_user_id is not None and sub.dm_user_id not in dm_allowlist:
+            _logger.info(
+                f"{ls.tag('Subscriptions', ls.Y)} pruned DM row "
+                f"{ls.kv('channel', str(sub.channel_id), vc=ls.LY)} "
+                f"{ls.kv('peer', str(sub.dm_user_id), vc=ls.LY)} — "
+                f"peer no longer allowlisted"
+            )
+            subscriptions.remove(channel_id=sub.channel_id, kind=sub.kind)
+
+
+# A DM channel has one human peer; a small window still tolerates
+# stray authors without scanning the whole channel history.
+_DM_PEER_AUTHOR_LIMIT = 5
+
+
+async def _rehydrate_dm_naming(
+    focus_manager: FocusManager,
+    *,
+    subscriptions: SubscriptionRegistry,
+    store: AsyncHistoryStore,
+    familiar_id: str,
+) -> None:
+    """Restore DM naming for persisted DM subscriptions after a restart.
+
+    Mirrors what ``_register_dm_channel`` records live: the sentinel
+    guild name (DM detection keys off it) and the peer's display name,
+    recovered from history via the author row matching the subscription's
+    ``dm_user_id``. When history has no such author, ``channel_names``
+    stays unset and the digest falls back to ``DM (id <cid>)``. Guild
+    rows (``dm_user_id is None``) are untouched.
+    """
+    for sub in subscriptions.all():
+        if sub.dm_user_id is None:
+            continue
+        focus_manager.guild_names[sub.channel_id] = PRIVATE_MESSAGE_GUILD_NAME
+        authors = await store.recent_distinct_authors(
+            familiar_id=familiar_id,
+            channel_id=sub.channel_id,
+            limit=_DM_PEER_AUTHOR_LIMIT,
+        )
+        peer = next(
+            (a for a in authors if a.user_id == str(sub.dm_user_id)),
+            None,
+        )
+        if peer is None:
+            continue
+        name = peer.display_name or peer.username
+        if name:
+            focus_manager.channel_names[sub.channel_id] = name
+
+
 async def _async_main(token: str, familiar: Familiar) -> None:
     """Asyncio entry point: bring up bus, responders, bot.
 
@@ -413,6 +476,12 @@ async def _async_main(token: str, familiar: Familiar) -> None:
     :param familiar: loaded :class:`Familiar` bundle.
     """
     await familiar.bus.start()
+
+    # De-allowlisted DM peers must not influence boot — drop their persisted
+    # rows before focus seeding below can read them.
+    _prune_deallowlisted_dm_subscriptions(
+        familiar.subscriptions, familiar.config.dm_allowlist
+    )
 
     focus_manager = FocusManager(
         familiar_id=familiar.id,
@@ -423,6 +492,16 @@ async def _async_main(token: str, familiar: Familiar) -> None:
         catch_up_limit=familiar.config.focus.catch_up_limit,
     )
     await focus_manager.initialize()
+
+    # Surviving persisted DM rows lost their in-memory naming on restart;
+    # restore it so the digest and focus line render DMs exactly as the
+    # live registration path (_register_dm_channel) does.
+    await _rehydrate_dm_naming(
+        focus_manager,
+        subscriptions=familiar.subscriptions,
+        store=familiar.history_store,
+        familiar_id=familiar.id,
+    )
 
     # Startup default: if no focus pointer persisted, use first subscribed
     # channel per modality so attentional stream is always live.

@@ -24,6 +24,7 @@ from familiar_connect.bot import (
     BotHandle,
     _defer_interaction,
     _register_events,
+    _register_slash_commands,
     _reply,
     build_activity_presence_cb,
     message_pings_bot,
@@ -81,6 +82,96 @@ async def test_reply_swallows_dead_interaction() -> None:
     ctx = _ctx(followup=AsyncMock(side_effect=_not_found()))
     # must not raise
     await _reply(ctx, "ok")
+
+
+def _slash_commands(
+    familiar: Familiar,
+) -> dict[str, Callable[..., Coroutine[None, None, None]]]:
+    """Register the slash commands on a mock bot; return them by name."""
+    commands: dict[str, Callable[..., Coroutine[None, None, None]]] = {}
+    bot = MagicMock(name="bot")
+    bot.slash_command.side_effect = lambda **kw: (
+        lambda fn: commands.setdefault(kw["name"], fn)
+    )
+    _register_slash_commands(BotHandle(bot=bot, send_text=AsyncMock()), familiar)
+    return commands
+
+
+def _slash_ctx(*, channel_id: int | None, guild_id: int | None) -> SimpleNamespace:
+    """Fake ``ApplicationContext`` carrying the fields the handlers read."""
+    return SimpleNamespace(
+        defer=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+        command=SimpleNamespace(name="subscribe-text"),
+        channel_id=channel_id,
+        guild_id=guild_id,
+    )
+
+
+class TestSubscribeTextDmGuard:
+    """``/subscribe-text`` refuses to run inside a DM.
+
+    Slash commands are global, so the command is invocable in a DM
+    (``ctx.guild_id is None``). ``add()`` there would replace a persisted
+    DM row — wiping its ``dm_user_id`` and hiding it from the boot
+    allowlist validator — or create an allowlist-bypassing ambiguous
+    row. DM subscriptions are managed by the allowlist alone.
+    """
+
+    @staticmethod
+    def _familiar(tmp_path: Path) -> Familiar:
+        return cast(
+            "Familiar",
+            SimpleNamespace(subscriptions=SubscriptionRegistry(tmp_path / "subs.toml")),
+        )
+
+    @pytest.mark.asyncio
+    async def test_dm_invocation_refuses_without_touching_registry(
+        self, tmp_path: Path
+    ) -> None:
+        familiar = self._familiar(tmp_path)
+        commands = _slash_commands(familiar)
+        ctx = _slash_ctx(channel_id=555, guild_id=None)
+        await commands["subscribe-text"](ctx)
+        assert (
+            familiar.subscriptions.get(channel_id=555, kind=SubscriptionKind.text)
+            is None
+        )
+        # Sidecar untouched — the registry never wrote anything.
+        assert not (tmp_path / "subs.toml").exists()
+        send_args = ctx.followup.send.await_args
+        assert send_args is not None
+        assert send_args.kwargs["ephemeral"] is True
+        assert "allowlist" in send_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_dm_invocation_does_not_wipe_persisted_peer_id(
+        self, tmp_path: Path
+    ) -> None:
+        # Regression guard: re-add replaces the row, so an unguarded DM
+        # invocation would silently drop dm_user_id from the sidecar.
+        familiar = self._familiar(tmp_path)
+        familiar.subscriptions.add(
+            channel_id=555,
+            kind=SubscriptionKind.text,
+            guild_id=None,
+            dm_user_id=123,
+        )
+        commands = _slash_commands(familiar)
+        await commands["subscribe-text"](_slash_ctx(channel_id=555, guild_id=None))
+        reloaded = SubscriptionRegistry(tmp_path / "subs.toml")
+        sub = reloaded.get(channel_id=555, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.dm_user_id == 123
+
+    @pytest.mark.asyncio
+    async def test_guild_invocation_still_adds_row(self, tmp_path: Path) -> None:
+        familiar = self._familiar(tmp_path)
+        commands = _slash_commands(familiar)
+        await commands["subscribe-text"](_slash_ctx(channel_id=888, guild_id=7))
+        sub = familiar.subscriptions.get(channel_id=888, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.guild_id == 7
 
 
 class TestMessagePingsBot:
@@ -296,9 +387,10 @@ def _reaction_payload(
 class TestOnMessageDmAllowlist:
     """DM allowlist gate in ``on_message``.
 
-    Allowlisted DMs become ephemeral text subscriptions (never written
-    to the sidecar) so the normal focus/respond machinery handles them;
-    guild channels keep their existing subscription gate.
+    Allowlisted DMs become persisted text subscriptions carrying the
+    peer's user id so the normal focus/respond machinery handles them
+    and the row survives restart; guild channels keep their existing
+    subscription gate.
     """
 
     @staticmethod
@@ -317,6 +409,7 @@ class TestOnMessageDmAllowlist:
         text_source.publish_text = AsyncMock()
         fm = MagicMock(name="focus_manager")
         fm.guild_names = {}
+        fm.channel_names = {}
         fm.get_focus.return_value = None
         handle = BotHandle(bot=bot, send_text=AsyncMock(), focus_manager=fm)
         familiar = cast(
@@ -333,9 +426,7 @@ class TestOnMessageDmAllowlist:
         return events, familiar, text_source, fm
 
     @pytest.mark.asyncio
-    async def test_allowlisted_dm_registers_ephemeral_and_ingests(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_allowlisted_dm_registers_and_ingests(self, tmp_path: Path) -> None:
         events, familiar, text_source, fm = self._setup(tmp_path)
         msg = _dm_message(author_id=123, channel_id=555, guild=None)
         await events["on_message"](cast("discord.Message", msg))
@@ -345,9 +436,23 @@ class TestOnMessageDmAllowlist:
             is not None
         )
         assert fm.guild_names[555] == "Private Message"
+        assert fm.channel_names[555] == "X"
         fm.set_focus_immediately.assert_called_once_with(555, "text")
-        # ephemeral row must never touch the sidecar
-        assert not (tmp_path / "subs.toml").exists()
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_dm_persists_subscription_with_peer_user_id(
+        self, tmp_path: Path
+    ) -> None:
+        events, _familiar, _ts, _fm = self._setup(tmp_path)
+        msg = _dm_message(author_id=123, channel_id=555, guild=None)
+        await events["on_message"](cast("discord.Message", msg))
+        # A fresh registry on the same path must see the row — i.e. it
+        # survives restart — carrying the peer's user id for the digest.
+        reloaded = SubscriptionRegistry(tmp_path / "subs.toml")
+        sub = reloaded.get(channel_id=555, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.dm_user_id == 123
+        assert sub.guild_id is None
 
     @pytest.mark.asyncio
     async def test_non_allowlisted_dm_ignored(self, tmp_path: Path) -> None:

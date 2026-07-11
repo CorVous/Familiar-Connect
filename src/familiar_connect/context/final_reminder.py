@@ -74,6 +74,7 @@ def build_final_reminder(
     unread_digest: dict[int, tuple[int, int]] | None = None,
     channel_names: dict[int, str] | None = None,
     guild_name: str | None = None,
+    guild_names: dict[int, str] | None = None,
 ) -> str:
     """Render closing reminder block.
 
@@ -90,6 +91,9 @@ def build_final_reminder(
     ``focus_channel_id`` appends a directive naming the active
     channel and the shift_focus tool; ``guild_name`` (raw display
     name, caller-resolved) also names the server on that focus line.
+    ``guild_names`` maps channel_id → server display name for the
+    *unread* digest; a channel whose name is ``PRIVATE_MESSAGE_GUILD_NAME``
+    renders as a DM (``DM from <name>``) rather than ``#<channel>``.
     ``unread_digest`` maps channel_id → ``(unread, pings)`` and renders
     a compact unreads summary (channels with unread > 0 only); the ping
     subset is surfaced per channel (see :func:`_unread_suffix`).
@@ -122,6 +126,7 @@ def build_final_reminder(
         ])
     if focus_channel_id is not None or unread_digest:
         names = channel_names or {}
+        guilds = guild_names or {}
 
         def _ch(cid: int) -> str:
             n = names.get(cid)
@@ -132,6 +137,9 @@ def build_final_reminder(
             # them; named channels otherwise render id-less and the model
             # hallucinates the channel_id. no-name case already shows the id.
             n = names.get(cid)
+            if guilds.get(cid) == PRIVATE_MESSAGE_GUILD_NAME:
+                # DMs have no #channel; keep the id — shift_focus needs it.
+                return f"DM from {n} (id {cid})" if n else f"DM (id {cid})"
             return f"#{n} (id {cid})" if n else f"#{cid}"
 
         if focus_channel_id is not None:

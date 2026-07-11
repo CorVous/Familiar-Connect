@@ -138,51 +138,47 @@ class TestPersistence:
 
 
 # ---------------------------------------------------------------------------
-# Ephemeral (in-memory-only) subscriptions
+# DM peer user id
 # ---------------------------------------------------------------------------
 
 
-class TestEphemeralSubscriptions:
-    def test_ephemeral_add_is_queryable_but_not_written(
-        self,
-        tmp_path: Path,
-    ) -> None:
+class TestDmUserId:
+    def test_dm_user_id_round_trips_through_sidecar(self, tmp_path: Path) -> None:
         path = tmp_path / "subs.toml"
         reg = SubscriptionRegistry(path)
         reg.add(
             channel_id=42,
             kind=SubscriptionKind.text,
             guild_id=None,
-            persist=False,
+            dm_user_id=42,
         )
-
-        assert reg.get(channel_id=42, kind=SubscriptionKind.text) is not None
-        assert reg.kind_for(42) is SubscriptionKind.text
-        assert not path.exists()
-
-    def test_persisted_mutation_excludes_ephemeral_row(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        path = tmp_path / "subs.toml"
-        reg = SubscriptionRegistry(path)
-        reg.add(
-            channel_id=42,
-            kind=SubscriptionKind.text,
-            guild_id=None,
-            persist=False,
-        )
-        reg.add(channel_id=77, kind=SubscriptionKind.text, guild_id=None)
-
-        # Live registry still sees both the ephemeral and persisted rows.
-        assert len(list(reg.all())) == 2
 
         reloaded = SubscriptionRegistry(path)
-        assert reloaded.get(channel_id=77, kind=SubscriptionKind.text) is not None
-        assert reloaded.get(channel_id=42, kind=SubscriptionKind.text) is None
-        assert len(list(reloaded.all())) == 1
+        sub = reloaded.get(channel_id=42, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.dm_user_id == 42
 
-    def test_persist_true_promotes_previously_ephemeral_row(
+    def test_row_without_dm_user_id_loads_as_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "subs.toml"
+        path.write_text('[[subscription]]\nchannel_id = 42\nkind = "text"\n')
+
+        reg = SubscriptionRegistry(path)
+        sub = reg.get(channel_id=42, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.dm_user_id is None
+
+    def test_non_int_dm_user_id_loads_as_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "subs.toml"
+        path.write_text(
+            '[[subscription]]\nchannel_id = 42\nkind = "text"\ndm_user_id = "42"\n',
+        )
+
+        reg = SubscriptionRegistry(path)
+        sub = reg.get(channel_id=42, kind=SubscriptionKind.text)
+        assert sub is not None
+        assert sub.dm_user_id is None
+
+    def test_sidecar_writes_dm_user_id_only_for_rows_that_carry_it(
         self,
         tmp_path: Path,
     ) -> None:
@@ -192,27 +188,14 @@ class TestEphemeralSubscriptions:
             channel_id=42,
             kind=SubscriptionKind.text,
             guild_id=None,
-            persist=False,
+            dm_user_id=42,
         )
-        reg.add(channel_id=42, kind=SubscriptionKind.text, guild_id=None)
+        reg.add(channel_id=77, kind=SubscriptionKind.text, guild_id=999)
 
-        reloaded = SubscriptionRegistry(path)
-        assert reloaded.get(channel_id=42, kind=SubscriptionKind.text) is not None
-
-    def test_persisted_remove_does_not_resurrect_ephemeral_row(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        path = tmp_path / "subs.toml"
-        reg = SubscriptionRegistry(path)
-        reg.add(channel_id=77, kind=SubscriptionKind.text, guild_id=None)
-        reg.add(
-            channel_id=42,
-            kind=SubscriptionKind.text,
-            guild_id=None,
-            persist=False,
+        text = path.read_text()
+        assert "dm_user_id = 42" in text
+        assert text.count("dm_user_id") == 1
+        # Row without dm_user_id stays byte-compatible with old format.
+        assert (
+            '[[subscription]]\nchannel_id = 77\nkind = "text"\nguild_id = 999\n' in text
         )
-        reg.remove(channel_id=77, kind=SubscriptionKind.text)
-
-        reloaded = SubscriptionRegistry(path)
-        assert reloaded.get(channel_id=42, kind=SubscriptionKind.text) is None

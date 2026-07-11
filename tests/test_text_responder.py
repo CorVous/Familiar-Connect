@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 import asyncio
 import logging
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from familiar_connect.activities.engine import GateAction, GateDecision
 from familiar_connect.bus import InProcessEventBus, TurnRouter
@@ -35,7 +35,7 @@ from familiar_connect.context import (
     RecentHistoryLayer,
 )
 from familiar_connect.context.layers import _turn_to_message_with_context
-from familiar_connect.focus import FocusManager
+from familiar_connect.focus import PRIVATE_MESSAGE_GUILD_NAME, FocusManager
 from familiar_connect.history.async_store import AsyncHistoryStore
 from familiar_connect.history.store import HistoryStore, HistoryTurn
 from familiar_connect.identity import Author
@@ -1240,6 +1240,58 @@ class TestTrailingReminderServerName:
         trailing = captured[0][-1].content_str
         assert "Your attention is currently on #general." in trailing
         assert "server" not in trailing
+
+
+class TestTrailingReminderDmDigest:
+    """Off-focus DM unreads render as ``DM from <name> (id <cid>)``.
+
+    The DM label only appears once the responder threads the focus
+    manager's ``guild_names`` map (which marks the channel a private
+    message) into ``build_final_reminder`` alongside ``channel_names``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_off_focus_dm_unread_renders_dm_label(self, tmp_path: Path) -> None:
+        captured: list[list[Message]] = []
+
+        class _CapturingLLM(LLMClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", model="m")
+
+            async def chat(self, messages: list[Message]) -> Message:
+                captured.append(list(messages))
+                return Message(role="assistant", content="ok")
+
+            async def chat_stream(  # type: ignore[override]
+                self,
+                messages: list[Message],
+            ) -> AsyncIterator[str]:
+                captured.append(list(messages))
+                yield "ok"
+
+        send = _CapturingSend()
+        responder, _, _ = _make_responder(
+            llm=_CapturingLLM(), send=send, tmp_path=tmp_path
+        )
+        fm = _focus_manager(
+            channel_id=42, channel_name="general", guild_name="My Server"
+        )
+        # Off-focus DM: peer name + the private-message marker.
+        fm.channel_names[555] = "Cor"
+        fm.guild_names[555] = PRIVATE_MESSAGE_GUILD_NAME
+        responder._focus_manager = fm
+        # Force one unread in the DM so it lands in the digest.
+        responder._history.staged_channels = AsyncMock(  # ty: ignore[unresolved-attribute]
+            return_value={555: (1, 0)}
+        )
+        bus = InProcessEventBus()
+        await bus.start()
+        await responder.handle(_discord_text_event(content="hi"), bus)
+        await bus.shutdown()
+
+        assert captured, "LLM was never invoked"
+        trailing = captured[0][-1].content_str
+        assert "DM from Cor (id 555)" in trailing
 
 
 class TestPerTurnOriginLogging:

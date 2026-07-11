@@ -1028,6 +1028,15 @@ def _register_slash_commands(handle: BotHandle, familiar: Familiar) -> None:
         if ctx.channel_id is None:
             await _reply(ctx, "No channel in context.")
             return
+        if ctx.guild_id is None:
+            # Global command, so invocable inside a DM — where add() would
+            # replace the persisted DM row and wipe its dm_user_id.
+            await _reply(
+                ctx,
+                "DM subscriptions are managed automatically via the DM "
+                "allowlist — no need to subscribe here.",
+            )
+            return
         familiar.subscriptions.add(
             channel_id=ctx.channel_id,
             kind=SubscriptionKind.text,
@@ -1167,24 +1176,30 @@ def _register_dm_channel(
     handle: BotHandle,
     familiar: Familiar,
     channel_id: int,
+    peer_name: str,
+    peer_user_id: int,
 ) -> None:
-    """Register a DM channel as an ephemeral text subscription.
+    """Register a DM channel as a persisted text subscription.
 
-    Idempotent — safe to call on every DM. The row is in-memory only
-    (``persist=False``) and never written to the sidecar. The focus seed
+    Idempotent — safe to call on every DM. The row is written to the
+    sidecar carrying the peer's user id, so the subscription survives
+    restart and the digest can label the DM by user. The focus seed
     mirrors the startup default in ``commands/run.py`` so a DM-only
     familiar doesn't stage its first message forever; it seeds only when
-    no text focus exists and never steals an existing one.
+    no text focus exists and never steals an existing one. The peer's
+    display name is recorded in ``channel_names`` so the digest has a name
+    to show for the DM.
     """
     familiar.subscriptions.add(
         channel_id=channel_id,
         kind=SubscriptionKind.text,
         guild_id=None,
-        persist=False,
+        dm_user_id=peer_user_id,
     )
     fm = handle.focus_manager
     if fm is not None:
         fm.guild_names[channel_id] = PRIVATE_MESSAGE_GUILD_NAME
+        fm.channel_names[channel_id] = peer_name
         if fm.get_focus("text") is None:
             fm.set_focus_immediately(channel_id, "text")
 
@@ -1196,8 +1211,7 @@ def _register_events(
     handle: BotHandle,
 ) -> None:
     # Users already shown the first-DM disclaimer this process. In-memory
-    # only (mirrors #176's ephemeral DM subscriptions) — a restart may
-    # re-send it; we deliberately don't persist.
+    # only — a restart may re-send it; we deliberately don't persist.
     disclaimed_dm_users: set[int] = set()
     # Live disclaimer messages awaiting a checkmark-to-dismiss reaction,
     # keyed by message id. In-memory only (same rationale) — a restart drops
@@ -1255,7 +1269,7 @@ def _register_events(
             return
         if message.guild is None:
             # DM: admit only allowlisted users, then register the channel
-            # as an ephemeral text subscription so the normal machinery
+            # as a persisted text subscription so the normal machinery
             # treats it as any other subscribed channel.
             if message.author.id not in familiar.config.dm_allowlist:
                 return
@@ -1271,7 +1285,13 @@ def _register_events(
                 # checkmark so dismissing is a single click.
                 disclaimer_messages[sent.id] = sent
                 await sent.add_reaction(DM_BOT_DISCLAIMER_DELETE_EMOJI)
-            _register_dm_channel(handle, familiar, message.channel.id)
+            _register_dm_channel(
+                handle,
+                familiar,
+                message.channel.id,
+                peer_name=message.author.display_name,
+                peer_user_id=message.author.id,
+            )
         elif (
             familiar.subscriptions.get(
                 channel_id=message.channel.id,

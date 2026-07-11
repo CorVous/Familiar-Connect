@@ -128,6 +128,8 @@ meaningful selection.
 ### Subscriptions
 
 `data/familiars/<id>/subscriptions.toml` — which Discord channels the
-bot listens in. Written by `/subscribe-text` and `/subscribe-voice`.
-Not meant for hand edits — the slash commands rewrite the whole file on
-every mutation.
+bot listens in. Written by `/subscribe-text` and `/subscribe-voice`;
+an inbound DM from an allowlisted user also auto-registers a persisted
+row, and boot prunes DM rows whose peer has left the allowlist. The
+bot rewrites the whole file on every mutation, so hand edits are only
+safe while the bot is stopped.
