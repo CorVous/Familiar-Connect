@@ -54,6 +54,9 @@ twitch = ["dep:twitch_api"]
 azure-tts = ["dep:azure-speech"]
 # rubato/opus for higher-quality resampling if the boxcar decimator is insufficient (09).
 audio-resample = ["dep:rubato", "dep:opus"]
+# Exposes the singleton reset seams (reset_span_collector, reset_voice_budget_recorder)
+# to cross-subsystem integration tests per DESIGN 4.8.
+test-util = []
 
 [dependencies]
 # --- async runtime + concurrency (all subsystems) ---
