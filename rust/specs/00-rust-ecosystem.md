@@ -51,6 +51,13 @@ assemble-it-yourself crates. Slash commands, typing indicators
 Risk: **LOW-MEDIUM** (receive-path maturity under DAVE is ~3 months old in the
 wild).
 
+> **CORRECTIONS (2026-07-11, scaffold build — see DESIGN.md D18):** two versions
+> below failed empirical validation. `rusqlite` is pinned to **0.37** (0.40.1
+> pulls libsqlite3-sys 0.38.1 whose build script needs unstable `cfg_select!`,
+> won't compile on stable rustc 1.94.1). `rubato 4.0.0` **does not exist** —
+> latest is **0.16.x** (also unifies with songbird's dependency tree). The
+> Cargo.toml manifest in DESIGN.md §6 is authoritative over this report.
+
 ## Per-capability picks
 
 | # | Capability | Pick | Version | Risk | Notes |

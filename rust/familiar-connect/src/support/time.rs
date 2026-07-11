@@ -1,0 +1,1 @@
+//! Shared ISO-8601 UTC helper: emit `%Y-%m-%dT%H:%M:%S%.6f+00:00` (fixed 6-digit micros, +00:00 suffix); parse tolerantly (missing micros / Z). Lexicographic == chronological is a correctness dependency (spec 03).

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs the formatter so nobody has to remember to.
+# Enable once per clone: git config core.hooksPath rust/.githooks
+# (drops the template's gen-docs step — the docs generator is not ported).
+set -eu
+cd "$(git rev-parse --show-toplevel)/rust"
+
+before=$(git diff | git hash-object --stdin)
+cargo fmt --all
+after=$(git diff | git hash-object --stdin)
+
+if [ "$before" != "$after" ]; then
+    echo "pre-commit: cargo fmt updated files; review and git add them" >&2
+    exit 1
+fi
