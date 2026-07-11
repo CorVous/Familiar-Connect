@@ -533,6 +533,7 @@ speech_start_ms       = 100
 vad_threshold         = 0.5
 smart_turn_threshold  = 0.5
 vad_hop_size          = 256
+idle_fallback_s       = 1.5
 ```
 
 | Field | Default | Purpose |
@@ -544,6 +545,7 @@ vad_hop_size          = 256
 | `vad_threshold` | `0.5` | TEN-VAD `is_speech` cutoff. |
 | `smart_turn_threshold` | `0.5` | SmartTurn `is_complete` cutoff. |
 | `vad_hop_size` | `256` | TEN-VAD frame size in samples at 16 kHz; `256` (16 ms) or `160` (10 ms). |
+| `idle_fallback_s` | `1.5` | Idle gap (no audio) before the pump force-completes a turn stranded in the endpointer. Longer than the plain-Deepgram idle-finalize (0.5 s) so a natural pause doesn't defeat Smart Turn's hold-through-pause. Tune down for snappier recovery from misfires, up if slow speakers get cut off. |
 
 A missing Smart Turn ONNX file disables the feature with a warning
 — the bot falls back to Deepgram endpointing rather than failing to
