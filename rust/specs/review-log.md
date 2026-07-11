@@ -29,3 +29,18 @@ compiler+tests structurally cannot). Reviewer stage retained for Layer 1.
 (Cargo.toml) and routed them to the orchestrator; the foundation fixer
 verified the finding empirically before choosing declare-and-pin over a
 behavior change. No finding was rubber-stamped.
+
+## Layer 1 (3 packages: config-identity, history, small-utils) — 2026-07-11
+
+| Pkg | Kind | Sev | Finding | Gate-visible? | Outcome |
+|---|---|---|---|---|---|
+| config-identity | semantic-divergence | med | Error-message tails printed `got -1.0` where Python prints `got -1`: the sign check ran after int→f64 conversion, Python checks the raw TOML value first. Substring-matching tests (mirroring `pytest.raises(match=)`) let it through | No — substring asserts passed | Fixed: per-arm sign checks; tests strengthened to byte-exact whole-message match |
+| config-identity | semantic-divergence | low | `parse_hhmm_range` length check counted bytes not chars (DESIGN 4.9); provably behavior-neutral behind the ASCII gate but convention-violating. Reviewer's deeper point (Python `isdigit()` accepts non-ASCII decimal digits) retained as blessed ASCII-only deviation | No | Fixed the count; deviation documented |
+| history | test-weakening | med | `search_facts`/`search_facts_scored` (spec behavior 20) had zero test coverage despite live tantivy indexes in the harness — 8 Python fact-search tests unported and undeclared | No — nothing failed | Fixed: 8 FTS-backed integration tests added (stemming, scoping, supersede-exclusion, bi-temporal as_of, BM25 ordering) |
+| history | semantic-divergence | low | `parse_subjects` dropped subject items with present-but-non-string fields; Python coerces via `str(...)` (True/False/None spellings included) | No | Fixed: coercion helper + parity unit tests |
+| small-utils | semantic-divergence | med | Python `str.isspace()` counts U+001C–U+001F (FS/GS/RS/US) as whitespace; Rust `char::is_whitespace()` doesn't — sentence-boundary detection diverged on those separators (spec 09 §67). Exhaustive scalar diff confirmed those 4 codepoints are the only gap | No — compiled, passed ported tests | Fixed: `is_py_whitespace` helper; 3 parity tests cross-checked against live Python |
+
+**Batch verdict:** 5 findings / 3 packages, all 5 invisible to the gates.
+Running total: 10 findings / 6 packages, 9 gate-invisible. The two med-severity
+semantic catches (whitespace scalars, error-message tails) are precisely the
+"compiles and passes weak tests" class. Reviewer stage retained.

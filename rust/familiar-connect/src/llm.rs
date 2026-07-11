@@ -166,8 +166,52 @@ pub struct LlmDelta {
 // rate-limit semaphore, `_CallMetrics`, `create_llm_clients`) but is Layer 2 per
 // DESIGN §3 and belongs to the subsystem-08 porting task. Only the Layer-0 value
 // types above are implemented in this foundation pass. The client is filled in
-// later against the `LlmClient` seam trait (DESIGN §4.8).
+// later against the `LlmClient` seam trait below.
+//
+// The trait itself is defined here now (Layer 1) because `structured_request`
+// and the 04/07 workers type against it (DESIGN §4.8: mocks touch only these
+// five methods). The concrete OpenRouter client that implements it — the SSE
+// streaming, the rate-limit semaphore, `create_llm_clients` — remains the
+// Layer-2 subsystem-08 task; nothing here constructs a client.
 // ============================================================================
+
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+
+/// The narrow LLM client seam the rest of the system types against
+/// (DESIGN §4.8).
+///
+/// Only these five methods are ever touched from outside the transport module,
+/// so a ~5-line scripted stub satisfies it (the 04/07 worker doubles and the 06
+/// responder doubles implement exactly this). The OpenRouter client (Layer 2,
+/// subsystem 08) implements the trait; the streaming/chat bodies, the rate-limit
+/// semaphore, and `create_llm_clients` are that later task's remit.
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    /// Blocking, 429-retrying chat completion.
+    ///
+    /// Transport / HTTP faults surface as `Err`; callers such as
+    /// `request_structured` propagate them unchanged (only shape problems are
+    /// retried).
+    async fn chat(&self, messages: Vec<Message>) -> anyhow::Result<Message>;
+
+    /// SSE streaming completion. `tools` is the OpenAI `tools` payload (`None`
+    /// when the registry is empty); each item is one [`LlmDelta`].
+    async fn stream_completion(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<Value>>,
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>>;
+
+    /// The config slot label (`"fast"` / `"prose"` / `"background"`), or `None`.
+    fn slot(&self) -> Option<&str>;
+
+    /// Whether `ImageResult`s serialize as multimodal blocks for this client.
+    fn multimodal(&self) -> bool;
+
+    /// Whether tool-calling is enabled for this slot (gates the agentic loop).
+    fn tool_calling_enabled(&self) -> bool;
+}
 
 #[cfg(test)]
 mod tests {
