@@ -67,3 +67,22 @@ in-flight fixers re-ran. Journal-based resume worked as designed.
 **Batch verdict:** the async-hazard class keeps paying (lazy-vs-eager stream
 semantics and WS close-on-drop are exactly what compiles clean and passes unit
 tests). Running total: 26 findings / 12 packages, ~24 gate-invisible.
+
+## Layer 2 Wave B (2 packages: tools, sleep) — 2026-07-12
+
+7 findings (tools 4, sleep 3), all applied; gates green.
+
+Notable fixer dispositions from the full Layer 2 fix stage:
+- **Justified reviewer override (llm-client):** the reviewer's eager-vs-lazy
+  `stream_completion` finding was verified REAL but SKIPPED with cause — the
+  eager header/status check is the spec-prescribed generator→Stream+Drop
+  translation (spec 08 port-notes) and is required for the permit-release-at-
+  header contract; making it lazy would break three faithfully-ported error-
+  path tests. First case of the decision-log/spec authority correctly
+  overruling a technically-true finding.
+- **tts-and-players jitter tests** were rewritten to assert the *observable*
+  prebuffer/pad-underrun behavior of the built source rather than the stub's
+  own fields — restoring guard value without a shared-file accessor.
+
+**Layer 2 totals:** 23 findings / 8 packages, ~21 gate-invisible, 1 justified
+skip. Tree at 1,484 tests / 0 failures after the layer. Reviewer retained.
