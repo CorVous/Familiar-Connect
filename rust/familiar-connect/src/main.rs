@@ -1,8 +1,10 @@
-//! Binary entry point (subsystem 10). The real composition root lands in
-//! `familiar_connect::cli` / `familiar_connect::commands::run` during the port;
-//! this stub keeps the `familiar-connect` binary compiling.
+//! Binary entry point (subsystem 10; Python `__main__.py`).
+//!
+//! Thin per the scaffold: delegate straight to [`familiar_connect::cli::main`],
+//! which parses args, configures logging, and dispatches to the subcommands.
+//! `cli::main` owns the exit-code contract (`ExitCode`), so `__main__.py`'s
+//! `sys.exit(main())` collapses into returning it.
 
-fn main() {
-    // Wired to `familiar_connect::cli::main()` once subsystem 10 is ported.
-    std::process::exit(0);
+fn main() -> std::process::ExitCode {
+    familiar_connect::cli::main()
 }
