@@ -171,8 +171,12 @@ const fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
-/// Percent-encode a query component (RFC 3986 unreserved kept; everything else
-/// `%XX`). Round-trips through `parse_qs`-style decoders.
+/// Encode a query component to match Python's `urlencode` (default
+/// `quote_via=quote_plus`, deepgram.py:136): the unreserved set
+/// (`A-Za-z0-9-._~`, identical to CPython's `quote` `ALWAYS_SAFE`) is kept
+/// verbatim, a space becomes `+`, and every other byte becomes `%XX`. Byte-for-
+/// byte identical to the Python-built URL; still round-trips through
+/// `parse_qs`-style decoders (which map both `+` and `%20` back to a space).
 fn encode_query(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
@@ -181,6 +185,8 @@ fn encode_query(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(char::from(b));
             }
+            // Python quote_plus renders a space as `+`, not `%20`.
+            b' ' => out.push('+'),
             _ => {
                 out.push('%');
                 out.push(char::from(HEX[usize::from(b >> 4)]));
@@ -281,14 +287,21 @@ fn parse_response(data: &serde_json::Value) -> Option<TranscriptionResult> {
     })
 }
 
-/// `int(value)` for a JSON number (accepts integer or float, mirrors Python
-/// `int(words[0]["speaker"])`).
+/// `int(value)` for a JSON speaker label, mirroring Python
+/// `int(words[0]["speaker"])`: a JSON integer passes through, a JSON float
+/// truncates toward zero, and a JSON string is parsed as a base-10 integer
+/// (Python `int("1") == 1`; leading/trailing whitespace and a sign are
+/// tolerated, an unparseable/float-shaped string yields `None`). The Deepgram
+/// wire contract always sends an integer, so the string branch is defensive
+/// parity for the `int()` coercion rather than an observed frame.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "Python int() truncates the diarization label toward zero; matches"
 )]
 fn json_to_i64(v: &serde_json::Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,6 +1374,28 @@ mod tests {
     }
 
     #[test]
+    fn keyterm_space_encodes_as_plus_like_python_quote_plus() {
+        // Python urlencode/quote_plus renders a space as `+`, not `%20`; the
+        // produced URL string must be byte-identical to Python's.
+        let mut c = DeepgramTranscriber::new("test-key");
+        c.keyterms = vec!["lifecycle mesh".to_string()];
+        let url = c.build_ws_url();
+        assert!(url.contains("keyterm=lifecycle+mesh"), "url = {url}");
+        assert!(!url.contains("%20"), "url = {url}");
+        // Still decodes back to the original term.
+        assert_eq!(parse_query(&url)["keyterm"], vec!["lifecycle mesh"]);
+    }
+
+    #[test]
+    fn encode_query_matches_quote_plus() {
+        // Unreserved kept verbatim; space → `+`; everything else `%XX` upper-hex.
+        assert_eq!(encode_query("aZ0-._~"), "aZ0-._~");
+        assert_eq!(encode_query("a b"), "a+b");
+        assert_eq!(encode_query("a+b"), "a%2Bb");
+        assert_eq!(encode_query("é"), "%C3%A9");
+    }
+
+    #[test]
     fn builds_headers() {
         let c = DeepgramTranscriber::new("sk-deepgram-test-123");
         let h = c.build_headers();
@@ -1498,6 +1533,31 @@ mod tests {
             "is_final": true, "start": 2.0, "duration": 1.0,
         });
         assert_eq!(parse_response(&data).unwrap().speaker, Some(1));
+    }
+
+    #[test]
+    fn parse_speaker_coerces_float_and_string_like_python_int() {
+        // Python `int(words[0]["speaker"])` coerces a JSON float (truncating
+        // toward zero) and a JSON string; mirror both.
+        let float_speaker = serde_json::json!({
+            "type": "Results",
+            "channel": {"alternatives": [{
+                "transcript": "hi", "confidence": 0.9,
+                "words": [{"word": "hi", "speaker": 2.0}],
+            }]},
+            "is_final": true, "start": 0.0, "duration": 1.0,
+        });
+        assert_eq!(parse_response(&float_speaker).unwrap().speaker, Some(2));
+
+        let string_speaker = serde_json::json!({
+            "type": "Results",
+            "channel": {"alternatives": [{
+                "transcript": "hi", "confidence": 0.9,
+                "words": [{"word": "hi", "speaker": "1"}],
+            }]},
+            "is_final": true, "start": 0.0, "duration": 1.0,
+        });
+        assert_eq!(parse_response(&string_speaker).unwrap().speaker, Some(1));
     }
 
     // ------------------------------------------------------------------

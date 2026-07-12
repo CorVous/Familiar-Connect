@@ -1106,12 +1106,17 @@ mod client {
                 .and_then(Value::as_str)
                 .unwrap_or("assistant")
                 .to_string();
-            let content = reply
-                .get("content")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("")
-                .to_string();
+            // Python `content = reply.get("content") or ""` (spec 08 §6): a
+            // non-empty string OR a non-empty list (block form) is preserved
+            // verbatim; None, an empty string, or an empty list all collapse
+            // to "". Mirror that truthiness contract — assistant replies are
+            // strings in practice, but the list branch keeps a multimodal /
+            // block-form reply intact instead of silently dropping it to "".
+            let content = match reply.get("content") {
+                Some(Value::String(s)) if !s.is_empty() => Content::Text(s.clone()),
+                Some(Value::Array(a)) if !a.is_empty() => Content::Blocks(a.clone()),
+                _ => Content::Text(String::new()),
+            };
             let tool_calls = match reply.get("tool_calls") {
                 Some(Value::Array(a)) if !a.is_empty() => Some(
                     a.iter()
@@ -1123,7 +1128,7 @@ mod client {
             };
             Ok(Message {
                 role,
-                content: Content::Text(content),
+                content,
                 name: None,
                 tool_calls,
                 tool_call_id: None,
@@ -1957,6 +1962,61 @@ mod client {
             assert!(result.tool_calls.is_none());
         }
 
+        #[tokio::test]
+        async fn chat_preserves_list_content_blocks() {
+            // Python `reply.get("content") or ""` keeps a NON-empty list (block
+            // form) verbatim; only None/empty collapses to "". The reply's
+            // content must round-trip as `Content::Blocks`, not be flattened to
+            // "" (which `as_str` on an array would do).
+            let server = MockServer::start().await;
+            let blocks = json!([
+                { "type": "text", "text": "hello" },
+                { "type": "image_url", "image_url": { "url": "data:..." } },
+                { "type": "text", "text": "world" }
+            ]);
+            mount_json(
+                &server,
+                200,
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": blocks.clone() },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
+            .await;
+            let c = client_for(&server.uri());
+            let result = c.chat(vec![user("hi")]).await.unwrap();
+            assert_eq!(
+                result.content,
+                Content::Blocks(blocks.as_array().unwrap().clone())
+            );
+            // `content_str` still projects the text blocks, joined by newline.
+            assert_eq!(result.content_str(), "hello\nworld");
+        }
+
+        #[tokio::test]
+        async fn chat_empty_list_content_collapses_to_empty() {
+            // Python truthiness: `[] or "" == ""`. An empty content list is
+            // falsy, so it collapses to an empty text reply (not empty Blocks).
+            let server = MockServer::start().await;
+            mount_json(
+                &server,
+                200,
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": [] },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
+            .await;
+            let c = client_for(&server.uri());
+            let result = c.chat(vec![user("hi")]).await.unwrap();
+            assert_eq!(result.content, Content::Text(String::new()));
+            assert_eq!(result.content_str(), "");
+        }
+
         // --- retry loop (paused clock) ------------------------------------
 
         #[tokio::test(start_paused = true)]
@@ -1998,6 +2058,51 @@ mod client {
             let c = client_no_timeout(&server.uri());
             assert!(c.chat(vec![user("hi")]).await.is_err());
             assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn post_respects_retry_after_header() {
+            // Python parity (test_post_respects_retry_after_header): a 429
+            // carrying a `Retry-After` value must drive a delay read OFF the
+            // response, NOT the exponential fallback (1.0s for attempt 0). This
+            // exercises the header-extraction wiring in `post_with_retry`
+            // (`response.headers().get("Retry-After")` -> `backoff_delay`) that
+            // the pure `backoff_delay` unit test bypasses entirely. A honored
+            // `Retry-After: 0.3` makes the single real retry sleep ~0.3s, well
+            // clear of the 1.0s attempt-0 exponential fallback: measuring wall
+            // time cleanly separates the two (honored ≈ 0.3s ≪ fallback ≈ 1.0s)
+            // without `start_paused` (whose auto-advancing clock overshoots on
+            // hyper pool timers) or log capture (whose thread-local subscriber
+            // races the parallel suite). Two localhost round trips add only
+            // milliseconds, so the window has wide margin at both ends.
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.3"))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "choices": [{ "message": { "role": "assistant", "content": "ok" } }]
+                })))
+                .with_priority(2)
+                .mount(&server)
+                .await;
+            let c = client_for(&server.uri());
+            let start = std::time::Instant::now();
+            let result = c.chat(vec![user("hi")]).await.unwrap();
+            let elapsed = start.elapsed().as_secs_f64();
+            assert_eq!(result.content_str(), "ok");
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+            // Retry-After=0.3 honored → ~0.3s wait, decisively short of the 1.0s
+            // exponential fallback the header must override (>= 0.2s confirms a
+            // real ~0.3s sleep happened, not near-zero).
+            assert!(
+                (0.2..0.75).contains(&elapsed),
+                "expected ~0.3s Retry-After wait, got {elapsed:.3}s \
+                 (>=0.75 ⇒ fell back to 1.0s exponential; header not honored)"
+            );
         }
 
         // --- streaming (wiremock) -----------------------------------------

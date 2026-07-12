@@ -316,14 +316,16 @@ fn coalesce_voice_fragments(turns: Vec<HistoryTurn>, max_gap_seconds: f64) -> Ve
     merged
 }
 
-/// Gap in seconds between two turns (millisecond precision).
+/// Gap in seconds between two turns (microsecond precision, matching Python
+/// `timedelta.total_seconds()` over microsecond-granularity store timestamps —
+/// `layers.py:392`/`:333`).
 fn gap_seconds(earlier: DateTime<Utc>, later: DateTime<Utc>) -> f64 {
     #[allow(
         clippy::cast_precision_loss,
-        reason = "turn gaps are small; millisecond counts never approach f64 precision limits"
+        reason = "turn gaps are small; microsecond counts never approach f64 precision limits"
     )]
-    let millis = (later - earlier).num_milliseconds() as f64;
-    millis / 1000.0
+    let micros = (later - earlier).num_microseconds().unwrap_or(i64::MAX) as f64;
+    micros / 1_000_000.0
 }
 
 fn can_coalesce(prev: &HistoryTurn, curr: &HistoryTurn, max_gap_seconds: f64) -> bool {
@@ -392,9 +394,15 @@ fn format_channel_marker(
     channel_resolver: Option<&ChannelResolver>,
     guild_resolver: Option<&ChannelResolver>,
 ) -> String {
-    let name = channel_resolver.and_then(|r| r(channel_id));
+    // Mirror Python's empty-string-is-falsy truthiness (`layers.py` lines
+    // 276/278): an empty resolver result is treated as absent, not rendered.
+    let name = channel_resolver
+        .and_then(|r| r(channel_id))
+        .filter(|s| !s.is_empty());
     let channel = name.map_or_else(|| format!("#{channel_id}"), |n| format!("#{n}"));
-    let guild = guild_resolver.and_then(|r| r(channel_id));
+    let guild = guild_resolver
+        .and_then(|r| r(channel_id))
+        .filter(|s| !s.is_empty());
     match guild {
         Some(g) => format!("{g}/{channel}"),
         None => channel,
@@ -792,21 +800,22 @@ impl Layer for ConversationSummaryLayer {
 // ---------------------------------------------------------------------------
 
 /// Simple ASCII-ish title-case fallback for the ego header display.
+///
+/// Mirrors Python `str.title()` (`layers.py:1001`): word boundaries fall on
+/// Unicode *cased* characters only. Digits and punctuation are uncased, so a
+/// letter following one starts a new word and is capitalized
+/// (`agent007bond` -> `Agent007Bond`, `3cats` -> `3Cats`). Uncased characters
+/// pass through their (identity) case mapping unchanged.
 fn title_case(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut start_of_word = true;
+    let mut previous_is_cased = false;
     for ch in text.chars() {
-        if ch.is_alphanumeric() {
-            if start_of_word {
-                out.extend(ch.to_uppercase());
-            } else {
-                out.extend(ch.to_lowercase());
-            }
-            start_of_word = false;
+        if previous_is_cased {
+            out.extend(ch.to_lowercase());
         } else {
-            out.push(ch);
-            start_of_word = true;
+            out.extend(ch.to_uppercase());
         }
+        previous_is_cased = ch.is_lowercase() || ch.is_uppercase();
     }
     out
 }
@@ -2044,5 +2053,61 @@ impl LorebookBuilder {
             max_entries: self.max_entries.max(0),
             max_tokens: self.max_tokens,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Parity with Python `str.title()` (`layers.py:1001`): word boundaries fall
+    // on cased characters only, so a letter after a digit begins a new word.
+    #[test]
+    fn title_case_matches_python_str_title() {
+        assert_eq!(title_case("familiar"), "Familiar");
+        assert_eq!(title_case("agent007bond"), "Agent007Bond");
+        assert_eq!(title_case("3cats"), "3Cats");
+        assert_eq!(title_case("my-familiar_name"), "My-Familiar_Name");
+        assert_eq!(title_case(""), "");
+    }
+
+    // Parity with Python `timedelta.total_seconds()`: sub-millisecond fractions
+    // of a second must survive so a gap just above a whole-second cap is not
+    // truncated down onto the cap (`layers.py:392`).
+    #[test]
+    fn gap_seconds_keeps_microsecond_precision() {
+        let base =
+            DateTime::<Utc>::from_timestamp_micros(1_000_000_000_000_000).expect("valid timestamp");
+        // 45.0004 s == 45_000_400 microseconds.
+        let later = base + chrono::Duration::microseconds(45_000_400);
+        let gap = gap_seconds(base, later);
+        assert!((gap - 45.0004).abs() < 1e-9, "gap was {gap}");
+        assert!(
+            gap > 45.0,
+            "sub-second fraction must not truncate onto the cap"
+        );
+    }
+
+    // Parity with Python's empty-string-is-falsy handling in
+    // `_format_channel_marker` (`layers.py:276`/`:278`).
+    #[test]
+    fn format_channel_marker_treats_empty_resolver_result_as_absent() {
+        let empty: ChannelResolver = Arc::new(|_| Some(String::new()));
+        // Empty channel name falls back to `#<id>`, not `#`.
+        assert_eq!(format_channel_marker(42, Some(&empty), None), "#42");
+        // Empty guild name is dropped entirely, leaving the bare channel.
+        let named: ChannelResolver = Arc::new(|_| Some("general".to_owned()));
+        assert_eq!(
+            format_channel_marker(42, Some(&named), Some(&empty)),
+            "#general"
+        );
+        // Non-empty guild + name renders `guild/#channel`.
+        let guild: ChannelResolver = Arc::new(|_| Some("My Server".to_owned()));
+        assert_eq!(
+            format_channel_marker(42, Some(&named), Some(&guild)),
+            "My Server/#general"
+        );
+        // No resolvers -> `#<id>`.
+        assert_eq!(format_channel_marker(42, None, None), "#42");
     }
 }

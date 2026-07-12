@@ -44,3 +44,26 @@ behavior change. No finding was rubber-stamped.
 Running total: 10 findings / 6 packages, 9 gate-invisible. The two med-severity
 semantic catches (whitespace scalars, error-message tails) are precisely the
 "compiles and passes weak tests" class. Reviewer stage retained.
+
+## Layer 2 Wave A (6 packages) — 2026-07-12
+
+16 findings (llm 3, stt 2, context 3, tts/players 4, voice 4, twitch+embed 0);
+15 applied, 1 skipped with cause. Highlights (all gate-invisible):
+
+| Pkg | Kind | Sev | Finding (condensed) |
+|---|---|---|---|
+| llm | test-weakening | med | Retry-After wiring test dropped: Python pins that a 429 with `Retry-After: 2` sleeps exactly 2.0s |
+| llm | async-hazard | low | Python `stream_completion` is lazy (semaphore acquire/POST run on first `__anext__`); Rust ran them eagerly at call time — semaphore hold-window semantics shifted |
+| tts/players | test-weakening | med | Jitter-hint tests stopped verifying DiscordVoicePlayer actually forwards client jitter params |
+| tts/players | async-hazard | low | Cartesia WS not closed gracefully on early consumer drop (barge-in path) — Python's async-generator `finally` sends close frame |
+| voice | semantic-div | low | SmartTurn/TenVad error variants swallowed as `false` verdicts where Python propagates (UnsupportedLogitsShape, WrongChunkLength) |
+| context | semantic-div | low | `str.title()` semantics, empty-string falsiness in channel markers, sub-ms gap precision — three small Python-ism drifts |
+| stt | semantic-div | low | urlencode space-as-`+` divergence in Deepgram keyterms; diarization speaker coercion narrower than Python's `int(...)` |
+
+Notable process event: the harness restarted mid-run, orphaning 2 fixers; the
+workflow resumed from its journal with all completed agents cached — only the
+in-flight fixers re-ran. Journal-based resume worked as designed.
+
+**Batch verdict:** the async-hazard class keeps paying (lazy-vs-eager stream
+semantics and WS close-on-drop are exactly what compiles clean and passes unit
+tests). Running total: 26 findings / 12 packages, ~24 gate-invisible.
