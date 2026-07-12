@@ -86,3 +86,22 @@ Notable fixer dispositions from the full Layer 2 fix stage:
 
 **Layer 2 totals:** 23 findings / 8 packages, ~21 gate-invisible, 1 justified
 skip. Tree at 1,484 tests / 0 failures after the layer. Reviewer retained.
+
+## Layer 3 (3 packages: responders, workers, activities-watchers-familiar) — 2026-07-12
+
+10 findings (responders 3, workers 4, activities 3), all applied. Highlights:
+
+| Pkg | Kind | Sev | Finding (condensed) |
+|---|---|---|---|
+| responders | async-hazard | high | `spawn_final` inflight-map race: on a multi-thread runtime a fast task could complete and run its cleanup BEFORE the parent inserted its handle, stranding a completed entry. Impossible under Python's event loop (create_task can't run before the current coroutine awaits) — a true GIL-hidden race. Fixed by holding the map lock across spawn+insert (no await under lock) |
+| responders | async-hazard | low | Per-delta cancellation check ran after the empty-content skip; Python checks cancellation FIRST unconditionally (spec V12, test-observable preempted log) |
+| responders | unapproved-deviation | med | Projector registry `with_builtins()` was left empty with a stale deferral note; all six workers existed — populated with full knob threading, fallible factory |
+| workers | semantic-divergence | low ×2 | Python f-string renders literal "None" for present-author/None-display-name; Rust rendered empty string. Classic `or`-truthiness: `familiar_display_name or familiar_id.title()` also catches "" |
+| activities | semantic-divergence | med | `valid keys:` error lists used declaration order; Python `", ".join(sorted(...))` — byte-stable contract restored + tests upgraded to full-string equality |
+| activities | semantic-divergence | low | Activity window end used absolute duration arithmetic; Python does wall-clock (DST-naive) addition |
+
+**Batch verdict:** the headline find — the spawn_final race — is the single
+strongest datapoint yet for the reviewer stage: a real concurrency bug that
+Python's runtime made unwritable, invisible to every gate, in the most
+concurrency-critical package of the codebase. Running total: 33 findings /
+15 packages, ~30 gate-invisible. Reviewer retained through Layer 4.
