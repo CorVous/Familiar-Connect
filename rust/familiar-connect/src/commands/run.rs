@@ -588,7 +588,7 @@ fn spawn_signal_listener(controller: Arc<ShutdownController>) {
 async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()> {
     use std::sync::Mutex;
 
-    use crate::bot::{ActivityResync, BotStore, CreateBotDeps, create_bot};
+    use crate::bot::{ActivityResync, AsyncBotStore, BotStore, CreateBotDeps, create_bot};
     use crate::bus::protocols::{BackpressurePolicy, Processor};
     use crate::log_style as ls;
     use crate::processors::debug_logger::DebugLoggerProcessor;
@@ -650,7 +650,11 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
         subscriptions: bot_subs.clone(),
         dm_allowlist: familiar.config.dm_allowlist.clone(),
         store: {
-            let store: Arc<dyn BotStore> = familiar.history_store.sync_arc();
+            // Route reaction / edit writes through the async store's
+            // blocking-thread facade (off the reactor, DESIGN §4.4) rather than
+            // running rusqlite inline on the gateway task; see `AsyncBotStore`.
+            let store: Arc<dyn BotStore> =
+                Arc::new(AsyncBotStore::new(familiar.history_store.clone()));
             store
         },
         history_store: familiar.history_store.clone(),
@@ -865,6 +869,12 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
 
     let mut set = tokio::task::JoinSet::new();
 
+    // All four production subscriptions below use the default BLOCK/64 policy
+    // (`maxsize == 0`), matching Python's `bus.subscribe(proc.topics)` (no policy
+    // arg → `BackpressurePolicy.BLOCK`, maxsize 64). Spec 01 pins this: the ADR's
+    // "unbounded for text/twitch" note describes intent for topics not yet on the
+    // bus, so the head-of-line backpressure coupling (spec 01 §6) stays in force.
+
     // debug-logger
     {
         let bus = familiar.bus.clone();
@@ -872,7 +882,7 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
         set.spawn(async move {
             let proc = DebugLoggerProcessor::new(DEBUG_TOPICS);
             let topics = proc.topics();
-            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Unbounded, 0);
+            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Block, 0);
             loop {
                 tokio::select! {
                     () = cancel.cancelled() => break,
@@ -891,7 +901,7 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
         let cancel = cancel.clone();
         set.spawn(async move {
             let topics = voice_responder.topics();
-            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Unbounded, 0);
+            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Block, 0);
             loop {
                 tokio::select! {
                     () = cancel.cancelled() => break,
@@ -912,7 +922,7 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
         let cancel = cancel.clone();
         set.spawn(async move {
             let topics = text_responder.topics();
-            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Unbounded, 0);
+            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Block, 0);
             loop {
                 tokio::select! {
                     () = cancel.cancelled() => break,
@@ -933,7 +943,7 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
         let cancel = cancel.clone();
         set.spawn(async move {
             let topics: Vec<&str> = alarm_waker.topics().to_vec();
-            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Unbounded, 0);
+            let mut sub = bus.subscribe(&topics, BackpressurePolicy::Block, 0);
             loop {
                 tokio::select! {
                     () = cancel.cancelled() => break,

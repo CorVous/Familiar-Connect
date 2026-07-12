@@ -10,7 +10,7 @@
 //! resets on restart, so the durable log is the only cross-run record.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Read};
+use std::io::Read;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -93,13 +93,15 @@ fn read_lines(paths: &[String]) -> Vec<String> {
             }
             continue;
         }
-        match std::fs::File::open(Path::new(path)) {
-            Ok(file) => {
-                let reader = std::io::BufReader::new(file);
-                // A decode error on one line is skipped; the rest still aggregate.
-                for line in reader.lines().map_while(Result::ok) {
-                    out.push(line);
-                }
+        match std::fs::read(Path::new(path)) {
+            Ok(bytes) => {
+                // Lossy-decode so an invalid UTF-8 byte replaces itself with
+                // U+FFFD and every line still aggregates — mirroring Python's
+                // `open(..., errors="replace")` (spec 01 §44). A `BufRead::lines()`
+                // + `map_while(Result::ok)` would instead STOP at the first bad
+                // byte, silently dropping every later span.
+                let text = String::from_utf8_lossy(&bytes);
+                out.extend(text.lines().map(str::to_owned));
             }
             Err(err) => {
                 tracing::error!("could not read {path}: {err}");
@@ -211,6 +213,29 @@ mod tests {
         // The empty summary renders the "no spans" placeholder.
         let summary = aggregate(std::fs::read_to_string(&log).unwrap().lines());
         assert!(render_summary_table(&summary).contains("no spans"));
+    }
+
+    #[test]
+    fn aggregates_lines_after_invalid_utf8() {
+        // A partial-write / mixed-encoding byte mid-file must not truncate the
+        // aggregation: Python opens with errors="replace" and yields every line,
+        // so spans AFTER the bad byte still count. (Regression: a prior
+        // `lines().map_while(Result::ok)` stopped at the first decode error.)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mixed.log");
+        let mut bytes = span_line("llm", 100, "ok").into_bytes();
+        bytes.push(b'\n');
+        bytes.push(0xFF); // lone invalid UTF-8 byte
+        bytes.push(b'\n');
+        bytes.extend_from_slice(span_line("llm", 200, "ok").as_bytes());
+        bytes.push(b'\n');
+        std::fs::write(&log, &bytes).expect("write log");
+        let paths = vec![log.to_string_lossy().into_owned()];
+        assert_eq!(diagnose(&paths), 0);
+        let summary = aggregate(super::read_lines(&paths));
+        // Both spans survive the bad byte between them.
+        assert!((summary["llm"].count - 2.0).abs() < f64::EPSILON);
+        assert!((summary["llm"].last_ms - 200.0).abs() < f64::EPSILON);
     }
 
     #[test]

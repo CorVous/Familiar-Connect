@@ -105,3 +105,21 @@ strongest datapoint yet for the reviewer stage: a real concurrency bug that
 Python's runtime made unwritable, invisible to every gate, in the most
 concurrency-critical package of the codebase. Running total: 33 findings /
 15 packages, ~30 gate-invisible. Reviewer retained through Layer 4.
+
+## Layer 4 (discord-shell, 2-stage) — 2026-07-12
+
+4 findings, 4 applied. Highlights:
+
+| Kind | Sev | Finding (condensed) |
+|---|---|---|
+| semantic-divergence | med | diagnose `read_lines` used `.lines().map_while(Result::ok)` — BufRead yields Err on invalid UTF-8 and map_while STOPS, silently dropping every later span line; Python opens with `errors="replace"`. Fixed to lossy decode |
+| unapproved-deviation | low | All four production bus subscriptions used Unbounded backpressure instead of the Python per-topic defaults |
+| async-hazard | low | Composition root wired BotStore over the blocking sync store facade inside gateway handlers |
+| semantic-divergence | low | serenity message_update glue dropped edits for messages absent from the cache |
+
+**FINAL PHASE 3 TALLY:** 37 findings / 16 packages+stages across 5 layers,
+~34 invisible to compiler+clippy+ported tests. Every layer produced at least
+one finding that survived fixer verification; zero findings were
+rubber-stamped and two were correctly overruled with cited authority. The
+port completed at 2,056 tests / 0 failures, gates green on default and
+discord,discord-voice feature sets.

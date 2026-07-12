@@ -31,6 +31,7 @@ use regex::Regex;
 use crate::activities::engine::{ActivityEngine, PresenceCb};
 use crate::focus::{FocusManager, PRIVATE_MESSAGE_GUILD_NAME};
 use crate::history::StoreError;
+use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::HistoryStore;
 use crate::identity::Author;
 use crate::log_style as ls;
@@ -278,6 +279,108 @@ impl BotStore for HistoryStore {
         emoji: Option<&str>,
     ) -> Result<(), StoreError> {
         Self::clear_reactions(self, familiar_id, platform_message_id, emoji)
+    }
+}
+
+/// A [`BotStore`] that pushes each write onto the async store's blocking-thread
+/// facade instead of running the synchronous `rusqlite` call inline on the
+/// caller's task.
+///
+/// The serenity gateway handlers (reaction / edit dispatch, B-RX) run on the
+/// reactor; a direct synchronous store write there would block a tokio worker on
+/// the SQLite lock + disk I/O, which DESIGN §4.4 forbids ("DB work stays off the
+/// reactor"). This adapter keeps the cheap subscription / emoji gating inline
+/// (`apply_message_edit` / `apply_reaction_*`) and spawns only the DB write,
+/// honouring spec 10's guidance: "in Rust use the async store, but keep the
+/// no-await-in-gateway-handler spirit by spawning if the write can block."
+///
+/// Writes are fire-and-forget: the enqueue always succeeds (returns `Ok`), and
+/// each spawned task logs its own failure, so the dispatchers' `Err` branch is a
+/// no-op in production. `bump_reaction` is additive and per-`(message, emoji)`,
+/// so the loss of strict inter-event ordering across concurrent spawns is
+/// benign (the net count converges). Must be constructed inside a tokio runtime
+/// (it is — the run composition root builds it before the gateway starts).
+pub struct AsyncBotStore {
+    inner: Arc<AsyncHistoryStore>,
+}
+
+impl AsyncBotStore {
+    /// Wrap the shared async history store.
+    #[must_use]
+    pub const fn new(inner: Arc<AsyncHistoryStore>) -> Self {
+        Self { inner }
+    }
+}
+
+impl BotStore for AsyncBotStore {
+    fn update_turn_content_by_message_id(
+        &self,
+        familiar_id: &str,
+        platform_message_id: &str,
+        content: &str,
+    ) -> Result<(), StoreError> {
+        let inner = Arc::clone(&self.inner);
+        let (familiar_id, platform_message_id, content) = (
+            familiar_id.to_owned(),
+            platform_message_id.to_owned(),
+            content.to_owned(),
+        );
+        tokio::spawn(async move {
+            if let Err(err) = inner
+                .update_turn_content_by_message_id(familiar_id, platform_message_id, content)
+                .await
+            {
+                tracing::warn!("update_turn_content_by_message_id failed: {err}");
+            }
+        });
+        Ok(())
+    }
+
+    fn bump_reaction(
+        &self,
+        familiar_id: &str,
+        platform_message_id: &str,
+        emoji: &str,
+        delta: i64,
+    ) -> Result<(), StoreError> {
+        let inner = Arc::clone(&self.inner);
+        let (familiar_id, platform_message_id, emoji) = (
+            familiar_id.to_owned(),
+            platform_message_id.to_owned(),
+            emoji.to_owned(),
+        );
+        tokio::spawn(async move {
+            if let Err(err) = inner
+                .bump_reaction(familiar_id, platform_message_id, emoji, delta)
+                .await
+            {
+                tracing::warn!("bump_reaction failed: {err}");
+            }
+        });
+        Ok(())
+    }
+
+    fn clear_reactions(
+        &self,
+        familiar_id: &str,
+        platform_message_id: &str,
+        emoji: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let inner = Arc::clone(&self.inner);
+        let (familiar_id, platform_message_id, emoji) = (
+            familiar_id.to_owned(),
+            platform_message_id.to_owned(),
+            emoji.map(str::to_owned),
+        );
+        tokio::spawn(async move {
+            if let Err(err) = inner
+                .clear_reactions(familiar_id, platform_message_id, emoji)
+                .await
+            {
+                tracing::warn!("clear_reactions failed: {err}");
+            }
+        });
+        Ok(())
     }
 }
 
@@ -1614,23 +1717,55 @@ mod serenity_glue {
             _ctx: Context,
             old: Option<Message>,
             new: Option<Message>,
-            _event: MessageUpdateEvent,
+            event: MessageUpdateEvent,
         ) {
-            let Some(after) = new else {
-                return;
-            };
+            // Prefer serenity's cache-merged `after`. When the pre-edit message
+            // has fallen out of cache (`new == None` — e.g. a late URL-unfurl
+            // edit on an older message after a restart, the exact B-RX16 case
+            // on_message_edit exists to merge), fall back to the raw
+            // MESSAGE_UPDATE payload, which still carries the embeds. The gateway
+            // payload is partial, so bail unless it also carries the author and
+            // content: without `author` the own/bot-author guards can't run, and
+            // without `content` an embeds-only rewrite would clobber the stored
+            // turn's original text.
+            let (author_id, author_is_bot, channel_id, message_id, content, after_embeds) =
+                if let Some(after) = new.as_ref() {
+                    (
+                        after.author.id.get() as i64,
+                        after.author.bot,
+                        after.channel_id.get() as i64,
+                        after.id.get() as i64,
+                        after.content.clone(),
+                        after.embeds.iter().map(embed_view).collect::<Vec<_>>(),
+                    )
+                } else if let (Some(author), Some(content), Some(embeds)) = (
+                    event.author.as_ref(),
+                    event.content.as_ref(),
+                    event.embeds.as_ref(),
+                ) {
+                    (
+                        author.id.get() as i64,
+                        author.bot,
+                        event.channel_id.get() as i64,
+                        event.id.get() as i64,
+                        content.clone(),
+                        embeds.iter().map(embed_view).collect::<Vec<_>>(),
+                    )
+                } else {
+                    return;
+                };
             let before_embeds = old
                 .as_ref()
                 .map(|m| m.embeds.iter().map(embed_view).collect())
                 .unwrap_or_default();
             self.events.on_message_edit(&MessageEditView {
-                author_id: after.author.id.get() as i64,
-                author_is_bot: after.author.bot,
-                channel_id: after.channel_id.get() as i64,
-                message_id: after.id.get() as i64,
-                content: after.content.clone(),
+                author_id,
+                author_is_bot,
+                channel_id,
+                message_id,
+                content,
                 before_embeds,
-                after_embeds: after.embeds.iter().map(embed_view).collect(),
+                after_embeds,
             });
         }
 
