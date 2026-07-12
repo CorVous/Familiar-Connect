@@ -836,9 +836,12 @@ pub struct BotHandle {
     pub resolve_member: Mutex<Option<ResolveMember>>,
     /// Absence controller (11); `on_ready` resyncs away presence via it.
     pub activity_engine: Mutex<Option<Arc<dyn ActivityResync>>>,
-    /// Per-voice-channel intake pipeline state (voice feature only).
+    /// Per-voice-channel intake pipeline state (voice feature only). A
+    /// `BTreeMap` (not `HashMap`) so the TTS voice-client getter's
+    /// `.values().next()` is deterministic + stable (Python `_first_voice_client`).
     #[cfg(feature = "discord-voice")]
-    pub voice_runtime: Mutex<HashMap<i64, crate::bot::voice_intake::VoiceRuntime>>,
+    pub voice_runtime:
+        Mutex<std::collections::BTreeMap<i64, crate::bot::voice_intake::VoiceRuntime>>,
     /// Active voice-channel ids (the default-feature proxy for `voice_runtime`;
     /// feeds the activity engine's `voice_active_fn`).
     pub voice_channels: Mutex<HashSet<i64>>,
@@ -859,7 +862,7 @@ impl BotHandle {
             resolve_member: Mutex::new(None),
             activity_engine: Mutex::new(None),
             #[cfg(feature = "discord-voice")]
-            voice_runtime: Mutex::new(HashMap::new()),
+            voice_runtime: Mutex::new(std::collections::BTreeMap::new()),
             voice_channels: Mutex::new(HashSet::new()),
         }
     }
@@ -996,6 +999,61 @@ impl BotEvents {
                 fm.set_focus_immediately(channel_id, "text");
             }
         }
+    }
+
+    /// `/subscribe-voice` registry + shared-state mutation (default-feature; the
+    /// songbird join + intake pipeline is layered on by the `discord-voice` glue
+    /// in [`create_bot`]'s dispatcher).
+    ///
+    /// Registers a persisted voice subscription and marks the channel active in
+    /// the `voice_channels` proxy the activity engine's `voice_active_fn` reads.
+    /// The focus manager sees the new subscription immediately through the
+    /// shared registry (no restart), matching Python's single-registry
+    /// semantics.
+    pub fn on_subscribe_voice(&self, channel_id: i64, guild_id: Option<i64>) {
+        if let Ok(cid) = u64::try_from(channel_id) {
+            let _ = self
+                .subscriptions
+                .lock()
+                .expect("subscriptions mutex poisoned")
+                .add(
+                    cid,
+                    SubscriptionKind::Voice,
+                    guild_id.and_then(|g| u64::try_from(g).ok()),
+                    true,
+                );
+        }
+        self.handle
+            .voice_channels
+            .lock()
+            .expect("voice channels mutex poisoned")
+            .insert(channel_id);
+    }
+
+    /// `/unsubscribe-voice` registry + shared-state mutation. Finds the guild's
+    /// voice subscription, removes it, and clears the active-channel proxy.
+    /// Returns the unsubscribed voice channel id (the `discord-voice` glue tears
+    /// down the intake pipeline + leaves the channel with it), or `None` when
+    /// the guild has no voice subscription.
+    pub fn on_unsubscribe_voice(&self, guild_id: i64) -> Option<i64> {
+        let sub = u64::try_from(guild_id).ok().and_then(|g| {
+            self.subscriptions
+                .lock()
+                .expect("subscriptions mutex poisoned")
+                .voice_in_guild(g)
+        })?;
+        let channel_id = i64::try_from(sub.channel_id).ok()?;
+        let _ = self
+            .subscriptions
+            .lock()
+            .expect("subscriptions mutex poisoned")
+            .remove(sub.channel_id, SubscriptionKind::Voice);
+        self.handle
+            .voice_channels
+            .lock()
+            .expect("voice channels mutex poisoned")
+            .remove(&channel_id);
+        Some(channel_id)
     }
 
     /// `on_message` ingest (B-OM). Guard order is load-bearing: own echo, then any
@@ -1574,12 +1632,21 @@ mod serenity_glue {
         presence: Arc<SerenityPresence>,
     }
 
-    /// The per-command dispatch context (subscriptions + focus + diagnostics).
+    /// The per-command dispatch context (subscriptions + focus + diagnostics,
+    /// plus the voice-intake seams `/subscribe-voice` needs under
+    /// `discord-voice`).
     struct SlashContext {
         familiar_id: String,
         subscriptions: Arc<Mutex<crate::subscriptions::SubscriptionRegistry>>,
         history_store: Arc<AsyncHistoryStore>,
         focus_manager: Option<Arc<FocusManager>>,
+        handle: Arc<BotHandle>,
+        #[cfg(feature = "discord-voice")]
+        bus: Arc<dyn crate::bus::protocols::EventBus>,
+        #[cfg(feature = "discord-voice")]
+        transcriber_template: Option<Arc<Mutex<Box<dyn crate::stt::Transcriber>>>>,
+        #[cfg(feature = "discord-voice")]
+        local_turn_detector: Option<Arc<crate::voice::turn_detection::LocalTurnDetector>>,
     }
 
     impl Handler {
@@ -1622,6 +1689,14 @@ mod serenity_glue {
                     }
                     reply(&ack, "No longer listening here.").await;
                 }
+                #[cfg(feature = "discord-voice")]
+                "subscribe-voice" => {
+                    self.dispatch_subscribe_voice(ctx, &ack).await;
+                }
+                #[cfg(feature = "discord-voice")]
+                "unsubscribe-voice" => {
+                    self.dispatch_unsubscribe_voice(ctx, &ack).await;
+                }
                 "diagnostics" => {
                     defer_interaction(&ack).await;
                     let summary = get_span_collector().summary();
@@ -1663,6 +1738,156 @@ mod serenity_glue {
             }
             line
         }
+
+        /// `/subscribe-voice`: join the caller's voice channel via songbird
+        /// (songbird owns the DAVE/MLS handshake), wire the [`RecordingSink`] +
+        /// per-speaker intake pipeline, populate the `voice_runtime` map, and
+        /// register the voice subscription (Python `bot.py::subscribe_voice`).
+        ///
+        /// [`RecordingSink`]: crate::voice::recording_sink::RecordingSink
+        #[cfg(feature = "discord-voice")]
+        async fn dispatch_subscribe_voice(&self, ctx: &Context, ack: &SlashCtx) {
+            use crate::bot::voice_intake::{join_voice, start_voice_intake, stop_voice_intake};
+            use std::collections::btree_map::Entry;
+
+            defer_interaction(ack).await;
+            let Some(gid) = ack.command.guild_id else {
+                reply(ack, "You must be in a guild voice channel.").await;
+                return;
+            };
+            let guild_id_u64 = gid.get();
+            let guild_id = guild_id_u64 as i64;
+            let user_id = ack.command.user.id;
+            // Resolve the caller's current voice channel from the gateway cache
+            // (GUILD_VOICE_STATES). The dashmap ref is dropped before any await.
+            let resolved: Option<(u64, Option<String>)> = ctx.cache.guild(gid).and_then(|guild| {
+                let cid = guild
+                    .voice_states
+                    .get(&user_id)
+                    .and_then(|vs| vs.channel_id)?;
+                let name = guild.channels.get(&cid).map(|ch| ch.name.clone());
+                Some((cid.get(), name))
+            });
+            let Some((channel_id_u64, channel_name)) = resolved else {
+                reply(ack, "You must be in a voice channel.").await;
+                return;
+            };
+            let channel_id = channel_id_u64 as i64;
+            let display = channel_name.unwrap_or_else(|| format!("#{channel_id}"));
+
+            // Idempotent: a second subscribe for the same live channel re-affirms.
+            if self
+                .slash
+                .handle
+                .voice_runtime
+                .lock()
+                .expect("voice_runtime mutex poisoned")
+                .contains_key(&channel_id)
+            {
+                self.events.on_subscribe_voice(channel_id, Some(guild_id));
+                reply(ack, &format!("Already listening in {display}.")).await;
+                return;
+            }
+
+            let Some(manager) = songbird::get(ctx).await else {
+                reply(ack, "Voice runtime unavailable.").await;
+                return;
+            };
+            let (voice_client, audio_rx) =
+                match join_voice(&manager, guild_id_u64, channel_id_u64).await {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        tracing::warn!("voice connect failed: {err}");
+                        reply(ack, "Could not join voice.").await;
+                        return;
+                    }
+                };
+
+            let template = self.slash.transcriber_template.clone();
+            let has_transcriber = template.is_some();
+            let runtime = start_voice_intake(
+                voice_client,
+                template,
+                self.slash.local_turn_detector.clone(),
+                self.slash.bus.clone(),
+                self.slash.familiar_id.clone(),
+                channel_id,
+                audio_rx,
+            );
+            // Re-check under the lock before inserting: `join_voice` awaited
+            // above, so a concurrent `/subscribe-voice` for this same channel
+            // could have won the race and already inserted. Keep the
+            // first-joined runtime (Python's idempotent `subscribe_voice`
+            // intent, bot.py:262) and tear down the one we just built rather
+            // than overwriting — a bare `insert` would drop the live runtime
+            // without `stop_voice_intake`, orphaning its intake tasks (which
+            // would keep publishing transcripts) and leaking the songbird call.
+            let displaced = match self
+                .slash
+                .handle
+                .voice_runtime
+                .lock()
+                .expect("voice_runtime mutex poisoned")
+                .entry(channel_id)
+            {
+                Entry::Occupied(_) => Some(runtime),
+                Entry::Vacant(slot) => {
+                    slot.insert(runtime);
+                    None
+                }
+            };
+            if let Some(orphan) = displaced {
+                // Loser of the race: stop only our intake tasks. Do NOT leave
+                // the songbird call — it is shared per-guild with the winner.
+                stop_voice_intake(orphan).await;
+                self.events.on_subscribe_voice(channel_id, Some(guild_id));
+                reply(ack, &format!("Already listening in {display}.")).await;
+                return;
+            }
+            self.events.on_subscribe_voice(channel_id, Some(guild_id));
+
+            let suffix = if has_transcriber {
+                ""
+            } else {
+                " (playback only — no transcriber)"
+            };
+            reply(ack, &format!("Joined {display}.{suffix}")).await;
+        }
+
+        /// `/unsubscribe-voice`: tear down the intake pipeline (cancel the
+        /// router / source / per-speaker pumps + fan-ins, close the
+        /// transcribers), leave the songbird call, and drop the voice
+        /// subscription (Python `bot.py::unsubscribe_voice`).
+        #[cfg(feature = "discord-voice")]
+        async fn dispatch_unsubscribe_voice(&self, ctx: &Context, ack: &SlashCtx) {
+            use crate::bot::voice_intake::stop_voice_intake;
+
+            defer_interaction(ack).await;
+            let Some(gid) = ack.command.guild_id else {
+                reply(ack, "Not in a guild.").await;
+                return;
+            };
+            let guild_id = gid.get() as i64;
+            let Some(channel_id) = self.events.on_unsubscribe_voice(guild_id) else {
+                reply(ack, "Not in a voice channel here.").await;
+                return;
+            };
+
+            let runtime = self
+                .slash
+                .handle
+                .voice_runtime
+                .lock()
+                .expect("voice_runtime mutex poisoned")
+                .remove(&channel_id);
+            if let Some(runtime) = runtime {
+                stop_voice_intake(runtime).await;
+            }
+            if let Some(manager) = songbird::get(ctx).await {
+                let _ = manager.remove(gid).await;
+            }
+            reply(ack, "Left voice channel.").await;
+        }
     }
 
     #[async_trait]
@@ -1682,7 +1907,8 @@ mod serenity_glue {
                 }
             }
             // Register the slash commands (best-effort).
-            for (cmd, desc) in [
+            #[cfg_attr(not(feature = "discord-voice"), allow(unused_mut))]
+            let mut commands: Vec<(&str, &str)> = vec![
                 (
                     "subscribe-text",
                     "Listen for text messages in this channel.",
@@ -1692,7 +1918,16 @@ mod serenity_glue {
                     "Stop listening for text messages in this channel.",
                 ),
                 ("diagnostics", "Show span timings (last p50/p95 per span)."),
-            ] {
+            ];
+            #[cfg(feature = "discord-voice")]
+            commands.extend([
+                ("subscribe-voice", "Join your voice channel and listen."),
+                (
+                    "unsubscribe-voice",
+                    "Leave the voice channel in this guild.",
+                ),
+            ]);
+            for (cmd, desc) in commands {
                 let _ = Command::create_global_command(
                     &ctx.http,
                     CreateCommand::new(cmd).description(desc),
@@ -1804,7 +2039,14 @@ mod serenity_glue {
         }
 
         async fn typing_start(&self, ctx: Context, event: TypingStartEvent) {
-            let is_bot = ctx.cache.user(event.user_id).is_some_and(|u| u.bot);
+            // Discord attaches the full `Member` (carrying the user's `bot`
+            // flag) on guild typing events; prefer it so the bot flag is read
+            // reliably (Python `on_typing` reads `user.bot` directly). Fall back
+            // to the user cache for DM typing, then to non-bot when uncached.
+            let is_bot = event.member.as_ref().map_or_else(
+                || ctx.cache.user(event.user_id).is_some_and(|u| u.bot),
+                |m| m.user.bot,
+            );
             self.events.on_typing(TypingEventView {
                 channel_id: event.channel_id.get() as i64,
                 user_id: event.user_id.get() as i64,
@@ -1858,10 +2100,21 @@ mod serenity_glue {
         pub store: Arc<dyn BotStore>,
         /// The async history store (diagnostics unread counts).
         pub history_store: Arc<AsyncHistoryStore>,
-        /// The event bus the text source publishes onto.
+        /// The event bus the text source (and voice source) publish onto.
         pub bus: Arc<dyn crate::bus::protocols::EventBus>,
         /// The attentional focus controller.
         pub focus_manager: Option<Arc<FocusManager>>,
+        /// The turn router the typing-interrupt policy cancels active turns on.
+        pub router: Arc<crate::bus::router::TurnRouter>,
+        /// `[discord.text]` config driving the typing-interrupt policy (the
+        /// `respond_to_typing` switch + backoff knobs).
+        pub discord_text: crate::config::DiscordTextConfig,
+        /// The transcriber prototype `/subscribe-voice` clones per speaker
+        /// (`None` degrades a join to playback-only). Cloned from the familiar's
+        /// own template so the familiar's teardown copy is unaffected.
+        pub transcriber_template: Option<Arc<Mutex<Box<dyn crate::stt::Transcriber>>>>,
+        /// Optional local turn detector for per-speaker endpointing.
+        pub local_turn_detector: Option<Arc<crate::voice::turn_detection::LocalTurnDetector>>,
     }
 
     /// Build the gateway client + [`BotHandle`], mirroring Python `create_bot`.
@@ -1881,6 +2134,32 @@ mod serenity_glue {
         let mut handle = BotHandle::new(send_text, presence.clone());
         handle.trigger_typing = Some(trigger_typing);
         handle.focus_manager = deps.focus_manager.clone();
+        // Typing-interrupt policy: cancel the active turn when a real user types,
+        // back off when another bot types (Python `bot.py` constructs it here and
+        // stores it on the handle; the text responder + `on_typing` consume it).
+        let typing_subs = deps.subscriptions.clone();
+        let is_subscribed: crate::typing_interrupt::IsSubscribed = Arc::new(move |ch: i64| {
+            u64::try_from(ch)
+                .ok()
+                .and_then(|cid| {
+                    typing_subs
+                        .lock()
+                        .expect("subscriptions mutex poisoned")
+                        .get(cid, SubscriptionKind::Text)
+                })
+                .is_some()
+        });
+        let typing_bot_id = deps.bot_user_id.clone();
+        let bot_user_id_provider: crate::typing_interrupt::BotUserIdProvider =
+            Arc::new(move || *typing_bot_id.lock().expect("bot_user_id mutex poisoned"));
+        handle.typing_interrupt = Some(Arc::new(
+            crate::typing_interrupt::TypingInterruptHandler::new(
+                deps.discord_text.clone(),
+                deps.router.clone(),
+                is_subscribed,
+                bot_user_id_provider,
+            ),
+        ));
         let handle = Arc::new(handle);
         // Cache-only resolver (no I/O on the audio path, B-VM29); the gateway
         // cache warm-up + background fetch land the side cache.
@@ -1908,6 +2187,13 @@ mod serenity_glue {
             subscriptions: deps.subscriptions.clone(),
             history_store: deps.history_store.clone(),
             focus_manager: deps.focus_manager.clone(),
+            handle: handle.clone(),
+            #[cfg(feature = "discord-voice")]
+            bus: deps.bus.clone(),
+            #[cfg(feature = "discord-voice")]
+            transcriber_template: deps.transcriber_template.clone(),
+            #[cfg(feature = "discord-voice")]
+            local_turn_detector: deps.local_turn_detector.clone(),
         });
         let handler = Handler {
             events,
@@ -1959,6 +2245,7 @@ pub mod voice_intake {
     use crate::log_style as ls;
     use crate::sources::voice::VoiceSource;
     use crate::stt::{Transcriber, TranscriptionResult};
+    use crate::tts_player::VoiceClientLike;
     use crate::voice::recording_sink::{AudioChunk, RecordingSink, SsrcResolver, VoiceTick};
     use crate::voice::turn_detection::{LocalTurnDetector, UtteranceEndpointer};
 
@@ -1987,8 +2274,15 @@ pub mod voice_intake {
     pub struct VoiceRuntime {
         /// The voice channel id.
         pub channel_id: i64,
-        router_task: JoinHandle<()>,
-        source_task: JoinHandle<()>,
+        /// The live voice client, read by [`DiscordVoicePlayer`] for TTS
+        /// playback (populated by [`join_voice`]).
+        ///
+        /// [`DiscordVoicePlayer`]: crate::tts_player::DiscordVoicePlayer
+        pub voice_client: Arc<dyn VoiceClientLike>,
+        // The intake tasks are `None` on a playback-only join (no transcriber
+        // configured) — the bot still joined so TTS can play out.
+        router_task: Option<JoinHandle<()>>,
+        source_task: Option<JoinHandle<()>>,
         watchdog_task: Option<JoinHandle<()>>,
         state: Arc<Mutex<IntakeState>>,
     }
@@ -2211,21 +2505,34 @@ pub mod voice_intake {
 
     /// Bring up the intake pipeline draining `audio_rx` for `channel_id`.
     ///
-    /// Returns `None` when no transcriber is configured (playback-only join,
-    /// B-VI31). The `template` is cloned per user on first audio.
+    /// With no transcriber configured the returned runtime is **playback-only**
+    /// (B-VI31): it carries the `voice_client` (so TTS still plays out) but
+    /// spawns no intake tasks. The `template` is cloned per user on first audio.
     pub fn start_voice_intake(
+        voice_client: Arc<dyn VoiceClientLike>,
         template: Option<Template>,
         detector: Option<Arc<LocalTurnDetector>>,
         bus: Arc<dyn EventBus>,
         familiar_id: String,
         channel_id: i64,
         audio_rx: UnboundedReceiver<AudioChunk>,
-    ) -> Option<VoiceRuntime> {
-        let template = template?;
+    ) -> VoiceRuntime {
+        let state = Arc::new(Mutex::new(IntakeState::default()));
+        let Some(template) = template else {
+            // Playback-only join: keep the voice client, spawn nothing.
+            drop(audio_rx);
+            return VoiceRuntime {
+                channel_id,
+                voice_client,
+                router_task: None,
+                source_task: None,
+                watchdog_task: None,
+                state,
+            };
+        };
         let idle_close_s = { template.lock().expect("template").idle_close_s() };
         let (result_tx, result_rx) = unbounded_channel();
         let source = Arc::new(VoiceSource::new(bus, familiar_id, channel_id, result_rx));
-        let state = Arc::new(Mutex::new(IntakeState::default()));
         let ctx = Arc::new(IntakeCtx {
             template,
             detector,
@@ -2244,19 +2551,24 @@ pub mod voice_intake {
             ls::kv_styled("intake", "started", ls::W, ls::LG),
             ls::kv_styled("channel", &channel_id.to_string(), ls::W, ls::LC),
         );
-        Some(VoiceRuntime {
+        VoiceRuntime {
             channel_id,
-            router_task,
-            source_task,
+            voice_client,
+            router_task: Some(router_task),
+            source_task: Some(source_task),
             watchdog_task,
             state,
-        })
+        }
     }
 
     /// Tear down the intake pipeline; per-user WS closes run in parallel (B-VI41).
     pub async fn stop_voice_intake(rt: VoiceRuntime) {
-        rt.router_task.abort();
-        rt.source_task.abort();
+        if let Some(t) = &rt.router_task {
+            t.abort();
+        }
+        if let Some(t) = &rt.source_task {
+            t.abort();
+        }
         if let Some(w) = &rt.watchdog_task {
             w.abort();
         }
@@ -2356,9 +2668,11 @@ pub mod voice_intake {
         }
     }
 
-    /// Join `channel_id` in `guild_id` via songbird and wire the [`RecordingSink`]
-    /// to its `VoiceTick` stream. Returns the sink's audio channel receiver — the
-    /// caller passes it to [`start_voice_intake`].
+    /// Join `channel_id` in `guild_id` via songbird (songbird owns the DAVE/MLS
+    /// handshake) and wire the [`RecordingSink`] to its `VoiceTick` stream.
+    ///
+    /// Returns the live voice client (for TTS playback) and the sink's audio
+    /// channel receiver — the caller passes both to [`start_voice_intake`].
     ///
     /// # Errors
     /// Propagates a songbird join failure.
@@ -2366,7 +2680,8 @@ pub mod voice_intake {
         manager: &songbird::Songbird,
         guild_id: u64,
         channel_id: u64,
-    ) -> Result<UnboundedReceiver<AudioChunk>, songbird::error::JoinError> {
+    ) -> Result<(Arc<dyn VoiceClientLike>, UnboundedReceiver<AudioChunk>), songbird::error::JoinError>
+    {
         let gid = songbird::id::GuildId(
             std::num::NonZeroU64::new(guild_id).unwrap_or(std::num::NonZeroU64::MIN),
         );
@@ -2377,16 +2692,196 @@ pub mod voice_intake {
         let (audio_tx, audio_rx) = unbounded_channel();
         let sink = Arc::new(RecordingSink::new(audio_tx));
         let ssrc_map = Arc::new(SsrcMap::default());
-        let mut call = call_lock.lock().await;
-        call.add_global_event(
-            songbird::CoreEvent::VoiceTick.into(),
-            TickReceiver::new(sink.clone(), ssrc_map.clone()),
-        );
-        call.add_global_event(
-            songbird::CoreEvent::SpeakingStateUpdate.into(),
-            TickReceiver::new(sink, ssrc_map),
-        );
-        Ok(audio_rx)
+        {
+            let mut call = call_lock.lock().await;
+            call.add_global_event(
+                songbird::CoreEvent::VoiceTick.into(),
+                TickReceiver::new(sink.clone(), ssrc_map.clone()),
+            );
+            call.add_global_event(
+                songbird::CoreEvent::SpeakingStateUpdate.into(),
+                TickReceiver::new(sink, ssrc_map),
+            );
+        }
+        let voice_client: Arc<dyn VoiceClientLike> = Arc::new(SongbirdVoiceClient::new(call_lock));
+        Ok((voice_client, audio_rx))
+    }
+
+    // -- songbird playback bridge (VoiceClientLike over a `Call`) -----------
+
+    /// [`VoiceClientLike`] adapter over a songbird [`Call`](songbird::Call).
+    ///
+    /// Bridges the synchronous 4-method player surface (DESIGN §4.8) onto
+    /// songbird's async call + [`TrackHandle`](songbird::tracks::TrackHandle):
+    /// [`DiscordVoicePlayer`](crate::tts_player::DiscordVoicePlayer) hands us
+    /// Discord-format stereo s16le @ 48 kHz PCM, which we convert to the
+    /// interleaved `f32` stream songbird's [`RawAdapter`](songbird::input::RawAdapter)
+    /// consumes. `is_playing` is tracked by an atomic flipped false by a
+    /// [`TrackEvent::End`](songbird::TrackEvent::End) handler.
+    struct SongbirdVoiceClient {
+        call: Arc<AsyncMutex<songbird::Call>>,
+        track: Mutex<Option<songbird::tracks::TrackHandle>>,
+        playing: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SongbirdVoiceClient {
+        fn new(call: Arc<AsyncMutex<songbird::Call>>) -> Self {
+            Self {
+                call,
+                track: Mutex::new(None),
+                playing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+    }
+
+    /// Flip the shared `is_playing` flag false when a track ends or is stopped.
+    struct TrackEndFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl songbird::EventHandler for TrackEndFlag {
+        async fn act(&self, _ctx: &songbird::EventContext<'_>) -> Option<songbird::Event> {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+    }
+
+    impl VoiceClientLike for SongbirdVoiceClient {
+        fn is_connected(&self) -> bool {
+            // Best-effort: if the call lock is momentarily held (e.g. mid-play),
+            // assume still connected rather than reporting a spurious drop.
+            self.call
+                .try_lock()
+                .map_or(true, |call| call.current_connection().is_some())
+        }
+
+        fn is_playing(&self) -> bool {
+            self.playing.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn play(
+            &self,
+            source: crate::tts_player::AudioSource,
+        ) -> Result<(), crate::tts_player::PlayError> {
+            use std::sync::atomic::Ordering;
+
+            if self.playing.swap(true, Ordering::SeqCst) {
+                return Err(crate::tts_player::PlayError::AlreadyPlaying);
+            }
+            let input: songbird::input::Input = match source {
+                crate::tts_player::AudioSource::Buffered(bytes) => {
+                    let f32_bytes = s16le_stereo_to_f32_bytes(&bytes);
+                    songbird::input::RawAdapter::new(std::io::Cursor::new(f32_bytes), 48_000, 2)
+                        .into()
+                }
+                crate::tts_player::AudioSource::Streaming(src) => {
+                    songbird::input::RawAdapter::new(StreamingF32Reader::new(src), 48_000, 2).into()
+                }
+            };
+            // Briefly lock the async call to hand songbird the track. The lock is
+            // uncontended at play time (the driver runs on its own task), so this
+            // resolves immediately; `block_in_place` lets peers progress if not.
+            let handle = tokio::task::block_in_place(|| {
+                futures::executor::block_on(async { self.call.lock().await.play_input(input) })
+            });
+            let _ = handle.add_event(
+                songbird::Event::Track(songbird::TrackEvent::End),
+                TrackEndFlag(self.playing.clone()),
+            );
+            *self.track.lock().expect("track handle mutex poisoned") = Some(handle);
+            Ok(())
+        }
+
+        fn stop(&self) {
+            let track = self
+                .track
+                .lock()
+                .expect("track handle mutex poisoned")
+                .take();
+            if let Some(handle) = track {
+                let _ = handle.stop();
+            }
+            self.playing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Convert interleaved s16le PCM bytes to interleaved `f32` LE PCM bytes
+    /// (songbird's `RawAdapter` reads `f32`; the player emits s16le). A trailing
+    /// odd byte (never produced by our 2-byte-aligned pipeline) is dropped.
+    fn s16le_stereo_to_f32_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len() * 2);
+        for frame in bytes.chunks_exact(2) {
+            let sample = i16::from_le_bytes([frame[0], frame[1]]);
+            let f = f32::from(sample) / 32768.0;
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+        out
+    }
+
+    /// A [`MediaSource`](songbird::input::core::io::MediaSource) that pulls
+    /// stereo s16le frames from a [`StreamingPcmSource`] and yields interleaved
+    /// `f32` LE bytes for songbird's `RawAdapter` (non-seekable, unbounded).
+    ///
+    /// [`StreamingPcmSource`]: crate::voice::audio::StreamingPcmSource
+    struct StreamingF32Reader {
+        src: Arc<crate::voice::audio::StreamingPcmSource>,
+        buf: Vec<u8>,
+        pos: usize,
+        done: bool,
+    }
+
+    impl StreamingF32Reader {
+        const fn new(src: Arc<crate::voice::audio::StreamingPcmSource>) -> Self {
+            Self {
+                src,
+                buf: Vec::new(),
+                pos: 0,
+                done: false,
+            }
+        }
+    }
+
+    impl std::io::Read for StreamingF32Reader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                if self.pos < self.buf.len() {
+                    let n = (self.buf.len() - self.pos).min(out.len());
+                    out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+                    self.pos += n;
+                    return Ok(n);
+                }
+                if self.done {
+                    return Ok(0);
+                }
+                // Blocking drain of the next 20 ms frame (empty == end of stream);
+                // songbird reads inputs on a dedicated blocking thread.
+                let frame = self.src.read();
+                if frame.is_empty() {
+                    self.done = true;
+                    return Ok(0);
+                }
+                self.buf = s16le_stereo_to_f32_bytes(&frame);
+                self.pos = 0;
+            }
+        }
+    }
+
+    impl std::io::Seek for StreamingF32Reader {
+        fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "voice stream is not seekable",
+            ))
+        }
+    }
+
+    impl songbird::input::core::io::MediaSource for StreamingF32Reader {
+        fn is_seekable(&self) -> bool {
+            false
+        }
+        fn byte_len(&self) -> Option<u64> {
+            None
+        }
     }
 }
 
@@ -2401,9 +2896,9 @@ mod tests {
         Author, BotEvents, BotHandle, DM_BOT_DISCLAIMER, DM_BOT_DISCLAIMER_DELETE_EMOJI,
         DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, InteractionAck, InteractionGone,
         MentionView, MessageView, Presence, PresenceSink, PresenceStatus, ReactionPayloadView,
-        ReadyInfo, SentMessage, apply_message_edit, apply_reaction_clear, apply_reaction_delta,
-        build_activity_presence_cb, collect_images, compose_content_with_embeds, defer_interaction,
-        emoji_repr, message_pings_bot, reply,
+        ReadyInfo, SentMessage, TypingEventView, apply_message_edit, apply_reaction_clear,
+        apply_reaction_delta, build_activity_presence_cb, collect_images,
+        compose_content_with_embeds, defer_interaction, emoji_repr, message_pings_bot, reply,
     };
     use crate::bot::{ActivityResync, ChannelSender};
     use crate::focus::{FocusManager, FocusStore};
@@ -3502,5 +3997,178 @@ mod tests {
             value: Some("v".to_owned()),
         };
         assert_eq!(f.name.as_deref(), Some("k"));
+    }
+
+    // --- composition-root wiring seams (parity-audit §3a/§3b + spec 10) -----
+
+    fn wiring_events(subs: Arc<Mutex<SubscriptionRegistry>>, handle: Arc<BotHandle>) -> BotEvents {
+        BotEvents::new(
+            "fam",
+            Arc::new(Mutex::new(Some(999))),
+            subs,
+            vec![],
+            Arc::new(RecordingStore::default()),
+            Arc::new(RecordingPublisher::default()),
+            handle,
+        )
+    }
+
+    fn wiring_handle_inner() -> BotHandle {
+        BotHandle::new(
+            Arc::new(NoopSendText),
+            Arc::new(RecordingPresence::default()) as Arc<dyn PresenceSink>,
+        )
+    }
+
+    fn wiring_handle() -> Arc<BotHandle> {
+        Arc::new(wiring_handle_inner())
+    }
+
+    // §3b — the composed `on_typing` path cancels an in-flight reply when a real
+    // user types. The unit ladder is pinned in `typing_interrupt.rs`; this proves
+    // the seam is actually wired (handler installed on the handle + reached by
+    // `on_typing`), which the audit flagged dead in production.
+    #[tokio::test]
+    async fn on_typing_cancels_active_turn_through_installed_handler() {
+        use crate::bus::router::TurnRouter;
+        use crate::config::DiscordTextConfig;
+        use crate::typing_interrupt::{BotUserIdProvider, IsSubscribed, TypingInterruptHandler};
+
+        let router = Arc::new(TurnRouter::new());
+        let subs = empty_subs_mut();
+        subs.lock()
+            .unwrap()
+            .add(42, SubscriptionKind::Text, None, true)
+            .unwrap();
+        let is_subscribed: IsSubscribed = {
+            let subs = subs.clone();
+            Arc::new(move |ch: i64| {
+                u64::try_from(ch)
+                    .ok()
+                    .and_then(|c| subs.lock().unwrap().get(c, SubscriptionKind::Text))
+                    .is_some()
+            })
+        };
+        let bot_id: BotUserIdProvider = Arc::new(|| Some(999));
+        let handler = Arc::new(TypingInterruptHandler::new(
+            DiscordTextConfig::default(),
+            router.clone(),
+            is_subscribed,
+            bot_id,
+        ));
+        let handle = Arc::new(wiring_handle_inner().with_typing_interrupt(handler));
+        let events = wiring_events(subs, handle);
+
+        let scope = router.begin_turn("discord:42", "t-1");
+        assert!(!scope.is_cancelled());
+        events.on_typing(TypingEventView {
+            channel_id: 42,
+            user_id: 7,
+            is_bot: false,
+        });
+        assert!(scope.is_cancelled());
+    }
+
+    // §3b — the `[discord.text].respond_to_typing` switch flows through the seam:
+    // disabled → the composed `on_typing` leaves the turn running.
+    #[tokio::test]
+    async fn on_typing_respects_disabled_config_through_seam() {
+        use crate::bus::router::TurnRouter;
+        use crate::config::DiscordTextConfig;
+        use crate::typing_interrupt::{BotUserIdProvider, IsSubscribed, TypingInterruptHandler};
+
+        let router = Arc::new(TurnRouter::new());
+        let subs = empty_subs_mut();
+        subs.lock()
+            .unwrap()
+            .add(42, SubscriptionKind::Text, None, true)
+            .unwrap();
+        let is_subscribed: IsSubscribed = Arc::new(|_| true);
+        let bot_id: BotUserIdProvider = Arc::new(|| Some(999));
+        let handler = Arc::new(TypingInterruptHandler::new(
+            DiscordTextConfig {
+                respond_to_typing: false,
+                ..Default::default()
+            },
+            router.clone(),
+            is_subscribed,
+            bot_id,
+        ));
+        let handle = Arc::new(wiring_handle_inner().with_typing_interrupt(handler));
+        let events = wiring_events(subs, handle);
+
+        let scope = router.begin_turn("discord:42", "t-1");
+        events.on_typing(TypingEventView {
+            channel_id: 42,
+            user_id: 7,
+            is_bot: false,
+        });
+        assert!(!scope.is_cancelled());
+    }
+
+    // With no handler installed (the shape a non-text build could take),
+    // `on_typing` is an inert no-op rather than a panic.
+    #[test]
+    fn on_typing_without_handler_is_noop() {
+        let events = wiring_events(empty_subs_mut(), wiring_handle());
+        events.on_typing(TypingEventView {
+            channel_id: 42,
+            user_id: 7,
+            is_bot: false,
+        });
+    }
+
+    // §3a — a runtime `/subscribe-voice` mutation is visible to the FocusManager
+    // through the shared `SubscriptionView` registry, with no restart.
+    #[test]
+    fn runtime_voice_subscribe_is_visible_to_focus_manager() {
+        let subs = empty_subs_mut();
+        let subs_view: Arc<dyn crate::subscriptions::SubscriptionView> = subs.clone();
+        let fm = Arc::new(FocusManager::new(
+            "fam",
+            Arc::new(NullFocusStore),
+            subs_view,
+        ));
+        let handle = Arc::new(wiring_handle_inner().with_focus_manager(fm.clone()));
+        let events = wiring_events(subs, handle);
+
+        assert!(!fm.is_subscribed(555));
+        events.on_subscribe_voice(555, Some(7));
+        assert!(fm.is_subscribed(555));
+    }
+
+    // spec 10 §B — `/subscribe-voice` registers a persisted voice row and marks
+    // the channel active in the `voice_channels` proxy the activity engine reads.
+    #[test]
+    fn subscribe_voice_registers_and_marks_active() {
+        let subs = empty_subs_mut();
+        let handle = wiring_handle();
+        let events = wiring_events(subs.clone(), handle.clone());
+
+        events.on_subscribe_voice(555, Some(7));
+        let row = subs.lock().unwrap().get(555, SubscriptionKind::Voice);
+        assert_eq!(row.map(|s| s.guild_id), Some(Some(7)));
+        assert!(handle.voice_channels.lock().unwrap().contains(&555));
+    }
+
+    // spec 10 §B — `/unsubscribe-voice` finds the guild's voice sub, removes it,
+    // clears the proxy, and returns the channel id for pipeline teardown.
+    #[test]
+    fn unsubscribe_voice_removes_and_returns_channel() {
+        let subs = empty_subs_mut();
+        let handle = wiring_handle();
+        let events = wiring_events(subs.clone(), handle.clone());
+
+        events.on_subscribe_voice(555, Some(7));
+        assert_eq!(events.on_unsubscribe_voice(7), Some(555));
+        assert!(
+            subs.lock()
+                .unwrap()
+                .get(555, SubscriptionKind::Voice)
+                .is_none()
+        );
+        assert!(!handle.voice_channels.lock().unwrap().contains(&555));
+        // An unknown guild is a no-op returning `None`.
+        assert_eq!(events.on_unsubscribe_voice(9999), None);
     }
 }

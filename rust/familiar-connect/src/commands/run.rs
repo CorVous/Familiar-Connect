@@ -606,21 +606,20 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
 
     familiar.bus.start().await;
 
-    // Subscriptions: the bot mutates a shared-mutable registry (`Arc<Mutex<…>>`);
-    // the focus manager reads an immutable `Arc<SubscriptionRegistry>`. The two
-    // are loaded from the same sidecar so startup state matches; live runtime
-    // `/subscribe` mutations reach the bot's copy (and disk) but not the focus
-    // snapshot until the FocusManager shared-mutable-seam change lands (filed as
-    // a shared-file request).
+    // Subscriptions: ONE shared-mutable registry (`Arc<Mutex<…>>`) consumed by
+    // both the bot (which mutates it on `/subscribe*`) and the focus manager
+    // (which reads it through the `SubscriptionView` seam). Mirrors Python, where
+    // `bot` and `focus` share a single registry object, so a runtime
+    // `/subscribe` mutation is visible to `is_focused` / `should_wake` /
+    // startup-default-focus / `staged_channels` logic without a restart.
     let subs_path = familiar.root.join("subscriptions.toml");
-    let focus_subs = Arc::new(SubscriptionRegistry::new(&subs_path)?);
-    let bot_subs = Arc::new(Mutex::new(SubscriptionRegistry::new(&subs_path)?));
+    let subscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new(&subs_path)?));
 
     let focus_manager = Arc::new(
         FocusManager::new(
             familiar.id.clone(),
             familiar.history_store.clone(),
-            focus_subs.clone(),
+            subscriptions.clone(),
         )
         .with_unread_nudge_enabled(familiar.config.focus.unread_nudge_enabled)
         .with_nudge_debounce_seconds(familiar.config.focus.nudge_debounce_seconds)
@@ -629,7 +628,8 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
     focus_manager.initialize().await;
 
     // Startup default focus: first subscribed channel per modality when unset.
-    for sub in focus_subs.all() {
+    let startup_subs = subscriptions.lock().expect("subscriptions mutex").all();
+    for sub in startup_subs {
         let cid = i64::try_from(sub.channel_id).unwrap_or_default();
         match sub.kind {
             SubscriptionKind::Text if focus_manager.get_focus("text").is_none() => {
@@ -647,8 +647,18 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
         token: token.clone(),
         familiar_id: familiar.id.clone(),
         bot_user_id: bot_user_id.clone(),
-        subscriptions: bot_subs.clone(),
+        subscriptions: subscriptions.clone(),
         dm_allowlist: familiar.config.dm_allowlist.clone(),
+        router: familiar.router.clone(),
+        discord_text: familiar.config.discord_text.clone(),
+        // Voice-intake prototype: clone the familiar's transcriber so
+        // `/subscribe-voice` clones a fresh per-speaker WS from it while the
+        // familiar keeps its own copy for teardown. `None` → playback-only join.
+        transcriber_template: familiar
+            .transcriber
+            .as_ref()
+            .map(|t| Arc::new(Mutex::new(t.clone_transcriber()))),
+        local_turn_detector: familiar.local_turn_detector.take().map(Arc::new),
         store: {
             // Route reaction / edit writes through the async store's
             // blocking-thread facade (off the reactor, DESIGN §4.4) rather than
@@ -683,12 +693,33 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
     ));
 
     let tts_player: Arc<dyn TtsPlayer> = if let Some(tts) = familiar.tts_client.clone() {
-        // The voice-client retrieval seam (songbird `Call` → `VoiceClientLike`)
-        // is not populated by the landed gateway glue, so this returns `None`
-        // and playback degrades to no-op until that voice-runtime wiring lands.
+        // Voice-client retrieval seam: read the live voice client `/subscribe-voice`
+        // stored in `handle.voice_runtime`. That map is a `BTreeMap`, so
+        // `.values().next()` deterministically yields the lowest-keyed entry and
+        // is stable across utterances (v1 supports one voice channel at a time, so
+        // the single entry is unambiguous — Python `_first_voice_client`).
+        // Under a `discord`-only build (no `discord-voice`), the runtime map does
+        // not exist, so playback degrades to no-op.
+        let vc_handle = handle.clone();
         Arc::new(DiscordVoicePlayer::new(
             tts,
-            || -> Option<Arc<dyn VoiceClientLike>> { None },
+            move || -> Option<Arc<dyn VoiceClientLike>> {
+                #[cfg(feature = "discord-voice")]
+                {
+                    vc_handle
+                        .voice_runtime
+                        .lock()
+                        .expect("voice_runtime mutex")
+                        .values()
+                        .next()
+                        .map(|rt| rt.voice_client.clone())
+                }
+                #[cfg(not(feature = "discord-voice"))]
+                {
+                    let _ = &vc_handle;
+                    None
+                }
+            },
         ))
     } else {
         Arc::new(LoggingTTSPlayer::default())
@@ -996,6 +1027,18 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
     }
     // abort the responder / projector tasks (already unwinding on `cancel`).
     set.shutdown().await;
+    // 2b. tear down any live voice-intake pipelines (per-speaker pumps / fan-ins
+    //     cancelled, transcriber WSs closed) before stopping the template.
+    #[cfg(feature = "discord-voice")]
+    {
+        let runtimes: Vec<_> =
+            std::mem::take(&mut *handle.voice_runtime.lock().expect("voice_runtime mutex"))
+                .into_values()
+                .collect();
+        for rt in runtimes {
+            crate::bot::voice_intake::stop_voice_intake(rt).await;
+        }
+    }
     // 3. stop the transcriber template.
     if let Some(transcriber) = familiar.transcriber.as_mut() {
         transcriber.stop().await;

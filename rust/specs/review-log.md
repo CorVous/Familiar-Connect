@@ -123,3 +123,24 @@ one finding that survived fixer verification; zero findings were
 rubber-stamped and two were correctly overruled with cited authority. The
 port completed at 2,056 tests / 0 failures, gates green on default and
 discord,discord-voice feature sets.
+
+## Phase 4: composition-root wiring round — 2026-07-12
+
+Context: the DAVE-runbook verification pass and the parity audit (independent
+fresh-context agents) both caught that per-package porting left three
+composition-root gaps that no package-scoped gate could see: voice
+subscribe/playback never dispatched, TypingInterruptHandler never constructed
+in production, SubscriptionRegistry duplicated (bot mutations invisible to
+FocusManager). All three closed by a wiring agent (+7 wiring tests), then
+diff-reviewed: 4 findings, 3 applied, 1 skipped with cause.
+
+| Kind | Sev | Finding (condensed) | Outcome |
+|---|---|---|---|
+| semantic-divergence | low | typing_start derived is_bot from the serenity cache (uncached bot → spurious cancel); TypingStartEvent's member field carries the bot flag on guild typing | Fixed |
+| semantic-divergence | low | Voice-client getter used HashMap::values().next() (arbitrary order) vs Python's insertion-ordered first-joined channel | Fixed per journal |
+| — | — | (remaining finding + skip detail in workflow journal wf_42f2381b-075) | 1 more fixed, 1 skipped with cited cause |
+
+**Lesson recorded:** package-scoped porting + review leaves integration-level
+holes by construction; the completeness-critic + runbook-verification pass
+(two agents, ~380k tokens) caught all three before the live integration
+session could burn an evening discovering them.

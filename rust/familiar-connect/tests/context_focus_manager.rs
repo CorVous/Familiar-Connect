@@ -9,7 +9,7 @@ use chrono::Utc;
 use familiar_connect::focus::{Clock, FocusManager, FocusStore};
 use familiar_connect::history::StoreError;
 use familiar_connect::history::store::{FocusPointers, Promotion};
-use familiar_connect::subscriptions::{SubscriptionKind, SubscriptionRegistry};
+use familiar_connect::subscriptions::{SubscriptionKind, SubscriptionRegistry, SubscriptionView};
 
 // ---------------------------------------------------------------------------
 // Doubles
@@ -195,6 +195,46 @@ async fn initialize_drops_unsubscribed_voice_focus() {
     let fm = FocusManager::new("fam", store, reg);
     fm.initialize().await;
     assert_eq!(fm.get_focus("voice"), None);
+}
+
+// ---------------------------------------------------------------------------
+// Shared-mutable SubscriptionView seam (parity-audit §3a): the FocusManager
+// reads the SAME registry the bot mutates, so a runtime `/subscribe` is visible
+// without a restart (Python shares one registry object between bot and focus).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn runtime_subscribe_is_visible_to_focus_manager() {
+    let dir = tempfile::tempdir().unwrap();
+    // ONE registry behind a Mutex, shared as an `Arc<dyn SubscriptionView>`.
+    let shared = Arc::new(Mutex::new(
+        SubscriptionRegistry::new(dir.path().join("subs.toml")).unwrap(),
+    ));
+    let view: Arc<dyn SubscriptionView> = shared.clone();
+    let fm = FocusManager::new("fam", make_store(None, None, 0), view);
+
+    // Nothing subscribed yet.
+    assert!(!fm.is_subscribed(42));
+    assert!(fm.subscribed_channels().is_empty());
+
+    // A runtime mutation on the shared registry (as `/subscribe-text` does)…
+    shared
+        .lock()
+        .unwrap()
+        .add(42, SubscriptionKind::Text, Some(1), true)
+        .unwrap();
+
+    // …is observed by the FocusManager immediately, no rebuild.
+    assert!(fm.is_subscribed(42));
+    assert_eq!(fm.subscribed_channels(), vec![42]);
+
+    // And a runtime unsubscribe is reflected too.
+    shared
+        .lock()
+        .unwrap()
+        .remove(42, SubscriptionKind::Text)
+        .unwrap();
+    assert!(!fm.is_subscribed(42));
 }
 
 #[tokio::test]

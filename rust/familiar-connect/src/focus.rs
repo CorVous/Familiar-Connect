@@ -24,7 +24,7 @@ use crate::history::StoreError;
 use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::{FocusPointers, Promotion};
 use crate::log_style as ls;
-use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry};
+use crate::subscriptions::{SubscriptionKind, SubscriptionView};
 
 /// Default debounce window: rapid arrivals within it share one nudge.
 const DEFAULT_NUDGE_DEBOUNCE_S: f64 = 30.0;
@@ -120,7 +120,7 @@ struct FocusState {
 pub struct FocusManager {
     familiar_id: String,
     store: Arc<dyn FocusStore>,
-    subscriptions: Arc<SubscriptionRegistry>,
+    subscriptions: Arc<dyn SubscriptionView>,
     clock: Clock,
     unread_nudge_enabled: bool,
     nudge_debounce_seconds: f64,
@@ -140,7 +140,7 @@ impl FocusManager {
     pub fn new(
         familiar_id: impl Into<String>,
         store: Arc<dyn FocusStore>,
-        subscriptions: Arc<SubscriptionRegistry>,
+        subscriptions: Arc<dyn SubscriptionView>,
     ) -> Self {
         Self {
             familiar_id: familiar_id.into(),

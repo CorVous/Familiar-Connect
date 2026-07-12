@@ -5,31 +5,30 @@ machine. Work top-to-bottom; each smoke stage has do / expect / if-it-fails.
 Paths are relative to `rust/`. Run everything from `rust/` (the workspace root)
 so `data/familiars/` resolves.
 
-> **READ THIS FIRST — voice is not wired into the running bot yet.**
-> The voice *building blocks* are all landed and unit-tested
-> (`bot::voice_intake::{join_voice, start_voice_intake, stop_voice_intake,
-> TickReceiver}`, `RecordingSink`, `DiscordVoicePlayer`), but **no glue calls
-> them.** Concretely, in this tree:
-> - `/subscribe-voice` and `/unsubscribe-voice` are **not registered and not
->   dispatched** — the serenity handler only wires `subscribe-text`,
->   `unsubscribe-text`, `diagnostics` (`src/bot.rs` ~L1598-1637, L1685-1701).
-> - `join_voice` / `start_voice_intake` / `stop_voice_intake` are `pub` but
->   **never called** anywhere outside their own definitions (verified by grep).
->   `BotHandle::voice_runtime` is never populated.
-> - `DiscordVoicePlayer`'s voice-client getter is hard-coded to `|| None`
->   (`src/commands/run.rs` ~L690), so TTS playback is a **no-op** even if a join
->   happened.
-> - TEN-VAD has **no native backend**: `TenVad::new` always returns
->   `MissingBackend` (`src/voice/turn_detection/ten_vad.rs:170`), so the
+> **READ THIS FIRST — the voice glue is now wired; validate it live.**
+> The composition-root wiring gaps are closed (parity-audit §3c + runbook flags).
+> Concretely, in this tree:
+> - `/subscribe-voice` and `/unsubscribe-voice` are **registered and dispatched**
+>   under `discord-voice` (`src/bot.rs`: `Handler::ready` command list +
+>   `dispatch_subscribe_voice` / `dispatch_unsubscribe_voice`).
+> - `join_voice` → `start_voice_intake` runs on subscribe (songbird join +
+>   DAVE, `RecordingSink` attach, per-speaker pumps + `VoiceSource`);
+>   `stop_voice_intake` runs on unsubscribe + shutdown. `BotHandle::voice_runtime`
+>   is populated per voice channel.
+> - `DiscordVoicePlayer`'s voice-client getter now reads `handle.voice_runtime`
+>   (`src/commands/run.rs`), returning the channel's live songbird-backed
+>   `VoiceClientLike`, so TTS playback reaches the call.
+> - **Still open:** TEN-VAD has **no native backend**: `TenVad::new` always
+>   returns `MissingBackend` (`src/voice/turn_detection/ten_vad.rs`), so the
 >   `ten+smart_turn` endpointer cannot be built at runtime and silently degrades
 >   to Deepgram idle-finalize.
 >
-> **What you CAN validate tonight:** Stage 0-1 (text path end-to-end: config,
-> LLM, gateway, Deepgram construction) and Section 5 (local-ML unit + real-model
-> tests). **Stages b-f require landing the voice glue first** — do not block out
-> an evening for them expecting them to run as-is. The stage instructions below
-> are written so they're ready the moment that glue lands; each voice stage names
-> the missing wire.
+> The songbird playback bridge (`SongbirdVoiceClient`) and slash dispatch are
+> `discord-voice` build + clippy clean but have **not** been exercised against a
+> live Discord voice channel — that is exactly what Stages b-f below now do.
+> **What you CAN validate without a call:** Stage 0-1 (text path end-to-end) and
+> Section 5 (local-ML tests). Stages b-f now run as written; TEN-VAD live
+> endpointing remains degraded until its FFI backend lands.
 
 ---
 
@@ -136,8 +135,8 @@ This proves the STT/TTS factories resolve before you attempt voice.
 
 ### Stage 2 (b) — voice join + DAVE handshake, single speaker
 
-> **BLOCKER:** requires the `/subscribe-voice` → `join_voice` →
-> `start_voice_intake` glue (not present). Once landed:
+> The `/subscribe-voice` → `join_voice` → `start_voice_intake` glue is landed
+> (build + clippy clean, live-untested). Validate:
 
 **Do:** join a voice channel, run `/subscribe-voice`.
 **Expect:** reply `Joined <channel>.`; log `[🎙️  Voice] intake=started
@@ -152,8 +151,8 @@ songbird logs and file upstream.
 
 ### Stage 3 (c) — STT round-trip (speak → transcript → reply → TTS)
 
-> **BLOCKER:** needs Stage b **and** the `DiscordVoicePlayer` voice-client seam
-> (currently `|| None`, so no audio plays back). Once landed:
+> Needs Stage b; the `DiscordVoicePlayer` voice-client seam now reads
+> `voice_runtime` (was `|| None`) so audio plays back through the songbird call.
 
 **Do:** speak one sentence, pause ~1 s.
 **Expect (in order):** `[🎙️  Voice] user=<id> transcriber=opened`; a

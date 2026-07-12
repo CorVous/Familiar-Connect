@@ -17,7 +17,7 @@ use familiar_connect::processors::voice_responder::VoiceResponder;
 use familiar_connect::processors::{
     DiscordTextPayload, FocusManagerApi, ResponderLlm, ToolContextFactory,
 };
-use familiar_connect::subscriptions::{SubscriptionKind, SubscriptionRegistry};
+use familiar_connect::subscriptions::{SubscriptionKind, SubscriptionRegistry, SubscriptionView};
 use familiar_connect::tools::registry::{ToolContext, ToolRegistry};
 use familiar_connect::tools::shift_focus::build_shift_focus_tool;
 use familiar_connect::tts_player::MockTTSPlayer;
@@ -343,9 +343,9 @@ fn real_focus_responder(
     let subs = Arc::new(subs);
 
     let s = store();
+    let subs_view: Arc<dyn SubscriptionView> = subs;
     let fm = Arc::new(
-        FocusManager::new("fam", Arc::clone(&s) as _, Arc::clone(&subs))
-            .with_unread_nudge_enabled(false),
+        FocusManager::new("fam", Arc::clone(&s) as _, subs_view).with_unread_nudge_enabled(false),
     );
     fm.set_focus_immediately(100, "text");
 

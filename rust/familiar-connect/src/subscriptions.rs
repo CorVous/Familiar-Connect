@@ -297,3 +297,44 @@ impl AsRef<Path> for SubscriptionRegistry {
         &self.path
     }
 }
+
+/// Read-only view over a subscription registry.
+///
+/// This is the shared seam that lets the bot's mutable
+/// `Arc<Mutex<SubscriptionRegistry>>` and the
+/// [`FocusManager`](crate::focus::FocusManager)'s read side observe **one**
+/// registry object, so a runtime `/subscribe` / `/unsubscribe` mutation is
+/// visible to focus / wake logic without a process restart (Python shares a
+/// single registry object between `bot` and `focus`). A plain
+/// `Arc<SubscriptionRegistry>` still satisfies it for read-only tests.
+pub trait SubscriptionView: Send + Sync {
+    /// Snapshot of every registered subscription (persisted and ephemeral).
+    fn all(&self) -> Vec<Subscription>;
+    /// The first kind subscribed for `channel_id` — text before voice — or
+    /// `None`.
+    fn kind_for(&self, channel_id: u64) -> Option<SubscriptionKind>;
+}
+
+impl SubscriptionView for SubscriptionRegistry {
+    fn all(&self) -> Vec<Subscription> {
+        // Method-call syntax prefers the inherent method, so this is not
+        // self-recursive.
+        self.all()
+    }
+    fn kind_for(&self, channel_id: u64) -> Option<SubscriptionKind> {
+        self.kind_for(channel_id)
+    }
+}
+
+impl SubscriptionView for std::sync::Mutex<SubscriptionRegistry> {
+    fn all(&self) -> Vec<Subscription> {
+        self.lock()
+            .expect("subscription registry mutex poisoned")
+            .all()
+    }
+    fn kind_for(&self, channel_id: u64) -> Option<SubscriptionKind> {
+        self.lock()
+            .expect("subscription registry mutex poisoned")
+            .kind_for(channel_id)
+    }
+}
