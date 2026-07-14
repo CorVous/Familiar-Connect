@@ -59,6 +59,10 @@ audio-resample = ["dep:rubato", "dep:opus"]
 test-util = []
 
 [dependencies]
+# Process-level TLS crypto provider pin (see main.rs): deepgram's reqwest
+# enables rustls/aws-lc-rs while the discord stack enables rustls/ring; with
+# both present rustls cannot auto-select and panics. main() installs ring.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # --- async runtime + concurrency (all subsystems) ---
 tokio = { version = "1", features = [
     "rt-multi-thread",

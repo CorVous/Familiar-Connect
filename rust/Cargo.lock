@@ -1624,6 +1624,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rubato",
  "rusqlite",
+ "rustls 0.23.41",
  "serde",
  "serde_json",
  "serenity",
