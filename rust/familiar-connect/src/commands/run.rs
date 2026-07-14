@@ -48,8 +48,16 @@ pub struct RunArgs {
 }
 
 /// Default familiars root (Python module const `_DEFAULT_FAMILIARS_ROOT`).
+///
+/// `FAMILIARS_ROOT` overrides the CWD-relative default: the Rust binary is
+/// typically invoked from `rust/` while the shared data tree lives at the
+/// repo root, so cohabitating with the Python bot needs a way to point here
+/// without cd-ing (Rust-only addition; Python resolves CWD-relative only).
 fn default_familiars_root() -> PathBuf {
-    Path::new("data").join("familiars")
+    match std::env::var("FAMILIARS_ROOT") {
+        Ok(root) if !root.is_empty() => PathBuf::from(root),
+        _ => Path::new("data").join("familiars"),
+    }
 }
 
 /// Resolve the active familiar's root directory.
@@ -76,7 +84,15 @@ pub fn resolve_familiar_root(
     };
     let dir = root.join(&familiar_id);
     if !dir.exists() {
-        return Err(format!("Familiar folder does not exist: {}", dir.display()));
+        // Show the absolute path: the lookup is CWD-relative, and a relative
+        // path in the error hides *which* directory was searched (running
+        // from rust/ vs the repo root resolves differently).
+        let shown = std::path::absolute(&dir).unwrap_or_else(|_| dir.clone());
+        return Err(format!(
+            "Familiar folder does not exist: {} (checked relative to the \
+             current directory; set FAMILIARS_ROOT to point elsewhere)",
+            shown.display()
+        ));
     }
     Ok(dir)
 }

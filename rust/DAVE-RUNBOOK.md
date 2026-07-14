@@ -53,6 +53,19 @@ cargo build --release --features discord-voice,stt-deepgram
 on stable (verified). `local-embed` / `local-turn` additionally need a native
 onnxruntime (Section 5).
 
+**Windows note (voice builds):** `discord-voice` pulls `songbird → opus2 →
+libopus_sys`, which compiles libopus **from source with CMake**. If the build
+fails with `is 'cmake' not installed?`:
+
+```powershell
+winget install Kitware.CMake   # then open a NEW shell so PATH updates
+```
+
+CMake drives the MSVC toolset you already have (the error appearing at the
+CMake step, not a compiler step, means VS Build Tools are fine). Alternative if
+you'd rather not install CMake: point `OPUS_LIB_DIR` at a prebuilt static
+libopus and rebuild. Text-only builds (`--features discord`) never need CMake.
+
 ### Env vars (`.env` in `rust/` is autoloaded by `dotenvy`)
 
 Copy `../.env.example` to `rust/.env` and fill:
@@ -82,6 +95,28 @@ logs a warning and the text path keeps working (`run.rs` L410-429).
   Read Message History, Add Reactions, Connect, Speak.
 
 ### Familiar directory shape
+
+**Resolution is CWD-relative**: the binary looks for `data/familiars/<id>`
+under the directory you invoke it from, NOT under `rust/` or the binary's
+location (Python behaves the same; it was just always run from the repo root).
+During cohabitation, run from the **repo root** so Rust and Python share one
+data tree — the SQLite file format and tantivy indexes are deliberately
+compatible, and sharing `history.db` is the parity oracle working as intended:
+
+```powershell
+# from C:\Source\Familiar-Connect (repo root):
+cargo run --manifest-path rust\Cargo.toml --release --features discord -- run --familiar <id> -v
+```
+
+Or, to run from `rust\` against the repo-root data, set `FAMILIARS_ROOT`:
+
+```powershell
+$env:FAMILIARS_ROOT = "..\data\familiars"
+cargo run --release --features discord -- run --familiar <id> -v
+```
+
+A missing familiar now errors with the **absolute** path it checked, so a CWD
+mismatch is self-diagnosing.
 
 `data/familiars/<id>/` must exist (`run.rs` `resolve_familiar_root` only checks
 existence). Config = `data/familiars/<id>/character.toml` **deep-merged over**

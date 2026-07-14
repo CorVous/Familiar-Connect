@@ -1640,6 +1640,9 @@ mod serenity_glue {
         subscriptions: Arc<Mutex<crate::subscriptions::SubscriptionRegistry>>,
         history_store: Arc<AsyncHistoryStore>,
         focus_manager: Option<Arc<FocusManager>>,
+        // Read only by the voice dispatch paths; without discord-voice the
+        // field still exists (constructor stays feature-agnostic) but is dead.
+        #[cfg_attr(not(feature = "discord-voice"), allow(dead_code))]
         handle: Arc<BotHandle>,
         #[cfg(feature = "discord-voice")]
         bus: Arc<dyn crate::bus::protocols::EventBus>,
