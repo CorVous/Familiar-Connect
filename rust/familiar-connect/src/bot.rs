@@ -2211,7 +2211,16 @@ mod serenity_glue {
         #[cfg(feature = "discord-voice")]
         let builder = {
             use songbird::serenity::SerenityInit as _;
-            builder.register_songbird()
+            // Songbird's default DecodeMode is Decrypt: DAVE/RTP decryption
+            // succeeds but packets are never Opus-decoded, so VoiceTick
+            // arrives with decoded_voice=None and the intake drops every
+            // frame silently (live-session finding). Decode gives PCM.
+            // Default DecodeConfig = stereo 48 kHz s16 — the exact shape
+            // voice::audio's stereo_to_mono + Resampler48to16 expect (same
+            // as py-cord's sink delivered).
+            builder.register_songbird_from_config(songbird::Config::default().decode_mode(
+                songbird::driver::DecodeMode::Decode(songbird::driver::DecodeConfig::default()),
+            ))
         };
         let client = builder.await?;
         Ok((handle, client))
@@ -2649,6 +2658,20 @@ pub mod voice_intake {
                 songbird::EventContext::VoiceTick(tick) => {
                     let mut vt = VoiceTick::default();
                     for (ssrc, data) in &tick.speaking {
+                        if data.decoded_voice.is_none() {
+                            // Speaking SSRC without PCM = songbird is not in
+                            // DecodeMode::Decode. Scream once instead of
+                            // silently eating the whole voice channel.
+                            static WARNED: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                tracing::warn!(
+                                    target: "familiar_connect.bot",
+                                    "[🎙️  Voice] WARNING voice_tick_has_no_pcm ssrc={ssrc} \
+                                     hint=songbird decode_mode must be Decode"
+                                );
+                            }
+                        }
                         if let Some(samples) = &data.decoded_voice {
                             let mut bytes = Vec::with_capacity(samples.len() * 2);
                             for s in samples {
