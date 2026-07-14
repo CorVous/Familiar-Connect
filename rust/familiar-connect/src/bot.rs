@@ -2641,13 +2641,26 @@ pub mod voice_intake {
     pub struct TickReceiver {
         sink: Arc<RecordingSink>,
         ssrc_map: Arc<SsrcMap>,
+        // Live-session diagnostics: voice-receive failures are silent at
+        // every layer (firewall = empty ticks; missing Speaking events =
+        // songbird DAVE-drops pre-decrypt; unmapped SSRC = our drop). The
+        // periodic counter line makes each layer distinguishable in -v logs.
+        ticks: std::sync::atomic::AtomicU64,
+        speaking_frames: std::sync::atomic::AtomicU64,
+        unmapped_frames: std::sync::atomic::AtomicU64,
     }
 
     impl TickReceiver {
         /// Build a receiver over the sink + SSRC map.
         #[must_use]
         pub const fn new(sink: Arc<RecordingSink>, ssrc_map: Arc<SsrcMap>) -> Self {
-            Self { sink, ssrc_map }
+            Self {
+                sink,
+                ssrc_map,
+                ticks: std::sync::atomic::AtomicU64::new(0),
+                speaking_frames: std::sync::atomic::AtomicU64::new(0),
+                unmapped_frames: std::sync::atomic::AtomicU64::new(0),
+            }
         }
     }
 
@@ -2656,6 +2669,28 @@ pub mod voice_intake {
         async fn act(&self, ctx: &songbird::EventContext<'_>) -> Option<songbird::Event> {
             match ctx {
                 songbird::EventContext::VoiceTick(tick) => {
+                    use std::sync::atomic::Ordering;
+                    let n = self.ticks.fetch_add(1, Ordering::Relaxed) + 1;
+                    if !tick.speaking.is_empty() {
+                        self.speaking_frames
+                            .fetch_add(tick.speaking.len() as u64, Ordering::Relaxed);
+                    }
+                    for ssrc in tick.speaking.keys() {
+                        if self.ssrc_map.user_id(*ssrc).is_none() {
+                            self.unmapped_frames.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    // 20ms ticks -> every 500 ticks ~= 10s. INFO on the first
+                    // tick, then a periodic one-line health counter.
+                    if n == 1 || n % 500 == 0 {
+                        tracing::info!(
+                            target: "familiar_connect.bot",
+                            "[🎙️  Voice] receive ticks={n} speaking_frames={} unmapped_frames={} silent_now={}",
+                            self.speaking_frames.load(Ordering::Relaxed),
+                            self.unmapped_frames.load(Ordering::Relaxed),
+                            tick.silent.len(),
+                        );
+                    }
                     let mut vt = VoiceTick::default();
                     for (ssrc, data) in &tick.speaking {
                         if data.decoded_voice.is_none() {
@@ -2684,6 +2719,14 @@ pub mod voice_intake {
                     self.sink.on_tick(&vt, self.ssrc_map.as_ref());
                 }
                 songbird::EventContext::SpeakingStateUpdate(speaking) => {
+                    // INFO: these are rare (state changes only) and their
+                    // absence is the DAVE-receive failure signature.
+                    tracing::info!(
+                        target: "familiar_connect.bot",
+                        "[🎙️  Voice] speaking_state ssrc={} user={:?}",
+                        speaking.ssrc,
+                        speaking.user_id.map(|u| u.0),
+                    );
                     if let Some(user_id) = speaking.user_id {
                         self.ssrc_map.insert(speaking.ssrc, user_id.0);
                     }
