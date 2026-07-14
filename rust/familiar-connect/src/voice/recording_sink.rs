@@ -57,6 +57,9 @@ pub trait SsrcResolver: Send + Sync {
 pub struct RecordingSink {
     audio_out: UnboundedSender<AudioChunk>,
     finished: AtomicBool,
+    /// Latched once the first unmapped SSRC is routed under a provisional id, so
+    /// the warn (below) fires exactly once instead of per-20 ms-tick.
+    warned_unmapped: AtomicBool,
 }
 
 impl RecordingSink {
@@ -66,6 +69,7 @@ impl RecordingSink {
         Self {
             audio_out,
             finished: AtomicBool::new(false),
+            warned_unmapped: AtomicBool::new(false),
         }
     }
 
@@ -94,13 +98,29 @@ impl RecordingSink {
 
     /// Demux one driver tick: per speaking SSRC, resolve the user and fan in.
     ///
-    /// SSRCs with no known user (speaking-state not yet observed) or malformed
-    /// audio are dropped — matching the Python pass-through/drop discipline.
+    /// When songbird's speaking-state map has no user for an SSRC yet, the frame
+    /// is routed under a **provisional** user id equal to the SSRC rather than
+    /// dropped ("first-audio-chunk lazy creation"; the turn is anonymous until the
+    /// real mapping lands). This matters because the op-5 Speaking event that
+    /// binds SSRC→user fires inconsistently (songbird PR #291) and DAVE decrypt is
+    /// MLS-sender-identified, so decoded audio routinely arrives *before* any
+    /// `SpeakingStateUpdate` — dropping it here silently eats the whole turn.
+    /// SSRCs are `u32` (< 2^32) and Discord snowflakes are > 2^52, so a
+    /// provisional id can never collide with a real user id. Malformed audio
+    /// (not whole stereo frames) is still dropped.
     pub fn on_tick(&self, tick: &VoiceTick, resolver: &dyn SsrcResolver) {
         for (&ssrc, pcm) in &tick.speaking {
-            let Some(user) = resolver.user_id(ssrc) else {
-                continue;
-            };
+            let user = resolver.user_id(ssrc).unwrap_or_else(|| {
+                if !self.warned_unmapped.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "[Sink] WARNING unmapped_ssrc={ssrc} action=provisional-id \
+                         hint=op-5 Speaking not observed yet; transcript is anonymous \
+                         until it lands"
+                    );
+                }
+                u64::from(ssrc)
+            });
             if let Err(err) = self.write(pcm, user) {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -185,14 +205,17 @@ mod tests {
         let mut tick = VoiceTick::default();
         tick.speaking.insert(10, stereo(200, 200)); // ssrc 10 → user 111, mono 200
         tick.speaking.insert(20, stereo(40, 60)); // ssrc 20 → user 222, mono (40+60)/2=50
-        tick.speaking.insert(30, stereo(9, 9)); // ssrc 30 → unknown, dropped
+        tick.speaking.insert(30, stereo(9, 9)); // ssrc 30 → unmapped → provisional id 30
         let resolver = MapResolver(HashMap::from([(10, 111), (20, 222)]));
 
         sink.on_tick(&tick, &resolver);
 
-        // BTreeMap iterates by ascending SSRC → deterministic order 10, 20.
+        // BTreeMap iterates by ascending SSRC → deterministic order 10, 20, 30.
         assert_eq!(rx.try_recv().unwrap(), (111, mono(200)));
         assert_eq!(rx.try_recv().unwrap(), (222, mono(50)));
-        assert!(rx.try_recv().is_err(), "unknown SSRC must be dropped");
+        // Unmapped SSRC is no longer dropped: it fans in under a provisional user
+        // id equal to the SSRC (anonymous turn until op-5 Speaking lands).
+        assert_eq!(rx.try_recv().unwrap(), (30, mono(9)));
+        assert!(rx.try_recv().is_err());
     }
 }

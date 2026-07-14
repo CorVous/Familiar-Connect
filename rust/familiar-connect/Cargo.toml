@@ -36,7 +36,7 @@ net = ["dep:reqwest", "dep:eventsource-stream", "dep:tokio-tungstenite"]
 images = ["dep:image"]
 # Discord gateway + REST (10). Voice/DAVE transport is `discord-voice` (native Opus).
 discord = ["dep:serenity"]
-discord-voice = ["discord", "dep:songbird"]
+discord-voice = ["discord", "dep:songbird", "dep:symphonia"]
 # Deepgram streaming STT via the official SDK (09); alt path is hand-rolled WS over `net`.
 stt-deepgram = ["net", "dep:deepgram"]
 # Local ONNX sentence embeddings — mirrors Python's implicit fastembed path (04).
@@ -147,6 +147,12 @@ songbird = { version = "0.6.0", default-features = false, features = [
     "rustls",
     "tungstenite", # `driver` requires exactly one WS backend (tungstenite for serenity)
 ], optional = true }
+# songbird pulls Symphonia with default-features=false (zero codec decoders). Its
+# `RawAdapter` — the only TTS playback path — emits a CODEC_TYPE_PCM_F32LE track, so
+# playback needs Symphonia's PCM decoder registered or every track dies with
+# `DecodeError("no compatible track found")`. Declaring Symphonia directly with `pcm`
+# makes Cargo feature-unify it into songbird's own Symphonia. Enabled by `discord-voice`.
+symphonia = { version = "0.5", default-features = false, features = ["pcm"], optional = true }
 
 # --- optional local-ML / external-service backends ---
 deepgram = { version = "0.10.0", optional = true }     # stt-deepgram
