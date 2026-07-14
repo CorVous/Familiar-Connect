@@ -144,3 +144,22 @@ diff-reviewed: 4 findings, 3 applied, 1 skipped with cause.
 holes by construction; the completeness-critic + runbook-verification pass
 (two agents, ~380k tokens) caught all three before the live integration
 session could burn an evening discovering them.
+
+## Live DAVE session findings (human-driven, Windows) — 2026-07-13/14
+
+The layer no agent could reach: a real Discord voice channel on a real
+Windows box. All defects were CROSS-CRATE RUNTIME WIRING — invisible to
+compiler, clippy, mocked tests, and differential review alike:
+
+| Finding | Layer | Fixer |
+|---|---|---|
+| rustls panic: deepgram's reqwest enables aws-lc-rs alongside the discord stack's ring; auto-select refuses with two providers | TLS init | orchestrator (pin ring in main) |
+| Zero received audio: songbird default `DecodeMode::Decrypt` never Opus-decodes; VoiceTick arrived with `decoded_voice=None`, silently skipped | voice receive | orchestrator (+ warn-once tripwire) |
+| TTS playback dead: songbird's Symphonia has NO codec decoders by default; RawAdapter emits PCM_F32LE → "no compatible track found" | voice send | **user** (symphonia `pcm` feature unification) |
+| libopus_sys needs CMake on Windows (builds libopus from source) | build env | user (documented in runbook) |
+| Windows firewall / codec confusion resolved by layer diagnostics (`receive ticks/speaking_frames/unmapped_frames` counters + speaking_state logs) added mid-session | observability | orchestrator |
+
+DAVE E2EE itself: **flawless on first contact** — MLS welcome, per-user
+decryptors, epoch transitions across runs (5→7), privacy code. The
+ecosystem-research verdict held. Runbook walked to completion; port
+declared live-validated by the user.
