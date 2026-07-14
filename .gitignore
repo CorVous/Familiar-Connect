@@ -1,4 +1,7 @@
-# Python-generated files
+# Rust build artifacts
+/target/
+
+# Python-generated files (historical)
 __pycache__/
 *.py[oc]
 build/
