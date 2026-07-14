@@ -223,12 +223,12 @@ mod ort_model {
         /// Load the ONNX model at `model_path`.
         pub fn load(model_path: &Path) -> Result<Self, SmartTurnError> {
             let session = Session::builder()
-                .and_then(|b| b.commit_from_file(model_path))
+                .and_then(|mut b| b.commit_from_file(model_path))
                 .map_err(|e| SmartTurnError::Model(e.to_string()))?;
             let input_name = session
-                .inputs
+                .inputs()
                 .first()
-                .map_or_else(|| "input_values".to_owned(), |i| i.name.clone());
+                .map_or_else(|| "input_values".to_owned(), |i| i.name().to_owned());
             Ok(Self {
                 session: Mutex::new(session),
                 input_name,
@@ -237,9 +237,18 @@ mod ort_model {
     }
 
     impl SmartTurnModel for OrtSmartTurnModel {
+        // The `Mutex` guard is held across `run()` and the output extraction:
+        // `SessionOutputs` and the tensor views taken from it borrow the session,
+        // so the guard cannot be tightened past the extraction.
+        #[allow(
+            clippy::significant_drop_tightening,
+            reason = "outputs borrow the guarded session; it must live through extraction"
+        )]
         fn run(&self, samples: &[f32]) -> Vec<f32> {
-            let n = samples.len();
-            let Ok(tensor) = Tensor::from_array(([1_i64, n as i64], samples.to_vec())) else {
+            let Ok(len) = i64::try_from(samples.len()) else {
+                return Vec::new();
+            };
+            let Ok(tensor) = Tensor::from_array(([1_i64, len], samples.to_vec())) else {
                 return Vec::new();
             };
             let mut session = self.session.lock().expect("smart turn session poisoned");
@@ -252,7 +261,9 @@ mod ort_model {
             match first.try_extract_tensor::<f32>() {
                 // `(shape, data)` — the logits row is the trailing dim.
                 Ok((shape, data)) => {
-                    let last = shape.last().map_or(data.len(), |d| *d as usize);
+                    let last = shape
+                        .last()
+                        .map_or(data.len(), |d| usize::try_from(*d).unwrap_or(data.len()));
                     data.iter().rev().take(last).rev().copied().collect()
                 }
                 Err(_) => Vec::new(),

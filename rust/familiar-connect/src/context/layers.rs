@@ -1071,6 +1071,10 @@ impl PeopleDossierBuilder {
 
 /// Cosine similarity over equal-length float vectors; `0.0` on mismatch / zero
 /// norm.
+#[allow(
+    clippy::suboptimal_flops,
+    reason = "mirror Python's plain +/* float arithmetic for bit-parity of the cosine score"
+)]
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
         return 0.0;

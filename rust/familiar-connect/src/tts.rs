@@ -819,8 +819,7 @@ async fn get_cached_greeting_audio_in(
     let path = greeting_cache_path(dir, provider, voice_id, greeting);
     let is_file = tokio::fs::metadata(&path)
         .await
-        .map(|m| m.is_file())
-        .unwrap_or(false);
+        .is_ok_and(|m| m.is_file());
     if is_file {
         let audio = tokio::fs::read(&path)
             .await

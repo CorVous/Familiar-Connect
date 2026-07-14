@@ -804,10 +804,10 @@ impl TextResponder {
                     return None;
                 }
                 Some(false) => {
-                    if typing.is_none() {
-                        if let Some(trigger) = &self.trigger_typing {
-                            *typing = Some(trigger.open(channel_id).await);
-                        }
+                    if typing.is_none()
+                        && let Some(trigger) = &self.trigger_typing
+                    {
+                        *typing = Some(trigger.open(channel_id).await);
                     }
                 }
                 None => {}
@@ -961,11 +961,11 @@ impl AgenticHooks for TextToolHooks<'_> {
                 self.bail_silent.store(true, Ordering::SeqCst);
             }
             Some(false) => {
-                if !self.typing_started.swap(true, Ordering::SeqCst) {
-                    if let Some(trigger) = &self.responder.trigger_typing {
-                        let ind = trigger.open(self.channel_id).await;
-                        *self.typing.lock().expect("typing mutex") = Some(ind);
-                    }
+                if !self.typing_started.swap(true, Ordering::SeqCst)
+                    && let Some(trigger) = &self.responder.trigger_typing
+                {
+                    let ind = trigger.open(self.channel_id).await;
+                    *self.typing.lock().expect("typing mutex") = Some(ind);
                 }
             }
             None => {}

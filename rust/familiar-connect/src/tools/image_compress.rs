@@ -54,9 +54,7 @@ fn rgba_to_rgb(rgba: &RgbaImage) -> RgbImage {
 /// # Errors
 /// Propagates a decode failure.
 pub fn open_as_rgb(raw: &[u8]) -> Result<RgbImage, ImageCompressError> {
-    let is_gif = image::guess_format(raw)
-        .map(|f| f == ImageFormat::Gif)
-        .unwrap_or(false);
+    let is_gif = image::guess_format(raw).is_ok_and(|f| f == ImageFormat::Gif);
     if !is_gif {
         return Ok(image::load_from_memory(raw)?.to_rgb8());
     }

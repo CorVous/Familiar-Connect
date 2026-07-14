@@ -129,7 +129,7 @@ impl FactEmbeddingWorker {
                 );
                 return Ok(0);
             }
-            for (fact, vec) in pending.iter().zip(vectors.into_iter()) {
+            for (fact, vec) in pending.iter().zip(vectors) {
                 self.store
                     .set_fact_embedding(fact.id, self.embedder.name().to_string(), vec)
                     .await?;
