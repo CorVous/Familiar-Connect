@@ -74,7 +74,7 @@ fn build_fixture(segments: &[Seg]) -> Vec<u8> {
             Seg::Silence(ms) => out.extend_from_slice(&silence_pcm(ms)),
             Seg::Speech(ms) => {
                 out.extend_from_slice(&speech_pcm(ms, phase));
-                phase += 2.0 * PI * SPEECH_FREQ_HZ * (ms / 1000.0);
+                phase = (2.0 * PI * SPEECH_FREQ_HZ).mul_add(ms / 1000.0, phase);
                 phase %= 2.0 * PI;
             }
         }

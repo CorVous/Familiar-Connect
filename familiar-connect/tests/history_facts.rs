@@ -817,7 +817,7 @@ fn dedup_superseded_does_not_block_and_valid_to_bypasses() {
                 .valid_to(Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap()),
         )
         .unwrap();
-    assert!(bounding.id != first.id);
+    assert_ne!(bounding.id, first.id);
     assert_eq!(store2.all_fact_ids("fam").unwrap().len(), 2);
 }
 

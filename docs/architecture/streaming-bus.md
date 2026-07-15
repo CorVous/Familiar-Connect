@@ -3,8 +3,8 @@
 ## Status
 
 Accepted. Implemented in
-`src/familiar_connect/bus/` and all processors under
-`src/familiar_connect/processors/`.
+`familiar-connect/src/bus/` and all processors under
+`familiar-connect/src/processors/`.
 
 ## Context
 
@@ -34,7 +34,7 @@ Three approaches were on the table:
 ## Decision
 
 Ship option 3 as the single data-plane. The `EventBus` Protocol
-(`src/familiar_connect/bus/protocols.py`) is the seam; concrete
+(`familiar-connect/src/bus/protocols.rs`) is the seam; concrete
 `InProcessEventBus` is the only implementation needed today. Every
 processor, responder, and worker subscribes via the Protocol so a
 future `CrossProcessEventBus` can drop in without rewriting them.
@@ -66,11 +66,11 @@ future `CrossProcessEventBus` can drop in without rewriting them.
 
 - One dependency surface to debug — standard library asyncio plus
   SQLite. No Redis-is-down failure modes.
-- Sub-200 ms barge-in latency (verified by
-  `tests/test_voice_responder.py::TestBargeIn`).
+- Sub-200 ms barge-in latency (verified by the barge-in tests in
+  `familiar-connect/tests/responders_voice.rs`).
 - Everything that matters is a pure-Python test away from being
   covered.
-- Processor composition is simple enough that `commands/run.py`
+- Processor composition is simple enough that `commands/run.rs`
   wires them in ~15 lines.
 
 ### Bad
@@ -85,7 +85,7 @@ future `CrossProcessEventBus` can drop in without rewriting them.
 - Backpressure policy is per-topic, per-subscriber. A misconfigured
   subscriber (e.g. `BLOCK` on `voice.audio.raw`) would stall audio
   capture. Defaults live next to the topic constants; wiring
-  in `commands/run.py` is the one place humans make the choice.
+  in `commands/run.rs` is the one place humans make the choice.
 
 ### Neutral
 
