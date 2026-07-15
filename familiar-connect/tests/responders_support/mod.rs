@@ -699,46 +699,70 @@ pub fn simple_ctx_factory() -> ToolContextFactory {
 // Log capture
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct VecWriter(Arc<Mutex<Vec<u8>>>);
+// One process-global subscriber writing through a thread-local buffer slot.
+//
+// Per-test `set_default` subscribers are a flake factory: every install/drop
+// rebuilds tracing's GLOBAL callsite-interest cache, and a rebuild landing
+// between another test's install and its emit — computed at an instant with
+// no live capture — caches the callsite as never-interested, silently
+// dropping the emit (observed as count==0 flakes under parallel test load,
+// on CI and locally). A single global dispatcher computes interest exactly
+// once; per-test isolation comes from the thread-local sink instead (tests
+// run one-per-thread; the current-thread tokio runtime keeps emits on the
+// test's own thread).
+std::thread_local! {
+    static CAPTURE_SINK: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
-impl std::io::Write for VecWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("log buf").extend_from_slice(buf);
-        Ok(buf.len())
+#[derive(Clone, Copy)]
+struct ThreadLocalWriter;
+
+impl std::io::Write for ThreadLocalWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        CAPTURE_SINK.with(|slot| {
+            if let Some(buf) = slot.borrow().as_ref() {
+                buf.lock().expect("log buf").extend_from_slice(data);
+            }
+        });
+        Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
     type Writer = Self;
     fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
+        *self
     }
 }
 
-/// A thread-local tracing capture; hold it for the duration of the assertion.
+/// A per-test tracing capture; hold it for the duration of the assertion.
 pub struct LogCapture {
     buf: Arc<Mutex<Vec<u8>>>,
-    _guard: tracing::subscriber::DefaultGuard,
 }
 
 impl LogCapture {
-    /// Install a thread-local capturing subscriber.
+    /// Register this test's capture buffer (global subscriber installed once).
     pub fn install() -> Self {
+        static GLOBAL: std::sync::Once = std::sync::Once::new();
+        GLOBAL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalWriter)
+                .with_ansi(true)
+                // The module target `…voice_responder` contains the substring
+                // "respond"; drop it so decision-line filters aren't polluted.
+                .with_target(false)
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global subscriber in the test binary");
+        });
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(VecWriter(buf.clone()))
-            .with_ansi(true)
-            // The module target `…voice_responder` contains the substring
-            // "respond"; drop it so decision-line filters aren't polluted.
-            .with_target(false)
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        Self { buf, _guard: guard }
+        CAPTURE_SINK.with(|slot| *slot.borrow_mut() = Some(buf.clone()));
+        Self { buf }
     }
     /// The captured text so far.
     pub fn contents(&self) -> String {
@@ -750,5 +774,11 @@ impl LogCapture {
             .lines()
             .filter(|l| l.contains(needle))
             .count()
+    }
+}
+
+impl Drop for LogCapture {
+    fn drop(&mut self) {
+        CAPTURE_SINK.with(|slot| *slot.borrow_mut() = None);
     }
 }
