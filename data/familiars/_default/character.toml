@@ -209,13 +209,13 @@ priors_max      = 20    # prior facts shown to the LLM per subject
 #                        checks / smoke tests.
 # backend = "fastembed"  ONNX-backed sentence embedder (Qdrant
 #                        FastEmbed). Real semantic similarity. Needs
-#                        the ``local-embed`` extra; install via
-#                        ``uv sync --extra local-embed``. Default model
-#                        BGE-small downloads ~130 MB on first use,
-#                        cached under ~/.cache/fastembed.
+#                        the ``local-embed`` feature; build with
+#                        ``cargo build --features local-embed``. Default
+#                        model BGE-small downloads ~130 MB on first use
+#                        (fastembed cache dir).
 #
 # To turn on semantic recall:
-#   1. switch ``backend`` here (and install ``local-embed`` for fastembed)
+#   1. switch ``backend`` here (and build with ``local-embed`` for fastembed)
 #   2. add ``"fact_embedding"`` to [providers.memory].projectors
 #   3. raise [memory.retrieval].embedding_weight above 0
 #
@@ -301,13 +301,15 @@ reconnect_backoff_cap_s = 16.0
 idle_close_s            = 30.0  # close per-user stream after silence; 0 disables
 
 [providers.stt.parakeet]
-# Install: ``uv sync --extra local-turn --extra local-stt-parakeet``.
+# NOT YET IMPLEMENTED in the Rust port (``local-stt`` backend crate TBD —
+# see docs/rust-port/DESIGN.md §6); config accepted, backend errors at runtime.
 model_name   = "nvidia/parakeet-tdt-0.6b-v3"
 device       = "auto"           # "auto" | "cuda" | "cpu"
 idle_close_s = 30.0
 
 [providers.stt.faster_whisper]
-# Install: ``uv sync --extra local-turn --extra local-stt-whisper``.
+# NOT YET IMPLEMENTED in the Rust port (``local-stt`` backend crate TBD —
+# see docs/rust-port/DESIGN.md §6); config accepted, backend errors at runtime.
 model_size   = "small"          # "tiny" | "base" | "small" | "medium" | "large-v3"
 device       = "auto"           # "auto" | "cuda" | "cpu"
 compute_type = "auto"           # "auto" | "int8" | "float16" | "float32"
