@@ -1915,6 +1915,64 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Compare-and-set dossier write, closing the supersede-vs-rebuild race
+    /// (#130). A dossier rebuild reads the prior row, runs a long LLM call, then
+    /// writes — and a concurrent supersede may DELETE the row as
+    /// cache-invalidation in that window (a surviving row would re-compound
+    /// stale prose). An unconditional upsert ([`Self::put_people_dossier`])
+    /// would resurrect the invalidated row with pre-supersede content, and
+    /// because supersede never raises `max(facts.id)` the resurrected watermark
+    /// blocks any future refresh — the orphan sticks. This write only lands
+    /// when the row is still the one the caller read.
+    ///
+    /// `expected_prev_last_fact_id`:
+    /// - `Some(w)` — a prior dossier existed at read time: UPDATE only the row
+    ///   still at watermark `w`. Zero rows affected means a concurrent supersede
+    ///   deleted it (or another writer already moved the watermark); the write
+    ///   is dropped and the next tick rebuilds cleanly from `prior = None`.
+    /// - `None` — no prior at read time: `INSERT ... ON CONFLICT DO NOTHING`, so
+    ///   a racing writer that already created the row is not clobbered.
+    ///
+    /// Returns whether the write landed.
+    pub fn put_people_dossier_if_current(
+        &self,
+        familiar_id: &str,
+        canonical_key: &str,
+        expected_prev_last_fact_id: Option<i64>,
+        new_last_fact_id: i64,
+        dossier_text: &str,
+    ) -> Result<bool, StoreError> {
+        let affected = match expected_prev_last_fact_id {
+            Some(prev) => self.db.execute(
+                "UPDATE people_dossiers \
+                 SET last_fact_id = ?, dossier_text = ?, created_at = ? \
+                 WHERE familiar_id = ? AND canonical_key = ? AND last_fact_id = ?",
+                vec![
+                    v_int(new_last_fact_id),
+                    v_str(dossier_text),
+                    v_str(iso_utc(Utc::now())),
+                    v_str(familiar_id),
+                    v_str(canonical_key),
+                    v_int(prev),
+                ],
+            )?,
+            None => self.db.execute(
+                "INSERT INTO people_dossiers \
+                    (familiar_id, canonical_key, last_fact_id, dossier_text, created_at) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (familiar_id, canonical_key) DO NOTHING",
+                vec![
+                    v_str(familiar_id),
+                    v_str(canonical_key),
+                    v_int(new_last_fact_id),
+                    v_str(dossier_text),
+                    v_str(iso_utc(Utc::now())),
+                ],
+            )?,
+        };
+        Ok(affected > 0)
+    }
+
     /// Map `canonical_key` → `max(facts.id)` across current (non-superseded) facts.
     pub fn subjects_with_facts(
         &self,

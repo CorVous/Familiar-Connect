@@ -385,6 +385,113 @@ fn supersede_deletes_subject_dossier() {
 }
 
 #[test]
+fn put_dossier_if_current_updates_when_watermark_matches() {
+    // The common (non-raced) path: the row is still at the read-time watermark,
+    // so the CAS lands and advances it.
+    let store = mem();
+    store
+        .put_people_dossier("fam", "discord:A", 5, "v1")
+        .unwrap();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", Some(5), 9, "v2")
+        .unwrap();
+    assert!(landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "v2");
+    assert_eq!(entry.last_fact_id, 9);
+}
+
+#[test]
+fn put_dossier_if_current_drops_write_after_supersede_delete() {
+    // #130: a concurrent supersede deletes the row between the worker's read (at
+    // watermark = old_id) and its write; the stale CAS must NOT resurrect it.
+    let (store, old_id, new_id) = store_with_subject_fact();
+    store
+        .put_people_dossier("fam", "discord:A", old_id, "Aria loves hiking.")
+        .unwrap();
+    store
+        .supersede("fam", &[old_id], NewFact::Repoint(new_id))
+        .unwrap();
+    assert!(
+        store
+            .get_people_dossier("fam", "discord:A")
+            .unwrap()
+            .is_none()
+    );
+
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", Some(old_id), new_id, "stale prose")
+        .unwrap();
+    assert!(!landed, "stale CAS must not land");
+    assert!(
+        store
+            .get_people_dossier("fam", "discord:A")
+            .unwrap()
+            .is_none(),
+        "dropped write must not resurrect the invalidated row",
+    );
+}
+
+#[test]
+fn put_dossier_if_current_stale_watermark_does_not_clobber() {
+    // Another writer already advanced the watermark; a CAS at the old watermark
+    // must not overwrite the newer row.
+    let store = mem();
+    store
+        .put_people_dossier("fam", "discord:A", 3, "current")
+        .unwrap();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", Some(1), 9, "stale")
+        .unwrap();
+    assert!(!landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "current");
+    assert_eq!(entry.last_fact_id, 3);
+}
+
+#[test]
+fn put_dossier_if_current_inserts_when_absent() {
+    // None-prior (fresh subject): a clean insert lands.
+    let store = mem();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", None, 4, "fresh")
+        .unwrap();
+    assert!(landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "fresh");
+    assert_eq!(entry.last_fact_id, 4);
+}
+
+#[test]
+fn put_dossier_if_current_none_prior_does_not_clobber_racing_insert() {
+    // None-prior but a racing writer already created the row: DO NOTHING and
+    // report the write did not land.
+    let store = mem();
+    store
+        .put_people_dossier("fam", "discord:A", 7, "winner")
+        .unwrap();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", None, 4, "loser")
+        .unwrap();
+    assert!(!landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "winner");
+    assert_eq!(entry.last_fact_id, 7);
+}
+
+#[test]
 fn supersede_null_subject_leaves_dossiers() {
     let store = mem();
     store

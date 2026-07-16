@@ -9,12 +9,16 @@
 mod helpers;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use familiar_connect::history::async_store::AsyncHistoryStore;
-use familiar_connect::history::store::{AppendFact, FactSubject};
+use familiar_connect::history::store::{AppendFact, FactSubject, NewFact};
 use familiar_connect::identity::Author;
-use familiar_connect::llm::LlmClient;
+use familiar_connect::llm::{LlmClient, LlmDelta, Message};
 use familiar_connect::processors::people_dossier_worker::PeopleDossierWorker;
+use futures::stream::BoxStream;
+use serde_json::Value;
 
 use helpers::{ScriptedLlm, joined, store, system_text, user_text};
 
@@ -369,4 +373,104 @@ async fn no_subjects_means_no_llm_call() {
     worker(&store, &llm).tick().await.unwrap();
 
     assert_eq!(llm.call_count(), 0);
+}
+
+/// An LLM double that supersedes `old_id` → `new_id` (deleting the subject's
+/// dossier row as cache-invalidation) on its FIRST `chat` call, modelling a
+/// concurrent `FactSupersedeWorker` firing DURING the dossier rebuild's LLM
+/// call — the interleave that #130 item 1 hardens against.
+struct SupersedingLlm {
+    store: Arc<AsyncHistoryStore>,
+    old_id: i64,
+    new_id: i64,
+    reply: String,
+    calls: AtomicUsize,
+}
+
+impl SupersedingLlm {
+    fn new(store: Arc<AsyncHistoryStore>, old_id: i64, new_id: i64, reply: &str) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            old_id,
+            new_id,
+            reply: reply.to_owned(),
+            calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl LlmClient for SupersedingLlm {
+    async fn chat(&self, _messages: Vec<Message>) -> anyhow::Result<Message> {
+        // Fire the racing supersede exactly once, on the first rebuild call.
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.store
+                .sync()
+                .supersede("fam", &[self.old_id], NewFact::Repoint(self.new_id))
+                .unwrap();
+        }
+        Ok(Message::new("assistant", self.reply.clone()))
+    }
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Option<Vec<Value>>,
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+    fn slot(&self) -> Option<&str> {
+        Some("background")
+    }
+    fn multimodal(&self) -> bool {
+        false
+    }
+    fn tool_calling_enabled(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn rebuild_racing_supersede_delete_does_not_resurrect_dossier() {
+    // #130 item 1: seed a dossier at watermark = old_id plus a newer fact that
+    // triggers a rebuild. A supersede deletes the dossier row mid-LLM-call; the
+    // stale CAS write must be dropped (no orphan), and the next tick rebuilds
+    // the row cleanly from prior=None.
+    let store = store();
+    let old_id = seed_subject_fact(&store, "Aria loves hiking.", "discord:A", "Aria");
+    store
+        .sync()
+        .put_people_dossier("fam", "discord:A", old_id, "Aria loves hiking.")
+        .unwrap();
+    let new_id = seed_subject_fact(&store, "Aria hates hiking now.", "discord:A", "Aria");
+
+    let llm = SupersedingLlm::new(
+        Arc::clone(&store),
+        old_id,
+        new_id,
+        "Aria used to love hiking.",
+    );
+    let worker = PeopleDossierWorker::new(store.clone(), llm.clone() as Arc<dyn LlmClient>, "fam");
+
+    // Tick 1: rebuild reads prior (wm=old_id), supersede deletes the row during
+    // the LLM call, CAS at old_id finds no row → dropped, not resurrected.
+    worker.tick().await.unwrap();
+    assert!(
+        store
+            .sync()
+            .get_people_dossier("fam", "discord:A")
+            .unwrap()
+            .is_none(),
+        "raced write must not resurrect the invalidated dossier",
+    );
+
+    // Tick 2: prior=None, so the worker rebuilds cleanly against the surviving
+    // (repointed) fact — the subject self-heals.
+    worker.tick().await.unwrap();
+    let entry = store
+        .sync()
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .expect("dossier rebuilt on the next tick");
+    assert_eq!(entry.last_fact_id, new_id);
+    assert!(entry.dossier_text.contains("Aria"));
 }
