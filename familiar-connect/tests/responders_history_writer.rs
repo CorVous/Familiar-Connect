@@ -86,6 +86,35 @@ async fn author_taken_without_isinstance_check() {
     assert_eq!(turns[0].author.as_ref().unwrap().user_id, "5");
 }
 
+#[tokio::test]
+async fn persists_pings_bot_on_user_turn() {
+    // Regression (#182): a pinging message must record pings_bot=true, matching
+    // TextResponder's user-turn write (responders_text.rs::persists_pings_bot_on_user_turn).
+    let s = store();
+    let writer = HistoryWriter::new(Arc::clone(&s), "fam");
+    let mut payload = text_payload(42, "you there @bot?");
+    payload.pings_bot = true;
+    let ev = discord_text_event(payload, "e-1");
+    writer.handle(&ev, &bus()).await.unwrap();
+
+    let turns = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].pings_bot);
+}
+
+#[tokio::test]
+async fn user_turn_pings_bot_false_without_ping() {
+    // The default (non-pinging) path stays pings_bot=false.
+    let s = store();
+    let writer = HistoryWriter::new(Arc::clone(&s), "fam");
+    let ev = discord_text_event(text_payload(42, "just chatting"), "e-1");
+    writer.handle(&ev, &bus()).await.unwrap();
+
+    let turns = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert!(!turns[0].pings_bot);
+}
+
 #[test]
 fn processor_surface() {
     let s = store();
