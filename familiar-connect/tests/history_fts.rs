@@ -211,6 +211,69 @@ fn search_turns_respects_max_id() {
     assert!(bounded.len() < full.len());
 }
 
+// --- rebuild after a wiped / foreign on-disk index ------------------------
+
+/// Migration failure mode: opening a store over a foreign/incompatible tantivy
+/// index (Python-written, different schema) wipes it to an empty index. Reopen
+/// must repopulate both indexes from the surviving SQLite tables rather than
+/// silently serving an empty FTS.
+#[test]
+fn reopen_rebuilds_fts_after_index_wipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("history.db");
+
+    {
+        let store = HistoryStore::open(&db_path).unwrap();
+        for text in [
+            "The fox jumped over the moon.",
+            "The quick brown fox.",
+            "Anything with foxes is cool.",
+        ] {
+            store
+                .append_turn(AppendTurn::new(FAM, 100, "user", text).author(alice()))
+                .unwrap();
+        }
+        store
+            .append_fact(AppendFact::new(
+                FAM,
+                Some(100),
+                "Aria adores strawberries.",
+                vec![1],
+            ))
+            .unwrap();
+        store
+            .append_fact(AppendFact::new(
+                FAM,
+                Some(100),
+                "Boris pilots dirigibles.",
+                vec![2],
+            ))
+            .unwrap();
+        // Sanity: both indexes are populated before the wipe.
+        assert_eq!(search(&store, "fox", 10).len(), 3);
+        assert_eq!(
+            store.search_facts(FAM, "strawberries", 10, false, None).unwrap().len(),
+            1
+        );
+        store.close();
+    }
+
+    // Destroy the on-disk FTS entirely, leaving the SQLite tables intact — the
+    // net effect of the incompatible-index wipe in `TantivyFts::open_or_recreate`.
+    std::fs::remove_dir_all(db_path.parent().unwrap().join("fts")).unwrap();
+
+    let store = HistoryStore::open(&db_path).unwrap();
+    assert_eq!(search(&store, "fox", 10).len(), 3);
+    assert_eq!(
+        store.search_facts(FAM, "strawberries", 10, false, None).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        store.search_facts(FAM, "dirigibles", 10, false, None).unwrap().len(),
+        1
+    );
+}
+
 // --- append_turn survives an FTS write failure ----------------------------
 
 /// A store-side FTS double whose every write fails — stands in for Python's

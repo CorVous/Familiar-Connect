@@ -1053,9 +1053,15 @@ impl HistoryStore {
             std::fs::create_dir_all(parent)?;
         }
         let fts_root = parent.unwrap_or_else(|| Path::new(".")).join("fts");
-        let fts_turns = Box::new(TantivyFts::open_dir(&fts_root.join("turns"))?);
-        let fts_facts = Box::new(TantivyFts::open_dir(&fts_root.join("facts"))?);
-        Self::init(Db::open(path)?, fts_turns, fts_facts)
+        let (fts_turns, turns_recreated) = TantivyFts::open_dir(&fts_root.join("turns"))?;
+        let (fts_facts, facts_recreated) = TantivyFts::open_dir(&fts_root.join("facts"))?;
+        // An index that was wiped-and-recreated, or is otherwise empty, has lost
+        // whatever the retired Python impl indexed; repopulate it from the DB.
+        let turns_stale = turns_recreated || fts_turns.is_empty();
+        let facts_stale = facts_recreated || fts_facts.is_empty();
+        let store = Self::init(Db::open(path)?, Box::new(fts_turns), Box::new(fts_facts))?;
+        store.repopulate_stale_fts(turns_stale, facts_stale)?;
+        Ok(store)
     }
 
     /// Open a store with caller-supplied FTS indexes. The DB is set up exactly
@@ -3285,13 +3291,70 @@ impl HistoryStore {
 
     /// Drop and repopulate the tantivy turns index from `turns`.
     pub fn rebuild_fts(&self) -> Result<(), StoreError> {
+        self.rebuild_turns_fts().map(|_| ())
+    }
+
+    /// Clear and repopulate the turns index from the `turns` table; returns the
+    /// number of rows indexed.
+    fn rebuild_turns_fts(&self) -> Result<usize, StoreError> {
         self.fts_turns.clear()?;
         let rows = self.db.query_map(
             "SELECT id, content FROM turns ORDER BY id ASC",
             vec![],
             |r| Ok((r.get::<_, i64>("id")?, r.get::<_, String>("content")?)),
         )?;
-        self.fts_turns.add_many(&rows)
+        let count = rows.len();
+        self.fts_turns.add_many(&rows)?;
+        Ok(count)
+    }
+
+    /// Clear and repopulate the facts index from the `facts` table; returns the
+    /// number of rows indexed.
+    fn rebuild_facts_fts(&self) -> Result<usize, StoreError> {
+        self.fts_facts.clear()?;
+        let rows = self.db.query_map(
+            "SELECT id, text FROM facts ORDER BY id ASC",
+            vec![],
+            |r| Ok((r.get::<_, i64>("id")?, r.get::<_, String>("text")?)),
+        )?;
+        let count = rows.len();
+        self.fts_facts.add_many(&rows)?;
+        Ok(count)
+    }
+
+    /// Repopulate any FTS index that was wiped/recreated or is empty while its
+    /// source table still holds rows (the Python-index migration failure mode).
+    /// Synchronous — the live corpus is ~10k rows.
+    fn repopulate_stale_fts(&self, turns_stale: bool, facts_stale: bool) -> Result<(), StoreError> {
+        if turns_stale && self.table_has_rows("turns")? {
+            let rows = self.rebuild_turns_fts()?;
+            tracing::info!(
+                target: "familiar_connect.history",
+                index = "turns",
+                rows,
+                "rebuilt FTS index from DB (on-disk index was wiped or empty)"
+            );
+        }
+        if facts_stale && self.table_has_rows("facts")? {
+            let rows = self.rebuild_facts_fts()?;
+            tracing::info!(
+                target: "familiar_connect.history",
+                index = "facts",
+                rows,
+                "rebuilt FTS index from DB (on-disk index was wiped or empty)"
+            );
+        }
+        Ok(())
+    }
+
+    /// Cheap existence probe for one of the fixed source tables.
+    fn table_has_rows(&self, table: &str) -> Result<bool, StoreError> {
+        // `table` is a fixed literal from `repopulate_stale_fts`, never user input.
+        let present = self
+            .db
+            .query_scalar_i64(format!("SELECT EXISTS(SELECT 1 FROM {table})"), vec![])?
+            .unwrap_or(0);
+        Ok(present != 0)
     }
 
     /// Highest turn id indexed for `familiar_id` (a `MAX(turns.id)` query; the
