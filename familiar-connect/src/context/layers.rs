@@ -625,6 +625,15 @@ impl RecentHistoryLayer {
             rendered = trim_messages_to_token_cap(rendered, max_tokens);
             let keep = rendered.len();
             let drop = turns.len().saturating_sub(keep);
+            if drop > 0 {
+                // Recent-history trim impact: how many oldest turns the token
+                // cap dropped this build. Observability only (issue #184
+                // profiling signal) — the trim behavior is unchanged.
+                tracing::debug!(
+                    "RecentHistoryLayer: trimmed {drop} oldest turn(s) to fit \
+                     {max_tokens}-token cap ({keep} kept)"
+                );
+            }
             turns = turns.split_off(drop);
         }
 
