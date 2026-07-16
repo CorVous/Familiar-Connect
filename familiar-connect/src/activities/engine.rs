@@ -2697,7 +2697,12 @@ mod tests {
     async fn recv_wake(
         sub: &mut crate::bus::in_process::Subscription,
     ) -> Option<std::sync::Arc<Event>> {
-        timeout(StdDur::from_secs(1), sub.recv())
+        // Pure hang-guard: every caller `.expect`s `Some`, so the bound only
+        // exists to fail a genuinely-stuck test instead of hanging CI forever.
+        // Keep it generous — the runner does several `spawn_blocking` DB
+        // round-trips before publishing, which can outlast a tight 1s deadline
+        // on a loaded current-thread test runtime (the `c1_*` flake).
+        timeout(StdDur::from_secs(30), sub.recv())
             .await
             .ok()
             .flatten()
