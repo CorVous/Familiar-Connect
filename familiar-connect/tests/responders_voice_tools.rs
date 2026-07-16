@@ -170,3 +170,68 @@ async fn filler_spoken_when_tool_call_has_empty_content() {
         snap[0]
     );
 }
+
+#[tokio::test]
+async fn leaked_invoke_xml_content_never_reaches_tts_or_history() {
+    // Issue #109: the model leaks a tool call as PLAIN CONTENT (no structured
+    // tool_calls), split across deltas, inside the agentic tool loop. The
+    // streaming gate must suppress it before it reaches TTS, and the raw XML
+    // must never land in the persisted assistant turn.
+    let spoken = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = FnHandler(|_a: Value, _c: ToolContext| async move {
+        Ok(ToolOutput::Text(json!({"ok": true}).to_string()))
+    });
+    let mut reg = ToolRegistry::new();
+    reg.register(Tool::new("read_channel", "", json!({}), Arc::new(handler)))
+        .unwrap();
+
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        text_delta("<invoke name=\"read_channel\">\n"),
+        text_delta("<parameter name=\"limit\">10</parameter>\n"),
+        text_delta("</invoke>"),
+        finish("stop"),
+    ]]));
+    let player = Arc::new(RecordingVoicePlayer {
+        spoken: Arc::clone(&spoken),
+    });
+    let s = store();
+    let assembler = make_assembler(Arc::clone(&s));
+    let r = VoiceResponder::new(
+        assembler,
+        llm,
+        player,
+        Arc::clone(&s),
+        Arc::new(TurnRouter::new()),
+        "fam",
+    )
+    .with_tools(Arc::new(reg), voice_ctx_factory());
+
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(
+        &voice_final("read the channel", "voice:1", "t-1", None),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    r.wait_until_idle().await;
+
+    let spoken = spoken.lock().unwrap();
+    assert!(
+        spoken
+            .iter()
+            .all(|s| !s.contains("invoke") && !s.contains('<')),
+        "leak reached TTS: {spoken:?}"
+    );
+    let turns = s.sync().recent("fam", 1, 10, None, None).unwrap();
+    assert!(
+        turns.iter().all(|t| t.role != "assistant"),
+        "assistant turn persisted: {:?}",
+        turns
+            .iter()
+            .map(|t| (t.role.clone(), t.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(turns.iter().all(|t| !t.content.contains("invoke")));
+}

@@ -240,10 +240,19 @@ single-letter initials (`J. K. Rowling`) don't trip a boundary. A
 trailing partial without a terminator (model omits the final period)
 is drained on stream end via `flush()` and spoken last.
 
-**Silent sentinel.** `SilentDetector` runs ahead of the splitter on
-every delta. Sentences finalised before the gate decides are buffered;
-on `True` they're dropped and TTS is never invoked; on `False` they
-flush and the streamer feeds TTS as new sentences arrive.
+**Silent sentinel + leak guard.** `StreamGate` (Rust `silence.rs`) runs
+ahead of the splitter on every delta. Sentences finalised before the
+gate decides are buffered; on `silent` they're dropped and TTS is never
+invoked; on `speak` they flush and the streamer feeds TTS as new
+sentences arrive. Beyond `<silent>`, the gate also recognises a
+tool-call block the model occasionally leaks as plain text (`<invoke …`,
+`silent(…)`, `read_channel(…)`, `<tool_call …`), staying pending while
+the token is still split across delta boundaries and latching `suppress`
+(or `silent`, for a leaked `silent` call) so the raw XML never reaches
+TTS or the persisted turn (issue #109). The confirmed-leak
+classification is shared with the agentic loop's return-time strip guard
+(`classify_leading_leak`), the single source of truth. The text path,
+which streams no content mid-turn, keeps the simpler `SilentDetector`.
 
 **Cancellation.** Each `await self._tts.speak(sentence, scope=...)` is
 awaited serially. Barge-in cancels the current `TurnScope`;
