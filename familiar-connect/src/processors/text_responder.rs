@@ -36,7 +36,7 @@ use crate::silence::SilentDetector;
 use crate::tools::agentic::{
     AgenticHooks, DEFAULT_MAX_ITERATIONS, agentic_loop, tool_content_as_text,
 };
-use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::{FocusControl, ToolRegistry};
 use crate::typing_interrupt::TypingInterruptHandler;
 
 // ---------------------------------------------------------------------------
@@ -427,8 +427,19 @@ impl TextResponder {
         } else {
             None
         };
+        // Turn-local sink: `shift_focus` (if the model calls it this turn)
+        // records the channel it moved to here, so the send target follows THIS
+        // turn's own shift rather than the mutable global focus (#170).
+        let shift_target: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
         let reply = self
-            .stream_reply(&scope, channel_id, guild_id, images, activity_state_line)
+            .stream_reply(
+                &scope,
+                channel_id,
+                guild_id,
+                images,
+                activity_state_line,
+                &shift_target,
+            )
             .await;
 
         let Some(reply) = reply else {
@@ -448,6 +459,24 @@ impl TextResponder {
                 "{} {} {}",
                 ls::tag("Text", ls::Y),
                 ls::kv_styled("skip", "empty_reply", ls::W, ls::LY),
+                ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
+            );
+            if let Some(engine) = &self.activity_engine {
+                engine.end_turn().await;
+            }
+            return Ok(());
+        }
+
+        // Wake = shift-or-silent (#170): a wake turn's reply follows a shift the
+        // model made this turn; without one it would post to the stale focus
+        // channel, so suppress it entirely (treat as silent).
+        let shifted_to = *shift_target.lock().expect("shift target mutex");
+        if is_wake && shifted_to.is_none() {
+            tracing::info!(
+                "{} {} {} {}",
+                ls::tag("\u{1f4a4} Text", ls::B),
+                ls::kv_styled("guard", "wake_shift_or_silent", ls::W, ls::LB),
+                ls::kv_styled("action", "suppress", ls::W, ls::LB),
                 ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
             );
             if let Some(engine) = &self.activity_engine {
@@ -478,13 +507,10 @@ impl TextResponder {
             None
         };
 
-        // A mid-turn shift_focus already moved the pointer — reply follows focus.
-        let mut send_channel_id = channel_id;
-        if let Some(fm) = &self.focus_manager {
-            if let Some(focus) = fm.get_focus("text") {
-                send_channel_id = focus;
-            }
-        }
+        // Per-turn routing (#170): the reply goes to the turn's own shift target
+        // (set by `shift_focus` this turn) or the triggering channel — never the
+        // mutable global focus read at send time (the cross-channel misroute).
+        let send_channel_id = shifted_to.unwrap_or(channel_id);
 
         let sent_message_id = match self
             .send_text
@@ -653,6 +679,7 @@ impl TextResponder {
         guild_id: Option<i64>,
         images: HashMap<String, String>,
         activity_state_line: Option<String>,
+        shift_target: &Arc<Mutex<Option<i64>>>,
     ) -> Option<String> {
         let mut ctx =
             AssemblyContext::new(&self.familiar_id, Some(channel_id)).with_viewer_mode("text");
@@ -731,8 +758,15 @@ impl TextResponder {
             && self.tool_context_factory.is_some()
             && (self.llm.tool_calling_enabled() || self.llm.image_tools_enabled());
         if tool_mode {
-            self.stream_reply_with_tools(scope, channel_id, guild_id, messages, images)
-                .await
+            self.stream_reply_with_tools(
+                scope,
+                channel_id,
+                guild_id,
+                messages,
+                images,
+                shift_target,
+            )
+            .await
         } else {
             self.stream_reply_bare(scope, channel_id, messages).await
         }
@@ -823,13 +857,23 @@ impl TextResponder {
         guild_id: Option<i64>,
         mut messages: Vec<Message>,
         images: HashMap<String, String>,
+        shift_target: &Arc<Mutex<Option<i64>>>,
     ) -> Option<String> {
         let (Some(factory), Some(registry)) = (&self.tool_context_factory, &self.tool_registry)
         else {
             return None;
         };
         let registry: &ToolRegistry = registry;
-        let ctx = factory(channel_id, &scope.turn_id, images);
+        let mut ctx = factory(channel_id, &scope.turn_id, images);
+        // Intercept `shift_focus` at its call site so the turn's send target is
+        // the channel focus actually moved to (not the requested one on a failed
+        // shift, and not the mutable global focus at send time) — issue #170.
+        if let Some(inner) = ctx.focus_manager.take() {
+            ctx.focus_manager = Some(Arc::new(TurnFocusRecorder {
+                inner,
+                shifted_to: Arc::clone(shift_target),
+            }) as Arc<dyn FocusControl>);
+        }
         let hooks = TextToolHooks {
             responder: self,
             scope,
@@ -1010,6 +1054,44 @@ impl AgenticHooks for TextToolHooks<'_> {
                 tracing::warn!("{} tool-turn persist failed: {e}", ls::tag("Text", ls::R));
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-turn focus recorder (#170)
+// ---------------------------------------------------------------------------
+
+/// Wraps the tool-path focus controller for the duration of one turn: every
+/// call delegates to the inner controller, but an applied `shift_focus`
+/// additionally records the channel it moved to into a turn-local sink. The
+/// responder then routes (and persists) the reply to that channel rather than
+/// reading the mutable global focus at send time — closing the cross-channel
+/// misroute race (#170).
+struct TurnFocusRecorder {
+    inner: Arc<dyn FocusControl>,
+    shifted_to: Arc<Mutex<Option<i64>>>,
+}
+
+#[async_trait]
+impl FocusControl for TurnFocusRecorder {
+    fn is_subscribed(&self, channel_id: i64) -> bool {
+        self.inner.is_subscribed(channel_id)
+    }
+    fn subscribed_channels(&self) -> Vec<i64> {
+        self.inner.subscribed_channels()
+    }
+    fn channel_label(&self, channel_id: i64) -> String {
+        self.inner.channel_label(channel_id)
+    }
+    fn get_focus(&self, modality: &str) -> Option<i64> {
+        self.inner.get_focus(modality)
+    }
+    fn catch_up_limit(&self) -> usize {
+        self.inner.catch_up_limit()
+    }
+    async fn shift_now(&self, channel_id: i64) {
+        self.inner.shift_now(channel_id).await;
+        *self.shifted_to.lock().expect("shift recorder mutex") = Some(channel_id);
     }
 }
 

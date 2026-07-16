@@ -1036,9 +1036,13 @@ Discord text on channel C
       seeds RagContextLayer cue = content
       Assembler.assemble(ctx, viewer_mode="text")
       LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
-      (shift_focus, if called, already moved focus + promoted staged)
+      (shift_focus, if called, already moved focus + promoted staged, and is
+       recorded turn-locally as this turn's send target)
       if `<silent>` detected: bail (no send, no assistant turn)
-      else: BotHandle.send_text(current text focus, reply); append assistant turn
+      if wake turn AND no shift this turn: suppress (shift-or-silent, #170)
+      else: BotHandle.send_text(this turn's shift target, else channel C, reply)
+            append assistant turn to that same channel  (never the global focus
+            read at send time — #170's cross-channel misroute)
       router.end_turn(scope)
       FocusManager.end_turn()  (idle-clock bookkeeping only)
 
