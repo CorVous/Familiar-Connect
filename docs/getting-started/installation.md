@@ -21,8 +21,9 @@
 
 Create a `.env` in the repo root (loaded on startup). Only install-wide
 secrets and the active-familiar selector live here; everything tunable
-about the familiar — LLM model, TTS voice — lives in
-`data/familiars/<id>/character.toml`.
+about the familiar — LLM model, TTS voice — lives in the familiar's
+`character.toml` under the
+[familiars root](on-disk-layout.md#where-the-familiars-root-lives).
 
 ```bash
 # required
@@ -58,13 +59,20 @@ slots](../architecture/tuning.md#llm-slots) for the schema.
 
 The reference profile at `data/familiars/_default/character.toml`
 fills each slot with a sensible default. A user's own `character.toml`
-only overrides the fields it wants to change. Copy the default to
-start a new familiar:
+only overrides the fields it wants to change. Copy the default into
+your [familiars root](on-disk-layout.md#where-the-familiars-root-lives)
+to start a new familiar:
 
 ```bash
-cp -r data/familiars/_default data/familiars/my-familiar
-# then edit data/familiars/my-familiar/character.toml
+export FAMILIARS_ROOT=./data/familiars   # or your chosen data dir
+cp -r data/familiars/_default "$FAMILIARS_ROOT/my-familiar"
+# then edit "$FAMILIARS_ROOT/my-familiar/character.toml"
 ```
+
+If a slot points at a vision-capable model, also set
+`multimodal = true` in that `[llm.<slot>]` table: it defaults to
+`false`, which silently sends the model only a text description of any
+image rather than the image itself.
 
 ## Start
 

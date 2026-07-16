@@ -52,7 +52,7 @@ Set in `.env` or the host environment. Never log them.
 | `DISCORD_BOT` | Discord bot token. |
 | `OPENROUTER_API_KEY` | Shared across every LLM call site. |
 | `DEEPGRAM_API_KEY` | STT credential. |
-| `FAMILIAR_ID` | Character folder under `data/familiars/`. Overridable by `--familiar`. |
+| `FAMILIAR_ID` | Character folder under the familiars root. Overridable by `--familiar`. |
 
 ### TTS provider credentials (one set, depending on `[tts].provider`)
 
@@ -61,6 +61,15 @@ Set in `.env` or the host environment. Never log them.
 | `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure (default). |
 | `CARTESIA_API_KEY` | Cartesia. |
 | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | Gemini. |
+
+### Optional path overrides
+
+| Var | Purpose |
+|---|---|
+| `FAMILIARS_ROOT` | Override the per-user familiars root (default: platform data dir; issue #201). |
+| `FAMILIAR_DEFAULTS_ROOT` | Override where the tracked `_default` skeleton resolves (default: `data/familiars`). |
+
+See [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
 
 ## Character TOML — current schema
 

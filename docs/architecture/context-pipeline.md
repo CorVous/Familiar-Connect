@@ -5,13 +5,13 @@ sync with the raw source of truth.
 
 ## Source of truth vs side-indices
 
-The `turns` table in `data/familiars/<id>/history.db` (Turso) is the
+The `turns` table in `data/familiars/<id>/history.db` (SQLite, `rusqlite`) is the
 durable, append-only source of truth. Every derived artifact —
 summaries, FTS indexes (sibling `fts/turns/`
 and `fts/facts/` tantivy dirs on disk) — is **regenerable from
 `turns` alone**. Deleting any side-index row (or the whole table) is
 safe; the next worker tick rebuilds it. Tantivy indexes auto-rebuild
-on `HistoryStore.__init__` when missing.
+on `HistoryStore::new` when missing.
 
 ```mermaid
 flowchart TB
@@ -59,14 +59,15 @@ flowchart TB
 
 ## Layers
 
-Each layer implements a narrow Protocol:
+Each layer implements a narrow trait:
 
-```python
-class Layer(Protocol):
-    name: str
-
-    async def build(self, ctx: AssemblyContext) -> str: ...
-    def invalidation_key(self, ctx: AssemblyContext) -> str: ...
+```rust
+#[async_trait]
+pub trait Layer: Send + Sync {
+    fn name(&self) -> &'static str;
+    async fn build(&self, ctx: &AssemblyContext) -> String;
+    async fn invalidation_key(&self, ctx: &AssemblyContext) -> String;
+}
 ```
 
 `build` returns the layer's text contribution (empty string opts out).
@@ -151,15 +152,15 @@ for later refinement once drift data demands it.
 ### Tantivy FTS indexes
 
 Two on-disk tantivy indexes — `fts/turns/` and `fts/facts/` under the
-familiar root — sit beside the Turso DB. They live outside the
-database because pyturso wheels don't ship Turso's own FTS module yet,
-and because tantivy queries outside Turso don't queue behind SQL
-writes (the original "FTS5 blocks the Discord heartbeat" bug was a
-single slow tokeniser query gating every other DB call).
+familiar root — sit beside the SQLite DB. They live outside the
+database because tantivy is native Rust and its queries don't queue
+behind the single-owner SQL actor (the original "FTS5 blocks the
+Discord heartbeat" bug was a single slow tokeniser query gating every
+other DB call).
 
 Updates are synchronous from `HistoryStore`:
 
-- `append_turn` writes the row to Turso, commits, then upserts the
+- `append_turn` writes the row to SQLite, commits, then upserts the
   `(id, content)` doc into `fts/turns/`.
 - `append_fact` does the same against `fts/facts/`.
 - `update_turn_content_by_message_id` re-adds the row (tantivy treats
@@ -247,8 +248,8 @@ not turn-by-turn updates.
 
 Per tick:
 
-1. Read `latest_id(turns)` for the familiar; compare to the newest
-   reflection row's `last_turn_id` watermark. Skip if the gap is
+1. Read `latest_id(turns)` for the familiar; compare to the
+   `reflection_watermark` table's `last_turn_id`. Skip if the gap is
    `< turns_threshold` (default 20).
 2. Pull turns since the watermark plus the most recent N facts, so
    the reflection can cite evidence even when the turns themselves
@@ -258,8 +259,8 @@ Per tick:
    `cited_fact_ids`.
 4. Persist rows that cite at least one valid id; drop rows that
    hallucinate everything. The row's `last_turn_id` / `last_fact_id`
-   columns snapshot the worker's view at write time and serve as the
-   next tick's watermark — no separate watermark table.
+   columns are the citation snapshot; the watermark itself lives in a
+   separate `reflection_watermark` table.
 
 `ReflectionLayer` reads recent rows on assemble and renders citation
 breadcrumbs `[T#42, F#7]`. Rows citing at least one superseded fact
@@ -452,9 +453,8 @@ pronouns (omitted when missing); the `Bio:` line is capped at 240
 characters to keep the header lightweight. Profile fields flow in via
 `Author.from_discord_member` (read defensively via `getattr` —
 pronouns/bio aren't always populated on bot tokens) and are persisted
-by `HistoryStore.upsert_account`. `accounts.pronouns` and
-`accounts.bio` columns are added by an idempotent migration on
-existing DBs.
+by `HistoryStore.upsert_account`. `accounts.pronouns` /
+`accounts.bio` are declared directly in `SCHEMA`.
 
 Cache invalidation key: `t<latest_id>:cap<n>:<key>:f<wm>,…`. New turns
 flip `latest_id` (changing the candidate set); a worker refresh flips
@@ -612,7 +612,7 @@ sometimes pre-attached on `on_message`, more often via a follow-up
 The bot flattens these into the message's stored content so the LLM
 sees the same body humans see in the client.
 
-- **Formatter** — `familiar_connect.sources.discord_embed_text.format_embeds`
+- **Formatter** — `familiar_connect::sources::discord_embed_text::format_embeds`
   is duck-typed over `discord.Embed` (any object with `title`,
   `description`, `author`, `provider`, `fields`, `footer`, `url`
   attributes works). Each rendered embed is tagged `[embed]` so the
@@ -822,7 +822,7 @@ Open work the current retrieval doesn't address:
 
 ## Cold-cache signals (research-phase)
 
-`familiar_connect.diagnostics.cold_cache` provides three detectors:
+`familiar_connect::diagnostics::cold_cache` provides three detectors:
 
 - `detect_topic_shift` — Jaccard overlap between the new turn's
   content words and the focus-stream rolling summary (read at the
@@ -875,7 +875,7 @@ turn for me?" without a separate gating LLM call:
 2. **Silent sentinel in the reply.** The system prompt instructs the
    model to emit the literal token `<silent>` as its *entire* reply
    when the latest message isn't for it. `SilentDetector`
-   (`familiar_connect.silence`) inspects the streaming reply
+   (`familiar_connect::silence`) inspects the streaming reply
    delta-by-delta; on a prefix match it short-circuits the stream, the
    responder skips Discord posting / TTS, and no assistant turn is
    appended. The user turn is still recorded — observation is not
@@ -937,9 +937,9 @@ too.
 
 ### FocusManager
 
-`familiar_connect.focus.FocusManager` holds two independent pointers
-(`text_focus`, `voice_focus`), each guarded by its own
-`asyncio.Lock`. Shifts are **model-decided and applied immediately**:
+`familiar_connect::focus::FocusManager` holds two pointers
+(`text_focus`, `voice_focus`) behind a single `std::sync::Mutex`.
+Shifts are **model-decided and applied immediately**:
 
 1. The `shift_focus(channel_id)` tool first **guards the target**: if
    `channel_id` is not in the `SubscriptionRegistry` the shift is
@@ -952,8 +952,8 @@ too.
    channel's content back into the same turn — the model sees the
    channel before it responds rather than narrating one it can't see.
    Voice/empty channels yield an empty list.
-2. `shift_now` applies the move **at tool-call time**, under the
-   per-modality lock. For a text shift it calls
+2. `shift_now` applies the move **at tool-call time**, under that
+   lock. For a text shift it calls
    `promote_staged_turns(channel_id, catch_up_limit)` — flipping only
    the last `catch_up_limit` staged turns (the preview she actually
    saw), plus any that @-mention her, to consumed (`consumed_at = now`)
@@ -962,8 +962,10 @@ too.
    matches consumption**) — then moves the pointer, persists
    both pointers via `set_focus_pointers`, and fires `on_shift`
    (presence). Because the move is immediate, any reply later in the
-   same turn posts to the **new** channel (the responder sends to the
-   current text focus), and a turn that goes **silent** still leaves her
+   same turn posts to the **new** channel (the reply routes to the
+   channel this turn's own shift moved to, recorded turn-locally —
+   never the global focus read at send time), and a turn that goes
+   **silent** still leaves her
    where she went — there is no deferred state to leak into a later turn.
    (Earlier designs deferred the shift to `end_turn`; an uncommitted
    deferral could leak and misroute the *next* turn's reply — e.g. a

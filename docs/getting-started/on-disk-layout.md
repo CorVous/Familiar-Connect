@@ -9,7 +9,7 @@ layout that boots:
 └── character.toml          # optional — defaults apply if missing
 ```
 
-`history.db` (Turso, SQLite-compatible) and `subscriptions.toml` are
+`history.db` (SQLite) and `subscriptions.toml` are
 created on first launch. `fts/turns/` and `fts/facts/` tantivy index
 dirs are created lazily alongside the DB. Multiple character folders
 can sit side-by-side under the root; only the one `FAMILIAR_ID` points

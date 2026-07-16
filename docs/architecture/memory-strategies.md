@@ -66,7 +66,7 @@ distinct facts) — a possible follow-up via `fact_embeddings`.
 
 Tantivy commits on Windows occasionally race with antivirus
 segment-scans (`PermissionDenied` on a fresh `.term` file).
-`FtsIndex._commit` retries those transient locks with short backoff;
+`TantivyFts::commit` retries those transient locks with short backoff;
 if the commit still can't land, `HistoryStore` logs a warning and
 keeps going so one FTS write can't tear down the bot. The SQL row
 remains canonical and `rebuild_fts` will pick up any skipped doc.
@@ -77,7 +77,7 @@ embedding (M6, opt-in).
 
 ## Swap points
 
-### 1. Layer order and selection (`Layer` Protocol)
+### 1. Layer order and selection (`Layer` trait)
 
 Per-channel `prompt_layers` in `character.toml` swaps order or
 disables layers per Discord channel. New layer = one class
@@ -88,16 +88,18 @@ M3 (`ReflectionLayer`) and M4 (`LorebookLayer`) plug in this way.
 A candidate replacement layer can also run side-by-side: register
 both, switch via TOML on a test channel.
 
-### 2. Projection writer (`MemoryProjector` Protocol)
+### 2. Projection writer (`MemoryProjector` trait)
 
 The watermark-driven writers — `SummaryWorker`, `FactExtractor`,
 `PeopleDossierWorker`, `ReflectionWorker`, `FactSupersedeWorker` —
-implement a thin :class:`MemoryProjector` Protocol (M5):
+implement a thin `MemoryProjector` trait (M5):
 
-```python
-class MemoryProjector(Protocol):
-    name: str
-    async def run(self) -> None: ...
+```rust
+#[async_trait]
+pub trait MemoryProjector: Send + Sync {
+    fn name(&self) -> &str;
+    async fn run(self: Box<Self>);
+}
 ```
 
 Names registered today (built-ins):
@@ -122,7 +124,7 @@ Default lists all five built-ins (`fact_embedding` is registered but
 opt-in — the seam is wired but stays off until the operator picks
 an embedder backend). Drop a name to disable that writer. Add a
 third-party projector (Graphiti, Cognee, …) by calling
-`register_projector("graphiti", factory)` at import time and listing
+`register_projector("graphiti", factory)` at startup and listing
 it here. Unknown names fail loudly at config load — a typo never
 silently drops a writer. Empty list disables all projection
 (side-indices stop refreshing; reads still work against whatever

@@ -2,8 +2,11 @@
 
 Validate the live-Discord voice path and the local-ML features on your own
 machine. Work top-to-bottom; each smoke stage has do / expect / if-it-fails.
-Paths are relative to the repo root (the workspace root since the promotion)
-so `data/familiars/` resolves.
+Per-user familiars resolve from the platform data dir (`FAMILIARS_ROOT`
+overrides); the tracked `_default` skeleton resolves from
+`data/familiars/_default` (`FAMILIAR_DEFAULTS_ROOT` overrides). Repo-relative
+paths in this doc therefore refer to `_default` and build artifacts only —
+see [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
 
 > **READ THIS FIRST — the voice glue is now wired; validate it live.**
 > The composition-root wiring gaps are closed (parity-audit §3c + runbook flags).
@@ -79,6 +82,8 @@ Copy `.env.example` to `.env` and fill:
 | `CARTESIA_API_KEY` | TTS if `[tts].provider="cartesia"` | Enables the byte-streaming playback path. |
 | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | TTS if `[tts].provider="gemini"` | `GOOGLE_` wins if both set. |
 | `FAMILIAR_ID` | selects familiar | Or pass `--familiar <id>` (flag wins). |
+| `FAMILIARS_ROOT` | per-user familiars root | Overrides the platform data-dir default (#201). |
+| `FAMILIAR_DEFAULTS_ROOT` | `_default` skeleton root | Overrides the CWD-relative `data/familiars`. |
 
 TTS/STT/turn-detector construction **degrades, never fails**: an unavailable key
 logs a warning and the text path keeps working (`run.rs` L410-429).
@@ -96,35 +101,33 @@ logs a warning and the text path keeps working (`run.rs` L410-429).
 
 ### Familiar directory shape
 
-**Resolution is CWD-relative**: the binary looks for `data/familiars/<id>`
-under the directory you invoke it from, NOT under the binary's
-location (Python behaves the same; it was just always run from the repo root).
-During cohabitation, run from the **repo root** so Rust and Python share one
-data tree — the SQLite file format and tantivy indexes are deliberately
-compatible, and sharing `history.db` is the parity oracle working as intended:
+Per-user familiars resolve from the **platform data dir**
+(`~/.local/share/familiar-connect/familiars` on Linux; macOS/Windows
+equivalents), independent of CWD. `FAMILIARS_ROOT` overrides the root (top
+precedence). The tracked `_default` skeleton is a repo resource resolved
+separately from `data/familiars/_default` (`FAMILIAR_DEFAULTS_ROOT` overrides).
+On startup a one-shot, idempotent, never-clobber migration moves any legacy
+`./data/familiars/<id>` (other than `_default`) into the resolved root. See
+[On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
+
+To keep everything inside the repo checkout while smoke-testing, point the root
+at `data/familiars`:
 
 ```powershell
-# from C:\Source\Familiar-Connect (repo root):
+$env:FAMILIARS_ROOT = "data/familiars"
 cargo run --release --features discord -- run --familiar <id> -v
 ```
 
-Since the workspace now lives at the repo root, running from the root Just
-Works; `FAMILIARS_ROOT` remains available for running from elsewhere:
+A missing familiar errors with the **absolute** path it checked, so a
+root/CWD mismatch is self-diagnosing.
 
-```powershell
-$env:FAMILIARS_ROOT = "..\data\familiars"
-cargo run --release --features discord -- run --familiar <id> -v
-```
-
-A missing familiar now errors with the **absolute** path it checked, so a CWD
-mismatch is self-diagnosing.
-
-`data/familiars/<id>/` must exist (`run.rs` `resolve_familiar_root` only checks
-existence). Config = `data/familiars/<id>/character.toml` **deep-merged over**
+The `<root>/<id>/` folder must exist (`run.rs` `resolve_familiar_root` only
+checks existence). Config = `<root>/<id>/character.toml` **deep-merged over**
 `data/familiars/_default/character.toml` (a missing per-familiar `character.toml`
-just inherits the defaults). Minimum useful setup:
+just inherits the defaults). Minimum useful setup (in-repo root):
 
 ```bash
+export FAMILIARS_ROOT=data/familiars
 cp -r data/familiars/_default data/familiars/aria
 # edit data/familiars/aria/character.md  (the persona; CharacterCardLayer reads it)
 # character.toml already ships [llm.fast] [llm.prose] [llm.background] +
@@ -132,8 +135,8 @@ cp -r data/familiars/_default data/familiars/aria
 # slots must be present or run exits 1.
 ```
 
-`_default` itself is runnable as a smoke target (`--familiar _default`) since it
-carries `character.toml` + `character.md`.
+With `FAMILIARS_ROOT=data/familiars`, `_default` itself is runnable as a smoke
+target (`--familiar _default`) since it carries `character.toml` + `character.md`.
 
 ### Run
 
@@ -266,7 +269,13 @@ and open an upstream issue; there were no open DAVE issues at 0.6.0 release.
 
 - **Ratchet-window packet drops.** The first instants of audio right after a join
   or an epoch transition are silently dropped until key ratchets establish. Lose a
-  first syllable — same loss class exists in the Python build. Not a bug.
+  first syllable — inherent to DAVE key-ratcheting. Not a bug.
+- **Benign songbird receive-path log noise (#199).** At `-vv`, songbird emits
+  lines like `RTCP decryption failed`, `opus_decode InvalidPacket`, and
+  `Decode error for SSRC <n>` during normal operation — expected under DAVE's
+  per-SSRC decrypt/ratchet behavior, not data loss. Do **not** file these
+  against this repo; the fix (if any) is upstream in songbird. #199 was the
+  phantom-bug chase that concluded exactly this.
 - **`SpeakingStateUpdate` fired inconsistently** (songbird PR #291 caveat). The
   SSRC→user map (`SsrcMap`, fed by those events) can lag. The design does **not**
   key per-user state solely off speaking events — first-audio-chunk lazy creation

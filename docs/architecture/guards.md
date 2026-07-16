@@ -27,7 +27,7 @@ decline (3) a guard interface / registry.**
 
 ### Why not a guard interface / registry
 
-The nine guards are genuinely heterogeneous by **altitude and shape**, and
+The guards are genuinely heterogeneous by **altitude and shape**, and
 forcing them under one interface would be over-engineering that buys nothing the
 non-goals of #132 allow us to spend:
 
@@ -83,7 +83,7 @@ The concrete bad outcome each guard exists to stop — e.g. compounding duplicat
 facts, persisting hallucinated provenance, or speaking tool-call XML aloud. Named
 per-guard in the enumeration below.
 
-## The nine guards
+## The guards
 
 Locations verified against the current tree. Paths are under
 `familiar-connect/src/`.
@@ -134,6 +134,12 @@ Locations verified against the current tree. Paths are under
    `processors/text_responder.rs` and `processors/voice_responder.rs` both drop a
    turn whose finished reply is whitespace-only (`reply.trim().is_empty()`).
    *Prevents:* sending an empty message / speaking silence.
+10. **Wake shift-or-silent gate** — `reply_gate`, predicate veto.
+   `processors/text_responder.rs` suppresses a wake turn that produced prose but
+   did not `shift_focus` this turn (`is_wake && shifted_to.is_none()`), logging
+   `guard=wake_shift_or_silent action=suppress` (#170). *Prevents:* a nudge-driven
+   wake turn misrouting its reply to the stale focus channel instead of going
+   silent.
 
 ## The audit-log convention
 

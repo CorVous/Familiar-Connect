@@ -9,7 +9,7 @@ A Discord bot that reads and speaks in text and voice channels, backed by an eve
 - CLI entry: `familiar-connect run --familiar <id>`.
 - Discord text + voice subscriptions (`/subscribe-text`, `/subscribe-voice`, plus the `unsubscribe-*` counterparts).
 - Twitch EventSub client.
-- SQLite history store (`data/familiars/<id>/history.db`) with facts, summaries, dossiers, reflections, and tantivy FTS + embedding retrieval.
+- SQLite history store (`history.db` in the familiar's data folder) with facts, summaries, dossiers, reflections, and tantivy FTS + embedding retrieval.
 - OpenRouter `LLMClient`, Deepgram STT, Azure / Cartesia / Gemini TTS.
 
 ## Where to look next
