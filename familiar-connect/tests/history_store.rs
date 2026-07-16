@@ -496,7 +496,39 @@ fn consumed_turns_after_includes_late_promoted_low_id() {
     assert_eq!(out.iter().map(|t| t.id).collect::<Vec<_>>(), [1]);
 }
 
-// --- migration backfill scope + ego migration -----------------------------
+// --- schema completeness + staged-turn survival ---------------------------
+
+/// The attentional columns (`turns.arrived_at` / `consumed_at` / `missed_at`,
+/// `summaries.last_consumed_at`) are folded straight into `SCHEMA`; nothing
+/// ALTERs them in at open time (issue #202). Guard the invariant so a future
+/// edit that drops one from the `CREATE TABLE` fails loudly here instead of at
+/// the first `no such column` query.
+#[test]
+fn schema_declares_attentional_columns() {
+    let store = mem();
+    let turn_cols = column_names(&store, "turns");
+    for col in ["arrived_at", "consumed_at", "missed_at"] {
+        assert!(
+            turn_cols.iter().any(|c| c == col),
+            "turns is missing folded column {col}: {turn_cols:?}"
+        );
+    }
+    let summary_cols = column_names(&store, "summaries");
+    assert!(
+        summary_cols.iter().any(|c| c == "last_consumed_at"),
+        "summaries is missing folded column last_consumed_at: {summary_cols:?}"
+    );
+    store.close();
+}
+
+fn column_names(store: &HistoryStore, table: &str) -> Vec<String> {
+    store
+        .conn()
+        .query_map(format!("PRAGMA table_info({table})"), vec![], |r| {
+            r.get::<_, String>("name")
+        })
+        .unwrap()
+}
 
 #[test]
 fn staged_turn_stays_staged_after_reopen() {
@@ -522,123 +554,6 @@ fn staged_turn_stays_staged_after_reopen() {
         consumed.is_none(),
         "staged turn must not be re-promoted by backfill"
     );
-}
-
-#[test]
-fn ego_key_migration_rewrites_self_keys_on_reopen() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("history.db");
-    let store = HistoryStore::open(&path).unwrap();
-    store
-        .conn()
-        .execute(
-            "INSERT INTO facts (familiar_id, channel_id, text, source_turn_ids, created_at, \
-             subjects_json, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            vec![
-                Value::Text(FAMILIAR.to_owned()),
-                Value::Integer(CHANNEL),
-                Value::Text("Aria felt proud of the bit.".to_owned()),
-                Value::Text("[]".to_owned()),
-                Value::Text("2026-06-19T00:00:00+00:00".to_owned()),
-                Value::Text(
-                    "[{\"canonical_key\": \"self:aria\", \"display_at_write\": \"Aria\"}]"
-                        .to_owned(),
-                ),
-                Value::Text("2026-06-19T00:00:00+00:00".to_owned()),
-            ],
-        )
-        .unwrap();
-    store
-        .conn()
-        .execute(
-            "INSERT INTO people_dossiers (familiar_id, canonical_key, last_fact_id, dossier_text, \
-             created_at) VALUES (?, ?, ?, ?, ?)",
-            vec![
-                Value::Text(FAMILIAR.to_owned()),
-                Value::Text("self:aria".to_owned()),
-                Value::Integer(1),
-                Value::Text("Aria's self-record.".to_owned()),
-                Value::Text("2026-06-19T00:00:00+00:00".to_owned()),
-            ],
-        )
-        .unwrap();
-    store.close();
-    drop(store);
-
-    let reopened = HistoryStore::open(&path).unwrap();
-    let subjects = reopened
-        .conn()
-        .query_scalar_string(
-            "SELECT subjects_json FROM facts WHERE familiar_id = ?",
-            vec![Value::Text(FAMILIAR.to_owned())],
-        )
-        .unwrap()
-        .unwrap();
-    let dossier_key = reopened
-        .conn()
-        .query_scalar_string(
-            "SELECT canonical_key FROM people_dossiers WHERE familiar_id = ?",
-            vec![Value::Text(FAMILIAR.to_owned())],
-        )
-        .unwrap()
-        .unwrap();
-    assert!(subjects.contains("ego:aria"));
-    assert!(!subjects.contains("self:aria"));
-    assert_eq!(dossier_key, "ego:aria");
-
-    // Idempotent: a second reopen leaves ego: intact.
-    reopened.close();
-    drop(reopened);
-    let again = HistoryStore::open(&path).unwrap();
-    let key = again
-        .conn()
-        .query_scalar_string(
-            "SELECT canonical_key FROM people_dossiers WHERE familiar_id = ?",
-            vec![Value::Text(FAMILIAR.to_owned())],
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(key, "ego:aria");
-}
-
-#[test]
-fn legacy_db_gains_pings_bot_column_with_default_zero() {
-    use familiar_connect::history::db::Db;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("history.db");
-    // Hand-build a legacy `turns` table lacking arrived_at/consumed_at/missed_at/pings_bot.
-    let legacy = Db::open(&path).unwrap();
-    legacy
-        .execute_batch(
-            "CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                familiar_id TEXT NOT NULL, channel_id INTEGER NOT NULL, guild_id INTEGER,
-                role TEXT NOT NULL, author_platform TEXT, author_user_id TEXT,
-                author_username TEXT, author_display_name TEXT, content TEXT NOT NULL,
-                timestamp TEXT NOT NULL, mode TEXT, platform_message_id TEXT,
-                reply_to_message_id TEXT, tool_calls_json TEXT, tool_call_id TEXT
-            );
-            INSERT INTO turns (familiar_id, channel_id, role, content, timestamp)
-            VALUES ('aria', 200, 'user', 'legacy ping', '2026-06-13T09:00:00+00:00');",
-        )
-        .unwrap();
-    legacy.close();
-    drop(legacy);
-
-    let store = HistoryStore::open(&path).unwrap();
-    let pings = store
-        .conn()
-        .query_scalar_i64("SELECT pings_bot FROM turns WHERE id = 1", vec![])
-        .unwrap();
-    assert_eq!(pings, Some(0));
-    let reloaded = &store.recent("aria", 200, 1, None, None).unwrap()[0];
-    assert!(!reloaded.pings_bot);
-    store.close();
-    drop(store);
-
-    // Second open must not error (idempotent ALTER).
-    let again = HistoryStore::open(&path).unwrap();
-    again.close();
 }
 
 // --- mode / pings_bot columns ---------------------------------------------

@@ -81,7 +81,10 @@ CREATE TABLE IF NOT EXISTS turns (
     reply_to_message_id    TEXT,
     tool_calls_json        TEXT,
     tool_call_id           TEXT,
-    pings_bot              INTEGER NOT NULL DEFAULT 0
+    pings_bot              INTEGER NOT NULL DEFAULT 0,
+    arrived_at             TEXT,
+    consumed_at            TEXT,
+    missed_at              TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -95,6 +98,9 @@ CREATE INDEX IF NOT EXISTS idx_turns_channel_mode
 
 CREATE INDEX IF NOT EXISTS idx_turns_platform_msg
     ON turns (familiar_id, platform_message_id);
+
+CREATE INDEX IF NOT EXISTS idx_turns_consumed
+    ON turns (familiar_id, consumed_at, arrived_at, id);
 
 CREATE TABLE IF NOT EXISTS message_reactions (
     familiar_id          TEXT    NOT NULL,
@@ -123,6 +129,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     last_summarised_id  INTEGER NOT NULL,
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
+    last_consumed_at    TEXT,
     PRIMARY KEY (familiar_id, channel_id)
 );
 
@@ -1080,8 +1087,12 @@ impl HistoryStore {
         Self::init(db, fts_turns, fts_facts)
     }
 
-    /// Wire the DB + FTS into a store, run the schema repair pass and the
-    /// idempotent migrations (Python `__init__` order: schema → migrate → FTS).
+    /// Wire the DB + FTS into a store and run the schema repair pass. `SCHEMA`
+    /// uses `CREATE TABLE/INDEX IF NOT EXISTS` throughout, so it is the whole of
+    /// construction: every column the store queries is declared there. The
+    /// Python era's incremental `_migrate()` (ALTER-in the attentional columns,
+    /// re-add `pings_bot`, the issue #154 ego-key rewrite) was folded into
+    /// `SCHEMA` and removed — see issue #202 and spec 03 §8-10.
     fn init(
         db: Db,
         fts_turns: Box<dyn FtsIndex>,
@@ -1093,7 +1104,6 @@ impl HistoryStore {
             fts_facts,
         };
         store.db.execute_batch(SCHEMA)?;
-        store.migrate()?;
         Ok(store)
     }
 
@@ -1107,59 +1117,6 @@ impl HistoryStore {
     /// [`StoreError::Closed`].
     pub fn close(&self) {
         self.db.close();
-    }
-
-    fn migrate(&self) -> Result<(), StoreError> {
-        // arrived_at / consumed_at: backfill ONLY when the column is newly added
-        // (one-time scoping — a deliberately-staged turn must survive restart).
-        for col in ["arrived_at", "consumed_at"] {
-            if self
-                .db
-                .execute(format!("ALTER TABLE turns ADD COLUMN {col} TEXT"), vec![])
-                .is_ok()
-            {
-                self.db.execute(
-                    format!("UPDATE turns SET {col} = timestamp WHERE {col} IS NULL"),
-                    vec![],
-                )?;
-            }
-        }
-        // Idempotent column adds (swallow "already exists").
-        let _ = self.db.execute(
-            "ALTER TABLE turns ADD COLUMN pings_bot INTEGER NOT NULL DEFAULT 0",
-            vec![],
-        );
-        let _ = self.db.execute(
-            "ALTER TABLE summaries ADD COLUMN last_consumed_at TEXT",
-            vec![],
-        );
-        let _ = self
-            .db
-            .execute("ALTER TABLE turns ADD COLUMN missed_at TEXT", vec![]);
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_turns_consumed \
-             ON turns (familiar_id, consumed_at, arrived_at, id)",
-            vec![],
-        )?;
-        // Ego-key rewrite (issue #154): idempotent, whitespace-tolerant (D9).
-        self.db.execute(
-            "UPDATE people_dossiers SET canonical_key = 'ego:' || substr(canonical_key, 6) \
-             WHERE canonical_key LIKE 'self:%'",
-            vec![],
-        )?;
-        self.db.execute(
-            "UPDATE facts SET subjects_json = \
-             replace(subjects_json, '\"canonical_key\": \"self:', '\"canonical_key\": \"ego:') \
-             WHERE subjects_json LIKE '%\"canonical_key\": \"self:%'",
-            vec![],
-        )?;
-        self.db.execute(
-            "UPDATE facts SET subjects_json = \
-             replace(subjects_json, '\"canonical_key\":\"self:', '\"canonical_key\":\"ego:') \
-             WHERE subjects_json LIKE '%\"canonical_key\":\"self:%'",
-            vec![],
-        )?;
-        Ok(())
     }
 
     fn safe_fts_add(index: &dyn FtsIndex, row_id: i64, content: &str, kind: &str) {

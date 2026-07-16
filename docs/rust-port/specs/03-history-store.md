@@ -263,20 +263,54 @@ closure is minted per attribute access.
 
 ### Construction & migration
 
-8. Constructor order: mkdir parents → executescript(_SCHEMA) → commit →
-   `_migrate()` → open FTS indexes. `_SCHEMA` uses `IF NOT EXISTS`
-   throughout, so it is a repair pass on every open.
-9. `_migrate()` steps, in order, each followed by commit:
+**Rust port (issue #202): migrations folded into `SCHEMA`, `migrate()` deleted.**
+The Python `_migrate()` existed only to grow a DB that predated the attentional
+columns. The Rust port has no shipped on-disk DBs to grow, so all four columns
+and the extra index were folded straight into the `CREATE TABLE` / `CREATE
+INDEX` block and the incremental migration pass was removed:
+
+- `turns.arrived_at TEXT`, `turns.consumed_at TEXT`, `turns.missed_at TEXT`,
+  and `summaries.last_consumed_at TEXT` are now declared in `SCHEMA`.
+- `idx_turns_consumed ON turns (familiar_id, consumed_at, arrived_at, id)` is
+  now created in `SCHEMA`.
+- Construction is just: mkdir parents → `execute_batch(SCHEMA)` → open FTS
+  indexes. `SCHEMA` uses `IF NOT EXISTS` throughout, so it stays a repair pass
+  on every open (a missing table/index is (re)created), but it no longer
+  ALTERs or backfills anything.
+- The one-time `arrived_at`/`consumed_at` backfill is unnecessary: a fresh row
+  gets `arrived_at` and (only when `consumed=True`) `consumed_at` written
+  directly by `append_turn`, so a deliberately staged turn (`consumed_at IS
+  NULL`) survives restart un-promoted with no backfill logic. Pinned by
+  `staged_turn_stays_staged_after_reopen`.
+- The issue #154 ego-key rewrite is gone: it existed to repair `self:` keys
+  written by an even older Python build, and re-ran two/three full-table scans
+  over `people_dossiers` + `facts` on **every** open. No such rows exist in a
+  Rust-created DB.
+
+**Operational consequence (breaking, authorized by the #202 author):** because
+`SCHEMA` uses `CREATE TABLE IF NOT EXISTS`, folding columns in does NOT retrofit
+an existing pre-#202 dev DB — an un-rebuilt old DB now hits `no such column:
+arrived_at` at query time instead of silently auto-upgrading. The two dev
+familiars (Cass's, Cor's) must either be **rebuilt from scratch** or **run once
+on the pre-#202 build** (which applies the old `_migrate()`, including the
+#154 ego rewrite) before upgrading. There is no shipped/production DB, so this
+affects only those two development databases.
+
+The historical Python `_migrate()` steps are preserved below for reference (the
+port no longer runs them):
+
+8. Python constructor order: mkdir parents → executescript(_SCHEMA) → commit →
+   `_migrate()` → open FTS indexes.
+9. Python `_migrate()` steps, in order, each followed by commit:
    a. For `arrived_at` then `consumed_at`: try `ALTER TABLE turns ADD COLUMN
       <col> TEXT`; on success immediately backfill
       `UPDATE turns SET <col> = timestamp WHERE <col> IS NULL`. Any exception
       (column exists, or pyturso's spurious "Parse error: no such table") is
-      swallowed — backfill runs ONLY when the ALTER succeeded. This one-time
-      scoping is load-bearing: a deliberately staged turn
-      (`consumed_at IS NULL`) must survive restart un-promoted
-      (TestMigrationBackfillScope).
+      swallowed — backfill runs ONLY when the ALTER succeeded.
    b. `ALTER TABLE turns ADD COLUMN pings_bot INTEGER NOT NULL DEFAULT 0`
-      (swallow failure; DEFAULT backfills legacy rows to 0).
+      (swallow failure; DEFAULT backfills legacy rows to 0). NOTE: the Rust
+      port already declared `pings_bot` in `SCHEMA`, so this re-add was pure
+      redundancy even before #202.
    c. `ALTER TABLE summaries ADD COLUMN last_consumed_at TEXT` (swallow).
    d. `ALTER TABLE turns ADD COLUMN missed_at TEXT` (swallow; NO backfill —
       legacy rows are never "missed").
@@ -292,8 +326,7 @@ closure is minted per attribute access.
       formatting exactly (see Data formats).
 10. Opening a legacy DB (turns without new columns, accounts without
     pronouns/bio) must not raise, even if the engine throws parse errors from
-    ALTER (pinned by test with monkeypatched `turso.Cursor.execute`). There
-    is NO accounts-table column migration in current code.
+    ALTER. There is NO accounts-table column migration in current code.
 
 ### Turn writes & reads
 
@@ -536,7 +569,11 @@ closure is minted per attribute access.
 
 ## Data formats
 
-### SQLite schema (post-migration, authoritative)
+### SQLite schema (authoritative)
+
+In the Rust port every column below — including the four once-"migration-added"
+ones — is declared directly in `SCHEMA` (issue #202); the `migration-added`
+labels are kept only to mark their Python origin.
 
 All timestamps are TEXT: Python `datetime.now(tz=UTC).isoformat()` →
 `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`. CAVEAT: Python omits `.ffffff` when
@@ -561,8 +598,8 @@ CREATE TABLE turns (
     platform_message_id TEXT, reply_to_message_id TEXT,  -- platform-native ids as TEXT
     tool_calls_json TEXT, tool_call_id TEXT,
     pings_bot INTEGER NOT NULL DEFAULT 0,
-    -- migration-added:
-    arrived_at TEXT,                      -- immutable ingest time; NULL only pre-migration
+    -- folded into SCHEMA in the Rust port (was migration-added in Python):
+    arrived_at TEXT,                      -- immutable ingest time; NULL only on pre-#202 rows
     consumed_at TEXT,                     -- NULL = staged (or missed)
     missed_at TEXT                        -- terminal; consumed_at stays NULL
 );
@@ -589,7 +626,7 @@ CREATE TABLE summaries (
     familiar_id TEXT NOT NULL, channel_id INTEGER NOT NULL DEFAULT 0,
     last_summarised_id INTEGER NOT NULL, summary_text TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    last_consumed_at TEXT,                -- migration-added; opaque cursor string
+    last_consumed_at TEXT,                -- folded into SCHEMA in Rust port; opaque cursor string
     PRIMARY KEY (familiar_id, channel_id)
 );
 
@@ -819,9 +856,10 @@ pass unchanged against the ported store.
   (mature, sync, `Connection: Send + !Sync`) or the `turso` Rust crate
   (the same engine pyturso wraps, async-native). Either removes pyturso
   0.5.1's pathologies — `reopen()`, the stale-schema-cache workaround, and
-  the swallow-parse-error-on-ALTER hack exist ONLY for pyturso; port the
-  tolerant migration (attempt ALTER, ignore duplicate-column errors) but the
-  reopen/schema-cache machinery can be dropped. Keep
+  the swallow-parse-error-on-ALTER hack exist ONLY for pyturso and are all
+  dropped. The port went further (issue #202): rather than port the tolerant
+  ALTER-based migration, it folded every column into `SCHEMA` and removed the
+  incremental migration pass entirely — see Construction & migration. Keep
   `PRAGMA`-free/`AUTOINCREMENT` semantics identical (ids must never be
   reused — AUTOINCREMENT, not bare rowid).
 - **Collapse the three-layer threading sandwich**. Python has: caller →
@@ -860,8 +898,9 @@ pass unchanged against the ported store.
   ordering of these strings is a correctness dependency in five query paths.
 - **JSON columns**: use serde_json but see Data formats — decide explicitly
   on separator compatibility for `subjects_json` (recommend: emit compact,
-  make the ego migration match both spaced and compact forms, keep the
-  LIKE pre-filters which are whitespace-agnostic).
+  keep the LIKE pre-filters which are whitespace-agnostic). The ego-key
+  rewrite that once depended on the exact spacing was removed with `migrate()`
+  (issue #202), so subjects spacing no longer has a migration consumer.
 - **Row tolerance**: the Python `_row_to_*` helpers catch IndexError/KeyError
   for columns absent from older SELECT shapes. In Rust, make every SELECT
   list explicit and total (always select all needed columns) and drop the
@@ -880,10 +919,11 @@ pass unchanged against the ported store.
   stored JSON — degrade to empty" behavior.
 - **Monkeypatch seams to redesign**: tests patch `FtsIndex._commit_writer`
   (commit-failure injection), `FtsIndex.add` (append_turn resilience), and
-  `turso.Cursor.execute` (migration failure injection),
   `set_trace_callback` (query counting). Provide equivalent injection
   points: a commit hook or fallible-writer trait on the FTS wrapper, and a
-  statement-trace hook on the connection actor.
+  statement-trace hook on the connection actor. (The Python
+  `turso.Cursor.execute` migration-failure-injection seam is moot — the port
+  removed `migrate()`; see issue #202.)
 - **Suggested crates**: rusqlite (or turso), tantivy, tokio, serde/serde_json,
   chrono or jiff, uuid (v4, `simple()` hex format to match `uuid4().hex` —
   32 lowercase hex chars, no dashes), thiserror, bytemuck or byteorder (f32
