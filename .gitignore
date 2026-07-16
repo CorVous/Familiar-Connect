@@ -23,11 +23,13 @@ src/*/_version.py
 # mkdocs build output
 site/
 
-# Familiar Data — every per-user familiar is ignored, but the
-# checked-in default profile at data/familiars/_default/ is not.
-# Git won't descend into an ignored directory, so the rules below
-# match individual folders under data/familiars/ rather than the
-# parent itself.
+# Familiar Data — per-user familiars now live in the platform data dir
+# (~/.local/share/familiar-connect/familiars, override with FAMILIARS_ROOT;
+# issue #201), so a `git clean -fdx` here can no longer wipe them. The only
+# tracked entry under data/familiars/ is the _default profile skeleton; these
+# rules keep it tracked while ignoring any legacy or opt-in in-repo familiars
+# (e.g. FAMILIARS_ROOT pointed back here). Git won't descend into an ignored
+# directory, so the rules match individual folders rather than the parent.
 data/familiars/*
 !data/familiars/_default/
 /data/cache/*

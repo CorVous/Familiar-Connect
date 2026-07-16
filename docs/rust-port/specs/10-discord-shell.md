@@ -547,7 +547,8 @@ field this subsystem stamps.
 | `DEFAULT_IDLE_FINALIZE_S` (const, `stt.deepgram`) | pump idle flush | 0.5 s | idle gap before forced `finalize()` |
 | transcriber `_IDLE_CLOSE_S` (from `[providers.stt.*].idle_close_s`) | idle watchdog | 30.0 (0 disables) | per-user stream close after silence |
 | `memory_providers.projectors` | `_async_main` | 02's default list | projector task set |
-| `_DEFAULT_FAMILIARS_ROOT` | module const | `data/familiars` | patchable in tests — keep injectable |
+| `FAMILIARS_ROOT` env | `default_familiars_root()` | platform data dir `…/familiar-connect/familiars` | per-user familiars root; env wins, else the home data dir so `git clean -fdx` can't wipe familiars (issue #201). Legacy `data/familiars/<id>` folders migrate in once on startup |
+| `FAMILIAR_DEFAULTS_ROOT` env | `default_defaults_root()` | `data/familiars` | root of the tracked `_default` profile; resolved independently of user state so `_default` never migrates. Pure cores (`resolve_familiars_root` / `resolve_defaults_root`) keep both injectable for tests |
 | Opus fallback path list | `load_opus` | hardcoded | libopus discovery |
 
 ## Dependency edges
