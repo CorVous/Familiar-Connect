@@ -517,7 +517,7 @@ mod client {
             // already a Unicode-scalar count). Emitted next to the true
             // `in_tokens` so the estimated-vs-actual ratio is observable
             // (issues #183/#184) — no calibration, purely a metric.
-            let est_in_tokens = (self.input_chars + 3) / 4;
+            let est_in_tokens = self.input_chars.div_ceil(4);
             parts.push(ls::kv_styled(
                 "est_in_tokens",
                 &est_in_tokens.to_string(),
