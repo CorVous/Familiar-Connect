@@ -135,8 +135,9 @@ pub enum SttError {
 ///
 /// The clone-as-template method is object-safe (returns `Box<dyn Transcriber>`)
 /// in place of Python's `clone() -> Self`. The `set_endpointing_ms` /
-/// `idle_close_s` / `backend_name` seams carry default no-ops so a minimal
-/// scripted stub only needs the five lifecycle methods (DESIGN §4.8).
+/// `set_keyterms` / `idle_close_s` / `backend_name` seams carry default no-ops
+/// so a minimal scripted stub only needs the five lifecycle methods (DESIGN
+/// §4.8).
 #[async_trait]
 pub trait Transcriber: Send {
     /// Fresh independent instance with the same config (Python `clone()`).
@@ -168,6 +169,20 @@ pub trait Transcriber: Send {
     /// `false` so the wiring keys off support exactly as the Python `hasattr`
     /// guard did.
     fn set_endpointing_ms(&mut self, _ms: i64) -> bool {
+        false
+    }
+
+    /// Add proper-noun keyterm biases (voice-member display names / nicknames)
+    /// on top of the config keyterms, returning `true` when the backend honours
+    /// the poke (#198).
+    ///
+    /// The wiring calls this before `start` with the current voice channel's
+    /// member names so a name a *different* speaker utters still transcribes
+    /// correctly; the backend is responsible for merging with any config
+    /// keyterms and normalizing/deduping/capping. Backends without keyterm
+    /// prompting (Parakeet / faster-whisper) inherit the default `false` no-op,
+    /// mirroring [`set_endpointing_ms`].
+    fn set_keyterms(&mut self, _terms: Vec<String>) -> bool {
         false
     }
 

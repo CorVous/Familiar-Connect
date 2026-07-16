@@ -420,7 +420,7 @@ idle_close_s            = 30.0
 | `utterance_end_ms` | `1500` | Speech-end grace window. |
 | `smart_format` | `true` | Punctuation, number/date/unit normalization. |
 | `punctuate` | `true` | Explicit punctuation pass. |
-| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. |
+| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. Voice-channel member proper nouns (display names, usernames, aliases, nicknames) are auto-appended per speaker at connect time on top of this list, then deduped and capped — so this field is only for jargon the members' names don't already cover. |
 | `replay_buffer_s` | `5.0` | Seconds replayed after WebSocket reconnect. |
 | `keepalive_interval_s` | `3.0` | Keepalive ping cadence. |
 | `reconnect_max_attempts` | `5` | Reconnect attempts before giving up. |
