@@ -26,6 +26,7 @@ use super::StoreError;
 use super::db::{Db, Value};
 use super::fts::TantivyFts;
 use crate::identity::Author;
+use crate::log_style as ls;
 use crate::support::time::{iso_utc, parse_iso};
 
 /// Reserved channel id for the per-familiar focus-stream summary (the consumed
@@ -2242,7 +2243,23 @@ impl HistoryStore {
             }))
         })?;
         match outcome {
-            FactInsert::Existing(fact) => Ok(fact),
+            FactInsert::Existing(fact) => {
+                // Pipeline guard (issue #132): near-duplicate suppression on the
+                // DB-insert path. Emitted here (caller thread, after the DB actor
+                // returns) so the shared audit convention is observable; behaviour
+                // is unchanged. See docs/architecture/guards.md.
+                tracing::debug!(
+                    target: "familiar_connect.history.store",
+                    "{} {} {} {} {} {}",
+                    ls::tag("Facts", ls::Y),
+                    ls::kv_styled("guard", "append_fact_dedup", ls::W, ls::LY),
+                    ls::kv_styled("step", "db_insert", ls::W, ls::LC),
+                    ls::kv_styled("action", "skip", ls::W, ls::LY),
+                    ls::kv_styled("reason", "near_duplicate", ls::W, ls::LW),
+                    ls::kv_styled("dup", &fact.id.to_string(), ls::W, ls::LC),
+                );
+                Ok(fact)
+            }
             FactInsert::Minted(fact) => {
                 Self::safe_fts_add(self.fts_facts.as_ref(), fact.id, &fact.text, "fact");
                 Ok(fact)

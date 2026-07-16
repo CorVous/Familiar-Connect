@@ -12,10 +12,15 @@
     clippy::iter_on_single_items
 )]
 
+#[path = "log_capture/mod.rs"]
+mod log_capture;
+
 use chrono::{TimeZone, Utc};
 use familiar_connect::history::{
     AppendFact, AppendTurn, FactDraft, FactSubject, HistoryStore, NewFact,
 };
+
+use log_capture::LogCapture;
 
 fn mem() -> HistoryStore {
     HistoryStore::open(":memory:").unwrap()
@@ -824,6 +829,44 @@ fn dedup_normalized_duplicate_skips_insert() {
         [first.id].into_iter().collect()
     );
     assert_eq!(again.id, first.id);
+}
+
+// Guard audit-log convention (issue #132): the near-duplicate skip on the
+// DB-insert path emits exactly one structured debug line naming the guard, and
+// stays silent when the insert actually mints. Behaviour is unchanged — the
+// second append still collapses onto the first fact.
+#[test]
+fn dedup_skip_emits_guard_audit_line() {
+    let capture = LogCapture::install();
+    let store = mem();
+    let sj = vec![subj("discord:1", "Cor")];
+    let first = store
+        .append_fact(
+            AppendFact::new("fam", Some(1), "Cor likes tea.", vec![1]).subjects(sj.clone()),
+        )
+        .unwrap();
+    // A distinct fact mints (no audit line); the identical fact is skipped.
+    store
+        .append_fact(
+            AppendFact::new("fam", Some(1), "Cor likes coffee.", vec![2]).subjects(sj.clone()),
+        )
+        .unwrap();
+    let again = store
+        .append_fact(AppendFact::new("fam", Some(2), "cor likes tea.", vec![3]).subjects(sj))
+        .unwrap();
+    assert_eq!(again.id, first.id, "dedup collapses onto the existing fact");
+
+    let out = capture.contents();
+    drop(capture);
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("append_fact_dedup"))
+            .count(),
+        1,
+        "exactly one dedup skip line expected: {out}"
+    );
+    assert!(out.contains("near_duplicate"), "{out}");
+    assert!(out.contains("db_insert"), "{out}");
 }
 
 #[test]

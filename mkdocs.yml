@@ -70,6 +70,7 @@ nav:
       - architecture/tuning.md
       - architecture/prompting.md
       - architecture/security.md
+      - architecture/guards.md
       - architecture/decisions.md
       - architecture/roadmap.md
   - Contributing: contributing.md
