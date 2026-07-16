@@ -699,7 +699,7 @@ honours. Rebuilt per-call (cheap), so the model never sees a stale
 clock — useful when the prompt cache lives across long-tailed turns.
 Voice channels see only `<silent>`; text channels also list
 `[@DisplayName]` and `[↩ <message_id>]`. Source:
-`src/familiar_connect/context/final_reminder.py`.
+`familiar-connect/src/context/final_reminder.rs`.
 
 When a `FocusManager` is wired, the block also carries a prose
 **focus + unread digest** line built from `focus_channel_id`,
@@ -780,13 +780,13 @@ acceptable on free-text chat cues:
   ascii-fold (so `café` and `cafe` match), custom stopword filter
   (same ~90-word English list the old `_FTS_STOPWORDS` carried),
   english stemmer (so `fox`/`foxes` share a stem) — is applied at both
-  index and query time. See `src/familiar_connect/history/fts.py`.
+  index and query time. See `familiar-connect/src/history/fts.rs`.
 - **Recent-window exclusion.** The user turn that *seeded* the cue is,
   by construction, the highest-BM25 match against itself — and it's
   already shown verbatim by `RecentHistoryLayer`. RAG passes
   `max_id = latest_in_channel - recent_window_size` to `search_turns`,
   scoping retrieval to turns *older* than the recent-history window.
-  `recent_window_size` is wired in `commands/run.py` to the same value
+  `recent_window_size` is wired in `commands/run.rs` to the same value
   as `RecentHistoryLayer`.
 
 Both surface as `RagContextLayer` constructor parameters
@@ -856,7 +856,7 @@ being asked to respond to. A separate writer task (e.g. an earlier
 `HistoryWriter` design) would race the responder and produce stale
 prompts.
 
-`HistoryWriter` (`processors/history_writer.py`) is kept as a
+`HistoryWriter` (`processors/history_writer.rs`) is kept as a
 reference implementation of the single-writer + dedup pattern, but is
 no longer wired into the run loop.
 

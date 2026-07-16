@@ -82,7 +82,7 @@ embedding (M6, opt-in).
 Per-channel `prompt_layers` in `character.toml` swaps order or
 disables layers per Discord channel. New layer = one class
 implementing `build(ctx)` + `invalidation_key(ctx)`, registered in
-`commands/run.py::_default_assembler`.
+`default_assembler` (`commands/run.rs`).
 
 M3 (`ReflectionLayer`) and M4 (`LorebookLayer`) plug in this way.
 A candidate replacement layer can also run side-by-side: register

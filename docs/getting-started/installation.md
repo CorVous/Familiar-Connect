@@ -2,15 +2,20 @@
 
 ## Prerequisites
 
-- [uv](https://docs.astral.sh/uv/)
-- `libopus` for Discord voice (`brew install opus`, `apt install libopus0`,
-  `dnf install opus`, or `pacman -S opus`)
+- A Rust toolchain — install via [rustup](https://rustup.rs/); the pinned
+  stable version in `rust-toolchain.toml` is fetched automatically on first
+  build.
 - A Discord application + bot token
   ([portal](https://discord.com/developers/applications)) with the
   `message_content`, `messages`, and `voice_states` intents enabled
 - An OpenRouter API key
 - *(optional, voice only)* One of: Azure Cognitive Services key + region, a Cartesia API key, or a Google Gemini API key
 - *(optional, voice only)* A Deepgram API key for speech transcription
+- *(voice builds only)* CMake — the `discord-voice` feature compiles libopus
+  from source (`songbird → opus2 → libopus_sys`). Windows especially needs it
+  installed; text-only builds (`--features discord`) never need it. See the
+  [DAVE runbook](../rust-port/DAVE-RUNBOOK.md) for the full voice
+  prerequisites and platform notes.
 
 ## Environment variables
 
@@ -63,25 +68,66 @@ cp -r data/familiars/_default data/familiars/my-familiar
 
 ## Start
 
+Build with the feature flags for the surfaces you want (see below), then
+run:
+
 ```bash
-uv sync --dev
-uv run familiar-connect run
-uv run familiar-connect run --familiar aria
-uv run familiar-connect -vv run --familiar aria
+cargo run --release --features discord -- run --familiar aria
+cargo run --release --features discord -- run --familiar aria -v
 ```
 
 `run` resolves the active familiar via `--familiar` first, then
-`FAMILIAR_ID`. `-v` / `-vv` / `-vvv` tune logging verbosity.
+`FAMILIAR_ID`. `-v` / `-vv` / `-vvv` tune logging verbosity — a global flag,
+accepted before or after `run`.
+
+### Feature flags
+
+Feature flags select the integration surface; the defaults cover storage,
+HTTP, and images:
+
+```bash
+# Text-only Discord bot
+cargo build --release --features discord
+
+# Voice (DAVE E2EE via songbird) + Deepgram streaming STT
+cargo build --release --features discord,discord-voice,stt-deepgram
+
+# Local ML extras (ONNX turn detection, local embeddings)
+cargo build --release --features local-turn,local-embed
+```
 
 ## CLI reference
 
-Help text below is generated at build time from the argparse parser in
-`src/familiar_connect/cli.py`. Run `uv run familiar-connect --help`
-locally for the same output.
+Run `familiar-connect --help` (or `cargo run -- --help`) locally for the
+same output.
 
-<!-- @cli-help: familiar-connect -->
+```text
+familiar-connect CLI tool
 
-<!-- @cli-help: familiar-connect run -->
+Usage: familiar-connect [OPTIONS] [COMMAND]
+
+Commands:
+  run       Start the Discord bot
+  diagnose  Aggregate span timings from log files
+  version   Display package version
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...  Increase verbosity (can be repeated: -v, -vv, -vvv)
+  -h, --help        Print help
+  -V, --version     Print version
+```
+
+```text
+Start the Discord bot
+
+Usage: familiar-connect run [OPTIONS]
+
+Options:
+      --familiar <ID>  Folder name of the character to run (under `data/familiars/`). Overrides `FAMILIAR_ID`
+  -v, --verbose...     Increase verbosity (can be repeated: -v, -vv, -vvv)
+  -h, --help           Print help
+```
 
 Once the bot is online, see [Slash commands](slash-commands.md) for the
 subscription surface.

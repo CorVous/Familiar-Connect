@@ -357,7 +357,7 @@ experience seed) lives on the `[[catalog]]` entries — see the
   tighter absolute cap on prompt size.
 - **`SummaryWorker.turns_threshold`** (default `10`). New turns
   before the rolling summary regenerates. Constructor arg in
-  `commands/run.py`; planned move to TOML.
+  `commands/run.rs`; planned move to TOML.
 - **`[budget.<tier>].max_dossier_people`** — was
   `PeopleDossierLayer.max_people`. Hard cap on dossier rows per
   prompt; combined with `dossier_tokens` so count or byte size
@@ -385,8 +385,8 @@ detection, and voice pipeline mode.
 ## STT — Deepgram
 
 `backend = "deepgram"` is the default. Selector lives in
-`[providers.stt].backend`; an unknown value (or one whose extra
-isn't installed) → `ValueError`, caught in `commands/run.py` and
+`[providers.stt].backend`; an unknown value (or a local backend whose
+engine isn't wired) → `SttError`, caught in `commands/run.rs` and
 logged as "Transcriber unavailable" — bot still starts, voice path
 degrades to no-op. `DEEPGRAM_API_KEY` is the only env input.
 
@@ -438,7 +438,7 @@ emits one final result.
 
 **Requirements:**
 
-- `uv sync --extra local-turn --extra local-stt-parakeet` — pulls
+- `cargo build --features local-turn,local-stt` — pulls
   TEN-VAD, Smart Turn, NeMo, torch.
 - `[providers.turn_detection].strategy = "ten+smart_turn"`. Without
   a local turn detector nothing drives `finalize()`, so transcripts
@@ -470,7 +470,7 @@ result.
 
 **Requirements:**
 
-- `uv sync --extra local-turn --extra local-stt-whisper` — pulls
+- `cargo build --features local-turn,local-stt` — pulls
   TEN-VAD, Smart Turn, faster-whisper.
 - `[providers.turn_detection].strategy = "ten+smart_turn"`. Without
   a local turn detector nothing drives `finalize()`.
@@ -502,15 +502,15 @@ locally, Deepgram becomes pure STT. Saves 150–200 ms vs. remote
 endpointing. Also required when the STT backend is local (Parakeet
 or FasterWhisper) since neither has an internal endpointer.
 
-Requires the `local-turn` extra (`uv sync --extra local-turn`).
+Requires the `local-turn` feature (`cargo build --features local-turn`).
 Smart Turn ONNX weights pull from HuggingFace on first use (cached
 under `~/.cache/huggingface`); subsequent runs are filesystem-only.
 `HF_HUB_OFFLINE=1` forces cache-only mode for air-gapped
 deployments.
 
 Default `smart_turn_filename` is the **CPU ONNX export**, matching
-the `onnxruntime` shipped by the `local-turn` extra. If you install
-`onnxruntime-gpu` separately, switch to the GPU export:
+the CPU ONNX Runtime (`ort`) the `local-turn` feature pulls. To run
+the GPU export, build `ort` with a GPU execution provider:
 
 ```toml
 [providers.turn_detection.local]
@@ -539,7 +539,7 @@ idle_fallback_s       = 1.5
 | Field | Default | Purpose |
 |---|---|---|
 | `smart_turn_repo_id` | `pipecat-ai/smart-turn-v3` | HuggingFace repo holding the ONNX exports. |
-| `smart_turn_filename` | `smart-turn-v3.2-cpu.onnx` | Specific export. Switch to `smart-turn-v3.2-gpu.onnx` if `onnxruntime-gpu` is installed. |
+| `smart_turn_filename` | `smart-turn-v3.2-cpu.onnx` | Specific export. Switch to `smart-turn-v3.2-gpu.onnx` when `ort` is built with a GPU execution provider. |
 | `silence_ms` | `200` | Silence after speech before SmartTurn classifies. |
 | `speech_start_ms` | `100` | Consecutive speech before "speaking" latches. |
 | `vad_threshold` | `0.5` | TEN-VAD `is_speech` cutoff. |
@@ -578,7 +578,7 @@ Three tiered slots, by latency / quality:
 
 Each slot picks its model independently. Slot names are canonical;
 unknown slots fail loudly at config load. See
-`familiar_connect.config.LLM_SLOT_NAMES`.
+`familiar_connect::config::LLM_SLOT_NAMES`.
 
 ### Schema
 
@@ -853,26 +853,27 @@ Built-in backends:
 | `hash` | none | weak (token-overlap baseline) | tests, smoke checks, cold-start without ONNX |
 | `fastembed` | ONNX runtime + ~130 MB model on first load | strong (BGE-small default) | production semantic recall |
 
-Third-party backends register at import time (same pattern as the
+Third-party backends register at startup (same pattern as the
 STT factory); the seam is stable so `register_embedder` drops in
 without touching `RagContextLayer`.
 
 ### FastEmbed install + model selection
 
 ```bash
-uv sync --extra local-embed
+cargo build --features local-embed
 ```
 
-Brings in `fastembed` + `onnxruntime` + `numpy`. Model downloads on
+Brings in the `fastembed` crate (ONNX via `ort`). Model downloads on
 first use (cached under `~/.cache/fastembed`). Common choices:
 
-If `backend = "fastembed"` is selected but the extra isn't installed,
-the bot **refuses to start** — `create_embedder` checks for the
-`fastembed` import at load and raises with the `uv sync --extra
-local-embed` hint. Fail-fast at boot beats a misconfigured deploy
-silently crashing on its first message. (The import is checked, not
-the model download — startup stays fast; the ~130 MB model still
-loads lazily on first embed.)
+If `backend = "fastembed"` is selected but the feature isn't compiled
+in, the bot **refuses to start** — the built-in `fastembed` factory
+fails fast with the `--features local-embed` hint (the real ONNX
+backend is injected only when the feature is present). Fail-fast at
+boot beats a misconfigured deploy silently crashing on its first
+message. (Only the backend wiring is checked, not the model download —
+startup stays fast; the ~130 MB model still loads lazily on first
+embed.)
 
 | `fastembed_model` | Dim | Approx size | Notes |
 |---|---|---|---|
@@ -922,8 +923,8 @@ sqlite3 data/familiars/<id>/history.db "DELETE FROM fact_embeddings;"
 
 ## Memory projectors (M5)
 
-Each watermark-driven writer is a :class:`MemoryProjector` —
-``name: str`` plus ``async def run(self) -> None``. TOML selector
+Each watermark-driven writer implements the `MemoryProjector` trait —
+`fn name(&self) -> &str` plus `async fn run(self: Box<Self>)`. TOML selector
 picks which run; unknown names raise at config load.
 
 ```toml
@@ -990,8 +991,8 @@ background spend.
 
 Third-party projectors (Graphiti / Cognee / external memory
 service) plug in by calling
-``familiar_connect.processors.projectors.register_projector(name, factory)``
-at import time; once registered, the same selector picks them up.
+`familiar_connect::processors::projectors::register_projector(name, factory)`
+at startup; once registered, the same selector picks them up.
 Each side-index remains regenerable from `turns`, so swapping
 projectors mid-deployment doesn't lose ground-truth — restart the
 new projector and let it backfill.

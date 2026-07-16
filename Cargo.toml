@@ -1,0 +1,39 @@
+# Cargo workspace root for the Familiar-Connect Rust port.
+# One member today (`familiar-connect`); FFI `-sys` crates (e.g. `ten-vad-sys`)
+# join here when subsystem 09's `local-turn` feature lands, keeping unsafe FFI
+# out of the main crate. See rust/DESIGN.md.
+[workspace]
+resolver = "3"
+members = ["familiar-connect"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Cassidy Prather <pratherea@gmail.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/CassidyPrather/Familiar-Connect"
+publish = false
+
+# Lint policy mirrors the user's rust-template: crank clippy up, allow only the
+# handful that earn their place. Members opt in with `[lints] workspace = true`.
+# A future `ten-vad-sys` FFI crate overrides `[lints.rust]` locally to relax
+# `unsafe_code` to `deny` with targeted allows — the main crate keeps `forbid`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Targeted allows (each earns its place, like the ruff ignores did)
+multiple_crate_versions = "allow" # Transitive deps disagree; not actionable here
+missing_errors_doc = "allow"      # Undocumented errors are fine (the D10 of clippy)
+missing_panics_doc = "allow"      # Ditto
+doc_markdown = "allow"            # Prose names Python module paths / symbols freely; backticking every one is noise
+
+[profile.release]
+# Smaller, faster binaries at the cost of compile time
+lto = "thin"
+strip = "symbols"
