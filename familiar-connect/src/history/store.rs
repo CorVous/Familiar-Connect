@@ -3312,11 +3312,11 @@ impl HistoryStore {
     /// number of rows indexed.
     fn rebuild_facts_fts(&self) -> Result<usize, StoreError> {
         self.fts_facts.clear()?;
-        let rows = self.db.query_map(
-            "SELECT id, text FROM facts ORDER BY id ASC",
-            vec![],
-            |r| Ok((r.get::<_, i64>("id")?, r.get::<_, String>("text")?)),
-        )?;
+        let rows =
+            self.db
+                .query_map("SELECT id, text FROM facts ORDER BY id ASC", vec![], |r| {
+                    Ok((r.get::<_, i64>("id")?, r.get::<_, String>("text")?))
+                })?;
         let count = rows.len();
         self.fts_facts.add_many(&rows)?;
         Ok(count)

@@ -252,7 +252,10 @@ fn reopen_rebuilds_fts_after_index_wipe() {
         // Sanity: both indexes are populated before the wipe.
         assert_eq!(search(&store, "fox", 10).len(), 3);
         assert_eq!(
-            store.search_facts(FAM, "strawberries", 10, false, None).unwrap().len(),
+            store
+                .search_facts(FAM, "strawberries", 10, false, None)
+                .unwrap()
+                .len(),
             1
         );
         store.close();
@@ -265,11 +268,17 @@ fn reopen_rebuilds_fts_after_index_wipe() {
     let store = HistoryStore::open(&db_path).unwrap();
     assert_eq!(search(&store, "fox", 10).len(), 3);
     assert_eq!(
-        store.search_facts(FAM, "strawberries", 10, false, None).unwrap().len(),
+        store
+            .search_facts(FAM, "strawberries", 10, false, None)
+            .unwrap()
+            .len(),
         1
     );
     assert_eq!(
-        store.search_facts(FAM, "dirigibles", 10, false, None).unwrap().len(),
+        store
+            .search_facts(FAM, "dirigibles", 10, false, None)
+            .unwrap()
+            .len(),
         1
     );
 }

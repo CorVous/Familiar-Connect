@@ -204,7 +204,8 @@ impl TantivyFts {
         std::fs::remove_dir_all(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
         std::fs::create_dir_all(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
         let mmap = MmapDirectory::open(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
-        let index = Index::open_or_create(mmap, schema).map_err(|e| StoreError::Fts(e.to_string()))?;
+        let index =
+            Index::open_or_create(mmap, schema).map_err(|e| StoreError::Fts(e.to_string()))?;
         Ok((index, true))
     }
 
@@ -441,7 +442,10 @@ mod tests {
         Index::create_in_dir(dir.path(), sb.build()).unwrap();
 
         let (idx, recreated) = TantivyFts::open_dir(dir.path()).unwrap();
-        assert!(recreated, "incompatible on-disk schema must trigger recreate");
+        assert!(
+            recreated,
+            "incompatible on-disk schema must trigger recreate"
+        );
         assert!(idx.is_empty(), "a recreated index starts empty");
     }
 

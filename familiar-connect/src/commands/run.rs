@@ -28,12 +28,12 @@ use crate::activities::engine::{
 };
 use crate::bot::{BotHandle, build_activity_presence_cb};
 use crate::budget::TierBudget;
+use crate::config::EmbeddingConfig;
 use crate::context::layers::ChannelResolver;
 use crate::context::{
     Assembler, CharacterCardLayer, ConversationSummaryLayer, LorebookLayer, OperatingModeLayer,
     PeopleDossierLayer, RagContextLayer, RecentHistoryLayer, ReflectionLayer,
 };
-use crate::config::EmbeddingConfig;
 use crate::embedding::{Embedder, EmbeddingError};
 use crate::familiar::Familiar;
 use crate::focus::FocusManager;
@@ -118,9 +118,7 @@ pub fn resolve_familiar_root(
                   the fail-fast contract is unit-tested under default features"
     )
 )]
-fn resolve_embedder(
-    config: &EmbeddingConfig,
-) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
+fn resolve_embedder(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
     crate::embedding::create_embedder(config)
 }
 
@@ -1129,10 +1127,10 @@ mod tests {
         ShutdownController, ShutdownStage, build_activity_engine, default_assembler,
         resolve_embedder, resolve_familiar_root,
     };
-    use crate::config::EmbeddingConfig;
     use crate::activities::engine::ActivityEngine;
     use crate::bot::{BotHandle, Presence, PresenceSink};
     use crate::budget::TierBudget;
+    use crate::config::EmbeddingConfig;
     use crate::familiar::Familiar;
     use crate::focus::FocusManager;
     use crate::processors::SendText;
