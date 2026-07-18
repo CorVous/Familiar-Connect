@@ -244,6 +244,98 @@ async fn empty_reply_skips_tts_and_assistant_turn() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Leaked tool-call XML (issue #109) — must never reach TTS or history
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn leaked_invoke_xml_content_never_spoken_bare_path() {
+    // The model leaks a tool call as PLAIN CONTENT (no structured tool_calls),
+    // split across deltas. The streaming gate must suppress it before TTS, and
+    // no assistant turn (raw XML) may land in history.
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[
+            "<invoke name=\"read_channel\">",
+            "<parameter name=\"limit\">10</parameter>",
+            "</invoke>",
+        ])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(
+        &voice_final("read the channel", "voice:1", "t-1", None),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    r.wait_until_idle().await;
+    assert!(
+        player.calls().is_empty(),
+        "leak spoken: {:?}",
+        player.calls()
+    );
+    let turns = s.sync().recent("fam", 1, 10, None, None).unwrap();
+    assert!(turns.iter().all(|t| t.role != "assistant"));
+    assert!(turns.iter().all(|t| !t.content.contains("invoke")));
+}
+
+#[tokio::test]
+async fn leaked_silent_invoke_content_treated_as_silent_bare_path() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&["<invoke name=\"silent\">", "</invoke>"])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hush", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert!(player.calls().is_empty());
+    let turns = s.sync().recent("fam", 1, 10, None, None).unwrap();
+    assert!(turns.iter().all(|t| t.role != "assistant"));
+}
+
+#[tokio::test]
+async fn leading_angle_bracket_prose_still_spoken() {
+    // False-positive guard: legit `<`-leading prose must open the speak path.
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&["<3 you all, ", "friends."])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("love?", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    let spoken: Vec<String> = player.calls().into_iter().map(|(t, _)| t).collect();
+    assert!(!spoken.is_empty(), "legit <3 prose was suppressed");
+    assert!(spoken.join(" ").contains("<3"), "spoken: {spoken:?}");
+    let assistants: Vec<String> = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.role == "assistant")
+        .map(|t| t.content)
+        .collect();
+    assert_eq!(assistants, ["<3 you all, friends."]);
+}
+
 #[tokio::test]
 async fn stale_final_ignored() {
     let player = Arc::new(MockTTSPlayer::new(5, 5));

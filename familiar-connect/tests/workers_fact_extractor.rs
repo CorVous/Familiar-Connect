@@ -8,6 +8,9 @@
 #[path = "workers_helpers/mod.rs"]
 mod helpers;
 
+#[path = "log_capture/mod.rs"]
+mod log_capture;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -173,6 +176,44 @@ async fn self_capability_facts_dropped() {
         texts,
         BTreeSet::from(["Aria likes strawberries.".to_string()])
     );
+}
+
+// Guard audit-log convention (issue #132): each self-capability drop at the
+// post-parse extraction filter emits one structured debug line naming the
+// guard. Behaviour is unchanged — the capability claims are still dropped and
+// only the real fact survives.
+#[tokio::test]
+async fn self_capability_drop_emits_guard_audit_line() {
+    let capture = log_capture::LogCapture::install();
+    let store = store();
+    seed_turns(&store, 10, 1);
+    let llm = ScriptedLlm::new(
+        [facts_json(json!([
+            {"text": "The assistant does not have access to the internet.", "source_turn_ids": [1]},
+            {"text": "As an AI, I have no personal preferences.", "source_turn_ids": [2]},
+            {"text": "Aria likes strawberries.", "source_turn_ids": [5]},
+        ]))],
+        "[]",
+    );
+    extractor(&store, &llm, 10).tick().await.unwrap();
+
+    // Behaviour unchanged: only the real fact survives.
+    assert_eq!(
+        fact_texts(&store),
+        BTreeSet::from(["Aria likes strawberries.".to_string()])
+    );
+
+    let out = capture.contents();
+    drop(capture);
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("self_capability"))
+            .count(),
+        2,
+        "one audit line per dropped self-capability claim: {out}"
+    );
+    assert!(out.contains("extraction_filter"), "{out}");
+    assert!(out.contains("self_capability_claim"), "{out}");
 }
 
 #[tokio::test]

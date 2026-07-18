@@ -14,8 +14,9 @@ surface is:
 The commands are registered in `familiar-connect/src/bot.rs`; the two
 voice commands are only registered in a `discord-voice` build.
 
-Subscriptions persist across restarts at
-`data/familiars/<id>/subscriptions.toml`; delete that file to reset.
+Subscriptions persist across restarts at `subscriptions.toml` in the
+familiar's data folder (see [On-disk layout](on-disk-layout.md)); delete
+that file to reset.
 
 Discord threads and forum posts are their own channels: running
 `/subscribe-text` inside a thread subscribes the familiar to that

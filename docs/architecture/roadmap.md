@@ -33,8 +33,8 @@ Folded into the architecture pages; the detail lives there.
 ### M5 — Pluggable memory-store backend (shipped)
 
 Watermark-driven writers lifted behind a `MemoryProjector`
-Protocol; operators select the active set via `[providers.memory]`.
-Third-party projectors (Graphiti, Cognee) register at import time. See
+trait; operators select the active set via `[providers.memory]`.
+Third-party projectors (Graphiti, Cognee) register at startup. See
 [Memory strategies — swap points](memory-strategies.md#swap-points).
 
 ### M6 phase 3 — ANN at scale (deferred)

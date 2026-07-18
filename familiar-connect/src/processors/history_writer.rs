@@ -88,6 +88,7 @@ impl HistoryWriter {
             "user",
             &payload.content,
         );
+        append = append.pings_bot(payload.pings_bot);
         if let Some(author) = &payload.author {
             append = append.author(author.clone());
         }

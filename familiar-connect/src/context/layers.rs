@@ -625,6 +625,15 @@ impl RecentHistoryLayer {
             rendered = trim_messages_to_token_cap(rendered, max_tokens);
             let keep = rendered.len();
             let drop = turns.len().saturating_sub(keep);
+            if drop > 0 {
+                // Recent-history trim impact: how many oldest turns the token
+                // cap dropped this build. Observability only (issue #184
+                // profiling signal) — the trim behavior is unchanged.
+                tracing::debug!(
+                    "RecentHistoryLayer: trimmed {drop} oldest turn(s) to fit \
+                     {max_tokens}-token cap ({keep} kept)"
+                );
+            }
             turns = turns.split_off(drop);
         }
 
@@ -1262,6 +1271,7 @@ pub struct RagContextLayer {
     fact_overfetch: i64,
     cue: Mutex<String>,
     embedder_warned: AtomicBool,
+    embed_err_warned: AtomicBool,
 }
 
 impl RagContextLayer {
@@ -1303,8 +1313,22 @@ impl RagContextLayer {
         if stored_vecs.is_empty() {
             return HashMap::new();
         }
-        let Ok(vectors) = embedder.embed(&[cue.to_owned()]).await else {
-            return HashMap::new();
+        let vectors = match embedder.embed(&[cue.to_owned()]).await {
+            Ok(vectors) => vectors,
+            Err(err) => {
+                // A configured embedder faulting silently degrades semantic
+                // recall to BM25-only; warn once so the degradation is visible
+                // (issue #108 observability gap — the None-embedder case is
+                // warned above at build()).
+                if !self.embed_err_warned.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "RagContextLayer: embedder '{}' embed() failed ({err:#}); \
+                         falling back to BM25-only ranking for semantic recall.",
+                        embedder.name()
+                    );
+                }
+                return HashMap::new();
+            }
         };
         let Some(cue_vec) = vectors.into_iter().next() else {
             return HashMap::new();
@@ -1662,6 +1686,7 @@ impl RagContextBuilder {
             fact_overfetch: self.fact_overfetch.max(1),
             cue: Mutex::new(String::new()),
             embedder_warned: AtomicBool::new(false),
+            embed_err_warned: AtomicBool::new(false),
         }
     }
 }

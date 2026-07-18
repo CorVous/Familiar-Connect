@@ -359,10 +359,19 @@ TextResponder (`wait_for_backoff` + `notify_user_message`).
     + `resolve_label(canonical_key, guild_id, familiar_id)` (synchronous
     store calls). Duplicate label with a different key: first write wins,
     WARN `ambiguous_label`. The map is never surfaced in the prompt.
-19. **T19** Send: target channel is `fm.get_focus("text")` when wired and
-    non-None (a mid-turn `shift_focus` already moved the pointer — reply
-    follows focus; pinned: shift+reply posts to the NEW channel), else the
-    event channel. `send_text` exception → WARN `send_error`,
+19. **T19** Send: **per-turn routing** (#170). The target channel is the channel
+    a `shift_focus` moved to *during this turn* (recorded turn-locally at the
+    tool's call site), else the triggering event channel. The mutable global
+    focus (`fm.get_focus("text")`) is **never** read at send time — that read
+    was the cross-channel misroute: a slow turn could pick up a concurrent
+    turn's shift. Pinned: shift+reply posts to the NEW channel (a turn that
+    shifts routes there and persists the assistant turn there); a turn that
+    never shifts routes to its own channel regardless of concurrent shifts.
+    **Wake turns are shift-or-silent** (#170): a `wake` turn (T20) that produces
+    prose but did NOT `shift_focus` this turn is suppressed entirely — no send,
+    treated as silent, logged `guard=wake_shift_or_silent action=suppress` then
+    `engine.end_turn()` — so a wake reply can only ever reach the channel the
+    model deliberately moved to. `send_text` exception → WARN `send_error`,
     `engine.end_turn()`, return — assistant turn NOT persisted and
     `router.end_turn` NOT called (the stale scope is cleaned up by the next
     `begin_turn` on that session). After a successful send: if

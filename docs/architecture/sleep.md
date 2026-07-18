@@ -163,7 +163,7 @@ changes leaves it untouched.
 
 The live bot shares the DB, and the plan→apply gap spans an LLM call
 over the whole window. If a writer supersedes a planned fact in that
-gap, apply skips that action (per-action `ValueError` handling) rather
+gap, apply skips that action (per-action skip-and-record) rather
 than crashing, and records it in the report. A rewrite pre-flights its
 sources and skips the whole action if any is no longer current, so it
 never strands a half-merged fact. This also makes apply idempotent:

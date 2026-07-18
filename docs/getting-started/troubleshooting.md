@@ -6,7 +6,9 @@ Common startup errors and what they mean:
   token. Add it to `.env`.
 - **`No familiar selected`** — neither `FAMILIAR_ID` nor `--familiar`
   was given.
-- **`Familiar folder does not exist`** — create `data/familiars/<id>/`.
+- **`Familiar folder does not exist`** — create the folder under the
+  familiars root (see [On-disk layout](on-disk-layout.md)), or set
+  `FAMILIARS_ROOT`.
 - **`OPENROUTER_API_KEY environment variable is required`** — missing
   OpenRouter key.
 - **`Opus library not found — voice playback will not work`** — voice

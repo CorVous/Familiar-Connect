@@ -418,6 +418,27 @@ impl AsyncHistoryStore {
         .await
     }
 
+    /// See [`HistoryStore::put_people_dossier_if_current`].
+    pub async fn put_people_dossier_if_current(
+        &self,
+        familiar_id: String,
+        canonical_key: String,
+        expected_prev_last_fact_id: Option<i64>,
+        new_last_fact_id: i64,
+        dossier_text: String,
+    ) -> Result<bool, StoreError> {
+        self.run(move |s| {
+            s.put_people_dossier_if_current(
+                &familiar_id,
+                &canonical_key,
+                expected_prev_last_fact_id,
+                new_last_fact_id,
+                &dossier_text,
+            )
+        })
+        .await
+    }
+
     /// See [`HistoryStore::subjects_with_facts`].
     pub async fn subjects_with_facts(
         &self,

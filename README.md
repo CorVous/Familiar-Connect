@@ -24,7 +24,7 @@ cargo build --release --features discord,discord-voice,stt-deepgram
 cargo build --release --features local-turn,local-embed
 ```
 
-See [`docs/rust-port/DAVE-RUNBOOK.md`](./docs/rust-port/DAVE-RUNBOOK.md) for prerequisites (Discord bot token + intents, OpenRouter key, optional TTS/STT keys), the on-disk `data/familiars/<id>/` shape, platform notes (Windows voice builds need CMake), and a staged smoke ladder for voice.
+See [`docs/rust-port/DAVE-RUNBOOK.md`](./docs/rust-port/DAVE-RUNBOOK.md) for prerequisites (Discord bot token + intents, OpenRouter key, optional TTS/STT keys), the on-disk `<familiars-root>/<id>/` shape, platform notes (Windows voice builds need CMake), and a staged smoke ladder for voice.
 
 ## Where things are
 

@@ -340,11 +340,17 @@ impl FactExtractor {
             }
             if is_self_capability(&text, Some(&name_re)) {
                 dropped_self_cap += 1;
+                // Pipeline guard (issue #132): self-capability claims are dropped
+                // at the post-parse extraction filter. Shared audit convention —
+                // see docs/architecture/guards.md.
                 tracing::debug!(
                     target: "familiar_connect.processors.fact_extractor",
-                    "{} {} {}",
+                    "{} {} {} {} {} {}",
                     ls::tag("Facts", ls::Y),
-                    ls::kv_styled("drop", "self_capability", ls::W, ls::LY),
+                    ls::kv_styled("guard", "self_capability", ls::W, ls::LY),
+                    ls::kv_styled("step", "extraction_filter", ls::W, ls::LC),
+                    ls::kv_styled("action", "drop", ls::W, ls::LY),
+                    ls::kv_styled("reason", "self_capability_claim", ls::W, ls::LW),
                     ls::kv_styled("text", &ls::trunc(&text, 120), ls::W, ls::LW),
                 );
                 continue;

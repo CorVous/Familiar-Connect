@@ -185,15 +185,22 @@ impl PeopleDossierWorker {
         if facts.is_empty() {
             // Window held only low-importance texture — advance the watermark
             // past it (keeping the prior text) so we don't re-filter every tick.
+            // CAS on the read-time watermark so a concurrent supersede's delete
+            // (cache-invalidation) is not undone by resurrecting the row (#130).
             if let Some(p) = &prior {
-                self.store
-                    .put_people_dossier(
+                let landed = self
+                    .store
+                    .put_people_dossier_if_current(
                         self.familiar_id.clone(),
                         canonical_key.to_string(),
+                        Some(prior_wm),
                         latest_fact_id,
                         p.dossier_text.clone(),
                     )
                     .await?;
+                if !landed {
+                    log_raced_supersede(canonical_key, "texture_watermark");
+                }
             }
             return Ok(());
         }
@@ -228,14 +235,23 @@ impl PeopleDossierWorker {
             // Don't overwrite a real dossier with an empty reply.
             return Ok(());
         }
-        self.store
-            .put_people_dossier(
+        // CAS on the read-time watermark: if a supersede deleted the row while
+        // the LLM ran, drop this write rather than resurrect an invalidated
+        // dossier — the next tick sees prior=None and rebuilds cleanly (#130).
+        let landed = self
+            .store
+            .put_people_dossier_if_current(
                 self.familiar_id.clone(),
                 canonical_key.to_string(),
+                prior.as_ref().map(|p| p.last_fact_id),
                 latest_fact_id,
                 text.clone(),
             )
             .await?;
+        if !landed {
+            log_raced_supersede(canonical_key, "rebuild");
+            return Ok(());
+        }
         tracing::info!(
             target: "familiar_connect.processors.people_dossier_worker",
             "{} {} {} {} {}",
@@ -247,6 +263,20 @@ impl PeopleDossierWorker {
         );
         Ok(())
     }
+}
+
+/// A dossier write was dropped because a concurrent supersede invalidated
+/// (deleted) the row between our read and this write (#130). Logged at debug —
+/// the worker self-heals on the next tick (`prior=None` → clean rebuild).
+fn log_raced_supersede(canonical_key: &str, stage: &str) {
+    tracing::debug!(
+        target: "familiar_connect.processors.people_dossier_worker",
+        "{} {} {} {}",
+        ls::tag("PeopleDossier", ls::LC),
+        ls::kv_styled("skip", "raced_supersede", ls::W, ls::LY),
+        ls::kv_styled("subject", canonical_key, ls::W, ls::LY),
+        ls::kv_styled("stage", stage, ls::W, ls::LW),
+    );
 }
 
 /// Compounding prompt for one subject. Self and non-self differ in header

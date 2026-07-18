@@ -67,6 +67,21 @@ impl Embedder for BoomEmbedder {
     }
 }
 
+struct ErringEmbedder;
+
+#[async_trait]
+impl Embedder for ErringEmbedder {
+    fn name(&self) -> &str {
+        "erring-v1"
+    }
+    fn dim(&self) -> usize {
+        4
+    }
+    async fn embed(&self, _texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Err(anyhow::anyhow!("simulated backend fault"))
+    }
+}
+
 struct CountingEmbedder {
     calls: AtomicUsize,
 }
@@ -257,6 +272,53 @@ async fn unembedded_facts_get_neutral_score_not_zero() {
         .build();
     layer.set_current_cue("strawberries");
     assert!(layer.build(&vctx(1)).await.contains("strawberries"));
+}
+
+#[tokio::test]
+async fn erring_embedder_warns_once_and_falls_back() {
+    let store = store();
+    store
+        .sync()
+        .append_fact(AppendFact::new(
+            "fam",
+            Some(1),
+            "Aria likes strawberries.",
+            vec![1],
+        ))
+        .unwrap();
+    // A stored vector under the embedder's name is required so the layer
+    // actually calls embed() (the cue-embedding step) and hits the fault.
+    store
+        .sync()
+        .set_fact_embedding(1, "erring-v1", &[0.0, 1.0, 0.0, 0.0])
+        .unwrap();
+    let layer = RagContextLayer::builder(store)
+        .max_facts(3)
+        .bm25_weight(1.0)
+        .embedding_weight(1.0)
+        .embedder(Arc::new(ErringEmbedder))
+        .build();
+    layer.set_current_cue("strawberry");
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(VecWriter(buf.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let (out1, out2) = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let out1 = layer.build(&vctx(1)).await;
+        let out2 = layer.build(&vctx(1)).await;
+        (out1, out2)
+    };
+
+    let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert_eq!(captured.matches("embed() failed").count(), 1, "{captured}");
+    // A faulting embedder must not panic; recall degrades to BM25-only, so the
+    // fact still surfaces on both builds.
+    assert!(out1.contains("Aria likes strawberries"));
+    assert!(out2.contains("Aria likes strawberries"));
 }
 
 #[tokio::test]

@@ -21,7 +21,7 @@
 //! the SDK's higher-level reconnect logic would hide. The `deepgram` crate stays
 //! available for a future higher-level path.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -57,6 +57,15 @@ const DEFAULT_MAX_RECONNECTS: i64 = 5;
 const DEFAULT_RECONNECT_DELAY: f64 = 1.0; // base delay; first attempt is immediate
 const DEFAULT_RECONNECT_BACKOFF_CAP: f64 = 16.0;
 const DEFAULT_IDLE_CLOSE_S: f64 = 30.0;
+
+/// Practical cap on the merged (config + voice-member) keyterm set (#198).
+///
+/// Keyterm prompting biases nova-3 toward a handful of proper nouns; a busy
+/// voice channel could otherwise push dozens of member names into the connect
+/// URL, past the point the prompting stays useful (and toward Deepgram's
+/// per-request keyterm ceiling). Config keyterms are merged first, so jargon
+/// wins the cap over member names.
+const MAX_KEYTERMS: usize = 100;
 
 const FINALIZE_JSON: &str = r#"{"type":"Finalize"}"#;
 const KEEPALIVE_JSON: &str = r#"{"type":"KeepAlive"}"#;
@@ -191,6 +200,31 @@ fn encode_query(s: &str) -> String {
                 out.push('%');
                 out.push(char::from(HEX[usize::from(b >> 4)]));
                 out.push(char::from(HEX[usize::from(b & 0x0F)]));
+            }
+        }
+    }
+    out
+}
+
+/// Merge + clean a keyterm set (#198): trim each term, drop empty /
+/// whitespace-only and letter-free tokens (emoji-only handles, bare
+/// punctuation/digits), case-insensitively dedupe (first spelling wins), and
+/// cap the total at [`MAX_KEYTERMS`]. Order is preserved so config keyterms —
+/// passed first — survive the cap ahead of runtime member names.
+fn normalize_keyterms(terms: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for term in terms {
+        let trimmed = term.trim();
+        // Drop empty and letter-free tokens (emoji-only handles, `!!!`, `2024`):
+        // they add no biasing value and can be noise in the request.
+        if trimmed.is_empty() || !trimmed.chars().any(char::is_alphabetic) {
+            continue;
+        }
+        if seen.insert(trimmed.to_lowercase()) {
+            out.push(trimmed.to_owned());
+            if out.len() >= MAX_KEYTERMS {
+                break;
             }
         }
     }
@@ -653,6 +687,19 @@ impl Transcriber for DeepgramTranscriber {
 
     fn set_endpointing_ms(&mut self, ms: i64) -> bool {
         self.endpointing_ms = ms;
+        true
+    }
+
+    fn set_keyterms(&mut self, terms: Vec<String>) -> bool {
+        // Merge config keyterms (already on `self.keyterms`) with the provided
+        // member names, config first so jargon wins the cap. The result flows
+        // into `build_ws_url`, which `start()` reads — so setting before start
+        // takes effect for this per-user clone (#198).
+        let merged = std::mem::take(&mut self.keyterms)
+            .into_iter()
+            .chain(terms)
+            .collect::<Vec<_>>();
+        self.keyterms = normalize_keyterms(merged);
         true
     }
 
@@ -1384,6 +1431,75 @@ mod tests {
         assert!(!url.contains("%20"), "url = {url}");
         // Still decodes back to the original term.
         assert_eq!(parse_query(&url)["keyterm"], vec!["lifecycle mesh"]);
+    }
+
+    // ------------------------------------------------------------------
+    // set_keyterms merge/normalize (#198)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn set_keyterms_merges_config_and_member_names_into_ws_url() {
+        // Config keyterms come first, then the voice-member names get appended;
+        // the merged set flows into the connect URL.
+        let mut c = DeepgramTranscriber::new("test-key");
+        c.keyterms = vec!["lifecycle mesh".to_string(), "Tam".to_string()];
+        assert!(c.set_keyterms(vec!["BlueSheep".to_string(), "Ada".to_string()]));
+        let p = parse_query(&c.build_ws_url());
+        assert_eq!(
+            p["keyterm"],
+            vec!["lifecycle mesh", "Tam", "BlueSheep", "Ada"]
+        );
+    }
+
+    #[test]
+    fn set_keyterms_dedupes_case_insensitively_config_wins() {
+        let mut c = DeepgramTranscriber::new("test-key");
+        c.keyterms = vec!["Tam".to_string()];
+        c.set_keyterms(vec![
+            "tam".to_string(),
+            "Ada".to_string(),
+            "ADA".to_string(),
+        ]);
+        // First spelling of each case-insensitive key survives, in order.
+        assert_eq!(c.keyterms, vec!["Tam".to_string(), "Ada".to_string()]);
+    }
+
+    #[test]
+    fn set_keyterms_drops_junk_and_letter_free_tokens() {
+        let mut c = DeepgramTranscriber::new("test-key");
+        c.set_keyterms(vec![
+            "  Ada  ".to_string(),   // trimmed
+            String::new(),           // empty
+            "   ".to_string(),       // whitespace-only
+            "\u{1f984}".to_string(), // emoji-only handle
+            "!!!".to_string(),       // punctuation-only
+            "2024".to_string(),      // digits-only
+        ]);
+        assert_eq!(c.keyterms, vec!["Ada".to_string()]);
+    }
+
+    #[test]
+    fn set_keyterms_caps_total_at_max_keyterms() {
+        let mut c = DeepgramTranscriber::new("test-key");
+        let many: Vec<String> = (0..(MAX_KEYTERMS + 50))
+            .map(|i| format!("name{i}"))
+            .collect();
+        c.set_keyterms(many);
+        assert_eq!(c.keyterms.len(), MAX_KEYTERMS);
+        // A per-user clone starts from config keyterms, so an empty config +
+        // capped names never exceeds the ceiling in the URL either.
+        let count = c.build_ws_url().matches("keyterm=").count();
+        assert_eq!(count, MAX_KEYTERMS);
+    }
+
+    #[test]
+    fn normalize_keyterms_preserves_config_order_ahead_of_names() {
+        // Config keyterms (passed first) survive the cap ahead of member names.
+        let mut input: Vec<String> = vec!["jargon".to_string()];
+        input.extend((0..MAX_KEYTERMS).map(|i| format!("member{i}")));
+        let out = normalize_keyterms(input);
+        assert_eq!(out.len(), MAX_KEYTERMS);
+        assert_eq!(out[0], "jargon");
     }
 
     #[test]

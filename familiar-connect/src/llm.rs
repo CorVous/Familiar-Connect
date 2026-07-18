@@ -512,6 +512,18 @@ mod client {
             if let Some(p) = &self.provider {
                 parts.push(ls::kv_styled("provider", p, ls::W, ls::LM));
             }
+            // Estimated prompt tokens via the char/4 heuristic (mirrors
+            // `budget::estimate_tokens`, CHARS_PER_TOKEN=4; `input_chars` is
+            // already a Unicode-scalar count). Emitted next to the true
+            // `in_tokens` so the estimated-vs-actual ratio is observable
+            // (issues #183/#184) — no calibration, purely a metric.
+            let est_in_tokens = self.input_chars.div_ceil(4);
+            parts.push(ls::kv_styled(
+                "est_in_tokens",
+                &est_in_tokens.to_string(),
+                ls::W,
+                ls::LC,
+            ));
             if let Some(v) = self.in_tokens {
                 parts.push(ls::kv_styled("in_tokens", &v.to_string(), ls::W, ls::LW));
             }

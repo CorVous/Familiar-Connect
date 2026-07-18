@@ -905,6 +905,27 @@ impl BotHandle {
             .get(&user_id)
             .cloned()
     }
+
+    /// Every cached voice member's proper nouns — `all_known_names()` (display /
+    /// username / aliases) plus the per-guild nickname — for STT keyterm biasing
+    /// (#198). Returned raw (with duplicates); the transcriber's `set_keyterms`
+    /// merges these with the config keyterms and normalizes/dedupes/caps. All
+    /// current members are enumerated so a name one speaker utters biases every
+    /// speaker's independent stream.
+    #[must_use]
+    pub fn voice_member_keyterms(&self) -> Vec<String> {
+        self.voice_members
+            .lock()
+            .expect("voice members mutex poisoned")
+            .values()
+            .flat_map(|author| {
+                author
+                    .all_known_names()
+                    .into_iter()
+                    .chain(author.guild_nick.clone())
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1808,10 +1829,21 @@ mod serenity_glue {
 
             let template = self.slash.transcriber_template.clone();
             let has_transcriber = template.is_some();
+            // Feed live voice-member proper nouns to each per-user transcriber
+            // clone as STT keyterm biases (#198). A weak ref avoids keeping the
+            // handle alive past shutdown; a dead handle yields no names.
+            let handle_weak = Arc::downgrade(&self.slash.handle);
+            let name_provider: Option<crate::bot::voice_intake::NameProvider> =
+                Some(Arc::new(move || {
+                    handle_weak
+                        .upgrade()
+                        .map_or_else(Vec::new, |h| h.voice_member_keyterms())
+                }));
             let runtime = start_voice_intake(
                 voice_client,
                 template,
                 self.slash.local_turn_detector.clone(),
+                name_provider,
                 self.slash.bus.clone(),
                 self.slash.familiar_id.clone(),
                 channel_id,
@@ -2269,6 +2301,10 @@ pub mod voice_intake {
     type SharedTranscriber = Arc<AsyncMutex<Box<dyn Transcriber>>>;
     /// The template, cloned per user (Python `familiar.transcriber`).
     type Template = Arc<Mutex<Box<dyn Transcriber>>>;
+    /// Yields the current voice-channel member proper nouns to bias STT keyterms
+    /// on each per-user transcriber clone (#198). Called on the audio path just
+    /// before `start`, so it must not block (a cache read).
+    pub type NameProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
     /// Per-voice-channel intake state (Python `VoiceRuntime`), all per-user maps
     /// keyed by Discord user id.
@@ -2303,6 +2339,8 @@ pub mod voice_intake {
     struct IntakeCtx {
         template: Template,
         detector: Option<Arc<LocalTurnDetector>>,
+        /// Supplies voice-member proper nouns as STT keyterm biases (#198).
+        name_provider: Option<NameProvider>,
         idle_finalize_s: f64,
         source: Arc<VoiceSource>,
         result_tx: UnboundedSender<TranscriptionResult>,
@@ -2329,6 +2367,15 @@ pub mod voice_intake {
             let mut clone = { self.template.lock().expect("template").clone_transcriber() };
             if self.detector.is_some() {
                 clone.set_endpointing_ms(10);
+            }
+            // Bias the fresh per-user stream toward the voice channel's member
+            // names before it connects (the URL bakes keyterms at `start`), so
+            // proper nouns any speaker utters transcribe correctly (#198).
+            if let Some(provider) = &self.name_provider {
+                let names = provider();
+                if !names.is_empty() {
+                    clone.set_keyterms(names);
+                }
             }
             let (per_user_tx, per_user_rx) = unbounded_channel();
             if clone.start(per_user_tx).await.is_err() {
@@ -2524,6 +2571,7 @@ pub mod voice_intake {
         voice_client: Arc<dyn VoiceClientLike>,
         template: Option<Template>,
         detector: Option<Arc<LocalTurnDetector>>,
+        name_provider: Option<NameProvider>,
         bus: Arc<dyn EventBus>,
         familiar_id: String,
         channel_id: i64,
@@ -2548,6 +2596,7 @@ pub mod voice_intake {
         let ctx = Arc::new(IntakeCtx {
             template,
             detector,
+            name_provider,
             idle_finalize_s: DEFAULT_IDLE_FINALIZE_S,
             source: source.clone(),
             result_tx,
@@ -3832,6 +3881,43 @@ mod tests {
             channel: channel.clone(),
         };
         (msg, channel)
+    }
+
+    #[test]
+    fn voice_member_keyterms_gathers_known_names_and_nicks() {
+        let handle = BotHandle::new(
+            Arc::new(NoopSendText),
+            Arc::new(RecordingPresence::default()) as Arc<dyn PresenceSink>,
+        );
+        let mut ada = Author::new("discord", "1", Some("ada_l".into()), Some("Ada".into()))
+            .with_aliases(["Addy".to_owned()]);
+        ada.guild_nick = Some("AdaTheGreat".into());
+        let blue = Author::new(
+            "discord",
+            "2",
+            Some("blue".into()),
+            Some("BlueSheep".into()),
+        );
+        {
+            let mut members = handle.voice_members.lock().expect("voice members");
+            members.insert(1, ada);
+            members.insert(2, blue);
+        }
+        let mut got = handle.voice_member_keyterms();
+        got.sort();
+        // all_known_names() (display / username / aliases) ∪ guild_nick for both
+        // members, returned raw — dedupe/cap happens in `set_keyterms`.
+        assert_eq!(
+            got,
+            vec![
+                "Ada".to_string(),
+                "AdaTheGreat".to_string(),
+                "Addy".to_string(),
+                "BlueSheep".to_string(),
+                "ada_l".to_string(),
+                "blue".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

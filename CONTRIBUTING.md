@@ -35,7 +35,7 @@ a test failing because the symbol doesn't exist is not a valid red; the
 item must exist (stub is fine) before the test can fail for the right reason.
 
 If the change touched **env vars / config keys**, **on-disk layout under
-`data/familiars/`**, or **architecture** (providers, processors, pipeline,
+the familiars root**, or **architecture** (providers, processors, pipeline,
 memory, history), update the matching page under `docs/` **in the same
 commit**.
 

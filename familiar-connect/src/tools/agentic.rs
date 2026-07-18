@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::llm::{Content, LlmClient, LlmDelta, Message};
 use crate::log_style as ls;
+use crate::silence::{LeadingLeak, classify_leading_leak};
 use crate::tools::registry::{Tool, ToolContext, ToolOutput, ToolRegistry};
 use crate::tools::silent::SILENT_RESULT;
 
@@ -61,18 +62,9 @@ pub trait AgenticHooks: Send + Sync {
 // Leak-guard regexes (behavior-pinned; ported verbatim)
 // ---------------------------------------------------------------------------
 
-static LEADING_INVOKE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?invoke\b").expect("valid regex"));
 static INVOKE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<(?:\w+:)?invoke\b.*?</(?:\w+:)?invoke>").expect("valid regex")
 });
-static INVOKE_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<(?:\w+:)?invoke\b[^>]*\bname="([^"]+)""#).expect("valid regex")
-});
-static PYTHON_SILENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*silent\s*\(").expect("valid regex"));
-static PYTHON_TOOL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*(read_channel|shift_focus)\s*\(").expect("valid regex"));
 static LEADING_THINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)^\s*(?:<think>.*?</think>|</think>)\s*").expect("valid regex")
 });
@@ -86,21 +78,29 @@ fn strip_think_artifacts(content: &str) -> String {
 ///
 /// Returns `(cleaned, silent_leak)`; `silent_leak` is true when the stripped
 /// invocation named the `silent` tool. Only fires when content *leads* with an
-/// invocation, so a stray mention mid-prose stays content.
+/// invocation, so a stray mention mid-prose stays content. Detection is shared
+/// with the streaming voice gate via [`classify_leading_leak`].
 fn strip_leaked_tool_calls(content: &str) -> (String, bool) {
-    if LEADING_INVOKE_RE.is_match(content) {
-        let silent_leak = INVOKE_NAME_RE
-            .captures_iter(content)
-            .any(|c| &c[1] == "silent");
-        let cleaned = INVOKE_BLOCK_RE.replace_all(content, "").trim().to_owned();
-        (cleaned, silent_leak)
-    } else if PYTHON_SILENT_RE.is_match(content) {
-        (String::new(), true)
-    } else if PYTHON_TOOL_RE.is_match(content) {
-        (String::new(), false)
-    } else {
-        (content.to_owned(), false)
+    match classify_leading_leak(content) {
+        Some(LeadingLeak::Invoke { silent }) => {
+            let cleaned = INVOKE_BLOCK_RE.replace_all(content, "").trim().to_owned();
+            (cleaned, silent)
+        }
+        Some(LeadingLeak::PythonSilent) => (String::new(), true),
+        Some(LeadingLeak::PythonTool) => (String::new(), false),
+        None => (content.to_owned(), false),
     }
+}
+
+/// Belt-and-suspenders guard for a streamed reply that bypasses the return-time
+/// [`AgenticResult::final_content`] path (the voice path streams `accumulated`
+/// straight through). Strips a leading think artifact then a leaked tool-call
+/// block so a leak never reaches TTS output or the persisted assistant turn;
+/// genuine prose passes through unchanged.
+#[must_use]
+pub(crate) fn guard_leaked_content(content: &str) -> String {
+    let stripped = strip_think_artifacts(content);
+    strip_leaked_tool_calls(&stripped).0
 }
 
 /// Project a tool-message content to plain text for history persistence.

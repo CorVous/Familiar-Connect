@@ -12,10 +12,15 @@
     clippy::iter_on_single_items
 )]
 
+#[path = "log_capture/mod.rs"]
+mod log_capture;
+
 use chrono::{TimeZone, Utc};
 use familiar_connect::history::{
     AppendFact, AppendTurn, FactDraft, FactSubject, HistoryStore, NewFact,
 };
+
+use log_capture::LogCapture;
 
 fn mem() -> HistoryStore {
     HistoryStore::open(":memory:").unwrap()
@@ -385,6 +390,113 @@ fn supersede_deletes_subject_dossier() {
 }
 
 #[test]
+fn put_dossier_if_current_updates_when_watermark_matches() {
+    // The common (non-raced) path: the row is still at the read-time watermark,
+    // so the CAS lands and advances it.
+    let store = mem();
+    store
+        .put_people_dossier("fam", "discord:A", 5, "v1")
+        .unwrap();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", Some(5), 9, "v2")
+        .unwrap();
+    assert!(landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "v2");
+    assert_eq!(entry.last_fact_id, 9);
+}
+
+#[test]
+fn put_dossier_if_current_drops_write_after_supersede_delete() {
+    // #130: a concurrent supersede deletes the row between the worker's read (at
+    // watermark = old_id) and its write; the stale CAS must NOT resurrect it.
+    let (store, old_id, new_id) = store_with_subject_fact();
+    store
+        .put_people_dossier("fam", "discord:A", old_id, "Aria loves hiking.")
+        .unwrap();
+    store
+        .supersede("fam", &[old_id], NewFact::Repoint(new_id))
+        .unwrap();
+    assert!(
+        store
+            .get_people_dossier("fam", "discord:A")
+            .unwrap()
+            .is_none()
+    );
+
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", Some(old_id), new_id, "stale prose")
+        .unwrap();
+    assert!(!landed, "stale CAS must not land");
+    assert!(
+        store
+            .get_people_dossier("fam", "discord:A")
+            .unwrap()
+            .is_none(),
+        "dropped write must not resurrect the invalidated row",
+    );
+}
+
+#[test]
+fn put_dossier_if_current_stale_watermark_does_not_clobber() {
+    // Another writer already advanced the watermark; a CAS at the old watermark
+    // must not overwrite the newer row.
+    let store = mem();
+    store
+        .put_people_dossier("fam", "discord:A", 3, "current")
+        .unwrap();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", Some(1), 9, "stale")
+        .unwrap();
+    assert!(!landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "current");
+    assert_eq!(entry.last_fact_id, 3);
+}
+
+#[test]
+fn put_dossier_if_current_inserts_when_absent() {
+    // None-prior (fresh subject): a clean insert lands.
+    let store = mem();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", None, 4, "fresh")
+        .unwrap();
+    assert!(landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "fresh");
+    assert_eq!(entry.last_fact_id, 4);
+}
+
+#[test]
+fn put_dossier_if_current_none_prior_does_not_clobber_racing_insert() {
+    // None-prior but a racing writer already created the row: DO NOTHING and
+    // report the write did not land.
+    let store = mem();
+    store
+        .put_people_dossier("fam", "discord:A", 7, "winner")
+        .unwrap();
+    let landed = store
+        .put_people_dossier_if_current("fam", "discord:A", None, 4, "loser")
+        .unwrap();
+    assert!(!landed);
+    let entry = store
+        .get_people_dossier("fam", "discord:A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.dossier_text, "winner");
+    assert_eq!(entry.last_fact_id, 7);
+}
+
+#[test]
 fn supersede_null_subject_leaves_dossiers() {
     let store = mem();
     store
@@ -717,6 +829,44 @@ fn dedup_normalized_duplicate_skips_insert() {
         [first.id].into_iter().collect()
     );
     assert_eq!(again.id, first.id);
+}
+
+// Guard audit-log convention (issue #132): the near-duplicate skip on the
+// DB-insert path emits exactly one structured debug line naming the guard, and
+// stays silent when the insert actually mints. Behaviour is unchanged — the
+// second append still collapses onto the first fact.
+#[test]
+fn dedup_skip_emits_guard_audit_line() {
+    let capture = LogCapture::install();
+    let store = mem();
+    let sj = vec![subj("discord:1", "Cor")];
+    let first = store
+        .append_fact(
+            AppendFact::new("fam", Some(1), "Cor likes tea.", vec![1]).subjects(sj.clone()),
+        )
+        .unwrap();
+    // A distinct fact mints (no audit line); the identical fact is skipped.
+    store
+        .append_fact(
+            AppendFact::new("fam", Some(1), "Cor likes coffee.", vec![2]).subjects(sj.clone()),
+        )
+        .unwrap();
+    let again = store
+        .append_fact(AppendFact::new("fam", Some(2), "cor likes tea.", vec![3]).subjects(sj))
+        .unwrap();
+    assert_eq!(again.id, first.id, "dedup collapses onto the existing fact");
+
+    let out = capture.contents();
+    drop(capture);
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("append_fact_dedup"))
+            .count(),
+        1,
+        "exactly one dedup skip line expected: {out}"
+    );
+    assert!(out.contains("near_duplicate"), "{out}");
+    assert!(out.contains("db_insert"), "{out}");
 }
 
 #[test]

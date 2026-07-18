@@ -4,9 +4,12 @@
 # familiar's `character.toml` omits a field, the loader falls back
 # to the value here.
 #
-# New familiars should copy this directory as a starting template:
+# New familiars should copy this directory into the familiars root as a
+# starting template (set FAMILIARS_ROOT to choose the root; see the
+# on-disk layout docs):
 #
-#     cp -r data/familiars/_default data/familiars/my-familiar
+#     export FAMILIARS_ROOT=./data/familiars   # or your chosen data dir
+#     cp -r data/familiars/_default "$FAMILIARS_ROOT/my-familiar"
 #     # then edit my-familiar/character.toml (config) and
 #     # my-familiar/character.md (persona + operational essentials).
 #

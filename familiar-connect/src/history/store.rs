@@ -26,6 +26,7 @@ use super::StoreError;
 use super::db::{Db, Value};
 use super::fts::TantivyFts;
 use crate::identity::Author;
+use crate::log_style as ls;
 use crate::support::time::{iso_utc, parse_iso};
 
 /// Reserved channel id for the per-familiar focus-stream summary (the consumed
@@ -81,7 +82,10 @@ CREATE TABLE IF NOT EXISTS turns (
     reply_to_message_id    TEXT,
     tool_calls_json        TEXT,
     tool_call_id           TEXT,
-    pings_bot              INTEGER NOT NULL DEFAULT 0
+    pings_bot              INTEGER NOT NULL DEFAULT 0,
+    arrived_at             TEXT,
+    consumed_at            TEXT,
+    missed_at              TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_channel
@@ -95,6 +99,9 @@ CREATE INDEX IF NOT EXISTS idx_turns_channel_mode
 
 CREATE INDEX IF NOT EXISTS idx_turns_platform_msg
     ON turns (familiar_id, platform_message_id);
+
+CREATE INDEX IF NOT EXISTS idx_turns_consumed
+    ON turns (familiar_id, consumed_at, arrived_at, id);
 
 CREATE TABLE IF NOT EXISTS message_reactions (
     familiar_id          TEXT    NOT NULL,
@@ -123,6 +130,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     last_summarised_id  INTEGER NOT NULL,
     summary_text        TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
+    last_consumed_at    TEXT,
     PRIMARY KEY (familiar_id, channel_id)
 );
 
@@ -1086,8 +1094,12 @@ impl HistoryStore {
         Self::init(db, fts_turns, fts_facts)
     }
 
-    /// Wire the DB + FTS into a store, run the schema repair pass and the
-    /// idempotent migrations (Python `__init__` order: schema → migrate → FTS).
+    /// Wire the DB + FTS into a store and run the schema repair pass. `SCHEMA`
+    /// uses `CREATE TABLE/INDEX IF NOT EXISTS` throughout, so it is the whole of
+    /// construction: every column the store queries is declared there. The
+    /// Python era's incremental `_migrate()` (ALTER-in the attentional columns,
+    /// re-add `pings_bot`, the issue #154 ego-key rewrite) was folded into
+    /// `SCHEMA` and removed — see issue #202 and spec 03 §8-10.
     fn init(
         db: Db,
         fts_turns: Box<dyn FtsIndex>,
@@ -1099,7 +1111,6 @@ impl HistoryStore {
             fts_facts,
         };
         store.db.execute_batch(SCHEMA)?;
-        store.migrate()?;
         Ok(store)
     }
 
@@ -1113,59 +1124,6 @@ impl HistoryStore {
     /// [`StoreError::Closed`].
     pub fn close(&self) {
         self.db.close();
-    }
-
-    fn migrate(&self) -> Result<(), StoreError> {
-        // arrived_at / consumed_at: backfill ONLY when the column is newly added
-        // (one-time scoping — a deliberately-staged turn must survive restart).
-        for col in ["arrived_at", "consumed_at"] {
-            if self
-                .db
-                .execute(format!("ALTER TABLE turns ADD COLUMN {col} TEXT"), vec![])
-                .is_ok()
-            {
-                self.db.execute(
-                    format!("UPDATE turns SET {col} = timestamp WHERE {col} IS NULL"),
-                    vec![],
-                )?;
-            }
-        }
-        // Idempotent column adds (swallow "already exists").
-        let _ = self.db.execute(
-            "ALTER TABLE turns ADD COLUMN pings_bot INTEGER NOT NULL DEFAULT 0",
-            vec![],
-        );
-        let _ = self.db.execute(
-            "ALTER TABLE summaries ADD COLUMN last_consumed_at TEXT",
-            vec![],
-        );
-        let _ = self
-            .db
-            .execute("ALTER TABLE turns ADD COLUMN missed_at TEXT", vec![]);
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_turns_consumed \
-             ON turns (familiar_id, consumed_at, arrived_at, id)",
-            vec![],
-        )?;
-        // Ego-key rewrite (issue #154): idempotent, whitespace-tolerant (D9).
-        self.db.execute(
-            "UPDATE people_dossiers SET canonical_key = 'ego:' || substr(canonical_key, 6) \
-             WHERE canonical_key LIKE 'self:%'",
-            vec![],
-        )?;
-        self.db.execute(
-            "UPDATE facts SET subjects_json = \
-             replace(subjects_json, '\"canonical_key\": \"self:', '\"canonical_key\": \"ego:') \
-             WHERE subjects_json LIKE '%\"canonical_key\": \"self:%'",
-            vec![],
-        )?;
-        self.db.execute(
-            "UPDATE facts SET subjects_json = \
-             replace(subjects_json, '\"canonical_key\":\"self:', '\"canonical_key\":\"ego:') \
-             WHERE subjects_json LIKE '%\"canonical_key\":\"self:%'",
-            vec![],
-        )?;
-        Ok(())
     }
 
     fn safe_fts_add(index: &dyn FtsIndex, row_id: i64, content: &str, kind: &str) {
@@ -1964,6 +1922,64 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Compare-and-set dossier write, closing the supersede-vs-rebuild race
+    /// (#130). A dossier rebuild reads the prior row, runs a long LLM call, then
+    /// writes — and a concurrent supersede may DELETE the row as
+    /// cache-invalidation in that window (a surviving row would re-compound
+    /// stale prose). An unconditional upsert ([`Self::put_people_dossier`])
+    /// would resurrect the invalidated row with pre-supersede content, and
+    /// because supersede never raises `max(facts.id)` the resurrected watermark
+    /// blocks any future refresh — the orphan sticks. This write only lands
+    /// when the row is still the one the caller read.
+    ///
+    /// `expected_prev_last_fact_id`:
+    /// - `Some(w)` — a prior dossier existed at read time: UPDATE only the row
+    ///   still at watermark `w`. Zero rows affected means a concurrent supersede
+    ///   deleted it (or another writer already moved the watermark); the write
+    ///   is dropped and the next tick rebuilds cleanly from `prior = None`.
+    /// - `None` — no prior at read time: `INSERT ... ON CONFLICT DO NOTHING`, so
+    ///   a racing writer that already created the row is not clobbered.
+    ///
+    /// Returns whether the write landed.
+    pub fn put_people_dossier_if_current(
+        &self,
+        familiar_id: &str,
+        canonical_key: &str,
+        expected_prev_last_fact_id: Option<i64>,
+        new_last_fact_id: i64,
+        dossier_text: &str,
+    ) -> Result<bool, StoreError> {
+        let affected = match expected_prev_last_fact_id {
+            Some(prev) => self.db.execute(
+                "UPDATE people_dossiers \
+                 SET last_fact_id = ?, dossier_text = ?, created_at = ? \
+                 WHERE familiar_id = ? AND canonical_key = ? AND last_fact_id = ?",
+                vec![
+                    v_int(new_last_fact_id),
+                    v_str(dossier_text),
+                    v_str(iso_utc(Utc::now())),
+                    v_str(familiar_id),
+                    v_str(canonical_key),
+                    v_int(prev),
+                ],
+            )?,
+            None => self.db.execute(
+                "INSERT INTO people_dossiers \
+                    (familiar_id, canonical_key, last_fact_id, dossier_text, created_at) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (familiar_id, canonical_key) DO NOTHING",
+                vec![
+                    v_str(familiar_id),
+                    v_str(canonical_key),
+                    v_int(new_last_fact_id),
+                    v_str(dossier_text),
+                    v_str(iso_utc(Utc::now())),
+                ],
+            )?,
+        };
+        Ok(affected > 0)
+    }
+
     /// Map `canonical_key` → `max(facts.id)` across current (non-superseded) facts.
     pub fn subjects_with_facts(
         &self,
@@ -2233,7 +2249,23 @@ impl HistoryStore {
             }))
         })?;
         match outcome {
-            FactInsert::Existing(fact) => Ok(fact),
+            FactInsert::Existing(fact) => {
+                // Pipeline guard (issue #132): near-duplicate suppression on the
+                // DB-insert path. Emitted here (caller thread, after the DB actor
+                // returns) so the shared audit convention is observable; behaviour
+                // is unchanged. See docs/architecture/guards.md.
+                tracing::debug!(
+                    target: "familiar_connect.history.store",
+                    "{} {} {} {} {} {}",
+                    ls::tag("Facts", ls::Y),
+                    ls::kv_styled("guard", "append_fact_dedup", ls::W, ls::LY),
+                    ls::kv_styled("step", "db_insert", ls::W, ls::LC),
+                    ls::kv_styled("action", "skip", ls::W, ls::LY),
+                    ls::kv_styled("reason", "near_duplicate", ls::W, ls::LW),
+                    ls::kv_styled("dup", &fact.id.to_string(), ls::W, ls::LC),
+                );
+                Ok(fact)
+            }
             FactInsert::Minted(fact) => {
                 Self::safe_fts_add(self.fts_facts.as_ref(), fact.id, &fact.text, "fact");
                 Ok(fact)

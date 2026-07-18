@@ -9,8 +9,9 @@
 //!   `mpsc` channel and block on a reply. This supersedes Python
 //!   `history/turso_compat.py` (`TursoConnection`).
 //! - [`store`] — [`HistoryStore`]: the append-only `turns` log plus every
-//!   watermarked side-index projection, all query shapes, and the idempotent
-//!   migrations. Ports Python `history/store.py`.
+//!   watermarked side-index projection and all query shapes. The full schema is
+//!   declared up front in `SCHEMA`; the Python era's incremental `_migrate()`
+//!   was folded in and removed (issue #202). Ports Python `history/store.py`.
 //! - [`fts`] — the tantivy full-text seam (`familiar_en` analyzer). **Stage B.**
 //! - [`async_store`] — the async facade over the store. **Stage B.**
 //!

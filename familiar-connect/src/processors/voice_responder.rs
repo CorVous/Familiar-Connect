@@ -34,8 +34,10 @@ use crate::processors::{
     VoiceTranscriptFinal,
 };
 use crate::sentence_streamer::SentenceStreamer;
-use crate::silence::SilentDetector;
-use crate::tools::agentic::{AgenticHooks, agentic_loop, tool_content_as_text};
+use crate::silence::{StreamDecision, StreamGate};
+use crate::tools::agentic::{
+    AgenticHooks, agentic_loop, guard_leaked_content, tool_content_as_text,
+};
 use crate::tools::registry::ToolRegistry;
 use crate::tts_player::protocol::TtsPlayer;
 
@@ -407,7 +409,7 @@ impl VoiceInner {
     ) -> Option<String> {
         let mut accumulated = String::new();
         let mut streamer = SentenceStreamer::new();
-        let mut silent = SilentDetector::new();
+        let mut gate = StreamGate::new();
         let mut pending: VecDeque<String> = VecDeque::new();
         let mut gate_open = false;
         let budget = get_voice_budget_recorder();
@@ -452,17 +454,24 @@ impl VoiceInner {
             accumulated.push_str(&delta.content);
 
             if !gate_open {
-                match silent.feed(&delta.content) {
-                    Some(true) => {
+                match gate.feed(&delta.content) {
+                    StreamDecision::Silent => {
                         self.log_silent(&scope.turn_id, channel_id);
                         return None;
                     }
-                    Some(false) => {
+                    StreamDecision::Suppress => {
+                        // A leaked tool-call block must never reach TTS or the
+                        // persisted turn (issue #109); drop the buffered
+                        // sentences and abandon the turn as empty.
+                        self.log_leak(&scope.turn_id, channel_id);
+                        return None;
+                    }
+                    StreamDecision::Speak => {
                         gate_open = true;
                         self.log_respond(&scope.turn_id, channel_id);
                         decision_logged = true;
                     }
-                    None => {}
+                    StreamDecision::Pending => {}
                 }
             }
             for sentence in streamer.feed(&delta.content) {
@@ -483,7 +492,7 @@ impl VoiceInner {
 
         // Stream ended undecided with non-whitespace content (a very short
         // reply) → treat as the speak path.
-        if !gate_open && silent.decided().is_none() && !accumulated.trim().is_empty() {
+        if !gate_open && gate.decided().is_none() && !accumulated.trim().is_empty() {
             self.log_respond(&scope.turn_id, channel_id);
             decision_logged = true;
             gate_open = true;
@@ -503,7 +512,10 @@ impl VoiceInner {
                 self.speak(&sentence, scope).await;
             }
         }
-        Some(accumulated)
+        // Belt-and-suspenders: strip any leaked leading block from the persisted
+        // string too, so history never keeps the raw leak (the streaming gate
+        // above already kept it out of TTS).
+        Some(guard_leaked_content(&accumulated))
     }
 
     async fn stream_and_speak_with_tools(
@@ -525,7 +537,7 @@ impl VoiceInner {
             state: tokio::sync::Mutex::new(VoiceToolState {
                 accumulated: String::new(),
                 streamer: SentenceStreamer::new(),
-                silent: SilentDetector::new(),
+                gate: StreamGate::new(),
                 pending: VecDeque::new(),
                 gate_open: false,
                 first_delta_seen: false,
@@ -549,6 +561,14 @@ impl VoiceInner {
         }
 
         let mut st = hooks.state.lock().await;
+        // A leaked `<silent>` / tool-call block that led the stream (issue #109):
+        // abandon the turn as silent/empty so nothing is spoken or persisted.
+        if matches!(
+            st.gate.decided(),
+            Some(StreamDecision::Silent | StreamDecision::Suppress)
+        ) {
+            return None;
+        }
         if st.gate_open {
             let tail = st.streamer.flush();
             if !tail.trim().is_empty() {
@@ -561,7 +581,7 @@ impl VoiceInner {
                 self.speak(&sentence, scope).await;
             }
         }
-        if !st.gate_open && st.silent.decided().is_none() && !st.accumulated.trim().is_empty() {
+        if !st.gate_open && st.gate.decided().is_none() && !st.accumulated.trim().is_empty() {
             self.log_respond(&scope.turn_id, channel_id);
             st.decision_logged = true;
         }
@@ -569,7 +589,9 @@ impl VoiceInner {
             log_preempted(&scope.turn_id);
             return None;
         }
-        Some(st.accumulated.clone())
+        // Belt-and-suspenders: strip any leaked leading block from the persisted
+        // string too (the streaming gate already kept it out of TTS).
+        Some(guard_leaked_content(&st.accumulated))
     }
 
     fn next_filler_phrase(&self) -> String {
@@ -657,6 +679,18 @@ impl VoiceInner {
             ls::kv_styled("turn", turn_id, ls::W, ls::LC),
         );
     }
+
+    fn log_leak(&self, turn_id: &str, channel_id: i64) {
+        let (ch, srv) = self.origin_fields(channel_id);
+        tracing::warn!(
+            "{} {}{}{} {}",
+            ls::tag("Voice", ls::Y),
+            ch,
+            srv,
+            ls::kv_styled("decision", "leaked_tool_suppressed", ls::W, ls::LY),
+            ls::kv_styled("turn", turn_id, ls::W, ls::LC),
+        );
+    }
 }
 
 fn log_preempted(turn_id: &str) {
@@ -691,7 +725,7 @@ fn log_agentic_error(exc: &anyhow::Error) {
 struct VoiceToolState {
     accumulated: String,
     streamer: SentenceStreamer,
-    silent: SilentDetector,
+    gate: StreamGate,
     pending: VecDeque<String>,
     gate_open: bool,
     first_delta_seen: bool,
@@ -718,18 +752,26 @@ impl AgenticHooks for VoiceToolHooks<'_> {
         }
         st.accumulated.push_str(&delta.content);
         if !st.gate_open {
-            match st.silent.feed(&delta.content) {
-                Some(true) => {
+            match st.gate.feed(&delta.content) {
+                StreamDecision::Silent => {
                     self.inner.log_silent(&self.scope.turn_id, self.channel_id);
                     st.pending.clear();
                     return;
                 }
-                Some(false) => {
+                StreamDecision::Suppress => {
+                    // Leaked tool-call block (issue #109): drop the buffered
+                    // sentences; the latched gate decision below abandons the
+                    // turn so nothing reaches TTS or the persisted turn.
+                    self.inner.log_leak(&self.scope.turn_id, self.channel_id);
+                    st.pending.clear();
+                    return;
+                }
+                StreamDecision::Speak => {
                     st.gate_open = true;
                     self.inner.log_respond(&self.scope.turn_id, self.channel_id);
                     st.decision_logged = true;
                 }
-                None => {}
+                StreamDecision::Pending => {}
             }
         }
         for sentence in st.streamer.feed(&delta.content) {

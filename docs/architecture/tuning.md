@@ -52,7 +52,7 @@ Set in `.env` or the host environment. Never log them.
 | `DISCORD_BOT` | Discord bot token. |
 | `OPENROUTER_API_KEY` | Shared across every LLM call site. |
 | `DEEPGRAM_API_KEY` | STT credential. |
-| `FAMILIAR_ID` | Character folder under `data/familiars/`. Overridable by `--familiar`. |
+| `FAMILIAR_ID` | Character folder under the familiars root. Overridable by `--familiar`. |
 
 ### TTS provider credentials (one set, depending on `[tts].provider`)
 
@@ -61,6 +61,15 @@ Set in `.env` or the host environment. Never log them.
 | `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure (default). |
 | `CARTESIA_API_KEY` | Cartesia. |
 | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | Gemini. |
+
+### Optional path overrides
+
+| Var | Purpose |
+|---|---|
+| `FAMILIARS_ROOT` | Override the per-user familiars root (default: platform data dir; issue #201). |
+| `FAMILIAR_DEFAULTS_ROOT` | Override where the tracked `_default` skeleton resolves (default: `data/familiars`). |
+
+See [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
 
 ## Character TOML — current schema
 
@@ -420,7 +429,7 @@ idle_close_s            = 30.0
 | `utterance_end_ms` | `1500` | Speech-end grace window. |
 | `smart_format` | `true` | Punctuation, number/date/unit normalization. |
 | `punctuate` | `true` | Explicit punctuation pass. |
-| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. |
+| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. Voice-channel member proper nouns (display names, usernames, aliases, nicknames) are auto-appended per speaker at connect time on top of this list, then deduped and capped — so this field is only for jargon the members' names don't already cover. |
 | `replay_buffer_s` | `5.0` | Seconds replayed after WebSocket reconnect. |
 | `keepalive_interval_s` | `3.0` | Keepalive ping cadence. |
 | `reconnect_max_attempts` | `5` | Reconnect attempts before giving up. |

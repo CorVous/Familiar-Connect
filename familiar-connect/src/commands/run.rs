@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Args;
+use directories::ProjectDirs;
 use tokio_util::sync::CancellationToken;
 
 use crate::activities::config::load_activities_config;
@@ -48,16 +49,118 @@ pub struct RunArgs {
     pub familiar: Option<String>,
 }
 
-/// Default familiars root (Python module const `_DEFAULT_FAMILIARS_ROOT`).
+/// Root holding per-user familiar folders (`<root>/<id>/`).
 ///
-/// `FAMILIARS_ROOT` overrides the CWD-relative default: the Rust binary is
-/// typically invoked from `rust/` while the shared data tree lives at the
-/// repo root, so cohabitating with the Python bot needs a way to point here
-/// without cd-ing (Rust-only addition; Python resolves CWD-relative only).
+/// Precedence: the `FAMILIARS_ROOT` env override wins; otherwise the platform
+/// per-user data directory (`~/.local/share/familiar-connect/familiars` on Linux,
+/// the OS-correct analog elsewhere). Home-based storage means a `git clean -fdx`
+/// in a repo checkout can no longer wipe live familiars — the reported foot-gun
+/// (issue #201). The legacy CWD-relative `data/familiars` survives only as the
+/// last-resort fallback when no home directory resolves, and as the source of the
+/// one-shot migration in [`run`].
 fn default_familiars_root() -> PathBuf {
-    match std::env::var("FAMILIARS_ROOT") {
-        Ok(root) if !root.is_empty() => PathBuf::from(root),
-        _ => Path::new("data").join("familiars"),
+    resolve_familiars_root(std::env::var("FAMILIARS_ROOT").ok(), home_familiars_root())
+}
+
+/// Pure core of [`default_familiars_root`]: the env override wins, else the home
+/// fallback. The env value and fallback are injected so tests need not mutate the
+/// process environment (`std::env::set_var` is `unsafe` under edition 2024, which
+/// the crate forbids).
+fn resolve_familiars_root(env_override: Option<String>, home_fallback: PathBuf) -> PathBuf {
+    match env_override {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => home_fallback,
+    }
+}
+
+/// The platform per-user data location for familiars, or the legacy CWD-relative
+/// `data/familiars` when no home directory is discoverable.
+fn home_familiars_root() -> PathBuf {
+    ProjectDirs::from("", "", "familiar-connect").map_or_else(legacy_familiars_root, |dirs| {
+        dirs.data_dir().join("familiars")
+    })
+}
+
+/// The historical CWD-relative `data/familiars` root. Now only the tracked
+/// `_default` profile and any not-yet-migrated legacy familiars live here.
+fn legacy_familiars_root() -> PathBuf {
+    Path::new("data").join("familiars")
+}
+
+/// Root holding the tracked `_default/` profile skeleton (character/activities
+/// merge defaults).
+///
+/// `_default` is a repo resource (`.gitignore` un-ignores it), so it is resolved
+/// **independently** of where per-user familiars live — it must not migrate to
+/// the home data dir with user state (issue #201). Precedence: the
+/// `FAMILIAR_DEFAULTS_ROOT` env override wins (point a `cargo install`ed binary
+/// at its bundled copy); otherwise the CWD-relative `data/familiars` a repo
+/// checkout ships.
+fn default_defaults_root() -> PathBuf {
+    resolve_defaults_root(std::env::var("FAMILIAR_DEFAULTS_ROOT").ok())
+}
+
+/// Pure core of [`default_defaults_root`] (env value injected; see
+/// [`resolve_familiars_root`] for why).
+fn resolve_defaults_root(env_override: Option<String>) -> PathBuf {
+    match env_override {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => legacy_familiars_root(),
+    }
+}
+
+/// One-shot, best-effort migration of legacy CWD-relative familiars into the
+/// resolved root (issue #201).
+///
+/// For every `legacy_root/<id>` folder other than the tracked `_default`, move it
+/// to `new_root/<id>` when no familiar already lives there. Idempotent (a second
+/// run finds nothing left to move) and never-clobbering (an existing home-dir
+/// familiar is left untouched, its legacy copy kept in place). Best-effort: a
+/// failed move logs a hint and leaves the legacy copy behind rather than aborting
+/// startup (e.g. a cross-device rename the operator must complete by hand).
+fn migrate_legacy_familiars(legacy_root: &Path, new_root: &Path) {
+    if legacy_root == new_root || !legacy_root.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(legacy_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if !src.is_dir() {
+            continue;
+        }
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // `_default` is a tracked repo resource, resolved via `default_defaults_root`.
+        if name == "_default" {
+            continue;
+        }
+        let dest = new_root.join(name);
+        if dest.exists() {
+            // A familiar already lives at the new root — never clobber it.
+            continue;
+        }
+        if let Err(err) = std::fs::create_dir_all(new_root) {
+            tracing::warn!(
+                "could not create familiars root {}: {err}",
+                new_root.display()
+            );
+            return;
+        }
+        match std::fs::rename(&src, &dest) {
+            Ok(()) => tracing::info!(
+                "migrated familiar '{name}' to {} (issue #201 home-dir storage)",
+                dest.display()
+            ),
+            Err(err) => tracing::warn!(
+                "could not migrate familiar '{name}' from {} to {} ({err}); \
+                 move it by hand or set FAMILIARS_ROOT",
+                src.display(),
+                dest.display()
+            ),
+        }
     }
 }
 
@@ -85,13 +188,13 @@ pub fn resolve_familiar_root(
     };
     let dir = root.join(&familiar_id);
     if !dir.exists() {
-        // Show the absolute path: the lookup is CWD-relative, and a relative
-        // path in the error hides *which* directory was searched (running
-        // from rust/ vs the repo root resolves differently).
+        // Show the absolute path: the resolved familiars root is platform- or
+        // env-dependent (issue #201), and a relative path in the error would
+        // hide *which* directory was searched.
         let shown = std::path::absolute(&dir).unwrap_or_else(|_| dir.clone());
         return Err(format!(
-            "Familiar folder does not exist: {} (checked relative to the \
-             current directory; set FAMILIARS_ROOT to point elsewhere)",
+            "Familiar folder does not exist: {} (set FAMILIARS_ROOT to point \
+             the familiars root elsewhere)",
             shown.display()
         ));
     }
@@ -246,15 +349,14 @@ pub fn build_activity_engine(
     handle: Arc<BotHandle>,
     bot_user_id: Arc<std::sync::Mutex<Option<i64>>>,
 ) -> Option<Arc<ActivityEngine>> {
-    let defaults_path = familiar
-        .root
-        .parent()
-        .map(|p| p.join("_default").join("activities.toml"));
-    let config = load_activities_config(
-        &familiar.root.join("activities.toml"),
-        defaults_path.as_deref(),
-    )
-    .ok()?;
+    // Activities defaults come from the tracked `_default` skeleton, resolved
+    // independently of the per-user familiar root (issue #201).
+    let defaults_path = default_defaults_root()
+        .join("_default")
+        .join("activities.toml");
+    let config =
+        load_activities_config(&familiar.root.join("activities.toml"), Some(&defaults_path))
+            .ok()?;
     if !config.enabled() {
         return None;
     }
@@ -374,6 +476,9 @@ pub fn run(args: &RunArgs) -> i32 {
         return 1;
     }
     let root = default_familiars_root();
+    // One-shot: relocate any legacy CWD-relative familiars into the resolved
+    // root before we look one up (idempotent, never clobbers — issue #201).
+    migrate_legacy_familiars(&legacy_familiars_root(), &root);
     let familiar_root = match resolve_familiar_root(
         args.familiar.as_deref(),
         std::env::var("FAMILIAR_ID").ok(),
@@ -408,9 +513,10 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     use crate::llm::LlmClient;
     use crate::processors::projectors::known_projectors;
 
-    let defaults_path = familiar_root
-        .parent()
-        .unwrap_or(familiar_root)
+    // `_default` is a tracked repo resource resolved independently of where the
+    // (now home-based) per-user familiars live, so it is not stranded by the
+    // #201 move — never `familiar_root.parent()/_default`.
+    let defaults_path = default_defaults_root()
         .join("_default")
         .join("character.toml");
     let known_proj = known_projectors();
@@ -1125,7 +1231,8 @@ async fn async_main(
 mod tests {
     use super::{
         ShutdownController, ShutdownStage, build_activity_engine, default_assembler,
-        resolve_embedder, resolve_familiar_root,
+        home_familiars_root, migrate_legacy_familiars, resolve_defaults_root, resolve_embedder,
+        resolve_familiar_root, resolve_familiars_root,
     };
     use crate::activities::engine::ActivityEngine;
     use crate::bot::{BotHandle, Presence, PresenceSink};
@@ -1204,6 +1311,121 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let err = resolve_familiar_root(Some("does-not-exist"), None, dir.path()).unwrap_err();
         assert!(err.contains("Familiar folder does not exist"));
+    }
+
+    // --- home-dir familiar storage (issue #201) ---
+
+    #[test]
+    fn familiars_root_env_override_wins_else_home() {
+        let home = PathBuf::from("/home/x/.local/share/familiar-connect/familiars");
+        // An explicit, non-empty override takes top precedence.
+        assert_eq!(
+            resolve_familiars_root(Some("/custom/root".to_owned()), home.clone()),
+            PathBuf::from("/custom/root")
+        );
+        // An empty override falls through to the home default.
+        assert_eq!(
+            resolve_familiars_root(Some(String::new()), home.clone()),
+            home
+        );
+        // An unset override falls through to the home default.
+        assert_eq!(resolve_familiars_root(None, home.clone()), home);
+    }
+
+    #[test]
+    fn home_familiars_root_lives_under_the_platform_data_dir() {
+        let root = home_familiars_root();
+        // The leaf is always `familiars` (both the home and legacy branches).
+        assert_eq!(root.file_name().and_then(|s| s.to_str()), Some("familiars"));
+        // When a home directory resolves, it sits under the app's data dir.
+        if directories::ProjectDirs::from("", "", "familiar-connect").is_some() {
+            assert!(
+                root.ends_with(Path::new("familiar-connect").join("familiars")),
+                "unexpected familiars root: {}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_root_env_override_wins_else_cwd() {
+        // The tracked `_default` root is decoupled from where user familiars live.
+        assert_eq!(
+            resolve_defaults_root(Some("/opt/fc".to_owned())),
+            PathBuf::from("/opt/fc")
+        );
+        assert_eq!(
+            resolve_defaults_root(Some(String::new())),
+            Path::new("data").join("familiars")
+        );
+        assert_eq!(
+            resolve_defaults_root(None),
+            Path::new("data").join("familiars")
+        );
+    }
+
+    #[test]
+    fn bundled_default_profile_still_resolves() {
+        // `_default` is a repo resource: joining it onto the defaults root finds
+        // the shipped profile the run loop loads as merge defaults, independent of
+        // the (now home-based) per-user familiar root.
+        let profile = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("data")
+            .join("familiars")
+            .join("_default")
+            .join("character.toml");
+        assert!(
+            profile.exists(),
+            "missing bundled default profile at {}",
+            profile.display()
+        );
+    }
+
+    #[test]
+    fn migration_moves_legacy_familiars_and_spares_default() {
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join("legacy");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(legacy.join("aria")).unwrap();
+        std::fs::write(legacy.join("aria").join("character.toml"), "id = 1").unwrap();
+        std::fs::create_dir_all(legacy.join("_default")).unwrap();
+        std::fs::write(legacy.join("_default").join("character.toml"), "d = 1").unwrap();
+
+        migrate_legacy_familiars(&legacy, &home);
+
+        // The user familiar moved to the new root, contents intact.
+        assert!(home.join("aria").join("character.toml").exists());
+        assert!(!legacy.join("aria").exists());
+        // The tracked `_default` skeleton stays put and is never copied over.
+        assert!(legacy.join("_default").join("character.toml").exists());
+        assert!(!home.join("_default").exists());
+
+        // Idempotent: a second run has nothing left to move and does not error.
+        migrate_legacy_familiars(&legacy, &home);
+        assert!(home.join("aria").join("character.toml").exists());
+    }
+
+    #[test]
+    fn migration_never_clobbers_existing_home_familiar() {
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join("legacy");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(legacy.join("aria")).unwrap();
+        std::fs::write(legacy.join("aria").join("character.toml"), "legacy").unwrap();
+        std::fs::create_dir_all(home.join("aria")).unwrap();
+        std::fs::write(home.join("aria").join("character.toml"), "home").unwrap();
+
+        migrate_legacy_familiars(&legacy, &home);
+
+        // The home copy is authoritative and untouched; the legacy copy is left
+        // in place rather than overwriting it.
+        assert_eq!(
+            std::fs::read_to_string(home.join("aria").join("character.toml")).unwrap(),
+            "home"
+        );
+        assert!(legacy.join("aria").exists());
     }
 
     // --- test familiar bundle ---

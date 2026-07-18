@@ -8,8 +8,9 @@ choices that would otherwise be made divergently across subsystems.
 Status of the scaffold this accompanies: `cargo build`, `cargo clippy
 --all-targets`, and `cargo fmt --check` are clean on default features. Every
 dependency version in the manifest resolves. `discord`, `discord-voice`,
-`stt-deepgram`, `twitch`, and `azure-tts` also compile clean. Modules are stubs
-(doc comment only) — no behavior is implemented.
+`stt-deepgram`, `twitch`, and `azure-tts` also compile clean. At that scaffold
+hand-off, modules were stubs (doc comment only) — no behavior was implemented
+yet (the port has since completed).
 
 ---
 

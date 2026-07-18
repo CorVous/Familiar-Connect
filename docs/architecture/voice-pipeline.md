@@ -115,7 +115,7 @@ runtime (`ort`) is built with a GPU execution provider.
 ### How the audio path forks
 
 When `[providers.turn_detection].strategy = "ten+smart_turn"` and
-model files exist, `bot._start_voice_intake` builds a per-user
+model files exist, `start_voice_intake` builds a per-user
 endpointer alongside the per-user Deepgram clone. The shared sink-side
 pump demuxes audio onto a per-user queue; one drain task per user_id
 feeds every PCM chunk into both clone and endpointer. Per-user drain
@@ -152,7 +152,7 @@ turn. Without a backstop the buffered final sits until the speaker's
 **next** utterance — the "transcript doesn't come through until the next
 sound" symptom.
 
-The per-user audio pump (`bot._user_pump`) is that backstop. After each
+The per-user audio pump (`user_pump`) is that backstop. After each
 chunk it arms an idle timer; when no audio arrives for the flush window
 it forces the turn to end:
 
@@ -240,12 +240,21 @@ single-letter initials (`J. K. Rowling`) don't trip a boundary. A
 trailing partial without a terminator (model omits the final period)
 is drained on stream end via `flush()` and spoken last.
 
-**Silent sentinel.** `SilentDetector` runs ahead of the splitter on
-every delta. Sentences finalised before the gate decides are buffered;
-on `True` they're dropped and TTS is never invoked; on `False` they
-flush and the streamer feeds TTS as new sentences arrive.
+**Silent sentinel + leak guard.** `StreamGate` (Rust `silence.rs`) runs
+ahead of the splitter on every delta. Sentences finalised before the
+gate decides are buffered; on `silent` they're dropped and TTS is never
+invoked; on `speak` they flush and the streamer feeds TTS as new
+sentences arrive. Beyond `<silent>`, the gate also recognises a
+tool-call block the model occasionally leaks as plain text (`<invoke …`,
+`silent(…)`, `read_channel(…)`, `<tool_call …`), staying pending while
+the token is still split across delta boundaries and latching `suppress`
+(or `silent`, for a leaked `silent` call) so the raw XML never reaches
+TTS or the persisted turn (issue #109). The confirmed-leak
+classification is shared with the agentic loop's return-time strip guard
+(`classify_leading_leak`), the single source of truth. The text path,
+which streams no content mid-turn, keeps the simpler `SilentDetector`.
 
-**Cancellation.** Each `await self._tts.speak(sentence, scope=...)` is
+**Cancellation.** Each `TTSPlayer::speak(sentence, scope)` call is
 awaited serially. Barge-in cancels the current `TurnScope`;
 `DiscordVoicePlayer`'s poll loop cuts the in-flight sentence within
 ~20 ms and the responder bails before queueing the next. The
@@ -324,10 +333,10 @@ collector, so `/diagnostics` shows the breakdown in its summary table.
 
 | Phase | Stamp site |
 |---|---|
-| `vad_end` | `bot._on_complete` parks a perf-counter; `VoiceSource._handle` drains on the next transcript event for the same `user_id` |
-| `stt_final` | `VoiceSource._handle` (just before publishing `voice.transcript.final`) |
-| `llm_first_token` | `VoiceResponder._stream_and_speak` on first delta |
-| `tts_first_audio` | `VoiceResponder._speak` (deduped — first sentence wins) |
+| `vad_end` | the turn-complete callback calls `VoiceSource::record_vad_end`; `VoiceSource::handle` drains on the next transcript event for the same `user_id` |
+| `stt_final` | `VoiceSource::handle` (just before publishing `voice.transcript.final`) |
+| `llm_first_token` | `VoiceResponder::stream_and_speak` on first delta |
+| `tts_first_audio` | `VoiceResponder::speak` (deduped — first sentence wins) |
 | `playback_start` | `DiscordVoicePlayer.speak` after `vc.play(source)` |
 
 | Span | Gap |
@@ -352,7 +361,7 @@ take the bot down.
 
 OpenAI's prompt caching matches the longest stable prefix (1024-token
 minimum, 128-token granularity). A change to any mid-prompt layer
-invalidates everything after it, so `_default_assembler` builds layers
+invalidates everything after it, so `default_assembler` builds layers
 in **stability descending** order:
 
 | Position | Layer | Refresh trigger |

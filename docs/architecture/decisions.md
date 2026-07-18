@@ -10,7 +10,7 @@ Ideas seriously considered during planning and deliberately turned down. Recorde
 
 - **SillyTavern is a single-user local web app, not a library.** Extensions are browser-side JavaScript hooked into the chat UI's event bus (`eventSource`, `getContext()`, generation interceptors). None of it is reachable from an external process.
 - **SillyTavern's HTTP server is a thin LLM proxy.** It exists so the browser can dodge CORS for the upstream model API. It does not run the extension pipeline.
-- **Running SillyTavern extensions outside SillyTavern requires a headless browser** driving a real ST tab (Playwright / CDP), intercepting `generate` calls, marshaling chat state in and out. High-latency, fragile across ST versions, painful to test alongside `asyncio.TaskGroup`-scoped concurrency.
+- **Running SillyTavern extensions outside SillyTavern requires a headless browser** driving a real ST tab (Playwright / CDP), intercepting `generate` calls, marshaling chat state in and out. High-latency, fragile across ST versions, painful to test alongside tokio-scoped structured concurrency.
 - **SillyTavern's architecture assumes one user, one active chat.** Familiar-Connect is multi-guild and concurrent. Forcing every guild through one ST session serialises the bot; one ST instance per guild is a deployment nightmare.
 
 ## Embedding a SillyTavern extension runtime via headless browser
@@ -29,7 +29,7 @@ Ideas seriously considered during planning and deliberately turned down. Recorde
 
 - **These frameworks assume a synchronous request/response chat app and bury the prompt-assembly step we specifically want visible and testable.** Adopting one would mean either fighting its opinions or shoehorning our pipeline inside it.
 - **LangChain's abstractions in particular have been rewritten repeatedly.** Production users commonly wrap their own pipelines on top rather than depending on the framework's memory/agent layers.
-- **Each wants to own the event loop and request lifecycle.** Familiar-Connect already has opinions about both (single-process, structured concurrency under `asyncio.TaskGroup`, multi-modality). The framework would be fighting us at the layer we care about most.
+- **Each wants to own the event loop and request lifecycle.** Familiar-Connect already has opinions about both (single-process, tokio-based structured concurrency, multi-modality). The framework would be fighting us at the layer we care about most.
 
 **What we do allow:** importing a *specific utility* from one of these libraries when it's a net simplification. Rule of thumb: a single function you call once (text splitter, document loader, tokenizer helper) is a utility — fine. Anything wanting to own the event loop, prompt structure, or retrieval flow is a runtime — not fine.
 
@@ -41,7 +41,7 @@ Ideas seriously considered during planning and deliberately turned down. Recorde
 
 **Why rejected:** The project commits to a **local-first principle**: all context state lives in-process, in the filesystem, or in SQLite on the same host. Sending conversation transcripts to a third-party memory service violates that, and the scale Familiar-Connect targets (one bot, N guilds, one host) doesn't justify the operational or privacy cost.
 
-This also rejects **running a memory MCP server as a sidecar** for the bot's own internal use. MCP is useful when separate agents share a tool surface; when both ends of the wire are inside the same Python process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle).
+This also rejects **running a memory MCP server as a sidecar** for the bot's own internal use. MCP is useful when separate agents share a tool surface; when both ends of the wire are inside the same process, in-process function calls are simpler on every axis (latency, debuggability, no socket lifecycle).
 
 The *open-source library* underneath Zep — Graphiti — is a different proposition. Graphiti is a Python package with pluggable graph backends; embedding it (or porting its bi-temporal edge logic onto our SQLite store) keeps every byte of state local. M5 [shipped](roadmap.md#m5-pluggable-memory-store-backend-shipped) the projector swap point Graphiti would plug into.
 
