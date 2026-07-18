@@ -29,12 +29,13 @@ use crate::activities::engine::{
 };
 use crate::bot::{BotHandle, build_activity_presence_cb};
 use crate::budget::TierBudget;
+use crate::config::EmbeddingConfig;
 use crate::context::layers::ChannelResolver;
 use crate::context::{
     Assembler, CharacterCardLayer, ConversationSummaryLayer, LorebookLayer, OperatingModeLayer,
     PeopleDossierLayer, RagContextLayer, RecentHistoryLayer, ReflectionLayer,
 };
-use crate::embedding::Embedder;
+use crate::embedding::{Embedder, EmbeddingError};
 use crate::familiar::Familiar;
 use crate::focus::FocusManager;
 use crate::sleep::maintenance::SleepPromptText;
@@ -198,6 +199,30 @@ pub fn resolve_familiar_root(
         ));
     }
     Ok(dir)
+}
+
+/// Resolve the startup embedder from `config`, or fail.
+///
+/// The composition root calls this BEFORE opening the history store / FTS: a
+/// misconfigured embedding backend (e.g. `fastembed` without the `local-embed`
+/// extra) must refuse to start rather than wipe the FTS and then die deep in
+/// `create_projectors` under a misleading Discord-token hint. The backend error
+/// (which already names the real fix) is propagated, never swallowed into
+/// `None`.
+///
+/// # Errors
+/// Whatever [`create_embedder`](crate::embedding::create_embedder) returns —
+/// unknown backend, bad dimensionality, or the `fastembed` `local-embed` gap.
+#[cfg_attr(
+    not(feature = "discord"),
+    allow(
+        dead_code,
+        reason = "the only non-test caller is the `discord`-gated `run_inner`; \
+                  the fail-fast contract is unit-tested under default features"
+    )
+)]
+fn resolve_embedder(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
+    crate::embedding::create_embedder(config)
 }
 
 /// The two hardcoded operating-mode strings (byte-exact; Python
@@ -550,6 +575,19 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         None
     };
 
+    // Resolve the embedder BEFORE loading the familiar (which opens + possibly
+    // rebuilds the history store / FTS). A misconfigured backend must refuse to
+    // start here, while nothing has been mutated — not fail deep in
+    // `create_projectors` after the store is already open. Its error names the
+    // real fix (e.g. the `local-embed` extra), so surface it verbatim.
+    let embedder = match resolve_embedder(&config.embedding) {
+        Ok(embedder) => embedder,
+        Err(err) => {
+            tracing::error!("Embedding backend unavailable: {err}");
+            return 1;
+        }
+    };
+
     let familiar = match Familiar::load_from_disk(
         familiar_root,
         llm_clients,
@@ -580,7 +618,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             return 1;
         }
     };
-    match runtime.block_on(async_main(token.to_owned(), familiar)) {
+    match runtime.block_on(async_main(token.to_owned(), familiar, embedder)) {
         Ok(()) => 0,
         Err(err) => {
             tracing::error!(
@@ -707,7 +745,11 @@ fn spawn_signal_listener(controller: Arc<ShutdownController>) {
     clippy::too_many_lines,
     reason = "the composition root wires every subsystem; splitting obscures the ordering contract"
 )]
-async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()> {
+async fn async_main(
+    token: String,
+    mut familiar: Familiar,
+    embedder: Option<Arc<dyn Embedder>>,
+) -> anyhow::Result<()> {
     use std::sync::Mutex;
 
     use crate::bot::{ActivityResync, AsyncBotStore, BotStore, CreateBotDeps, create_bot};
@@ -795,8 +837,8 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
     })
     .await?;
 
-    let embedder = crate::embedding::create_embedder(&familiar.config.embedding).unwrap_or(None);
-
+    // Embedder resolved at the composition root (before the store opened); a bad
+    // backend would already have aborted startup in `run_inner`.
     let voice_assembler = Arc::new(default_assembler(
         &familiar,
         familiar.config.voice_window_size,
@@ -1189,12 +1231,13 @@ async fn async_main(token: String, mut familiar: Familiar) -> anyhow::Result<()>
 mod tests {
     use super::{
         ShutdownController, ShutdownStage, build_activity_engine, default_assembler,
-        home_familiars_root, migrate_legacy_familiars, resolve_defaults_root,
+        home_familiars_root, migrate_legacy_familiars, resolve_defaults_root, resolve_embedder,
         resolve_familiar_root, resolve_familiars_root,
     };
     use crate::activities::engine::ActivityEngine;
     use crate::bot::{BotHandle, Presence, PresenceSink};
     use crate::budget::TierBudget;
+    use crate::config::EmbeddingConfig;
     use crate::familiar::Familiar;
     use crate::focus::FocusManager;
     use crate::processors::SendText;
@@ -1204,6 +1247,38 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    // --- resolve_embedder (composition-root fail-fast) ---
+
+    /// The composition root must surface the embedder feature-gap as an error
+    /// (which names the `local-embed` fix), not swallow it into `None` and let
+    /// startup proceed to mutate the store. The default test build lacks the
+    /// `local-embed` extra, so `fastembed` genuinely has no backend here.
+    #[test]
+    fn resolve_embedder_fastembed_without_extra_errors() {
+        let config = EmbeddingConfig {
+            backend: "fastembed".to_owned(),
+            ..EmbeddingConfig::default()
+        };
+        let err = resolve_embedder(&config)
+            .err()
+            .expect("fastembed without the local-embed extra must fail fast");
+        assert!(
+            err.to_string().contains("local-embed"),
+            "error must name the real fix, got: {err}"
+        );
+    }
+
+    /// A disabled backend resolves to `None` without erroring — fail-fast must
+    /// not become fail-always.
+    #[test]
+    fn resolve_embedder_off_backend_is_none() {
+        let config = EmbeddingConfig {
+            backend: "off".to_owned(),
+            ..EmbeddingConfig::default()
+        };
+        assert!(resolve_embedder(&config).unwrap().is_none());
+    }
 
     // --- resolve_familiar_root (ported from test_run_cmd.py) ---
 

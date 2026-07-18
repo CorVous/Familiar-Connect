@@ -182,25 +182,31 @@ impl TantivyFts {
 
     /// On-disk index rooted at `dir` (created if absent). If an existing index
     /// there is unreadable/version-incompatible, the directory is wiped and a
-    /// fresh empty index is created — callers repopulate via
+    /// fresh empty index is created. The returned flag is `true` in exactly that
+    /// wipe-and-recreate case, so callers can repopulate from the source-of-truth
+    /// tables via
     /// [`HistoryStore::rebuild_fts`](super::store::HistoryStore::rebuild_fts).
-    pub fn open_dir(dir: &Path) -> Result<Self, StoreError> {
+    pub fn open_dir(dir: &Path) -> Result<(Self, bool), StoreError> {
         std::fs::create_dir_all(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
-        let index = Self::open_or_recreate(dir)?;
-        Self::finish(index)
+        let (index, recreated) = Self::open_or_recreate(dir)?;
+        Ok((Self::finish(index)?, recreated))
     }
 
-    fn open_or_recreate(dir: &Path) -> Result<Index, StoreError> {
+    /// Open the on-disk index, or wipe-and-recreate it if incompatible. The bool
+    /// reports whether the recreate path was taken.
+    fn open_or_recreate(dir: &Path) -> Result<(Index, bool), StoreError> {
         let schema = build_schema();
         let mmap = MmapDirectory::open(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
         if let Ok(index) = Index::open_or_create(mmap, schema.clone()) {
-            return Ok(index);
+            return Ok((index, false));
         }
         // Incompatible/corrupt on-disk index — wipe and start fresh.
         std::fs::remove_dir_all(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
         std::fs::create_dir_all(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
         let mmap = MmapDirectory::open(dir).map_err(|e| StoreError::Fts(e.to_string()))?;
-        Index::open_or_create(mmap, schema).map_err(|e| StoreError::Fts(e.to_string()))
+        let index =
+            Index::open_or_create(mmap, schema).map_err(|e| StoreError::Fts(e.to_string()))?;
+        Ok((index, true))
     }
 
     fn finish(index: Index) -> Result<Self, StoreError> {
@@ -231,6 +237,14 @@ impl TantivyFts {
             commit_fault: Mutex::new(None),
             retry_delays: Mutex::new(COMMIT_RETRY_DELAYS.to_vec()),
         })
+    }
+
+    /// Whether the index currently holds no documents. Used after `open_dir` to
+    /// decide whether a freshly-created (but not recreate-flagged) index needs
+    /// repopulating from the source tables.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.reader.searcher().num_docs() == 0
     }
 
     /// Test seam: install (or clear with `None`) a fake commit that fails before
@@ -412,6 +426,41 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 1);
         assert!(hits[0].1 > 0.0, "BM25 score must be positive");
+    }
+
+    #[test]
+    fn open_dir_flags_recreate_on_incompatible_schema() {
+        use tantivy::Index;
+        use tantivy::schema::{STORED, STRING, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        // Write an index whose schema differs from `build_schema` (row_id as text
+        // rather than i64) — stands in for the Python-vs-Rust incompatibility.
+        let mut sb = Schema::builder();
+        sb.add_text_field("row_id", STRING | STORED);
+        sb.add_text_field("content", STRING | STORED);
+        Index::create_in_dir(dir.path(), sb.build()).unwrap();
+
+        let (idx, recreated) = TantivyFts::open_dir(dir.path()).unwrap();
+        assert!(
+            recreated,
+            "incompatible on-disk schema must trigger recreate"
+        );
+        assert!(idx.is_empty(), "a recreated index starts empty");
+    }
+
+    #[test]
+    fn open_dir_preserves_compatible_index() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (idx, recreated) = TantivyFts::open_dir(dir.path()).unwrap();
+            assert!(!recreated);
+            idx.add(1, "the quick brown fox").unwrap();
+        }
+        let (idx, recreated) = TantivyFts::open_dir(dir.path()).unwrap();
+        assert!(!recreated, "a compatible reopen must not wipe the index");
+        assert!(!idx.is_empty());
+        assert_eq!(idx.search("fox", 5).len(), 1);
     }
 
     #[test]
