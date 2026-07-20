@@ -3921,7 +3921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allowlisted_dm_registers_ephemeral_and_ingests() {
+    async fn allowlisted_dm_registers_and_ingests() {
         let fx = dm_fixture(vec![123]);
         let (msg, _ch) = dm_message(123, 555, None, false);
         fx.events.on_message(msg).await;
@@ -3937,9 +3937,22 @@ mod tests {
             fx.fm.guild_name_for(Some(555)).as_deref(),
             Some("Private Message")
         );
+        // The peer's display name is recorded so the digest can label the DM.
+        assert_eq!(fx.fm.channel_label(Some(555)), "#X(555)");
         assert_eq!(fx.fm.get_focus("text"), Some(555));
-        // ephemeral row must never touch the sidecar
-        assert!(!fx.subs_path.exists());
+    }
+
+    #[tokio::test]
+    async fn allowlisted_dm_persists_subscription_with_peer_user_id() {
+        let fx = dm_fixture(vec![123]);
+        let (msg, _ch) = dm_message(123, 555, None, false);
+        fx.events.on_message(msg).await;
+        // A fresh registry on the same path must see the row — i.e. it
+        // survives restart — carrying the peer's user id for the digest.
+        let reloaded = SubscriptionRegistry::new(&fx.subs_path).unwrap();
+        let sub = reloaded.get(555, SubscriptionKind::Text).unwrap();
+        assert_eq!(sub.dm_user_id, Some(123));
+        assert_eq!(sub.guild_id, None);
     }
 
     #[tokio::test]
