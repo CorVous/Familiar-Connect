@@ -808,6 +808,51 @@ async fn rehydrate_dm_naming(
     Ok(())
 }
 
+/// Boot-time DM validation, naming, and default-focus seeding — the ordering
+/// contract, in one testable unit (the tail of Python `_async_main`).
+///
+/// Order is load-bearing: (1) prune de-allowlisted DM rows so a stale DM can
+/// neither survive nor win the focus seed, and so `initialize`'s
+/// `keep_if_subscribed` drops a pointer at a de-allowlisted DM; (2) initialize
+/// focus from the persisted pointers; (3) rehydrate DM naming for surviving DM
+/// rows *before* seeding, so a seeded DM already renders by name; (4) seed the
+/// first subscribed channel per modality when that modality has no focus.
+///
+/// `focus_manager` must be freshly constructed (not yet initialized). Callers
+/// keep ownership of the shared registry; this only reads/mutates through the
+/// borrow.
+#[cfg(feature = "discord")]
+async fn boot_dm_focus(
+    focus_manager: &FocusManager,
+    subscriptions: &std::sync::Mutex<crate::subscriptions::SubscriptionRegistry>,
+    store: &crate::history::async_store::AsyncHistoryStore,
+    dm_allowlist: &[i64],
+    familiar_id: &str,
+) -> anyhow::Result<()> {
+    use crate::subscriptions::{SubscriptionKind, SubscriptionView};
+
+    prune_deallowlisted_dm_subscriptions(
+        &mut subscriptions.lock().expect("subscriptions mutex"),
+        dm_allowlist,
+    )?;
+    focus_manager.initialize().await;
+    rehydrate_dm_naming(focus_manager, subscriptions, store, familiar_id).await?;
+
+    for sub in subscriptions.all() {
+        let cid = i64::try_from(sub.channel_id).unwrap_or_default();
+        match sub.kind {
+            SubscriptionKind::Text if focus_manager.get_focus("text").is_none() => {
+                focus_manager.set_focus_immediately(cid, "text");
+            }
+            SubscriptionKind::Voice if focus_manager.get_focus("voice").is_none() => {
+                focus_manager.set_focus_immediately(cid, "voice");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Asyncio entry point: bring up the bus, responders, workers, and gateway, then
 /// tear down in order (Python `_async_main`).
 ///
@@ -834,7 +879,7 @@ async fn async_main(
     use crate::processors::text_responder::TextResponder;
     use crate::processors::voice_responder::VoiceResponder;
     use crate::processors::{ActivityGate, FocusManagerApi, MemberResolver};
-    use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry};
+    use crate::subscriptions::SubscriptionRegistry;
     use crate::tools::builtins::{build_text_registry, build_voice_registry};
     use crate::tools::registry::{ChannelReadStore, FocusControl, ToolContext};
     use crate::tools::scheduler::AlarmScheduler;
@@ -853,13 +898,6 @@ async fn async_main(
     let subs_path = familiar.root.join("subscriptions.toml");
     let subscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new(&subs_path)?));
 
-    // De-allowlisted DM peers must not influence boot — drop their persisted
-    // rows before the focus seeding below can read them.
-    prune_deallowlisted_dm_subscriptions(
-        &mut subscriptions.lock().expect("subscriptions mutex"),
-        &familiar.config.dm_allowlist,
-    )?;
-
     let focus_manager = Arc::new(
         FocusManager::new(
             familiar.id.clone(),
@@ -870,33 +908,18 @@ async fn async_main(
         .with_nudge_debounce_seconds(familiar.config.focus.nudge_debounce_seconds)
         .with_catch_up_limit(usize::try_from(familiar.config.focus.catch_up_limit).unwrap_or(20)),
     );
-    focus_manager.initialize().await;
 
-    // Surviving persisted DM rows lost their in-memory naming on restart;
-    // restore it so the digest and focus line render DMs exactly as the live
-    // registration path (register_dm_channel) does.
-    rehydrate_dm_naming(
+    // Boot DM validation + naming + default-focus seeding, in one ordered unit:
+    // prune de-allowlisted DM rows, initialize focus, rehydrate DM naming, then
+    // seed the default focus (see `boot_dm_focus` for the ordering contract).
+    boot_dm_focus(
         focus_manager.as_ref(),
         subscriptions.as_ref(),
         familiar.history_store.as_ref(),
+        &familiar.config.dm_allowlist,
         &familiar.id,
     )
     .await?;
-
-    // Startup default focus: first subscribed channel per modality when unset.
-    let startup_subs = subscriptions.lock().expect("subscriptions mutex").all();
-    for sub in startup_subs {
-        let cid = i64::try_from(sub.channel_id).unwrap_or_default();
-        match sub.kind {
-            SubscriptionKind::Text if focus_manager.get_focus("text").is_none() => {
-                focus_manager.set_focus_immediately(cid, "text");
-            }
-            SubscriptionKind::Voice if focus_manager.get_focus("voice").is_none() => {
-                focus_manager.set_focus_immediately(cid, "voice");
-            }
-            _ => {}
-        }
-    }
 
     let bot_user_id = Arc::new(Mutex::new(None::<i64>));
     let (handle, client) = create_bot(CreateBotDeps {
@@ -1965,7 +1988,8 @@ mod tests {
             // The DM row has a LOWER channel id than the legit guild row, so
             // without prune-before-seed it would win the seeded text focus.
             let (_dir, path, mut reg) = registry();
-            reg.add(10, SubscriptionKind::Text, None, Some(999)).unwrap(); // peer 999 NOT allowlisted
+            reg.add(10, SubscriptionKind::Text, None, Some(999))
+                .unwrap(); // peer 999 NOT allowlisted
             reg.add(42, SubscriptionKind::Text, Some(1), None).unwrap(); // legit guild row
             let store = store();
             let (subs, fm) = shared_boot(reg, &store);
@@ -1976,14 +2000,24 @@ mod tests {
 
             // The de-allowlisted DM neither survives nor wins the focus seed.
             assert_eq!(fm.get_focus("text"), Some(42));
-            assert!(subs.lock().unwrap().get(10, SubscriptionKind::Text).is_none());
-            assert!(!std::fs::read_to_string(&path).unwrap().contains("channel_id = 10"));
+            assert!(
+                subs.lock()
+                    .unwrap()
+                    .get(10, SubscriptionKind::Text)
+                    .is_none()
+            );
+            assert!(
+                !std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("channel_id = 10")
+            );
         }
 
         #[tokio::test]
         async fn boot_populates_dm_naming_and_seeds_the_dm_focus() {
             let (_dir, _path, mut reg) = registry();
-            reg.add(555, SubscriptionKind::Text, None, Some(123)).unwrap();
+            reg.add(555, SubscriptionKind::Text, None, Some(123))
+                .unwrap();
             let store = store();
             store
                 .append_turn(AppendTurn::new("fam", 555, "user", "hi").author(peer_author()))
