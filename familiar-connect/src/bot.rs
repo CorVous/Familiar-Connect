@@ -1029,6 +1029,33 @@ impl BotEvents {
         }
     }
 
+    /// `/subscribe-text` registry mutation, returning the ack to reply with.
+    ///
+    /// Refuses inside a DM (`guild_id` is `None`): the command is global, so it
+    /// is invocable in a DM, where `add()` would replace the persisted DM row
+    /// and wipe its `dm_user_id`. DM subscriptions are managed by the allowlist
+    /// alone.
+    pub fn on_subscribe_text(&self, channel_id: i64, guild_id: Option<i64>) -> &'static str {
+        if guild_id.is_none() {
+            return "DM subscriptions are managed automatically via the DM \
+                    allowlist — no need to subscribe here.";
+        }
+        let Ok(cid) = u64::try_from(channel_id) else {
+            return "No channel in context.";
+        };
+        let _ = self
+            .subscriptions
+            .lock()
+            .expect("subscriptions mutex poisoned")
+            .add(
+                cid,
+                SubscriptionKind::Text,
+                guild_id.and_then(|g| u64::try_from(g).ok()),
+                None,
+            );
+        "Listening in this channel."
+    }
+
     /// `/subscribe-voice` registry + shared-state mutation (default-feature; the
     /// songbird join + intake pipeline is layered on by the `discord-voice` glue
     /// in [`create_bot`]'s dispatcher).
@@ -1700,17 +1727,7 @@ mod serenity_glue {
             match name.as_str() {
                 "subscribe-text" => {
                     defer_interaction(&ack).await;
-                    if let Ok(cid) = u64::try_from(channel_id) {
-                        let _ = self.slash.subscriptions.lock().expect("subs").add(
-                            cid,
-                            SubscriptionKind::Text,
-                            guild_id.and_then(|g| u64::try_from(g).ok()),
-                            None,
-                        );
-                        reply(&ack, "Listening in this channel.").await;
-                    } else {
-                        reply(&ack, "No channel in context.").await;
-                    }
+                    reply(&ack, self.events.on_subscribe_text(channel_id, guild_id)).await;
                 }
                 "unsubscribe-text" => {
                     defer_interaction(&ack).await;
