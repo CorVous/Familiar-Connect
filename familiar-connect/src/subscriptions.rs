@@ -231,13 +231,14 @@ impl SubscriptionRegistry {
                 .get("guild_id")
                 .and_then(toml::Value::as_integer)
                 .and_then(|n| u64::try_from(n).ok());
+            let dm_user_id = table.get("dm_user_id").and_then(toml::Value::as_integer);
             self.rows.insert(
                 (channel_id, kind),
                 Subscription {
                     channel_id,
                     kind,
                     guild_id,
-                    dm_user_id: None,
+                    dm_user_id,
                 },
             );
         }
@@ -275,6 +276,9 @@ impl SubscriptionRegistry {
             ];
             if let Some(guild_id) = sub.guild_id {
                 row_lines.push(format!("guild_id = {guild_id}"));
+            }
+            if let Some(dm_user_id) = sub.dm_user_id {
+                row_lines.push(format!("dm_user_id = {dm_user_id}"));
             }
             row_lines.push(String::new());
             lines.push(row_lines.join("\n"));
