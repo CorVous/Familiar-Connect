@@ -97,7 +97,7 @@ fn make_registry(
         } else {
             None
         };
-        reg.add(*ch, *kind, guild, true).unwrap();
+        reg.add(*ch, *kind, guild, None).unwrap();
     }
     (dir, Arc::new(reg))
 }
