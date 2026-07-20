@@ -1776,14 +1776,16 @@ mod tests {
 
     #[cfg(feature = "discord")]
     mod boot_dm {
-        use super::super::{prune_deallowlisted_dm_subscriptions, rehydrate_dm_naming};
+        use super::super::{
+            boot_dm_focus, prune_deallowlisted_dm_subscriptions, rehydrate_dm_naming,
+        };
         use crate::context::final_reminder::FinalReminder;
         use crate::focus::{FocusManager, FocusStore, PRIVATE_MESSAGE_GUILD_NAME};
         use crate::history::async_store::AsyncHistoryStore;
         use crate::history::store::{AppendTurn, HistoryStore};
         use crate::identity::Author;
         use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry, SubscriptionView};
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex};
 
         fn store() -> Arc<AsyncHistoryStore> {
             Arc::new(AsyncHistoryStore::new(
@@ -1938,6 +1940,72 @@ mod tests {
                 .guild_names(fm.guild_names())
                 .render();
             assert!(out.contains("DM from Cor (id 555)"), "{out}");
+        }
+
+        // --- boot_dm_focus ordering invariants ----------------------------
+
+        /// Build a focus manager sharing one mutable registry with the caller,
+        /// so `boot_dm_focus`'s prune/seed observe the same rows the manager does.
+        fn shared_boot(
+            reg: SubscriptionRegistry,
+            store: &Arc<AsyncHistoryStore>,
+        ) -> (Arc<Mutex<SubscriptionRegistry>>, Arc<FocusManager>) {
+            let subs = Arc::new(Mutex::new(reg));
+            let view: Arc<dyn SubscriptionView> = subs.clone();
+            let fm = Arc::new(FocusManager::new(
+                "fam",
+                Arc::clone(store) as Arc<dyn FocusStore>,
+                view,
+            ));
+            (subs, fm)
+        }
+
+        #[tokio::test]
+        async fn boot_prunes_deallowlisted_dm_before_seeding_focus() {
+            // The DM row has a LOWER channel id than the legit guild row, so
+            // without prune-before-seed it would win the seeded text focus.
+            let (_dir, path, mut reg) = registry();
+            reg.add(10, SubscriptionKind::Text, None, Some(999)).unwrap(); // peer 999 NOT allowlisted
+            reg.add(42, SubscriptionKind::Text, Some(1), None).unwrap(); // legit guild row
+            let store = store();
+            let (subs, fm) = shared_boot(reg, &store);
+
+            boot_dm_focus(fm.as_ref(), subs.as_ref(), store.as_ref(), &[], "fam")
+                .await
+                .unwrap();
+
+            // The de-allowlisted DM neither survives nor wins the focus seed.
+            assert_eq!(fm.get_focus("text"), Some(42));
+            assert!(subs.lock().unwrap().get(10, SubscriptionKind::Text).is_none());
+            assert!(!std::fs::read_to_string(&path).unwrap().contains("channel_id = 10"));
+        }
+
+        #[tokio::test]
+        async fn boot_populates_dm_naming_and_seeds_the_dm_focus() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(123)).unwrap();
+            let store = store();
+            store
+                .append_turn(AppendTurn::new("fam", 555, "user", "hi").author(peer_author()))
+                .await
+                .unwrap();
+            let (subs, fm) = shared_boot(reg, &store);
+
+            boot_dm_focus(fm.as_ref(), subs.as_ref(), store.as_ref(), &[123], "fam")
+                .await
+                .unwrap();
+
+            // Naming rehydrated (guild sentinel + peer name) before the seed loop
+            // seeded the surviving DM as the text focus.
+            assert_eq!(
+                fm.guild_names().get(&555).map(String::as_str),
+                Some(PRIVATE_MESSAGE_GUILD_NAME)
+            );
+            assert_eq!(
+                fm.channel_names().get(&555).map(String::as_str),
+                Some("Cor")
+            );
+            assert_eq!(fm.get_focus("text"), Some(555));
         }
     }
 }
