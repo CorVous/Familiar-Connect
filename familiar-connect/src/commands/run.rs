@@ -734,6 +734,80 @@ fn spawn_signal_listener(controller: Arc<ShutdownController>) {
     });
 }
 
+/// Drop persisted DM subscription rows whose peer left the allowlist.
+///
+/// Guild rows (`dm_user_id` is `None`) are untouched. Removal rewrites the
+/// sidecar, so a de-allowlisted peer's row cannot resurface on restart or win
+/// the seeded text focus (Python `_prune_deallowlisted_dm_subscriptions`).
+#[cfg(feature = "discord")]
+fn prune_deallowlisted_dm_subscriptions(
+    subscriptions: &mut crate::subscriptions::SubscriptionRegistry,
+    dm_allowlist: &[i64],
+) -> Result<(), crate::subscriptions::SubscriptionError> {
+    for sub in subscriptions.all() {
+        let Some(dm_user_id) = sub.dm_user_id else {
+            continue;
+        };
+        if !dm_allowlist.contains(&dm_user_id) {
+            tracing::info!(
+                channel_id = sub.channel_id,
+                peer = dm_user_id,
+                "pruned DM subscription — peer no longer allowlisted"
+            );
+            subscriptions.remove(sub.channel_id, sub.kind)?;
+        }
+    }
+    Ok(())
+}
+
+/// A DM channel has one human peer; a small window still tolerates stray
+/// authors without scanning the whole channel history.
+#[cfg(feature = "discord")]
+const DM_PEER_AUTHOR_LIMIT: i64 = 5;
+
+/// Restore DM naming for persisted DM subscriptions after a restart.
+///
+/// Mirrors what `register_dm_channel` records live: the sentinel guild name
+/// (DM detection keys off it) and the peer's display name, recovered from
+/// history via the author row matching the subscription's `dm_user_id`. When
+/// history has no such author, `channel_names` stays unset and the digest falls
+/// back to `DM (id <cid>)`. Guild rows (`dm_user_id` is `None`) are untouched
+/// (Python `_rehydrate_dm_naming`).
+#[cfg(feature = "discord")]
+async fn rehydrate_dm_naming(
+    focus_manager: &FocusManager,
+    subscriptions: &dyn crate::subscriptions::SubscriptionView,
+    store: &crate::history::async_store::AsyncHistoryStore,
+    familiar_id: &str,
+) -> Result<(), crate::history::StoreError> {
+    for sub in subscriptions.all() {
+        let Some(dm_user_id) = sub.dm_user_id else {
+            continue;
+        };
+        let Ok(channel_id) = i64::try_from(sub.channel_id) else {
+            continue;
+        };
+        focus_manager.set_guild_name(channel_id, crate::focus::PRIVATE_MESSAGE_GUILD_NAME);
+        let authors = store
+            .recent_distinct_authors(familiar_id.to_owned(), channel_id, DM_PEER_AUTHOR_LIMIT)
+            .await?;
+        let Some(peer) = authors
+            .into_iter()
+            .find(|a| a.user_id == dm_user_id.to_string())
+        else {
+            continue;
+        };
+        let name = peer
+            .display_name
+            .filter(|s| !s.is_empty())
+            .or_else(|| peer.username.filter(|s| !s.is_empty()));
+        if let Some(name) = name {
+            focus_manager.set_channel_name(channel_id, name);
+        }
+    }
+    Ok(())
+}
+
 /// Asyncio entry point: bring up the bus, responders, workers, and gateway, then
 /// tear down in order (Python `_async_main`).
 ///
@@ -779,6 +853,13 @@ async fn async_main(
     let subs_path = familiar.root.join("subscriptions.toml");
     let subscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new(&subs_path)?));
 
+    // De-allowlisted DM peers must not influence boot — drop their persisted
+    // rows before the focus seeding below can read them.
+    prune_deallowlisted_dm_subscriptions(
+        &mut subscriptions.lock().expect("subscriptions mutex"),
+        &familiar.config.dm_allowlist,
+    )?;
+
     let focus_manager = Arc::new(
         FocusManager::new(
             familiar.id.clone(),
@@ -790,6 +871,17 @@ async fn async_main(
         .with_catch_up_limit(usize::try_from(familiar.config.focus.catch_up_limit).unwrap_or(20)),
     );
     focus_manager.initialize().await;
+
+    // Surviving persisted DM rows lost their in-memory naming on restart;
+    // restore it so the digest and focus line render DMs exactly as the live
+    // registration path (register_dm_channel) does.
+    rehydrate_dm_naming(
+        focus_manager.as_ref(),
+        subscriptions.as_ref(),
+        familiar.history_store.as_ref(),
+        &familiar.id,
+    )
+    .await?;
 
     // Startup default focus: first subscribed channel per modality when unset.
     let startup_subs = subscriptions.lock().expect("subscriptions mutex").all();
