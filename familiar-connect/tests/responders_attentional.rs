@@ -338,9 +338,9 @@ fn real_focus_responder(
 ) -> (TextResponder, Arc<FocusManager>, Arc<AsyncHistoryStore>) {
     let tmp = tempfile::tempdir().unwrap();
     let mut subs = SubscriptionRegistry::new(tmp.path().join("subscriptions.toml")).unwrap();
-    subs.add(100, SubscriptionKind::Text, Some(99), false)
+    subs.add(100, SubscriptionKind::Text, Some(99), None)
         .unwrap();
-    subs.add(200, SubscriptionKind::Text, Some(99), false)
+    subs.add(200, SubscriptionKind::Text, Some(99), None)
         .unwrap();
     // Keep the temp dir alive for the process lifetime (registry reads lazily).
     std::mem::forget(tmp);
@@ -498,9 +498,9 @@ fn real_focus_bare_responder(
 ) -> (TextResponder, Arc<FocusManager>, Arc<AsyncHistoryStore>) {
     let tmp = tempfile::tempdir().unwrap();
     let mut subs = SubscriptionRegistry::new(tmp.path().join("subscriptions.toml")).unwrap();
-    subs.add(100, SubscriptionKind::Text, Some(99), false)
+    subs.add(100, SubscriptionKind::Text, Some(99), None)
         .unwrap();
-    subs.add(200, SubscriptionKind::Text, Some(99), false)
+    subs.add(200, SubscriptionKind::Text, Some(99), None)
         .unwrap();
     std::mem::forget(tmp);
     let subs = Arc::new(subs);
