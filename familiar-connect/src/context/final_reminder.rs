@@ -72,10 +72,23 @@ fn channel_label(names: &HashMap<i64, String>, cid: i64) -> String {
 
 /// Unread-list item label: named channels **must** carry the numeric id so the
 /// model can pass a valid `channel_id` to `shift_focus`.
-fn channel_label_with_id(names: &HashMap<i64, String>, cid: i64) -> String {
-    names
-        .get(&cid)
-        .map_or_else(|| format!("#{cid}"), |name| format!("#{name} (id {cid})"))
+///
+/// A channel whose `guilds` entry is [`PRIVATE_MESSAGE_GUILD_NAME`] is a DM and
+/// renders as `DM from <name> (id <cid>)` (or `DM (id <cid>)` unnamed); the id
+/// is preserved either way because `shift_focus` still needs it.
+fn channel_label_with_id(
+    names: &HashMap<i64, String>,
+    guilds: &HashMap<i64, String>,
+    cid: i64,
+) -> String {
+    let name = names.get(&cid);
+    if guilds.get(&cid).map(String::as_str) == Some(PRIVATE_MESSAGE_GUILD_NAME) {
+        return name.map_or_else(
+            || format!("DM (id {cid})"),
+            |name| format!("DM from {name} (id {cid})"),
+        );
+    }
+    name.map_or_else(|| format!("#{cid}"), |name| format!("#{name} (id {cid})"))
 }
 
 /// The closing "final reminder" block builder.
@@ -250,7 +263,7 @@ impl FinalReminder {
                     .map(|(cid, (unread, pings))| {
                         format!(
                             "{}{}",
-                            channel_label_with_id(&self.channel_names, *cid),
+                            channel_label_with_id(&self.channel_names, &self.guild_names, *cid),
                             unread_suffix(*unread, *pings)
                         )
                     })
