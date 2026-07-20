@@ -3966,6 +3966,55 @@ mod tests {
         assert_eq!(sub.guild_id, None);
     }
 
+    // --- /subscribe-text DM guard (PR #194) --------------------------------
+
+    #[test]
+    fn subscribe_text_in_dm_refuses_and_leaves_registry_untouched() {
+        let fx = dm_fixture(vec![]);
+        // Global command, so invocable in a DM (guild_id None).
+        let msg = fx.events.on_subscribe_text(555, None);
+        assert!(msg.contains("allowlist"));
+        assert!(
+            fx.subs
+                .lock()
+                .unwrap()
+                .get(555, SubscriptionKind::Text)
+                .is_none()
+        );
+        // Sidecar untouched — the registry never wrote anything.
+        assert!(!fx.subs_path.exists());
+    }
+
+    #[test]
+    fn subscribe_text_in_dm_does_not_wipe_persisted_peer_id() {
+        // Regression guard: an unguarded DM add() would replace the row and
+        // silently drop dm_user_id from the sidecar.
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(555, SubscriptionKind::Text, None, Some(123))
+            .unwrap();
+        let _ = fx.events.on_subscribe_text(555, None);
+        let reloaded = SubscriptionRegistry::new(&fx.subs_path).unwrap();
+        let sub = reloaded.get(555, SubscriptionKind::Text).unwrap();
+        assert_eq!(sub.dm_user_id, Some(123));
+    }
+
+    #[test]
+    fn subscribe_text_in_guild_adds_row() {
+        let fx = dm_fixture(vec![]);
+        let msg = fx.events.on_subscribe_text(888, Some(7));
+        assert_eq!(msg, "Listening in this channel.");
+        let sub = fx
+            .subs
+            .lock()
+            .unwrap()
+            .get(888, SubscriptionKind::Text)
+            .unwrap();
+        assert_eq!(sub.guild_id, Some(7));
+    }
+
     #[tokio::test]
     async fn non_allowlisted_dm_ignored() {
         let fx = dm_fixture(vec![123]);
