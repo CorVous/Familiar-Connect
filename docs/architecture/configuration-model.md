@@ -14,7 +14,8 @@ by the admin, never exposed through Discord.
 - `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech
 - `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS
 - `DEEPGRAM_API_KEY` — Deepgram STT credential. Every other Deepgram knob lives in `[providers.stt.deepgram]`. Full list: [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
-- `FAMILIAR_ID` — picks the character folder under `data/familiars/` this process runs.
+- `FAMILIAR_ID` — picks the character folder (under the familiars root) this process runs.
+- `FAMILIARS_ROOT` — overrides the per-user familiars root (default: platform data dir). `FAMILIAR_DEFAULTS_ROOT` overrides where the tracked `_default` skeleton resolves (default: `data/familiars`). See [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
 
 Lives in environment variables or a `.env` file. Never checked into
 git. Never editable from inside Discord.
@@ -22,8 +23,9 @@ git. Never editable from inside Discord.
 ## 2. Character config
 
 Per-familiar, loaded once from
-`data/familiars/<familiar_id>/character.toml`, deep-merged over
-`data/familiars/_default/character.toml`.
+`<familiars-root>/<familiar_id>/character.toml`, deep-merged over
+`data/familiars/_default/character.toml` (the tracked `_default`
+skeleton stays CWD-relative).
 
 Surface today:
 
@@ -109,10 +111,10 @@ repo. Two purposes:
 
 1. **Fallback source.** Any field missing from the user's
    `character.toml` falls back to the corresponding value in
-   `_default/character.toml`. No hardcoded defaults live in Python —
+   `_default/character.toml`. No hardcoded defaults live in code —
    the default profile is the single source of truth.
-2. **Documentation-by-example.** A new operator copies `_default/` to
-   `data/familiars/my-familiar/` and edits from there.
+2. **Documentation-by-example.** A new operator copies `_default/`
+   into the familiars root and edits from there.
 
 The leading underscore keeps `FAMILIAR_ID=_default` from being a
 meaningful selection.
@@ -127,9 +129,7 @@ meaningful selection.
 
 ### Subscriptions
 
-`data/familiars/<id>/subscriptions.toml` — which Discord channels the
-bot listens in. Written by `/subscribe-text` and `/subscribe-voice`;
-an inbound DM from an allowlisted user also auto-registers a persisted
-row, and boot prunes DM rows whose peer has left the allowlist. The
-bot rewrites the whole file on every mutation, so hand edits are only
-safe while the bot is stopped.
+`<familiars-root>/<id>/subscriptions.toml` — which Discord channels the
+bot listens in. Written by `/subscribe-text` and `/subscribe-voice`.
+Not meant for hand edits — the slash commands rewrite the whole file on
+every mutation.

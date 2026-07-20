@@ -26,7 +26,7 @@ Trust model is single-operator: the admin running the bot has full access to eve
 
 ## Dependency hygiene
 
-- Dependency versions pinned in `pyproject.toml` / `uv.lock` to avoid supply-chain surprises.
+- Dependency versions pinned in `Cargo.toml` / `Cargo.lock` to avoid supply-chain surprises.
 - Review new dependencies before adding — prefer well-maintained packages with active security response.
 
 ## Principle of least privilege

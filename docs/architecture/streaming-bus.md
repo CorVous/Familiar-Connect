@@ -3,8 +3,8 @@
 ## Status
 
 Accepted. Implemented in
-`src/familiar_connect/bus/` and all processors under
-`src/familiar_connect/processors/`.
+`familiar-connect/src/bus/` and all processors under
+`familiar-connect/src/processors/`.
 
 ## Context
 
@@ -14,7 +14,7 @@ transcripts, Twitch EventSub — into several processing surfaces —
 reply generation, TTS playback, rolling summary, fact extraction,
 debug logging. The re-architecture needed a structured way to
 connect them without collapsing into hand-wired spaghetti of
-`asyncio.Queue`s and direct method calls.
+channels and direct method calls.
 
 Three approaches were on the table:
 
@@ -26,17 +26,17 @@ Three approaches were on the table:
    inter-process machinery, and nothing today benefits
    from isolation between components running in one user's Discord
    bot instance.
-3. **In-process pub/sub.** A `Protocol`-hidden event bus running
+3. **In-process pub/sub.** A trait-hidden event bus running
    inside the single bot process. No broker, no sidecar. Cross-
    process messaging stays possible later by swapping the
-   implementation behind the `EventBus` Protocol.
+   implementation behind the `EventBus` trait.
 
 ## Decision
 
-Ship option 3 as the single data-plane. The `EventBus` Protocol
-(`src/familiar_connect/bus/protocols.py`) is the seam; concrete
+Ship option 3 as the single data-plane. The `EventBus` trait
+(`familiar-connect/src/bus/protocols.rs`) is the seam; concrete
 `InProcessEventBus` is the only implementation needed today. Every
-processor, responder, and worker subscribes via the Protocol so a
+processor, responder, and worker subscribes via the trait so a
 future `CrossProcessEventBus` can drop in without rewriting them.
 
 ### Constraints baked in
@@ -50,7 +50,7 @@ future `CrossProcessEventBus` can drop in without rewriting them.
   low volume, dropping them is costly.
 - **Lifecycle states** (`starting → running → draining → stopped`)
   with idempotent `start`/`shutdown`.
-- **Content-addressed envelopes.** `Event` is a frozen dataclass
+- **Content-addressed envelopes.** `Event` is a struct
   with `event_id`, `turn_id`, `session_id`, `parent_event_ids`,
   `topic`, `timestamp`, `sequence_number`, `payload`. ``parent_event_ids``
   carries lineage for in-memory provenance; derived SQLite rows
@@ -64,13 +64,13 @@ future `CrossProcessEventBus` can drop in without rewriting them.
 
 ### Good
 
-- One dependency surface to debug — standard library asyncio plus
+- One dependency surface to debug — the tokio runtime plus
   SQLite. No Redis-is-down failure modes.
-- Sub-200 ms barge-in latency (verified by
-  `tests/test_voice_responder.py::TestBargeIn`).
-- Everything that matters is a pure-Python test away from being
+- Sub-200 ms barge-in latency (verified by the barge-in tests in
+  `familiar-connect/tests/responders_voice.rs`).
+- Everything that matters is a Rust test away from being
   covered.
-- Processor composition is simple enough that `commands/run.py`
+- Processor composition is simple enough that `commands/run.rs`
   wires them in ~15 lines.
 
 ### Bad
@@ -81,11 +81,11 @@ future `CrossProcessEventBus` can drop in without rewriting them.
   "currently speaking" state is lost.
 - No cross-process fan-out. If we ever want one summary worker
   serving multiple bots, we'll need a new `EventBus` implementation.
-  The Protocol was designed for this.
+  The trait was designed for this.
 - Backpressure policy is per-topic, per-subscriber. A misconfigured
   subscriber (e.g. `BLOCK` on `voice.audio.raw`) would stall audio
   capture. Defaults live next to the topic constants; wiring
-  in `commands/run.py` is the one place humans make the choice.
+  in `commands/run.rs` is the one place humans make the choice.
 
 ### Neutral
 
@@ -120,7 +120,7 @@ latency budget.
 Tempting given one character per process. Doesn't model the "any step
 may be interrupted by new data" constraint cleanly — you end up with
 cancellation tokens threaded through every signature, or
-`asyncio.Queue`s orphaned because nobody consumes them. The
+channels orphaned because nobody consumes them. The
 bus makes cancel-on-new-turn explicit (TurnRouter + TurnScope) and
 makes adding a new data stream cheap (new `StreamSource`, new topic,
 no edits to existing processors).

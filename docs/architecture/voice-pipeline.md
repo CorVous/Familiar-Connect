@@ -73,8 +73,8 @@ biased by `endpointing_ms` and `utterance_end_ms`. See
   endpointing.
 
 **Status:** V1 phase 2 — local endpointer behind a feature flag.
-Three classes plus a factory under
-`familiar_connect.voice.turn_detection`:
+Three types plus a factory under
+`familiar_connect::voice::turn_detection`:
 
 - `TenVAD(sample_rate=16000, hop_size=256)` — Agora's TEN-VAD via the
   `ten_vad` package. Stateful native handle: feed 16 ms (256-sample)
@@ -97,26 +97,25 @@ Three classes plus a factory under
   `UtteranceEndpointer` per Discord user (TenVAD's native handle is
   stateful; Smart Turn is shared).
 
-Both runtimes lazy-import; install via the `local-turn` extra:
+Both runtimes are behind the `local-turn` feature; build it in:
 
 ```bash
-uv sync --extra local-turn
+cargo build --features local-turn
 ```
 
-TEN-VAD ships its model + native shared library inside the `ten-vad`
-wheel (sourced from upstream git via `[tool.uv.sources]`). Smart Turn's
-ONNX weights are pulled from
+TEN-VAD ships its model + native shared library, bound through a
+`ten-vad-sys` crate. Smart Turn's ONNX weights are pulled from
 [`pipecat-ai/smart-turn-v3`](https://huggingface.co/pipecat-ai/smart-turn-v3)
-on first use via `huggingface_hub.hf_hub_download` — the Hub cache
+on first use via the `hf-hub` crate — the Hub cache
 (`~/.cache/huggingface`) covers offline reruns. Default filename is
 the CPU export (`smart-turn-v3.2-cpu.onnx`); override via
-`[providers.turn_detection.local].smart_turn_filename` if
-`onnxruntime-gpu` is installed separately.
+`[providers.turn_detection.local].smart_turn_filename` when the ONNX
+runtime (`ort`) is built with a GPU execution provider.
 
 ### How the audio path forks
 
 When `[providers.turn_detection].strategy = "ten+smart_turn"` and
-model files exist, `bot._start_voice_intake` builds a per-user
+model files exist, `start_voice_intake` builds a per-user
 endpointer alongside the per-user Deepgram clone. The shared sink-side
 pump demuxes audio onto a per-user queue; one drain task per user_id
 feeds every PCM chunk into both clone and endpointer. Per-user drain
@@ -153,7 +152,7 @@ turn. Without a backstop the buffered final sits until the speaker's
 **next** utterance — the "transcript doesn't come through until the next
 sound" symptom.
 
-The per-user audio pump (`bot._user_pump`) is that backstop. After each
+The per-user audio pump (`user_pump`) is that backstop. After each
 chunk it arms an idle timer; when no audio arrives for the flush window
 it forces the turn to end:
 
@@ -178,9 +177,9 @@ See [Roadmap V1](roadmap.md#v1-local-vad-semantic-turn-detection).
 
 Two layers pin the state machine:
 
-- `tests/test_utterance_endpointer.py` — unit tests with canned
+- `familiar-connect/tests/voice_endpointer.rs` — unit tests with canned
   VAD/SmartTurn return values. Drives every state-machine edge.
-- `tests/test_endpointer_audio_fixtures.py` — audio-fixture integration
+- `familiar-connect/tests/voice_endpointer_fixtures.rs` — audio-fixture integration
   tests. Synthesises 48 kHz mono int16 PCM (silence + 220 Hz sine
   bursts), feeds it through the real resampler + framer, and validates
   the three patterns field consensus calls out: **complete-sentence**
@@ -193,14 +192,14 @@ Two layers pin the state machine:
 
 ## STT (transcription)
 
-**Today:** `DeepgramTranscriber` in `familiar_connect.stt.deepgram`.
+**Today:** `DeepgramTranscriber` in `familiar_connect::stt::deepgram`.
 Per-speaker clone-from-template; one stream per Discord user,
 lazy-opened, closed after `idle_close_s`.
 
 **Pluggability:** V3 phase 1 lifted the clone-template shape into a
-`Transcriber` Protocol (`familiar_connect.stt.protocol`). The voice
-pipeline (`bot.py`, `sources/voice.py`, `familiar.py`) types against
-the Protocol; backend selection lives in `stt.factory`, dispatched on
+`Transcriber` trait (`familiar_connect::stt::protocol`). The voice
+pipeline (`bot.rs`, `sources/voice.rs`, `familiar.rs`) types against
+the trait; backend selection lives in `stt::factory`, dispatched on
 `[providers.stt].backend`.
 
 V3 phase 2 added `ParakeetTranscriber` (NeMo Parakeet-TDT 0.6B v3,
@@ -212,10 +211,9 @@ Neither has an internal endpointer, so both must pair with
 `[providers.turn_detection].strategy = "ten+smart_turn"` — the local
 endpointer drives `finalize()` on turn-complete.
 
-Install with `uv sync --extra local-turn --extra local-stt-parakeet`
-or `--extra local-stt-whisper` (or both). Parakeet pulls torch +
-~600 MB of weights; FasterWhisper is lighter (~150 MB for `small`,
-no torch).
+Build with `cargo build --features local-turn,local-stt`. Parakeet
+pulls torch + ~600 MB of weights; FasterWhisper is lighter (~150 MB
+for `small`, no torch).
 
 **Partial vs final transcripts.** Modal's benchmark: partials are a
 UX feature, not a latency feature. The LLM can't start until the
@@ -232,7 +230,7 @@ stage incrementally.
 ## Sentence streaming
 
 `VoiceResponder` feeds each LLM delta through a `SentenceStreamer`
-(`familiar_connect.sentence_streamer`) and calls `TTSPlayer.speak`
+(`familiar_connect::sentence_streamer`) and calls `TTSPlayer.speak`
 once per completed sentence. Time-to-first-audio drops from "after
 the LLM finishes" to "after the first sentence" — the same 1–3 s
 perceived-latency win Pipecat's `SentenceAggregator` ships.
@@ -242,12 +240,21 @@ single-letter initials (`J. K. Rowling`) don't trip a boundary. A
 trailing partial without a terminator (model omits the final period)
 is drained on stream end via `flush()` and spoken last.
 
-**Silent sentinel.** `SilentDetector` runs ahead of the splitter on
-every delta. Sentences finalised before the gate decides are buffered;
-on `True` they're dropped and TTS is never invoked; on `False` they
-flush and the streamer feeds TTS as new sentences arrive.
+**Silent sentinel + leak guard.** `StreamGate` (Rust `silence.rs`) runs
+ahead of the splitter on every delta. Sentences finalised before the
+gate decides are buffered; on `silent` they're dropped and TTS is never
+invoked; on `speak` they flush and the streamer feeds TTS as new
+sentences arrive. Beyond `<silent>`, the gate also recognises a
+tool-call block the model occasionally leaks as plain text (`<invoke …`,
+`silent(…)`, `read_channel(…)`, `<tool_call …`), staying pending while
+the token is still split across delta boundaries and latching `suppress`
+(or `silent`, for a leaked `silent` call) so the raw XML never reaches
+TTS or the persisted turn (issue #109). The confirmed-leak
+classification is shared with the agentic loop's return-time strip guard
+(`classify_leading_leak`), the single source of truth. The text path,
+which streams no content mid-turn, keeps the simpler `SilentDetector`.
 
-**Cancellation.** Each `await self._tts.speak(sentence, scope=...)` is
+**Cancellation.** Each `TTSPlayer::speak(sentence, scope)` call is
 awaited serially. Barge-in cancels the current `TurnScope`;
 `DiscordVoicePlayer`'s poll loop cuts the in-flight sentence within
 ~20 ms and the responder bails before queueing the next. The
@@ -257,10 +264,10 @@ assistant turn records only if the full reply played uncancelled.
 
 Three clients behind `synthesize(text) → TTSResult`: `AzureTTSClient`,
 `CartesiaTTSClient`, `GeminiTTSClient`. `DiscordVoicePlayer`
-synthesises, mono→stereo, pushes through pycord. Without a configured
+synthesises, mono→stereo, pushes through songbird. Without a configured
 client, `LoggingTTSPlayer` logs the intended speech.
 
-Already a Protocol seam. Adding a backend is one new class.
+Already a trait seam. Adding a backend is one new type.
 
 ### Byte-level streaming (Cartesia)
 
@@ -272,11 +279,11 @@ path:
 
 1. Open Cartesia stream (~140 ms TTFB).
 2. Pre-buffer the first chunk into a `StreamingPCMSource` (a
-   thread-safe `discord.AudioSource` with `feed` / `close_input`).
-3. `vc.play(source)` — pycord's audio thread drains 20 ms frames.
+   thread-safe songbird audio source with `feed` / `close_input`).
+3. `vc.play(source)` — songbird's audio thread drains 20 ms frames.
 4. A producer task feeds the rest into the source as chunks arrive.
-   `close_input()` on stream end lets the reader return `b""` and
-   pycord stop the player cleanly.
+   `close_input()` on stream end lets the reader return end-of-stream and
+   songbird stop the player cleanly.
 
 That cuts `voice.tts_to_playback` from full-sentence synthesis time
 (1.5–3 s for a long sentence on `cartesia-sonic-3` at ~270 ms/word)
@@ -319,17 +326,17 @@ byte-level Cartesia streaming both shipped — see
 
 ## Per-turn budget telemetry
 
-`familiar_connect.diagnostics.voice_budget.VoiceBudgetRecorder` (a
+`familiar_connect::diagnostics::voice_budget::VoiceBudgetRecorder` (a
 process singleton like `SpanCollector`) stamps four phase markers
 keyed by `turn_id` and emits one span per adjacent gap into the shared
 collector, so `/diagnostics` shows the breakdown in its summary table.
 
 | Phase | Stamp site |
 |---|---|
-| `vad_end` | `bot._on_complete` parks a perf-counter; `VoiceSource._handle` drains on the next transcript event for the same `user_id` |
-| `stt_final` | `VoiceSource._handle` (just before publishing `voice.transcript.final`) |
-| `llm_first_token` | `VoiceResponder._stream_and_speak` on first delta |
-| `tts_first_audio` | `VoiceResponder._speak` (deduped — first sentence wins) |
+| `vad_end` | the turn-complete callback calls `VoiceSource::record_vad_end`; `VoiceSource::handle` drains on the next transcript event for the same `user_id` |
+| `stt_final` | `VoiceSource::handle` (just before publishing `voice.transcript.final`) |
+| `llm_first_token` | `VoiceResponder::stream_and_speak` on first delta |
+| `tts_first_audio` | `VoiceResponder::speak` (deduped — first sentence wins) |
 | `playback_start` | `DiscordVoicePlayer.speak` after `vc.play(source)` |
 
 | Span | Gap |
@@ -354,7 +361,7 @@ take the bot down.
 
 OpenAI's prompt caching matches the longest stable prefix (1024-token
 minimum, 128-token granularity). A change to any mid-prompt layer
-invalidates everything after it, so `_default_assembler` builds layers
+invalidates everything after it, so `default_assembler` builds layers
 in **stability descending** order:
 
 | Position | Layer | Refresh trigger |
@@ -371,9 +378,9 @@ so its inevitable per-turn churn invalidates *only* itself — the
 prefix from `CharacterCardLayer` through `PeopleDossierLayer` stays
 cached when its constituent layers haven't moved.
 
-`tests/test_run_cmd.py::TestDefaultAssemblerLayerOrder` pins this
-ordering so a refactor doesn't silently drop into "everything goes
-cold" mode. Prompt-cache hit count surfaces as `cached=N` on the
+The `default_assembler` layer-order test in
+`familiar-connect/src/commands/run.rs` pins this ordering so a refactor
+doesn't silently drop into "everything goes cold" mode. Prompt-cache hit count surfaces as `cached=N` on the
 `[LLM call]` log line below — if it drops to 0, suspect a mid-prompt
 layer that just started churning between turns.
 
@@ -407,7 +414,8 @@ Already implemented. New `voice.activity.start` cancels prior
    cancel isn't starved).
 2. Calls `TTSPlayer.stop()` to flush in-flight audio.
 
-Verified sub-200 ms by `tests/test_voice_responder.py::TestBargeIn`.
+Verified sub-200 ms by the barge-in tests in
+`familiar-connect/tests/responders_voice.rs`.
 See [Voice reply loop](overview.md#voice-reply-loop).
 
 Every voice turn emits exactly one decision line for observability:
@@ -420,15 +428,15 @@ Every voice turn emits exactly one decision line for observability:
   tell which transcript was dropped.
 
 After `vc.stop()`, `DiscordVoicePlayer` polls `vc.is_playing()` for up
-to 200 ms before releasing the play lock. Pycord's audio thread checks
+to 200 ms before releasing the play lock. Songbird's audio thread checks
 the stop flag once per 20 ms tick, so the actual wait is one or two
 polls; the upper bound is a safety net for a wedged thread. Without
 that drain, a barge-in followed by an immediate next-speaker turn
 would race: the next `speak()` acquires the lock the instant the prior
-call returns, but pycord still has `is_playing() == True` for one tick
-— and `vc.play()` raises `ClientException('Already playing audio.')`.
-Pinned by
-`tests/test_discord_voice_player.py::TestConcurrentSpeak::test_cancel_then_immediate_speak_does_not_collide`.
+call returns, but songbird still has `is_playing() == true` for one tick
+— and `vc.play()` returns `PlayError::AlreadyPlaying` ("Already playing audio.").
+Pinned by `cancel_then_immediate_speak_does_not_collide` in
+`familiar-connect/src/tts_player/discord_player/tests.rs`.
 
 ## Cross-speaker reply gate
 
@@ -443,7 +451,7 @@ moment — the back-to-back near-duplicate replies seen in production
 ("Fair enough. I'll reserve judgment…" / "Fair enough. I'll form my
 opinion later…").
 
-A per-channel `asyncio.Lock` (`VoiceResponder._gate_for`) serializes
+A per-channel `tokio::sync::Mutex` (`VoiceResponder::gate_for`) serializes
 reply *generation*: `set_rag_cue` → assemble → stream → assistant-turn
 commit run under the lock. The waiting pipeline therefore assembles
 only after the prior reply lands in history, sees it in context, and
@@ -460,9 +468,9 @@ can resolve `<silent>` instead of duplicating. Two further points:
   could clobber the retrieval cue mid-assemble.
 
 Barge-in composes cleanly: the lock releases on return or cancellation
-(`async with` unwind), and same-speaker self-barge still cancels via
-the scope. Pinned by
-`tests/test_voice_responder.py::TestCrossUserReplyGate`.
+(guard drop), and same-speaker self-barge still cancels via
+the scope. Pinned by the cross-user reply-gate tests in
+`familiar-connect/tests/responders_voice.rs`.
 
 ## Per-channel tuning
 

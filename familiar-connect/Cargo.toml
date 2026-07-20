@@ -1,0 +1,182 @@
+[package]
+name = "familiar-connect"
+description = "Rust port of Familiar-Connect, a Discord voice AI companion bot."
+keywords = ["discord", "voice", "ai", "bot"]
+categories = ["multimedia::audio"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+default-run = "familiar-connect"
+
+[lib]
+name = "familiar_connect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "familiar-connect"
+path = "src/main.rs"
+
+# Cargo features mirror the Python `[project.optional-dependencies]` extras and
+# isolate native / external-service dependencies. The DEFAULT set compiles the
+# pure-Rust + safe-native foundation (rustls everywhere, no OpenSSL). Heavier or
+# native deps (serenity/songbird, ONNX runtime, whisper, twitch, azure) stay off
+# by default: their versions still resolve (validated by `cargo build`) but they
+# are compiled only when the owning porting agent flips the feature.
+[features]
+default = ["store", "net", "images"]
+# Durable state: SQLite (rusqlite, bundled) + tantivy full-text indexes (03).
+store = ["dep:rusqlite", "dep:tantivy"]
+# Network I/O: OpenRouter LLM over reqwest+SSE (08); Deepgram/Cartesia/Twitch WS (09/11).
+net = ["dep:reqwest", "dep:eventsource-stream", "dep:tokio-tungstenite"]
+# view_image JPEG re-encode / GIF tiling (08).
+images = ["dep:image"]
+# Discord gateway + REST (10). Voice/DAVE transport is `discord-voice` (native Opus).
+discord = ["dep:serenity"]
+discord-voice = ["discord", "dep:songbird", "dep:symphonia"]
+# Deepgram streaming STT via the official SDK (09); alt path is hand-rolled WS over `net`.
+stt-deepgram = ["net", "dep:deepgram"]
+# Local ONNX sentence embeddings — mirrors Python's implicit fastembed path (04).
+local-embed = ["dep:fastembed"]
+# TEN-VAD + Smart Turn v3 local endpointing — mirrors Python `local-turn` extra (09).
+# ONNX via `ort`; weights via `hf-hub`. TEN-VAD FFI will arrive as a `ten-vad-sys`
+# workspace member so unsafe stays out of this crate.
+local-turn = ["dep:ort", "dep:hf-hub"]
+# Local STT (Parakeet/faster-whisper replacements, e.g. whisper-rs) — mirrors
+# Python `local-stt` extra (09). Placeholder until an engine is chosen.
+local-stt = []
+# Twitch EventSub (11) — dormant in production; feature-gated until a consumer exists.
+twitch = ["dep:twitch_api"]
+# Azure TTS via the pure-Rust SDK reimplementation (09); alt path is REST over `net`.
+azure-tts = ["dep:azure-speech"]
+# rubato/opus for higher-quality resampling if the boxcar decimator is insufficient (09).
+audio-resample = ["dep:rubato", "dep:opus"]
+# Exposes the singleton reset seams (reset_span_collector, reset_voice_budget_recorder)
+# to cross-subsystem integration tests per DESIGN 4.8.
+test-util = []
+
+[dependencies]
+# Process-level TLS crypto provider pin (see main.rs): deepgram's reqwest
+# enables rustls/aws-lc-rs while the discord stack enables rustls/ring; with
+# both present rustls cannot auto-select and panics. main() installs ring.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# --- async runtime + concurrency (all subsystems) ---
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "io-util",
+    "net",
+    "fs",
+    "signal",
+    "test-util",
+] }
+tokio-util = { version = "0.7.18", features = ["rt", "time"] } # CancellationToken (TurnScope)
+futures = "0.3"                                                # Stream / StreamExt
+async-trait = "0.1"                                           # async fns in the seam traits
+
+# --- serialization / errors / logging ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# --- time / text / ids ---
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"       # IANA zone validation + local-date bucketing (02/04/05/11)
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+
+# --- config / hashing / encoding ---
+toml = "1.1.2"           # TOML parse + deep-merge + write (02/05/11)
+dotenvy = "0.15.7"       # .env autoload (10)
+base64 = "0.22"          # SSE image data URIs / TTS chunks (08/09)
+sha2 = "0.10"            # greeting-cache keys (09)
+blake2 = "0.10"          # HashEmbedder (04) + layer invalidation keys (05)
+byteorder = "1"          # f32 fact-embedding BLOB pack/unpack (03)
+
+# --- CLI ---
+clap = { version = "4", features = ["derive"] }
+
+# --- platform paths ---
+# Per-user data directory for familiar storage so a `git clean -fdx` in a repo
+# checkout can no longer wipe live familiars (10; issue #201).
+directories = "6"
+
+# --- durable state (feature: store) ---
+# DESIGN NOTE / version correction: the ecosystem report pins rusqlite 0.40.1, but
+# that pulls libsqlite3-sys 0.38.1, whose build.rs uses the unstable `cfg_select!`
+# macro (rust-lang #115585) — not available on the pinned stable rustc 1.94.1.
+# Downgraded to the newest rusqlite whose bundled sys crate compiles on stable.
+# Revisit (bump back to 0.40.x) once the toolchain gains `cfg_select`.
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+tantivy = { version = "0.26.1", optional = true }
+
+# --- network / streaming (feature: net) ---
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+], optional = true }
+eventsource-stream = { version = "0.2.3", optional = true }
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+], optional = true }
+
+# --- images (feature: images) ---
+image = { version = "0.25.10", optional = true }
+
+# --- Discord (features: discord / discord-voice) ---
+serenity = { version = "0.12.5", default-features = false, features = [
+    "builder",
+    "cache",
+    "client",
+    "gateway",
+    "http",
+    "model",
+    "rustls_backend",
+    "voice",
+], optional = true }
+songbird = { version = "0.6.0", default-features = false, features = [
+    "driver",
+    "gateway",
+    "receive",
+    "serenity",
+    "rustls",
+    "tungstenite", # `driver` requires exactly one WS backend (tungstenite for serenity)
+], optional = true }
+# songbird pulls Symphonia with default-features=false (zero codec decoders). Its
+# `RawAdapter` — the only TTS playback path — emits a CODEC_TYPE_PCM_F32LE track, so
+# playback needs Symphonia's PCM decoder registered or every track dies with
+# `DecodeError("no compatible track found")`. Declaring Symphonia directly with `pcm`
+# makes Cargo feature-unify it into songbird's own Symphonia. Enabled by `discord-voice`.
+symphonia = { version = "0.5", default-features = false, features = ["pcm"], optional = true }
+
+# --- optional local-ML / external-service backends ---
+deepgram = { version = "0.10.0", optional = true }     # stt-deepgram
+fastembed = { version = "5.17.2", optional = true }    # local-embed
+ort = { version = "2.0.0-rc.12", optional = true }     # local-turn (Smart Turn ONNX)
+hf-hub = { version = "0.3", optional = true }          # local-turn (weights)
+twitch_api = { version = "0.8.0", optional = true }    # twitch
+azure-speech = { version = "0.10.0", optional = true } # azure-tts
+rubato = { version = "0.16", optional = true }         # audio-resample (report said 4.0.0; latest is 0.16.x, and songbird uses the same line — unifies)
+opus = { version = "0.3.1", optional = true }          # audio-resample
+
+[dev-dependencies]
+tempfile = "3"       # tmp-dir fixtures for store / config tests
+wiremock = "0.6"     # HTTP mock for the LLM client (08)
+assert_cmd = "2"     # CLI subprocess tests (10)
+predicates = "3"
+
+[build-dependencies]
+# (none — build.rs uses only std)
+
+[lints]
+workspace = true

@@ -3,45 +3,52 @@
 This file is the working contributor reference — hot commands, the
 post-change checklist, and code conventions. The pages under
 [`docs/`](docs/index.md) are the authoritative deep dive:
-[`docs/contributing.md`](docs/contributing.md) for the full human workflow,
-[`docs/architecture/overview.md`](docs/architecture/overview.md) for the system.
+[`docs/architecture/overview.md`](docs/architecture/overview.md) for the
+system, [`docs/rust-port/DESIGN.md`](docs/rust-port/DESIGN.md) for the
+implementation's module map, cross-cutting conventions, and decision log.
 
 ## Project specifics
 
-- This is a **`uv`** project. Run everything through `uv run` — there is no bare
-  `python` on `PATH`. Update `uv` first: `uv self update`.
-- Test collection imports the `local-turn` (numpy, huggingface_hub) and
-  `local-embed` (fastembed) extras unconditionally, so run tests with both:
-  `uv run --extra local-turn --extra local-embed pytest -q`. The live bot also
-  runs from this repo's `.venv` and crashes at startup without `local-embed`, so
-  keep both extras synced: `uv sync --dev --extra local-turn --extra local-embed`.
+- This is a **Cargo workspace** (edition 2024, stable toolchain pinned by
+  `rust-toolchain.toml`). No Python — the prototype was retired after the
+  Rust port reached parity (July 2026).
+- Integration surfaces are **feature-gated**: `discord`, `discord-voice`,
+  `stt-deepgram`, `local-turn`, `local-embed`, `twitch`, `azure-tts`,
+  `audio-resample`. Defaults (`store`, `net`, `images`) cover everything
+  unit tests need. Feature-gated code must keep default-feature gates green.
 
 ## After every change
 
-Run `scripts/ci-local.sh` — it mirrors the CI `lint-and-test` job exactly (sync,
-`ruff check`, `ruff format`, `ty check`, `pytest`), puts `uv` on `PATH`, and
-re-syncs disk exec bits to git's modes first so `ruff` doesn't fire spurious
-`EXE002`. Run the steps by hand when you need finer control.
+```bash
+cargo build
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt
+```
 
-Red / green TDD. One project nuance: **import errors don't count as red** — a
-test failing on `ImportError` / `ModuleNotFoundError` is not a valid red; the
-module or function must exist before the test can fail for the right reason.
+Touched feature-gated code? Also gate the combo you touched, e.g.
+`cargo clippy --features discord,discord-voice --all-targets -- -D warnings`.
+The pre-commit hook (`git config core.hooksPath .githooks`) runs these gates.
+
+Red / green TDD. One project nuance: **compile errors don't count as red** —
+a test failing because the symbol doesn't exist is not a valid red; the
+item must exist (stub is fine) before the test can fail for the right reason.
 
 If the change touched **env vars / config keys**, **on-disk layout under
-`data/familiars/`**, or **architecture** (providers, processors, pipeline,
-memory, history), update the matching page under `docs/` **in the same commit**,
-then run `uv run mkdocs build --strict`. `tests/test_docs.py` fails CI if
-documented env vars have drifted from code.
+the familiars root**, or **architecture** (providers, processors, pipeline,
+memory, history), update the matching page under `docs/` **in the same
+commit**.
 
-CLI flags and slash-command descriptions don't need a manual doc edit — the
-`docs/hooks/cli_reference.py` mkdocs hook inlines them from `bot.py` / `cli.py`
-at build time. Still run `mkdocs build --strict` after touching those; if you add
-a *new* slash command or CLI subcommand, check it renders in the
-`getting-started/slash-commands.md` / `getting-started/installation.md` pages.
+Behavioral contracts to respect (see `docs/rust-port/DESIGN.md` §4 for the
+full list): exact error-message strings are test contracts; timestamps go
+through `support::time::iso_utc` (lexicographic ordering is load-bearing);
+Python-`round()` call sites use `support::round::half_even`; log lines are
+wire formats parsed by `diagnose`; truncation counts Unicode scalars via
+`support::text`.
 
 ## Conventions — technical writing
 
-Comments, docstrings, and documentation:
+Comments and documentation:
 
 - Be concise. Prefer **telegraphic** style.
     - Omit: articles ("the", "a"), auxiliary verbs, unnecessary prepositions, filler.
@@ -50,32 +57,27 @@ Comments, docstrings, and documentation:
   summarize a function when its name says it.
 - Document what's close and stable; avoid "far away" references likely to change
   (exception: ok if lints/tests/jobs catch the breakage).
-- Capitalize the first word of a comment (PEP 8), unless it's an identifier that
-  begins lowercase (`os.environ`, `self._x`, backticked code); continuation lines
-  of a multi-line sentence stay lowercase. Periods only for full sentences. Full
+- Capitalize the first word of a comment, unless it's an identifier that begins
+  lowercase (`std::env`, `self.x`, backticked code); continuation lines of a
+  multi-line sentence stay lowercase. Periods only for full sentences. Full
   sentences only when needed; lean on context.
 
-**Scope:** telegraphic style applies strictly to docstrings and inline comments.
-Wiki pages (`docs/*.md`) keep full sentences for readability but stay concise —
-trim wordiness, filler, restating.
+**Scope:** telegraphic style applies strictly to doc comments and inline
+comments. Wiki pages (`docs/*.md`) keep full sentences for readability but stay
+concise — trim wordiness, filler, restating.
 
 ## Conventions — logging
 
 Adding a log call. Match existing style — don't invent a new one.
 
-- Per module: `_logger = logging.getLogger(__name__)` at top. Never root.
-- Compose with `from familiar_connect import log_style as ls`:
-    - `ls.tag(label, color)` — leading `[label]`
-    - `ls.kv(key, val, vc=color)` — `key=value` chunk
-    - `ls.trunc(text, limit=200)` — ellipsis-truncate payloads
-- Layout: one line, leading `ls.tag(...)` then space-separated `ls.kv(...)` pairs.
-  `StyledFormatter` repaints the leading tag for `WARNING`/`ERROR` — keep the tag
-  first. Example (`mood.py`):
-  ```python
-  _logger.info(
-      f"{ls.tag('Mood', ls.M)} "
-      f"{ls.kv('modifier', f'{modifier:+.2f}', vc=ls.LM)}"
-  )
-  ```
+- Use `tracing` with `target: "familiar_connect.<module>"` (targets mirror the
+  historical logger names so `diagnose` and log filters keep working).
+- Compose with `crate::log_style as ls`:
+    - `ls::tag(label, color)` — leading `[label]`
+    - `ls::kv(key, val, ...)` — `key=value` chunk
+    - `ls::trunc(text, limit)` — ellipsis-truncate payloads
+- Layout: one line, leading `ls::tag(...)` then space-separated `ls::kv(...)`
+  pairs. The formatter repaints the leading tag for `WARN`/`ERROR` — keep the
+  tag first. **Log lines are wire formats**: `diagnose` regex-parses
+  `span=/ms=/status=` lines, and single-parameter ANSI SGR codes only.
 - Emoji: reserve for notable transitions (✨ summon, 🎙️ stream).
-- One color per subsystem; stay consistent across that subsystem's logs.

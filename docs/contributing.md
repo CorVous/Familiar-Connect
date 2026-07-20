@@ -4,25 +4,21 @@ Dev workflow and expectations.
 
 ## Environment setup
 
-Dependencies via [uv](https://docs.astral.sh/uv/). Update `uv` first:
+This is a Cargo workspace (edition 2024). Install a Rust toolchain via
+[rustup](https://rustup.rs/); the pinned stable version in
+`rust-toolchain.toml` is fetched automatically on first build. No Python —
+the prototype was retired after the Rust port reached parity (July 2026).
+
+Integration surfaces are feature-gated (`discord`, `discord-voice`,
+`stt-deepgram`, `local-turn`, `local-embed`, `twitch`, `azure-tts`,
+`audio-resample`); the defaults (`store`, `net`, `images`) cover everything
+unit tests need. Build a combo with `--features`:
 
 ```bash
-uv self update
+cargo build --features discord,discord-voice,stt-deepgram
 ```
 
-If `uv self update` fails (pip-installed uv, or GitHub API rate limits from cloud/sandbox egress IPs), upgrade from PyPI instead:
-
-```bash
-python3 -m pip install --user --upgrade uv
-```
-
-Install project + dev + docs groups plus the `local-turn` (numpy + huggingface_hub, imported by test collection) and `local-embed` (fastembed, needed at runtime) extras:
-
-```bash
-uv sync --dev --group docs --extra local-turn --extra local-embed
-```
-
-See [Installation](getting-started/installation.md) for runtime prerequisites (libopus, Discord token, OpenRouter key, Cartesia key, etc.).
+See [Installation](getting-started/installation.md) for runtime prerequisites (Discord token, OpenRouter key, Cartesia key, CMake for voice builds, etc.).
 
 ## TDD workflow
 
@@ -32,42 +28,36 @@ Red / green TDD:
 2. Minimum code to pass (green).
 3. Refactor if needed.
 
-**Import errors don't count as red.** A test failing on `ImportError` / `ModuleNotFoundError` is not a valid red — the module or function must exist before the test can fail for the right reason.
+**Compile errors don't count as red.** A test failing because the symbol doesn't exist is not a valid red — the item must exist (a stub is fine) before the test can fail for the right reason.
 
 ## After every code change
 
 Run the same four checks CI runs:
 
 ```bash
-uv sync --dev --extra local-turn --extra local-embed  # sync deps
-uv run ruff check             # lint
-uv run ruff format            # format
-uv run ty check               # type-check
-uv run pytest                 # run suite
+cargo build
+cargo test
+cargo clippy --all-targets -- -D warnings   # lint (pedantic; warnings are errors)
+cargo fmt
 ```
 
-Or run `scripts/ci-local.sh` for all of the above in one pass — the same job CI runs.
+Touched feature-gated code? Also gate the combo you touched, e.g.
+`cargo clippy --features discord,discord-voice --all-targets -- -D warnings`.
 
-Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing.
-
-Tests marked `@pytest.mark.integration` hit live services (e.g. OpenRouter) and skip by default. Run explicitly:
-
-```bash
-uv run pytest -m integration  # needs OPENROUTER_API_KEY etc. in env
-```
+Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing. The pre-commit hook at `.githooks/pre-commit` runs the same gates (`git config core.hooksPath .githooks` to enable).
 
 ## Docs build & preview
 
-Built with [mkdocs-material](https://squidfunk.github.io/mkdocs-material/). Local preview:
+Built with [mkdocs-material](https://squidfunk.github.io/mkdocs-material/), a standalone Python tool independent of the Rust workspace. Install it with [`uvx`](https://docs.astral.sh/uv/) or `pipx`, then preview locally:
 
 ```bash
-uv run mkdocs serve
+mkdocs serve
 ```
 
 Strict build (fails on broken internal links — what CI runs):
 
 ```bash
-uv run mkdocs build --strict
+mkdocs build --strict
 ```
 
 ## Commit style
