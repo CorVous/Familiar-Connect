@@ -95,6 +95,7 @@ pub struct FinalReminder {
     focus_channel_id: Option<i64>,
     unread_digest: Vec<(i64, (i64, i64))>,
     channel_names: HashMap<i64, String>,
+    guild_names: HashMap<i64, String>,
     guild_name: Option<String>,
 }
 
@@ -114,6 +115,7 @@ impl FinalReminder {
             focus_channel_id: None,
             unread_digest: Vec::new(),
             channel_names: HashMap::new(),
+            guild_names: HashMap::new(),
             guild_name: None,
         }
     }
@@ -170,6 +172,14 @@ impl FinalReminder {
     #[must_use]
     pub fn channel_names(mut self, names: HashMap<i64, String>) -> Self {
         self.channel_names = names;
+        self
+    }
+    /// Set the channel→server-name map for the unread digest. An entry equal to
+    /// [`PRIVATE_MESSAGE_GUILD_NAME`] marks the channel a DM, rendered as
+    /// `DM from <name>` instead of `#<channel>`.
+    #[must_use]
+    pub fn guild_names(mut self, names: HashMap<i64, String>) -> Self {
+        self.guild_names = names;
         self
     }
     /// Set the current server display name for the focus line.
@@ -723,5 +733,88 @@ mod tests {
         assert!(out.contains("#the-annex"));
         assert!(out.contains("422137955130408970"));
         assert!(out.contains("shift_focus"));
+    }
+
+    // --- DM digest labels (PR #194) -----------------------------------------
+
+    #[test]
+    fn dm_unread_named_renders_dm_from() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(123, (1, 0))])
+            .channel_names(names(&[(123, "Cor")]))
+            .guild_names(names(&[(123, PRIVATE_MESSAGE_GUILD_NAME)]))
+            .render();
+        assert!(out.contains("DM from Cor (id 123)"));
+        assert!(!out.contains("#123"));
+        assert!(!out.contains("#Cor"));
+    }
+
+    #[test]
+    fn dm_unread_unnamed_falls_back_to_dm_id() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(123, (1, 0))])
+            .guild_names(names(&[(123, PRIVATE_MESSAGE_GUILD_NAME)]))
+            .render();
+        assert!(out.contains("DM (id 123)"));
+    }
+
+    #[test]
+    fn guild_unread_entry_unchanged() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(20, (2, 0))])
+            .channel_names(names(&[(20, "general")]))
+            .guild_names(names(&[(20, "My Server")]))
+            .render();
+        assert!(out.contains("#general (id 20)"));
+        assert!(!out.contains("DM from"));
+    }
+
+    #[test]
+    fn dm_unread_with_pings_keeps_suffix() {
+        // Guards the label / suffix boundary: the suffix is appended outside
+        // the labeler, so the DM branch must not swallow the ping count.
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(123, (2, 2))])
+            .channel_names(names(&[(123, "Cor")]))
+            .guild_names(names(&[(123, PRIVATE_MESSAGE_GUILD_NAME)]))
+            .render();
+        assert!(out.contains("DM from Cor (id 123) (2 pings)"));
+    }
+
+    #[test]
+    fn mixed_guild_and_dm_in_one_digest() {
+        // Per-cid branch selection: guild and DM each keep their own form.
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(20, (2, 0)), (123, (1, 1))])
+            .channel_names(names(&[(20, "general"), (123, "Cor")]))
+            .guild_names(names(&[(20, "My Server"), (123, PRIVATE_MESSAGE_GUILD_NAME)]))
+            .render();
+        assert!(out.contains("#general (id 20) (2)"));
+        assert!(out.contains("DM from Cor (id 123) (1 ping)"));
+    }
+
+    #[test]
+    fn omitting_guild_names_preserves_todays_output() {
+        // New input defaults safely: no guild_names == today's behavior.
+        let named = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(20, (2, 0))])
+            .channel_names(names(&[(20, "general")]))
+            .render();
+        assert!(named.contains("#general (id 20)"));
+        assert!(!named.contains("DM from"));
+        // A DM channel with no guild_names map falls through to the old
+        // no-name #{cid} rendering.
+        let fallback = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(123, (1, 0))])
+            .render();
+        assert!(fallback.contains("#123"));
+        assert!(!fallback.contains("DM"));
     }
 }
