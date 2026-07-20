@@ -11,7 +11,7 @@
 //! `[[subscription]]` block per persisted row in `(channel_id, kind)` order,
 //! with the `guild_id` line omitted when `None`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Errors from loading or persisting the sidecar. Content problems degrade to an
@@ -89,18 +89,21 @@ pub struct Subscription {
     pub kind: SubscriptionKind,
     /// Owning guild snowflake, when known.
     pub guild_id: Option<u64>,
+    /// DM peer's user snowflake for a DM subscription; `None` for guild rows.
+    /// Persisted so a DM subscription survives restart and the unread digest
+    /// can label the channel by user (PR #194).
+    pub dm_user_id: Option<i64>,
 }
 
 /// In-memory set backed by a TOML sidecar.
 ///
-/// Loads on construction; persisting mutations rewrite the whole file. Rows are
-/// keyed by `(channel_id, kind)`, so text and voice for the same channel
-/// coexist. Ephemeral rows (`persist=false`) are queryable but never written.
+/// Loads on construction; every mutation rewrites the whole file. Rows are keyed
+/// by `(channel_id, kind)`, so text and voice for the same channel coexist. DM
+/// subscriptions are first-class persisted rows carrying the peer's `dm_user_id`.
 #[derive(Debug)]
 pub struct SubscriptionRegistry {
     path: PathBuf,
     rows: BTreeMap<(u64, SubscriptionKind), Subscription>,
-    ephemeral: BTreeSet<(u64, SubscriptionKind)>,
 }
 
 impl SubscriptionRegistry {
@@ -113,7 +116,6 @@ impl SubscriptionRegistry {
         let mut reg = Self {
             path: path.into(),
             rows: BTreeMap::new(),
-            ephemeral: BTreeSet::new(),
         };
         reg.load()?;
         Ok(reg)
@@ -121,7 +123,7 @@ impl SubscriptionRegistry {
 
     // -- Queries -----------------------------------------------------------
 
-    /// Snapshot of every registered subscription (persisted and ephemeral).
+    /// Snapshot of every registered subscription.
     #[must_use]
     pub fn all(&self) -> Vec<Subscription> {
         self.rows.values().copied().collect()
@@ -154,32 +156,24 @@ impl SubscriptionRegistry {
 
     // -- Mutations (each persisting change rewrites the whole file) --------
 
-    /// Add or replace `(channel_id, kind)`; idempotent upsert.
+    /// Add or replace `(channel_id, kind)`; idempotent upsert that persists.
     ///
-    /// Re-add updates `guild_id`. With `persist = false` the row is registered in
-    /// memory only and never written — even when a later persisted mutation
-    /// rewrites the file. A subsequent `persist = true` add of the same key
-    /// promotes it to persisted.
+    /// Re-add updates `guild_id` and `dm_user_id`.
     pub fn add(
         &mut self,
         channel_id: u64,
         kind: SubscriptionKind,
         guild_id: Option<u64>,
-        persist: bool,
+        dm_user_id: Option<i64>,
     ) -> Result<Subscription, SubscriptionError> {
-        let key = (channel_id, kind);
         let sub = Subscription {
             channel_id,
             kind,
             guild_id,
+            dm_user_id,
         };
-        self.rows.insert(key, sub);
-        if persist {
-            self.ephemeral.remove(&key);
-            self.save()?;
-        } else {
-            self.ephemeral.insert(key);
-        }
+        self.rows.insert((channel_id, kind), sub);
+        self.save()?;
         Ok(sub)
     }
 
@@ -190,9 +184,7 @@ impl SubscriptionRegistry {
         channel_id: u64,
         kind: SubscriptionKind,
     ) -> Result<(), SubscriptionError> {
-        let key = (channel_id, kind);
-        if self.rows.remove(&key).is_some() {
-            self.ephemeral.remove(&key);
+        if self.rows.remove(&(channel_id, kind)).is_some() {
             self.save()?;
         }
         Ok(())
@@ -239,12 +231,14 @@ impl SubscriptionRegistry {
                 .get("guild_id")
                 .and_then(toml::Value::as_integer)
                 .and_then(|n| u64::try_from(n).ok());
+            let dm_user_id = table.get("dm_user_id").and_then(toml::Value::as_integer);
             self.rows.insert(
                 (channel_id, kind),
                 Subscription {
                     channel_id,
                     kind,
                     guild_id,
+                    dm_user_id,
                 },
             );
         }
@@ -267,16 +261,14 @@ impl SubscriptionRegistry {
     }
 
     /// Render the byte-exact sidecar contents (header + sorted `[[subscription]]`
-    /// blocks, ephemeral rows excluded).
+    /// blocks).
     fn serialize(&self) -> String {
         let header = "# Persistent subscription registry.\n\
-             # Managed by /subscribe-* slash commands; safe to hand-edit while the bot is stopped.\n";
+             # Managed by /subscribe-* slash commands and DM auto-registration; \
+             safe to hand-edit while the bot is stopped.\n";
         let mut lines: Vec<String> = vec![header.to_owned()];
         // BTreeMap iteration is already sorted by (channel_id, kind).
-        for (key, sub) in &self.rows {
-            if self.ephemeral.contains(key) {
-                continue;
-            }
+        for sub in self.rows.values() {
             let mut row_lines = vec![
                 "[[subscription]]".to_owned(),
                 format!("channel_id = {}", sub.channel_id),
@@ -284,6 +276,9 @@ impl SubscriptionRegistry {
             ];
             if let Some(guild_id) = sub.guild_id {
                 row_lines.push(format!("guild_id = {guild_id}"));
+            }
+            if let Some(dm_user_id) = sub.dm_user_id {
+                row_lines.push(format!("dm_user_id = {dm_user_id}"));
             }
             row_lines.push(String::new());
             lines.push(row_lines.join("\n"));
@@ -308,7 +303,7 @@ impl AsRef<Path> for SubscriptionRegistry {
 /// single registry object between `bot` and `focus`). A plain
 /// `Arc<SubscriptionRegistry>` still satisfies it for read-only tests.
 pub trait SubscriptionView: Send + Sync {
-    /// Snapshot of every registered subscription (persisted and ephemeral).
+    /// Snapshot of every registered subscription.
     fn all(&self) -> Vec<Subscription>;
     /// The first kind subscribed for `channel_id` — text before voice — or
     /// `None`.
