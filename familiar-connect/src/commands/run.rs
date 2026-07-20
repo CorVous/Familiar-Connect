@@ -1679,4 +1679,149 @@ mod tests {
         controller.signal();
         waiter.await.unwrap();
     }
+
+    // --- boot DM subscription validation + naming (PR #194) ----------------
+
+    #[cfg(feature = "discord")]
+    mod boot_dm {
+        use super::super::{prune_deallowlisted_dm_subscriptions, rehydrate_dm_naming};
+        use crate::context::final_reminder::FinalReminder;
+        use crate::focus::{FocusManager, FocusStore, PRIVATE_MESSAGE_GUILD_NAME};
+        use crate::history::async_store::AsyncHistoryStore;
+        use crate::history::store::{AppendTurn, HistoryStore};
+        use crate::identity::Author;
+        use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry, SubscriptionView};
+        use std::sync::Arc;
+
+        fn store() -> Arc<AsyncHistoryStore> {
+            Arc::new(AsyncHistoryStore::new(
+                HistoryStore::open(":memory:").expect("open :memory:"),
+            ))
+        }
+
+        /// The DM peer (user 123) as history recorded it.
+        fn peer_author() -> Author {
+            Author::new("discord", "123", Some("cor".to_owned()), Some("Cor".to_owned()))
+        }
+
+        fn registry() -> (tempfile::TempDir, std::path::PathBuf, SubscriptionRegistry) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("subscriptions.toml");
+            let reg = SubscriptionRegistry::new(&path).unwrap();
+            (dir, path, reg)
+        }
+
+        // --- prune ---------------------------------------------------------
+
+        #[test]
+        fn prune_removes_dm_row_whose_peer_left_allowlist() {
+            let (_dir, path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(999)).unwrap();
+            prune_deallowlisted_dm_subscriptions(&mut reg, &[]).unwrap();
+            assert!(reg.get(555, SubscriptionKind::Text).is_none());
+            assert!(!std::fs::read_to_string(&path).unwrap().contains("channel_id = 555"));
+        }
+
+        #[test]
+        fn prune_keeps_dm_row_whose_peer_is_allowlisted() {
+            let (_dir, path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(999)).unwrap();
+            prune_deallowlisted_dm_subscriptions(&mut reg, &[999]).unwrap();
+            let sub = reg.get(555, SubscriptionKind::Text).unwrap();
+            assert_eq!(sub.dm_user_id, Some(999));
+            assert!(std::fs::read_to_string(&path).unwrap().contains("dm_user_id = 999"));
+        }
+
+        #[test]
+        fn prune_leaves_guild_rows_untouched() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(42, SubscriptionKind::Text, Some(1), None).unwrap();
+            reg.add(43, SubscriptionKind::Voice, Some(1), None).unwrap();
+            prune_deallowlisted_dm_subscriptions(&mut reg, &[]).unwrap();
+            assert!(reg.get(42, SubscriptionKind::Text).is_some());
+            assert!(reg.get(43, SubscriptionKind::Voice).is_some());
+        }
+
+        // --- rehydrate -----------------------------------------------------
+
+        fn focus_manager(reg: SubscriptionRegistry, store: &Arc<AsyncHistoryStore>) -> (Arc<dyn SubscriptionView>, Arc<FocusManager>) {
+            let view: Arc<dyn SubscriptionView> = Arc::new(reg);
+            let fm = Arc::new(FocusManager::new(
+                "fam",
+                Arc::clone(store) as Arc<dyn FocusStore>,
+                Arc::clone(&view),
+            ));
+            (view, fm)
+        }
+
+        #[tokio::test]
+        async fn rehydrate_dm_row_with_history_restores_guild_and_peer_name() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(123)).unwrap();
+            let store = store();
+            store
+                .append_turn(AppendTurn::new("fam", 555, "user", "hi").author(peer_author()))
+                .await
+                .unwrap();
+            let (view, fm) = focus_manager(reg, &store);
+            rehydrate_dm_naming(fm.as_ref(), view.as_ref(), store.as_ref(), "fam")
+                .await
+                .unwrap();
+            assert_eq!(
+                fm.guild_name_for(Some(555)).as_deref(),
+                Some(PRIVATE_MESSAGE_GUILD_NAME)
+            );
+            assert_eq!(fm.channel_names().get(&555).map(String::as_str), Some("Cor"));
+        }
+
+        #[tokio::test]
+        async fn rehydrate_dm_row_without_history_sets_guild_only() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(123)).unwrap();
+            let store = store();
+            let (view, fm) = focus_manager(reg, &store);
+            rehydrate_dm_naming(fm.as_ref(), view.as_ref(), store.as_ref(), "fam")
+                .await
+                .unwrap();
+            assert_eq!(
+                fm.guild_name_for(Some(555)).as_deref(),
+                Some(PRIVATE_MESSAGE_GUILD_NAME)
+            );
+            assert!(fm.channel_names().get(&555).is_none());
+        }
+
+        #[tokio::test]
+        async fn rehydrate_leaves_guild_row_naming_untouched() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(42, SubscriptionKind::Text, Some(1), None).unwrap();
+            let store = store();
+            let (view, fm) = focus_manager(reg, &store);
+            rehydrate_dm_naming(fm.as_ref(), view.as_ref(), store.as_ref(), "fam")
+                .await
+                .unwrap();
+            assert!(fm.guild_names().is_empty());
+            assert!(fm.channel_names().is_empty());
+        }
+
+        #[tokio::test]
+        async fn rehydrated_maps_feed_unread_digest() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(123)).unwrap();
+            let store = store();
+            store
+                .append_turn(AppendTurn::new("fam", 555, "user", "hi").author(peer_author()))
+                .await
+                .unwrap();
+            let (view, fm) = focus_manager(reg, &store);
+            rehydrate_dm_naming(fm.as_ref(), view.as_ref(), store.as_ref(), "fam")
+                .await
+                .unwrap();
+            let out = FinalReminder::new("text")
+                .unread_digest(vec![(555, (1, 0))])
+                .channel_names(fm.channel_names())
+                .guild_names(fm.guild_names())
+                .render();
+            assert!(out.contains("DM from Cor (id 555)"), "{out}");
+        }
+    }
 }
