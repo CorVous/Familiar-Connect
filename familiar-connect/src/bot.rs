@@ -1004,18 +1004,25 @@ impl BotEvents {
             .is_some()
     }
 
-    /// Register a DM channel as an ephemeral (never-persisted) text subscription
-    /// and seed a text focus when none exists.
-    fn register_dm_channel(&self, channel_id: i64) {
+    /// Register a DM channel as a persisted text subscription carrying the
+    /// peer's user id, record the peer's display name, and seed a text focus
+    /// when none exists.
+    ///
+    /// Idempotent — safe to call on every DM. The sidecar row survives restart
+    /// so the subscription and its digest label persist; the peer name is
+    /// refreshed on each DM. The focus seed mirrors the startup default: it
+    /// seeds only when no text focus exists and never steals an existing one.
+    fn register_dm_channel(&self, channel_id: i64, peer_name: &str, peer_user_id: i64) {
         if let Ok(cid) = u64::try_from(channel_id) {
             let _ = self
                 .subscriptions
                 .lock()
                 .expect("subscriptions mutex poisoned")
-                .add(cid, SubscriptionKind::Text, None, None);
+                .add(cid, SubscriptionKind::Text, None, Some(peer_user_id));
         }
         if let Some(fm) = &self.handle.focus_manager {
             fm.set_guild_name(channel_id, PRIVATE_MESSAGE_GUILD_NAME);
+            fm.set_channel_name(channel_id, peer_name);
             if fm.get_focus("text").is_none() {
                 fm.set_focus_immediately(channel_id, "text");
             }
@@ -1115,7 +1122,11 @@ impl BotEvents {
                     }
                 }
             }
-            self.register_dm_channel(message.channel_id);
+            self.register_dm_channel(
+                message.channel_id,
+                &message.author.label(),
+                message.author_id,
+            );
         } else if !self.text_subscribed(message.channel_id) {
             return;
         }
