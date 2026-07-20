@@ -60,6 +60,12 @@ impl EmbedderRegistry {
         registry.register("off", Arc::new(|_config| Ok(None)));
         registry.register("hash", Arc::new(hash_factory));
         registry.register("fastembed", Arc::new(fastembed_factory));
+        // The real ONNX backend (feature `local-embed`) overrides the fail-fast
+        // stub above via silent re-registration — the "wiring injects it" step the
+        // module docs describe. Without this, `backend = "fastembed"` errors even
+        // when `local-embed` is compiled in.
+        #[cfg(feature = "local-embed")]
+        registry.register("fastembed", Arc::new(real_fastembed_factory));
         registry
     }
 
@@ -137,6 +143,27 @@ fn fastembed_factory(
     Err(EmbeddingError::FastembedMissing)
 }
 
+/// `fastembed` backend when the `local-embed` extra is compiled: constructs the
+/// real ONNX [`FastEmbedEmbedder`], overriding [`fastembed_factory`]'s stub via
+/// re-registration in [`EmbedderRegistry::with_builtins`]. An empty configured
+/// model falls back to the default (BGE-small).
+#[cfg(feature = "local-embed")]
+fn real_fastembed_factory(
+    config: &EmbeddingConfig,
+) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
+    let model = if config.fastembed_model.is_empty() {
+        crate::embedding::fastembed::DEFAULT_MODEL_NAME.to_owned()
+    } else {
+        config.fastembed_model.clone()
+    };
+    Ok(Some(Arc::new(
+        crate::embedding::fastembed::FastEmbedEmbedder::new(
+            model,
+            config.fastembed_cache_dir.clone(),
+        ),
+    )))
+}
+
 /// Built-in registered names, sorted (convenience over a fresh
 /// [`EmbedderRegistry::with_builtins`]).
 ///
@@ -206,6 +233,19 @@ mod tests {
         assert!(msg.contains("fastembed, hash, off"));
     }
 
+    #[cfg(feature = "local-embed")]
+    #[test]
+    fn fastembed_with_extra_resolves_to_the_real_backend() {
+        // With the extra compiled, `with_builtins` overrides the stub with the
+        // real ONNX backend, so `fastembed` resolves to a live embedder (lazy
+        // model load — construction here does not download).
+        let out = create_embedder(&config("fastembed", 384))
+            .expect("fastembed backend resolves when local-embed is compiled");
+        let embedder = out.expect("fastembed is not the `off` backend");
+        assert_eq!(embedder.name(), "fastembed:BAAI/bge-small-en-v1.5");
+    }
+
+    #[cfg(not(feature = "local-embed"))]
     #[test]
     fn fastembed_without_extra_fails_at_load() {
         let err = create_embedder(&config("fastembed", 256))
