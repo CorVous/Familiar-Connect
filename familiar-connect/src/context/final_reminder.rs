@@ -805,7 +805,10 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(20, (2, 0)), (123, (1, 1))])
             .channel_names(names(&[(20, "general"), (123, "Cor")]))
-            .guild_names(names(&[(20, "My Server"), (123, PRIVATE_MESSAGE_GUILD_NAME)]))
+            .guild_names(names(&[
+                (20, "My Server"),
+                (123, PRIVATE_MESSAGE_GUILD_NAME),
+            ]))
             .render();
         assert!(out.contains("#general (id 20) (2)"));
         assert!(out.contains("DM from Cor (id 123) (1 ping)"));
