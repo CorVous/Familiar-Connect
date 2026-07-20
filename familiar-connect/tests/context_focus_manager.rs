@@ -221,7 +221,7 @@ async fn runtime_subscribe_is_visible_to_focus_manager() {
     shared
         .lock()
         .unwrap()
-        .add(42, SubscriptionKind::Text, Some(1), true)
+        .add(42, SubscriptionKind::Text, Some(1), None)
         .unwrap();
 
     // …is observed by the FocusManager immediately, no rebuild.

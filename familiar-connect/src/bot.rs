@@ -1012,7 +1012,7 @@ impl BotEvents {
                 .subscriptions
                 .lock()
                 .expect("subscriptions mutex poisoned")
-                .add(cid, SubscriptionKind::Text, None, false);
+                .add(cid, SubscriptionKind::Text, None, None);
         }
         if let Some(fm) = &self.handle.focus_manager {
             fm.set_guild_name(channel_id, PRIVATE_MESSAGE_GUILD_NAME);
@@ -1041,7 +1041,7 @@ impl BotEvents {
                     cid,
                     SubscriptionKind::Voice,
                     guild_id.and_then(|g| u64::try_from(g).ok()),
-                    true,
+                    None,
                 );
         }
         self.handle
@@ -1694,7 +1694,7 @@ mod serenity_glue {
                             cid,
                             SubscriptionKind::Text,
                             guild_id.and_then(|g| u64::try_from(g).ok()),
-                            true,
+                            None,
                         );
                         reply(&ack, "Listening in this channel.").await;
                     } else {
@@ -3999,7 +3999,7 @@ mod tests {
         fx.subs
             .lock()
             .unwrap()
-            .add(888, SubscriptionKind::Text, Some(7), true)
+            .add(888, SubscriptionKind::Text, Some(7), None)
             .unwrap();
         let (msg, _ch) = dm_message(123, 888, Some(7), false);
         fx.events.on_message(msg).await;
@@ -4193,7 +4193,7 @@ mod tests {
         let subs = empty_subs_mut();
         subs.lock()
             .unwrap()
-            .add(42, SubscriptionKind::Text, None, true)
+            .add(42, SubscriptionKind::Text, None, None)
             .unwrap();
         let is_subscribed: IsSubscribed = {
             let subs = subs.clone();
@@ -4236,7 +4236,7 @@ mod tests {
         let subs = empty_subs_mut();
         subs.lock()
             .unwrap()
-            .add(42, SubscriptionKind::Text, None, true)
+            .add(42, SubscriptionKind::Text, None, None)
             .unwrap();
         let is_subscribed: IsSubscribed = Arc::new(|_| true);
         let bot_id: BotUserIdProvider = Arc::new(|| Some(999));
