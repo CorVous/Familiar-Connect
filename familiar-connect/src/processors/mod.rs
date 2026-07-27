@@ -194,6 +194,11 @@ pub trait FocusManagerApi: Send + Sync {
     fn channel_names(&self) -> HashMap<i64, String> {
         HashMap::new()
     }
+    /// The channel→server-name map (for the unread digest; a
+    /// `PRIVATE_MESSAGE_GUILD_NAME` entry marks a DM, rendered `DM from <name>`).
+    fn guild_names(&self) -> HashMap<i64, String> {
+        HashMap::new()
+    }
     /// Server name for a channel; `None` for `None` / unknown.
     fn guild_name_for(&self, channel_id: Option<i64>) -> Option<String>;
     /// Render a channel as `#name(id)` / `#id` (`"none"` for `None`).
@@ -216,12 +221,12 @@ impl FocusManagerApi for crate::focus::FocusManager {
     fn mark_nudge_pending(&self) {
         Self::mark_nudge_pending(self);
     }
-    // NOTE: `channel_names` falls back to the trait default (empty map). The
-    // real `FocusManager` keeps its name map private with no getter; a
-    // `pub fn channel_names(&self) -> HashMap<i64, String>` getter is requested
-    // as a shared-file change so this delegation can be completed. In the only
-    // test that wires a real `FocusManager` (immediate shift_focus) no channel
-    // names are set, so the empty map is observationally correct there.
+    fn channel_names(&self) -> HashMap<i64, String> {
+        Self::channel_names(self)
+    }
+    fn guild_names(&self) -> HashMap<i64, String> {
+        Self::guild_names(self)
+    }
     fn guild_name_for(&self, channel_id: Option<i64>) -> Option<String> {
         Self::guild_name_for(self, channel_id)
     }

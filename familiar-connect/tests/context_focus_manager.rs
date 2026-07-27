@@ -97,7 +97,7 @@ fn make_registry(
         } else {
             None
         };
-        reg.add(*ch, *kind, guild, true).unwrap();
+        reg.add(*ch, *kind, guild, None).unwrap();
     }
     (dir, Arc::new(reg))
 }
@@ -597,6 +597,19 @@ fn guild_name_for_returns_none_for_none_input() {
     let (_dir, fm) = bare_fm();
     fm.set_guild_name(42, "My Server");
     assert_eq!(fm.guild_name_for(None), None);
+}
+
+// ---------------------------------------------------------------------------
+// channel_names / guild_names bulk getters (PR #194 — digest threading)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn channel_names_and_guild_names_getters_reflect_setters() {
+    let (_dir, fm) = bare_fm();
+    fm.set_channel_name(42, "general");
+    fm.set_guild_name(42, "My Server");
+    assert_eq!(fm.channel_names().get(&42).map(String::as_str), Some("general"));
+    assert_eq!(fm.guild_names().get(&42).map(String::as_str), Some("My Server"));
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ use familiar_connect::bus::in_process::InProcessEventBus;
 use familiar_connect::bus::router::TurnRouter;
 use familiar_connect::bus::topics::TOPIC_DISCORD_TEXT;
 use familiar_connect::config::DiscordTextConfig;
+use familiar_connect::focus::PRIVATE_MESSAGE_GUILD_NAME;
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::AppendTurn;
 use familiar_connect::identity::Author;
@@ -922,6 +923,31 @@ async fn trailing_names_server_head_does_not() {
     assert!(trailing.contains("\"My Server\" server"));
     assert!(head.contains("#general"));
     assert!(!head.contains("My Server"));
+}
+
+#[tokio::test]
+async fn trailing_labels_off_focus_dm_unread_as_dm_from() {
+    // The DM label only appears once the responder threads the focus manager's
+    // guild_names map (marking the channel a private message) into the digest
+    // labeler alongside channel_names.
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let s = store();
+    // Off-focus DM (channel 555) with one unread turn so it lands in the digest.
+    s.sync()
+        .stage_turn(AppendTurn::new("fam", 555, "user", "hi"))
+        .unwrap();
+    let fm = Arc::new(
+        TestFocusManager::focused(42)
+            .with_channel_name(555, "Cor")
+            .with_guild_name(555, PRIVATE_MESSAGE_GUILD_NAME),
+    );
+    let (r, _) = responder(s, llm.clone(), Arc::new(CapturingSend::new()));
+    let r = r.with_focus_manager(fm);
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    let trailing = trailing_of(&llm.captured());
+    assert!(trailing.contains("DM from Cor (id 555)"), "{trailing}");
 }
 
 #[tokio::test]
