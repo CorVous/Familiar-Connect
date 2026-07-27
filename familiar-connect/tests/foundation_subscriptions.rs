@@ -33,7 +33,7 @@ fn empty_registry_has_nothing() {
 fn add_and_get() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
 
     let sub = reg.get(42, SubscriptionKind::Text);
@@ -43,6 +43,7 @@ fn add_and_get() {
             channel_id: 42,
             kind: SubscriptionKind::Text,
             guild_id: Some(999),
+            dm_user_id: None,
         })
     );
 }
@@ -51,9 +52,9 @@ fn add_and_get() {
 fn add_is_idempotent() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
     assert_eq!(reg.all().len(), 1);
 }
@@ -62,8 +63,8 @@ fn add_is_idempotent() {
 fn add_re_add_updates_guild_id() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(42, SubscriptionKind::Text, None, true).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(7), true).unwrap();
+    reg.add(42, SubscriptionKind::Text, None, None).unwrap();
+    reg.add(42, SubscriptionKind::Text, Some(7), None).unwrap();
     assert_eq!(
         reg.get(42, SubscriptionKind::Text).unwrap().guild_id,
         Some(7)
@@ -75,7 +76,7 @@ fn add_re_add_updates_guild_id() {
 fn remove_deletes_row() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(42, SubscriptionKind::Text, None, true).unwrap();
+    reg.add(42, SubscriptionKind::Text, None, None).unwrap();
     reg.remove(42, SubscriptionKind::Text).unwrap();
     assert_eq!(reg.get(42, SubscriptionKind::Text), None);
 }
@@ -92,8 +93,8 @@ fn remove_of_unknown_is_noop() {
 fn text_and_voice_in_same_channel_coexist() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(1), true).unwrap();
-    reg.add(42, SubscriptionKind::Voice, Some(1), true).unwrap();
+    reg.add(42, SubscriptionKind::Text, Some(1), None).unwrap();
+    reg.add(42, SubscriptionKind::Voice, Some(1), None).unwrap();
     assert_eq!(reg.all().len(), 2);
 }
 
@@ -101,9 +102,9 @@ fn text_and_voice_in_same_channel_coexist() {
 fn all_returns_every_subscription() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(1, SubscriptionKind::Text, None, true).unwrap();
-    reg.add(2, SubscriptionKind::Text, None, true).unwrap();
-    reg.add(3, SubscriptionKind::Voice, None, true).unwrap();
+    reg.add(1, SubscriptionKind::Text, None, None).unwrap();
+    reg.add(2, SubscriptionKind::Text, None, None).unwrap();
+    reg.add(3, SubscriptionKind::Voice, None, None).unwrap();
     assert_eq!(reg.all().len(), 3);
 }
 
@@ -113,9 +114,9 @@ fn all_returns_every_subscription() {
 fn kind_for_checks_text_before_voice() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(42, SubscriptionKind::Voice, None, true).unwrap();
+    reg.add(42, SubscriptionKind::Voice, None, None).unwrap();
     assert_eq!(reg.kind_for(42), Some(SubscriptionKind::Voice));
-    reg.add(42, SubscriptionKind::Text, None, true).unwrap();
+    reg.add(42, SubscriptionKind::Text, None, None).unwrap();
     // Text wins the declaration-order scan when both exist.
     assert_eq!(reg.kind_for(42), Some(SubscriptionKind::Text));
     assert_eq!(reg.kind_for(9999), None);
@@ -127,7 +128,7 @@ fn kind_for_checks_text_before_voice() {
 fn voice_in_guild_returns_sub() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path).unwrap();
-    reg.add(9000, SubscriptionKind::Voice, Some(123), true)
+    reg.add(9000, SubscriptionKind::Voice, Some(123), None)
         .unwrap();
     assert!(reg.voice_in_guild(123).is_some());
 }
@@ -145,7 +146,7 @@ fn voice_in_guild_returns_none_when_absent() {
 fn add_writes_to_disk() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
     assert!(path.exists());
 }
@@ -154,11 +155,11 @@ fn add_writes_to_disk() {
 fn reload_round_trip() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
-    reg.add(42, SubscriptionKind::Voice, Some(999), true)
+    reg.add(42, SubscriptionKind::Voice, Some(999), None)
         .unwrap();
-    reg.add(77, SubscriptionKind::Text, None, true).unwrap();
+    reg.add(77, SubscriptionKind::Text, None, None).unwrap();
 
     let reloaded = SubscriptionRegistry::new(path).unwrap();
     assert!(reloaded.get(42, SubscriptionKind::Text).is_some());
@@ -180,7 +181,7 @@ fn reload_round_trip() {
 fn remove_persists() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
     reg.remove(42, SubscriptionKind::Text).unwrap();
 
@@ -188,56 +189,55 @@ fn remove_persists() {
     assert_eq!(reloaded.get(42, SubscriptionKind::Text), None);
 }
 
-// --- Ephemeral (in-memory-only) subscriptions -------------------------------
+// --- DM peer user id (PR #194) ----------------------------------------------
 
 #[test]
-fn ephemeral_add_is_queryable_but_not_written() {
+fn dm_user_id_round_trips_through_sidecar() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(42, SubscriptionKind::Text, None, false).unwrap();
+    reg.add(42, SubscriptionKind::Text, None, Some(42)).unwrap();
 
-    assert!(reg.get(42, SubscriptionKind::Text).is_some());
-    assert_eq!(reg.kind_for(42), Some(SubscriptionKind::Text));
-    assert!(!path.exists());
+    let reloaded = SubscriptionRegistry::new(path).unwrap();
+    let sub = reloaded.get(42, SubscriptionKind::Text).unwrap();
+    assert_eq!(sub.dm_user_id, Some(42));
 }
 
 #[test]
-fn persisted_mutation_excludes_ephemeral_row() {
+fn row_without_dm_user_id_loads_as_none() {
     let (_dir, path) = subs_path();
-    let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(42, SubscriptionKind::Text, None, false).unwrap();
-    reg.add(77, SubscriptionKind::Text, None, true).unwrap();
+    std::fs::write(&path, "[[subscription]]\nchannel_id = 42\nkind = \"text\"\n").unwrap();
 
-    // Live registry still sees both the ephemeral and persisted rows.
-    assert_eq!(reg.all().len(), 2);
-
-    let reloaded = SubscriptionRegistry::new(path).unwrap();
-    assert!(reloaded.get(77, SubscriptionKind::Text).is_some());
-    assert_eq!(reloaded.get(42, SubscriptionKind::Text), None);
-    assert_eq!(reloaded.all().len(), 1);
+    let reg = SubscriptionRegistry::new(path).unwrap();
+    let sub = reg.get(42, SubscriptionKind::Text).unwrap();
+    assert_eq!(sub.dm_user_id, None);
 }
 
 #[test]
-fn persist_true_promotes_previously_ephemeral_row() {
+fn non_int_dm_user_id_loads_as_none() {
     let (_dir, path) = subs_path();
-    let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(42, SubscriptionKind::Text, None, false).unwrap();
-    reg.add(42, SubscriptionKind::Text, None, true).unwrap();
+    std::fs::write(
+        &path,
+        "[[subscription]]\nchannel_id = 42\nkind = \"text\"\ndm_user_id = \"42\"\n",
+    )
+    .unwrap();
 
-    let reloaded = SubscriptionRegistry::new(path).unwrap();
-    assert!(reloaded.get(42, SubscriptionKind::Text).is_some());
+    let reg = SubscriptionRegistry::new(path).unwrap();
+    let sub = reg.get(42, SubscriptionKind::Text).unwrap();
+    assert_eq!(sub.dm_user_id, None);
 }
 
 #[test]
-fn persisted_remove_does_not_resurrect_ephemeral_row() {
+fn sidecar_writes_dm_user_id_only_for_rows_that_carry_it() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(77, SubscriptionKind::Text, None, true).unwrap();
-    reg.add(42, SubscriptionKind::Text, None, false).unwrap();
-    reg.remove(77, SubscriptionKind::Text).unwrap();
+    reg.add(42, SubscriptionKind::Text, None, Some(42)).unwrap();
+    reg.add(77, SubscriptionKind::Text, Some(999), None).unwrap();
 
-    let reloaded = SubscriptionRegistry::new(path).unwrap();
-    assert_eq!(reloaded.get(42, SubscriptionKind::Text), None);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("dm_user_id = 42"));
+    assert_eq!(text.matches("dm_user_id").count(), 1);
+    // Row without dm_user_id stays byte-compatible with the old format.
+    assert!(text.contains("[[subscription]]\nchannel_id = 77\nkind = \"text\"\nguild_id = 999\n"));
 }
 
 // --- Byte-exact sidecar format (spec 02 Data formats) -----------------------
@@ -246,12 +246,13 @@ fn persisted_remove_does_not_resurrect_ephemeral_row() {
 fn single_row_serializes_byte_exact() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
 
     let written = std::fs::read_to_string(&path).unwrap();
     let expected = "# Persistent subscription registry.\n\
-         # Managed by /subscribe-* slash commands; safe to hand-edit while the bot is stopped.\n\
+         # Managed by /subscribe-* slash commands and DM auto-registration; \
+         safe to hand-edit while the bot is stopped.\n\
          \n\
          [[subscription]]\n\
          channel_id = 42\n\
@@ -265,15 +266,16 @@ fn multiple_rows_serialize_sorted_with_guild_omitted_when_none() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
     // Insert out of order; the file must come out sorted by (channel_id, kind).
-    reg.add(77, SubscriptionKind::Text, None, true).unwrap();
-    reg.add(42, SubscriptionKind::Voice, Some(999), true)
+    reg.add(77, SubscriptionKind::Text, None, None).unwrap();
+    reg.add(42, SubscriptionKind::Voice, Some(999), None)
         .unwrap();
-    reg.add(42, SubscriptionKind::Text, Some(999), true)
+    reg.add(42, SubscriptionKind::Text, Some(999), None)
         .unwrap();
 
     let written = std::fs::read_to_string(&path).unwrap();
     let expected = "# Persistent subscription registry.\n\
-         # Managed by /subscribe-* slash commands; safe to hand-edit while the bot is stopped.\n\
+         # Managed by /subscribe-* slash commands and DM auto-registration; \
+         safe to hand-edit while the bot is stopped.\n\
          \n\
          [[subscription]]\n\
          channel_id = 42\n\

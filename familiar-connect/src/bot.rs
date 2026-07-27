@@ -1004,18 +1004,25 @@ impl BotEvents {
             .is_some()
     }
 
-    /// Register a DM channel as an ephemeral (never-persisted) text subscription
-    /// and seed a text focus when none exists.
-    fn register_dm_channel(&self, channel_id: i64) {
+    /// Register a DM channel as a persisted text subscription carrying the
+    /// peer's user id, record the peer's display name, and seed a text focus
+    /// when none exists.
+    ///
+    /// Idempotent — safe to call on every DM. The sidecar row survives restart
+    /// so the subscription and its digest label persist; the peer name is
+    /// refreshed on each DM. The focus seed mirrors the startup default: it
+    /// seeds only when no text focus exists and never steals an existing one.
+    fn register_dm_channel(&self, channel_id: i64, peer_name: &str, peer_user_id: i64) {
         if let Ok(cid) = u64::try_from(channel_id) {
             let _ = self
                 .subscriptions
                 .lock()
                 .expect("subscriptions mutex poisoned")
-                .add(cid, SubscriptionKind::Text, None, false);
+                .add(cid, SubscriptionKind::Text, None, Some(peer_user_id));
         }
         if let Some(fm) = &self.handle.focus_manager {
             fm.set_guild_name(channel_id, PRIVATE_MESSAGE_GUILD_NAME);
+            fm.set_channel_name(channel_id, peer_name);
             if fm.get_focus("text").is_none() {
                 fm.set_focus_immediately(channel_id, "text");
             }
@@ -1041,7 +1048,7 @@ impl BotEvents {
                     cid,
                     SubscriptionKind::Voice,
                     guild_id.and_then(|g| u64::try_from(g).ok()),
-                    true,
+                    None,
                 );
         }
         self.handle
@@ -1115,7 +1122,11 @@ impl BotEvents {
                     }
                 }
             }
-            self.register_dm_channel(message.channel_id);
+            self.register_dm_channel(
+                message.channel_id,
+                &message.author.label(),
+                message.author_id,
+            );
         } else if !self.text_subscribed(message.channel_id) {
             return;
         }
@@ -1694,7 +1705,7 @@ mod serenity_glue {
                             cid,
                             SubscriptionKind::Text,
                             guild_id.and_then(|g| u64::try_from(g).ok()),
-                            true,
+                            None,
                         );
                         reply(&ack, "Listening in this channel.").await;
                     } else {
@@ -3921,7 +3932,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allowlisted_dm_registers_ephemeral_and_ingests() {
+    async fn allowlisted_dm_registers_and_ingests() {
         let fx = dm_fixture(vec![123]);
         let (msg, _ch) = dm_message(123, 555, None, false);
         fx.events.on_message(msg).await;
@@ -3937,9 +3948,22 @@ mod tests {
             fx.fm.guild_name_for(Some(555)).as_deref(),
             Some("Private Message")
         );
+        // The peer's display name is recorded so the digest can label the DM.
+        assert_eq!(fx.fm.channel_label(Some(555)), "#X(555)");
         assert_eq!(fx.fm.get_focus("text"), Some(555));
-        // ephemeral row must never touch the sidecar
-        assert!(!fx.subs_path.exists());
+    }
+
+    #[tokio::test]
+    async fn allowlisted_dm_persists_subscription_with_peer_user_id() {
+        let fx = dm_fixture(vec![123]);
+        let (msg, _ch) = dm_message(123, 555, None, false);
+        fx.events.on_message(msg).await;
+        // A fresh registry on the same path must see the row — i.e. it
+        // survives restart — carrying the peer's user id for the digest.
+        let reloaded = SubscriptionRegistry::new(&fx.subs_path).unwrap();
+        let sub = reloaded.get(555, SubscriptionKind::Text).unwrap();
+        assert_eq!(sub.dm_user_id, Some(123));
+        assert_eq!(sub.guild_id, None);
     }
 
     #[tokio::test]
@@ -3999,7 +4023,7 @@ mod tests {
         fx.subs
             .lock()
             .unwrap()
-            .add(888, SubscriptionKind::Text, Some(7), true)
+            .add(888, SubscriptionKind::Text, Some(7), None)
             .unwrap();
         let (msg, _ch) = dm_message(123, 888, Some(7), false);
         fx.events.on_message(msg).await;
@@ -4193,7 +4217,7 @@ mod tests {
         let subs = empty_subs_mut();
         subs.lock()
             .unwrap()
-            .add(42, SubscriptionKind::Text, None, true)
+            .add(42, SubscriptionKind::Text, None, None)
             .unwrap();
         let is_subscribed: IsSubscribed = {
             let subs = subs.clone();
@@ -4236,7 +4260,7 @@ mod tests {
         let subs = empty_subs_mut();
         subs.lock()
             .unwrap()
-            .add(42, SubscriptionKind::Text, None, true)
+            .add(42, SubscriptionKind::Text, None, None)
             .unwrap();
         let is_subscribed: IsSubscribed = Arc::new(|_| true);
         let bot_id: BotUserIdProvider = Arc::new(|| Some(999));
