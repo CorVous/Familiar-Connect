@@ -205,7 +205,11 @@ fn dm_user_id_round_trips_through_sidecar() {
 #[test]
 fn row_without_dm_user_id_loads_as_none() {
     let (_dir, path) = subs_path();
-    std::fs::write(&path, "[[subscription]]\nchannel_id = 42\nkind = \"text\"\n").unwrap();
+    std::fs::write(
+        &path,
+        "[[subscription]]\nchannel_id = 42\nkind = \"text\"\n",
+    )
+    .unwrap();
 
     let reg = SubscriptionRegistry::new(path).unwrap();
     let sub = reg.get(42, SubscriptionKind::Text).unwrap();
@@ -231,7 +235,8 @@ fn sidecar_writes_dm_user_id_only_for_rows_that_carry_it() {
     let (_dir, path) = subs_path();
     let mut reg = SubscriptionRegistry::new(path.clone()).unwrap();
     reg.add(42, SubscriptionKind::Text, None, Some(42)).unwrap();
-    reg.add(77, SubscriptionKind::Text, Some(999), None).unwrap();
+    reg.add(77, SubscriptionKind::Text, Some(999), None)
+        .unwrap();
 
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("dm_user_id = 42"));

@@ -1029,6 +1029,33 @@ impl BotEvents {
         }
     }
 
+    /// `/subscribe-text` registry mutation, returning the ack to reply with.
+    ///
+    /// Refuses inside a DM (`guild_id` is `None`): the command is global, so it
+    /// is invocable in a DM, where `add()` would replace the persisted DM row
+    /// and wipe its `dm_user_id`. DM subscriptions are managed by the allowlist
+    /// alone.
+    pub fn on_subscribe_text(&self, channel_id: i64, guild_id: Option<i64>) -> &'static str {
+        if guild_id.is_none() {
+            return "DM subscriptions are managed automatically via the DM \
+                    allowlist — no need to subscribe here.";
+        }
+        let Ok(cid) = u64::try_from(channel_id) else {
+            return "No channel in context.";
+        };
+        let _ = self
+            .subscriptions
+            .lock()
+            .expect("subscriptions mutex poisoned")
+            .add(
+                cid,
+                SubscriptionKind::Text,
+                guild_id.and_then(|g| u64::try_from(g).ok()),
+                None,
+            );
+        "Listening in this channel."
+    }
+
     /// `/subscribe-voice` registry + shared-state mutation (default-feature; the
     /// songbird join + intake pipeline is layered on by the `discord-voice` glue
     /// in [`create_bot`]'s dispatcher).
@@ -1700,17 +1727,7 @@ mod serenity_glue {
             match name.as_str() {
                 "subscribe-text" => {
                     defer_interaction(&ack).await;
-                    if let Ok(cid) = u64::try_from(channel_id) {
-                        let _ = self.slash.subscriptions.lock().expect("subs").add(
-                            cid,
-                            SubscriptionKind::Text,
-                            guild_id.and_then(|g| u64::try_from(g).ok()),
-                            None,
-                        );
-                        reply(&ack, "Listening in this channel.").await;
-                    } else {
-                        reply(&ack, "No channel in context.").await;
-                    }
+                    reply(&ack, self.events.on_subscribe_text(channel_id, guild_id)).await;
                 }
                 "unsubscribe-text" => {
                     defer_interaction(&ack).await;
@@ -3964,6 +3981,55 @@ mod tests {
         let sub = reloaded.get(555, SubscriptionKind::Text).unwrap();
         assert_eq!(sub.dm_user_id, Some(123));
         assert_eq!(sub.guild_id, None);
+    }
+
+    // --- /subscribe-text DM guard (PR #194) --------------------------------
+
+    #[test]
+    fn subscribe_text_in_dm_refuses_and_leaves_registry_untouched() {
+        let fx = dm_fixture(vec![]);
+        // Global command, so invocable in a DM (guild_id None).
+        let msg = fx.events.on_subscribe_text(555, None);
+        assert!(msg.contains("allowlist"));
+        assert!(
+            fx.subs
+                .lock()
+                .unwrap()
+                .get(555, SubscriptionKind::Text)
+                .is_none()
+        );
+        // Sidecar untouched — the registry never wrote anything.
+        assert!(!fx.subs_path.exists());
+    }
+
+    #[test]
+    fn subscribe_text_in_dm_does_not_wipe_persisted_peer_id() {
+        // Regression guard: an unguarded DM add() would replace the row and
+        // silently drop dm_user_id from the sidecar.
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(555, SubscriptionKind::Text, None, Some(123))
+            .unwrap();
+        let _ = fx.events.on_subscribe_text(555, None);
+        let reloaded = SubscriptionRegistry::new(&fx.subs_path).unwrap();
+        let sub = reloaded.get(555, SubscriptionKind::Text).unwrap();
+        assert_eq!(sub.dm_user_id, Some(123));
+    }
+
+    #[test]
+    fn subscribe_text_in_guild_adds_row() {
+        let fx = dm_fixture(vec![]);
+        let msg = fx.events.on_subscribe_text(888, Some(7));
+        assert_eq!(msg, "Listening in this channel.");
+        let sub = fx
+            .subs
+            .lock()
+            .unwrap()
+            .get(888, SubscriptionKind::Text)
+            .unwrap();
+        assert_eq!(sub.guild_id, Some(7));
     }
 
     #[tokio::test]
