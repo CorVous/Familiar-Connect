@@ -1369,6 +1369,7 @@ mod tests {
     /// (which names the `local-embed` fix), not swallow it into `None` and let
     /// startup proceed to mutate the store. The default test build lacks the
     /// `local-embed` extra, so `fastembed` genuinely has no backend here.
+    #[cfg(not(feature = "local-embed"))]
     #[test]
     fn resolve_embedder_fastembed_without_extra_errors() {
         let config = EmbeddingConfig {
