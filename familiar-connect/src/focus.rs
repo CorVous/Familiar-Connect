@@ -437,6 +437,27 @@ impl FocusManager {
         );
     }
 
+    /// Snapshot of the channel→display-name map (for the final-reminder digest).
+    #[must_use]
+    pub fn channel_names(&self) -> HashMap<i64, String> {
+        self.state
+            .lock()
+            .expect("focus state mutex")
+            .channel_names
+            .clone()
+    }
+
+    /// Snapshot of the channel→server-name map (for the final-reminder digest;
+    /// a [`PRIVATE_MESSAGE_GUILD_NAME`] entry marks a DM).
+    #[must_use]
+    pub fn guild_names(&self) -> HashMap<i64, String> {
+        self.state
+            .lock()
+            .expect("focus state mutex")
+            .guild_names
+            .clone()
+    }
+
     /// Set a channel's display name (populated by the Discord shell on ready).
     pub fn set_channel_name(&self, channel_id: i64, name: impl Into<String>) {
         self.state

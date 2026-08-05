@@ -712,10 +712,16 @@ impl TextResponder {
             .as_ref()
             .map(|fm| fm.channel_names())
             .unwrap_or_default();
+        let gn_names = self
+            .focus_manager
+            .as_ref()
+            .map(|fm| fm.guild_names())
+            .unwrap_or_default();
 
         let mut head = FinalReminder::new("text")
             .include_time(false)
-            .channel_names(ch_names.clone());
+            .channel_names(ch_names.clone())
+            .guild_names(gn_names.clone());
         if let Some(fc) = focus_ch {
             head = head.focus_channel_id(fc);
         }
@@ -738,7 +744,8 @@ impl TextResponder {
             .display_tz(&self.display_tz)
             .include_mode_instruction(true)
             .post_history_instructions(&self.post_history_instructions)
-            .channel_names(ch_names);
+            .channel_names(ch_names)
+            .guild_names(gn_names);
         if let Some(fc) = focus_ch {
             trailing_b = trailing_b.focus_channel_id(fc);
         }

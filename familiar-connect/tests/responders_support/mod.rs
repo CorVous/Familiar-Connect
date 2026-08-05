@@ -624,6 +624,9 @@ impl FocusManagerApi for TestFocusManager {
     fn channel_names(&self) -> HashMap<i64, String> {
         self.channel_names.clone()
     }
+    fn guild_names(&self) -> HashMap<i64, String> {
+        self.guild_names.clone()
+    }
     fn guild_name_for(&self, channel_id: Option<i64>) -> Option<String> {
         channel_id.and_then(|c| self.guild_names.get(&c).cloned())
     }
