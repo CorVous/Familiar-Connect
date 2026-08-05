@@ -909,7 +909,7 @@ async fn async_main(
     let prose_image_tools = familiar
         .config
         .llm
-        .get("prose")
+        .get(crate::config::IMAGE_TOOL_SLOT)
         .is_some_and(|slot| slot.image_tools);
     let voice_tool_registry = Arc::new(build_voice_registry(&alarm_scheduler, true));
     let text_activity_engine: Option<Arc<dyn StartActivityEngine>> =

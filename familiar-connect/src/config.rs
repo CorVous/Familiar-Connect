@@ -33,6 +33,12 @@ pub struct ConfigError(pub String);
 
 /// Canonical LLM call-site slot names.
 pub const LLM_SLOT_NAMES: [&str; 3] = ["fast", "prose", "background"];
+/// The only slot whose `image_tools` flag reaches a tool registry.
+///
+/// `commands::run` gates `view_image` registration on this slot, and the voice
+/// registry never carries the tool. Read it from both places so the gate and
+/// the config diagnostics cannot drift apart.
+pub const IMAGE_TOOL_SLOT: &str = "prose";
 /// Canonical assembly-tier names.
 pub const BUDGET_TIER_NAMES: [&str; 3] = ["voice", "text", "background"];
 /// Allowed values for `[llm.<slot>].reasoning`.
@@ -853,6 +859,90 @@ fn deep_merge(base: &Table, override_: &Table) -> Table {
     result
 }
 
+/// Reject vision wiring that cannot carry anything about an image.
+///
+/// `view_image` always produces both a description and a JPEG, but the
+/// description needs `[llm].image_description_model` and the JPEG needs the
+/// slot's `multimodal`. With neither, the tool spends a fetch, two compressions
+/// and a 30 s timeout to hand the model the fixed string
+/// `"(no description model configured)"` — never what an author intends, so the
+/// load fails instead of degrading silently. Enforces what
+/// `docs/architecture/tuning.md` § `image_tools` already documents; Python
+/// accepted it silently (DESIGN D22).
+fn validate_vision_wiring(
+    llm: &BTreeMap<String, LLMSlotConfig>,
+    image_description_model: &str,
+) -> Result<(), ConfigError> {
+    for (name, slot) in llm {
+        if slot.image_tools && image_description_model.is_empty() && !slot.multimodal {
+            return Err(ConfigError(format!(
+                "[llm.{name}].image_tools = true needs [llm].image_description_model (to \
+                 describe the image) or [llm.{name}].multimodal = true (to send the image \
+                 itself) — with neither, view_image can only return '(no description model \
+                 configured)'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Non-fatal vision-wiring diagnostics, emitted once at startup.
+///
+/// Each entry names a flag combination that parses cleanly but does not do what
+/// the author most likely meant. Vision capability cannot be inferred from a
+/// model string, so the text-only case is *reported*, never guessed at: the
+/// point is that the active mode is visible in the log rather than silent
+/// (DESIGN D22).
+#[must_use]
+pub fn vision_config_warnings(config: &CharacterConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    let describer = !config.image_description_model.is_empty();
+    let mut any_image_tools = false;
+
+    for (name, slot) in &config.llm {
+        if !slot.image_tools {
+            if slot.multimodal {
+                out.push(format!(
+                    "[llm.{name}].multimodal has no effect without image_tools = true — only \
+                     view_image produces image content blocks"
+                ));
+            }
+            continue;
+        }
+        any_image_tools = true;
+        if name != IMAGE_TOOL_SLOT {
+            out.push(format!(
+                "[llm.{name}].image_tools is ignored — only the `{IMAGE_TOOL_SLOT}` slot \
+                 registers view_image (the voice registry never does)"
+            ));
+        }
+        if slot.multimodal && !describer {
+            out.push(format!(
+                "[llm.{name}] sees images but nothing describes them — history persists text \
+                 only, so the image is invisible to every later turn; set \
+                 [llm].image_description_model"
+            ));
+        }
+        if !slot.multimodal && describer {
+            out.push(format!(
+                "[llm.{name}].multimodal = false — view_image will send '{}' a text \
+                 description only, never the image; set multimodal = true if that model \
+                 supports vision",
+                slot.model
+            ));
+        }
+    }
+
+    if describer && !any_image_tools {
+        out.push(format!(
+            "[llm].image_description_model = '{}' is never called — no slot sets \
+             image_tools = true",
+            config.image_description_model
+        ));
+    }
+    out
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "faithful 1:1 transliteration of the Python _parse_character_config sequence"
@@ -923,6 +1013,7 @@ fn parse_character_config(
         }
     }
     let llm = parse_llm_slots(&llm_slots_raw)?;
+    validate_vision_wiring(&llm, &image_description_model)?;
 
     let tts = parse_tts_config(expect_table(data.get("tts"), "[tts]")?)?;
     let channels = parse_channel_overrides(expect_table(data.get("channels"), "[channels]")?)?;
@@ -2411,12 +2502,142 @@ fn parse_tools_config(raw: &Table) -> Result<ToolsConfig, ConfigError> {
 mod tests {
     use super::{
         BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DeepgramSTTConfig, DiscordTextConfig,
-        EmbeddingConfig, FactSupersedeConfig, FocusConfig, LLM_SLOT_NAMES, MemoryProvidersConfig,
-        MemoryRetrievalConfig, PeopleDossierConfig, ReflectionConfig, RichNoteConfig,
-        RollingSummaryConfig, STTConfig, ToolsConfig, TurnDetectionConfig, default_projectors,
+        EmbeddingConfig, FactSupersedeConfig, FocusConfig, IMAGE_TOOL_SLOT, LLM_SLOT_NAMES,
+        LLMSlotConfig, MemoryProvidersConfig, MemoryRetrievalConfig, PeopleDossierConfig,
+        ReflectionConfig, RichNoteConfig, RollingSummaryConfig, STTConfig, ToolsConfig,
+        TurnDetectionConfig, default_projectors, validate_vision_wiring, vision_config_warnings,
     };
     use crate::budget::TierBudget;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // --- vision wiring coherence -------------------------------------------
+
+    fn vision_slot(image_tools: bool, multimodal: bool) -> LLMSlotConfig {
+        LLMSlotConfig {
+            model: "vendor/model".into(),
+            image_tools,
+            multimodal,
+            ..Default::default()
+        }
+    }
+
+    fn slots(pairs: &[(&str, LLMSlotConfig)]) -> BTreeMap<String, LLMSlotConfig> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect()
+    }
+
+    fn vision_config(
+        pairs: &[(&str, LLMSlotConfig)],
+        image_description_model: &str,
+    ) -> CharacterConfig {
+        CharacterConfig {
+            llm: slots(pairs),
+            image_description_model: image_description_model.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn image_tools_without_describer_or_multimodal_is_rejected() {
+        let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, false))]);
+        let err = validate_vision_wiring(&llm, "").unwrap_err();
+        assert!(err.0.contains("[llm.prose].image_tools = true needs"));
+        assert!(err.0.contains("(no description model configured)"));
+    }
+
+    #[test]
+    fn image_tools_accepts_either_describer_or_multimodal() {
+        // Describer only — the blind-prose-model path.
+        assert!(
+            validate_vision_wiring(
+                &slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, false))]),
+                "openai/gpt-4o",
+            )
+            .is_ok()
+        );
+        // Multimodal only — the model sees the image itself.
+        assert!(
+            validate_vision_wiring(&slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, true))]), "")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn image_tools_off_never_rejected() {
+        let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(false, false))]);
+        assert!(validate_vision_wiring(&llm, "").is_ok());
+    }
+
+    #[test]
+    fn fully_wired_vision_warns_about_nothing() {
+        let cfg = vision_config(
+            &[(IMAGE_TOOL_SLOT, vision_slot(true, true))],
+            "openai/gpt-4o",
+        );
+        assert!(vision_config_warnings(&cfg).is_empty());
+    }
+
+    #[test]
+    fn text_only_mode_is_reported_not_guessed() {
+        let cfg = vision_config(
+            &[(IMAGE_TOOL_SLOT, vision_slot(true, false))],
+            "openai/gpt-4o",
+        );
+        let warnings = vision_config_warnings(&cfg);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("multimodal = false"));
+        assert!(warnings[0].contains("vendor/model"));
+    }
+
+    #[test]
+    fn seeing_without_describing_warns_about_lost_history() {
+        let cfg = vision_config(&[(IMAGE_TOOL_SLOT, vision_slot(true, true))], "");
+        let warnings = vision_config_warnings(&cfg);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("invisible to every later turn"));
+    }
+
+    #[test]
+    fn image_tools_on_ignored_slot_warns() {
+        let cfg = vision_config(&[("fast", vision_slot(true, true))], "openai/gpt-4o");
+        let warnings = vision_config_warnings(&cfg);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("[llm.fast].image_tools is ignored"));
+    }
+
+    #[test]
+    fn multimodal_without_image_tools_warns() {
+        let cfg = vision_config(&[(IMAGE_TOOL_SLOT, vision_slot(false, true))], "");
+        let warnings = vision_config_warnings(&cfg);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("has no effect without image_tools"));
+    }
+
+    #[test]
+    fn unused_description_model_warns() {
+        let cfg = vision_config(
+            &[(IMAGE_TOOL_SLOT, vision_slot(false, false))],
+            "openai/gpt-4o",
+        );
+        let warnings = vision_config_warnings(&cfg);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("is never called"));
+    }
+
+    #[test]
+    fn clean_default_config_warns_about_nothing() {
+        let cfg = vision_config(
+            &[
+                ("fast", vision_slot(false, false)),
+                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+                ("background", vision_slot(false, false)),
+            ],
+            "",
+        );
+        assert!(vision_config_warnings(&cfg).is_empty());
+    }
 
     #[test]
     fn tiered_slots() {

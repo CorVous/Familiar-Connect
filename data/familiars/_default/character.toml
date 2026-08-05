@@ -453,8 +453,14 @@ person's key.
 #
 # tool_calling: bool — enables alarm/cancel tools + agentic loop.
 # image_tools: bool — enables view_image in text registry (never voice).
+#   Read from the prose slot only. Requires image_description_model or
+#   multimodal = true on the same slot, else the config is rejected:
+#   with neither, view_image has no way to tell the model anything.
 # multimodal: bool — send JPEG content blocks instead of text descriptions
-#   for ImageResult; only set for vision-capable model slots.
+#   for ImageResult; only set for vision-capable model slots. Leaving it
+#   false with image_tools on is legal (the model reads descriptions) and
+#   logs a warning at startup naming the model, since nothing can detect
+#   vision capability from a model name.
 #
 # image_description_model: shared key at [llm] level (not per slot).
 #   Model used to generate text descriptions of images. Empty = disabled.
@@ -487,7 +493,7 @@ provider_order = ["z-ai"]            # first-party — best caching for GLM
 reasoning      = "medium"
 tool_calling   = false
 # image_tools = false  # set true + configure image_description_model to enable
-# multimodal = false   # set true when prose model supports vision
+# multimodal = false   # set true when prose model supports vision (warns if not set)
 
 [llm.background]
 model          = "z-ai/glm-5.2"

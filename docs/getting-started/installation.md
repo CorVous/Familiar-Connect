@@ -71,8 +71,13 @@ cp -r data/familiars/_default "$FAMILIARS_ROOT/my-familiar"
 
 If a slot points at a vision-capable model, also set
 `multimodal = true` in that `[llm.<slot>]` table: it defaults to
-`false`, which silently sends the model only a text description of any
-image rather than the image itself.
+`false`, which sends the model only a text description of any image
+rather than the image itself. Nothing can detect vision capability from
+a model name, so this stays your call — but startup logs a warning
+naming the model whenever `view_image` is wired up text-only, and a
+combination that could never show the model anything fails the config
+load outright. See
+[Tuning — Vision wiring checks](../architecture/tuning.md#vision-wiring-checks).
 
 ## Start
 

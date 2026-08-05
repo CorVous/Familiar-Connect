@@ -395,6 +395,55 @@ fn tool_calling_must_be_bool() {
     );
 }
 
+// --- vision wiring (DESIGN D22) --------------------------------------------
+
+/// Three slots plus whatever vision keys the case needs, over empty defaults —
+/// isolates the check from the shipped profile's pins.
+fn load_vision(prose_extra: &str, llm_extra: &str) -> Result<CharacterConfig, ConfigError> {
+    let defaults = format!(
+        "[llm]\n{llm_extra}\
+         [llm.fast]\nmodel = \"x\"\n\
+         [llm.prose]\nmodel = \"vendor/seer\"\n{prose_extra}\
+         [llm.background]\nmodel = \"x\"\n"
+    );
+    load_custom(None, &defaults)
+}
+
+#[test]
+fn image_tools_without_any_delivery_path_is_rejected() {
+    assert_err(
+        load_vision("image_tools = true\n", ""),
+        "[llm.prose].image_tools = true needs [llm].image_description_model",
+    );
+}
+
+#[test]
+fn image_tools_with_describer_loads() {
+    let cfg = load_vision(
+        "image_tools = true\n",
+        "image_description_model = \"openai/gpt-4o\"\n",
+    )
+    .expect("describer satisfies the check");
+    assert!(cfg.llm.get("prose").unwrap().image_tools);
+    assert_eq!(cfg.image_description_model, "openai/gpt-4o");
+}
+
+#[test]
+fn image_tools_with_multimodal_loads() {
+    let cfg = load_vision("image_tools = true\nmultimodal = true\n", "")
+        .expect("multimodal satisfies the check");
+    assert!(cfg.llm.get("prose").unwrap().multimodal);
+    assert!(cfg.image_description_model.is_empty());
+}
+
+#[test]
+fn shipped_default_profile_passes_vision_checks() {
+    // The `_default` profile leaves all three flags off, so it must load
+    // cleanly and report nothing — D22 is not allowed to break a fresh install.
+    let cfg = load_missing_target();
+    assert!(familiar_connect::config::vision_config_warnings(&cfg).is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Prompt shaping
 // ---------------------------------------------------------------------------

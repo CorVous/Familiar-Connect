@@ -1411,6 +1411,13 @@ mod client {
             tracing::info!(target: "familiar_connect.llm", "{line}");
             clients.insert("__image_description__".to_string(), client);
         }
+        for warning in crate::config::vision_config_warnings(config) {
+            tracing::warn!(
+                target: "familiar_connect.llm",
+                "{} {warning}",
+                ls::tag("Config", ls::Y),
+            );
+        }
         Ok(clients)
     }
 
