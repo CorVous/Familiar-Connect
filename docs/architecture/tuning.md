@@ -674,9 +674,18 @@ queue behind each other.
 When `true`, registers the `view_image` tool in the text tool registry
 for this slot. The agentic loop runs when either `tool_calling` or
 `image_tools` is set. `view_image` is never registered in the voice
-registry. Requires `[llm].image_description_model` for descriptions.
-The describe prompt is neutral by default; append per-familiar persona
-constraints with `[prompt].image_description_constraints` (see below).
+registry. Only the `prose` slot is read — `image_tools` on `fast` or
+`background` is ignored (and warned about at startup). The describe
+prompt is neutral by default; append per-familiar persona constraints
+with `[prompt].image_description_constraints` (see below).
+
+`image_tools = true` requires at least one way for the image to reach
+the model: `[llm].image_description_model` (text description) or this
+slot's `multimodal = true` (the image itself). With neither, the tool
+would spend a fetch, two compressions and a 30 s timeout to return the
+fixed string `"(no description model configured)"`, so config loading
+**fails** rather than degrading silently. See
+[Vision wiring checks](#vision-wiring-checks).
 
 ### `[prompt].image_description_constraints`
 
@@ -693,6 +702,22 @@ When `true`, `ImageResult` tool-result messages include JPEG
 `image_url` content blocks so vision-capable models can see the image.
 When `false` (default), only the text description is sent.
 Set this only for slots backed by vision-capable models.
+
+### Vision wiring checks
+
+Whether a model can actually see is not knowable from its name, so the
+loader never guesses. It rejects the one combination that cannot work,
+and reports the rest at startup so the active mode is visible in the log
+instead of silent:
+
+| Combination | Result |
+|---|---|
+| `image_tools`, no describer, `multimodal = false` | **config error** — nothing about the image can reach the model |
+| `image_tools`, describer, `multimodal = false` | warn: text descriptions only, never the image — set `multimodal = true` if the model supports vision |
+| `image_tools`, no describer, `multimodal = true` | warn: history persists text only, so the image is invisible to every later turn |
+| `image_tools` on a slot other than `prose` | warn: ignored, only `prose` registers `view_image` |
+| `multimodal` without `image_tools` | warn: no effect, only `view_image` produces image blocks |
+| `image_description_model` set, no slot with `image_tools` | warn: the description model is never called |
 
 ## Prompt assembly budget
 

@@ -411,6 +411,7 @@ deviation reviewers must sign off.
 | D19 | **Discord = serenity 0.12.5 + songbird 0.6.0** (`driver,gateway,receive,serenity,rustls,tungstenite`); rustls everywhere (no OpenSSL) | Ecosystem report pick; both compile clean; songbird owns Opus + DAVE | neutral |
 | D20 | **Twitch dormant:** port pure `twitch` (exact formatter strings); `twitch_watcher`/`sources::twitch` behind the `twitch` feature until a consumer exists | Matches production dormancy (spec 11 §12) | neutral |
 | D21 | **Renames:** `bus::in_process` (was `bus/bus.py` — avoids `clippy::module_inception`), `tools::agentic` (was `tools/loop.py` — `loop` keyword), `history::db` (was `turso_compat.py` — now a DB actor); `commands/example.py` not ported | Rust keyword/lint/engine realities | neutral |
+| D22 | **Vision wiring is validated across fields** (spec 02/08): `image_tools` with neither `image_description_model` nor `multimodal` is a `ConfigError`; five further incoherent combinations warn at startup. `config::IMAGE_TOOL_SLOT` replaces the `"prose"` literal in `commands::run` so the gate and the diagnostics cannot drift | Python accepted all of these silently — the rejected one can only ever return `"(no description model configured)"` after a fetch + two compressions, and vision capability is not inferable from a model name, so the remainder are reported rather than guessed. Enforces what `tuning.md` § `image_tools` already documented | **BREAKING** (intended fix; no shipped profile is affected — `_default` leaves all three flags off) |
 
 ---
 
