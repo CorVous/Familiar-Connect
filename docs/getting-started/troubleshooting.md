@@ -13,6 +13,27 @@ Common startup errors and what they mean:
   OpenRouter key.
 - **`Opus library not found — voice playback will not work`** — voice
   commands still run, but no audio; install libopus.
+- **`[llm.prose].image_tools = true needs …`** — **upgrade note.** A
+  familiar that started fine before this release can exit 1 here. Enabling
+  `image_tools` without either delivery path used to load and silently
+  degrade — `view_image` was registered but could return nothing about the
+  image — and is now rejected at load instead. Only configs that set
+  `[llm.prose].image_tools = true` with **both** `[llm].image_description_model`
+  empty **and** `[llm.prose].multimodal = false` are affected; nothing else
+  about the familiar (text, voice, alarms) had stopped working, which is why
+  the misconfiguration went unnoticed. Pick one:
+
+    ```toml
+    [llm]
+    image_description_model = "openai/gpt-4o"  # describe images as text
+
+    [llm.prose]
+    multimodal = true                          # or send the image itself
+    ```
+
+    Setting `image_tools = false` also clears it, and matches what the
+    familiar was effectively doing before. See
+    [Tuning — Vision wiring checks](../architecture/tuning.md#vision-wiring-checks).
 
 ## Runtime symptoms
 

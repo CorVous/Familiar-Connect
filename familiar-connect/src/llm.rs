@@ -1349,11 +1349,28 @@ mod client {
         if slot.tool_calling {
             parts.push(ls::kv_styled("tools", "on", ls::W, ls::LM));
         }
+        // Only IMAGE_TOOL_SLOT's vision flags do anything, so elsewhere report
+        // them as inert. Printing a bare "on" at info level would look
+        // authoritative next to the warn-level "never take effect" line and
+        // invite an operator to dismiss it (DESIGN D22).
+        let vision_active = slot_name == crate::config::IMAGE_TOOL_SLOT;
+        let vision_state = if vision_active { "on" } else { "ignored" };
+        let vision_style = if vision_active { ls::LM } else { ls::LY };
         if slot.image_tools {
-            parts.push(ls::kv_styled("image_tools", "on", ls::W, ls::LM));
+            parts.push(ls::kv_styled(
+                "image_tools",
+                vision_state,
+                ls::W,
+                vision_style,
+            ));
         }
         if slot.multimodal {
-            parts.push(ls::kv_styled("multimodal", "on", ls::W, ls::LM));
+            parts.push(ls::kv_styled(
+                "multimodal",
+                vision_state,
+                ls::W,
+                vision_style,
+            ));
         }
         tracing::info!(target: "familiar_connect.llm", "{}", parts.join(" "));
     }

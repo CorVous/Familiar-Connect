@@ -682,12 +682,18 @@ with `[prompt].image_description_constraints` (see below).
 On the `prose` slot, `image_tools = true` requires at least one way for
 the image to reach the model: `[llm].image_description_model` (text
 description) or that slot's `multimodal = true` (the image itself). With
-neither, the tool would spend a fetch and a compression to return the
-fixed string `"(no description model configured)"`, so config loading
-**fails** rather than degrading silently. The check is scoped to `prose`
-because that is the only slot whose flag registers anything — elsewhere
-the same combination is an inert no-op and only warns. See
+neither, the tool has nothing to hand back — no description to persist
+and no image in the payload — so config loading **fails** rather than
+degrading silently. The check is scoped to `prose` because that is the
+only slot whose flag registers anything; elsewhere the same combination
+is an inert no-op and only warns. See
 [Vision wiring checks](#vision-wiring-checks).
+
+When `multimodal` carries the image with no describer configured, the
+description slot is filled with a neutral placeholder rather than an
+error string: it travels beside the JPEG and is the only part persisted
+to history, so wording it as a failure would invite the model to answer
+"I can't see images" while holding one.
 
 ### `[prompt].image_description_constraints`
 
@@ -726,8 +732,8 @@ other slot the flag is inert and earns row 4 instead:
 | `image_tools`, no describer, `multimodal = false` | **config error** — nothing about the image can reach the model |
 | `image_tools`, describer, `multimodal = false` | warn: text descriptions only, never the image — set `multimodal = true` if the model supports vision |
 | `image_tools`, no describer, `multimodal = true` | warn: history persists text only, so the image is invisible to every later turn |
-| `image_tools` on a slot other than `prose` | warn: ignored, only `prose` registers `view_image` (and nothing further is said about that slot's delivery mode, since nothing is delivered there) |
-| `multimodal` without `image_tools` | warn: no effect, only `view_image` produces image blocks |
+| either vision flag on a slot other than `prose` | warn: never takes effect — no image reaches that slot under any combination, so move the flags to `[llm.prose]` or drop them (one warning per slot, naming no remedy on that slot, since there isn't one) |
+| `multimodal` without `image_tools`, on `prose` | warn: no effect, only `view_image` produces image blocks |
 | `image_description_model` set, `prose` without `image_tools` | warn: the description model is never called |
 
 Warnings are emitted once, at the composition root — the fatal half runs

@@ -493,8 +493,10 @@ temperature    = 0.7
 provider_order = ["z-ai"]            # first-party — best caching for GLM
 reasoning      = "medium"
 tool_calling   = false
-# image_tools = false  # set true + configure image_description_model to enable
-# multimodal = false   # set true when prose model supports vision (warns if not set)
+# image_tools = false  # set true + EITHER image_description_model OR multimodal
+# multimodal = false   # set true when this model supports vision; with a
+#                      # describer configured, leaving it false warns that only
+#                      # descriptions are sent
 
 [llm.background]
 model          = "z-ai/glm-5.2"

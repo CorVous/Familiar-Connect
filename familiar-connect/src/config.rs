@@ -38,6 +38,13 @@ pub const LLM_SLOT_NAMES: [&str; 3] = ["fast", "prose", "background"];
 /// `commands::run` gates `view_image` registration on this slot, and the voice
 /// registry never carries the tool. Read it from both places so the gate and
 /// the config diagnostics cannot drift apart.
+///
+/// Scope is exactly that pair. It does **not** name the slot that answers text
+/// turns: that binding is pinned independently by [`tier_to_slot`]
+/// (`text => prose`) and by the text responder's client lookup, both of which
+/// keep their own literal. Selecting those through this constant would make
+/// retargeting it silently repoint all text chat, with nothing failing to
+/// compile.
 pub const IMAGE_TOOL_SLOT: &str = "prose";
 /// Canonical assembly-tier names.
 pub const BUDGET_TIER_NAMES: [&str; 3] = ["voice", "text", "background"];
@@ -891,32 +898,36 @@ fn classify_vision_wiring(
     use VisionSeverity::{Fatal, Warning};
 
     let describer = !image_description_model.is_empty();
-    let inert_multimodal = |name: &str| {
-        format!(
-            "[llm.{name}].multimodal has no effect without image_tools = true — only \
-             view_image produces image content blocks"
-        )
-    };
     let mut out = Vec::new();
 
     for (name, slot) in llm {
         if name != IMAGE_TOOL_SLOT {
-            if slot.image_tools {
+            // Terminal for this slot, and phrased as a dead end rather than as
+            // a fixable omission: no flag combination here delivers an image,
+            // so pointing at the other flag would just swap one warning for the
+            // other and back.
+            if slot.image_tools || slot.multimodal {
                 out.push((
                     Warning,
                     format!(
-                        "[llm.{name}].image_tools is ignored — only the `{IMAGE_TOOL_SLOT}` \
-                         slot registers view_image (the voice registry never does)"
+                        "[llm.{name}] sets vision flags that never take effect — only the \
+                         `{IMAGE_TOOL_SLOT}` slot registers view_image (the voice registry \
+                         never does), so no image content reaches `{name}` under any \
+                         combination; move them to [llm.{IMAGE_TOOL_SLOT}] or drop them"
                     ),
                 ));
-            } else if slot.multimodal {
-                out.push((Warning, inert_multimodal(name)));
             }
             continue;
         }
         if !slot.image_tools {
             if slot.multimodal {
-                out.push((Warning, inert_multimodal(name)));
+                out.push((
+                    Warning,
+                    format!(
+                        "[llm.{name}].multimodal has no effect without image_tools = true — \
+                         only view_image produces image content blocks"
+                    ),
+                ));
             }
             continue;
         }
@@ -926,8 +937,8 @@ fn classify_vision_wiring(
                 format!(
                     "[llm.{name}].image_tools = true needs [llm].image_description_model (to \
                      describe the image) or [llm.{name}].multimodal = true (to send the image \
-                     itself) — with neither, view_image can only return '(no description \
-                     model configured)'"
+                     itself) — with neither, view_image has nothing to hand back: no \
+                     description to persist, and no image in the payload"
                 ),
             )),
             (false, true) => out.push((
@@ -2594,7 +2605,7 @@ mod tests {
         let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, false))]);
         let err = validate_vision_wiring(&llm, "").unwrap_err();
         assert!(err.0.contains("[llm.prose].image_tools = true needs"));
-        assert!(err.0.contains("(no description model configured)"));
+        assert!(err.0.contains("no description to persist"));
     }
 
     #[test]
@@ -2644,7 +2655,7 @@ mod tests {
             assert!(
                 vision_config_warnings(&cfg)
                     .iter()
-                    .any(|w| w.contains("is ignored")),
+                    .any(|w| w.contains("never take effect")),
                 "[llm.{name}].image_tools must still warn"
             );
         }
@@ -2692,7 +2703,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("[llm.fast].image_tools is ignored"))
+                .any(|w| w.contains("[llm.fast] sets vision flags that never take effect"))
         );
     }
 
@@ -2727,8 +2738,30 @@ mod tests {
         );
         let warnings = vision_config_warnings(&cfg);
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
-        assert!(warnings[0].contains("[llm.fast].image_tools is ignored"));
+        assert!(warnings[0].contains("[llm.fast] sets vision flags that never take effect"));
         assert!(!warnings.iter().any(|w| w.contains("set multimodal = true")));
+    }
+
+    /// Off-prose, "set image_tools = true" would be a dead end: taking the
+    /// advice just swaps this warning for the ignored-slot one and back. The
+    /// non-prose wording must name no remedy on that slot.
+    #[test]
+    fn inert_multimodal_off_prose_does_not_advise_a_circular_fix() {
+        let cfg = vision_config(
+            &[
+                ("fast", vision_slot(false, true)),
+                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+            ],
+            "",
+        );
+        let warnings = vision_config_warnings(&cfg);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(warnings[0].contains("never take effect"));
+        assert!(
+            !warnings[0].contains("without image_tools = true"),
+            "must not send a non-prose slot chasing image_tools: {:?}",
+            warnings[0]
+        );
     }
 
     #[test]

@@ -429,7 +429,7 @@ fn image_tools_on_non_prose_slot_still_loads() {
     assert!(cfg.llm.get("fast").unwrap().image_tools);
     let warnings = familiar_connect::config::vision_config_warnings(&cfg);
     assert!(
-        warnings.iter().any(|w| w.contains("is ignored")),
+        warnings.iter().any(|w| w.contains("never take effect")),
         "got {warnings:?}"
     );
 }

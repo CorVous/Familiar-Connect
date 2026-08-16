@@ -21,6 +21,13 @@ use crate::tools::registry::{FnHandler, ImageResult, Tool, ToolContext, ToolOutp
 
 const TOOL_TIMEOUT_S: f64 = 30.0;
 
+/// Stands in for the description when no description model is configured.
+///
+/// Reachable only on the multimodal path (DESIGN D22), so it is phrased as a
+/// statement about this result rather than as a fault — the image itself is
+/// attached alongside it.
+pub const NO_DESCRIPTION_PLACEHOLDER: &str = "(image attached without text description)";
+
 /// Fetches raw image bytes from a URL (validating it is an image).
 #[async_trait]
 pub trait ImageFetcher: Send + Sync {
@@ -143,7 +150,13 @@ async fn view_image_handler(
             }
         }
     } else {
-        "(no description model configured)".to_owned()
+        // Neutral, not an error report: this text travels *beside* the JPEG in
+        // the tool result and is the only part persisted to history. Config
+        // validation (DESIGN D22) rejects `image_tools` without a describer
+        // unless the slot is `multimodal`, so reaching here means the model is
+        // holding the image — wording it as a failure invites the model to
+        // answer "I can't see images" while looking straight at one.
+        NO_DESCRIPTION_PLACEHOLDER.to_owned()
     };
 
     // Tight compress for the prompt payload; this failure IS fatal to the call.

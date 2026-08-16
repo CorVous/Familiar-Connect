@@ -511,6 +511,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     use crate::config::load_character_config;
     use crate::embedding::known_embedders;
     use crate::llm::LlmClient;
+    use crate::log_style as ls;
     use crate::processors::projectors::known_projectors;
 
     // `_default` is a tracked repo resource resolved independently of where the
@@ -980,14 +981,16 @@ async fn async_main(
             .ok_or_else(|| anyhow::anyhow!("missing 'fast' LLM slot"))?,
         false,
     );
+    // Literal, not `IMAGE_TOOL_SLOT`: this is the slot that answers every text
+    // turn, which `config::tier_to_slot` independently pins as `text => prose`.
+    // Selecting it through the view_image constant would silently repoint all
+    // text chat if that constant were ever retargeted.
     let prose_llm = responder_llm(
         familiar
             .llm_clients
-            .get(crate::config::IMAGE_TOOL_SLOT)
+            .get("prose")
             .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!("missing '{}' LLM slot", crate::config::IMAGE_TOOL_SLOT)
-            })?,
+            .ok_or_else(|| anyhow::anyhow!("missing 'prose' LLM slot"))?,
         prose_image_tools,
     );
 

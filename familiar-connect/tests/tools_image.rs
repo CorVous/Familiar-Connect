@@ -13,7 +13,7 @@ use serde_json::Value;
 use familiar_connect::llm::{Content, LlmClient, LlmDelta, Message};
 use familiar_connect::tools::image::{ImageFetcher, build_view_image_tool_with_fetcher};
 use familiar_connect::tools::image_describe::{DESCRIBE_PROMPT, describe_image};
-use familiar_connect::tools::registry::{ToolContext, ToolOutput};
+use familiar_connect::tools::registry::{ToolContext, ToolOutput, serialize_image_result};
 
 // ---------------------------------------------------------------------------
 // Doubles
@@ -250,4 +250,48 @@ async fn view_image_no_description_llm_degrades() {
     };
     assert!(!img.description.is_empty());
     assert!(!img.jpeg_base64.is_empty());
+}
+
+/// Config validation (DESIGN D22) only allows a missing describer when the slot
+/// is multimodal, so this text always rides *beside* the JPEG and is the only
+/// part persisted to history. It must not read as "I cannot see images", or the
+/// model answers that while holding the image.
+#[tokio::test]
+async fn view_image_placeholder_does_not_read_as_a_vision_failure() {
+    let ctx = ctx_with_images(&[("img_0", "http://cdn.example.com/img.png")], None);
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let out = tool
+        .handler
+        .call(serde_json::json!({"image_id": "img_0"}), &ctx)
+        .await
+        .unwrap();
+    let ToolOutput::Image(img) = out else {
+        panic!("expected image result");
+    };
+    assert_eq!(
+        img.description,
+        familiar_connect::tools::image::NO_DESCRIPTION_PLACEHOLDER
+    );
+    for leak in ["no description model", "not configured", "unavailable"] {
+        assert!(
+            !img.description.to_lowercase().contains(leak),
+            "placeholder {:?} still reads as a fault ({leak})",
+            img.description
+        );
+    }
+
+    // And it survives into the multimodal tool message as the text block beside
+    // the image, which is what the model actually reads.
+    let Content::Blocks(blocks) = serialize_image_result(&img, true) else {
+        panic!("multimodal serialization should produce blocks");
+    };
+    let text = blocks
+        .iter()
+        .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .and_then(|b| b.get("text").and_then(|t| t.as_str()))
+        .expect("a text block");
+    assert_eq!(
+        text,
+        familiar_connect::tools::image::NO_DESCRIPTION_PLACEHOLDER
+    );
 }

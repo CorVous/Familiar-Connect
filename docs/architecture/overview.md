@@ -222,7 +222,7 @@ compact `→ name(args)` / `(tool→) ...` summary in the rebuilt prompt.
 - `[llm.<slot>].image_tools = true` — registers `view_image` in the text tool registry for that slot (independent of `tool_calling`). Only the `prose` slot is read.
 - `[llm.<slot>].multimodal = true` — sends JPEG content blocks instead of text-only descriptions.
 
-**Wiring checks:** vision capability cannot be inferred from a model name, so the loader rejects only the one combination that cannot work — on the `prose` slot, `image_tools` with neither a description model nor `multimodal`, which could only ever return `"(no description model configured)"` — and warns at startup about combinations that parse cleanly but do nothing, including `image_tools` on any other slot, where the flag never reaches a registry. One classifier over `(slot, image_tools, describer, multimodal)` feeds both the rejection and the warnings (see [Tuning — Vision wiring checks](tuning.md#vision-wiring-checks)).
+**Wiring checks:** vision capability cannot be inferred from a model name, so the loader rejects only the one combination that cannot work — on the `prose` slot, `image_tools` with neither a description model nor `multimodal`, which can hand back neither a description to persist nor an image in the payload — and warns at startup about combinations that parse cleanly but do nothing, including `image_tools` on any other slot, where the flag never reaches a registry. One classifier over `(slot, image_tools, describer, multimodal)` feeds both the rejection and the warnings (see [Tuning — Vision wiring checks](tuning.md#vision-wiring-checks)).
 
 **Voice exclusion:** `view_image` is never registered in the voice tool registry.
 
