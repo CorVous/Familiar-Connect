@@ -1,22 +1,17 @@
 { // I find these handy. You may too!
     "editor.rulers": [
-        72,
-        79,
+        100,
     ],
-    "editor.wordWrapColumn": 79,
+    "editor.wordWrapColumn": 100,
     "editor.tabSize": 4,
+    "editor.formatOnSave": true,
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    },
     "markdown.validate.enabled": true,
     "markdown.updateLinksOnFileMove.enabled": "always",
     "markdown.validate.fileLinks.enabled": "error",
     "markdown.validate.fragmentLinks.enabled": "error",
     "markdown.validate.duplicateLinkDefinitions.enabled": "error",
     "markdown.validate.referenceLinks.enabled": "error",
-    "extensions.ignoreRecommendations": true,
-    "editor.formatOnSave": true,
-    "python.testing.pytestArgs": [
-        "tests"
-    ],
-    "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true,
-    "python.terminal.useEnvFile": true,
 }

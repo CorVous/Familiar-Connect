@@ -28,7 +28,9 @@ cargo fmt
 
 Touched feature-gated code? Also gate the combo you touched, e.g.
 `cargo clippy --features discord,discord-voice --all-targets -- -D warnings`.
-The pre-commit hook (`git config core.hooksPath .githooks`) runs these gates.
+The pre-commit hook (`git config core.hooksPath .githooks`) runs only the
+`cargo fmt` gate, failing the commit if it reformatted anything; run the rest
+yourself before pushing — CI enforces them.
 
 Red / green TDD. One project nuance: **compile errors don't count as red** —
 a test failing because the symbol doesn't exist is not a valid red; the

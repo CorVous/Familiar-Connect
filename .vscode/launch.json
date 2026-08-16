@@ -1,34 +1,157 @@
 {
+    // Requires the CodeLLDB extension (vadimcn.vscode-lldb).
+    // Each config builds its own feature set, so switching configs recompiles.
+    // `run` reads .env from the repo root; --familiar overrides FAMILIAR_ID.
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: CLI - Version (INFO)",
-            "type": "debugpy",
+            "name": "CLI: version",
+            "type": "lldb",
             "request": "launch",
-            "module": "familiar_connect",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=familiar-connect",
+                    "--package=familiar-connect"
+                ],
+                "filter": {
+                    "name": "familiar-connect",
+                    "kind": "bin"
+                }
+            },
             "args": [
-                "-v",
                 "version"
             ],
-            "console": "integratedTerminal",
-            "justMyCode": true,
             "cwd": "${workspaceFolder}"
         },
         {
-            "name": "Python: CLI - Example Command (INFO)",
-            "type": "debugpy",
+            "name": "Run: text-only (discord, INFO)",
+            "type": "lldb",
             "request": "launch",
-            "module": "familiar_connect",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=familiar-connect",
+                    "--package=familiar-connect",
+                    "--features=discord"
+                ],
+                "filter": {
+                    "name": "familiar-connect",
+                    "kind": "bin"
+                }
+            },
             "args": [
                 "-v",
-                "example",
-                "World",
-                "--greeting",
-                "Hello"
+                "run",
+                "--familiar",
+                "${input:familiarId}"
             ],
-            "console": "integratedTerminal",
-            "justMyCode": true,
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Run: voice + Deepgram STT (INFO)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=familiar-connect",
+                    "--package=familiar-connect",
+                    "--features=discord-voice,stt-deepgram"
+                ],
+                "filter": {
+                    "name": "familiar-connect",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "-v",
+                "run",
+                "--familiar",
+                "${input:familiarId}"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Run: voice + local ML (DEBUG, all targets)",
+            "type": "lldb",
+            "request": "launch",
+            // -vv includes songbird/serenity targets. Local turn detection also
+            // needs TEN-VAD's native backend, which has no `ten-vad-sys` yet
+            // (issue #196) — expect a degrade-to-Deepgram warning at startup.
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=familiar-connect",
+                    "--package=familiar-connect",
+                    "--features=discord-voice,stt-deepgram,local-turn,local-embed"
+                ],
+                "filter": {
+                    "name": "familiar-connect",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "-vv",
+                "run",
+                "--familiar",
+                "${input:familiarId}"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "CLI: diagnose <logfile>",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=familiar-connect",
+                    "--package=familiar-connect"
+                ],
+                "filter": {
+                    "name": "familiar-connect",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "diagnose",
+                "${input:logFile}"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Test: debug lib unit tests",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=familiar-connect"
+                ],
+                "filter": {
+                    "kind": "lib"
+                }
+            },
+            // Narrow to one test with a filter, e.g. "voice::turn_detection".
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "familiarId",
+            "type": "promptString",
+            "description": "Familiar id (folder under the familiars root)",
+            "default": "test-familiar"
+        },
+        {
+            "id": "logFile",
+            "type": "promptString",
+            "description": "Log file to aggregate span timings from",
+            "default": "familiar.log"
         }
     ]
 }

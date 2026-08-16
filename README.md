@@ -42,4 +42,4 @@ cargo fmt                                      # format
 cargo run -- diagnose <logfile>                # span/latency report from a captured log
 ```
 
-The pre-commit hook at [`.githooks/pre-commit`](./.githooks/pre-commit) runs the same gates (`git config core.hooksPath .githooks` to enable).
+The pre-commit hook at [`.githooks/pre-commit`](./.githooks/pre-commit) runs `cargo fmt` and fails the commit if it changed anything (`git config core.hooksPath .githooks` to enable). The remaining gates are yours to run — CI enforces them.
