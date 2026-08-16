@@ -1,4 +1,4 @@
-# DAVE integration-testing runbook (Rust port)
+# DAVE integration-testing runbook
 
 Validate the live-Discord voice path and the local-ML features on your own
 machine. Work top-to-bottom; each smoke stage has do / expect / if-it-fails.
@@ -6,10 +6,10 @@ Per-user familiars resolve from the platform data dir (`FAMILIARS_ROOT`
 overrides); the tracked `_default` skeleton resolves from
 `data/familiars/_default` (`FAMILIAR_DEFAULTS_ROOT` overrides). Repo-relative
 paths in this doc therefore refer to `_default` and build artifacts only —
-see [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
+see [On-disk layout](on-disk-layout.md#where-the-familiars-root-lives).
 
 > **READ THIS FIRST — the voice glue is now wired; validate it live.**
-> The composition-root wiring gaps are closed (parity-audit §3c + runbook flags).
+> The composition-root wiring gaps are closed.
 > Concretely, in this tree:
 > - `/subscribe-voice` and `/unsubscribe-voice` are **registered and dispatched**
 >   under `discord-voice` (`src/bot.rs`: `Handler::ready` command list +
@@ -108,7 +108,7 @@ precedence). The tracked `_default` skeleton is a repo resource resolved
 separately from `data/familiars/_default` (`FAMILIAR_DEFAULTS_ROOT` overrides).
 On startup a one-shot, idempotent, never-clobber migration moves any legacy
 `./data/familiars/<id>` (other than `_default`) into the resolved root. See
-[On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
+[On-disk layout](on-disk-layout.md#where-the-familiars-root-lives).
 
 To keep everything inside the repo checkout while smoke-testing, point the root
 at `data/familiars`:

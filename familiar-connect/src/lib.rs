@@ -1,9 +1,8 @@
-//! Familiar-Connect — Rust port of the Python Discord voice AI companion bot.
+//! Familiar-Connect — a Discord voice AI companion bot.
 //!
-//! Modules mirror the Python `familiar_connect` package layout; every module maps
-//! to exactly one porting-spec subsystem (01–11). Stubs only — the porting agents
-//! fill them in. See `rust/DESIGN.md` for the module map, port order (topological
-//! layers), and the cross-cutting conventions that all porters must follow.
+//! Modules are grouped into layered subsystems: bus and leaf utilities at the
+//! bottom, then storage and config, then the context/LLM pipeline, with the
+//! Discord and Twitch shells on top. See `docs/architecture/overview.md`.
 
 // --- subsystem 01: bus + diagnostics + leaf utilities ---
 pub mod bus;

@@ -1,24 +1,10 @@
 # Rust build artifacts
 /target/
 
-# Python-generated files (historical)
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
 # Secrets
 .env
 .env.*
 !.env.example
-
-# Auto-generated version file
-src/*/_version.py
 
 # mkdocs build output
 site/

@@ -1,9 +1,8 @@
-//! Port-introduced shared helpers (no direct Python source). These resolve
-//! cross-cutting conventions ONCE so porters do not diverge. See rust/DESIGN.md
-//! section 4.
+//! Shared helpers that resolve cross-cutting conventions ONCE, so call sites
+//! across the crate do not diverge.
 //!
 //! - `time`:  ISO-8601 UTC emission/parse (fixed-width microseconds, `+00:00`).
-//! - `round`: half-to-even rounding matching Python `round()`.
+//! - `round`: half-to-even ("banker's") rounding.
 //! - `text`:  Unicode-scalar-safe truncation with the U+2026 ellipsis.
 
 pub mod round;

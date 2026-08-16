@@ -1,7 +1,7 @@
-# Cargo workspace root for the Familiar-Connect Rust port.
+# Cargo workspace root for Familiar-Connect.
 # One member today (`familiar-connect`); FFI `-sys` crates (e.g. `ten-vad-sys`)
-# join here when subsystem 09's `local-turn` feature lands, keeping unsafe FFI
-# out of the main crate. See rust/DESIGN.md.
+# join here when the `local-turn` feature lands, keeping unsafe FFI out of the
+# main crate.
 [workspace]
 resolver = "3"
 members = ["familiar-connect"]

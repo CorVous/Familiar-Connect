@@ -875,8 +875,8 @@ cargo build --features local-embed
 Brings in the `fastembed` crate (ONNX via `ort`). Model downloads on
 first use. **Leave `fastembed_cache_dir` blank and the cache lands in
 `./.fastembed_cache`, relative to the process's working directory** —
-that's the crate's own default, not `~/.cache/fastembed` (the Python
-library's default, which this port does not inherit). Under `cargo
+that's the crate's own default (`DEFAULT_CACHE_DIR` in
+`fastembed::common`), *not* a fixed path under `~/.cache`. Under `cargo
 run`/`cargo test` from the crate dir that means ~130 MB inside the
 repo. Set `fastembed_cache_dir` (or the `FASTEMBED_CACHE_DIR` env var
 the crate reads) to a stable absolute path for any long-lived deploy,

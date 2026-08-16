@@ -14,7 +14,7 @@
 - *(voice builds only)* CMake — the `discord-voice` feature compiles libopus
   from source (`songbird → opus2 → libopus_sys`). Windows especially needs it
   installed; text-only builds (`--features discord`) never need it. See the
-  [DAVE runbook](../rust-port/DAVE-RUNBOOK.md) for the full voice
+  [DAVE runbook](dave-runbook.md) for the full voice
   prerequisites and platform notes.
 - *(local-ML builds only)* OpenSSL headers — `local-turn` / `local-embed` pull
   `ort`, whose **build script** (`ort-sys → ureq → native-tls`) links system

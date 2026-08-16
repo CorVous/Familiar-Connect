@@ -198,9 +198,9 @@ async fn initialize_drops_unsubscribed_voice_focus() {
 }
 
 // ---------------------------------------------------------------------------
-// Shared-mutable SubscriptionView seam (parity-audit §3a): the FocusManager
-// reads the SAME registry the bot mutates, so a runtime `/subscribe` is visible
-// without a restart (Python shares one registry object between bot and focus).
+// Shared-mutable SubscriptionView seam: the FocusManager reads the SAME
+// registry the bot mutates, so a runtime `/subscribe` is visible without a
+// restart.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

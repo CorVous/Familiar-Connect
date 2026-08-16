@@ -4244,7 +4244,7 @@ mod tests {
         assert_eq!(f.name.as_deref(), Some("k"));
     }
 
-    // --- composition-root wiring seams (parity-audit §3a/§3b + spec 10) -----
+    // --- composition-root wiring seams -------------------------------------
 
     fn wiring_events(subs: Arc<Mutex<SubscriptionRegistry>>, handle: Arc<BotHandle>) -> BotEvents {
         BotEvents::new(
