@@ -181,11 +181,16 @@ def diagnose(args) -> int                           # commands/diagnose.py
 
 ### on_message ingest (B-OM)
 
-8. Guard order is load-bearing (pinned by 4 tests): (a) drop own echo
-   (`author.id == familiar.bot_user_id`), (b) drop any `author.bot`, (c) THEN the DM-allowlist /
-   subscription gates. A bot user id colliding with the allowlist must never be admitted (no DM loops).
+8. Guard order is load-bearing: (a) drop own echo
+   (`author.id == familiar.bot_user_id`), (b) THEN the DM-allowlist / subscription gates.
+   **Bot-authored messages ingest** (#223) — she perceives sibling familiars and webhooks in the
+   channels she is subscribed to; only her OWN messages are dropped, which is what keeps a DM or
+   channel loop impossible. The payload carries `author_is_bot` so downstream policy can damp its
+   response to bots (06 T4) instead of the shell blinding her.
 9. DM (guild is None): admit only `author.id in config.dm_allowlist`. On the FIRST admitted DM per
-   user per process (in-memory `set`, deliberately not persisted — restart may re-send): post
+   HUMAN user per process (in-memory `set`, deliberately not persisted — restart may re-send;
+   **skipped entirely for bot authors** (#223) — the disclaimer is addressed to a person, while
+   `_register_dm_channel` still runs so the bot's DM lane is focusable): post
    `DM_BOT_DISCLAIMER + DM_BOT_DISCLAIMER_DISMISS_HINT` to the channel, remember the sent message in
    an in-memory `disclaimer_messages: dict[message_id, Message]`, then pre-seed the ✅ reaction on it.
    Then `_register_dm_channel`: `subscriptions.add(channel_id, text, guild_id=None, persist=False)`
@@ -195,9 +200,11 @@ def diagnose(args) -> int                           # commands/diagnose.py
    None (never steal an existing focus). Idempotent per DM.
 10. Guild message: drop unless a text subscription exists for the channel.
 11. `reply_to = str(message.reference.message_id)` when a reference with message_id is present, else None.
-12. `mentions` payload = `Author.from_discord_member(u)` for each `message.mentions` entry with
-    `bot` falsy. `pings_bot = message_pings_bot(...)` is carried separately precisely because the
-    bot is filtered out of `mentions` and reply-pings have no `<@id>` in content.
+12. `mentions` payload = `Author.from_discord_member(u)` for each `message.mentions` entry whose id
+    is not `bot_user_id` (#223: **other bots' mentions ride along**; only HER account is filtered,
+    so a mention of a sibling familiar resolves to a real author). `pings_bot =
+    message_pings_bot(...)` is carried separately precisely because she is filtered out of
+    `mentions` and reply-pings have no `<@id>` in content.
 13. `message_pings_bot`: True iff `bot_user_id` is not None and some entry of `message.mentions` has
     that id. py-cord puts both `<@id>` mentions AND reply-ping targets in `mentions`; role/@everyone
     mentions and bare name-strings never count.
@@ -211,7 +218,8 @@ def diagnose(args) -> int                           # commands/diagnose.py
 
 ### Message edits / reactions (B-RX)
 
-16. `on_message_edit`: skip own/bot authors; act only when `after.embeds` is non-empty AND differs
+16. `on_message_edit`: skip her own echo only (#223 — a bot's unfurl edit merges like a human's);
+    act only when `after.embeds` is non-empty AND differs
     from `before.embeds` (pure text edits are NOT tracked). Dispatch to `apply_message_edit` with the
     SYNCHRONOUS store facade (`familiar.history_store.sync`) — the handler body does no awaiting.
 17. `apply_message_edit` no-ops when: channel not text-subscribed, `format_embeds(embeds)` is empty,
@@ -480,9 +488,10 @@ def diagnose(args) -> int                           # commands/diagnose.py
   "content": str,                  # body + "\n\n" embeds + "\n" image markers
   "message_id": str | None,        # Discord snowflake as string
   "reply_to_message_id": str | None,
-  "mentions": tuple[Author, ...],  # non-bot user mentions only
+  "mentions": tuple[Author, ...],  # mentions incl. bots; never her own account (#223)
   "images": dict[str, str],        # "img_N" -> URL, {} when none
   "pings_bot": bool,
+  "author_is_bot": bool,           # platform bot flag on the author (#223)
 }
 ```
 Envelope: `event_id = turn_id = "discord-text-" + 12 hex chars`, `session_id = "discord:{channel_id}"`,

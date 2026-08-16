@@ -1123,12 +1123,14 @@ impl BotEvents {
             if !self.dm_allowlist.contains(&message.author_id) {
                 return;
             }
-            // First admitted DM from this user: warn DMs aren't private.
-            let first = self
-                .disclaimed_dm_users
-                .lock()
-                .expect("disclaimed users mutex poisoned")
-                .insert(message.author_id);
+            // First admitted DM from this human: warn DMs aren't private. The
+            // warning is addressed to a person, so bots never receive it.
+            let first = !message.author_is_bot
+                && self
+                    .disclaimed_dm_users
+                    .lock()
+                    .expect("disclaimed users mutex poisoned")
+                    .insert(message.author_id);
             if first {
                 let body = format!("{DM_BOT_DISCLAIMER}{DM_BOT_DISCLAIMER_DISMISS_HINT}");
                 match message.channel.send(&body).await {
@@ -1178,7 +1180,7 @@ impl BotEvents {
                 mentions: mention_authors,
                 images,
                 pings_bot,
-                author_is_bot: false,
+                author_is_bot: message.author_is_bot,
             },
         )
         .await;
@@ -3037,8 +3039,8 @@ mod tests {
         Author, BotEvents, BotHandle, DM_BOT_DISCLAIMER, DM_BOT_DISCLAIMER_DELETE_EMOJI,
         DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, InteractionAck, InteractionGone,
         MentionView, MessageEditView, MessageView, Presence, PresenceSink, PresenceStatus,
-        ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView, apply_message_edit, apply_reaction_clear,
-        apply_reaction_delta, build_activity_presence_cb, collect_images,
+        ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView, apply_message_edit,
+        apply_reaction_clear, apply_reaction_delta, build_activity_presence_cb, collect_images,
         compose_content_with_embeds, defer_interaction, emoji_repr, message_pings_bot, reply,
     };
     use crate::bot::{ActivityResync, ChannelSender};
@@ -4054,6 +4056,21 @@ mod tests {
         let (msg, _ch) = dm_message(123, 555, None, true);
         fx.events.on_message(msg).await;
         assert_eq!(fx.publisher.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bot_authored_dm_skips_the_human_disclaimer() {
+        let fx = dm_fixture(vec![123]);
+        let (msg, ch) = dm_message(123, 555, None, true);
+        fx.events.on_message(msg).await;
+        assert!(ch.sent.lock().unwrap().is_empty());
+        assert!(
+            fx.subs
+                .lock()
+                .unwrap()
+                .get(555, SubscriptionKind::Text)
+                .is_some()
+        );
     }
 
     #[tokio::test]

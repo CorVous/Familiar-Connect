@@ -129,7 +129,7 @@ impl DiscordTextSource {
                 mentions: params.mentions,
                 images: params.images,
                 pings_bot: params.pings_bot,
-                author_is_bot: false,
+                author_is_bot: params.author_is_bot,
                 wake: false,
             }),
         };
