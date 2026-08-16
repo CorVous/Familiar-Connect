@@ -511,6 +511,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     use crate::config::load_character_config;
     use crate::embedding::known_embedders;
     use crate::llm::LlmClient;
+    use crate::log_style as ls;
     use crate::processors::projectors::known_projectors;
 
     // `_default` is a tracked repo resource resolved independently of where the
