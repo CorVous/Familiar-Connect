@@ -840,7 +840,7 @@ the store side; non-numeric input drops to NULL.
 backend          = "off"   # "off" | "hash" | "fastembed"
 dim              = 256     # hash only — vector size
 fastembed_model  = "BAAI/bge-small-en-v1.5"
-fastembed_cache_dir = ""   # blank = ~/.cache/fastembed
+fastembed_cache_dir = ""   # blank = ./.fastembed_cache (CWD-relative!)
 ```
 
 Three knobs gate the seam — flip all three to turn it on:
@@ -873,7 +873,15 @@ cargo build --features local-embed
 ```
 
 Brings in the `fastembed` crate (ONNX via `ort`). Model downloads on
-first use (cached under `~/.cache/fastembed`). Common choices:
+first use. **Leave `fastembed_cache_dir` blank and the cache lands in
+`./.fastembed_cache`, relative to the process's working directory** —
+that's the crate's own default, not `~/.cache/fastembed` (the Python
+library's default, which this port does not inherit). Under `cargo
+run`/`cargo test` from the crate dir that means ~130 MB inside the
+repo. Set `fastembed_cache_dir` (or the `FASTEMBED_CACHE_DIR` env var
+the crate reads) to a stable absolute path for any long-lived deploy,
+so a redeploy from a different CWD doesn't re-download the model.
+Common choices:
 
 If `backend = "fastembed"` is selected but the feature isn't compiled
 in, the bot **refuses to start** — the built-in `fastembed` factory

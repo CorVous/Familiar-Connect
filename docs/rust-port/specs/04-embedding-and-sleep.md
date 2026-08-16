@@ -445,7 +445,7 @@ contract; this subsystem only declares the two `Schema` values above.
 | `[providers.embedding].backend` | `"off"` | factory via `EmbeddingConfig` | must be in `known_embedders()`; validated at config parse (02 imports this subsystem's registry) |
 | `[providers.embedding].dim` | `256` | `hash` backend only | positive int; real backends ignore it |
 | `[providers.embedding].fastembed_model` | `"BAAI/bge-small-en-v1.5"` | `fastembed` backend | non-empty string |
-| `[providers.embedding].fastembed_cache_dir` | `None` | `fastembed` backend | empty string coerces to `None`; unset → library default `~/.cache/fastembed` |
+| `[providers.embedding].fastembed_cache_dir` | `None` | `fastembed` backend | empty string coerces to `None`; unset → library default, which **differs by language**: Python `~/.cache/fastembed`, Rust crate `./.fastembed_cache` (CWD-relative, or `$FASTEMBED_CACHE_DIR`) |
 | `[prompt].sleep_consolidation_system` | `""` | consolidation system msg | prose ships only in `data/familiars/_default/character.toml`; `_default`→override deep-merge |
 | `[prompt].sleep_stance_system` | `""` | stance stage (`{self_name}`) | same |
 | `[prompt].sleep_synthesis_system` | `""` | synthesis stage (`{self_name}`) | same |
@@ -516,7 +516,13 @@ Imported BY (others → this subsystem):
 - **`asyncio.to_thread` / load lock** → `tokio::sync::OnceCell` or `Mutex<Option<Model>>` +
   `spawn_blocking`. `fastembed` has a native Rust crate (`fastembed` on crates.io, ONNX via ort)
   — use it instead of shelling to Python; keep `name` format `fastembed:{model}` and the
-  known-dims table so stored rows stay compatible.
+  known-dims table so stored rows stay compatible. **Cache-dir divergence:** the pass-through
+  of `cache_dir` (only set the option when configured) is preserved, but the two libraries'
+  defaults differ — Python falls back to `~/.cache/fastembed`, the Rust crate to a CWD-relative
+  `./.fastembed_cache` (`DEFAULT_CACHE_DIR` in `fastembed::common`, overridable via
+  `$FASTEMBED_CACHE_DIR`). So an unset `fastembed_cache_dir` writes ~130 MB wherever the process
+  was launched from, and re-downloads if the CWD moves. Same class of CWD-relative-state bug as
+  the familiars root (#201); worth defaulting to the platform data dir if it bites.
 - **Timezone bucketing**: `chrono` + `chrono-tz`; the bucket key is a LOCAL calendar date string
   from a UTC timestamp — DST-transition days must match Python `astimezone` semantics (chrono-tz
   does). Invalid tz name currently raises out of `gather_days` (engine guard catches it); keep

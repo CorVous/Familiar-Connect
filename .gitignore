@@ -37,6 +37,13 @@ data/familiars/*
 # Downloaded out of band; see docs/architecture/voice-pipeline.md.
 /data/models/
 
+# FastEmbed model cache (~130 MB for BGE-small). The `fastembed` crate's
+# default cache_dir is the CWD-relative `.fastembed_cache`, so this lands
+# wherever cargo was invoked from — not anchored. Set
+# `[providers.embedding].fastembed_cache_dir` or FASTEMBED_CACHE_DIR to
+# relocate it.
+.fastembed_cache/
+
 .aider*
 
 # Claude Code local agent artifacts (worktrees, run logs, locks)
