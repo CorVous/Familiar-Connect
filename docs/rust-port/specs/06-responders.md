@@ -214,7 +214,8 @@ TextResponder (`wait_for_backoff` + `notify_user_message`).
    initial=1, max=16: 1, 2, 4, … capped at max. Ladder state is in-memory
    only (lost on restart).
 4. **Y4** `notify_user_message` resets the ladder (pops both `next` and
-   `deadline`); the next bot-typing event starts at initial again.
+   `deadline`); the next bot-typing event starts at initial again. Its caller
+   (T4) invokes it for human authors only (#223).
 5. **Y5** `backoff_deadline` lazily cleans expired deadlines (≤ now → pop,
    return None). `wait_for_backoff` reads the deadline ONCE and sleeps once;
    a new bot-typing event landing during the sleep extends the stored deadline
@@ -246,8 +247,12 @@ TextResponder (`wait_for_backoff` + `notify_user_message`).
    feeds the quiet-clock.
 4. **T4** Typing policy (when handler wired): `await
    wait_for_backoff(channel_id)` BEFORE claiming the turn, then
-   `notify_user_message(channel_id)` (ladder reset). Order: backoff sleep →
-   reset → `begin_turn`.
+   `notify_user_message(channel_id)` (ladder reset) **only when the payload's
+   `author_is_bot` is false** (#223). Order: backoff sleep → reset →
+   `begin_turn`. A bot-authored message still ingests and still waits out the
+   backoff, but must NOT reset the ladder — otherwise two familiars sharing a
+   channel hold each other at `typing_backoff_initial_s` forever instead of
+   climbing to `typing_backoff_max_s`.
 5. **T5** `scope = router.begin_turn(session_id=event.session_id,
    turn_id=event.turn_id)` — session is `discord:<channel_id>`; this cancels
    any prior in-flight turn for the channel (self-supersede).
