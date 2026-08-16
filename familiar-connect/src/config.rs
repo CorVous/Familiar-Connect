@@ -859,88 +859,138 @@ fn deep_merge(base: &Table, override_: &Table) -> Table {
     result
 }
 
+/// How a vision-wiring finding is surfaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisionSeverity {
+    /// Cannot work under any model; rejected at load.
+    Fatal,
+    /// Loads, but does not do what the author most likely meant.
+    Warning,
+}
+
+/// The single truth table over `(slot, image_tools, describer, multimodal)`.
+///
+/// Load-time rejection and startup warnings both read this one walk, so the
+/// runtime gate ([`IMAGE_TOOL_SLOT`]), the validator and the diagnostics cannot
+/// disagree about which slot actually registers `view_image` — the drift the
+/// constant exists to prevent.
+///
+/// Only [`IMAGE_TOOL_SLOT`] reaches a tool registry, so a flag on any other slot
+/// is inert: it earns one "ignored" warning and no judgement about delivery
+/// mode, because no delivery happens there at all. Within that slot,
+/// `view_image` needs `[llm].image_description_model` (to describe the image) or
+/// `multimodal` (to send it); with neither the tool can only ever hand back
+/// `"(no description model configured)"` after spending a fetch and a
+/// compression, which is what `docs/architecture/tuning.md` § `image_tools`
+/// already documents as a requirement. Python accepted all of this silently
+/// (DESIGN D22).
+fn classify_vision_wiring(
+    llm: &BTreeMap<String, LLMSlotConfig>,
+    image_description_model: &str,
+) -> Vec<(VisionSeverity, String)> {
+    use VisionSeverity::{Fatal, Warning};
+
+    let describer = !image_description_model.is_empty();
+    let inert_multimodal = |name: &str| {
+        format!(
+            "[llm.{name}].multimodal has no effect without image_tools = true — only \
+             view_image produces image content blocks"
+        )
+    };
+    let mut out = Vec::new();
+
+    for (name, slot) in llm {
+        if name != IMAGE_TOOL_SLOT {
+            if slot.image_tools {
+                out.push((
+                    Warning,
+                    format!(
+                        "[llm.{name}].image_tools is ignored — only the `{IMAGE_TOOL_SLOT}` \
+                         slot registers view_image (the voice registry never does)"
+                    ),
+                ));
+            } else if slot.multimodal {
+                out.push((Warning, inert_multimodal(name)));
+            }
+            continue;
+        }
+        if !slot.image_tools {
+            if slot.multimodal {
+                out.push((Warning, inert_multimodal(name)));
+            }
+            continue;
+        }
+        match (describer, slot.multimodal) {
+            (false, false) => out.push((
+                Fatal,
+                format!(
+                    "[llm.{name}].image_tools = true needs [llm].image_description_model (to \
+                     describe the image) or [llm.{name}].multimodal = true (to send the image \
+                     itself) — with neither, view_image can only return '(no description \
+                     model configured)'"
+                ),
+            )),
+            (false, true) => out.push((
+                Warning,
+                format!(
+                    "[llm.{name}] sees images but nothing describes them — history persists \
+                     text only, so the image is invisible to every later turn; set \
+                     [llm].image_description_model"
+                ),
+            )),
+            (true, false) => out.push((
+                Warning,
+                format!(
+                    "[llm.{name}].multimodal = false — view_image will send '{}' a text \
+                     description only, never the image; set multimodal = true if that model \
+                     supports vision",
+                    slot.model
+                ),
+            )),
+            (true, true) => {}
+        }
+    }
+
+    // Keyed on the one slot that can call the describer — a flag on any other
+    // slot is inert and must not mask this, and an absent slot cannot call it.
+    if describer && !llm.get(IMAGE_TOOL_SLOT).is_some_and(|s| s.image_tools) {
+        out.push((
+            Warning,
+            format!(
+                "[llm].image_description_model = '{image_description_model}' is never called \
+                 — the `{IMAGE_TOOL_SLOT}` slot does not set image_tools = true"
+            ),
+        ));
+    }
+    out
+}
+
 /// Reject vision wiring that cannot carry anything about an image.
 ///
-/// `view_image` always produces both a description and a JPEG, but the
-/// description needs `[llm].image_description_model` and the JPEG needs the
-/// slot's `multimodal`. With neither, the tool spends a fetch, two compressions
-/// and a 30 s timeout to hand the model the fixed string
-/// `"(no description model configured)"` — never what an author intends, so the
-/// load fails instead of degrading silently. Enforces what
-/// `docs/architecture/tuning.md` § `image_tools` already documents; Python
-/// accepted it silently (DESIGN D22).
+/// See [`classify_vision_wiring`] for the rules; this surfaces the first
+/// [`VisionSeverity::Fatal`] finding as the load error.
 fn validate_vision_wiring(
     llm: &BTreeMap<String, LLMSlotConfig>,
     image_description_model: &str,
 ) -> Result<(), ConfigError> {
-    for (name, slot) in llm {
-        if slot.image_tools && image_description_model.is_empty() && !slot.multimodal {
-            return Err(ConfigError(format!(
-                "[llm.{name}].image_tools = true needs [llm].image_description_model (to \
-                 describe the image) or [llm.{name}].multimodal = true (to send the image \
-                 itself) — with neither, view_image can only return '(no description model \
-                 configured)'"
-            )));
-        }
-    }
-    Ok(())
+    classify_vision_wiring(llm, image_description_model)
+        .into_iter()
+        .find(|(severity, _)| *severity == VisionSeverity::Fatal)
+        .map_or(Ok(()), |(_, message)| Err(ConfigError(message)))
 }
 
-/// Non-fatal vision-wiring diagnostics, emitted once at startup.
+/// Non-fatal vision-wiring diagnostics, emitted once at the composition root.
 ///
-/// Each entry names a flag combination that parses cleanly but does not do what
-/// the author most likely meant. Vision capability cannot be inferred from a
-/// model string, so the text-only case is *reported*, never guessed at: the
-/// point is that the active mode is visible in the log rather than silent
-/// (DESIGN D22).
+/// Vision capability cannot be inferred from a model string, so the text-only
+/// case is *reported*, never guessed at: the point is that the active mode is
+/// visible in the log rather than silent. See [`classify_vision_wiring`].
 #[must_use]
 pub fn vision_config_warnings(config: &CharacterConfig) -> Vec<String> {
-    let mut out = Vec::new();
-    let describer = !config.image_description_model.is_empty();
-    let mut any_image_tools = false;
-
-    for (name, slot) in &config.llm {
-        if !slot.image_tools {
-            if slot.multimodal {
-                out.push(format!(
-                    "[llm.{name}].multimodal has no effect without image_tools = true — only \
-                     view_image produces image content blocks"
-                ));
-            }
-            continue;
-        }
-        any_image_tools = true;
-        if name != IMAGE_TOOL_SLOT {
-            out.push(format!(
-                "[llm.{name}].image_tools is ignored — only the `{IMAGE_TOOL_SLOT}` slot \
-                 registers view_image (the voice registry never does)"
-            ));
-        }
-        if slot.multimodal && !describer {
-            out.push(format!(
-                "[llm.{name}] sees images but nothing describes them — history persists text \
-                 only, so the image is invisible to every later turn; set \
-                 [llm].image_description_model"
-            ));
-        }
-        if !slot.multimodal && describer {
-            out.push(format!(
-                "[llm.{name}].multimodal = false — view_image will send '{}' a text \
-                 description only, never the image; set multimodal = true if that model \
-                 supports vision",
-                slot.model
-            ));
-        }
-    }
-
-    if describer && !any_image_tools {
-        out.push(format!(
-            "[llm].image_description_model = '{}' is never called — no slot sets \
-             image_tools = true",
-            config.image_description_model
-        ));
-    }
-    out
+    classify_vision_wiring(&config.llm, &config.image_description_model)
+        .into_iter()
+        .filter(|(severity, _)| *severity == VisionSeverity::Warning)
+        .map(|(_, message)| message)
+        .collect()
 }
 
 #[allow(
@@ -2570,6 +2620,36 @@ mod tests {
         assert!(validate_vision_wiring(&llm, "").is_ok());
     }
 
+    /// Only the prose slot's flag reaches a registry, so the same combination
+    /// that is fatal there is an inert no-op elsewhere — it must stay loadable
+    /// and warn, exactly as the docs promise.
+    #[test]
+    fn image_tools_on_non_prose_slot_is_never_fatal() {
+        for name in ["fast", "background"] {
+            let llm = slots(&[
+                (name, vision_slot(true, false)),
+                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+            ]);
+            assert!(
+                validate_vision_wiring(&llm, "").is_ok(),
+                "[llm.{name}].image_tools is inert and must not refuse to boot"
+            );
+            let cfg = vision_config(
+                &[
+                    (name, vision_slot(true, false)),
+                    (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+                ],
+                "",
+            );
+            assert!(
+                vision_config_warnings(&cfg)
+                    .iter()
+                    .any(|w| w.contains("is ignored")),
+                "[llm.{name}].image_tools must still warn"
+            );
+        }
+    }
+
     #[test]
     fn fully_wired_vision_warns_about_nothing() {
         let cfg = vision_config(
@@ -2601,10 +2681,54 @@ mod tests {
 
     #[test]
     fn image_tools_on_ignored_slot_warns() {
-        let cfg = vision_config(&[("fast", vision_slot(true, true))], "openai/gpt-4o");
+        let cfg = vision_config(
+            &[
+                ("fast", vision_slot(true, true)),
+                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+            ],
+            "openai/gpt-4o",
+        );
         let warnings = vision_config_warnings(&cfg);
-        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[llm.fast].image_tools is ignored"))
+        );
+    }
+
+    /// An inert flag on a non-prose slot must not mask the dead-describer
+    /// warning: nothing there can ever call the description model.
+    #[test]
+    fn ignored_slot_does_not_mask_unused_description_model() {
+        let cfg = vision_config(
+            &[
+                ("fast", vision_slot(true, true)),
+                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+            ],
+            "openai/gpt-4o",
+        );
+        let warnings = vision_config_warnings(&cfg);
+        assert!(
+            warnings.iter().any(|w| w.contains("is never called")),
+            "dead describer must still be reported, got {warnings:?}"
+        );
+    }
+
+    /// The ignored-slot warning is terminal for that slot — following it with
+    /// delivery-mode advice would contradict it in the same log block.
+    #[test]
+    fn ignored_slot_warning_does_not_also_advise_delivery_mode() {
+        let cfg = vision_config(
+            &[
+                ("fast", vision_slot(true, false)),
+                (IMAGE_TOOL_SLOT, vision_slot(true, true)),
+            ],
+            "openai/gpt-4o",
+        );
+        let warnings = vision_config_warnings(&cfg);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert!(warnings[0].contains("[llm.fast].image_tools is ignored"));
+        assert!(!warnings.iter().any(|w| w.contains("set multimodal = true")));
     }
 
     #[test]
@@ -2624,6 +2748,7 @@ mod tests {
         let warnings = vision_config_warnings(&cfg);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("is never called"));
+        assert!(warnings[0].contains("`prose` slot does not set image_tools"));
     }
 
     #[test]

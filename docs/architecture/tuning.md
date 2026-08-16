@@ -679,12 +679,14 @@ registry. Only the `prose` slot is read — `image_tools` on `fast` or
 prompt is neutral by default; append per-familiar persona constraints
 with `[prompt].image_description_constraints` (see below).
 
-`image_tools = true` requires at least one way for the image to reach
-the model: `[llm].image_description_model` (text description) or this
-slot's `multimodal = true` (the image itself). With neither, the tool
-would spend a fetch, two compressions and a 30 s timeout to return the
+On the `prose` slot, `image_tools = true` requires at least one way for
+the image to reach the model: `[llm].image_description_model` (text
+description) or that slot's `multimodal = true` (the image itself). With
+neither, the tool would spend a fetch and a compression to return the
 fixed string `"(no description model configured)"`, so config loading
-**fails** rather than degrading silently. See
+**fails** rather than degrading silently. The check is scoped to `prose`
+because that is the only slot whose flag registers anything — elsewhere
+the same combination is an inert no-op and only warns. See
 [Vision wiring checks](#vision-wiring-checks).
 
 ### `[prompt].image_description_constraints`
@@ -710,14 +712,27 @@ loader never guesses. It rejects the one combination that cannot work,
 and reports the rest at startup so the active mode is visible in the log
 instead of silent:
 
+Every row below is decided by one walk over
+`(slot, image_tools, describer, multimodal)`, shared by the load-time
+rejection and the startup warnings, so the runtime gate and the
+diagnostics cannot disagree about which slot registers `view_image`.
+
+The first three rows apply to the **`prose` slot only** — that is the
+only slot whose `image_tools` flag reaches a tool registry, so on any
+other slot the flag is inert and earns row 4 instead:
+
 | Combination | Result |
 |---|---|
 | `image_tools`, no describer, `multimodal = false` | **config error** — nothing about the image can reach the model |
 | `image_tools`, describer, `multimodal = false` | warn: text descriptions only, never the image — set `multimodal = true` if the model supports vision |
 | `image_tools`, no describer, `multimodal = true` | warn: history persists text only, so the image is invisible to every later turn |
-| `image_tools` on a slot other than `prose` | warn: ignored, only `prose` registers `view_image` |
+| `image_tools` on a slot other than `prose` | warn: ignored, only `prose` registers `view_image` (and nothing further is said about that slot's delivery mode, since nothing is delivered there) |
 | `multimodal` without `image_tools` | warn: no effect, only `view_image` produces image blocks |
-| `image_description_model` set, no slot with `image_tools` | warn: the description model is never called |
+| `image_description_model` set, `prose` without `image_tools` | warn: the description model is never called |
+
+Warnings are emitted once, at the composition root — the fatal half runs
+at parse time, so neither half depends on a build that has the network
+feature enabled.
 
 ## Prompt assembly budget
 
