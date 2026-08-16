@@ -1178,6 +1178,7 @@ impl BotEvents {
                 mentions: mention_authors,
                 images,
                 pings_bot,
+                author_is_bot: false,
             },
         )
         .await;
@@ -4066,6 +4067,23 @@ mod tests {
         let (msg, _ch) = dm_message(321, 888, Some(7), true);
         fx.events.on_message(msg).await;
         assert_eq!(fx.publisher.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingested_event_carries_author_is_bot() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        let (bot_msg, _ch) = dm_message(321, 888, Some(7), true);
+        fx.events.on_message(bot_msg).await;
+        let (human_msg, _ch2) = dm_message(123, 888, Some(7), false);
+        fx.events.on_message(human_msg).await;
+        let calls = fx.publisher.calls.lock().unwrap();
+        assert!(calls[0].author_is_bot);
+        assert!(!calls[1].author_is_bot);
     }
 
     #[tokio::test]

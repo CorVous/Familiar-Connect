@@ -64,6 +64,8 @@ pub struct DiscordTextPayload {
     pub images: HashMap<String, String>,
     /// Whether the incoming message pinged the bot.
     pub pings_bot: bool,
+    /// Whether the platform reports the author as a bot.
+    pub author_is_bot: bool,
     /// Synthetic unread-nudge wake (no real user content).
     pub wake: bool,
 }
