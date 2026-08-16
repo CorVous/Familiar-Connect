@@ -1,4 +1,4 @@
-//! `activities.toml` catalog + knobs loader (subsystem 11; Python `activities/config.py`).
+//! `activities.toml` catalog + knobs loader (subsystem 11).
 //!
 //! Sidecar per familiar: `data/familiars/<id>/activities.toml` (lorebook
 //! precedent). Missing file or empty catalog ⇒ disabled config
@@ -196,8 +196,8 @@ fn deep_merge(base: &Table, override_: &Table) -> Table {
     result
 }
 
-/// Render a sorted key list as a Python-`repr`-ish `['a', 'b']` blob (the
-/// substring the tests match is the key name; the shape mirrors Python).
+/// Render a sorted key list as a `['a', 'b']` blob (the substring the tests
+/// match is the key name).
 fn sorted_list_repr<I: IntoIterator<Item = String>>(items: I) -> String {
     let mut v: Vec<String> = items.into_iter().collect();
     v.sort();
@@ -206,8 +206,8 @@ fn sorted_list_repr<I: IntoIterator<Item = String>>(items: I) -> String {
 }
 
 /// Alphabetically-sorted `", "`-joined key list for the `valid keys:` portion
-/// of unknown-key errors — mirrors Python's `", ".join(sorted(_KEYS))` (the
-/// declared arrays are in authoring order, not sorted).
+/// of unknown-key errors — always sorted (the declared arrays are in
+/// authoring order, not sorted).
 fn sorted_join(keys: &[&str]) -> String {
     let mut v: Vec<&str> = keys.to_vec();
     v.sort_unstable();
@@ -288,7 +288,7 @@ fn parse_activities_config(data: &Table) -> Result<ActivitiesConfig, ConfigError
 
 #[allow(
     clippy::too_many_lines,
-    reason = "faithful 1:1 transliteration of the Python _parse_catalog_entry sequence"
+    reason = "one flat field-by-field parse sequence; splitting it would scatter the error-message contract"
 )]
 fn parse_catalog_entry(raw: &Value, idx: usize) -> Result<ActivityType, ConfigError> {
     let Value::Table(entry) = raw else {
@@ -446,8 +446,8 @@ fn parse_duration_minutes(value: &Value, entry_id: &str) -> Result<(i64, i64), C
     if arr.len() != 2 {
         return Err(err());
     }
-    // `as_integer` rejects booleans (toml keeps them distinct) — the Python
-    // `isinstance(_, bool)` guard is free here.
+    // `as_integer` rejects booleans (toml keeps them distinct), so no explicit
+    // bool guard is needed here.
     let (Some(lo), Some(hi)) = (arr[0].as_integer(), arr[1].as_integer()) else {
         return Err(err());
     };
@@ -457,7 +457,7 @@ fn parse_duration_minutes(value: &Value, entry_id: &str) -> Result<(i64, i64), C
     Ok((lo, hi))
 }
 
-/// TOML value type name (mirrors Python's `type(x).__name__` in messages).
+/// TOML value type name, as it appears in error messages.
 const fn toml_type_name(v: &Value) -> &'static str {
     match v {
         Value::String(_) => "str",
@@ -472,7 +472,7 @@ const fn toml_type_name(v: &Value) -> &'static str {
 
 /// A short `repr`-ish rendering of a scalar TOML value for error messages.
 ///
-/// Booleans render Python-style (`True`/`False`) to match `{value!r}`: a TOML
+/// Booleans render as `True`/`False` in error messages: a TOML
 /// `true` reaches these paths as a `Value::Boolean`, whose `to_string()` would
 /// otherwise emit the lowercase `true`/`false`.
 fn py_value_repr(v: &Value) -> String {
@@ -655,12 +655,10 @@ seed = \"The night's dream, told on waking.\"
 
     #[test]
     fn knob_rejects_bool() {
-        // Python `bool` is an `int`; the explicit rejection is replicated free
-        // by toml's distinct Boolean variant.
+        // toml's distinct Boolean variant rejects bools for free.
         let err = load("min_gap_minutes = true\n").unwrap_err();
         assert!(err.0.contains("min_gap_minutes"), "{}", err.0);
-        // Python renders the offender via `{value!r}` = `repr(True)` = `True`,
-        // not TOML's lowercase `true`.
+        // The offender renders as `True`, not TOML's lowercase `true`.
         assert_eq!(
             err.0,
             "min_gap_minutes must be a positive integer, got True"
@@ -671,8 +669,8 @@ seed = \"The night's dream, told on waking.\"
     fn unknown_top_level_key_rejected() {
         let err = load("archive_minutes = 45\n").unwrap_err();
         assert!(err.0.contains("archive_minutes"), "{}", err.0);
-        // The `valid keys:` list is alphabetically sorted (Python
-        // `", ".join(sorted(_TOP_LEVEL_KEYS))`), not array-declaration order.
+        // The `valid keys:` list is alphabetically sorted, not
+        // array-declaration order.
         assert_eq!(
             err.0,
             "unknown activities.toml keys: ['archive_minutes']; valid keys: \
@@ -700,7 +698,7 @@ seed = \"The night's dream, told on waking.\"
     fn unknown_entry_key_rejected() {
         let err = load(&format!("{VALID_ENTRY}colour = \"blue\"\n")).unwrap_err();
         assert!(err.0.contains("colour"), "{}", err.0);
-        // Sorted valid-keys list (Python `", ".join(sorted(_ENTRY_KEYS))`).
+        // Sorted valid-keys list.
         assert_eq!(
             err.0,
             "unknown keys in [[catalog]] entry #0: ['colour']; valid keys: \

@@ -1,10 +1,10 @@
 //! Bus seams: [`BackpressurePolicy`] + the [`EventBus`] / [`StreamSource`] /
-//! [`Processor`] traits (subsystem 01; Python `bus/protocols.py`).
+//! [`Processor`] traits (subsystem 01).
 //!
 //! Kept separate from the concrete [`InProcessEventBus`](crate::bus::InProcessEventBus)
 //! so a future process-spanning `EventBus` drops in without touching processor
-//! code. Python's runtime-checkable `Protocol`s become Rust traits (structural
-//! conformance is enforced at compile time rather than by `isinstance`).
+//! code. Capability contracts are Rust traits, so conformance is enforced at
+//! compile time.
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use crate::bus::in_process::Subscription;
 
 /// Per-subscription behaviour when a subscriber's queue is full.
 ///
-/// The wire string values (`"block"`, …) match the Python enum values.
+/// The wire string values (`"block"`, …) are a stable contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BackpressurePolicy {
     /// `publish` awaits until space frees — never loses data. The default.
@@ -41,7 +41,7 @@ impl BackpressurePolicy {
         Self::Unbounded,
     ];
 
-    /// The wire string value (matches the Python enum member values).
+    /// The wire string value.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -54,7 +54,7 @@ impl BackpressurePolicy {
 }
 
 /// Topic-addressed pub/sub surface. **The** swappable seam — a future
-/// cross-process bus drops in here (Python `EventBus` `Protocol`).
+/// cross-process bus drops in here.
 #[async_trait]
 pub trait EventBus: Send + Sync {
     /// Transition `STARTING → RUNNING` (idempotent).
@@ -72,7 +72,7 @@ pub trait EventBus: Send + Sync {
     ) -> Subscription;
 }
 
-/// Produces events onto the bus (Python runtime-checkable `StreamSource`).
+/// Produces events onto the bus.
 #[async_trait]
 pub trait StreamSource: Send + Sync {
     /// Stable identifier for logging/registration.
@@ -81,13 +81,10 @@ pub trait StreamSource: Send + Sync {
     async fn run(&self, bus: Arc<dyn EventBus>);
 }
 
-/// Subscribes to one or more topics; optionally re-publishes (Python
-/// runtime-checkable `Processor`).
+/// Subscribes to one or more topics; optionally re-publishes.
 ///
-/// Per DESIGN D6 (the resolved dispatcher error contract) `handle` returns a
-/// `Result`, and the dispatch loop logs-and-continues on `Err` rather than
-/// swallowing exceptions inside the processor — the behaviour the Python
-/// docstring promised but the wiring never delivered.
+/// `handle` returns a `Result`, and the dispatch loop logs-and-continues on
+/// `Err` rather than swallowing errors inside the processor.
 #[async_trait]
 pub trait Processor: Send + Sync {
     /// Stable identifier for logging/registration.

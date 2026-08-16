@@ -1,5 +1,4 @@
-//! Opinion-formation pass — form the familiar's stances (subsystem 04; Python
-//! `sleep/opinion_formation.py`).
+//! Opinion-formation pass — form the familiar's stances (subsystem 04).
 //!
 //! Sleep function #2. Reads the conversation log up to the sleep watermark's turn
 //! axis, bucketed per calendar day in the familiar's `display_tz`, and forms its
@@ -31,8 +30,8 @@ use crate::structured_request::{
 };
 use crate::support::time::parse_iso;
 
-/// Declared but unused in the Python source — no per-day turn cap is
-/// implemented. Retained as a documented constant for parity; **not** consulted.
+/// Declared but unused — no per-day turn cap is
+/// implemented. Retained as a documented constant; **not** consulted.
 pub const DEFAULT_TURNS_MAX_PER_DAY: i64 = 600;
 /// Default cap on the number of opinions one synthesis may record.
 pub const DEFAULT_OPINION_CAP: i64 = 60;
@@ -162,8 +161,7 @@ pub struct OpinionPlan {
 }
 
 impl OpinionPlan {
-    /// A plan with the counts zeroed and no notes (the Python default-arg
-    /// constructor; [`validate_opinions`] fills the counts directly).
+    /// A plan with the counts zeroed and no notes.
     #[must_use]
     pub fn new(
         familiar_id: impl Into<String>,
@@ -200,8 +198,8 @@ pub struct OpinionApplyReport {
 /// turns stay id-ordered (chronological).
 ///
 /// # Errors
-/// [`SleepError::InvalidTimezone`] when `tz_name` is not an IANA zone — Python's
-/// `ZoneInfo(tz_name)` raises here too; the engine guard catches it.
+/// [`SleepError::InvalidTimezone`] when `tz_name` is not an IANA zone; the
+/// engine guard catches it.
 pub fn bucket_by_day(turns: &[HistoryTurn], tz_name: &str) -> Result<Vec<DayBatch>, SleepError> {
     let tz: Tz = tz_name
         .parse()
@@ -272,14 +270,14 @@ pub fn render_turn(t: &HistoryTurn, self_name: &str) -> String {
 #[must_use]
 pub fn coerce_importance(raw: Option<&Value>) -> i64 {
     match raw {
-        // JSON integers clamp to [1, 10]. A JSON `true`/`false` is `Value::Bool`
-        // (distinct from `Number`), a float has no `as_i64`, and absent/other
-        // values all fall to the wildcard — every non-integer degrades to 5,
-        // matching Python's `isinstance(bool) → 5` / non-int → 5 rules.
+        // JSON integers clamp to [1, 10]. A JSON `true`/`false` is
+        // `Value::Bool` (distinct from `Number`), a float has no `as_i64`, and
+        // absent/other values all fall to the wildcard — every non-integer
+        // degrades to 5→ 5 rules.
         Some(Value::Number(n)) => n.as_i64().map_or(5, |v| v.clamp(1, 10)),
         Some(Value::String(s)) => {
             let t = s.trim();
-            // Python: raw.strip().lstrip("-").isdigit() then int(raw.strip()).
+            // Trim, allow one leading `-`, require digits, then parse.
             let body = t.strip_prefix('-').unwrap_or(t);
             if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()) {
                 t.parse::<i64>().map_or(5, |v| v.clamp(1, 10))
@@ -457,8 +455,8 @@ pub async fn synthesize(
 ///
 /// # Errors
 /// [`SleepError::EmptyOpinionGroundingDays`] when an accepted opinion's ids are
-/// all absent from the window's turn→day map (Python's `min(...)` raises
-/// `ValueError` here). Unreachable via [`plan_opinions`], where
+/// all absent from the window's turn→day map (the earliest-day `min` has no
+/// argument). Unreachable via [`plan_opinions`], where
 /// `grounding_union ⊆ turn_day` by construction.
 pub fn validate_opinions(
     raw: &[Value],
@@ -539,8 +537,8 @@ pub fn validate_opinions(
         }
         // earliest grounding day (honest timeline); ids are all in grounding_union
         // ⊆ turn_day, so `min` is always present via plan_opinions. An absent
-        // day map (inconsistent window/stance pairing) mirrors Python's `min()`
-        // ValueError rather than silently degrading to an empty date.
+        // day map (inconsistent window/stance pairing) raises rather than
+        // silently degrading to an empty date.
         let valid_from = ids
             .iter()
             .filter_map(|i| turn_day.get(i))
@@ -640,7 +638,7 @@ pub async fn apply_opinions(
             parse_iso(&format!("{}T00:00:00+00:00", op.valid_from_date)).ok_or_else(|| {
                 anyhow::anyhow!("invalid valid_from_date: {}", op.valid_from_date)
             })?;
-        // `dedup` stays at its `true` default, matching Python's `append_fact`.
+        // `dedup` stays at its `true` default.
         let builder = crate::history::store::AppendFact::new(
             fam.clone(),
             None, // opinions are global stances, not channel-bound
@@ -1072,8 +1070,7 @@ mod tests {
     fn errors_when_accepted_grounding_absent_from_window_days() {
         // grounding_union carries id 99 (so the ungrounded rail passes), but 99
         // is in no window turn, so the earliest-grounding-day `min` is empty.
-        // Python's `min(... for i in ids if i in turn_day)` raises ValueError;
-        // the port mirrors the raise instead of degrading to an empty date.
+        // The empty `min` raises here rather than degrading to an empty date.
         // Unreachable via plan_opinions (grounding_union ⊆ turn_day there).
         let cands = vec![cand("orphan stance", "2026-06-12", vec![99])];
         let raw =

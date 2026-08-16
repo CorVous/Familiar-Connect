@@ -58,5 +58,5 @@ pub mod activities;
 pub mod twitch;
 pub mod twitch_watcher;
 
-// --- port-introduced shared helpers (no direct Python source) ---
+// --- shared helpers ---
 pub mod support;

@@ -1,5 +1,3 @@
-//! Ported from Python `tests/test_fact_supersede_worker.py`.
-
 #[path = "workers_helpers/mod.rs"]
 mod helpers;
 

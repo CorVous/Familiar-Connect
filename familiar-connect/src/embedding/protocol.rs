@@ -1,16 +1,17 @@
-//! Embedder seam trait (subsystem 04; Python `embedding/protocol.py`).
+//! Embedder seam trait (subsystem 04).
 //!
-//! The swappable text → fixed-dim vector seam. Consumers (`FactEmbeddingWorker`
-//! in 07, `RagContextLayer` in 05) hold an `Option<Arc<dyn Embedder>>` and treat
-//! "no embedder" and "seam off" identically, so every call site stays
-//! non-conditional (DESIGN §4.8: the trait accepts non-registered impls — a bare
-//! struct with `name`/`dim`/`embed` satisfies it, no registry needed).
+//! The swappable text → fixed-dim vector seam. Consumers
+//! (`FactEmbeddingWorker` in 07, `RagContextLayer` in 05) hold an
+//! `Option<Arc<dyn Embedder>>` and treat "no embedder" and "seam off"
+//! identically, so every call site stays non-conditional (the trait accepts
+//! non-registered impls — a bare struct with `name`/`dim`/`embed` satisfies
+//! it, no registry needed).
 
 use async_trait::async_trait;
 
 /// Stable text → vector seam.
 ///
-/// Contract (mirrors the Python `Embedder` Protocol):
+/// Contract:
 ///
 /// * [`name`](Embedder::name) — backend label persisted with each vector so a
 ///   model swap accumulates new `(fact_id, model)` rows beside old ones instead

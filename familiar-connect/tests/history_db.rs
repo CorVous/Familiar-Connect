@@ -1,9 +1,9 @@
 //! Integration tests for the single-owner DB actor (`history::db`).
 //!
-//! Re-pins the Python `test_turso_compat.py` thread-affinity invariant as "all
+//! Pins the thread-affinity invariant: "all
 //! statements execute on the one owner thread, never the caller's". The
-//! `reopen()` / `_conn()` escape-hatch tests are intentionally not ported (the
-//! Rust design drops them — see spec 03 "Do not port").
+//! `reopen()` / `_conn()` escape hatches are deliberately absent from the
+//! design.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

@@ -1,5 +1,5 @@
 //! `TtsPlayer` seam + Discord/logging/mock playback impls
-//! (subsystem 09; Python `tts_player/`).
+//! (subsystem 09).
 
 pub mod discord_player;
 pub mod logging_player;

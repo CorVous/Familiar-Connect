@@ -1,5 +1,4 @@
-//! Discord text message → bus event (subsystem 10; Python
-//! `sources/discord_text.py`).
+//! Discord text message → bus event (subsystem 10).
 //!
 //! Not a pull-loop source; the gateway owns the event loop. The bot's
 //! `on_message` hands off to [`DiscordTextSource::publish_text`], which builds the
@@ -44,8 +43,8 @@ pub struct PublishText {
 }
 
 impl PublishText {
-    /// A minimal payload carrying only the required fields (optionals default to
-    /// absent, matching the Python keyword defaults).
+    /// A minimal payload carrying only the required fields (optionals default
+    /// to absent).
     #[must_use]
     pub fn new(
         channel_id: i64,
@@ -135,8 +134,8 @@ impl DiscordTextSource {
 
 /// The narrow publish seam the Discord shell (`on_message`) points at.
 ///
-/// Mirrors Python's `ingest_event` → `source.publish_text`. A scripted double
-/// satisfies it in the bot tests; production wires [`DiscordTextSource`].
+/// A scripted double satisfies it in the bot tests; production wires
+/// [`DiscordTextSource`].
 #[async_trait]
 pub trait TextPublisher: Send + Sync {
     /// Publish a text event onto the bus.

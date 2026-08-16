@@ -1,6 +1,5 @@
-//! Ported from Python `tests/test_image_describe.py` + `tests/test_image_tool.py`
-//! — the vision describe call and the `view_image` tool (fetch injected via the
-//! `ImageFetcher` seam, replacing the Python `_fetch_image_bytes` patch).
+//! The vision describe call and the `view_image` tool (fetch injected via the
+//! `ImageFetcher` seam).
 #![cfg(feature = "images")]
 
 use std::collections::HashMap;

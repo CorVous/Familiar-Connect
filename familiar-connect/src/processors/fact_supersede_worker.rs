@@ -1,4 +1,4 @@
-//! FactSupersedeWorker retirement (subsystem 07; Python `processors/fact_supersede_worker.py`).
+//! FactSupersedeWorker retirement (subsystem 07).
 //!
 //! For each newly-appended fact, ask the background LLM whether it retires any
 //! prior current facts about the same subject — if so, call
@@ -105,9 +105,9 @@ impl FactSupersedeWorker {
     /// Skip the historical backlog; start from the latest current fact id.
     ///
     /// Called by the projector factory at process start (and directly by tests
-    /// to assert the no-new-facts path) so a fresh deploy doesn't burn LLM calls
-    /// re-evaluating every old fact on the first tick. SYNC — reads
-    /// `store.sync().latest_fact_id`, mirroring the Python `.sync` escape hatch.
+    /// to assert the no-new-facts path) so a fresh deploy doesn't burn LLM
+    /// calls re-evaluating every old fact on the first tick. SYNC — reads
+    /// `store.sync.latest_fact_id`.
     ///
     /// # Errors
     /// Propagates a [`crate::history::StoreError`] if the underlying read fails.

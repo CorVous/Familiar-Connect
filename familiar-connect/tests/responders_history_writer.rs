@@ -1,5 +1,4 @@
-//! Integration tests for `HistoryWriter` (subsystem 06; Python
-//! `tests/test_history_writer.py`).
+//! Integration tests for `HistoryWriter` (subsystem 06).
 
 #[path = "responders_support/mod.rs"]
 mod support;

@@ -1,4 +1,4 @@
-//! ReflectionWorker higher-order reflections (subsystem 07; Python `processors/reflection_worker.py`).
+//! ReflectionWorker higher-order reflections (subsystem 07).
 //!
 //! Compounds higher-order syntheses over recent turns + facts. Fires when at
 //! least `turns_threshold` new turns have accumulated past the
@@ -131,8 +131,8 @@ impl ReflectionWorker {
 
     /// One pass; write reflections if enough new turns accumulated.
     ///
-    /// The watermark ALWAYS advances to `latest_turn` — mirroring the Python
-    /// `try/finally` — so an empty/malformed/all-filtered reply, or a mid-tick
+    /// The watermark ALWAYS advances to `latest_turn` — advanced on every exit
+    /// path — so an empty/malformed/all-filtered reply, or a mid-tick
     /// transport error, cannot pin the worker to an ever-growing window.
     pub async fn tick(&self) -> anyhow::Result<()> {
         timed_async("reflection.tick", async move {
@@ -260,8 +260,7 @@ impl ReflectionWorker {
 }
 
 /// Most-frequent channel id across `turns`; `None` for a cross-channel batch
-/// with no majority winner. Ties go to the first-encountered channel (Python
-/// `max` over the insertion-ordered count dict).
+/// with no majority winner. Ties go to the first-encountered channel.
 fn dominant_channel(turns: &[HistoryTurn]) -> Option<i64> {
     let mut order: Vec<i64> = Vec::new();
     let mut counts: HashMap<i64, i64> = HashMap::new();
@@ -318,8 +317,8 @@ fn build_reflection_prompt(
     let header = format!("{persona}\n\n{}", render_contract(schema));
     let mut lines: Vec<String> = vec!["Recent turns (id prefixed):".to_string()];
     for t in new_turns {
-        // Python: `who = t.author.display_name if t.author is not None else
-        // t.role`, then f-string-rendered. An author present with a `None`
+        // `who` is the author's display name when an author is present, else the
+        // role. An author present with a `None`
         // display name renders the literal `"None"` (not empty, not `role`).
         let who = t.author.as_ref().map_or_else(
             || t.role.clone(),
@@ -371,7 +370,7 @@ fn normalize_reflection_items(parsed: Option<&Value>) -> Vec<ReflectionItem> {
 }
 
 /// Integer-only citation list: keeps JSON integers, drops strings, floats,
-/// bools (JSON `true`/`false` are distinct variants — the Python `True == 1`
+/// bools (JSON `true`/`false` are distinct variants, so the `true == 1`
 /// hazard cannot occur here), and non-array input.
 fn int_list(raw: Option<&Value>) -> Vec<i64> {
     let Some(Value::Array(arr)) = raw else {
@@ -385,7 +384,7 @@ fn int_list(raw: Option<&Value>) -> Vec<i64> {
         .collect()
 }
 
-/// Python `str(value)` for the JSON `text` field (identity on strings).
+/// Stringify the JSON `text` field (identity on strings).
 fn py_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -486,8 +485,8 @@ mod tests {
         let facts: Vec<Fact> = Vec::new();
         let schema = reflection_schema(3);
         let body = build_reflection_prompt(&turns, &facts, &schema)[1].content_str();
-        // display_name present → the name; author present + display_name None →
-        // literal "None" (Python f-string parity); author None → role.
+        // display_name present → the name; author present + display_name None
+        // → literal "None"; author None → role.
         assert!(body.contains("[Cass] m1"), "{body}");
         assert!(body.contains("[None] m2"), "{body}");
         assert!(body.contains("[user] m3"), "{body}");

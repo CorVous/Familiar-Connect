@@ -1,4 +1,4 @@
-//! SummaryWorker rolling focus-stream summary (subsystem 07; Python `processors/summary_worker.py`).
+//! SummaryWorker rolling focus-stream summary (subsystem 07).
 //!
 //! Regenerates the focus-stream rolling summary from the raw `turns` table —
 //! the consumed cross-channel stream the familiar actually attended to, stored
@@ -182,8 +182,8 @@ fn build_rolling_prompt(prior_summary: Option<&str>, new_turns: &[HistoryTurn]) 
         _ => body_lines.push("Turns:".to_string()),
     }
     for t in new_turns {
-        // Python: `who = t.author.display_name if t.author is not None else
-        // t.role`, then f-string-rendered. An author present with a `None`
+        // `who` is the author's display name when an author is present, else the
+        // role. An author present with a `None`
         // display name renders the literal `"None"` (not empty, not `role`).
         let who = t.author.as_ref().map_or_else(
             || t.role.clone(),
@@ -243,8 +243,8 @@ mod tests {
             ),
         ];
         let body = build_rolling_prompt(None, &turns)[1].content_str();
-        // author=None → role; author present + display_name None → the literal
-        // "None" (Python f-string parity); display_name present → the name.
+        // author=None → role; author present + display_name None → the
+        // literal "None"; display_name present → the name.
         assert!(body.contains("[#7 assistant] no author"), "{body}");
         assert!(body.contains("[#7 None] author no display name"), "{body}");
         assert!(

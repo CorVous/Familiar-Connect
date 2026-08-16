@@ -1,10 +1,10 @@
 //! Plain-text renderers for span summaries.
 //!
-//! Port of `familiar_connect/diagnostics/report.py`. Shared by the
-//! `/diagnostics` slash command and the `familiar-connect diagnose` CLI — both
-//! consume [`SpanCollector::summary`](super::collector::SpanCollector::summary)
-//! output (or log-file aggregates in the same [`SpanStats`] shape) and both want
-//! the same terse, Discord-friendly code-fenced table.
+//! Shared by the `/diagnostics` slash command and the `familiar-connect
+//! diagnose` CLI — both consume
+//! [`SpanCollector::summary`](super::collector::SpanCollector::summary) output
+//! (or log-file aggregates in the same [`SpanStats`] shape) and both want the
+//! same terse, Discord-friendly code-fenced table.
 
 use std::collections::BTreeMap;
 

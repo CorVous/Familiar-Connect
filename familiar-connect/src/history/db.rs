@@ -1,16 +1,14 @@
-//! Dedicated single-owner DB actor over `rusqlite` (subsystem 03; supersedes
-//! Python `history/turso_compat.py`).
+//! Dedicated single-owner DB actor over `rusqlite` (subsystem 03).
 //!
 //! One OS thread owns the [`rusqlite::Connection`]. Every operation is a
 //! whole-operation closure submitted over an `mpsc` channel; the caller blocks
-//! on a per-call reply channel (DESIGN §4.4, decision D5). This preserves the
-//! Python single-owning-thread contract — all SQL executes on one thread, never
+//! on a per-call reply channel. This preserves the
+//! single-owning-thread contract — all SQL executes on one thread, never
 //! the caller's — while letting multi-statement operations run in explicit
 //! transactions (`&Connection` closures via [`Db::run`]).
 //!
-//! A statement-trace hook ([`Db::set_trace_callback`]) fires on the actor thread
-//! just before each traced statement, mirroring Python's
-//! `TursoConnection.set_trace_callback` (used by the single-query-count tests).
+//! A statement-trace hook ([`Db::set_trace_callback`]) fires on the actor
+//! thread just before each traced statement.
 //!
 //! Calls after [`Db::close`] fail with [`StoreError::Closed`] (behavior 7).
 

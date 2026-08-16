@@ -1,4 +1,4 @@
-//! Voice tool-path tests (subsystem 06; Python `tests/test_voice_responder_tools.py`).
+//! Voice tool-path tests (subsystem 06).
 //!
 //! V15: spoken content reaches TTS before the tool handler runs; the filler
 //! backstop speaks a stock phrase before an empty-content tool iteration.

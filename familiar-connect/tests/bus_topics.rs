@@ -1,11 +1,11 @@
-//! Ported from `tests/test_bus_topics.py` — topic constant sanity.
+//! Topic constant sanity.
 
 use std::collections::HashSet;
 
 use familiar_connect::bus::topics;
 
 #[test]
-// The `!values.is_empty()` check mirrors the Python `assert values, "no topics
+// The `!values.is_empty()` check pins that the topic list is non-empty
 // defined"` guard against an empty `dir(topics)`. In Rust the topic list is a
 // fixed array, so non-emptiness is a compile-time constant; keep the assertion
 // for parity and silence the resulting always-true lint.

@@ -1,5 +1,5 @@
 //! JPEG compression for images fetched by the `view_image` tool (subsystem 08;
-//! Python `tools/image_compress.py`; feature `images`).
+//! feature `images`).
 //!
 //! Resizes to a 1024px longest edge (downscale only), then steps JPEG quality
 //! down until the output fits under a byte ceiling. Animated GIFs are tiled into
@@ -33,7 +33,7 @@ pub const MAX_GIF_FRAMES: usize = 4;
 /// Compression / decode error.
 #[derive(Debug, thiserror::Error)]
 pub enum ImageCompressError {
-    /// No quality setting achieves the target size (Python `ImageTooLargeError`).
+    /// No quality setting achieves the target size.
     #[error("image cannot be compressed under {0} bytes")]
     TooLarge(usize),
     /// Underlying decode/encode failure.
@@ -73,7 +73,7 @@ pub fn open_as_rgb(raw: &[u8]) -> Result<RgbImage, ImageCompressError> {
 
     let count = MAX_GIF_FRAMES.min(n);
     // round(i*(n-1) / (count-1)) via integer half-up. For these inputs no exact
-    // .5 tie occurs, so this equals Python's banker's-rounding result.
+    //.5 tie occurs, so this equals the banker's-rounding result.
     let indices: Vec<usize> = (0..count)
         .map(|i| (2 * i * (n - 1) + (count - 1)) / (2 * (count - 1)))
         .collect();

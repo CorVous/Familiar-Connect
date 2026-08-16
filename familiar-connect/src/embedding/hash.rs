@@ -1,5 +1,4 @@
-//! Deterministic BLAKE2b `HashEmbedder` baseline (subsystem 04; Python
-//! `embedding/hash.py`).
+//! Deterministic BLAKE2b `HashEmbedder` baseline (subsystem 04).
 //!
 //! Locality-hashing fallback: tokenise on word boundaries, casefold, project
 //! each token onto a stable bucket via BLAKE2b, accumulate a fixed-dim float
@@ -8,10 +7,9 @@
 //!
 //! The algorithm is pinned by the class-level name `"hash-v1"` and must stay
 //! bit-for-bit portable so stored vectors keyed by `model = "hash-v1"` remain
-//! comparable. Accumulation runs in `f64` (matching Python); the returned
-//! vectors are `f32` (the storage BLOB width, spec 03). Any tokenisation change
-//! must bump the name to `hash-v2` rather than corrupt the mixed similarity
-//! space.
+//! comparable. Accumulation runs in `f64`; the returned
+//! vectors are `f32` (the storage BLOB width). Any tokenisation change must
+//! bump the name to `hash-v2` rather than corrupt the mixed similarity space.
 
 use std::sync::LazyLock;
 
@@ -23,15 +21,15 @@ use regex::Regex;
 use crate::embedding::EmbeddingError;
 use crate::embedding::protocol::Embedder;
 
-/// Unicode word-boundary tokeniser (`\w+`, matching Python `re.UNICODE`).
+/// Unicode word-boundary tokeniser (`\w+`).
 static TOKEN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\w+").expect("valid word-token regex"));
 
 /// Tokenise `text` into casefolded word tokens.
 ///
-/// Python casefolds each token; Rust has no `casefold`, so this uses
-/// [`str::to_lowercase`] (Unicode lowercasing). The two agree for every token
-/// the tests exercise; they diverge only on characters like `ß` (casefold →
+/// Uses [`str::to_lowercase`] (Unicode lowercasing) rather than full
+/// case-folding. The two agree for every token the tests exercise; they
+/// diverge only on characters like `ß` (casefold →
 /// `ss`, lowercase → `ß`), which do not occur in stored `hash-v1` data — a
 /// declared, unobservable deviation (spec 04 note 2 flags the tokenisation-drift
 /// risk and the `hash-v2` escape hatch).
@@ -59,8 +57,8 @@ impl HashEmbedder {
     /// Construct with dimensionality `dim`.
     ///
     /// # Errors
-    /// [`EmbeddingError::DimTooSmall`] when `dim < 8` (message contains
-    /// `>= 8`), mirroring the Python `ValueError`.
+    /// [`EmbeddingError::DimTooSmall`] when `dim < 8` (message contains `>=
+    /// 8`).
     pub fn new(dim: i64) -> Result<Self, EmbeddingError> {
         if dim < 8 {
             return Err(EmbeddingError::DimTooSmall(dim));
@@ -97,7 +95,7 @@ impl HashEmbedder {
 }
 
 impl Default for HashEmbedder {
-    /// The Python default dimensionality is `256`.
+    /// The default dimensionality is `256`.
     fn default() -> Self {
         Self { dim: 256 }
     }
@@ -151,7 +149,7 @@ mod tests {
     fn dim_must_be_at_least_8() {
         let err = HashEmbedder::new(4).unwrap_err();
         assert!(matches!(err, EmbeddingError::DimTooSmall(4)));
-        // Message contains ">= 8" (pinned by the Python `pytest.raises(match)`).
+        // Message contains ">= 8" (pinned by the error-string contract).
         assert!(err.to_string().contains(">= 8"));
     }
 
@@ -239,7 +237,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::cast_possible_truncation)] // reference constant narrowed to f32
     async fn byte_exact_parity_with_python_blake2b() {
-        // Reference generated from Python `hashlib.blake2b(digest_size=4)`:
+        // Reference vectors for `blake2b(digest_size=4)`:
         //   "hello" → bucket 7 (dim 8), sign +1; "world" → bucket 1, sign -1.
         // vec = [0,-1,0,0,0,0,0,1] → L2-normalised = ±1/sqrt(2).
         let out = HashEmbedder::new(8)

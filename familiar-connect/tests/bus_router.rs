@@ -1,4 +1,4 @@
-//! Ported from `tests/test_bus_router.py` — `TurnRouter` barge-in semantics.
+//! `TurnRouter` barge-in semantics.
 
 use std::sync::Arc;
 use std::time::Duration;

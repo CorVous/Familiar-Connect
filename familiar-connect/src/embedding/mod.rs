@@ -1,7 +1,7 @@
 //! Embedder seam + factory registry with built-in backends
-//! (subsystem 04; Python `embedding/`).
+//! (subsystem 04).
 //!
-//! Public surface (mirrors Python `embedding/__init__.py`): the [`Embedder`]
+//! Public surface: the [`Embedder`]
 //! trait, the [`HashEmbedder`] built-in, the [`EmbedderRegistry`] builder, and
 //! the [`known_embedders`] / [`create_embedder`] convenience functions. The
 //! optional `fastembed` ONNX backend is Layer 2 (feature `local-embed`).

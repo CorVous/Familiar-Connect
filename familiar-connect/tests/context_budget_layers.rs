@@ -1,5 +1,4 @@
-//! Ported from Python `tests/test_context_budget_layers.py` — per-layer
-//! `max_tokens` self-truncation.
+//! Per-layer `max_tokens` self-truncation.
 
 #[path = "context_helpers/mod.rs"]
 mod helpers;

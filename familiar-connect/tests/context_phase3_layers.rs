@@ -1,5 +1,4 @@
-//! Ported from Python `tests/test_phase3_layers.py` — ConversationSummaryLayer,
-//! RagContextLayer, and tool-turn narration.
+//! ConversationSummaryLayer, RagContextLayer, and tool-turn narration.
 
 #[path = "context_helpers/mod.rs"]
 mod helpers;

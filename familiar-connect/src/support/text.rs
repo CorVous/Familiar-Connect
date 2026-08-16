@@ -1,11 +1,10 @@
-//! Shared Unicode-scalar-safe text truncation (DESIGN §4.9).
+//! Shared Unicode-scalar-safe text truncation.
 //!
 //! All truncation caps in the port count **Unicode scalars**, never bytes —
 //! byte slicing lands mid-codepoint on emoji-heavy chat text. [`truncate`]
-//! mirrors the Python `log_style.trunc` helper: keep the first `limit` scalars
-//! and append the U+2026 ellipsis (`…`) only when the input was longer than the
-//! cap. The ellipsis is *appended*, so the result is at most `limit + 1`
-//! scalars — matching Python's `f"{text[:limit]}{'…' if len(text) > limit …}"`.
+//! keeps the first `limit` scalars and appends the U+2026 ellipsis (`…`) only
+//! when the input was longer than the cap. The ellipsis is *appended*, so the
+//! result is at most `limit + 1` scalars.
 
 /// The ellipsis glyph appended by [`truncate`] (U+2026, `…`).
 pub const ELLIPSIS: char = '\u{2026}';

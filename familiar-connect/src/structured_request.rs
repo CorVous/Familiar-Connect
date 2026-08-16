@@ -1,5 +1,4 @@
-//! Request side of structured LLM output (subsystem 08; Python
-//! `structured_request.py`).
+//! Request side of structured LLM output (subsystem 08).
 //!
 //! [`structured_output`](crate::structured_output) owns the PARSE side (raw
 //! reply → tolerant JSON). This module owns the REQUEST side: declare a

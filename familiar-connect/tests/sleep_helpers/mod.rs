@@ -22,8 +22,8 @@ pub fn store() -> Arc<AsyncHistoryStore> {
 }
 
 /// A scripted `LlmClient`: pops canned replies from a queue and records every
-/// call for assertions (mirrors the Python `FakeLLMClient`). An exhausted queue
-/// returns an empty assistant message, like the Python double.
+/// call for assertions. An exhausted queue
+/// returns an empty assistant message.
 pub struct ScriptedLlm {
     replies: Mutex<VecDeque<String>>,
     calls: Mutex<Vec<Vec<Message>>>,

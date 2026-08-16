@@ -1,4 +1,4 @@
-//! FactExtractor rich-note worker (subsystem 07; Python `processors/fact_extractor.py`).
+//! FactExtractor rich-note worker (subsystem 07).
 //!
 //! Distils atomic facts from new turns via a cheap background LLM pass; stores
 //! them in `facts` with `source_turn_ids` pointing back to `turns`. Advances
@@ -94,9 +94,9 @@ static FACT_SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
 
 /// Prefix pattern marking first-person / generic self-capability "facts".
 ///
-/// `re.match` in Python (anchored at start); the leading `^\s*` keeps the
-/// same anchoring here. Note `can(?:not|'t|\s+not)?` makes the suffix optional
-/// — a bare "I can …" matches too, faithfully to the Python source.
+/// Anchored at the start by the leading `^\s*`. Note
+/// `can(?:not|'t|\s+not)?` makes the suffix optional — a
+/// bare "I can …" matches too.
 static SELF_CAPABILITY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)^\s*(?:i\s+(?:can(?:not|'t|\s+not)?|do(?:n't|\s+not)|am\s+(?:not|unable))|i'm\s+(?:not|unable)|i\s+have\s+no\b|as\s+(?:an?\s+)?(?:ai|assistant|language\s+model|llm)\b|the\s+(?:assistant|ai|familiar|model|bot)\b)",
@@ -200,11 +200,6 @@ impl FactExtractor {
     }
 
     /// Resolved self-subject display name (explicit, else title-cased id).
-    ///
-    /// Mirrors Python `familiar_display_name or familiar_id.title()`: the `or`
-    /// falls back for an EMPTY explicit name as well as an absent one, so an
-    /// explicit `""` still title-cases the id (and never feeds the empty-name
-    /// inability regex, which would over-drop).
     fn display_name(&self) -> String {
         resolve_display_name(self.familiar_display_name.as_deref(), &self.familiar_id)
     }
@@ -245,7 +240,7 @@ impl FactExtractor {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "faithful 1:1 transliteration of the Python tick body"
+        reason = "one flat tick body; splitting it would scatter the ordering contract"
     )]
     async fn tick_inner(&self) -> anyhow::Result<()> {
         let new_turns = self
@@ -320,7 +315,7 @@ impl FactExtractor {
             if source_ids.is_empty() {
                 // Fall back to the whole batch minus dream turns (real facts
                 // about people stay person-attributable); all batch ids if
-                // every turn was a dream. Python `set` order is unspecified —
+                // every turn was a dream. Set iteration order is unspecified —
                 // sort ascending for determinism (membership is the contract).
                 let mut fallback: Vec<i64> = valid_ids
                     .iter()
@@ -432,7 +427,7 @@ impl FactExtractor {
 // ---------------------------------------------------------------------------
 
 /// Insert-or-update `(key, value)` into an ordered participant list, preserving
-/// the first-occurrence position (Python dict assignment semantics).
+/// the first-occurrence position.
 fn upsert(out: &mut Vec<(String, String)>, key: String, value: String) {
     if let Some(entry) = out.iter_mut().find(|(k, _)| *k == key) {
         entry.1 = value;
@@ -519,7 +514,7 @@ fn resolve_subjects(raw: &[String], participants: &[(String, String)]) -> Vec<Fa
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the persona/guidance prose blocks are ported verbatim from Python"
+    reason = "the persona/guidance prose blocks are one verbatim contiguous block"
 )]
 fn build_extract_prompt(
     turns: &[&HistoryTurn],
@@ -742,8 +737,7 @@ fn parse_iso_dt(raw: Option<&Value>) -> Option<DateTime<Utc>> {
 }
 
 /// Resolve the self-subject display name from an optional explicit override,
-/// falling back to the title-cased id. Mirrors Python `explicit or id.title()`:
-/// an empty explicit string is falsy and falls back too.
+/// falling back to the title-cased id.
 fn resolve_display_name(explicit: Option<&str>, familiar_id: &str) -> String {
     match explicit {
         Some(name) if !name.is_empty() => name.to_string(),
@@ -751,7 +745,7 @@ fn resolve_display_name(explicit: Option<&str>, familiar_id: &str) -> String {
     }
 }
 
-/// ASCII title-case matching Python `str.title()`.
+/// ASCII title-case: first letter of each alphabetic run upper, rest lower.
 fn title_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_alpha = false;
@@ -771,7 +765,7 @@ fn title_case(s: &str) -> String {
     out
 }
 
-/// Python `str(value)` for the JSON `text` field (identity on strings).
+/// Stringify the JSON `text` field (identity on strings).
 fn py_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -918,7 +912,7 @@ mod tests {
 
     #[test]
     fn resolve_display_name_falls_back_for_empty_and_none() {
-        // Python `familiar_display_name or familiar_id.title()`: a non-empty
+        // A non-empty
         // explicit name wins; an empty string (falsy) or None title-cases the id.
         assert_eq!(resolve_display_name(Some("Sapphire"), "fam"), "Sapphire");
         assert_eq!(resolve_display_name(Some(""), "my-fam"), "My-Fam");

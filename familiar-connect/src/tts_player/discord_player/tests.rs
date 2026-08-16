@@ -1,4 +1,4 @@
-//! Port of `tests/test_discord_voice_player.py` — buffered + streaming playback,
+//! Buffered + streaming playback,
 //! stereo conversion, skip paths, barge-in `vc.stop`, play-lock serialization,
 //! cancel-then-speak drain, and the `playback_start` budget stamp.
 
@@ -524,7 +524,7 @@ async fn uses_streaming_when_client_supports_it() {
 fn source_uses_default_jitter_params_without_attrs() {
     // A Cartesia-like client exposes no jitter hints, so the player must build the
     // source with prebuffer=0 (first read starts at once) and pad_underrun=false
-    // (an open-but-empty buffer blocks rather than padding silence). Python asserts
+    // (an open-but-empty buffer blocks rather than padding silence). This asserts
     // `source._prebuffer_bytes == 0` / `source._pad_underrun is False`; those fields
     // are private in the landed voice::audio, so guard the *player's* forwarding by
     // the built source's observable read behavior — not the stub's own hints.
@@ -558,7 +558,7 @@ fn source_uses_default_jitter_params_without_attrs() {
 fn source_uses_client_jitter_params() {
     // An Azure-like client sets pre-roll (3 frames) + underrun padding; the player
     // must forward BOTH into StreamingPcmSource::new(prebuffer_bytes, pad_underrun).
-    // Python asserts `source._prebuffer_bytes == DISCORD_FRAME_SIZE * 3` and
+    // Asserts the prebuffer is `DISCORD_FRAME_SIZE * 3` and
     // `source._pad_underrun is True`; guard the same via observable read behavior.
     let tts = streaming_stub(
         vec![vec![0x10; DISCORD_FRAME_SIZE]],

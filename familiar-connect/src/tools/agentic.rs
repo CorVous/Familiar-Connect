@@ -1,5 +1,5 @@
-//! Agentic tool-execution loop (subsystem 08; Python `tools/loop.py` — renamed
-//! because `loop` is a Rust keyword, DESIGN D21).
+//! Agentic tool-execution loop (subsystem 08). Named `agentic` because
+//! `loop` is a Rust keyword.
 //!
 //! Drives [`LlmClient::stream_completion`] through one or more iterations: stream
 //! deltas, accumulate `content` + `tool_calls`, execute tools, append results,
@@ -23,7 +23,7 @@ use crate::silence::{LeadingLeak, classify_leading_leak};
 use crate::tools::registry::{Tool, ToolContext, ToolOutput, ToolRegistry};
 use crate::tools::silent::SILENT_RESULT;
 
-// Re-exported here so callers can reach it at the Python `tools.loop` path.
+// Re-exported here so callers can reach it from the `tools::agentic` path.
 pub use crate::tools::registry::serialize_image_result;
 
 /// Library-default iteration cap (spec 08 §T15 / DESIGN D17).
@@ -187,12 +187,11 @@ fn finalize_tool_calls(pending: &BTreeMap<i64, PendingCall>) -> Vec<Value> {
 // Tool execution
 // ---------------------------------------------------------------------------
 
-/// Render an `f64` the way Python's `str(float)` does, so the timeout wire
-/// string matches the reference byte-for-byte: an integer-valued float keeps a
-/// trailing `.0` (`"10.0"`, not Rust's default `"10"`), while a fractional
-/// value uses the shortest round-tripping form (`"0.05"`). Scoped to the small
-/// positive timeouts tools carry; the extreme magnitudes where Python switches
-/// to exponent notation are unreachable here.
+/// Render an `f64` for the timeout wire string: an integer-valued float keeps
+/// a trailing `.0` (`"10.0"`, not Rust's default `"10"`), while a fractional
+/// value uses the shortest round-tripping form (`"0.05"`). Scoped to the
+/// small positive timeouts tools carry; the extreme magnitudes that would
+/// switch to exponent notation are unreachable here.
 fn py_float_str(v: f64) -> String {
     let s = format!("{v}");
     if v.is_finite() && !s.contains(['.', 'e', 'E']) {
@@ -288,7 +287,7 @@ async fn run_tool_call(
 ///
 /// # Errors
 /// Propagates stream-open / mid-stream errors from `stream_completion`; handler
-/// faults are captured as `{"error": ...}` tool results (never `Err`).
+/// faults are captured as `{"error":...}` tool results (never `Err`).
 #[allow(
     clippy::too_many_lines,
     reason = "single cohesive stream→tools→recall loop"
@@ -428,12 +427,11 @@ mod tests {
 
     #[test]
     fn py_float_str_matches_python_str_float() {
-        // Integer-valued floats keep the trailing `.0` (Python `str(10.0)`),
+        // Integer-valued floats keep the trailing `.0`,
         // where Rust's default `{}` would drop it to `"10"`.
         assert_eq!(py_float_str(10.0), "10.0");
         assert_eq!(py_float_str(30.0), "30.0");
-        // Fractional values use the shortest round-tripping form, matching
-        // Python for the realistic timeout range.
+        // Fractional values use the shortest round-tripping form.
         assert_eq!(py_float_str(0.05), "0.05");
         assert_eq!(py_float_str(0.5), "0.5");
     }

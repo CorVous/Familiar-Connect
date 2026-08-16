@@ -38,8 +38,7 @@ pub fn vctx_guild(channel_id: i64, guild_id: i64) -> AssemblyContext {
     vctx(channel_id).with_guild_id(guild_id)
 }
 
-/// A Discord author (`username = display.lower()`), mirroring the Python
-/// `_author` fixture.
+/// A Discord author (`username = display.lower`).
 #[must_use]
 pub fn author(user_id: &str, display: &str) -> Author {
     Author::new(
@@ -50,7 +49,7 @@ pub fn author(user_id: &str, display: &str) -> Author {
     )
 }
 
-/// Overwrite a turn's timestamp (mirrors the Python `store._conn.execute(...)`
+/// Overwrite a turn's timestamp (a direct SQL
 /// fixtures that pin clocks for coalesce / date-header assertions).
 pub fn set_ts(store: &AsyncHistoryStore, turn_id: i64, dt: DateTime<Utc>) {
     store

@@ -1,17 +1,16 @@
 //! Durable per-familiar SQLite store + tantivy full-text indexes
-//! (subsystem 03; Python `history/`).
+//! (subsystem 03).
 //!
-//! Layout mirrors the Python package but reshapes the threading sandwich into a
+//! The threading sandwich is reshaped into a
 //! single DB actor (see [`db`] and DESIGN §4.4 / decision D5):
 //!
 //! - [`db`] — the single-owner DB actor over `rusqlite`. One OS thread owns the
 //!   [`rusqlite::Connection`]; callers submit whole-operation closures over an
-//!   `mpsc` channel and block on a reply. This supersedes Python
-//!   `history/turso_compat.py` (`TursoConnection`).
+//!   `mpsc` channel and block on a reply.
 //! - [`store`] — [`HistoryStore`]: the append-only `turns` log plus every
 //!   watermarked side-index projection and all query shapes. The full schema is
-//!   declared up front in `SCHEMA`; the Python era's incremental `_migrate()`
-//!   was folded in and removed (issue #202). Ports Python `history/store.py`.
+//!   declared up front in `SCHEMA`; the earlier incremental `_migrate()`
+//!   was folded in and removed (issue #202).
 //! - [`fts`] — the tantivy full-text seam (`familiar_en` analyzer). **Stage B.**
 //! - [`async_store`] — the async facade over the store. **Stage B.**
 //!
@@ -34,7 +33,7 @@ pub use store::{
     Reflection, SleepWatermark, SummaryEntry, SupersedeResult, WatermarkEntry,
 };
 
-/// One error enum for the whole history subsystem (DESIGN §4.1).
+/// One error enum for the whole history subsystem.
 ///
 /// Genuine faults only: a closed connection, an engine error (including CHECK
 /// violations such as an out-of-range `alarms.channel_kind`), an empty

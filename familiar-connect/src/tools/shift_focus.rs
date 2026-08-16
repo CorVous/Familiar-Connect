@@ -1,4 +1,4 @@
-//! `shift_focus` tool (subsystem 08; Python `tools/shift_focus.py`).
+//! `shift_focus` tool (subsystem 08).
 //!
 //! Immediate focus shift: applies at handler time via
 //! [`FocusControl::shift_now`] (modality inferred from subscriptions). No

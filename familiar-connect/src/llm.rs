@@ -1,7 +1,7 @@
-//! LLM value types + `sanitize_name` (subsystem 08; Python `llm.py`).
+//! LLM value types + `sanitize_name` (subsystem 08).
 //!
-//! This module is split across two port layers (DESIGN §3). Implemented here are
-//! the **Layer-0 core value types** — [`Message`], [`Content`], [`LlmDelta`], and
+//! This module is split across two port layers. Implemented here are the
+//! **Layer-0 core value types** — [`Message`], [`Content`], [`LlmDelta`], and
 //! [`sanitize_name`] — which `identity` (02) and `budget` (05) depend on. The
 //! Layer-2 OpenRouter transport half (the client, SSE streaming, the rate-limit
 //! semaphore, `create_llm_clients`) is a separate porting task; see the stub
@@ -25,7 +25,7 @@ static NAME_DISALLOWED: LazyLock<Regex> =
 pub fn sanitize_name(name: &str) -> Option<String> {
     let replaced = NAME_DISALLOWED.replace_all(name, "_");
     // After substitution the string is pure ASCII, so scalar and byte counts
-    // agree; take 64 scalars to mirror Python's `[:64]`.
+    // agree; take the first 64 scalars.
     let truncated: String = replaced.chars().take(64).collect();
     let trimmed = truncated.trim_matches('_');
     if trimmed.is_empty() {
@@ -45,7 +45,7 @@ pub fn sanitize_name(name: &str) -> Option<String> {
 pub enum Content {
     /// Plain-text content.
     Text(String),
-    /// Structured content blocks (`[{"type": "text", ...}, ...]`).
+    /// Structured content blocks (`[{"type": "text",...},...]`).
     Blocks(Vec<Value>),
 }
 
@@ -75,8 +75,7 @@ impl From<Vec<Value>> for Content {
 
 /// Chat message — role + content + optional speaker name and tool fields.
 ///
-/// `to_dict` (via `Serialize`) omits the `None`-valued optional fields, matching
-/// the Python `Message.to_dict`.
+/// `to_dict` (via `Serialize`) omits the `None`-valued optional fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     /// `"system"` / `"user"` / `"assistant"` / `"tool"`.
@@ -159,27 +158,19 @@ pub struct LlmDelta {
 }
 
 // ============================================================================
-// Layer-2 client (subsystem 08) — STUB.
+// Client seam (subsystem 08).
 //
-// The OpenRouter transport half of `llm` lives here in the Python source
-// (`LLMClient`, `stream_completion`/`chat`/`chat_stream`, the process-wide
-// rate-limit semaphore, `_CallMetrics`, `create_llm_clients`) but is Layer 2 per
-// DESIGN §3 and belongs to the subsystem-08 porting task. Only the Layer-0 value
-// types above are implemented in this foundation pass. The client is filled in
-// later against the `LlmClient` seam trait below.
-//
-// The trait itself is defined here now (Layer 1) because `structured_request`
-// and the 04/07 workers type against it (DESIGN §4.8: mocks touch only these
-// five methods). The concrete OpenRouter client that implements it — the SSE
-// streaming, the rate-limit semaphore, `create_llm_clients` — remains the
-// Layer-2 subsystem-08 task; nothing here constructs a client.
+// The trait itself is defined here (Layer 1) because `structured_request`
+// and the 04/07 workers type against it (mocks touch only these five methods).
+// The concrete OpenRouter client that implements it — the SSE streaming, the
+// rate-limit semaphore, `create_llm_clients` — remains the Layer-2
+// subsystem-08 task; nothing here constructs a client.
 // ============================================================================
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
-/// The narrow LLM client seam the rest of the system types against
-/// (DESIGN §4.8).
+/// The narrow LLM client seam the rest of the system types against.
 ///
 /// Only these five methods are ever touched from outside the transport module,
 /// so a ~5-line scripted stub satisfies it (the 04/07 worker doubles and the 06
@@ -219,7 +210,7 @@ pub trait LlmClient: Send + Sync {
 // Feature-gated on `net` (default). The value types + `LlmClient` trait above
 // stay ungated because `identity`/`budget`/`structured_request` depend on them.
 // The concrete OpenRouter client, its SSE streaming, the INJECTED rate-limit
-// semaphore (DESIGN D13 — no module global), and `create_llm_clients` live here.
+// semaphore (no module global), and `create_llm_clients` live here.
 // ============================================================================
 
 #[cfg(feature = "net")]
@@ -256,7 +247,7 @@ mod client {
     // -- free helpers -------------------------------------------------------
 
     /// Sum of the plain-string content lengths (Unicode scalars) of `messages`;
-    /// list/multimodal content counts 0 (spec 08 §21).
+    /// list/multimodal content counts 0.
     fn input_chars(messages: &[Message]) -> usize {
         messages
             .iter()
@@ -267,7 +258,7 @@ mod client {
             .sum()
     }
 
-    /// 429 backoff delay for a zero-indexed `attempt` (spec 08 §4).
+    /// 429 backoff delay for a zero-indexed `attempt`.
     ///
     /// `min(1.0 * 2**attempt, 30.0)`; a numeric `Retry-After` overrides with
     /// `min(value, 30.0)`; an unparseable header falls back to exponential.
@@ -281,8 +272,8 @@ mod client {
         Duration::from_secs_f64(secs.max(0.0))
     }
 
-    /// Set an Anthropic prompt-caching breakpoint on the FIRST system message
-    /// (spec 08 §10). Mutates in place; a no-op when no system message exists.
+    /// Set an Anthropic prompt-caching breakpoint on the FIRST system message.
+    /// Mutates in place; a no-op when no system message exists.
     fn mark_system_cache_breakpoint(messages: &mut [Value]) {
         let Some(system) = messages
             .iter_mut()
@@ -303,7 +294,7 @@ mod client {
         }
     }
 
-    /// Render an SSE code field like Python `str(code)` (spec 08 §13).
+    /// Render an SSE code field as a string.
     fn code_str(code: Option<&Value>) -> String {
         match code {
             None | Some(Value::Null) => "None".to_string(),
@@ -392,8 +383,7 @@ mod client {
 
     // -- per-call metrics ---------------------------------------------------
 
-    /// Per-call timing + token signals for one OpenRouter request
-    /// (Python `_CallMetrics`; spec 08 §19–21).
+    /// Per-call timing + token signals for one OpenRouter request.
     struct CallMetrics {
         slot: Option<String>,
         model: String,
@@ -409,7 +399,7 @@ mod client {
         cached_tokens: Option<i64>,
     }
 
-    /// `max(0, round(delta * 1000))` — half-to-even (DESIGN §4.3), clamped ≥ 0.
+    /// `max(0, round(delta * 1000))` — half-to-even, clamped ≥ 0.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn clamp_ms(from: Instant, to: Instant) -> i64 {
         let ms =
@@ -458,9 +448,9 @@ mod client {
             }
         }
 
-        /// Records per-phase spans into the collector and one structured
-        /// `[LLM call]` INFO line (spec 01 §31, spec 08 §19–21). Both are wire
-        /// contracts. Collector failures are suppressed (poison-safe).
+        /// Records per-phase spans into the collector and one structured `[LLM
+        /// call]` INFO line (spec 01 §31). Both are wire contracts. Collector
+        /// failures are suppressed (poison-safe).
         #[allow(clippy::similar_names)] // ttfb_ms / ttft_ms are the wire keys
         fn emit(&self) {
             let suffix = self
@@ -554,7 +544,7 @@ mod client {
     /// was already released at header-check time; this struct's job is to parse
     /// deltas and emit call metrics EXACTLY ONCE — on clean end (`ok`), on a
     /// transport error (`error`), or, via `Drop`, on consumer abandonment
-    /// (`cancelled`, the barge-in path; spec 08 §16).
+    /// (`cancelled`, the barge-in path).
     struct SseDeltaStream {
         events: InnerEvents,
         metrics: CallMetrics,
@@ -636,12 +626,12 @@ mod client {
     /// OpenRouter chat-completions client for one call-site slot.
     ///
     /// Blocking `chat` (429-retrying), SSE-streaming `stream_completion` /
-    /// `chat_stream`. The process-wide rate-limit `Arc<Semaphore>` is INJECTED
-    /// (DESIGN D13); `chat` holds a permit only across the POST, streaming drops
-    /// it the instant response headers pass the status check (spec 08 §2–3).
+    /// `chat_stream`. The process-wide rate-limit `Arc<Semaphore>` is INJECTED;
+    /// `chat` holds a permit only across the POST, streaming drops it the
+    /// instant response headers pass the status check.
     #[allow(
         clippy::struct_excessive_bools,
-        reason = "mirrors the Python client's independent boolean knobs 1:1"
+        reason = "these are independent boolean knobs, not a state enum"
     )]
     pub struct OpenRouterClient {
         api_key: String,
@@ -670,7 +660,7 @@ mod client {
     /// injects one shared handle across all slots.
     #[allow(
         clippy::struct_excessive_bools,
-        reason = "mirrors the Python client's independent boolean knobs 1:1"
+        reason = "these are independent boolean knobs, not a state enum"
     )]
     pub struct OpenRouterClientBuilder {
         api_key: String,
@@ -814,7 +804,7 @@ mod client {
             self
         }
 
-        /// Inject the shared rate-limit semaphore (DESIGN D13).
+        /// Inject the shared rate-limit semaphore.
         pub fn semaphore(mut self, sem: Arc<Semaphore>) -> Self {
             self.semaphore = Some(sem);
             self
@@ -958,7 +948,7 @@ mod client {
             &self.semaphore
         }
 
-        /// Request headers: `Authorization: Bearer …` + `Content-Type` (spec 08).
+        /// Request headers: `Authorization: Bearer …` + `Content-Type`.
         #[must_use]
         pub fn build_headers(&self) -> BTreeMap<String, String> {
             let mut headers = BTreeMap::new();
@@ -1018,8 +1008,8 @@ mod client {
             payload
         }
 
-        /// Log a ≥400 upstream error body at WARNING before erroring
-        /// (spec 08 §5). Truncated to 600 scalars, slot-suffixed.
+        /// Log a ≥400 upstream error body at WARNING before erroring.
+        /// Truncated to 600 scalars, slot-suffixed.
         fn log_http_error_body(&self, status: u16, body: &str) {
             let slot_suffix = self
                 .slot
@@ -1046,9 +1036,9 @@ mod client {
             tracing::warn!(target: "familiar_connect.llm", "{line}");
         }
 
-        /// POST with the 429 retry/backoff policy (spec 08 §4). Holds a
-        /// semaphore permit ONLY across each POST — released before the backoff
-        /// sleep so a retrying background call never starves live traffic.
+        /// POST with the 429 retry/backoff policy. Holds a semaphore permit
+        /// ONLY across each POST — released before the backoff sleep so a
+        /// retrying background call never starves live traffic.
         async fn post_with_retry(&self, url: &str, payload: &Value) -> Result<reqwest::Response> {
             let mut last: Option<reqwest::Response> = None;
             for attempt in 0..=MAX_RETRIES {
@@ -1090,7 +1080,7 @@ mod client {
             last.ok_or_else(|| anyhow!("post_with_retry produced no response"))
         }
 
-        /// Blocking, 429-retrying chat completion (spec 08 §4–6).
+        /// Blocking, 429-retrying chat completion.
         pub async fn chat(&self, messages: Vec<Message>) -> Result<Message> {
             let url = format!("{}/chat/completions", self.base_url);
             let payload = self.build_payload(&messages, None);
@@ -1118,12 +1108,12 @@ mod client {
                 .and_then(Value::as_str)
                 .unwrap_or("assistant")
                 .to_string();
-            // Python `content = reply.get("content") or ""` (spec 08 §6): a
-            // non-empty string OR a non-empty list (block form) is preserved
-            // verbatim; None, an empty string, or an empty list all collapse
-            // to "". Mirror that truthiness contract — assistant replies are
-            // strings in practice, but the list branch keeps a multimodal /
-            // block-form reply intact instead of silently dropping it to "".
+            // `content` falls back to `""`: a non-empty string
+            // OR a non-empty list (block form) is preserved verbatim; None, an
+            // empty string, or an empty list all collapse to "". Mirror that
+            // truthiness contract — assistant replies are strings in
+            // practice, but the list branch keeps a multimodal / block-form
+            // reply intact instead of silently dropping it to "".
             let content = match reply.get("content") {
                 Some(Value::String(s)) if !s.is_empty() => Content::Text(s.clone()),
                 Some(Value::Array(a)) if !a.is_empty() => Content::Blocks(a.clone()),
@@ -1147,9 +1137,9 @@ mod client {
             })
         }
 
-        /// SSE streaming completion (spec 08 §12–16). Acquires a permit, opens
-        /// the request, and RELEASES the permit immediately once the response
-        /// headers pass the status check — before any body iteration.
+        /// SSE streaming completion. Acquires a permit, opens the request, and
+        /// RELEASES the permit immediately once the response headers pass the
+        /// status check — before any body iteration.
         pub async fn stream_completion(
             &self,
             messages: Vec<Message>,
@@ -1200,8 +1190,8 @@ mod client {
                 metrics.emit();
                 return Err(anyhow!("OpenRouter stream failed: HTTP {status}"));
             }
-            // Headers accepted — release the permit before body iteration so a
-            // long stream does not occupy a rate-limit slot (spec 08 §3).
+            // Headers accepted — release the permit before body iteration so
+            // a long stream does not occupy a rate-limit slot.
             drop(permit);
             metrics.t_first_byte = Some(Instant::now());
 
@@ -1214,8 +1204,8 @@ mod client {
             }))
         }
 
-        /// `no_stream=True` path: delegate to `chat`, then synthesize deltas —
-        /// content, one per tool call, terminal finish reason (spec 08 §18).
+        /// `no_stream=True` path: delegate to `chat`, then synthesize deltas
+        /// — content, one per tool call, terminal finish reason.
         async fn no_stream_completion(
             &self,
             messages: Vec<Message>,
@@ -1266,8 +1256,8 @@ mod client {
         }
 
         /// Stream assistant content deltas as strings — a projection of
-        /// `stream_completion` to non-empty `.content` (spec 08 §17). Errors
-        /// propagate; the inner cleanup runs when this stream is dropped.
+        /// `stream_completion` to non-empty `.content`. Errors propagate; the
+        /// inner cleanup runs when this stream is dropped.
         pub async fn chat_stream(
             &self,
             messages: Vec<Message>,
@@ -1314,7 +1304,7 @@ mod client {
         }
     }
 
-    /// One structured `[Config]` INFO line per slot (Python parity).
+    /// One structured `[Config]` INFO line per slot.
     fn log_slot_config(slot_name: &str, slot: &LLMSlotConfig) {
         let temp = slot
             .temperature
@@ -1362,9 +1352,8 @@ mod client {
     ///
     /// Plus a reserved `"__image_description__"` client when
     /// `image_description_model` is set. All clients share ONE injected
-    /// rate-limit semaphore sized from `[llm].max_concurrent_requests`
-    /// (spec 08 §22; DESIGN D13). A missing slot is an `Err` (Python raised
-    /// `KeyError`, which run.py caught).
+    /// rate-limit semaphore sized from `[llm].max_concurrent_requests` (spec 08
+    /// §22). A missing slot is an `Err`.
     pub fn create_llm_clients(
         api_key: &str,
         config: &CharacterConfig,
@@ -1976,7 +1965,7 @@ mod client {
 
         #[tokio::test]
         async fn chat_preserves_list_content_blocks() {
-            // Python `reply.get("content") or ""` keeps a NON-empty list (block
+            // The content fallback keeps a NON-empty list (block
             // form) verbatim; only None/empty collapses to "". The reply's
             // content must round-trip as `Content::Blocks`, not be flattened to
             // "" (which `as_str` on an array would do).
@@ -2009,7 +1998,7 @@ mod client {
 
         #[tokio::test]
         async fn chat_empty_list_content_collapses_to_empty() {
-            // Python truthiness: `[] or "" == ""`. An empty content list is
+            // An empty content list is
             // falsy, so it collapses to an empty text reply (not empty Blocks).
             let server = MockServer::start().await;
             mount_json(
@@ -2074,7 +2063,7 @@ mod client {
 
         #[tokio::test]
         async fn post_respects_retry_after_header() {
-            // Python parity (test_post_respects_retry_after_header): a 429
+            // A 429
             // carrying a `Retry-After` value must drive a delay read OFF the
             // response, NOT the exponential fallback (1.0s for attempt 0). This
             // exercises the header-extraction wiring in `post_with_retry`

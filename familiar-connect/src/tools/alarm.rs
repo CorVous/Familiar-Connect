@@ -1,4 +1,4 @@
-//! `set_alarm` / `cancel_alarm` tools (subsystem 08; Python `tools/alarm.py`).
+//! `set_alarm` / `cancel_alarm` tools (subsystem 08).
 //!
 //! Both route the wake to the channel the user spoke in
 //! (`ctx.channel_id` / `ctx.channel_kind`, `originating_turn_id = ctx.turn_id`).
@@ -130,7 +130,7 @@ async fn set_alarm_handler(args: &Value, ctx: &ToolContext) -> anyhow::Result<To
 
 /// The `cancel_alarm` tool handler. Domain outcomes return `Ok(ToolOutput)`; a
 /// genuine store write fault propagates as `Err` (the loop wraps it as an
-/// `{"error": ...}` result), mirroring Python letting the DB error raise.
+/// `{"error":...}` result).
 async fn cancel_alarm_handler(args: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
     let Some(scheduler) = ctx.scheduler.as_ref() else {
         return Ok(error_output("alarm scheduler not wired into context"));

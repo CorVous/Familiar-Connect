@@ -1,4 +1,4 @@
-//! PeopleDossierWorker per-person dossiers (subsystem 07; Python `processors/people_dossier_worker.py`).
+//! PeopleDossierWorker per-person dossiers (subsystem 07).
 //!
 //! For each `canonical_key` appearing as a subject on at least one current fact,
 //! maintains a compounded summary in `people_dossiers`. Refreshes when the
@@ -113,9 +113,6 @@ impl PeopleDossierWorker {
     }
 
     /// The self-subject display name (explicit, else the title-cased id).
-    ///
-    /// Mirrors Python `familiar_display_name or familiar_id.title()`: the `or`
-    /// falls back for an EMPTY explicit name as well as an absent one.
     fn display_name(&self) -> String {
         resolve_display_name(self.familiar_display_name.as_deref(), &self.familiar_id)
     }
@@ -342,8 +339,7 @@ fn build_dossier_prompt(
 }
 
 /// Resolve the self-subject display name from an optional explicit override,
-/// falling back to the title-cased id. Mirrors Python `explicit or id.title()`:
-/// an empty explicit string is falsy and falls back too.
+/// falling back to the title-cased id.
 fn resolve_display_name(explicit: Option<&str>, familiar_id: &str) -> String {
     match explicit {
         Some(name) if !name.is_empty() => name.to_string(),
@@ -351,7 +347,7 @@ fn resolve_display_name(explicit: Option<&str>, familiar_id: &str) -> String {
     }
 }
 
-/// ASCII title-case matching Python `str.title()`: the first alphabetic char of
+/// ASCII title-case: the first alphabetic char of
 /// each maximal alphabetic run is upper-cased, the rest lower-cased; every
 /// non-alphabetic char passes through and resets the "start of word" flag.
 fn title_case(s: &str) -> String {
@@ -450,7 +446,7 @@ mod tests {
 
     #[test]
     fn resolve_display_name_falls_back_for_empty_and_none() {
-        // Python `familiar_display_name or familiar_id.title()`: a non-empty
+        // A non-empty
         // explicit name wins; an empty string (falsy) or None title-cases the id.
         assert_eq!(resolve_display_name(Some("Sapphire"), "fam"), "Sapphire");
         assert_eq!(resolve_display_name(Some(""), "my-fam"), "My-Fam");

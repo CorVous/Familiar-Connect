@@ -1,5 +1,4 @@
-//! In-process tool registry + the per-call [`ToolContext`] (subsystem 08;
-//! Python `tools/registry.py`).
+//! In-process tool registry + the per-call [`ToolContext`] (subsystem 08).
 //!
 //! A [`ToolRegistry`] is a name-indexed, insertion-ordered bag of [`Tool`]s.
 //! Each tool carries a JSON-Schema `parameters` object and an async
@@ -7,8 +6,8 @@
 //! [`ToolContext`] — no globals.
 //!
 //! Two narrow seam traits ([`FocusControl`], [`ChannelReadStore`]) replace the
-//! Python duck-typed `FocusManager` / `AsyncHistoryStore` references so tests can
-//! inject scripted doubles (DESIGN §4.8); the production `FocusManager` and
+//! concrete `FocusManager` / `AsyncHistoryStore` types so tests
+//! can inject scripted doubles; the production `FocusManager` and
 //! `AsyncHistoryStore` implement them.
 
 use std::collections::{HashMap, HashSet};
@@ -58,7 +57,7 @@ impl ImageResult {
 
 /// What a [`ToolHandler`] produces: either a JSON/text string, or an
 /// [`ImageResult`] the agentic loop serialises per the client's `multimodal`
-/// flag. Replaces the Python `str | ImageResult` union.
+/// flag. Replaces an untyped string-or-image union.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolOutput {
     /// Plain string (usually a JSON object the model reads back).
@@ -68,14 +67,13 @@ pub enum ToolOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Seam traits (DESIGN §4.8): FocusControl + ChannelReadStore
+// Seam traits: FocusControl + ChannelReadStore
 // ---------------------------------------------------------------------------
 
 /// The narrow slice of `FocusManager` the attentional tools touch.
 ///
 /// A tool holds an `Arc<dyn FocusControl>`; the production [`FocusManager`]
-/// implements it, and tests inject a scripted double (mirrors the Python
-/// `MagicMock` focus manager).
+/// implements it, and tests inject a scripted double.
 #[async_trait]
 pub trait FocusControl: Send + Sync {
     /// Is `channel_id` a known text/voice subscription?
@@ -116,8 +114,8 @@ impl FocusControl for FocusManager {
 
 /// The narrow read slice of the history store the focus tools page over.
 ///
-/// Both methods deliberately omit the `mode` filter (the Python tool calls pass
-/// none); [`AsyncHistoryStore`] implements it, tests inject a recorder.
+/// Both methods deliberately omit the `mode` filter; [`AsyncHistoryStore`]
+/// implements it, tests inject a recorder.
 #[async_trait]
 pub trait ChannelReadStore: Send + Sync {
     /// Recent turns in a channel, newest-window, optionally paged with
@@ -188,7 +186,7 @@ impl ChannelReadStore for AsyncHistoryStore {
 /// Per-call context handed to tool handlers.
 ///
 /// `history`/`bus` are `Option` so the unit suites can build a context without
-/// real subsystems (mirrors the Python `cast("...", None)` doubles); no shipped
+/// real subsystems; no shipped
 /// handler reads them. `scheduler`/`focus_manager`/`store`/`description_llm`
 /// default to `None`; `images` defaults empty.
 #[derive(Clone)]
@@ -363,8 +361,7 @@ impl Tool {
     }
 }
 
-/// Registration error: a duplicate tool name (a programming error, like the
-/// Python `ValueError`).
+/// Registration error: a duplicate tool name (a programming error).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ToolError {
     /// A tool with this name is already registered.

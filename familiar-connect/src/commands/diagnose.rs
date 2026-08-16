@@ -1,5 +1,4 @@
-//! diagnose subcommand: log grep + summary table (subsystem 10; Python
-//! commands/diagnose.py).
+//! diagnose subcommand: log grep + summary table (subsystem 10).
 //!
 //! Reads `span=<name> … ms=<int> … status=<word>` markers from one or more log
 //! files (or stdin for `-`), groups by span, and prints the same code-fenced
@@ -21,7 +20,7 @@ use crate::diagnostics::report::render_summary_table;
 
 /// Matches `span=<name>` + `ms=<int>` + `status=<word>` KV markers, tolerating
 /// interleaved single-parameter ANSI codes and arbitrary intervening tokens
-/// (DOTALL). Byte-for-byte the Python `_SPAN_RE` (`commands/diagnose.py`).
+/// (DOTALL).
 static SPAN_RE: LazyLock<Regex> = LazyLock::new(|| {
     // `_ANSI = (?:\x1b\[\d+m)*` — zero or more single-parameter SGR codes.
     Regex::new(concat!(
@@ -39,7 +38,7 @@ static SPAN_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// `SpanCollector::summary`'s shape.
 ///
 /// `last_ms` is the most recently *seen* value for the span (file order), not
-/// the maximum — mirroring the Python `last_ms[name] = ms` overwrite.
+/// the maximum — each occurrence overwrites the previous.
 #[must_use]
 pub fn aggregate<I, S>(lines: I) -> BTreeMap<String, SpanStats>
 where
@@ -81,8 +80,7 @@ where
 }
 
 /// Yield the lines of every path in order; `-` reads stdin. An unreadable file
-/// logs an error and is skipped (the rest still aggregate), mirroring Python's
-/// `_iter_lines`.
+/// logs an error and is skipped (the rest still aggregate).
 fn read_lines(paths: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for path in paths {
@@ -96,8 +94,7 @@ fn read_lines(paths: &[String]) -> Vec<String> {
         match std::fs::read(Path::new(path)) {
             Ok(bytes) => {
                 // Lossy-decode so an invalid UTF-8 byte replaces itself with
-                // U+FFFD and every line still aggregates — mirroring Python's
-                // `open(..., errors="replace")` (spec 01 §44). A `BufRead::lines()`
+                // U+FFFD and every line still aggregates. A `BufRead::lines`
                 // + `map_while(Result::ok)` would instead STOP at the first bad
                 // byte, silently dropping every later span.
                 let text = String::from_utf8_lossy(&bytes);
@@ -125,11 +122,11 @@ mod tests {
     use crate::diagnostics::report::render_summary_table;
 
     fn span_line(name: &str, ms: i64, status: &str) -> String {
-        // The `_SPAN_LINE` template from test_diagnose_cmd.py, filled directly.
+        // The span-line template, filled directly.
         format!("2026-04-22 12:00:00 INFO [span] span={name} ms={ms} status={status}")
     }
 
-    // --- aggregate (ported from test_diagnose_cmd.py::TestAggregate) ---
+    // --- aggregate ---
 
     #[test]
     fn parses_simple_span_lines() {
@@ -148,7 +145,7 @@ mod tests {
 
     #[test]
     fn tolerates_ansi_coloured_lines() {
-        // Byte-exact ANSI line from test_diagnose_cmd.py.
+        // Byte-exact ANSI line.
         let line = "\x1b[37mspan=\x1b[0m\x1b[95mllm\x1b[0m \
              \x1b[37mms=\x1b[0m\x1b[96m42\x1b[0m \
              \x1b[37mstatus=\x1b[0m\x1b[32mok\x1b[0m";
@@ -163,7 +160,7 @@ mod tests {
         assert!((summary["llm"].last_ms - 30.0).abs() < f64::EPSILON);
     }
 
-    // --- diagnose CLI (ported from test_diagnose_cmd.py::TestDiagnoseCLI) ---
+    // --- diagnose CLI ---
 
     #[test]
     fn runs_against_a_log_file() {
@@ -218,7 +215,7 @@ mod tests {
     #[test]
     fn aggregates_lines_after_invalid_utf8() {
         // A partial-write / mixed-encoding byte mid-file must not truncate the
-        // aggregation: Python opens with errors="replace" and yields every line,
+        // aggregation: lossy decoding yields every line,
         // so spans AFTER the bad byte still count. (Regression: a prior
         // `lines().map_while(Result::ok)` stopped at the first decode error.)
         let dir = tempfile::tempdir().expect("tempdir");

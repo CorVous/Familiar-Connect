@@ -1,18 +1,18 @@
 //! `CharacterConfig` loader: TOML deep-merge + validation + `ConfigError`
-//! (subsystem 02; Python `config.py`).
+//! (subsystem 02).
 //!
 //! The process-wide "load once, immutable thereafter" layer: parses
-//! `character.toml` deep-merged over the checked-in default profile into a fully
-//! validated, frozen [`CharacterConfig`]. Validation is hand-rolled over
+//! `character.toml` deep-merged over the checked-in default profile into a
+//! fully validated, frozen [`CharacterConfig`]. Validation is hand-rolled over
 //! `toml::Value` — the per-section unknown-key policy is deliberately
 //! inconsistent (some sections reject unknown keys, `[tts]` /
 //! `[providers.stt.*]` / `[channels.<id>]` ignore them), so serde
 //! `deny_unknown_fields` cannot reproduce the contract. Error messages are
-//! byte-stable test contracts (DESIGN §4.1); reproduce the phrases exactly.
+//! byte-stable test contracts; reproduce the phrases exactly.
 //!
-//! The two Python deferred-import registry lookups (`known_projectors`,
-//! `known_embedders`) are injected as `&BTreeSet<String>` parameters (DESIGN
-//! D3), keeping this a near-leaf module.
+//! The two registry lookups (`known_projectors`,
+//! `known_embedders`) are injected as `&BTreeSet<String>` parameters, keeping
+//! this a near-leaf module.
 
 use crate::budget::{ModelBudgetCurve, TierBudget};
 use chrono::NaiveTime;
@@ -92,7 +92,7 @@ const BUDGET_FIELDS: [&str; 12] = [
 #[derive(Clone, Debug, PartialEq)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "mirrors the Python dataclass's independent boolean knobs 1:1"
+    reason = "these are independent boolean knobs, not a state enum"
 )]
 pub struct LLMSlotConfig {
     /// Model string (required, non-empty).
@@ -730,7 +730,7 @@ impl Default for CharacterConfig {
     }
 }
 
-/// Tier → LLM slot mapping (mirrors run.py responder wiring).
+/// Tier → LLM slot mapping (matches the responder wiring).
 fn tier_to_slot(tier: &str) -> Option<&'static str> {
     match tier {
         "voice" => Some("fast"),
@@ -770,7 +770,7 @@ impl CharacterConfig {
     ///
     /// # Panics
     /// Panics if `tier` is not one of the canonical tier names (callers only
-    /// pass canonical names; mirrors Python's `KeyError`).
+    /// pass canonical names).
     #[must_use]
     pub fn budget_for(&self, tier: &str) -> TierBudget {
         let base = *self
@@ -796,8 +796,8 @@ impl CharacterConfig {
 ///
 /// The default profile must exist (else a `ConfigError` containing "default
 /// character profile"); a missing target file is treated as `{}`. The registry
-/// validator sets (`known_projectors`, `known_embedders`) are injected (DESIGN
-/// D3) rather than looked up via a module cycle.
+/// validator sets (`known_projectors`, `known_embedders`) are injected rather
+/// than looked up via a module cycle.
 pub fn load_character_config(
     path: &Path,
     defaults_path: &Path,
@@ -855,7 +855,7 @@ fn deep_merge(base: &Table, override_: &Table) -> Table {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "faithful 1:1 transliteration of the Python _parse_character_config sequence"
+    reason = "one flat field-by-field parse sequence; splitting it would scatter the error-message contract"
 )]
 fn parse_character_config(
     data: &Table,
@@ -1044,13 +1044,12 @@ pub fn parse_hhmm_range(value: &Value, key: &str) -> Result<(NaiveTime, NaiveTim
     let mut parsed: Vec<NaiveTime> = Vec::with_capacity(2);
     for part in &parts {
         let pieces: Vec<&str> = part.split(':').collect();
-        // Count Unicode scalars, not bytes (DESIGN §4.9). The ASCII-digit gate
-        // still dominates: any two-scalar piece that passes `is_ascii_digit`
-        // has byte length 2 as well, so this is behaviour-neutral for ASCII and
-        // only aligns with the convention. Non-ASCII Unicode digits (which
-        // Python's `str.isdigit()`/`int()` would accept) remain rejected — the
-        // blessed ASCII-digit deviation, consistent with the structured_output
-        // gate.
+        // Count Unicode scalars, not bytes. The ASCII-digit gate still
+        // dominates: any two-scalar piece that passes `is_ascii_digit` has byte
+        // length 2 as well, so this is behaviour-neutral for ASCII and only
+        // aligns with the convention. Non-ASCII Unicode digits (which a more
+        // lenient parser would accept) remain rejected — the blessed
+        // ASCII-digit deviation, consistent with the structured_output gate.
         if pieces.len() != 2
             || !pieces
                 .iter()
@@ -1096,7 +1095,7 @@ const fn py_type_name(v: &Value) -> &'static str {
 
 #[allow(
     clippy::float_cmp,
-    reason = "fract() == 0.0 exactly detects integer-valued floats for Python-style formatting"
+    reason = "fract() == 0.0 exactly detects integer-valued floats for %g-style formatting"
 )]
 fn fmt_num(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
@@ -1108,7 +1107,7 @@ fn fmt_num(x: f64) -> String {
 
 #[allow(
     clippy::float_cmp,
-    reason = "fract() == 0.0 exactly detects integer-valued bounds for Python %g formatting"
+    reason = "fract() == 0.0 exactly detects integer-valued bounds for %g formatting"
 )]
 fn fmt_g(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
@@ -1331,8 +1330,8 @@ fn parse_history_windows(raw: &Table) -> Result<(i64, i64), ConfigError> {
 fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
     match raw.get("coalesce_max_gap_seconds") {
         None => Ok(45.0),
-        // Python does the `v < 0` sign check on the raw TOML value before
-        // `float(v)`, so a negative integer prints as an int (`got -1`), not a
+        // The `v < 0` sign check runs on the raw TOML value before the
+        // float conversion, so a negative integer prints as an int (`got -1`), not a
         // padded float (`got -1.0`). Mirror that per-arm.
         Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
             "[providers.history].coalesce_max_gap_seconds must be >= 0, got {n}"
@@ -1353,8 +1352,8 @@ fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
 fn parse_text_silence(raw: &Table) -> Result<f64, ConfigError> {
     match raw.get("text_silence_gap_fold_seconds") {
         None => Ok(0.0),
-        // Sign check on the raw value (see `parse_coalesce_gap`): integers print
-        // as ints, floats through `fmt_num`, matching Python's `got {v}`.
+        // Sign check on the raw value (see `parse_coalesce_gap`): integers
+        // print as ints, floats through `fmt_num`.
         Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
             "[providers.history].text_silence_gap_fold_seconds must be >= 0, got {n}"
         ))),
@@ -1442,7 +1441,7 @@ fn parse_provider_order(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "faithful 1:1 transliteration of the Python _parse_llm_slots field sequence"
+    reason = "one flat field-by-field parse sequence; splitting it would scatter the error-message contract"
 )]
 fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, ConfigError> {
     let mut slots = BTreeMap::new();
@@ -1878,7 +1877,7 @@ fn worker_section<'a>(raw: &'a Table, name: &str) -> Result<&'a Table, ConfigErr
 
 #[allow(
     clippy::too_many_lines,
-    reason = "explicit per-worker knob parsing (Python derives these by dataclass reflection; DESIGN says enumerate explicitly)"
+    reason = "per-worker knobs are enumerated explicitly rather than derived by reflection"
 )]
 fn parse_memory_providers(
     raw: &Table,
@@ -2341,7 +2340,7 @@ fn parse_memory_retrieval(raw: &Table) -> Result<MemoryRetrievalConfig, ConfigEr
             None => Ok(fallback),
             // Sign check on the raw value before `float(v)` (see
             // `parse_coalesce_gap`): a negative integer prints as `got -1`, not
-            // `got -1.0`, matching Python's `got {v}`.
+            // `got -1.0`.
             Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
                 "[memory.retrieval].{key} must be non-negative, got {n}"
             ))),

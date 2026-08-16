@@ -1,5 +1,4 @@
-//! Factory for the V1 phase-2 local turn-detection chain (subsystem 09; Python
-//! `voice/turn_detection/factory.py`).
+//! Factory for the V1 phase-2 local turn-detection chain (subsystem 09).
 //!
 //! Bundles the Smart Turn ONNX path + thresholds.
 //! [`LocalTurnDetector::make_endpointer`] is called once per Discord user —
@@ -9,9 +8,9 @@
 //!
 //! Smart Turn weights are fetched from HuggingFace via a [`ModelDownloader`]
 //! seam (the `local-turn`-gated production impl calls `hf_hub_download`; tests
-//! inject a scripted double, DESIGN §4.8). [`create_local_turn_detector`]
-//! returns [`None`] — never an error — when weights can't be resolved, so the
-//! bot degrades to Deepgram-only endpointing (spec 09 §29).
+//! inject a scripted double). [`create_local_turn_detector`] returns [`None`]
+//! — never an error — when weights can't be resolved, so the bot degrades
+//! to Deepgram-only endpointing.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -23,7 +22,7 @@ use crate::voice::turn_detection::endpointer::{OnTurnComplete, UtteranceEndpoint
 use crate::voice::turn_detection::smart_turn::{SmartTurnDetector, SmartTurnError};
 use crate::voice::turn_detection::ten_vad::{TenVad, VadError};
 
-/// Log target mirroring the Python logger name (grep-stable for ops).
+/// Log target (grep-stable for ops).
 const LOG_TARGET: &str = "familiar_connect.voice.turn_detection.factory";
 
 /// Error building a live endpointer (native VAD or ONNX Smart Turn missing).
@@ -39,8 +38,8 @@ pub enum TurnDetectionError {
 
 /// Resolves a model file from a HuggingFace repo to a local (cached) path.
 ///
-/// The one seam `create_local_turn_detector` depends on — mirrors Python's
-/// `hf_hub_download(repo_id, filename) -> path`. `Err(reason)` covers any
+/// The one seam `create_local_turn_detector` depends on:
+/// `download(repo_id, filename) -> path`. `Err(reason)` covers any
 /// download / network / FS failure; the reason string is logged.
 pub trait ModelDownloader {
     /// Resolve `filename` in `repo_id`, returning the on-disk path.

@@ -1,11 +1,11 @@
-//! `TwitchSource`: queue → bus drain (subsystem 11/10; Python `sources/twitch.py`).
+//! `TwitchSource`: queue → bus drain (subsystem 11/10).
 //!
 //! Consumes the queue produced by
 //! [`TwitchWatcher`](crate::twitch_watcher::TwitchWatcher), wraps each event in
 //! an envelope, and publishes on [`TOPIC_TWITCH_EVENT`]. Unbounded topic policy
 //! per plan (Twitch volume is low, dropping a cheer is costly). The source is
 //! generic over the queued item so it treats the event as opaque, exactly like
-//! the Python `asyncio.Queue[object]`; the whole Twitch pipeline is dormant
+//! an opaque queue item; the whole Twitch pipeline is dormant
 //! (nothing constructs a watcher/source, nothing consumes `twitch.event`).
 
 use std::sync::{Arc, Mutex};
@@ -20,8 +20,7 @@ use crate::bus::topics::TOPIC_TWITCH_EVENT;
 
 /// Payload for a `twitch.event` envelope: `{familiar_id, twitch: <raw event>}`.
 ///
-/// Generic over the queued item — the drain never inspects it (Python passes
-/// the raw object straight through).
+/// Generic over the queued item — the drain never inspects it.
 #[derive(Clone, Debug)]
 pub struct TwitchEventPayload<T> {
     /// The owning familiar id.

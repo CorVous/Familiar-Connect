@@ -1,16 +1,12 @@
-//! DAVE E2EE voice client — **verification checklist**, not a 1:1 port
-//! (subsystem 09; Python `voice/dave_client.py`; DESIGN D8).
+//! DAVE E2EE voice client — **verification checklist**, not an implementation
+//! (subsystem 09).
 //!
-//! In Python this subclasses `discord.VoiceClient` to own the `davey.DaveSession`
-//! lifecycle and to insert DAVE decrypt/encrypt around Opus. In the Rust stack
 //! **songbird owns the voice connection, Opus, SRTP, and DAVE/MLS**, so there is
-//! no `VoiceClient` subclass to port. This module is a documentation stub: the RX
-//! /TX layering invariants below are the checklist the Layer-4 songbird glue is
-//! verified against, and the corresponding Python tests (`test_dave_client.py`)
-//! are recorded as skip-with-reason. Opcode/wire details live in
-//! [`super::dave_ws`].
+//! no client type to implement here. This module is a documentation stub: the
+//! RX/TX layering invariants below are the checklist the Layer-4 songbird glue
+//! is verified against. Opcode/wire details live in [`super::dave_ws`].
 //!
-//! ## Session lifecycle (spec 09 §A.2)
+//! ## Session lifecycle
 //!
 //! - **A.2 connect + reinit.** Poll until the voice `secret_key` is set, then —
 //!   only when the negotiated `dave_protocol_version > 0` (from
@@ -19,7 +15,7 @@
 //!   the whole session (fresh key package). Verify songbird performs this
 //!   negotiate→key-package handshake and exposes a recovery reinit.
 //!
-//! ## RX audio layering (spec 09 §A.13)
+//! ## RX audio layering
 //!
 //! - **A.13 receive path.** Drop the frame unless `data[1] & 0x78 == 0x78`; drop
 //!   when paused; drop the silence sentinel payload `f8 ff fe`. When a session
@@ -29,7 +25,7 @@
 //!   id passes through undecrypted to the Opus decoder. Verify songbird's receive
 //!   hook applies MLS decrypt with this exact gating and error discipline.
 //!
-//! ## TX audio layering (spec 09 §A.14)
+//! ## TX audio layering
 //!
 //! - **A.14 send path.** Layer **opus frame → DAVE `encrypt_opus` (only when the
 //!   session is ready) → 12-byte RTP header (`80 78`, seq u16 BE, timestamp u32

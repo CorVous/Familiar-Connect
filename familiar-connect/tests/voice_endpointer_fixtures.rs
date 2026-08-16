@@ -1,5 +1,4 @@
-//! Audio-fixture integration tests for the endpointer (ported from Python
-//! `tests/test_endpointer_audio_fixtures.py`).
+//! Audio-fixture integration tests for the endpointer.
 //!
 //! Synthesised 48 kHz mono int16 PCM flows through the **real**
 //! [`Resampler48to16`] + framer + state machine. The VAD is stubbed but

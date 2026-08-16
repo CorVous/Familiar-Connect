@@ -1,4 +1,4 @@
-//! `start_activity` tool (subsystem 08; Python `tools/start_activity.py`).
+//! `start_activity` tool (subsystem 08).
 //!
 //! Stages a global absence via [`StartActivityEngine::defer_start`]; actual
 //! departure is applied by the engine's `end_turn` after the reply ships (the
@@ -47,7 +47,7 @@ pub struct ActivityCatalogEntry {
 pub trait StartActivityEngine: Send + Sync {
     /// The catalog of choosable activities (snapshot at build time).
     fn catalog(&self) -> Vec<ActivityCatalogEntry>;
-    /// Whether the familiar is already out (Python `engine.active is not None`).
+    /// Whether the familiar is already out.
     fn is_active(&self) -> bool;
     /// Stage a departure; returns the engine's JSON result (`{"error": ...}` on
     /// rejection).

@@ -1,5 +1,5 @@
 //! Nightly maintenance passes: consolidation + opinion formation + registry
-//! (subsystem 04; Python `sleep/`).
+//! (subsystem 04).
 //!
 //! Two loosely-related halves that share the "background LLM behind a seam"
 //! shape, both governed by **the model proposes, code decides**: every LLM
@@ -12,7 +12,7 @@
 //!   [`consolidation::ConsolidationPlan`]. [`apply`] is the only mutator.
 //! * [`opinion_formation`] — the two-stage opinion pass (per-day stance-moments →
 //!   one synthesis) mints grounded `ego:` facts.
-//! * [`maintenance`] — the explicit pass registry (DESIGN D14) sequencing the two
+//! * [`maintenance`] — the explicit pass registry sequencing the two
 //!   passes and threading consolidation's retirements into the opinion pass's
 //!   known-bits deny-list.
 
@@ -27,14 +27,13 @@ use serde_json::Value;
 
 use crate::history::store::FactSubject;
 
-/// Faults raised by the sleep subsystem (DESIGN §4.1). Reserved for genuine
-/// programming/config errors; bad LLM output degrades to an empty plan, never an
-/// `Err`.
+/// Faults raised by the sleep subsystem. Reserved for genuine
+/// programming/config errors; bad LLM output degrades to an empty plan, never
+/// an `Err`.
 #[derive(Debug, thiserror::Error)]
 pub enum SleepError {
     /// [`maintenance::create_passes`] was handed a name not in the registry. The
-    /// message names the bad name (`{name!r}`) and the sorted valid list — the
-    /// Python `ValueError("unknown maintenance pass …")` contract.
+    /// message names the bad name (`{name!r}`) and the sorted valid list.
     #[error("unknown maintenance pass '{name}'; valid: {valid}")]
     UnknownPass {
         /// The unrecognised pass name.
@@ -43,19 +42,16 @@ pub enum SleepError {
         valid: String,
     },
     /// [`opinion_formation::bucket_by_day`] was handed a tz name `chrono-tz`
-    /// cannot resolve. Python's `ZoneInfo(tz_name)` raises here too; the engine
-    /// guard (subsystem 11) catches it — the port keeps that behavior rather than
-    /// silently defaulting.
+    /// cannot resolve. The engine guard (subsystem 11) catches it; this raises
+    /// rather than silently defaulting.
     #[error("unknown time zone: {0}")]
     InvalidTimezone(String),
     /// [`opinion_formation::validate_opinions`] accepted an opinion whose
     /// grounding ids are all absent from the window's turn→day map, so the
-    /// earliest-grounding-day `min` has no argument. Python's
-    /// `min(turn_day[i] for i in ids if i in turn_day)`
-    /// (`opinion_formation.py:410`) raises `ValueError('min() arg is an empty
-    /// sequence')` here; the port keeps that raise (the engine guard degrades
-    /// wake prose to seed-only, dry-run included) rather than emitting an opinion
-    /// with an empty `valid_from` date that only fails later inside
+    /// earliest-grounding-day `min` has no argument here; this raises (the
+    /// engine guard degrades wake prose to seed-only, dry-run included) rather
+    /// than emitting an opinion with an empty `valid_from` date that only
+    /// fails later inside
     /// `apply_opinions`. Unreachable via [`opinion_formation::plan_opinions`],
     /// where `grounding_union ⊆ turn_day` by construction.
     #[error("opinion grounding ids are all absent from the window's day map")]
@@ -68,10 +64,9 @@ pub enum SleepError {
 // ---------------------------------------------------------------------------
 
 /// Deterministic normalization for near-duplicate detection: lowercase →
-/// whitespace-collapse → strip ALL `'`/`"` → trim the surrounding character set
-/// `.,!?;:()[]{} \t\n`. Internal non-quote punctuation is kept. Mirrors Python
-/// `history.store._normalize_fact_text` (the noop rail and opinion dedup depend
-/// on it).
+/// whitespace-collapse → strip ALL `'`/`"` → trim the surrounding character
+/// set `.,!?;:()[]{} \t\n`. Internal non-quote punctuation is kept. The noop
+/// rail and opinion dedup both depend on it.
 pub(crate) fn normalize_fact_text(text: &str) -> String {
     let collapsed = text
         .to_lowercase()
@@ -87,24 +82,23 @@ pub(crate) fn normalize_fact_text(text: &str) -> String {
         .to_owned()
 }
 
-/// The set of canonical subject keys of `subjects`. Mirrors Python
-/// `history.store._subject_key_set`.
+/// The set of canonical subject keys of `subjects`.
 pub(crate) fn subject_key_set(subjects: &[FactSubject]) -> HashSet<String> {
     subjects.iter().map(|s| s.canonical_key.clone()).collect()
 }
 
 // ---------------------------------------------------------------------------
-// Python `str(x)` / repr parity helpers for JSON-decoded LLM payload fields.
+// `str(x)` / repr rendering helpers for JSON-decoded LLM payload fields.
 // ---------------------------------------------------------------------------
 
-/// Mirror Python `str(value)` for a JSON-decoded value: a string passes through;
-/// `None`/`True`/`False` follow Python's `str`; numbers render their decimal
-/// form; arrays/objects render as Python container repr via [`py_repr`]
-/// (`['a', 'b']`, `{'k': 1}`), matching `str(list)`/`str(dict)`. These are
-/// absurd inputs no prompt produces in the `text`/`reason`/`new_text` fields
-/// this backs; the one residual vs Python is object key order, which follows
-/// serde_json's sorted-key iteration rather than Python's insertion order
-/// (serde_json is built without `preserve_order`).
+/// Render a JSON-decoded value in `str()` form: strings pass through; null,
+/// true and false render as `None`/`True`/`False`; numbers render their
+/// decimal form; arrays and objects render as container repr via [`py_repr`]
+/// (`['a', 'b']`, `{'k': 1}`).
+///
+/// These are absurd inputs no prompt produces in the `text`/`reason`/`new_text`
+/// fields this backs; the one residual is object key order, which follows
+/// serde_json's sorted-key iteration (built without `preserve_order`).
 pub(crate) fn py_str(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -116,11 +110,11 @@ pub(crate) fn py_str(value: &Value) -> String {
     }
 }
 
-/// Mirror Python `repr(value)` for a JSON-decoded value — the element rendering
-/// `str(list)`/`str(dict)` apply to their contents. Differs from [`py_str`] only
-/// for strings, which are quoted-and-escaped Python-repr style; scalars match
-/// [`py_str`] and containers recurse. Object keys iterate serde_json's sorted
-/// order (no `preserve_order`), the one residual vs Python's insertion order.
+/// Render a JSON-decoded value in `repr()` form — the element rendering that
+/// container `str()` applies to its contents. Differs from [`py_str`] only for
+/// strings, which are quoted and escaped; scalars match [`py_str`] and
+/// containers recurse. Object keys iterate serde_json's sorted order (built
+/// without `preserve_order`).
 fn py_repr(value: &Value) -> String {
     match value {
         Value::String(s) => py_repr_str(s),
@@ -142,11 +136,10 @@ fn py_repr(value: &Value) -> String {
     }
 }
 
-/// Python `repr(str)`: wrap in `'…'`, switching to `"…"` when the string holds a
-/// `'` but no `"` (Python's quote-preference rule); escape `\`, the active quote,
-/// and `\n`/`\r`/`\t`; render other C0 controls and DEL as `\xNN`. Printable
-/// non-ASCII passes through, as in CPython 3 (exotic non-printable code points
-/// above `\x7f` are not category-escaped — an absurd-input residual).
+/// String repr: wrap in `'…'`, switching to `"…"` when the string
+/// holds a `'` but no `"`; escape `\`, the active quote, and `\n`/`\r`/`\t`;
+/// render other C0 controls and DEL as `\xNN`. Printable non-ASCII passes
+/// through.
 fn py_repr_str(s: &str) -> String {
     let quote = if s.contains('\'') && !s.contains('"') {
         '"'
@@ -179,8 +172,6 @@ fn py_repr_str(s: &str) -> String {
     out
 }
 
-/// Mirror Python `str(payload.get(key, ""))`: absent key → `""`; otherwise
-/// [`py_str`] of the value.
 pub(crate) fn py_str_field(payload: &Value, key: &str) -> String {
     payload.get(key).map_or_else(String::new, py_str)
 }
@@ -192,7 +183,7 @@ pub(crate) fn len_i64(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// Python tuple repr for an int tuple: `()`, `(1,)`, `(1, 2)`.
+/// Tuple repr for an int tuple: `()`, `(1,)`, `(1, 2)`.
 pub(crate) fn py_tuple_repr(ids: &[i64]) -> String {
     match ids {
         [] => "()".to_owned(),
@@ -207,7 +198,7 @@ pub(crate) fn py_tuple_repr(ids: &[i64]) -> String {
     }
 }
 
-/// Python list repr for a list of strings: `['a', 'b']`.
+/// List repr for a list of strings: `['a', 'b']`.
 pub(crate) fn py_str_list_repr(items: &[String]) -> String {
     format!(
         "[{}]",
@@ -219,7 +210,7 @@ pub(crate) fn py_str_list_repr(items: &[String]) -> String {
     )
 }
 
-/// Python list repr for a list of ints: `[1, 2]`.
+/// List repr for a list of ints: `[1, 2]`.
 pub(crate) fn py_int_list_repr(ids: &[i64]) -> String {
     format!(
         "[{}]",
@@ -246,9 +237,9 @@ mod tests {
 
     #[test]
     fn py_str_list_uses_python_container_repr() {
-        // Python: str(["a", "b"]) == "['a', 'b']"
+        // ["a", "b"] renders as "['a', 'b']"
         assert_eq!(py_str(&json!(["a", "b"])), "['a', 'b']");
-        // Python: str([1, True, None, "x"]) == "[1, True, None, 'x']"
+        // [1, true, null, "x"] renders as "[1, True, None, 'x']"
         assert_eq!(py_str(&json!([1, true, null, "x"])), "[1, True, None, 'x']");
         // nesting: str([["a"], []]) == "[['a'], []]"
         assert_eq!(py_str(&json!([["a"], []])), "[['a'], []]");
@@ -256,7 +247,7 @@ mod tests {
 
     #[test]
     fn py_str_object_uses_python_container_repr() {
-        // single key matches Python exactly: str({"k": 1}) == "{'k': 1}"
+        // single key: {"k": 1} renders as "{'k': 1}"
         assert_eq!(py_str(&json!({"k": 1})), "{'k': 1}");
         assert_eq!(py_str(&json!({"a": "b"})), "{'a': 'b'}");
     }

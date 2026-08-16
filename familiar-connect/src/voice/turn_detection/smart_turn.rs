@@ -1,5 +1,5 @@
-//! Smart Turn v3 wrapper — semantic utterance-completion classifier (subsystem
-//! 09; Python `voice/turn_detection/smart_turn.py`).
+//! Smart Turn v3 wrapper — semantic utterance-completion classifier
+//! (subsystem 09).
 //!
 //! Pipecat's [Smart Turn v3](https://github.com/pipecat-ai/smart-turn) is a
 //! small wav2vec2-derived model classifying whether the current audio buffer
@@ -10,16 +10,16 @@
 //!
 //! Stateless: feed buffered utterance audio after the VAD reports silence; the
 //! classifier returns a completion probability. Output handles both common
-//! export shapes (spec 09 §24):
+//! export shapes:
 //!
 //! - 2-class logits `[incomplete, complete]` → numerically-stable softmax, take
 //!   class 1;
 //! - single sigmoid logit `[complete_score]` → `1/(1+exp(-x))`.
 //!
-//! The ONNX runtime ([`ort`]) is gated behind the `local-turn` feature; the pure
-//! preprocessing (int16 → f32/32768, 16 s tail-truncation) and postprocessing
-//! (softmax/sigmoid) are always compiled and injected-model testable via the
-//! [`SmartTurnModel`] seam (DESIGN §4.8).
+//! The ONNX runtime ([`ort`]) is gated behind the `local-turn` feature; the
+//! pure preprocessing (int16 → f32/32768, 16 s tail-truncation) and
+//! postprocessing (softmax/sigmoid) are always compiled and injected-model
+//! testable via the [`SmartTurnModel`] seam.
 
 use std::path::Path;
 
@@ -186,11 +186,8 @@ impl SmartTurnDetector {
 
 impl SmartTurn for SmartTurnDetector {
     fn is_turn_complete(&self, pcm_audio: &[u8]) -> bool {
-        // Parity with Python (smart_turn.py:94-98): `is_complete` ->
-        // `completion_probability` RAISES `ValueError` on an unexpected logits
-        // shape, and via `asyncio.to_thread` that exception propagates out of the
-        // endpointer's `_on_vad_frame`/`feed_audio` (endpointer.py:176-178). A
-        // malformed logits head is a model-export mismatch (a deployment fault),
+        // An unexpected logits shape is a model-export mismatch (a deployment
+        // fault),
         // so surface it loudly rather than silently classifying every turn as
         // incomplete and stranding it in POST_INCOMPLETE.
         self.is_complete(pcm_audio)
@@ -308,7 +305,7 @@ mod tests {
         out
     }
 
-    // --- output-shape handling (test_smart_turn.py TestCompletionProbability)
+    // --- output-shape handling
 
     #[test]
     fn softmax_2class_logits() {
@@ -373,8 +370,7 @@ mod tests {
     }
 
     // The endpointer seam (`SmartTurn::is_turn_complete`) must NOT swallow the
-    // shape error as a `false` verdict — Python's `is_complete` raises through
-    // `asyncio.to_thread` and crashes the pump; we mirror that with a panic.
+    // shape error as a `false` verdict — it must panic loudly instead.
     #[test]
     #[should_panic(expected = "unsupported logits shape")]
     fn is_turn_complete_panics_on_unexpected_shape() {

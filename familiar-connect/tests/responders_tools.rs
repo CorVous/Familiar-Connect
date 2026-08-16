@@ -1,5 +1,4 @@
-//! Tool-calling integration tests for `TextResponder` (subsystem 06; Python
-//! `tests/test_text_responder_tools.py`).
+//! Tool-calling integration tests for `TextResponder` (subsystem 06).
 //!
 //! Port note: `HistoryTurn` exposes no `tool_calls_json` / `tool_call_id`
 //! accessor, so these assert the persisted **role sequence** (T14's pinned

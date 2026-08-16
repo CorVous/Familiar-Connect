@@ -1,4 +1,4 @@
-//! `VoiceSource`: transcription queue → bus (subsystem 09/10; Python `sources/voice.py`).
+//! `VoiceSource`: transcription queue → bus (subsystem 09/10).
 //!
 //! Drains a transcriber result queue onto the bus, publishing four topics per
 //! utterance — `voice.activity.start`, `voice.transcript.partial`,
@@ -46,7 +46,7 @@ fn perf_counter() -> f64 {
     PERF_EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64()
 }
 
-/// `voice.activity.end` payload — mirrors Python `{"user_id": ...}`.
+/// `voice.activity.end` payload — `{"user_id": ...}`.
 #[derive(Clone, Debug, Default)]
 pub struct VoiceActivityEnd {
     /// Speaker Discord user id, when known.
@@ -87,7 +87,7 @@ impl VoiceSource {
 
     /// Build a source draining `queue` onto `bus` for `voice_channel_id`.
     ///
-    /// `familiar_id` is accepted for signature parity with Python; the voice
+    /// `familiar_id` is accepted for signature symmetry; the voice
     /// payloads and envelope key on the channel, not the familiar.
     #[must_use]
     pub fn new(

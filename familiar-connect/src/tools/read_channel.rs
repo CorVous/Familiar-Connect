@@ -1,4 +1,4 @@
-//! `read_channel` tool (subsystem 08; Python `tools/read_channel.py`).
+//! `read_channel` tool (subsystem 08).
 //!
 //! Read-only peek into the focused text channel history — returns recent turns
 //! without touching `consumed_at`. Voice not supported. Deliberately unfiltered

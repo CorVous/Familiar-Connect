@@ -1,4 +1,3 @@
-//! Ported from Python `tests/test_reflection_worker.py`.
 //!
 //! Watermark-driven reflection writes — fires when enough new turns have
 //! accumulated since the previous reflection's watermark; persists each answer

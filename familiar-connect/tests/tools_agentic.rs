@@ -1,5 +1,4 @@
-//! Ported from Python `tests/test_agentic_loop.py` + `tests/test_image_serialization.py`
-//! — the agentic loop (leak guard, termination, tool execution, guards,
+//! The agentic loop (leak guard, termination, tool execution, guards,
 //! callbacks) and `ImageResult` serialization through the loop.
 
 use std::collections::VecDeque;
@@ -714,7 +713,7 @@ async fn on_iteration_end_receives_assistant_and_tool_messages() {
 }
 
 // ---------------------------------------------------------------------------
-// ImageResult serialization (test_image_serialization.py)
+// ImageResult serialization
 // ---------------------------------------------------------------------------
 
 fn image_tool() -> Tool {
@@ -831,7 +830,7 @@ fn message_to_dict_passes_list_content() {
 }
 
 // ---------------------------------------------------------------------------
-// Silent-tool detection through the loop (test_attentional_tools.py)
+// Silent-tool detection through the loop
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

@@ -1,4 +1,3 @@
-//! Ported from Python `tests/test_people_dossier_worker.py`.
 //!
 //! Watermark-driven per-`canonical_key` dossier refresh: fires when a subject's
 //! max `facts.id` exceeds its dossier's `last_fact_id`; compounds prior text

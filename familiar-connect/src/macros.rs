@@ -1,11 +1,11 @@
 //! Minimal SillyTavern macro substitution.
 //!
-//! Port of `familiar_connect/macros.py`. Supported macros (deliberate subset —
-//! unknown macros pass through unchanged): `{{char}}`, `{{user}}` (default
-//! `"User"`), `{{trim}}`, `{{scenario}}`, `{{personality}}`, `{{description}}`,
-//! and `{{// ... }}` comments (removed entirely).
+//! Supported macros (deliberate subset — unknown macros pass through
+//! unchanged): `{{char}}`, `{{user}}` (default `"User"`), `{{trim}}`,
+//! `{{scenario}}`, `{{personality}}`, `{{description}}`, and `{{//... }}`
+//! comments (removed entirely).
 //!
-//! Currently dead code upstream — only `tests/test_macros.py` references it. The
+//! Currently exercised only by its own unit tests. The
 //! module is `pub`; nothing wires it yet (identity/character-card code in
 //! subsystem 02 is its intended consumer).
 

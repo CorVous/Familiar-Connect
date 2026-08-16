@@ -1,5 +1,4 @@
-//! Persistent subscription registry backed by a TOML sidecar (subsystem 02;
-//! Python `subscriptions.py`).
+//! Persistent subscription registry backed by a TOML sidecar (subsystem 02).
 //!
 //! Multi-channel, multi-kind. Every persisting mutation rewrites the whole file
 //! (tens of rows at most) so subscriptions survive restart, and the file stays
@@ -299,8 +298,7 @@ impl AsRef<Path> for SubscriptionRegistry {
 /// `Arc<Mutex<SubscriptionRegistry>>` and the
 /// [`FocusManager`](crate::focus::FocusManager)'s read side observe **one**
 /// registry object, so a runtime `/subscribe` / `/unsubscribe` mutation is
-/// visible to focus / wake logic without a process restart (Python shares a
-/// single registry object between `bot` and `focus`). A plain
+/// visible to focus / wake logic without a process restart. A plain
 /// `Arc<SubscriptionRegistry>` still satisfies it for read-only tests.
 pub trait SubscriptionView: Send + Sync {
     /// Snapshot of every registered subscription.

@@ -1,21 +1,20 @@
-//! TEN-VAD wrapper — voice activity detection on 16 kHz mono PCM (subsystem 09;
-//! Python `voice/turn_detection/ten_vad.py`).
+//! TEN-VAD wrapper — voice activity detection on 16 kHz mono PCM (subsystem
+//! 09).
 //!
 //! Wraps Agora's TEN-VAD. The native shared library + bundled ONNX arrive as a
-//! `ten-vad-sys` FFI crate (DESIGN D2) so `unsafe` stays out of this crate; until
-//! then the native handle is an **injected seam** ([`NativeTenVad`]) and
-//! [`TenVad::new`] degrades to [`VadError::MissingBackend`].
+//! `ten-vad-sys` FFI crate so `unsafe` stays out of this crate; until then the
+//! native handle is an **injected seam** ([`NativeTenVad`]) and [`TenVad::new`]
+//! degrades to [`VadError::MissingBackend`].
 //!
 //! Feed 16 ms (256-sample) or 10 ms (160-sample) frames of 16 kHz mono int16
-//! PCM; get back a probability. The native binary verdict flag is ignored — the
-//! wrapper re-thresholds the returned probability so the same handle can be
-//! re-tuned without a rebuild (spec 09 §23). Stateful: the C handle accumulates
-//! across calls; [`reset`](TenVad::reset) rebuilds it so per-utterance state
-//! doesn't leak.
+//! PCM; get back a probability. The native binary verdict flag is ignored —
+//! the wrapper re-thresholds the returned probability so the same handle can be
+//! re-tuned without a rebuild. Stateful: the C handle accumulates across calls;
+//! [`reset`](TenVad::reset) rebuilds it so per-utterance state doesn't leak.
 //!
 //! [`Vad`] is the narrow seam the
-//! [`UtteranceEndpointer`](super::endpointer::UtteranceEndpointer) consumes — a
-//! scripted double satisfies it in ~5 lines (DESIGN §4.8).
+//! [`UtteranceEndpointer`](super::endpointer::UtteranceEndpointer) consumes —
+//! a scripted double satisfies it in ~5 lines.
 
 use std::sync::Arc;
 
@@ -58,7 +57,7 @@ pub trait Vad: Send {
     /// True when `frame` (exactly `hop_size` int16 samples, s16le) is speech at
     /// the configured threshold. The endpointer only ever feeds well-formed
     /// 256-sample frames; the production [`TenVad`] impl panics on a wrong-length
-    /// frame (parity with Python raising `ValueError`), never a silent `false`.
+    /// frame, never a silent `false`.
     fn is_speech(&mut self, frame: &[u8]) -> bool;
 
     /// Drop accumulated state — call at an utterance boundary.
@@ -129,7 +128,7 @@ impl TenVad {
 
     /// Build a VAD from an injected native-handle factory.
     ///
-    /// The factory is called once now (matching Python's native ctor call) and
+    /// The factory is called once now and
     /// again on every [`reset`](TenVad::reset), each time with
     /// `(hop_size, threshold)`.
     ///
@@ -158,11 +157,11 @@ impl TenVad {
 
     /// Build a production VAD backed by the native TEN-VAD library.
     ///
-    /// Until the `ten-vad-sys` FFI crate lands (DESIGN D2) there is no native
-    /// backend in any feature configuration, so this always returns
-    /// [`VadError::MissingBackend`] — mirroring Python raising `RuntimeError`
-    /// mentioning the `local-turn` extra when the native package is absent. The
-    /// backend-missing check precedes argument validation, matching Python.
+    /// Until the `ten-vad-sys` FFI crate lands there is no native backend in
+    /// any feature configuration, so this always returns
+    /// [`VadError::MissingBackend`], whose message mentions the `local-turn`
+    /// feature. The
+    /// backend-missing check precedes argument validation.
     ///
     /// # Errors
     /// [`VadError::MissingBackend`] — the native backend is not compiled in.
@@ -220,10 +219,8 @@ impl TenVad {
 
 impl Vad for TenVad {
     fn is_speech(&mut self, frame: &[u8]) -> bool {
-        // Parity with Python (ten_vad.py:83-86): `speech_probability` RAISES
-        // `ValueError` when the frame isn't exactly `hop_size` samples, and that
-        // propagates through `_on_vad_frame`/`feed_audio` to the awaiting pump. A
-        // wrong-length frame is a framing/config bug, so surface it loudly rather
+        // A frame that isn't exactly `hop_size` samples is a framing/config bug, so
+        // surface it loudly rather
         // than silently classifying every frame as silence (which would strand
         // the endpointer, never detecting a turn).
         self.speech_probability(frame)
@@ -233,7 +230,7 @@ impl Vad for TenVad {
 
     fn reset(&mut self) {
         // No public C reset — rebuild the native handle to drop accumulated
-        // state (spec 09 §23), reusing the same hop/threshold.
+        // state, reusing the same hop/threshold.
         self.native = (self.factory)(self.hop_size, self.threshold);
     }
 }
@@ -299,7 +296,7 @@ mod tests {
         out
     }
 
-    // --- construction / validation (test_ten_vad.py TestTenVADInit) --------
+    // --- construction / validation --------
 
     #[test]
     fn constructs_native_with_defaults() {
@@ -402,8 +399,8 @@ mod tests {
     }
 
     // The endpointer seam (`Vad::is_speech`) must NOT swallow a wrong-length
-    // frame as `false`: Python's `speech_probability` raises and crashes the
-    // pump. A hop/frame mismatch (e.g. hop_size=160 fed 256-sample frames) must
+    // frame as `false`. A hop/frame mismatch (e.g. hop_size=160 fed 256-sample
+    // frames) must
     // surface loudly, not silently classify every frame as silence.
     #[test]
     #[should_panic(expected = "hop_size")]

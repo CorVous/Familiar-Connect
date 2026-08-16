@@ -1,14 +1,14 @@
 //! Styled console log primitives + `StyledFormatter` wire format.
 //!
-//! Port of `familiar_connect/log_style.py`. Each call site composes its own log
-//! string — emoji, label, colour choices live next to the log they describe.
+//! Each call site composes its own log string — emoji, label, colour choices
+//! live next to the log they describe.
 //!
 //! The rendered forms produced by [`tag`], [`kv`], [`kv_styled`], and [`word`]
 //! are **wire formats**: they are regex-parsed downstream by the `diagnose` CLI
 //! and by `StyledFormatter`. ANSI codes are single-parameter SGR only
-//! (`ESC[<n>m`, colorama `Fore.*` 30–37/90–97, reset `ESC[0m`) — never emit
-//! compound sequences (`ESC[1;33m`), they break both the formatter regex and the
-//! diagnose parser (spec 01 §37).
+//! (`ESC[<n>m`, colorama `Fore.*` 30–37/90–97, reset `ESC[0m`) — never
+//! emit compound sequences (`ESC[1;33m`), they break both the formatter regex
+//! and the diagnose parser.
 
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,10 +21,10 @@ use regex::Regex;
 
 static STRIP: AtomicBool = AtomicBool::new(false);
 
-/// Configure ANSI stripping; call once at process start (colorama parity).
+/// Configure ANSI stripping; call once at process start.
 ///
-/// Python delegates to `colorama.init(strip=strip, autoreset=False)`, which
-/// wraps the output stream to strip ANSI on write when `strip` is true. The
+/// Stripping wraps the output stream to remove ANSI on write when `strip` is
+/// true. The
 /// primitives below always *build* ANSI; stripping is a property of the output
 /// writer (subsystem 10). This stores the flag for that writer to consult.
 pub fn init(strip: bool) {
@@ -92,7 +92,7 @@ pub fn kv(key: &str, val: &str) -> String {
 ///
 /// Render: `kc + key + "=" + RS + vc + val + RS`. The `=` is painted in the key
 /// colour and `RS` sits between `=` and the value; the `diagnose` regex depends
-/// on this exact shape (spec 01 §37).
+/// on this exact shape.
 #[must_use]
 pub fn kv_styled(key: &str, val: &str, kc: &str, vc: &str) -> String {
     format!("{kc}{key}={RS}{vc}{val}{RS}")
@@ -106,7 +106,7 @@ pub fn word(text: &str, color: &str) -> String {
 
 /// Truncate with `…` (U+2026) if longer than `limit` **Unicode scalars**.
 ///
-/// Counts and slices by `char`, never bytes (DESIGN §4.9).
+/// Counts and slices by `char`, never bytes.
 #[must_use]
 pub fn trunc(text: &str, limit: usize) -> String {
     if text.chars().count() > limit {
@@ -127,7 +127,7 @@ static TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("static tag regex is valid")
 });
 
-/// Log severity, mirroring Python `logging` levels used by `StyledFormatter`.
+/// Log severity.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LogLevel {
     /// `DEBUG` — routine per-call timing, visible at `-vv`.
@@ -159,7 +159,7 @@ impl LogLevel {
 
 /// A record to be formatted.
 ///
-/// Mirrors the fields of Python `logging.LogRecord` that `StyledFormatter`
+/// The fields `StyledFormatter`
 /// consults. `exc_info`/`exc_text` model the traceback caching; in Rust the
 /// "traceback" is any pre-formatted string.
 #[derive(Clone, Debug)]
@@ -205,7 +205,7 @@ impl StyledFormatter {
         Self
     }
 
-    /// Format `record`, mutating its `exc_text` cache like the Python formatter.
+    /// Format `record`, mutating its `exc_text` cache.
     #[allow(clippy::unused_self)] // instance API mirrors `StyledFormatter().format(...)`
     #[must_use]
     pub fn format(&self, record: &mut LogRecord) -> String {
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(trunc("😀😀😀", 2), "😀😀\u{2026}");
     }
 
-    // --- StyledFormatter (ported from tests/test_logging.py) ---
+    // --- StyledFormatter ---
 
     #[test]
     fn formatter_info_no_prefix() {
@@ -360,8 +360,8 @@ mod tests {
 
     #[test]
     fn formatter_appends_exception_traceback() {
-        // Rust has no Python traceback; model exc_info as pre-formatted text
-        // carrying the exact substrings the Python test asserts.
+        // Model exc_info as pre-formatted text carrying the exact substrings
+        // this test asserts.
         let exc = "Traceback (most recent call last):\n  ...\nRuntimeError: boom";
         let mut rec = LogRecord::new(LogLevel::Error, "Command failed");
         rec.exc_info = Some(exc.to_string());

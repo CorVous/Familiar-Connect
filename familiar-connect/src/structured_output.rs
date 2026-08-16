@@ -1,5 +1,4 @@
-//! Tolerant JSON coercion for possibly-fenced LLM replies (subsystem 02; Python
-//! `structured_output.py`).
+//! Tolerant JSON coercion for possibly-fenced LLM replies (subsystem 02).
 //!
 //! Chat-tuned models wrap JSON in ```` ``` ```` / ```` ```json ```` fences and
 //! pad it with prose. This is the PARSE half of structured output (the REQUEST
@@ -8,45 +7,36 @@
 //! worker reading it.
 //!
 //! The blob extraction is deliberately a **greedy DOTALL span** (`\{.*\}` /
-//! `\[.*\]`), not a balanced-bracket matcher: it mirrors the three per-call-site
-//! regexes the Python consolidates, so a reply containing both shapes resolves
-//! the same way. Do not "fix" it into a proper bracket matcher.
+//! `\[.*\]`), not a balanced-bracket matcher, so a reply containing both shapes
+//! resolves the same way at every call site. Do not "fix" it into a proper
+//! bracket matcher.
 //!
-//! ## Tolerant-parse-boundary deviations (declared; unobservable in practice)
+//! ## Tolerant-parse boundary (declared; unobservable in practice)
 //!
-//! Python parses the extracted blob with `json.loads` (structured_output.py:77),
-//! whose number handling is a strict superset of `serde_json::from_str`. Two
-//! inputs that Python accepts are treated differently here. Both are untested in
-//! either suite, cannot occur in real LLM replies, and are **fundamentally
-//! unrepresentable in the Rust value types** rather than a porting oversight —
-//! so the port keeps the closest-parity option (degrade, never panic) and
-//! records the divergence:
+//! Two number shapes a more lenient JSON reader might accept are
+//! **fundamentally unrepresentable in the Rust value types**, so this module
+//! takes the closest safe option (degrade, never panic) and records the
+//! boundary:
 //!
-//! 1. **Non-finite literals.** `json.loads` accepts the non-standard tokens
-//!    `NaN` / `Infinity` / `-Infinity` (via its `parse_constant`) and an
-//!    overflowing exponent like `1e999` (→ `inf`), returning
-//!    `JsonResult(value=<float>, parsed_ok=True)`. `serde_json` rejects all of
-//!    these ("expected value" / "number out of range"), so [`coerce_json`]
-//!    degrades to `JsonResult { value: None, parsed_ok: false }`. Even if we
-//!    wanted parity, `serde_json::Value::Number` cannot hold a non-finite float
-//!    (`Number::from_f64` returns `None` for `NaN`/`inf`), so the *value* could
-//!    never match — only the `parsed_ok` flag, and matching that alone would
-//!    trade one divergence for a worse one (a wrong value). The sole downstream
-//!    effect is one extra corrective re-ask in `structured_request`; LLM replies
-//!    do not emit bare `NaN`/`Infinity`.
-//! 2. **Integers wider than `i64`/`u64`.** Python preserves arbitrary-precision
-//!    ints exactly (`123456789012345678901234567890` stays an exact `int`);
-//!    `serde_json` without the (crate-wide, deliberately unset) `arbitrary_precision`
-//!    feature coerces such a token to a lossy `f64`
-//!    (`Number(1.2345678901234568e29)`). [`coerce_json`] still reports
-//!    `parsed_ok: true`, but the *value* is a float where Python has an exact
-//!    int, so a downstream [`coerce_positive_int_list`] drops it (`as_i64()` is
-//!    `None`) where Python would keep it. `Vec<i64>` cannot represent the value
-//!    regardless, so this cannot be made to match without changing the
-//!    spec-approved return type. Fact/turn ids are small; unobservable.
+//! 1. **Non-finite literals.** The non-standard tokens `NaN` / `Infinity` /
+//!    `-Infinity` and an overflowing exponent like `1e999` (→ `inf`) are
+//!    rejected by `serde_json` ("expected value" / "number out of range"), so
+//!    [`coerce_json`] degrades to `JsonResult { value: None, parsed_ok: false }`.
+//!    `serde_json::Value::Number` cannot hold a non-finite float
+//!    (`Number::from_f64` returns `None` for `NaN`/`inf`), so accepting them
+//!    would trade a clean failure for a wrong value. The sole downstream effect
+//!    is one extra corrective re-ask in `structured_request`; LLM replies do
+//!    not emit bare `NaN`/`Infinity`.
+//! 2. **Integers wider than `i64`/`u64`.** Without the (crate-wide,
+//!    deliberately unset) `arbitrary_precision` feature, `serde_json` coerces
+//!    such a token to a lossy `f64` (`Number(1.2345678901234568e29)`).
+//!    [`coerce_json`] still reports `parsed_ok: true`, but the *value* is a
+//!    float, so a downstream [`coerce_positive_int_list`] drops it (`as_i64()`
+//!    is `None`). `Vec<i64>` could not represent the value regardless, and
+//!    fact/turn ids are small; unobservable.
 //!
 //! Both cases are pinned by regression tests below so the degrade-never-panic
-//! contract (spec 02 #40) holds across this boundary.
+//! contract holds across this boundary.
 
 use regex::Regex;
 use serde_json::Value;
@@ -60,9 +50,10 @@ static JSON_ARRAY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)\[.*\]").expect("valid array regex"));
 static FENCE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)```(?:json)?").expect("valid fence regex"));
-// A signed decimal integer and nothing else (full match). ASCII-only `\d` per
-// DESIGN §4.6: Python's `_INT_RE` + `int()` would accept Unicode digits, but
-// `str::parse::<i64>` will not — an untested, unobservable-in-practice deviation.
+// A signed decimal integer and nothing else (full match). ASCII-only `\d`:
+// a more lenient reader would accept Unicode digits, but
+// `str::parse::<i64>` will not — an untested, unobservable-in-practice
+// deviation.
 static INT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^-?[0-9]+$").expect("valid int regex"));
 
@@ -102,10 +93,10 @@ pub fn coerce_json(reply: &str, expect: Expect) -> JsonResult {
     let stripped = FENCE_RE.replace_all(reply, "");
     let cleaned = stripped.trim();
     let blob = shaped_json_blob(cleaned, expect);
-    // `serde_json::from_str` is slightly stricter than Python's `json.loads`
+    // `serde_json::from_str` is strict about numbers
     // here: bare `NaN`/`Infinity`/`-Infinity` and overflow-exponent numbers
     // fumble instead of yielding a non-finite float, and a >i64 integer becomes
-    // a lossy f64. See the module-level "Tolerant-parse-boundary deviations"
+    // a lossy f64. See the module-level "Tolerant-parse boundary"
     // note — both are unrepresentable in the Rust value types and unobservable
     // in real LLM replies; the degrade-never-panic contract still holds.
     serde_json::from_str::<Value>(blob).map_or_else(
@@ -161,7 +152,7 @@ pub fn coerce_positive_int_list(raw: &Value) -> Vec<i64> {
     for item in arr {
         let val: i64 = match item {
             // `as_i64` is `None` for floats and out-of-range values, so JSON
-            // like `1.5` / `2.0` is dropped (Python `isinstance(x, int)` false).
+            // like `1.5` / `2.0` is dropped (not an integer).
             Value::Number(n) => match n.as_i64() {
                 Some(v) => v,
                 None => continue,
@@ -178,7 +169,7 @@ pub fn coerce_positive_int_list(raw: &Value) -> Vec<i64> {
                 }
             }
             // Everything else — including `Value::Bool` (JSON true/false is a
-            // distinct variant, so the Python `True == 1` hazard cannot occur) —
+            // distinct variant, so the `true == 1` hazard cannot occur) —
             // is dropped.
             _ => continue,
         };
@@ -351,18 +342,18 @@ mod tests {
         assert_eq!(coerce_str_list(&json!(42)), Vec::<String>::new());
     }
 
-    // --- Tolerant-parse-boundary deviations (see module docs) -------------
-    // These pin the DELIBERATE, declared divergence from Python's `json.loads`:
+    // --- Tolerant-parse boundary (see module docs) -----------------------
+    // These pin the DELIBERATE, declared boundary:
     // non-finite literals and >i64 integers are unrepresentable in the Rust
-    // value types, so the port keeps the degrade-never-panic contract instead
-    // of matching Python bit-for-bit. Documented as untested/unobservable in
+    // value types, so this module keeps the degrade-never-panic contract.
+    // Documented as untested/unobservable in
     // real LLM replies; pinned here so the boundary stays intentional.
 
     #[test]
     fn non_finite_literals_fumble_instead_of_panicking() {
-        // Python `json.loads` yields nan/inf with parsed_ok=True for each of
-        // these; `serde_json` rejects them, so the port degrades to a fumble.
-        // The contract that MUST hold is spec 02 #40: never raise/panic.
+        // A lenient reader would yield nan/inf with parsed_ok=true for each of
+        // these; `serde_json` rejects them, so this degrades to a fumble.
+        // The contract that MUST hold: never raise/panic.
         for reply in [
             "NaN",
             "Infinity",
@@ -385,8 +376,9 @@ mod tests {
 
     #[test]
     fn oversized_integer_parses_lossily_and_is_dropped_downstream() {
-        // Python keeps `123456789012345678901234567890` as an exact int and
-        // `coerce_positive_int_list` would return it. `serde_json` (no
+        // An arbitrary-precision reader would keep
+        // `123456789012345678901234567890` exact and `coerce_positive_int_list`
+        // would return it. `serde_json` (no
         // `arbitrary_precision`) coerces the token to a lossy f64, so the parse
         // still succeeds but the value is a float — which the int-list coercion
         // then drops (`as_i64()` is None). `Vec<i64>` could not hold the value
@@ -402,7 +394,7 @@ mod tests {
         assert_eq!(
             coerce_positive_int_list(&value),
             Vec::<i64>::new(),
-            "downstream drops the lossy float (Python would keep the exact int)"
+            "downstream drops the lossy float"
         );
     }
 }

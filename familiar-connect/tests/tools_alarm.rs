@@ -1,11 +1,10 @@
-//! Ported from Python `tests/test_alarm_scheduler.py`, `test_alarm_tool.py`,
-//! and `test_alarm_waker.py` — the DB-backed [`AlarmScheduler`], the
-//! `set_alarm` / `cancel_alarm` tools, and the [`AlarmWaker`] bus processor.
+//! The DB-backed [`AlarmScheduler`], the `set_alarm` / `cancel_alarm` tools,
+//! and the [`AlarmWaker`] bus processor.
 //!
-//! Timing uses real (short) sleeps, mirroring the Python suite; each test
-//! subscribes *before* `start`/`add` so a past-due immediate fire cannot race
-//! ahead of the subscriber (a multi-threaded-runtime concern the single-threaded
-//! Python event loop did not have).
+//! Timing uses real (short) sleeps; each test subscribes *before* `start`/`add`
+//! so a past-due immediate fire cannot race ahead of the subscriber (a
+//! multi-threaded-runtime concern a single-threaded runtime would not
+//! have).
 
 use std::sync::Arc;
 use std::time::Duration;

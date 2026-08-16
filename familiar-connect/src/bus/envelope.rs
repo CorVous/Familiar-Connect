@@ -1,9 +1,9 @@
-//! Event envelope + per-turn cancel scope (subsystem 01; Python `bus/envelope.py`).
+//! Event envelope + per-turn cancel scope (subsystem 01).
 //!
 //! [`Event`] is the immutable, topic-addressed envelope the bus fans out; sharing
 //! is safe because consumers only ever observe it behind `Arc<Event>` (read-only).
 //! [`TurnScope`] is the per-turn barge-in handle, backed by a
-//! `tokio_util::sync::CancellationToken` (DESIGN §4.4, D12): `cancel()` is
+//! `tokio_util::sync::CancellationToken`: `cancel()` is
 //! idempotent and `wait_cancelled()` is level-triggered.
 
 use std::any::Any;
@@ -16,16 +16,9 @@ use tokio_util::sync::CancellationToken;
 
 /// Opaque, type-erased event payload.
 ///
-/// Python's envelope carries `payload: Any` (dicts, dataclasses like `Author`,
-/// bytes, …) and the bus itself never inspects it. The closed `EventPayload`
-/// enum the design sketches (DESIGN §4.6 / spec 01 Data formats) cannot be built
-/// at this porting stage: its variants name producer types owned by the still
-/// unported subsystems 02–11 (files this agent may not edit). Until those land,
-/// the closest-parity representation is a type-erased `Arc<dyn Any + Send + Sync>`
-/// — it reproduces Python's `Any` semantics exactly, keeps the bus fully
-/// payload-agnostic, and lets every future producer attach any concrete payload
-/// via [`payload`] / `Arc::new`, recovering it with `downcast_ref`. See the
-/// deviation note in the port summary.
+/// A type-erased `Arc<dyn Any + Send + Sync>`, so the bus stays fully
+/// payload-agnostic: any producer attaches any concrete payload via
+/// [`payload`] / `Arc::new`, and consumers recover it with `downcast_ref`.
 pub type Payload = Arc<dyn Any + Send + Sync>;
 
 /// Wrap any value as an opaque [`Payload`].
@@ -40,8 +33,7 @@ static SCOPE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Immutable, topic-addressed event envelope.
 ///
 /// Deep immutability is a compile-time property in Rust: consumers receive the
-/// event as `Arc<Event>` and cannot mutate through a shared reference, so the
-/// Python `@dataclass(frozen=True)` guarantee holds structurally.
+/// event as `Arc<Event>` and cannot mutate through a shared reference.
 #[derive(Clone)]
 pub struct Event {
     /// Unique per publish.
@@ -50,13 +42,13 @@ pub struct Event {
     pub turn_id: String,
     /// Usually the channel id (`"discord:{id}"` / `"voice:{id}"`).
     pub session_id: String,
-    /// Lineage; empty for source events (Python `tuple[str, ...]`).
+    /// Lineage; empty for source events.
     pub parent_event_ids: Vec<String>,
     /// Routing key (see [`crate::bus::topics`]).
     pub topic: String,
     /// `Utc::now()` at construction.
     pub timestamp: DateTime<Utc>,
-    /// Monotonic **per source instance**; not globally monotonic (DESIGN §4.7).
+    /// Monotonic **per source instance**; not globally monotonic.
     pub sequence_number: u64,
     /// Opaque payload; the bus never inspects it.
     pub payload: Payload,
@@ -71,8 +63,7 @@ pub struct TurnScope {
     pub turn_id: String,
     /// The session this scope belongs to.
     pub session_id: String,
-    /// Creation time. Per DESIGN D12 this is `Instant::now()` unconditionally
-    /// (the Python `0.0` no-loop fallback is dropped).
+    /// Creation time. The this is `Instant::now` unconditionally.
     pub started_at: Instant,
     /// Unique identity; the router's `end_turn` compares this, **not** `turn_id`
     /// (two scopes may legitimately share a `turn_id`).
@@ -116,7 +107,7 @@ impl TurnScope {
     }
 
     /// A clone of the underlying cancellation token, for `select!` in pipeline
-    /// stages that race work against barge-in (DESIGN §4.4).
+    /// stages that race work against barge-in.
     #[must_use]
     pub fn cancellation_token(&self) -> CancellationToken {
         self.token.clone()

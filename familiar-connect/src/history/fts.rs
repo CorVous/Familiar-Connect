@@ -1,5 +1,4 @@
-//! Tantivy full-text index + `familiar_en` analyzer (subsystem 03; Python
-//! `history/fts.py`).
+//! Tantivy full-text index + `familiar_en` analyzer (subsystem 03).
 //!
 //! One [`TantivyFts`] per indexed relational table (`turns`, `facts`). The index
 //! lives OUTSIDE the SQLite database — on disk under `<db_dir>/fts/<name>/`, or
@@ -7,22 +6,20 @@
 //! `:memory:` stores). Documents are `(row_id: i64 stored/indexed/fast,
 //! content: text unstored)`; upserts are delete-by-row_id then add.
 //!
-//! The analyzer chain matches Python's tantivy pipeline **exactly** so BM25
+//! The analyzer chain is pinned **exactly** so BM25
 //! rankings are identical (spec 03 behavior 17): simple tokenizer →
 //! remove_long(64) → lowercase → ascii_fold → the custom stopwords →
-//! English stemmer. tantivy is native Rust here, so this is the same crate the
-//! Python bindings wrap.
+//! English stemmer. tantivy is native Rust here.
 //!
-//! ## Commit-retry seam (behavior 22, DESIGN §4.8)
+//! ## Commit-retry seam (behavior 22)
 //!
-//! `commit()` occasionally races a Windows antivirus segment-scan that briefly
-//! locks a freshly-written `.term` file, surfacing as a `PermissionDenied`
-//! I/O error. Those transient-lock errors are retried with short backoffs
-//! (`50ms`, `200ms`, `500ms`) then one final propagating attempt; every other
-//! error fails fast. [`TantivyFts::set_commit_fault`] injects a fake failing
-//! commit for the three retry tests (Python monkeypatched `_commit_writer`);
-//! [`TantivyFts::set_retry_delays`] collapses the backoffs so those tests run
-//! fast.
+//! `commit` occasionally races a Windows antivirus segment-scan that briefly
+//! locks a freshly-written `.term` file, surfacing as a `PermissionDenied` I/O
+//! error. Those transient-lock errors are retried with short backoffs (`50ms`,
+//! `200ms`, `500ms`) then one final propagating attempt; every other error
+//! fails fast. [`TantivyFts::set_commit_fault`] injects a fake failing commit
+//! for the three retry tests; [`TantivyFts::set_retry_delays`] collapses the
+//! backoffs so those tests run fast.
 
 use std::io::ErrorKind;
 use std::path::Path;
@@ -63,15 +60,14 @@ const LOCK_SIGNATURES: [&str; 3] = ["PermissionDenied", "Access is denied", "os 
 /// query parser).
 const ANALYZER_NAME: &str = "familiar_en";
 
-/// Writer heap (bytes) and thread count — matches Python `writer(heap_size=…,
-/// num_threads=1)`. 15 MB is tantivy's per-thread minimum.
+/// Writer heap (bytes) and thread count.
+/// 15 MB is tantivy's per-thread minimum.
 const WRITER_HEAP_BYTES: usize = 15_000_000;
 
 /// Common English stopwords dropped before FTS matching.
 ///
-/// Verbatim copy of `_FTS_STOPWORDS` in `fts.py` (the actual list is 87 words,
-/// not the 88 the spec quotes; includes chat fillers `hey`, `hi`, `lol`, `ok`,
-/// `know`, `yes`). Changing this shifts BM25 rankings.
+/// The stopword list — 87 words, including chat fillers `hey`, `hi`, `lol`,
+/// `ok`, `know`, `yes`. Changing this shifts BM25 rankings.
 const FTS_STOPWORDS: [&str; 87] = [
     "a", "about", "an", "and", "any", "anything", "are", "as", "at", "be", "been", "but", "by",
     "can", "could", "did", "do", "does", "doing", "done", "for", "from", "had", "has", "have",
@@ -85,12 +81,12 @@ const FTS_STOPWORDS: [&str; 87] = [
 /// Test seam consulted before every real writer commit.
 ///
 /// Returns `Some(err)` to simulate a commit failure this attempt, or `None` to
-/// let the real commit proceed. Mirrors Python's monkeypatched `_commit_writer`.
+/// let the real commit proceed.
 pub type CommitFault = Box<dyn FnMut() -> Option<std::io::Error> + Send>;
 
 /// Strip tantivy query syntax before parse: any run of non-word, non-space
 /// characters becomes a single space, then lowercase. `\w` is Unicode-aware
-/// (regex crate default), matching Python's `re.compile(r"[^\w\s]+")`.
+/// (regex crate default).
 fn sanitize_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"[^\w\s]+").expect("static FTS sanitize regex is valid"))
@@ -222,7 +218,7 @@ impl TantivyFts {
             .writer_with_num_threads::<TantivyDocument>(1, WRITER_HEAP_BYTES)
             .map_err(|e| StoreError::Fts(e.to_string()))?;
         // Manual reload so every search sees the immediately-preceding commit
-        // (Python calls `index.reload()` after each write).
+        // (`index.reload()` after each write).
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -308,8 +304,7 @@ impl TantivyFts {
     }
 
     /// Commit (via the retry path) then reload the reader so reads are
-    /// synchronous. `writer` is released before the reload (Python reloads
-    /// outside the writer lock).
+    /// synchronous. `writer` is released before the reload.
     fn commit_and_reload(
         &self,
         mut writer: std::sync::MutexGuard<'_, IndexWriter>,
@@ -400,8 +395,7 @@ mod tests {
 
     #[test]
     fn stopword_list_matches_python() {
-        // Python's `_FTS_STOPWORDS` actually holds 87 entries (the spec's "88"
-        // is off by one); parity requires the exact same set.
+        // The list holds 87 entries; this pins the exact set.
         assert_eq!(FTS_STOPWORDS.len(), 87);
     }
 
@@ -435,7 +429,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         // Write an index whose schema differs from `build_schema` (row_id as text
-        // rather than i64) — stands in for the Python-vs-Rust incompatibility.
+        // rather than i64) — stands in for a schema incompatibility.
         let mut sb = Schema::builder();
         sb.add_text_field("row_id", STRING | STORED);
         sb.add_text_field("content", STRING | STORED);

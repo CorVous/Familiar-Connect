@@ -1,4 +1,4 @@
-//! Twitch event types + formatters + builders (subsystem 11; Python `twitch.py`).
+//! Twitch event types + formatters + builders (subsystem 11).
 //!
 //! The **pure** half of the Twitch pipeline: normalized [`TwitchEvent`] values,
 //! the exact-string text [formatters](format_follow), and the config-gated
@@ -26,7 +26,7 @@ use crate::llm::Message;
 ///
 /// Everything is [`Normal`](Priority::Normal) except ad break start/end, which
 /// are [`Immediate`](Priority::Immediate) when the watcher config's
-/// `ads_immediate` flag is set (spec 11 §6).
+/// `ads_immediate` flag is set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Priority {
     /// Batched with the normal message flow.
@@ -36,8 +36,7 @@ pub enum Priority {
 }
 
 impl Priority {
-    /// The wire string (`"normal"` / `"immediate"`), matching Python's
-    /// `Literal["normal", "immediate"]`.
+    /// The wire string (`"normal"` / `"immediate"`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -50,7 +49,7 @@ impl Priority {
 /// Single Twitch channel event ready for an LLM message batch.
 ///
 /// `viewer` is `None` for events with no associated person (ad breaks) and for
-/// anonymous gift subs / cheers (spec 11 §4).
+/// anonymous gift subs / cheers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TwitchEvent {
     /// The channel the event fired on.
@@ -92,8 +91,7 @@ impl TwitchEvent {
 /// All boolean flags default to `true`; `redemption_names` defaults to empty
 /// (channel-point redemptions are an opt-in allow-list). Programmatic only — no
 /// TOML/env source (spec 11 Config knobs).
-// The five independent on/off toggles are the faithful port of the Python
-// `TwitchWatcherConfig` dataclass fields; each gates a distinct event type, so
+// The five independent on/off toggles each gate a distinct event type, so
 // collapsing them into a bitflag/enum would diverge from the pinned surface.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,8 +127,8 @@ impl Default for TwitchWatcherConfig {
 // Text formatters
 // ---------------------------------------------------------------------------
 
-/// Channel-point redemption text. Empty/absent `user_input` drops the
-/// `" and says: …"` clause (spec 11 §5).
+/// Channel-point redemption text. Empty/absent `user_input` drops the `" and
+/// says: …"` clause.
 #[must_use]
 pub fn format_channel_point_redemption(
     viewer: &str,
@@ -554,7 +552,7 @@ mod tests {
 
     #[test]
     fn resubscription_one_month() {
-        // Python keeps plural month phrasing regardless of count; the substring
+        // Plural month phrasing is kept regardless of count; the substring
         // `"1 month"` is present within `"1 months"`.
         let text = format_resubscription("Bob", 1, 1, "woo");
         assert!(text.contains("1 month"));
@@ -656,8 +654,8 @@ mod tests {
 
     #[test]
     fn config_redemption_names_independent_per_instance() {
-        // Rust `Vec` is owned per value — no shared mutable default (the Python
-        // `field(default_factory=list)` bug class cannot occur here).
+        // Rust `Vec` is owned per value — no shared mutable default, so the
+        // shared-default bug class cannot occur here.
         let mut a = TwitchWatcherConfig::default();
         let b = TwitchWatcherConfig::default();
         a.redemption_names.push("Test".to_owned());

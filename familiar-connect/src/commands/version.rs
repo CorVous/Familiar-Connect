@@ -1,14 +1,11 @@
-//! version subcommand (subsystem 10; Python commands/version.py).
+//! version subcommand (subsystem 10).
 //!
-//! Prints one styled line carrying the package version. The version string comes
-//! from `CARGO_PKG_VERSION` (Python read `familiar_connect.__version__`); the
-//! layout mirrors Python's `tag('✨ Version') + word('familiar-connect') +
-//! word(__version__)`.
+//! Prints one styled line carrying the package version. The version string
+//! comes from `CARGO_PKG_VERSION`.
 
 use crate::log_style as ls;
 
-/// The installed crate version (`CARGO_PKG_VERSION`), the Rust analog of
-/// Python's `familiar_connect.__version__`.
+/// The installed crate version (`CARGO_PKG_VERSION`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build the styled one-line version banner (separated from [`run`] so the
@@ -44,7 +41,7 @@ mod tests {
 
     #[test]
     fn version_is_semver_prefixed() {
-        // Ported from test_version.py::test_version_format — starts with X.Y.Z.
+        // Starts with X.Y.Z.
         assert!(
             Regex::new(r"^\d+\.\d+\.\d+")
                 .expect("valid")
@@ -55,8 +52,7 @@ mod tests {
 
     #[test]
     fn version_line_contains_version_and_name() {
-        // Ported from test_version.py::test_version_subcommand (output contains
-        // the version) — asserts on the built line rather than captured stdout.
+        // Asserts on the built line rather than captured stdout.
         let stripped = strip_ansi(&version_line());
         assert!(stripped.contains(VERSION));
         assert!(stripped.contains("familiar-connect"));

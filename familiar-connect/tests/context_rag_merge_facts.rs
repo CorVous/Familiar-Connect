@@ -1,5 +1,4 @@
-//! Ported from Python `tests/test_rag_merge_facts.py` — facts+turns dual
-//! sections and importance-weighted reranking.
+//! Facts+turns dual sections and importance-weighted reranking.
 
 #[path = "context_helpers/mod.rs"]
 mod helpers;

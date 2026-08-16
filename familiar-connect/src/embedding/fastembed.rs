@@ -1,14 +1,13 @@
-//! FastEmbed ONNX embedder (subsystem 04; Python `embedding/fastembed.py`;
-//! feature `local-embed`).
+//! FastEmbed ONNX embedder (subsystem 04; feature `local-embed`).
 //!
 //! An ONNX-compiled sentence-transformer wrapper — the intended production
 //! backend for paraphrase-tolerant fact recall, replacing the `hash` baseline's
 //! token-overlap proxy with real semantic similarity. Default model is
 //! BGE-small (384-dim), per the ecosystem report.
 //!
-//! **Lazy load** (spec 04 §3): the underlying ONNX model is constructed on the
-//! first non-empty [`embed`](FastEmbedEmbedder::embed) call, double-checked under
-//! a lock so exactly one model is built even under concurrent first calls. Both
+//! **Lazy load**: the underlying ONNX model is constructed on the first
+//! non-empty [`embed`](FastEmbedEmbedder::embed) call, double-checked under a
+//! lock so exactly one model is built even under concurrent first calls. Both
 //! the construction and the (CPU-bound) inference run on a blocking worker via
 //! [`tokio::task::spawn_blocking`] so the reactor keeps draining. `embed([])`
 //! returns `[]` without loading.
@@ -20,11 +19,10 @@
 //! accessor.
 //!
 //! **The model loader is a seam** ([`ModelLoader`]): the production
-//! [`FastembedLoader`] wraps the `fastembed` crate, but the lazy-load / dim-probe
-//! / single-load / cache-dir behaviors are pinned by tests through stub loaders
-//! that never touch ONNX (Python stubbed `sys.modules["fastembed"]`; here we
-//! inject the loader). Tests needing a real ~130 MB model download are
-//! `#[ignore]`.
+//! [`FastembedLoader`] wraps the `fastembed` crate, but the lazy-load /
+//! dim-probe / single-load / cache-dir behaviors are pinned by tests through
+//! stub loaders that never touch ONNX. Tests needing a real ~130 MB model
+//! download are `#[ignore]`.
 #![cfg(feature = "local-embed")]
 
 use std::sync::Arc;
@@ -36,13 +34,12 @@ use tokio::sync::Mutex;
 
 use crate::embedding::protocol::Embedder;
 
-/// Default model name (BGE-small; 384-dim). Matches the Python
-/// `DEFAULT_MODEL_NAME` and the `[providers.embedding].fastembed_model` default.
+/// Default model name (BGE-small; 384-dim).
 pub const DEFAULT_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 
 /// Known model dimensionalities, so `dim` can be advertised before the first
 /// embed lands. A model not listed here reports `dim == 0` until the first
-/// embed probes a real vector (Python `_KNOWN_DIMS`).
+/// embed probes a real vector.
 #[must_use]
 fn known_dim(model_name: &str) -> usize {
     match model_name {
@@ -168,8 +165,7 @@ impl Embedder for FastEmbedEmbedder {
         let vectors = tokio::task::spawn_blocking(move || model.embed(&owned)).await??;
         // Probe `dim` opportunistically the first time we see a real vector —
         // covers models absent from `known_dim`. A nonzero pre-known dim is
-        // never overwritten (guard is "current dim == 0"), matching Python's
-        // `if vectors and not self.dim`.
+        // never overwritten (guard is "current dim == 0").
         if self.dim.load(Ordering::Relaxed) == 0 {
             if let Some(first) = vectors.first() {
                 self.dim.store(first.len(), Ordering::Relaxed);

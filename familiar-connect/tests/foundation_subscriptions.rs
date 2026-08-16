@@ -1,6 +1,5 @@
 //! Integration tests for `subscriptions::SubscriptionRegistry` (foundation
-//! package). Ported from Python `tests/test_subscriptions.py`, plus a byte-exact
-//! sidecar-serialization pin for the DESIGN §4 / spec-02 on-disk contract.
+//! package)..
 
 use familiar_connect::subscriptions::{Subscription, SubscriptionKind, SubscriptionRegistry};
 use std::path::PathBuf;

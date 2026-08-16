@@ -1,5 +1,5 @@
-//! STT backend selector — dispatches on `[providers.stt].backend`
-//! (subsystem 09; Python `stt/factory.py`).
+//! STT backend selector — dispatches on `[providers.stt].backend` (subsystem
+//! 09).
 //!
 //! Each per-backend builder takes its typed `[providers.stt.<backend>]`
 //! sub-table; only secrets (`DEEPGRAM_API_KEY`) come from the environment.
@@ -20,8 +20,7 @@ pub const KNOWN_BACKENDS: [&str; 3] = ["deepgram", "faster_whisper", "parakeet"]
 ///   `DEEPGRAM_API_KEY` is unset.
 /// - [`SttError::LocalSttUnavailable`] when a local backend (`parakeet` /
 ///   `faster_whisper`) is selected — no local engine is built into this binary
-///   yet (DESIGN §6). The caller logs + degrades to text-only, mirroring the
-///   Python lazy-import degradation.
+///   yet. The caller logs + degrades to text-only.
 pub fn create_transcriber(config: &STTConfig) -> Result<Box<dyn Transcriber>, SttError> {
     let deepgram_key = std::env::var("DEEPGRAM_API_KEY").ok();
     create_transcriber_with_secrets(config, deepgram_key)
@@ -48,9 +47,8 @@ pub(crate) fn create_transcriber_with_secrets(
         }
         // Parakeet / faster-whisper are buffer-and-finalize local backends. No
         // Rust local-STT engine is wired yet (the `local-stt` feature has no
-        // engine chosen — DESIGN §6), so selecting them degrades with a clear
-        // error, exactly as the Python lazy-import path re-raises its
-        // RuntimeError as ValueError for the run command to catch + warn.
+        // engine chosen), so selecting them degrades with a clear
+        // error for the run command to catch + warn.
         "parakeet" => Err(SttError::LocalSttUnavailable("parakeet".to_string())),
         "faster_whisper" => Err(SttError::LocalSttUnavailable("faster_whisper".to_string())),
         // Unreachable while every KNOWN_BACKENDS entry has a dispatch arm.

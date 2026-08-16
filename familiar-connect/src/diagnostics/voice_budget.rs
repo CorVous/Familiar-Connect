@@ -1,10 +1,10 @@
 //! Per-turn voice latency budget recorder.
 //!
-//! Port of `familiar_connect/diagnostics/voice_budget.py`. Stamps phase markers
-//! across the voice path (`vad_end` → `stt_final` → `llm_first_token` →
-//! `tts_first_audio` → `playback_start`) keyed by `turn_id`; emits one span per
-//! adjacent gap into the shared [`SpanCollector`](super::collector), plus a
-//! cumulative `voice.total` when the funnel completes.
+//! Stamps phase markers across the voice path (`vad_end` → `stt_final` →
+//! `llm_first_token` → `tts_first_audio` → `playback_start`) keyed by
+//! `turn_id`; emits one span per adjacent gap into the shared
+//! [`SpanCollector`](super::collector), plus a cumulative `voice.total` when
+//! the funnel completes.
 //!
 //! `vad_end` is optional (only stamped when local turn detection is wired in);
 //! without it the funnel starts at `stt_final`. First record per (turn, phase)
@@ -61,7 +61,7 @@ fn perf_counter() -> f64 {
 }
 
 /// Gap ms = `max(0, round(delta_seconds * 1000))`, banker's rounding
-/// (`round_ties_even`, DESIGN §4.3); negative gaps clamp to 0.
+/// (`round_ties_even`); negative gaps clamp to 0.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn gap_ms(delta_seconds: f64) -> i64 {
     crate::support::round::half_even(delta_seconds * 1000.0).max(0.0) as i64
@@ -152,10 +152,9 @@ impl VoiceBudgetRecorder {
     /// Stamp `phase` for `turn_id`; emit newly-reachable gap spans.
     ///
     /// `t` defaults to a monotonic clock read when `None`. First record per
-    /// (turn, phase) wins — duplicates are dropped (but still refresh LRU order,
-    /// matching Python's `move_to_end` before the dedupe check). Gaps are
-    /// emitted **after** releasing the internal lock, so the lock order is never
-    /// budget→collector (DESIGN §4.4 / spec 01 §30).
+    /// (turn, phase) wins — duplicates are dropped (but still refresh LRU
+    /// order. Gaps are emitted **after** releasing the internal lock, so the
+    /// lock order is never budget→collector (DESIGN §4.4 / spec 01 §30).
     // The guard is deliberately block-scoped and dropped before `emit`.
     #[allow(clippy::significant_drop_tightening)]
     pub fn record(&self, turn_id: &str, phase: &str, t: Option<f64>) {
@@ -171,9 +170,8 @@ impl VoiceBudgetRecorder {
                     compute_gaps(phases, phase)
                 }
                 // `max_turns == 0`: `touch_or_create` evicts the turn the instant
-                // it is created. Python keeps a now-orphaned local dict after
-                // `popitem` and writes/computes on it, so a lone phase emits
-                // nothing; mirror that graceful degradation instead of panicking.
+                // it is created, so a lone phase emits nothing. Degrade gracefully
+                // instead of panicking.
                 None => {
                     let mut phases = HashMap::new();
                     phases.insert(phase.to_string(), t);
@@ -355,9 +353,9 @@ mod tests {
     fn max_turns_zero_degrades_without_panic() {
         let _g = isolated();
         let rec = VoiceBudgetRecorder::new(0);
-        // Every turn is evicted the instant it is created, so each phase lands on
-        // a fresh orphan map with no predecessor: no gap ever emits and, crucially,
-        // `record` must not panic (Python degrades gracefully; see finding).
+        // Every turn is evicted the instant it is created, so each phase lands
+        // on a fresh orphan map with no predecessor: no gap ever emits and,
+        // crucially, `record` must not panic.
         rec.record("t-1", PHASE_STT_FINAL, Some(10.0));
         rec.record("t-1", PHASE_LLM_FIRST_TOKEN, Some(10.25));
         rec.record("t-1", PHASE_PLAYBACK_START, Some(10.7));

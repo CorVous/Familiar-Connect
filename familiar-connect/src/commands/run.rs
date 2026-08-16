@@ -1,11 +1,10 @@
-//! run subcommand: composition root + teardown (subsystem 10; Python
-//! commands/run.py).
+//! run subcommand: composition root + teardown (subsystem 10).
 //!
-//! `run` is the failure ladder (token → familiar → config → clients → familiar
-//! bundle); the async composition root `async_main` brings up the bus,
-//! responders, workers, sources, alarm scheduler, and activity engine, wires the
-//! serenity gateway, and tears everything down in the spec's order on a
-//! cooperative SIGINT/SIGTERM (spec 10 §55–58).
+//! `run` is the failure ladder (token → familiar → config → clients →
+//! familiar bundle); the async composition root `async_main` brings up the bus,
+//! responders, workers, sources, alarm scheduler, and activity engine, wires
+//! the serenity gateway, and tears everything down in the spec's order on a
+//! cooperative SIGINT/SIGTERM.
 //!
 //! Because the real gateway needs `serenity`, `async_main` and the client-facing
 //! half of `run` are `cfg(feature = "discord")`; the default-feature build keeps
@@ -40,7 +39,7 @@ use crate::familiar::Familiar;
 use crate::focus::FocusManager;
 use crate::sleep::maintenance::SleepPromptText;
 
-/// `run` arguments (Python `add_parser`'s `--familiar`).
+/// `run` arguments.
 #[derive(Args, Debug)]
 pub struct RunArgs {
     /// Folder name of the character to run (under `data/familiars/`). Overrides
@@ -166,9 +165,8 @@ fn migrate_legacy_familiars(legacy_root: &Path, new_root: &Path) {
 
 /// Resolve the active familiar's root directory.
 ///
-/// Resolution order: `--familiar` flag → `FAMILIAR_ID` env (Python
-/// `_resolve_familiar_root`). The `root` base is injected so tests need not touch
-/// the process environment (the Python `_DEFAULT_FAMILIARS_ROOT` monkeypatch).
+/// Resolution order: `--familiar` flag → `FAMILIAR_ID` env. The `root` base
+/// is injected so tests need not touch the process environment.
 ///
 /// # Errors
 /// Byte-stable messages: no id selected, or the resolved directory is missing.
@@ -225,8 +223,7 @@ fn resolve_embedder(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>
     crate::embedding::create_embedder(config)
 }
 
-/// The two hardcoded operating-mode strings (byte-exact; Python
-/// `_default_assembler`).
+/// The two hardcoded operating-mode strings (byte-exact).
 fn operating_modes() -> HashMap<String, String> {
     let mut modes = HashMap::new();
     modes.insert(
@@ -246,12 +243,11 @@ fn operating_modes() -> HashMap<String, String> {
 
 /// Build the full layer stack with token-aware per-section caps.
 ///
-/// Order is **stability descending** for OpenAI prompt-cache friendliness
-/// (Python `_default_assembler`). Per DESIGN D15 recent-history is a distinct
-/// slot (not a system-prompt layer), so the layer-order pin applies to the
-/// system-prompt `Vec`: `[character_card, operating_mode, lorebook,
-/// conversation_summary, reflection, people_dossier, rag_context]` with
-/// `rag_context` last, recent-history in its own slot.
+/// Order is **stability descending** for OpenAI prompt-cache friendliness. The
+/// recent-history is a distinct slot (not a system-prompt layer), so the
+/// layer-order pin applies to the system-prompt `Vec`: `[character_card,
+/// operating_mode, lorebook, conversation_summary, reflection, people_dossier,
+/// rag_context]` with `rag_context` last, recent-history in its own slot.
 #[must_use]
 pub fn default_assembler(
     familiar: &Familiar,
@@ -337,11 +333,11 @@ pub fn default_assembler(
 
 /// Build an [`ActivityEngine`] from the familiar's `activities.toml`.
 ///
-/// Sidecar merged over the `_default` skeleton (Python `_build_activity_engine`);
-/// a missing file or empty catalog yields `None` (no engine, zero behavior
-/// change). `voice_active_fn` reads `handle.voice_channels` (the default-feature
-/// proxy for the voice runtime map), and `bot_user_id` is late-bound over the
-/// shared cell the gateway fills on ready.
+/// Sidecar merged over the `_default` skeleton; a missing file or empty catalog
+/// yields `None` (no engine, zero behavior change). `voice_active_fn` reads
+/// `handle.voice_channels` (the default-feature proxy for the voice runtime
+/// map), and `bot_user_id` is late-bound over the shared cell the gateway fills
+/// on ready.
 #[must_use]
 pub fn build_activity_engine(
     familiar: &Familiar,
@@ -404,7 +400,7 @@ pub fn build_activity_engine(
 }
 
 // ---------------------------------------------------------------------------
-// Cooperative shutdown (Python `_install_shutdown_handlers` / `_wait_for_shutdown`)
+// Cooperative shutdown
 // ---------------------------------------------------------------------------
 
 /// What a delivered signal should do: drain (first) or force-exit (second).
@@ -419,10 +415,10 @@ pub enum ShutdownStage {
 /// Two-stage cooperative shutdown coordinator.
 ///
 /// The first delivered signal flips the [`CancellationToken`] (the run loop's
-/// supervisor unwinds and teardown runs in normal task state — the Python
-/// `_GracefulShutdown` path). A second signal returns [`ShutdownStage::Force`],
+/// supervisor unwinds and teardown runs in normal task state).
+/// A second signal returns [`ShutdownStage::Force`],
 /// the caller's cue to restore the OS default and force-exit so a wedged
-/// shutdown stays killable (Python's second-signal handler removal).
+/// shutdown stays killable.
 #[derive(Debug, Default)]
 pub struct ShutdownController {
     cancel: CancellationToken,
@@ -452,7 +448,7 @@ impl ShutdownController {
         }
     }
 
-    /// Park until the first signal cancels the token (Python `_wait_for_shutdown`).
+    /// Park until the first signal cancels the token.
     pub async fn wait(&self) {
         self.cancel.cancelled().await;
     }
@@ -462,7 +458,7 @@ impl ShutdownController {
 // run (failure ladder)
 // ---------------------------------------------------------------------------
 
-/// Start the Discord bot (Python `run`).
+/// Start the Discord bot.
 ///
 /// Reads `DISCORD_BOT`, selects the familiar, and — with the `discord` feature —
 /// loads the config + clients + familiar bundle and launches the gateway under
@@ -640,7 +636,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
 ///
 /// The familiar stores clients as `Arc<dyn LlmClient>`, erasing the concrete
 /// `image_tools_enabled` accessor the text responder needs; this thin adapter
-/// re-attaches it (the Python `getattr(llm, "image_tools_enabled")` seam).
+/// re-attaches it.
 #[cfg(feature = "discord")]
 struct ResponderLlmAdapter {
     inner: Arc<dyn crate::llm::LlmClient>,
@@ -690,7 +686,7 @@ fn responder_llm(
     Arc::new(ResponderLlmAdapter { inner, image_tools })
 }
 
-/// Debug-logger observed topics (Python `_DEBUG_TOPICS`).
+/// Debug-logger observed topics.
 #[cfg(feature = "discord")]
 const DEBUG_TOPICS: [&str; 4] = [
     crate::bus::topics::TOPIC_DISCORD_TEXT,
@@ -699,8 +695,7 @@ const DEBUG_TOPICS: [&str; 4] = [
     crate::bus::topics::TOPIC_VOICE_TRANSCRIPT_FINAL,
 ];
 
-/// Spawn the two-stage SIGINT/SIGTERM listener (Python
-/// `_install_shutdown_handlers`).
+/// Spawn the two-stage SIGINT/SIGTERM listener.
 #[cfg(all(feature = "discord", unix))]
 fn spawn_signal_listener(controller: Arc<ShutdownController>) {
     use crate::log_style as ls;
@@ -738,7 +733,7 @@ fn spawn_signal_listener(controller: Arc<ShutdownController>) {
 ///
 /// Guild rows (`dm_user_id` is `None`) are untouched. Removal rewrites the
 /// sidecar, so a de-allowlisted peer's row cannot resurface on restart or win
-/// the seeded text focus (Python `_prune_deallowlisted_dm_subscriptions`).
+/// the seeded text focus.
 #[cfg(feature = "discord")]
 fn prune_deallowlisted_dm_subscriptions(
     subscriptions: &mut crate::subscriptions::SubscriptionRegistry,
@@ -767,12 +762,11 @@ const DM_PEER_AUTHOR_LIMIT: i64 = 5;
 
 /// Restore DM naming for persisted DM subscriptions after a restart.
 ///
-/// Mirrors what `register_dm_channel` records live: the sentinel guild name
-/// (DM detection keys off it) and the peer's display name, recovered from
-/// history via the author row matching the subscription's `dm_user_id`. When
-/// history has no such author, `channel_names` stays unset and the digest falls
-/// back to `DM (id <cid>)`. Guild rows (`dm_user_id` is `None`) are untouched
-/// (Python `_rehydrate_dm_naming`).
+/// Mirrors what `register_dm_channel` records live: the sentinel guild name (DM
+/// detection keys off it) and the peer's display name, recovered from history
+/// via the author row matching the subscription's `dm_user_id`. When history
+/// has no such author, `channel_names` stays unset and the digest falls back to
+/// `DM (id <cid>)`. Guild rows (`dm_user_id` is `None`) are untouched.
 #[cfg(feature = "discord")]
 async fn rehydrate_dm_naming(
     focus_manager: &FocusManager,
@@ -809,7 +803,7 @@ async fn rehydrate_dm_naming(
 }
 
 /// Boot-time DM validation, naming, and default-focus seeding — the ordering
-/// contract, in one testable unit (the tail of Python `_async_main`).
+/// contract, in one testable unit.
 ///
 /// Order is load-bearing: (1) prune de-allowlisted DM rows so a stale DM can
 /// neither survive nor win the focus seed, and so `initialize`'s
@@ -853,8 +847,8 @@ async fn boot_dm_focus(
     Ok(())
 }
 
-/// Asyncio entry point: bring up the bus, responders, workers, and gateway, then
-/// tear down in order (Python `_async_main`).
+/// Async entry point: bring up the bus, responders, workers, and gateway,
+/// then tear down in order.
 ///
 /// # Errors
 /// Propagates a serenity client build/start failure (surfaced by `run` with a
@@ -889,12 +883,9 @@ async fn async_main(
 
     familiar.bus.start().await;
 
-    // Subscriptions: ONE shared-mutable registry (`Arc<Mutex<…>>`) consumed by
-    // both the bot (which mutates it on `/subscribe*`) and the focus manager
-    // (which reads it through the `SubscriptionView` seam). Mirrors Python, where
-    // `bot` and `focus` share a single registry object, so a runtime
-    // `/subscribe` mutation is visible to `is_focused` / `should_wake` /
-    // startup-default-focus / `staged_channels` logic without a restart.
+    // Subscriptions: ONE shared-mutable registry (`Arc<Mutex<…>>`) consumed
+    // by both the bot (which mutates it on `/subscribe*`) and the focus manager
+    // (which reads it through the `SubscriptionView` seam).
     let subs_path = familiar.root.join("subscriptions.toml");
     let subscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new(&subs_path)?));
 
@@ -940,8 +931,8 @@ async fn async_main(
         local_turn_detector: familiar.local_turn_detector.take().map(Arc::new),
         store: {
             // Route reaction / edit writes through the async store's
-            // blocking-thread facade (off the reactor, DESIGN §4.4) rather than
-            // running rusqlite inline on the gateway task; see `AsyncBotStore`.
+            // blocking-thread facade (off the reactor) rather than running
+            // rusqlite inline on the gateway task; see `AsyncBotStore`.
             let store: Arc<dyn BotStore> =
                 Arc::new(AsyncBotStore::new(familiar.history_store.clone()));
             store
@@ -976,7 +967,7 @@ async fn async_main(
         // stored in `handle.voice_runtime`. That map is a `BTreeMap`, so
         // `.values().next()` deterministically yields the lowest-keyed entry and
         // is stable across utterances (v1 supports one voice channel at a time, so
-        // the single entry is unambiguous — Python `_first_voice_client`).
+        // the single entry is unambiguous).
         // Under a `discord`-only build (no `discord-voice`), the runtime map does
         // not exist, so playback degrades to no-op.
         let vc_handle = handle.clone();
@@ -1042,7 +1033,7 @@ async fn async_main(
 
     let description_llm = familiar.llm_clients.get("__image_description__").cloned();
 
-    // Per-turn ToolContext factory (Python `_make_tool_context`).
+    // Per-turn ToolContext factory.
     let make_factory = |channel_kind: &'static str, with_description: bool| {
         let familiar_id = familiar.id.clone();
         let history = familiar.history_store.clone();
@@ -1180,10 +1171,10 @@ async fn async_main(
     let mut set = tokio::task::JoinSet::new();
 
     // All four production subscriptions below use the default BLOCK/64 policy
-    // (`maxsize == 0`), matching Python's `bus.subscribe(proc.topics)` (no policy
-    // arg → `BackpressurePolicy.BLOCK`, maxsize 64). Spec 01 pins this: the ADR's
-    // "unbounded for text/twitch" note describes intent for topics not yet on the
-    // bus, so the head-of-line backpressure coupling (spec 01 §6) stays in force.
+    // (`maxsize == 0` → `BackpressurePolicy::BLOCK`, maxsize 64). This is
+    // pinned: the ADR's "unbounded for text/twitch" note describes intent for
+    // topics not yet on the bus, so the head-of-line backpressure coupling
+    // stays in force.
 
     // debug-logger
     {
@@ -1296,7 +1287,7 @@ async fn async_main(
         );
     }
 
-    // -- teardown (order pinned, spec 10 §57) ----------------------------
+    // teardown (order pinned) ----------------------------
     // 1. (signal handlers auto-drop with the runtime)
     // 2. close the gateway first so serenity's session does not leak.
     shard_manager.shutdown_all().await;
@@ -1396,7 +1387,7 @@ mod tests {
         assert!(resolve_embedder(&config).unwrap().is_none());
     }
 
-    // --- resolve_familiar_root (ported from test_run_cmd.py) ---
+    // --- resolve_familiar_root ---
 
     #[test]
     fn flag_overrides_env() {
@@ -1670,8 +1661,7 @@ mod tests {
         Arc::new(BotHandle::new(Arc::new(NoopSend), Arc::new(NoopPresence)))
     }
 
-    // --- default_assembler layer order (ported from
-    //     test_run_cmd.py::TestDefaultAssemblerLayerOrder, adapted to D15) ---
+    // --- default_assembler layer order ---
 
     fn layer_order() -> Vec<String> {
         let (familiar, _dir) = load_test_familiar(false);
@@ -1700,16 +1690,15 @@ mod tests {
 
     #[test]
     fn rag_is_last_system_prompt_layer() {
-        // Per DESIGN D15 recent-history is a slot, so rag_context is the tail of
-        // the system-prompt layer vec (recent-history is not among the names).
+        // The recent-history is a slot, so rag_context is the tail of the
+        // system-prompt layer vec (recent-history is not among the names).
         let order = layer_order();
         let rag = order.iter().position(|n| n == "rag_context").unwrap();
         assert_eq!(rag, order.len() - 1);
         assert!(!order.iter().any(|n| n == "recent_history"));
     }
 
-    // --- build_activity_engine (ported from
-    //     test_run_cmd.py::TestBuildActivityEngine) ---
+    // --- build_activity_engine ---
 
     #[test]
     fn missing_sidecar_disables_engine() {

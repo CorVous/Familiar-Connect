@@ -1,5 +1,4 @@
-//! Ported from Python `tests/test_focus_manager.py` — FocusManager + the
-//! `SubscriptionRegistry.kind_for` helper it depends on.
+//! FocusManager + the `SubscriptionRegistry.kind_for` helper it depends on.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

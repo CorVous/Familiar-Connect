@@ -1,15 +1,14 @@
-//! Deepgram streaming transcription backend (subsystem 09; Python `stt/deepgram.py`).
+//! Deepgram streaming transcription backend (subsystem 09).
 //!
 //! Concrete [`Transcriber`] over Deepgram's `/v1/listen` WebSocket. Holds the WS
 //! lifecycle, the replay-on-reconnect buffer, the reconnect classification /
 //! exponential-backoff policy, `finalize()`-driven flush, and the env-override
 //! factory.
 //!
-//! ## Transport seam (parity + testability)
+//! ## Transport seam (testability)
 //!
-//! The Python code drives a raw `aiohttp` WebSocket and the tests monkeypatch
-//! `_ws_connect` to inject fake sockets. The Rust port keeps that seam explicit:
-//! [`WsConnector`] (the `_ws_connect` replacement) yields a [`WsTransport`], and
+//! The raw WebSocket sits behind an explicit, injectable seam so tests can
+//! supply fake sockets: [`WsConnector`] yields a [`WsTransport`], and
 //! all the lifecycle logic (receive loop, keepalive, reconnect, replay, backoff)
 //! is pure Rust over those traits — fully exercised by the mock transport in the
 //! test module, with no live network. The real transport ([`net_ws`]) is a
@@ -17,7 +16,7 @@
 //! feature. We deliberately do **not** use the `deepgram` crate (the
 //! `stt-deepgram` feature): the tested behaviors — exact URL params, the
 //! whole-chunk replay buffer, the 1008/4xxx close-code classification, and the
-//! `Finalize`-driven flush — live at the raw-frame level the Python pins, which
+//! `Finalize`-driven flush — live at the raw-frame level, which
 //! the SDK's higher-level reconnect logic would hide. The `deepgram` crate stays
 //! available for a future higher-level path.
 
@@ -75,8 +74,7 @@ const CLOSESTREAM_JSON: &str = r#"{"type":"CloseStream"}"#;
 // WebSocket transport seam
 // ---------------------------------------------------------------------------
 
-/// A received WebSocket event (mirrors the aiohttp `WSMessage` types the Python
-/// receive loop dispatches on).
+/// A received WebSocket event, as dispatched on by the receive loop.
 #[derive(Debug)]
 pub enum WsEvent {
     /// A text frame (Deepgram JSON).
@@ -99,7 +97,7 @@ pub enum WsEvent {
 }
 
 /// Transport-level WebSocket error. Almost every call site suppresses these
-/// (matching Python's `contextlib.suppress`); the variant is informational.
+///; the variant is informational.
 #[derive(Debug, Error)]
 pub enum WsError {
     /// Generic transport failure (connect / send / protocol).
@@ -135,7 +133,7 @@ pub trait WsTransport: Send + Sync {
     fn close_code(&self) -> Option<i64>;
 }
 
-/// Opens [`WsTransport`]s. The injectable replacement for Python's `_ws_connect`.
+/// Opens [`WsTransport`]s. The injectable connection seam.
 #[async_trait]
 pub trait WsConnector: Send + Sync {
     /// Open a WebSocket to `url` with the given headers.
@@ -180,12 +178,10 @@ const fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
-/// Encode a query component to match Python's `urlencode` (default
-/// `quote_via=quote_plus`, deepgram.py:136): the unreserved set
-/// (`A-Za-z0-9-._~`, identical to CPython's `quote` `ALWAYS_SAFE`) is kept
-/// verbatim, a space becomes `+`, and every other byte becomes `%XX`. Byte-for-
-/// byte identical to the Python-built URL; still round-trips through
-/// `parse_qs`-style decoders (which map both `+` and `%20` back to a space).
+/// Encode a query component `quote_plus`-style: the unreserved set
+/// (`A-Za-z0-9-._~`) is kept verbatim, a space becomes `+`, and every other
+/// byte becomes `%XX`. Round-trips through `parse_qs`-style decoders (which
+/// map both `+` and `%20` back to a space).
 fn encode_query(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
@@ -194,7 +190,7 @@ fn encode_query(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(char::from(b));
             }
-            // Python quote_plus renders a space as `+`, not `%20`.
+            // `quote_plus` renders a space as `+`, not `%20`.
             b' ' => out.push('+'),
             _ => {
                 out.push('%');
@@ -321,16 +317,15 @@ fn parse_response(data: &serde_json::Value) -> Option<TranscriptionResult> {
     })
 }
 
-/// `int(value)` for a JSON speaker label, mirroring Python
-/// `int(words[0]["speaker"])`: a JSON integer passes through, a JSON float
-/// truncates toward zero, and a JSON string is parsed as a base-10 integer
-/// (Python `int("1") == 1`; leading/trailing whitespace and a sign are
+/// `int(value)` for a JSON speaker label: a JSON integer passes through, a JSON
+/// float truncates toward zero, and a JSON string is parsed as a base-10
+/// integer (`"1"` → `1`; leading/trailing whitespace and a sign are
 /// tolerated, an unparseable/float-shaped string yields `None`). The Deepgram
 /// wire contract always sends an integer, so the string branch is defensive
-/// parity for the `int()` coercion rather than an observed frame.
+/// hardening for the integer coercion rather than an observed frame.
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "Python int() truncates the diarization label toward zero; matches"
+    reason = "the diarization label truncates toward zero"
 )]
 fn json_to_i64(v: &serde_json::Value) -> Option<i64> {
     v.as_i64()
@@ -343,7 +338,7 @@ fn json_to_i64(v: &serde_json::Value) -> Option<i64> {
 // ---------------------------------------------------------------------------
 
 /// Streaming Deepgram transcriber. Config fields are public (they mirror the
-/// Python instance attributes the bot / tests read); the runtime handles are
+/// fields the bot / tests read); the runtime handles are
 /// private.
 #[allow(
     clippy::struct_excessive_bools,
@@ -503,7 +498,7 @@ impl DeepgramTranscriber {
     }
 
     /// Transcriber with the same config + carried tunables, an independent WS,
-    /// and no runtime state (Python `clone()`).
+    /// and no runtime state.
     #[must_use]
     fn clone_config(&self) -> Self {
         Self {
@@ -521,8 +516,8 @@ impl DeepgramTranscriber {
             punctuate: self.punctuate,
             keyterms: self.keyterms.clone(),
             replay_buffer_s: self.replay_buffer_s,
-            // Python clone() carries these four env-tuned attrs; reconnect_delay
-            // is NOT copied (it resets to the class default 1.0).
+            // The clone carries these four env-tuned fields; reconnect_delay
+            // is NOT copied (it resets to the default 1.0).
             keepalive_interval_s: self.keepalive_interval_s,
             max_reconnects: self.max_reconnects,
             reconnect_delay: DEFAULT_RECONNECT_DELAY,
@@ -539,7 +534,7 @@ impl DeepgramTranscriber {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss,
-        reason = "Python int(replay_buffer_s * rate * ch * 2) truncates toward zero; matches"
+        reason = "int(replay_buffer_s * rate * ch * 2) truncates toward zero"
     )]
     fn replay_max_bytes(&self) -> usize {
         let raw = self.replay_buffer_s * self.sample_rate as f64 * self.channels as f64 * 2.0;
@@ -591,7 +586,7 @@ impl DeepgramTranscriber {
 
     #[allow(
         clippy::significant_drop_tightening,
-        reason = "the send_lock guard intentionally spans the send so replay-drain and live sends stay ordered (Python holds _send_lock across the send)"
+        reason = "the send_lock guard intentionally spans the send so replay-drain and live sends stay ordered"
     )]
     async fn send_audio_impl(&self, data: &[u8]) -> Result<(), SttError> {
         let Some(shared) = self.shared.clone() else {
@@ -808,7 +803,7 @@ async fn receive_loop(shared: Arc<Shared>, output: TranscriptSender) {
 
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "the send_lock guard intentionally spans the replay drain so live send_audio queues behind it (Python holds _send_lock across the drain)"
+    reason = "the send_lock guard intentionally spans the replay drain so live send_audio queues behind it"
 )]
 async fn reconnect(shared: &Arc<Shared>) -> Result<(), WsError> {
     // Tear down old.
@@ -1422,8 +1417,8 @@ mod tests {
 
     #[test]
     fn keyterm_space_encodes_as_plus_like_python_quote_plus() {
-        // Python urlencode/quote_plus renders a space as `+`, not `%20`; the
-        // produced URL string must be byte-identical to Python's.
+        // `quote_plus` renders a space as `+`, not `%20`; the produced URL string
+        // is byte-pinned by this test.
         let mut c = DeepgramTranscriber::new("test-key");
         c.keyterms = vec!["lifecycle mesh".to_string()];
         let url = c.build_ws_url();
@@ -1653,7 +1648,7 @@ mod tests {
 
     #[test]
     fn parse_speaker_coerces_float_and_string_like_python_int() {
-        // Python `int(words[0]["speaker"])` coerces a JSON float (truncating
+        // `int(words[0]["speaker"])` coerces a JSON float (truncating
         // toward zero) and a JSON string; mirror both.
         let float_speaker = serde_json::json!({
             "type": "Results",

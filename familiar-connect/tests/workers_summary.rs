@@ -1,4 +1,3 @@
-//! Ported from Python `tests/test_summary_worker.py`.
 //!
 //! Watermark-driven regeneration of the focus-stream rolling summary (the
 //! consumed cross-channel stream the familiar attended to).

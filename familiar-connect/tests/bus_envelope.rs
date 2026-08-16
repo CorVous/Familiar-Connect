@@ -1,9 +1,9 @@
-//! Ported from `tests/test_bus_envelope.py` — `Event` / `TurnScope` envelope.
+//! `Event` / `TurnScope` envelope.
 //!
-//! `test_event_is_immutable` (Python `setattr` raising on a frozen dataclass) is
-//! not ported: in Rust immutability is a compile-time property — consumers only
-//! ever hold `Arc<Event>` and cannot mutate through a shared reference, so there
-//! is no runtime equivalent to exercise. See the port summary's skipped list.
+//! `test_event_is_immutable` is not ported: in Rust immutability is a
+//! compile-time property — consumers only ever hold `Arc<Event>` and cannot
+//! mutate through a shared reference, so there is no runtime equivalent to
+//! exercise. See the port summary's skipped list.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -34,7 +34,7 @@ fn event_has_core_fields() {
     assert_eq!(ev.topic, "discord.text");
     assert_eq!(ev.timestamp, ts);
     assert_eq!(ev.sequence_number, 0);
-    // Payload carried through unchanged (Python asserts `ev.payload == {"text": "hi"}`).
+    // Payload carried through unchanged.
     assert_eq!(
         ev.payload.downcast_ref::<HashMap<String, String>>(),
         Some(&map)
@@ -55,13 +55,14 @@ fn parent_event_ids_carries_lineage() {
     };
     // Carries the lineage verbatim.
     assert_eq!(ev.parent_event_ids, vec!["e-1".to_owned()]);
-    // Python's `test_parent_event_ids_is_tuple_for_hashability` pins
-    // `isinstance(ev.parent_event_ids, tuple)` (spec 01 §11): the lineage collection
-    // must be a *hashable* type. A frozen dataclass derives `__hash__` from its fields,
-    // so a `list` field would break hashing an `Event` at runtime while a `tuple` does
-    // not. The Rust analog is that the field's concrete type is `Hash + Eq` — pinned by
-    // using the value as a `HashSet<Vec<String>>` key. This fails to compile if the
-    // field's type ever stops being hashable (or ceases to be `Vec<String>`).
+    // This pins
+    // `isinstance(ev.parent_event_ids, tuple)`: the lineage collection must be
+    // a *hashable* type. A frozen dataclass derives `__hash__` from its fields,
+    // so a `list` field would break hashing an `Event` at runtime while a
+    // `tuple` does not. The Rust analog is that the field's concrete type is
+    // `Hash + Eq` — pinned by using the value as a `HashSet<Vec<String>>`
+    // key. This fails to compile if the field's type ever stops being hashable
+    // (or ceases to be `Vec<String>`).
     let mut lineage_set: HashSet<Vec<String>> = HashSet::new();
     lineage_set.insert(ev.parent_event_ids);
     assert!(lineage_set.contains(&vec!["e-1".to_owned()]));
@@ -73,7 +74,7 @@ async fn scope_carries_identity() {
     assert_eq!(scope.turn_id, "t-1");
     assert_eq!(scope.session_id, "chan-42");
     // D12: `started_at` is `Instant::now()`; pin that it is a real, past-or-present
-    // stamp (replaces Python's `started_at > 0`).
+    // stamp (a positive `started_at`).
     assert!(scope.started_at <= Instant::now());
     assert!(!scope.is_cancelled());
 }

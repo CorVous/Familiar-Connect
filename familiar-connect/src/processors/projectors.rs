@@ -1,12 +1,12 @@
-//! Memory-projector registry (subsystem 06; Python `processors/projectors.py`).
+//! Memory-projector registry (subsystem 06).
 //!
 //! Lifts the watermark-driven writers (subsystem 07) behind the
 //! [`MemoryProjector`] seam so operators can swap or extend strategy via
-//! `[providers.memory].projectors`. Per DESIGN §5 (D14) the Python import-time
-//! global registration becomes an **explicit** [`ProjectorRegistry`] builder
-//! rather than module-level mutable state.
+//! `[providers.memory].projectors`. Registration is an **explicit**
+//! [`ProjectorRegistry`] builder rather
+//! than module-level mutable state.
 //!
-//! Port status: the six built-in factories map their `[providers.memory.<name>]`
+//! The six built-in factories map their `[providers.memory.<name>]`
 //! knob structs onto the subsystem-07 worker constructors and are all wired in
 //! [`ProjectorRegistry::with_builtins`] (`rolling_summary`→`SummaryWorker`,
 //! `rich_note`→`FactExtractor`, `people_dossier`→`PeopleDossierWorker`,
@@ -14,12 +14,11 @@
 //! `fact_embedding`→`FactEmbeddingWorker`). Every built-in reads the
 //! `"background"` LLM slot; `fact_embedding` is registered but NOT in
 //! [`DEFAULT_PROJECTORS`] (opt-in), and its factory errors when
-//! `context.embedder` is `None` (byte-compatible message with Python).
+//! `context.embedder` is `None`.
 //!
 //! The subsystem-07 workers expose `run(&self, CancellationToken)` (a
 //! cooperative-cancellation forever loop); the [`MemoryProjector`] contract
-//! stops a projector by dropping/aborting its spawned task instead (mirroring
-//! Python's `tg.create_task(proj.run())` + task cancellation). A small
+//! stops a projector by dropping/aborting its spawned task instead. A small
 //! [`WorkerProjector`] adapter bridges the two — see [`worker_projector`].
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -103,9 +102,8 @@ impl ProjectorContext {
 
     /// The shared `"background"` LLM slot every built-in projector uses.
     ///
-    /// Python indexes `ctx.llm_clients["background"]` (a `KeyError` propagates
-    /// out of the factory when the slot is absent); the Rust factory surfaces
-    /// the same failure as a [`ProjectorError::Config`] instead of panicking.
+    /// A missing slot surfaces as a [`ProjectorError::Config`] rather than a
+    /// panic.
     fn background_llm(&self) -> Result<Arc<dyn LlmClient>, ProjectorError> {
         self.llm_clients.get("background").cloned().ok_or_else(|| {
             ProjectorError::Config(
@@ -116,8 +114,7 @@ impl ProjectorContext {
 }
 
 /// A projector factory: `&ProjectorContext -> MemoryProjector` (or an error, as
-/// `fact_embedding` raises when no embedder is configured — mirroring the
-/// fallible Python built-in factories).
+/// `fact_embedding` raises when no embedder is configured).
 pub type ProjectorFactory = Arc<
     dyn Fn(&ProjectorContext) -> Result<Box<dyn MemoryProjector>, ProjectorError> + Send + Sync,
 >;
@@ -134,12 +131,12 @@ pub enum ProjectorError {
         valid: String,
     },
     /// A factory refused to build (e.g. `fact_embedding` without an embedder,
-    /// or a missing LLM slot). The message is byte-compatible with Python.
+    /// or a missing LLM slot).
     #[error("{0}")]
     Config(String),
 }
 
-/// An explicit projector registry (replaces the Python import-time global).
+/// An explicit projector registry — no module-level mutable state.
 #[derive(Clone)]
 pub struct ProjectorRegistry {
     factories: BTreeMap<String, ProjectorFactory>,
@@ -186,8 +183,7 @@ impl ProjectorRegistry {
     ///
     /// # Errors
     /// [`ProjectorError::Unknown`] when any name is not registered (the valid
-    /// list is sorted, matching the Python error text), plus whatever the
-    /// selected factory returns ([`ProjectorError::Config`]).
+    /// list is sorted).
     pub fn create(
         &self,
         names: &[String],
@@ -230,18 +226,12 @@ impl Default for ProjectorRegistry {
 /// Registered built-in names, sorted (convenience over a fresh
 /// [`ProjectorRegistry::with_builtins`]).
 ///
-/// Mirrors the Python module-level `known_projectors()`; config parsing (02)
-/// injects this set to validate `[providers.memory].projectors`.
 #[must_use]
 pub fn known_projectors() -> BTreeSet<String> {
     ProjectorRegistry::with_builtins().known()
 }
 
 /// Instantiate the selected projectors from the built-ins, in `names` order.
-///
-/// Mirrors the Python module-level `create_projectors(names=..., context=...)`;
-/// the wiring uses a shared [`ProjectorRegistry`] when third-party projectors
-/// need registering.
 ///
 /// # Errors
 /// See [`ProjectorRegistry::create`].
@@ -262,10 +252,9 @@ type RunFuture = BoxFuture<'static, ()>;
 ///
 /// The worker's forever loop is `run(&self, CancellationToken)`; the
 /// [`MemoryProjector`] contract has no token and is stopped by
-/// dropping/aborting its spawned task (Python's `create_task` + cancellation).
-/// The adapter therefore runs the worker with a fresh token that is never
-/// signalled — `JoinHandle::abort()` at the wiring drops the future at its next
-/// await point, exactly as asyncio's `CancelledError` unwinds the Python loop.
+/// dropping/aborting its spawned task. The adapter therefore runs the worker
+/// with a fresh token that is never signalled — `JoinHandle::abort` at the
+/// wiring drops the future at its next await point.
 struct WorkerProjector {
     name: &'static str,
     run: Box<dyn FnOnce(CancellationToken) -> RunFuture + Send + Sync>,
@@ -589,7 +578,7 @@ mod tests {
 
     #[test]
     fn fact_embedding_factory_requires_embedder() {
-        // No embedder configured → the factory refuses with the Python message.
+        // No embedder configured → the factory refuses.
         let err = create_projectors(&["fact_embedding".to_owned()], &ctx_with_llm())
             .err()
             .expect("expected a Config error");
@@ -611,8 +600,7 @@ mod tests {
 
     #[test]
     fn missing_background_slot_reports_config_error() {
-        // A built-in that needs the "background" slot errors when it is absent
-        // (Python raises KeyError; Rust surfaces a Config error).
+        // A built-in that needs the "background" slot errors when it is absent.
         let err = create_projectors(&["rolling_summary".to_owned()], &ctx())
             .err()
             .expect("expected a Config error");

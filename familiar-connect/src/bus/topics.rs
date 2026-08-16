@@ -1,4 +1,4 @@
-//! Topic string constants (subsystem 01; Python `bus/topics.py`).
+//! Topic string constants (subsystem 01).
 //!
 //! One file, grep-friendly. Every topic the system routes on lives here. Dotted
 //! namespaces group related topics; the prefix names the subsystem. The

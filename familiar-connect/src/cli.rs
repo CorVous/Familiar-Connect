@@ -1,12 +1,12 @@
-//! CLI parsing + setup_logging (subsystem 10; Python cli.py).
+//! CLI parsing + setup_logging (subsystem 10).
 //!
 //! `clap` (derive) replaces `argparse`; the subcommand set (`run` / `diagnose` /
-//! `version`) and the repeatable `-v/--verbose` counter mirror the Python parser
-//! exactly, and there is deliberately **no** `sleep` subcommand (test-pinned).
+//! `version`) and the repeatable `-v/--verbose` counter are a fixed CLI
+//! contract, and there is deliberately **no** `sleep` subcommand (test-pinned).
 //! [`setup_logging`] installs a `tracing` subscriber whose event formatter
 //! reproduces the [`StyledFormatter`](crate::log_style::StyledFormatter) wire
 //! format, and pins the two-tier visibility (`warn` root, `familiar_connect` at
-//! `info`) the Python `setup_logging` set via the package logger floor.
+//! `info`) via the package logger floor.
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -23,7 +23,7 @@ use tracing_subscriber::registry::LookupSpan;
 use crate::commands;
 use crate::log_style::{self as ls, LogLevel, LogRecord, StyledFormatter};
 
-/// Top-level parser (Python `create_parser`).
+/// Top-level parser.
 #[derive(Parser, Debug)]
 #[command(
     name = "familiar-connect",
@@ -68,9 +68,8 @@ pub struct DiagnoseArgs {
 // setup_logging
 // ---------------------------------------------------------------------------
 
-/// A resolved log level, mirroring the Python `logging` levels
-/// `setup_logging` selects. `Critical` has no `tracing` analog and maps to
-/// `error` at the subscriber (tracing's most severe level).
+/// A resolved log level. `Critical` has no `tracing` analog and maps to `error`
+/// at the subscriber (tracing's most severe level).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvedLevel {
     /// `DEBUG` (verbose ≥ 2).
@@ -98,7 +97,7 @@ impl ResolvedLevel {
     }
 
     /// The package-logger floor: `min(level, INFO)` so package INFO stays
-    /// visible even at root WARNING (Python `pkg_logger.setLevel`).
+    /// visible even at root WARNING.
     const fn floored_to_info(self) -> Self {
         match self {
             Self::Debug => Self::Debug,
@@ -108,14 +107,14 @@ impl ResolvedLevel {
 }
 
 /// Resolve the effective level from the verbose counter and optional explicit
-/// name (Python `setup_logging`'s level ladder).
+/// name.
 ///
 /// `verbose`: 0 → WARNING, 1 → INFO, ≥ 2 → DEBUG. An explicit `level`
 /// (case-insensitive) overrides the counter.
 ///
 /// # Errors
-/// An unknown `level` name yields `Err` with the byte-stable
-/// `"Invalid log level: <name>"` message (Python raised `ValueError`).
+/// An unknown `level` name yields `Err` with the byte-stable `"Invalid log
+/// level: <name>"` message.
 pub fn resolve_log_level(verbose: u8, level: Option<&str>) -> Result<ResolvedLevel, String> {
     if let Some(level) = level {
         return match level.to_ascii_uppercase().as_str() {
@@ -159,8 +158,7 @@ impl tracing::field::Visit for MessageVisitor {
 }
 
 /// A `tracing` event formatter that reproduces the `log_style` wire format via
-/// [`StyledFormatter`] (DESIGN §4.5) — the same layout the Python
-/// `StyledFormatter` emitted, and the one the `diagnose` grep parses.
+/// [`StyledFormatter`] — the layout the `diagnose` grep parses.
 struct StyledEventFormat;
 
 impl<S, N> FormatEvent<S, N> for StyledEventFormat
@@ -191,12 +189,12 @@ where
     }
 }
 
-/// Configure logging (Python `setup_logging`).
+/// Configure logging.
 ///
 /// Installs a process-wide `tracing` subscriber with the `StyledFormatter` wire
 /// format and the two-tier `EnvFilter` (`<root>,familiar_connect=<min(root,info)>`).
-/// Re-installation across a process is a no-op (`try_init`), the Rust analog of
-/// Python's `force=True` reconfigure being harmless.
+/// Re-installation across a process is a no-op (`try_init`), so a second
+/// call is harmless.
 ///
 /// # Errors
 /// Propagates the `resolve_log_level` error on an unknown explicit level.
@@ -228,13 +226,13 @@ fn exit_code(code: i32) -> ExitCode {
     u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from)
 }
 
-/// Program entry (Python `main`): load `.env`, parse, dispatch.
+/// Program entry: load `.env`, parse, dispatch.
 ///
 /// A bare invocation (no subcommand) prints help and exits `0`. `clap` handles
 /// `--version` (prints and exits `0`) during parse, matching argparse.
 #[must_use]
 pub fn main() -> ExitCode {
-    // Autoload `.env` before parsing (Python `load_dotenv()`); a missing file is
+    // Autoload `.env` before parsing; a missing file is
     // not an error.
     let _ = dotenvy::dotenv();
 
@@ -266,7 +264,7 @@ mod tests {
     use crate::commands::version::VERSION;
     use clap::Parser;
 
-    // --- parser shape (ported from test_cli.py) ---
+    // --- parser shape ---
 
     #[test]
     fn parser_definition_is_valid() {
@@ -346,7 +344,7 @@ mod tests {
         assert!(cli.command.is_none());
     }
 
-    // --- resolve_log_level (ported from test_logging.py setup half) ---
+    // --- resolve_log_level ---
 
     #[test]
     fn verbose_ladder() {

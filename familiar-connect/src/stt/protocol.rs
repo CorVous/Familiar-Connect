@@ -1,10 +1,10 @@
-//! Transcriber seam + `TranscriptionResult` (subsystem 09; Python `stt/protocol.py`).
+//! Transcriber seam + `TranscriptionResult` (subsystem 09).
 //!
 //! Lifts the implicit shape of the Deepgram backend into a [`Transcriber`] trait
 //! so local-model backends (Parakeet / faster-whisper) drop in behind
 //! `[providers.stt].backend` without code-path changes downstream. The trait is
 //! object-safe (via `async_trait` + an object-safe [`Transcriber::clone_transcriber`]
-//! in place of Python's `clone()` returning `Self`).
+//! in place of a `clone()` returning `Self`).
 
 use std::collections::HashMap;
 
@@ -15,8 +15,7 @@ use crate::llm::Message;
 
 /// Channel the wiring layer (subsystem 10) drains transcription results from.
 ///
-/// Python passes an unbounded `asyncio.Queue[TranscriptionEvent]` into
-/// [`Transcriber::start`]; the Rust equivalent is an unbounded mpsc sender.
+/// An unbounded mpsc sender is handed to [`Transcriber::start`].
 /// Results leave the backend with `user_id = None`; the per-user fan-in task
 /// stamps the Discord user id.
 pub type TranscriptSender = tokio::sync::mpsc::UnboundedSender<TranscriptionResult>;
@@ -47,7 +46,7 @@ pub struct TranscriptionResult {
 
 impl TranscriptionResult {
     /// Construct a result with default `confidence = 0.0`, `speaker = None`,
-    /// `user_id = None` — matching the Python dataclass field defaults.
+    /// `user_id = None`.
     #[must_use]
     pub fn new(text: impl Into<String>, is_final: bool, start: f64, end: f64) -> Self {
         Self {
@@ -84,8 +83,7 @@ impl TranscriptionResult {
     }
 }
 
-/// `TranscriptionEvent` is an alias of [`TranscriptionResult`] (mirrors the
-/// Python `TranscriptionEvent = TranscriptionResult`).
+/// `TranscriptionEvent` is an alias of [`TranscriptionResult`].
 pub type TranscriptionEvent = TranscriptionResult;
 
 /// Errors surfaced by the STT factory + backends.
@@ -113,10 +111,8 @@ pub enum SttError {
     #[error("Transcriber is not connected — call start() first")]
     NotConnected,
     /// A local-STT backend was selected but no local engine is built into this
-    /// binary (the `local-stt` feature has no engine chosen yet — DESIGN §6).
+    /// binary (the `local-stt` feature has no engine chosen yet).
     ///
-    /// Mirrors the Python lazy-import degradation (`RuntimeError` re-raised as
-    /// `ValueError`): the run command logs a warning and continues text-only.
     #[error(
         "STT backend '{0}' requires a local-stt engine, which is not built into this binary (no engine chosen for the local-stt feature yet — see DESIGN §6)"
     )]
@@ -134,13 +130,12 @@ pub enum SttError {
 /// Feed rate is 48 kHz mono s16le from the sink.
 ///
 /// The clone-as-template method is object-safe (returns `Box<dyn Transcriber>`)
-/// in place of Python's `clone() -> Self`. The `set_endpointing_ms` /
+/// in place of a `clone -> Self`. The `set_endpointing_ms` /
 /// `set_keyterms` / `idle_close_s` / `backend_name` seams carry default no-ops
-/// so a minimal scripted stub only needs the five lifecycle methods (DESIGN
-/// §4.8).
+/// so a minimal scripted stub only needs the five lifecycle methods.
 #[async_trait]
 pub trait Transcriber: Send {
-    /// Fresh independent instance with the same config (Python `clone()`).
+    /// Fresh independent instance with the same config.
     fn clone_transcriber(&self) -> Box<dyn Transcriber>;
 
     /// Begin transcription, pushing results onto `output` in wire order.
@@ -162,12 +157,10 @@ pub trait Transcriber: Send {
     /// Set the Deepgram hosted-endpointer silence window (ms), returning `true`
     /// when the backend honours the poke.
     ///
-    /// This is the typed replacement for Python's duck-typed
-    /// `hasattr(clone, "endpointing_ms")` + `clone.endpointing_ms = 10` seam
-    /// (spec 09 J.70): the wiring calls this before `start`; backends that do
-    /// not endpoint server-side (Parakeet / faster-whisper) inherit the default
-    /// `false` so the wiring keys off support exactly as the Python `hasattr`
-    /// guard did.
+    /// This is a typed capability probe in place of an untyped attribute check:
+    /// the wiring calls this before `start`; backends that do not endpoint
+    /// server-side (Parakeet / faster-whisper) inherit the default `false`, so
+    /// the wiring keys off the return value.
     fn set_endpointing_ms(&mut self, _ms: i64) -> bool {
         false
     }

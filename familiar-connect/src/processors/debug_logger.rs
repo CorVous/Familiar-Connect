@@ -1,11 +1,9 @@
-//! One log line per event on subscribed topics (subsystem 06; Python
-//! `processors/debug_logger.py`).
+//! One log line per event on subscribed topics (subsystem 06).
 //!
 //! The Phase-1 "is the bus alive?" signal. Passive — never republishes.
 //!
-//! Port note: Python renders the payload as `repr(...)` truncated at 160 chars
-//! (`-` when `None`). The Rust bus payload is a type-erased `Arc<dyn Any>` the
-//! logger cannot inspect generically, so the payload field renders as `-`. The
+//! The bus payload is a type-erased `Arc<dyn Any>` the logger cannot inspect
+//! generically, so the payload field renders as `-`. The
 //! topic / ids / sequence fields — the only ones the tests assert — are
 //! reproduced exactly.
 

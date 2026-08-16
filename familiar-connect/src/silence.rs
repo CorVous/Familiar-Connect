@@ -1,5 +1,4 @@
-//! Silent-sentinel detection for LLM reply streams (subsystem 06; Python
-//! `silence.py`).
+//! Silent-sentinel detection for LLM reply streams (subsystem 06).
 //!
 //! The system prompt tells the model to emit `<silent>` as its entire reply
 //! when staying silent. [`SilentDetector`] watches streamed deltas and decides
@@ -100,9 +99,9 @@ pub(crate) enum LeadingLeak {
     /// A leaked `<invoke>…</invoke>` block (optionally namespaced). `silent` is
     /// true when it names the `silent` tool.
     Invoke { silent: bool },
-    /// A leaked Python-style `silent(…)` call — honoured as silence.
+    /// A leaked function-call-style `silent(…)` string — honoured as silence.
     PythonSilent,
-    /// A leaked Python-style `read_channel(…)` / `shift_focus(…)` call.
+    /// A leaked function-call-style `read_channel(…)` / `shift_focus(…)` string.
     PythonTool,
 }
 
@@ -251,7 +250,7 @@ fn local_name_possible(after: &str, local: &str) -> bool {
     is_xml_name(after)
 }
 
-/// Python-call prefixes: `silent(`, `read_channel(`, `shift_focus(`.
+/// Call-style prefixes: `silent(`, `read_channel(`, `shift_focus(`.
 fn call_prefix_possible(stripped: &str) -> bool {
     let lc = stripped.to_ascii_lowercase();
     ["silent", "read_channel", "shift_focus"]

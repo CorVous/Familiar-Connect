@@ -1,5 +1,5 @@
 //! Memory-consolidation pass — propose + validate fact consolidations
-//! (subsystem 04; Python `sleep/consolidation.py`).
+//! (subsystem 04).
 //!
 //! Runs on sleep-activity departure. The LLM sees the whole window at once —
 //! unlike small-batch extraction it spots day-level patterns (a claim asserted
@@ -126,8 +126,7 @@ pub struct ConsolidationPlan {
 }
 
 impl ConsolidationPlan {
-    /// A plan with the counts zeroed and no notes (the Python default-arg
-    /// constructor; [`validate`] fills the counts directly).
+    /// A plan with the counts zeroed and no notes.
     #[must_use]
     pub fn new(
         familiar_id: impl Into<String>,
@@ -263,7 +262,7 @@ pub fn build_prompt(window: &ConsolidationWindow, self_key: &str, system: &str) 
 #[must_use]
 pub fn parse_actions(reply: &str) -> (Vec<Value>, Vec<Value>) {
     let result = coerce_json(reply, Expect::Object);
-    // Python `coerce_json(...).value or {}` then `isinstance(dict)`: only a
+    // `coerce_json(...).value` then a dict check: only a
     // (possibly empty) object proceeds — everything else degrades to ([], []).
     let Some(obj) = result.value.as_ref().and_then(Value::as_object) else {
         return (Vec::new(), Vec::new());
@@ -301,7 +300,7 @@ pub fn reply_parse_failed(reply: &str) -> bool {
 /// proposals in input order — an earlier action reserves ids and cap budget from
 /// later ones.
 #[must_use]
-#[allow(clippy::too_many_lines)] // the two rail loops read best kept together (parity with Python)
+#[allow(clippy::too_many_lines)] // the two rail loops read best kept together
 pub fn validate(
     window: &ConsolidationWindow,
     retire_raw: &[Value],

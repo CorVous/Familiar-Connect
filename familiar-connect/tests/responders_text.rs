@@ -1,5 +1,4 @@
-//! Integration tests for `TextResponder` (subsystem 06; Python
-//! `tests/test_text_responder.py`).
+//! Integration tests for `TextResponder` (subsystem 06).
 
 #![allow(clippy::significant_drop_tightening)]
 

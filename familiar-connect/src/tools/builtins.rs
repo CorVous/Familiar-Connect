@@ -1,11 +1,10 @@
-//! Registry-builder helpers (subsystem 08; Python `tools/builtins.py`).
+//! Registry-builder helpers (subsystem 08).
 //!
-//! Extracted so tests can compose registries without `run.py`. The focus
+//! Extracted so tests can compose registries without the full wiring. The focus
 //! manager and image-tools/describe knobs are *gates*: the tools reach the live
 //! focus manager / store / scheduler through the per-call [`ToolContext`], so the
-//! builder only needs to know *whether* to include each tool (the Python passes
-//! the `FocusManager` object, but uses it solely as a presence gate — a `bool`
-//! is the faithful Rust shape). The activity engine is passed by value because
+//! builder only needs to know *whether* to include each tool, so a `bool`
+//! gate is enough. The activity engine is passed by value because
 //! its catalog shapes the `start_activity` schema at build time.
 
 use std::sync::Arc;
@@ -15,8 +14,8 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::scheduler::AlarmScheduler;
 use crate::tools::start_activity::StartActivityEngine;
 
-// Re-exported so the shipped tool builders are reachable at the Python
-// `tools.builtins` import path used by tests / wiring.
+// Re-exported so the shipped tool builders are reachable from this module
+// path, as tests / wiring expect.
 pub use crate::tools::read_channel::build_read_channel_tool;
 pub use crate::tools::shift_focus::build_shift_focus_tool;
 pub use crate::tools::silent::build_silent_tool;

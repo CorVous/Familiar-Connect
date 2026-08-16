@@ -1,4 +1,4 @@
-//! Token estimator + `TierBudget` / `ModelBudgetCurve` (subsystem 05; Python `budget.py`).
+//! Token estimator + `TierBudget` / `ModelBudgetCurve` (subsystem 05).
 //!
 //! Per-tier prompt-assembly budget. Each cap is a hard number — no proportional
 //! derivation, no "auto-fill from total". The assembly layers consume the values
@@ -11,8 +11,7 @@
 //! over-counts (safer for budgets). `len` counts **Unicode scalars**, not bytes.
 //!
 //! This is a leaf module: it names [`crate::llm::Message`] but pulls in nothing
-//! from `config`/`context`, so `config` can depend on it without a cycle (DESIGN
-//! D4).
+//! from `config`/`context`, so `config` can depend on it without a cycle.
 
 use crate::llm::Message;
 use crate::support::round::half_even;
@@ -30,7 +29,7 @@ pub fn estimate_tokens(text: &str) -> i64 {
     if text.is_empty() {
         return 0;
     }
-    // `len` in Python is the Unicode scalar count, not bytes (DESIGN §4.9).
+    // Count Unicode scalars, not bytes.
     let n = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
     (n + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
 }
@@ -41,8 +40,7 @@ pub fn estimate_tokens(text: &str) -> i64 {
 pub fn estimate_message_tokens(msg: &Message) -> i64 {
     let mut n = estimate_tokens(&msg.content_str()) + MESSAGE_OVERHEAD_TOKENS;
     if let Some(name) = &msg.name {
-        // An empty name adds `estimate_tokens("") == 0`, matching Python's
-        // truthy `if msg.name:` guard.
+        // An empty name adds `estimate_tokens("") == 0`.
         n += estimate_tokens(name);
     }
     n
@@ -109,7 +107,7 @@ impl Default for ModelBudgetCurve {
 }
 
 /// Scale one integer cap by a curve multiplier: `max(1, round(base * mult))`,
-/// with Python's banker's rounding (half-to-even, DESIGN D10).
+/// with banker's rounding (half-to-even).
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,

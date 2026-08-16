@@ -1,5 +1,5 @@
-//! `HistoryStore`: turns log + watermarked side-index projections
-//! (subsystem 03; Python `history/store.py`).
+//! `HistoryStore`: turns log + watermarked side-index projections (subsystem
+//! 03).
 //!
 //! One SQLite database per familiar. The append-only `turns` table is the
 //! source of truth; every side-index (summaries, facts, fact embeddings, people
@@ -10,7 +10,7 @@
 //!
 //! Timestamps are always emitted through [`iso_utc`] (fixed-width microseconds,
 //! `+00:00`) so lexicographic ordering equals chronological ordering — a
-//! correctness dependency in five query paths (DESIGN §4.2).
+//! correctness dependency in five query paths.
 //!
 //! Author identity is [`crate::identity::Author`] (re-exported at the module
 //! root as `history::Author`): the store round-trips its `platform` / `user_id`
@@ -291,7 +291,7 @@ CREATE INDEX IF NOT EXISTS idx_activities_active
 ";
 
 // ---------------------------------------------------------------------------
-// Value types (Python frozen dataclasses / NamedTuples)
+// Value types
 // ---------------------------------------------------------------------------
 
 /// A single persisted conversational turn.
@@ -457,8 +457,7 @@ pub struct SupersedeResult {
     pub skipped: Vec<(i64, String)>,
 }
 
-/// Replacement shape for [`HistoryStore::supersede`] (Python's
-/// `FactDraft | Fact | int | None` union).
+/// Replacement shape for [`HistoryStore::supersede`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewFact {
     /// Retire each obsolete row (`superseded_by` stays NULL).
@@ -500,7 +499,7 @@ pub struct Fact {
     pub importance: Option<i64>,
 }
 
-/// One pending/terminal alarm row (Python returned raw dicts).
+/// One pending/terminal alarm row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmRow {
     pub id: String,
@@ -521,7 +520,7 @@ pub struct AlarmRow {
 
 /// Builder for [`HistoryStore::append_turn`] / [`HistoryStore::stage_turn`].
 ///
-/// `consumed` defaults to `true` (matching the Python default); `stage_turn`
+/// `consumed` defaults to `true`; `stage_turn`
 /// forces it to `false`.
 #[derive(Debug, Clone)]
 pub struct AppendTurn {
@@ -729,7 +728,7 @@ impl FtsIndex for NoopFtsIndex {
 }
 
 // ---------------------------------------------------------------------------
-// Free helpers (Python module-level functions)
+// Free helpers
 // ---------------------------------------------------------------------------
 
 fn v_str(s: impl Into<String>) -> Value {
@@ -829,11 +828,10 @@ fn parse_id_array(raw: &str) -> Vec<i64> {
     serde_json::from_str::<Vec<i64>>(raw).unwrap_or_default()
 }
 
-/// Coerce a `subjects_json` field value to a string, mirroring Python
-/// `_row_to_fact`'s `str(item["canonical_key"])` / `str(item["display_at_write"])`:
-/// a JSON string passes through unchanged; any other present value is stringified
-/// (so `{"canonical_key": 5, ...}` yields `"5"` rather than a dropped item). Bool
-/// and null follow Python's `str()` (`True`/`False`/`None`); arrays/objects are
+/// Coerce a `subjects_json` field value to a string: a JSON string passes
+/// through unchanged; any other present value is stringified (so
+/// `{"canonical_key": 5,...}` yields `"5"` rather than a dropped item). Bool
+/// and null render as `True`/`False`/`None`; arrays/objects are
 /// absurd inputs no writer produces, so their exact rendering is not pinned.
 fn subject_field_to_string(value: &serde_json::Value) -> String {
     match value {
@@ -855,9 +853,6 @@ fn parse_subjects(raw: Option<&str>) -> Vec<FactSubject> {
     let Some(items) = value.as_array() else {
         return Vec::new();
     };
-    // Mirror Python `_row_to_fact`: keep any object that has BOTH keys present
-    // (even with non-string values), coercing each value via `str(...)`; skip
-    // non-object items and objects missing either key.
     items
         .iter()
         .filter_map(|item| {
@@ -1064,7 +1059,7 @@ impl HistoryStore {
         let (fts_turns, turns_recreated) = TantivyFts::open_dir(&fts_root.join("turns"))?;
         let (fts_facts, facts_recreated) = TantivyFts::open_dir(&fts_root.join("facts"))?;
         // An index that was wiped-and-recreated, or is otherwise empty, has lost
-        // whatever the retired Python impl indexed; repopulate it from the DB.
+        // whatever the retired implementation indexed; repopulate it from the DB.
         let turns_stale = turns_recreated || fts_turns.is_empty();
         let facts_stale = facts_recreated || fts_facts.is_empty();
         let store = Self::init(Db::open(path)?, Box::new(fts_turns), Box::new(fts_facts))?;
@@ -1075,8 +1070,7 @@ impl HistoryStore {
     /// Open a store with caller-supplied FTS indexes. The DB is set up exactly
     /// as [`open`](Self::open) (in-memory for `":memory:"`, file otherwise) but
     /// no tantivy index is created. This is the injection seam behind the
-    /// "append survives an FTS failure" test (Python monkeypatched
-    /// `store._fts_turns.add`).
+    /// "append survives an FTS failure" test.
     pub fn open_with_fts(
         db_path: impl AsRef<Path>,
         fts_turns: Box<dyn FtsIndex>,
@@ -1097,9 +1091,9 @@ impl HistoryStore {
     /// Wire the DB + FTS into a store and run the schema repair pass. `SCHEMA`
     /// uses `CREATE TABLE/INDEX IF NOT EXISTS` throughout, so it is the whole of
     /// construction: every column the store queries is declared there. The
-    /// Python era's incremental `_migrate()` (ALTER-in the attentional columns,
+    /// earlier incremental `_migrate()` (ALTER-in the attentional columns,
     /// re-add `pings_bot`, the issue #154 ego-key rewrite) was folded into
-    /// `SCHEMA` and removed — see issue #202 and spec 03 §8-10.
+    /// `SCHEMA` and removed — see issue #202.
     fn init(
         db: Db,
         fts_turns: Box<dyn FtsIndex>,
@@ -1114,7 +1108,7 @@ impl HistoryStore {
         Ok(store)
     }
 
-    /// The DB actor handle (mirrors Python `store._conn`; test/diagnostic use).
+    /// The DB actor handle.
     #[must_use]
     pub const fn conn(&self) -> &Db {
         &self.db
@@ -3355,8 +3349,8 @@ impl HistoryStore {
     }
 
     /// Repopulate any FTS index that was wiped/recreated or is empty while its
-    /// source table still holds rows (the Python-index migration failure mode).
-    /// Synchronous — the live corpus is ~10k rows.
+    /// source table still holds rows. Synchronous — the live corpus is ~10k
+    /// rows.
     fn repopulate_stale_fts(&self, turns_stale: bool, facts_stale: bool) -> Result<(), StoreError> {
         if turns_stale && self.table_has_rows("turns")? {
             let rows = self.rebuild_turns_fts()?;
@@ -3607,7 +3601,7 @@ mod tests {
 
     #[test]
     fn parse_subjects_coerces_non_string_values_like_python_str() {
-        // Python `_row_to_fact` keeps any dict with BOTH keys, coercing each via
+        // Keep any object with BOTH keys, coercing each via
         // `str(...)`; only non-dict items or items missing a key are dropped.
         let blob = "[{\"canonical_key\": \"discord:1\", \"display_at_write\": \"Cor\"}, \
              {\"canonical_key\": 5, \"display_at_write\": \"X\"}, \

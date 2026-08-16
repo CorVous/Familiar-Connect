@@ -1,7 +1,7 @@
-//! Ported from Python `tests/test_attentional_layers.py` — the RecentHistoryLayer
-//! halves (cross-channel window, archive watermark, `#channel_id` tags, channel
-//! markers, token-trim realignment). The final-reminder focus/unread halves live
-//! in the `context::final_reminder` in-module tests.
+//! The RecentHistoryLayer halves (cross-channel window, archive watermark,
+//! `#channel_id` tags, channel markers, token-trim realignment). The
+//! final-reminder focus/unread halves live in the `context::final_reminder`
+//! in-module tests.
 
 #[path = "context_helpers/mod.rs"]
 mod helpers;

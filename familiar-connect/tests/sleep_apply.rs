@@ -1,7 +1,6 @@
-//! Ported from Python `tests/test_sleep_apply.py` — the consolidation apply
-//! path: retire → superseded, rewrite → mint with union provenance +
-//! backlink, ego-subject display, concurrent-supersede skip-not-raise,
-//! fact-axis-only watermark, and the full plan→apply e2e.
+//! The consolidation apply path: retire → superseded, rewrite → mint with
+//! union provenance + backlink, ego-subject display, concurrent-supersede
+//! skip-not-raise, fact-axis-only watermark, and the full plan→apply e2e.
 
 #[path = "sleep_helpers/mod.rs"]
 mod helpers;
@@ -234,7 +233,7 @@ async fn full_plan_apply_via_plan_consolidation() {
 #[tokio::test]
 async fn rewrite_missing_source_fact_raises() {
     // A rewrite whose source id was never snapshotted (never existed) has no
-    // entry in the up-front facts_by_ids map. Python indexes `by_id[fid]`,
+    // entry in the up-front facts_by_ids map. The lookup is by exact id,
     // raising KeyError; the port mirrors the raise rather than silently
     // degrading (skipping the subject / yielding channel_id=None). Unreachable
     // in the pipeline: supersede is the only removal path, so a fact current at

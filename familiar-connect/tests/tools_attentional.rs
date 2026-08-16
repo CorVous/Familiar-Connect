@@ -1,7 +1,6 @@
-//! Ported from Python `tests/test_attentional_tools.py` — the `shift_focus`,
-//! `read_channel`, and `start_activity` handlers, driven through the narrow
-//! `FocusControl` / `ChannelReadStore` / `StartActivityEngine` seams with
-//! scripted doubles (replacing the Python `MagicMock`s).
+//! The `shift_focus`, `read_channel`, and `start_activity` handlers, driven
+//! through the narrow `FocusControl` / `ChannelReadStore` /
+//! `StartActivityEngine` seams with scripted doubles.
 
 use std::sync::{Arc, Mutex};
 

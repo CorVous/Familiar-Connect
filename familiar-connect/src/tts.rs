@@ -1,21 +1,22 @@
-//! Cartesia/Azure/Gemini TTS clients + greeting cache (subsystem 09; Python `tts.py`).
+//! Cartesia/Azure/Gemini TTS clients + greeting cache (subsystem 09).
 //!
 //! All three providers return the uniform [`TTSResult`] (raw PCM audio + per-word
 //! timestamps). Two seams the rest of the system types against:
 //!
 //! * [`TtsClient`] — the buffered `synthesize` surface every client offers, plus
-//!   [`TtsClient::as_streaming`] which reifies Python's duck-typed
-//!   `hasattr(client, "synthesize_stream")` check into a typed downcast.
+//!   [`TtsClient::as_streaming`], a typed downcast in place of an untyped
+//!   capability check.
 //! * [`StreamingTtsClient`] — the incremental `synthesize_stream` surface
 //!   (Cartesia, Azure) with the [`JitterHints`] the player duck-typed as
 //!   `stream_prebuffer_bytes` / `stream_pad_underrun`.
 //!
-//! Integer math (Gemini 2× upsample midpoint) uses floor division (`div_euclid`)
-//! to match Python `//` bit-for-bit (DESIGN §4.3). Timestamps are milliseconds.
+//! Integer math (Gemini 2× upsample midpoint) uses floor division
+//! (`div_euclid`). Timestamps are
+//! milliseconds.
 //!
 //! Transport parity note: the Cartesia WebSocket is wired over
 //! `tokio-tungstenite` behind the default `net` feature. The Azure Speech SDK and
-//! Google Gemini SDK have no drop-in Rust equivalent that matches the Python mock
+//! Google Gemini SDK have no drop-in Rust equivalent that matches the mock
 //! surface, so their live backends are deferred to the wiring layer (10): the
 //! buffered/streaming *logic* is fully ported and unit-tested against mockable
 //! backend seams ([`AzureBufferedBackend`], [`AzureStreamReader`],
@@ -43,10 +44,10 @@ use crate::config::TTSConfig;
 use crate::log_style as ls;
 
 // ---------------------------------------------------------------------------
-// Constants (Python module-level)
+// Constants
 // ---------------------------------------------------------------------------
 
-/// Log target for per-synthesis TTS telemetry (Python `familiar_connect.tts`).
+/// Log target for per-synthesis TTS telemetry.
 const TTS_TARGET: &str = "familiar_connect.tts";
 
 /// Cartesia REST base (used for header construction / non-WS call sites).
@@ -83,13 +84,13 @@ pub const GREETING_CACHE_DIR: &str = "data/cache/greetings";
 /// Failure surface for TTS synthesis, factory construction, and playback prep.
 #[derive(Debug, thiserror::Error)]
 pub enum TtsError {
-    /// Factory misconfiguration (unknown provider / missing secret / empty field).
-    /// Mirrors Python's `ValueError` from `create_tts_client`.
+    /// Factory misconfiguration (unknown provider / missing secret / empty
+    /// field).
     #[error("{0}")]
     Config(String),
-    /// Provider-side or protocol failure surfaced at synthesis time
-    /// (Cartesia `error` event, Azure cancellation, Gemini missing audio part,
-    /// unexpected WS close). Mirrors Python's `RuntimeError`.
+    /// Provider-side or protocol failure surfaced at synthesis time (Cartesia
+    /// `error` event, Azure cancellation, Gemini missing audio part, unexpected
+    /// WS close).
     #[error("{0}")]
     Runtime(String),
     /// WebSocket / HTTP transport failure.
@@ -163,15 +164,15 @@ pub struct JitterHints {
 /// Owned async stream of raw mono `pcm_s16le` chunks (Cartesia/Azure streaming).
 ///
 /// Dropping the stream tears down the underlying transport (WS close / Azure
-/// worker abort) — the port's replacement for Python's `aclose` finally, since
-/// Rust streams have no consumer-drop hook. `Some(Err(_))` is a mid-stream
-/// failure; `None` is a clean end (Python `StopAsyncIteration`).
+/// worker abort), since Rust streams have no consumer-drop hook.
+/// `Some(Err(_))` is a
+/// mid-stream failure; `None` is a clean end.
 pub type TtsStream = BoxStream<'static, Result<Vec<u8>, TtsError>>;
 
 /// The buffered synth surface every TTS client exposes.
 ///
-/// [`as_streaming`](TtsClient::as_streaming) reifies the Python duck-typed
-/// `hasattr(client, "synthesize_stream")` check: `Some` selects the player's
+/// [`as_streaming`](TtsClient::as_streaming) is a typed capability check:
+/// `Some` selects the player's
 /// streaming path, `None` the buffered path.
 #[async_trait]
 pub trait TtsClient: Send + Sync {
@@ -188,7 +189,7 @@ pub trait TtsClient: Send + Sync {
 /// The incremental synth surface (Cartesia, Azure).
 pub trait StreamingTtsClient: Send + Sync {
     /// Open a fresh stream of PCM chunks. The transport connects lazily on first
-    /// poll (matching Python's connect-on-first-`anext`).
+    /// poll.
     fn synthesize_stream(&self, text: &str) -> TtsStream;
 
     /// Jitter-buffer hints for the player's source. Default: none.
@@ -198,11 +199,11 @@ pub trait StreamingTtsClient: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Per-synthesis telemetry (Python `_logger.info` lines)
+// Per-synthesis telemetry
 // ---------------------------------------------------------------------------
 
-/// Emit the buffered-synthesis INFO line: `🔉 TTS <Provider> words=.. audio=..b
-/// timing=..ms→..ms` (Python `synthesize` / `_synthesize_sync` tail log).
+/// Emit the buffered-synthesis INFO line: `🔉 TTS <Provider> words=..
+/// audio=..b timing=..ms→..ms`.
 fn log_buffered_synth(provider: &str, audio: &[u8], timestamps: &[WordTimestamp]) {
     let start_ms = timestamps.first().map_or(0.0, |t| t.start_ms);
     let end_ms = timestamps.last().map_or(0.0, |t| t.end_ms);
@@ -222,8 +223,7 @@ fn log_buffered_synth(provider: &str, audio: &[u8], timestamps: &[WordTimestamp]
     );
 }
 
-/// Emit the Azure streaming INFO line: `🔉 TTS Azure/stream audio=..b`
-/// (Python `_read_stream_chunks` tail log).
+/// Emit the Azure streaming INFO line: `🔉 TTS Azure/stream audio=..b`.
 fn log_azure_stream(total_bytes: usize) {
     tracing::info!(
         target: TTS_TARGET,
@@ -234,8 +234,8 @@ fn log_azure_stream(total_bytes: usize) {
     );
 }
 
-/// Emit the Gemini INFO line: `🔉 TTS Gemini words=.. audio=..b duration=..ms`
-/// (Python `_synthesize_sync` tail log).
+/// Emit the Gemini INFO line: `🔉 TTS Gemini words=.. audio=..b
+/// duration=..ms`.
 fn log_gemini_synth(audio: &[u8], timestamps: &[WordTimestamp], total_ms: f64) {
     tracing::info!(
         target: TTS_TARGET,
@@ -248,9 +248,9 @@ fn log_gemini_synth(audio: &[u8], timestamps: &[WordTimestamp], total_ms: f64) {
     );
 }
 
-/// Per-stream Cartesia telemetry: total bytes + first/last chunk arrival for the
-/// `span_ms` INFO line emitted on clean stream end (Python `synthesize_stream`
-/// tail log). Timing uses wall-clock deltas between chunk arrivals.
+/// Per-stream Cartesia telemetry: total bytes + first/last chunk arrival for
+/// the `span_ms` INFO line emitted on clean stream end. Timing uses wall-clock
+/// deltas between chunk arrivals.
 #[derive(Default)]
 struct StreamTel {
     total_bytes: usize,
@@ -751,10 +751,10 @@ impl CartesiaConn for RealCartesiaConn {
 impl Drop for RealCartesiaConn {
     fn drop(&mut self) {
         // Consumer dropped the stream mid-flight (barge-in) without the End/Fail
-        // path reaching `close()`: mirror Python's `finally: await ws.close()` by
+        // path reaching `close()`: close gracefully by
         // handing the still-open socket to a detached task that sends a graceful
         // Close (1000). Without this the server only ever observes an abnormal
-        // 1006 (DESIGN TtsStream drop contract; spec 09 §48). If `close()` already
+        // 1006 (DESIGN TtsStream drop contract). If `close()` already
         // ran the socket is gone and this is a no-op.
         let Some(mut ws) = self.ws.take() else {
             return;
@@ -1019,7 +1019,7 @@ impl Stream for AzureStream {
 impl Drop for AzureStream {
     fn drop(&mut self) {
         // Barge-in / consumer drop: unblock the in-flight read and let the daemon
-        // worker exit on its own (matching Python's stop-event + daemon thread).
+        // worker exit on its own.
         self.stop.store(true, Ordering::SeqCst);
         self.aborter.stop_speaking();
         if let Some(handle) = self.worker.take() {
@@ -1055,7 +1055,7 @@ fn azure_stream(
         }
         // A `read_data == 0` is ambiguous: only a *natural* end (not a
         // consumer-driven stop) inspects the terminal status for a failure.
-        // The mid-stream cancel raises (matching Python) and skips the tail log.
+        // The mid-stream cancel raises and skips the tail log.
         if !stop_worker.load(Ordering::SeqCst) && reader.status() == AzureStreamStatus::Canceled {
             let _ = tx.send(Err(reader.cancel_error()));
             return;
@@ -1129,7 +1129,7 @@ impl AzureTTSClient {
 
 /// Upsample 16-bit signed LE mono PCM by 2× via linear interpolation: each pair
 /// `(a, b)` emits `(a, (a + b) // 2)`; the last sample is doubled. Floor
-/// division matches Python `//`.
+/// division (`div_euclid`) is used.
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,
@@ -1179,7 +1179,7 @@ pub fn estimate_word_timestamps(text: &str, total_ms: f64) -> Vec<WordTimestamp>
         .collect()
 }
 
-/// `Some(&str)` when the option holds a non-empty string (Python truthiness).
+/// `Some(&str)` when the option holds a non-empty string.
 fn nonempty(opt: Option<&str>) -> Option<&str> {
     opt.filter(|s| !s.is_empty())
 }
@@ -1448,7 +1448,7 @@ fn build_tts_client(
                 compose_gemini_style_prompt(cfg),
             )))
         }
-        // Python: `f"Unknown TTS provider {provider!r}; ..."` — `{!r}` (repr)
+        // The message quotes the provider repr-style:
         // single-quotes the string; `{:?}` (Debug) would double-quote it.
         other => Err(TtsError::Config(format!(
             "Unknown TTS provider '{other}'; expected 'azure', 'cartesia', or 'gemini'"

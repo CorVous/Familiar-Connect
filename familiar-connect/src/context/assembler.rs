@@ -1,5 +1,5 @@
-//! Prompt assembler: layer compose + per-layer memoization + recent-history slot
-//! (subsystem 05; Python `context/assembler.py`).
+//! Prompt assembler: layer compose + per-layer memoization + recent-history
+//! slot (subsystem 05).
 //!
 //! Composes [`Layer`] contributions into one system-prompt string plus the
 //! recent-history message list. Each system-prompt layer is independently cached
@@ -7,10 +7,10 @@
 //! context and unchanged keys reuse the rendered text without re-running
 //! [`Layer::build`].
 //!
-//! Per DESIGN D15 the assembler uses **explicit slots**, not `isinstance`
-//! downcasting: recent-history is a distinct slot (not a `Layer`), and the RAG
-//! cue is routed through an explicit handle. The layer-order pin (behavior 6)
-//! therefore applies to the system-prompt layer `Vec` only.
+//! The assembler uses **explicit slots**, not `isinstance` downcasting:
+//! recent-history is a distinct slot (not a `Layer`), and the RAG cue is routed
+//! through an explicit handle. The layer-order pin (behavior 6) therefore
+//! applies to the system-prompt layer `Vec` only.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -71,9 +71,9 @@ pub struct AssembledPrompt {
 /// Layer composer with per-layer memoization.
 ///
 /// Layer order is preserved from construction. The cache keeps a single slot per
-/// layer name (`name -> (key, text)`): this is behavior-equivalent to Python's
-/// unbounded `(name, key) -> text` dict for every observable test — nothing reads
-/// stale entries — while staying leak-free (DESIGN §5, port notes).
+/// layer name (`name -> (key, text)`): a single slot is observably equivalent
+/// to an unbounded `(name, key) -> text` map — nothing reads stale entries —
+/// while staying leak-free.
 pub struct Assembler {
     layers: Vec<Arc<dyn Layer>>,
     recent_history: Option<RecentHistoryLayer>,
@@ -96,7 +96,7 @@ impl Assembler {
 
     /// Forward *cue* to the RAG layer, if one is wired.
     ///
-    /// Uses the explicit handle registered at build time (DESIGN D15) rather than
+    /// Uses the explicit handle registered at build time rather than
     /// downcasting a `dyn Layer`.
     pub fn set_rag_cue(&self, cue: &str) {
         if let Some(rag) = &self.rag {
@@ -146,8 +146,8 @@ impl Assembler {
     }
 }
 
-/// Fluent builder for [`Assembler`] (mirrors Python's `Assembler(layers=[...])`
-/// while keeping recent-history and RAG as explicit slots, DESIGN D15).
+/// Fluent builder for [`Assembler`], keeping recent-history and RAG as
+/// explicit slots.
 #[derive(Default)]
 pub struct AssemblerBuilder {
     layers: Vec<Arc<dyn Layer>>,

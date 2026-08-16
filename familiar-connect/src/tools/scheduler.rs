@@ -1,4 +1,4 @@
-//! Alarm scheduler (subsystem 08; Python `tools/scheduler.py`).
+//! Alarm scheduler (subsystem 08).
 //!
 //! One `tokio` task per pending alarm. Tasks sleep until the target time, then
 //! do a **conditional** `mark_alarm_fired` (`fired_at IS NULL AND cancelled_at
@@ -163,9 +163,8 @@ impl AlarmScheduler {
     /// `Ok(false)`.
     ///
     /// # Errors
-    /// Propagates a store write fault (Python lets `cancel_alarm` raise to the
-    /// caller); the tool layer surfaces it as an `{"error": ...}` result rather
-    /// than a benign "no pending alarm".
+    /// Propagates a store write fault; the tool layer surfaces it as an
+    /// `{"error":...}` result rather than a benign "no pending alarm".
     pub async fn cancel(&self, alarm_id: &str) -> Result<bool, crate::history::StoreError> {
         let handle = self.tasks.lock().expect("tasks mutex").remove(alarm_id);
         if let Some(h) = handle {
@@ -215,8 +214,7 @@ async fn sleep_then_fire(history: &AsyncHistoryStore, bus: &dyn EventBus, alarm:
         Ok(v) => v,
         Err(e) => {
             // A store write fault is a genuine fault, not a benign "already
-            // fired". Python lets the fire task raise (its runtime logs the
-            // fault); surface it here instead of silently coercing to `false`.
+            // fired": surface it here instead of silently coercing to `false`.
             // Publish is skipped either way, but the error is now visible.
             tracing::error!(
                 "{} {} {}",

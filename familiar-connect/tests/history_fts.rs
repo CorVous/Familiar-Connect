@@ -1,14 +1,14 @@
 //! Integration tests for the tantivy FTS side-indexes reached through
 //! `HistoryStore` — search scoping, ranking determinism, rebuild, query
 //! sanitization, and `append_turn` resilience when the FTS write fails.
-//! Ports `test_history_fts.py` (`TestFtsSearch`) plus the FTS-backed
-//! `search_facts` / `search_facts_scored` cases of `test_facts_store.py`
+//! Covers FTS search plus the FTS-backed
+//! `search_facts` / `search_facts_scored` cases
 //! (behavior 20 — both indexes are real `TantivyFts::in_memory()` under
 //! `HistoryStore::open(":memory:")`).
 //!
-//! The pure commit-retry tests (Python monkeypatched `FtsIndex._commit_writer`)
-//! live as in-module unit tests in `src/history/fts.rs`, exercising the
-//! `TantivyFts::set_commit_fault` seam directly.
+//! The pure commit-retry tests live as in-module unit tests in
+//! `src/history/fts.rs`, exercising the `TantivyFts::set_commit_fault` seam
+//! directly.
 
 use chrono::{TimeZone, Utc};
 use familiar_connect::history::{
@@ -28,7 +28,7 @@ fn alice() -> Author {
 }
 
 /// Five turns; the fox mentions land on channel 100 (turns 0, 2, 4), the
-/// non-fox rows on channel 101 (turns 1, 3) — mirrors the Python fixture.
+/// non-fox rows on channel 101 (turns 1, 3).
 fn store_with_turns() -> HistoryStore {
     let store = HistoryStore::open(":memory:").unwrap();
     let texts = [
@@ -214,9 +214,8 @@ fn search_turns_respects_max_id() {
 // --- rebuild after a wiped / foreign on-disk index ------------------------
 
 /// Migration failure mode: opening a store over a foreign/incompatible tantivy
-/// index (Python-written, different schema) wipes it to an empty index. Reopen
-/// must repopulate both indexes from the surviving SQLite tables rather than
-/// silently serving an empty FTS.
+/// index wipes it to an empty index. Reopen must repopulate both indexes from
+/// the surviving SQLite tables rather than silently serving an empty FTS.
 #[test]
 fn reopen_rebuilds_fts_after_index_wipe() {
     let dir = tempfile::tempdir().unwrap();
@@ -285,7 +284,7 @@ fn reopen_rebuilds_fts_after_index_wipe() {
 
 // --- append_turn survives an FTS write failure ----------------------------
 
-/// A store-side FTS double whose every write fails — stands in for Python's
+/// A store-side FTS double whose every write fails — stands in for an
 /// monkeypatched `store._fts_turns.add`.
 struct FailingFts;
 
@@ -332,7 +331,6 @@ fn append_turn_survives_fts_commit_failure() {
 // so these exercise: BM25 positivity / higher-is-better, the 4x overfetch, the
 // facts-validity join over FTS candidates (superseded exclusion + as_of slice),
 // and the (-score, -id) re-rank. Ports the FTS-backed cases of
-// `test_facts_store.py`.
 
 fn subj(key: &str, display: &str) -> FactSubject {
     FactSubject {
@@ -341,8 +339,7 @@ fn subj(key: &str, display: &str) -> FactSubject {
     }
 }
 
-/// Two facts (`strawberries`, `night shifts`) under `FAM`, mirroring Python's
-/// `_store_with_turns_and_facts` fixture.
+/// Two facts (`strawberries`, `night shifts`) under `FAM`.
 fn store_with_facts() -> HistoryStore {
     let store = HistoryStore::open(":memory:").unwrap();
     for i in 0..5 {
@@ -498,7 +495,7 @@ fn search_facts_scored_returns_positive_bm25_best_first() {
     }
     // Result is sorted BM25 desc (best first). The two docs tokenize to the same
     // multiset ("too" is a stopword), so scores tie and `<=` holds — matching
-    // the Python assertion `scored[0][1] <= scored[1][1]`.
+    // the assertion `scored[0][1] <= scored[1][1]`.
     assert!(scored[0].1 <= scored[1].1);
 }
 

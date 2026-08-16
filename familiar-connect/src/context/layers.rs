@@ -1,12 +1,12 @@
-//! Prompt layer implementations (subsystem 05; Python `context/layers.py`).
+//! Prompt layer implementations (subsystem 05).
 //!
 //! Each layer owns one segment of the system prompt with its own invalidation
-//! signal. The [`Layer`] trait is the swappable seam (Python's `Protocol`); the
-//! eight concrete layers below implement it — except [`RecentHistoryLayer`],
-//! which is a distinct assembler slot (DESIGN D15), not a `Layer`.
+//! signal. The [`Layer`] trait is the swappable seam; the eight concrete layers
+//! below implement it — except [`RecentHistoryLayer`], which is a distinct
+//! assembler slot, not a `Layer`.
 //!
 //! Store access goes through the async facade (`build` and `invalidation_key` are
-//! both `async` so neither blocks the reactor — DESIGN D16). All truncation caps
+//! both `async` so neither blocks the reactor). All truncation caps
 //! count Unicode scalars via a `limit-1 + "…"` helper (DESIGN §4.9, spec 05 port
 //! notes); chars-per-token is 4.
 
@@ -52,9 +52,9 @@ const BIO_CHAR_CAP: usize = 240;
 /// Single prompt-layer seam.
 ///
 /// [`build`](Layer::build) returns the layer's text contribution to the system
-/// prompt (empty string opts out); [`invalidation_key`](Layer::invalidation_key)
-/// is a short string used for in-process caching. Both are `async` so neither
-/// blocks the reactor (DESIGN D16).
+/// prompt (empty string opts out);
+/// [`invalidation_key`](Layer::invalidation_key) is a short string used for
+/// in-process caching. Both are `async` so neither blocks the reactor.
 #[async_trait]
 pub trait Layer: Send + Sync {
     /// Stable layer name (the cache key namespace).
@@ -97,9 +97,9 @@ fn content_hash(path: &Path) -> String {
     )
 }
 
-/// Hard cap on a string; `…` (U+2026) suffix when truncated. Keeps `limit - 1`
-/// scalars then the ellipsis so the result is at most `limit` scalars — the
-/// context module's convention (Python `_truncate`), distinct from
+/// Hard cap on a string; `…` (U+2026) suffix when truncated. Keeps `limit -
+/// 1` scalars then the ellipsis so the result is at most `limit` scalars —
+/// the context module's convention, distinct from
 /// [`crate::support::text::truncate`] (which keeps `limit` then appends).
 fn truncate_cap(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
@@ -135,7 +135,7 @@ fn format_reactions(reactions: &[(String, i64)]) -> String {
     format!("[reactions: {}]", parts.join(" "))
 }
 
-/// Non-empty string test mirroring Python truthiness of an optional string.
+/// Non-empty string test for an optional string (`None` and `""` are both false).
 fn is_nonempty(value: Option<&str>) -> bool {
     value.is_some_and(|s| !s.is_empty())
 }
@@ -289,7 +289,7 @@ impl Layer for OperatingModeLayer {
 }
 
 // ---------------------------------------------------------------------------
-// Recent history (assembler slot, not a Layer — DESIGN D15)
+// Recent history (assembler slot, not a Layer)
 // ---------------------------------------------------------------------------
 
 /// Collapse consecutive same-speaker voice fragments into one rendered message.
@@ -316,9 +316,7 @@ fn coalesce_voice_fragments(turns: Vec<HistoryTurn>, max_gap_seconds: f64) -> Ve
     merged
 }
 
-/// Gap in seconds between two turns (microsecond precision, matching Python
-/// `timedelta.total_seconds()` over microsecond-granularity store timestamps —
-/// `layers.py:392`/`:333`).
+/// Gap in seconds between two turns (microsecond precision).
 fn gap_seconds(earlier: DateTime<Utc>, later: DateTime<Utc>) -> f64 {
     #[allow(
         clippy::cast_precision_loss,
@@ -394,8 +392,6 @@ fn format_channel_marker(
     channel_resolver: Option<&ChannelResolver>,
     guild_resolver: Option<&ChannelResolver>,
 ) -> String {
-    // Mirror Python's empty-string-is-falsy truthiness (`layers.py` lines
-    // 276/278): an empty resolver result is treated as absent, not rendered.
     let name = channel_resolver
         .and_then(|r| r(channel_id))
         .filter(|s| !s.is_empty());
@@ -545,8 +541,8 @@ pub(crate) async fn turn_to_message_with_context(
 
 /// Verbatim tail of the consumed cross-channel stream for the active familiar.
 ///
-/// Not a [`Layer`]: the assembler holds it as a distinct slot (DESIGN D15) and
-/// consumes [`recent_messages`](RecentHistoryLayer::recent_messages).
+/// Not a [`Layer`]: the assembler holds it as a distinct slot and consumes
+/// [`recent_messages`](RecentHistoryLayer::recent_messages).
 pub struct RecentHistoryLayer {
     store: Store,
     tz: Tz,
@@ -810,11 +806,10 @@ impl Layer for ConversationSummaryLayer {
 
 /// Simple ASCII-ish title-case fallback for the ego header display.
 ///
-/// Mirrors Python `str.title()` (`layers.py:1001`): word boundaries fall on
-/// Unicode *cased* characters only. Digits and punctuation are uncased, so a
-/// letter following one starts a new word and is capitalized
-/// (`agent007bond` -> `Agent007Bond`, `3cats` -> `3Cats`). Uncased characters
-/// pass through their (identity) case mapping unchanged.
+/// Digits and punctuation are uncased, so a letter following one starts a new
+/// word and is capitalized (`agent007bond` -> `Agent007Bond`, `3cats` ->
+/// `3Cats`). Uncased characters pass through their (identity) case mapping
+/// unchanged.
 fn title_case(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut previous_is_cased = false;
@@ -1082,7 +1077,7 @@ impl PeopleDossierBuilder {
 /// norm.
 #[allow(
     clippy::suboptimal_flops,
-    reason = "mirror Python's plain +/* float arithmetic for bit-parity of the cosine score"
+    reason = "plain +/* float arithmetic keeps the cosine score bit-stable"
 )]
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
@@ -1163,7 +1158,7 @@ fn rerank_fact_candidates(
         let embedding_q = sims.get(&fact.id).map_or(0.5, |cos| (cos + 1.0) / 2.0);
         #[allow(
             clippy::suboptimal_flops,
-            reason = "mirror Python's plain +/* float arithmetic for bit-parity of the rerank score"
+            reason = "plain +/* float arithmetic keeps the rerank score bit-stable"
         )]
         let score = bm25_weight * bm25_q
             + recency_weight * recency_q
@@ -1666,8 +1661,7 @@ impl RagContextBuilder {
         self
     }
 
-    /// Build the layer (`context_window`/`fact_overfetch` are floored as in
-    /// Python).
+    /// Build the layer (`context_window`/`fact_overfetch` are floored).
     #[must_use]
     pub fn build(self) -> RagContextLayer {
         RagContextLayer {
@@ -1728,7 +1722,7 @@ impl ReflectionLayer {
     }
 }
 
-/// `Option<i64>` rendered as Python would render `ctx.channel_id` in an f-string.
+/// `Option<i64>` rendered for interpolation: `None` renders as `"None"`.
 fn opt_int_display(value: Option<i64>) -> String {
     value.map_or_else(|| "None".to_owned(), |v| v.to_string())
 }
@@ -1834,7 +1828,7 @@ pub struct LorebookEntry {
     pub selective: bool,
 }
 
-/// Stringify a TOML scalar the way Python `str(...)` would for lorebook content.
+/// Stringify a TOML scalar for lorebook content.
 fn toml_value_to_string(value: &toml::Value) -> String {
     match value {
         toml::Value::String(s) => s.clone(),
@@ -1846,7 +1840,8 @@ fn toml_value_to_string(value: &toml::Value) -> String {
     }
 }
 
-/// Python-style truthiness of a TOML scalar (for the `selective` flag).
+/// Truthiness of a TOML scalar (for the `selective` flag): `false`, zero, the
+/// empty string, and empty collections are falsy; everything else is truthy.
 fn toml_truthy(value: &toml::Value) -> bool {
     match value {
         toml::Value::Boolean(b) => *b,
@@ -2089,7 +2084,7 @@ impl LorebookBuilder {
 mod tests {
     use super::*;
 
-    // Parity with Python `str.title()` (`layers.py:1001`): word boundaries fall
+    // Word boundaries fall
     // on cased characters only, so a letter after a digit begins a new word.
     #[test]
     fn title_case_matches_python_str_title() {
@@ -2100,9 +2095,9 @@ mod tests {
         assert_eq!(title_case(""), "");
     }
 
-    // Parity with Python `timedelta.total_seconds()`: sub-millisecond fractions
+    // Sub-millisecond fractions
     // of a second must survive so a gap just above a whole-second cap is not
-    // truncated down onto the cap (`layers.py:392`).
+    // truncated down onto the cap.
     #[test]
     fn gap_seconds_keeps_microsecond_precision() {
         let base =
@@ -2117,8 +2112,8 @@ mod tests {
         );
     }
 
-    // Parity with Python's empty-string-is-falsy handling in
-    // `_format_channel_marker` (`layers.py:276`/`:278`).
+    // Empty-string-is-falsy handling in
+    // the channel-marker formatter.
     #[test]
     fn format_channel_marker_treats_empty_resolver_result_as_absent() {
         let empty: ChannelResolver = Arc::new(|_| Some(String::new()));

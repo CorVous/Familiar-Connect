@@ -1,5 +1,4 @@
-//! Apply a validated [`ConsolidationPlan`] to the DB (subsystem 04; Python
-//! `sleep/apply.py`).
+//! Apply a validated [`ConsolidationPlan`] to the DB (subsystem 04).
 //!
 //! Separate from planning so a dry run can compute the plan without touching the
 //! DB. Apply is supersede-only: retires drop facts with no replacement, rewrites
@@ -41,9 +40,9 @@ pub struct ApplyReport {
 /// part; otherwise the key's local part.
 ///
 /// # Errors
-/// Raises when a source id is absent from `by_id` — Python indexes `by_id[fid]`,
-/// raising `KeyError`; supersede-only removal keeps every plan-time id fetchable
-/// by exact id at apply time, so this is unreachable in the pipeline.
+/// Raises when a source id is absent from `by_id`; supersede-only removal
+/// keeps every plan-time id fetchable by exact id at apply time, so this is
+/// unreachable in the pipeline.
 fn subjects_for_rewrite(
     action: &RewriteAction,
     by_id: &HashMap<i64, Fact>,
@@ -80,8 +79,8 @@ fn subjects_for_rewrite(
     Ok(out)
 }
 
-/// Python `key.split(":", 1)[-1]`: everything after the first `:`, or the whole
-/// string when there is no colon.
+/// Everything after the first `:`, or the whole string when there is no
+/// colon.
 fn local_part(key: &str) -> String {
     key.split_once(':')
         .map_or_else(|| key.to_owned(), |(_, rest)| rest.to_owned())
@@ -143,8 +142,8 @@ pub async fn apply_consolidation(
         // provenance, and mints only if all are current — declining the whole
         // merge otherwise. Subjects stay caller-prepared; channel follows the
         // first obsolete row. A source id absent from the snapshot raises
-        // (Python indexes `by_id[...]`, a KeyError) rather than degrading —
-        // unreachable in the pipeline, where supersede is the only removal path.
+        // rather than degrading — unreachable in the pipeline, where
+        // supersede is the only removal path.
         let channel_id = by_id
             .get(&action.old_fact_ids[0])
             .ok_or_else(|| {

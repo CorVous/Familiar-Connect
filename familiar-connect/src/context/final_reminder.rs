@@ -1,5 +1,5 @@
-//! Closing "final reminder" block appended to every system prompt (subsystem 05;
-//! Python `context/final_reminder.py`).
+//! Closing "final reminder" block appended to every system prompt (subsystem
+//! 05).
 //!
 //! Restates the current time (so the model doesn't drift on long-lived caches)
 //! and enumerates text-channel sentinels, the per-mode operating directive, an
@@ -94,9 +94,8 @@ fn channel_label_with_id(
 /// The closing "final reminder" block builder.
 ///
 /// Construct with [`FinalReminder::new`], set the desired options, then
-/// [`render`](FinalReminder::render). Mirrors Python `build_final_reminder(*,
-/// viewer_mode, ...)` — the keyword-only args become builder setters. `now`
-/// defaults to the wall clock when `include_time` and unset.
+/// [`render`](FinalReminder::render). `now` defaults to the wall clock when
+/// `include_time` and unset.
 pub struct FinalReminder {
     viewer_mode: String,
     now: Option<DateTime<Utc>>,

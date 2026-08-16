@@ -1,4 +1,4 @@
-//! Text reply orchestrator (subsystem 06; Python `processors/text_responder.py`).
+//! Text reply orchestrator (subsystem 06).
 //!
 //! Consumes `discord.text` events, assembles a layered prompt (05), streams an
 //! LLM reply (08), gates it through the `<silent>` sentinel, rewrites its
@@ -915,8 +915,8 @@ impl TextResponder {
                 }
             };
             // qwen leak quirk: an empty completion (no text, no tool, not
-            // silent) earns exactly one retry (D17: the retry keeps Python's
-            // library-default iteration cap).
+            // silent) earns exactly one retry (the retry keeps the
+            // default iteration cap).
             if result.final_content.is_empty()
                 && !result.is_silent
                 && result.tool_calls_made == 0
@@ -1039,8 +1039,7 @@ impl AgenticHooks for TextToolHooks<'_> {
         if let Some(g) = self.guild_id {
             append = append.guild_id(g);
         }
-        // Hook returns `()`; a store failure here is logged and dropped (Python
-        // propagated it out of the loop — see the port summary).
+        // Hook returns ``; a store failure here is logged and dropped.
         if let Err(e) = self.responder.history.append_turn(append).await {
             tracing::warn!("{} tool-turn persist failed: {e}", ls::tag("Text", ls::R));
         }

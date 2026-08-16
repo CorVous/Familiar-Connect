@@ -1,12 +1,10 @@
-//! Ported from Python `tests/test_maintenance_passes.py` — registry
-//! order/unknown-raises/known-set/DEFAULT_PASSES, the denylist data-flow
-//! (consolidation's retired text reaches the opinion stance prompt), and the
-//! default run applying both passes.
+//! Registry order/unknown-raises/known-set/DEFAULT_PASSES, the denylist
+//! data-flow (consolidation's retired text reaches the opinion stance prompt),
+//! and the default run applying both passes.
 //!
-//! The Python denylist test monkeypatches `execute_opinion_formation` to spy on
-//! the `denylist` kwarg. Rust has no monkeypatch: we assert the equivalent
-//! observable — the retired fact's text arrives in the stance prompt's KNOWN
-//! BITS block (the ONLY place the denylist is consumed).
+//! The denylist is asserted through its observable effect rather than by
+//! spying on the call: the retired fact's text arrives in the stance
+//! prompt's KNOWN BITS block (the ONLY place the denylist is consumed).
 
 #[path = "sleep_helpers/mod.rs"]
 mod helpers;

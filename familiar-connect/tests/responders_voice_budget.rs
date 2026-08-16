@@ -1,5 +1,4 @@
-//! Voice-budget span test — speech path (subsystem 06; Python
-//! `tests/test_voice_responder.py::TestVoiceBudgetSpans`).
+//! Voice-budget span test — speech path (subsystem 06).
 //!
 //! The span collector is a process-wide singleton whose `reset_*` seam is gated
 //! behind the non-default `test-util` feature, so this test lives alone in its

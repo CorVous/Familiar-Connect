@@ -1,4 +1,4 @@
-//! Voice reply orchestrator (subsystem 06; Python `processors/voice_responder.py`).
+//! Voice reply orchestrator (subsystem 06).
 //!
 //! Consumes `voice.activity.start` + `voice.transcript.final`, produces an LLM
 //! reply and speaks it through the injected [`TtsPlayer`]. The dispatcher hands
@@ -41,7 +41,7 @@ use crate::tools::agentic::{
 use crate::tools::registry::ToolRegistry;
 use crate::tts_player::protocol::TtsPlayer;
 
-// Cold-cache signal thresholds (Python `log_signals` defaults).
+// Cold-cache signal thresholds.
 const TOPIC_SHIFT_THRESHOLD: f64 = 0.15;
 const TOPIC_SHIFT_MIN_TOKENS: usize = 4;
 const SILENCE_GAP_THRESHOLD_S: f64 = 300.0;
@@ -209,7 +209,7 @@ impl VoiceResponder {
     /// Await every in-flight final-handling task (tests + graceful shutdown).
     ///
     /// Never raises: a task aborted mid-flight yields a `JoinError` that is
-    /// swallowed, mirroring the Python `gather(return_exceptions=True)`.
+    /// swallowed.
     pub async fn wait_until_idle(&self) {
         let handles: Vec<tokio::task::JoinHandle<()>> = {
             let mut inflight = self.inner.inflight.lock().expect("inflight mutex");
@@ -239,9 +239,7 @@ impl VoiceInner {
         let inner = Arc::clone(self);
         let key = scope_key.clone();
         // Take the inflight lock BEFORE spawning and hold it across the insert.
-        // Python installs `self._inflight[key] = task` synchronously (asyncio's
-        // create_task cannot run the coroutine until the current one awaits), so
-        // the done-callback never fires before the entry exists. On a
+        // The entry must exist before the done-callback can fire. On a
         // multi-thread tokio runtime the spawned task can begin — and, for a
         // fast stale-turn/empty-text drop, finish — on another worker thread
         // before this function returns; holding the lock across spawn+insert
@@ -434,8 +432,8 @@ impl VoiceInner {
             // Cancellation check FIRST, unconditionally (spec V12): a barge-in
             // that lands while the stream is emitting content-empty deltas
             // (finish/role-only frames) must still log `decision=preempted` and
-            // bail, exactly as Python's `chat_stream` loop checks
-            // `scope.is_cancelled()` as its first per-delta statement. Skipping
+            // bail: `scope.is_cancelled()` is the first per-delta statement.
+            // Skipping
             // empty deltas ahead of this check would let a cancelled turn slip
             // past without the preempted marker.
             if scope.is_cancelled() {

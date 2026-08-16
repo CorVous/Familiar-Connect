@@ -1,10 +1,7 @@
-//! Async facade over [`HistoryStore`] (subsystem 03; Python
-//! `history/async_store.py`).
+//! Async facade over [`HistoryStore`] (subsystem 03).
 //!
-//! Python's `AsyncHistoryStore` is a `__getattr__` duck-proxy that dispatches
-//! every call onto a 4-worker `ThreadPoolExecutor`, keeping Turso/tantivy work
-//! off the event loop. Rust cannot transliterate `__getattr__`, so this is an
-//! explicit set of `async fn` wrappers (DESIGN §4.4 / port notes). Each wrapper
+//! An explicit set of `async fn` wrappers keeping SQLite/tantivy work off the
+//! reactor. Each wrapper
 //! moves its owned arguments onto a `tokio::task::spawn_blocking` thread and
 //! runs the synchronous [`HistoryStore`] method there — DB work already lives on
 //! the store's single owning actor thread (see [`super::db`]), so this only
@@ -16,10 +13,8 @@
 //! concurrent `spawn_blocking` tasks may run tantivy searches in genuine
 //! parallel (searches take no lock). Whole multi-statement operations
 //! (`supersede`, promotions, `bump_reaction`, `append_fact`'s dedup-scan+insert)
-//! run inside explicit transactions on the actor, so — unlike Python's
-//! per-statement interleaving — an interleaving of two operations' statements
-//! is impossible. This is the safe atomicity strengthening the DESIGN sanctions
-//! (D5); no test pins the old non-atomicity.
+//! run inside explicit transactions on the actor, so an interleaving of two
+//! operations' statements is impossible.
 //!
 //! Cancelling an awaiting caller drops the `JoinHandle` but leaves the dispatched
 //! blocking job running to completion (standard `spawn_blocking` semantics),
@@ -58,8 +53,7 @@ impl AsyncHistoryStore {
         Self { inner: store }
     }
 
-    /// The raw synchronous store — for callers that must run inline (Python's
-    /// `.sync` property; used by invalidation-key paths in subsystem 05).
+    /// The raw synchronous store — for callers that must run inline.
     #[must_use]
     pub fn sync(&self) -> &HistoryStore {
         &self.inner
@@ -71,7 +65,7 @@ impl AsyncHistoryStore {
         Arc::clone(&self.inner)
     }
 
-    /// Shut down the underlying DB actor (synchronous, like Python).
+    /// Shut down the underlying DB actor (synchronous).
     pub fn close(&self) {
         self.inner.close();
     }

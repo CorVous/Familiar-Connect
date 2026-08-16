@@ -1,12 +1,11 @@
 //! Bus processors: reply loops (subsystem 06) + watermark-driven memory
-//! projectors / background workers (subsystem 07). Python `processors/`.
+//! projectors / background workers (subsystem 07).
 //!
 //! This module root also owns the shared **seam traits** and **event payload
-//! types** the two responders consume. Python passed a plain `dict` payload and
-//! duck-typed collaborators (an assembler, a `send_text` callable, a
-//! `FocusManager`, an `ActivityEngine`); Rust replaces each monkeypatch seam
-//! with a trait object (DESIGN §4.8) and each `dict` payload with a typed
-//! struct the future producers (subsystem 10) and the tests construct.
+//! types** the two responders consume. Each collaborator (assembler,
+//! `send_text` callable, `FocusManager`, `ActivityEngine`) is a trait
+//! object and each payload a typed struct the future
+//! producers (subsystem 10) and the tests construct.
 
 // subsystem 06 — reply loops + projector registry + debug logger
 pub mod debug_logger;
@@ -33,15 +32,14 @@ use crate::llm::LlmClient;
 use crate::tools::registry::ToolContext;
 
 // ---------------------------------------------------------------------------
-// Event payloads (typed replacements for Python's `dict` payloads)
+// Event payloads (typed structs, not loose maps)
 // ---------------------------------------------------------------------------
 
 /// `discord.text` payload (producer: the Discord text source, subsystem 10).
 ///
-/// Field types encode the Python defensive `.get()` / `isinstance` checks: a
+/// Field types encode the defensive checks statically: a
 /// non-`DiscordTextPayload` payload fails to downcast (the "not a dict" drop
-/// rule) and `channel_id` is statically an `i64` (Python's "channel_id not int"
-/// drop rule becomes unrepresentable — see the port summary).
+/// rule) and `channel_id` is statically an `i64`.
 #[derive(Clone, Debug, Default)]
 pub struct DiscordTextPayload {
     /// The responder filters on `familiar_id == self.familiar_id`.
@@ -92,9 +90,8 @@ pub struct VoiceTranscriptFinal {
 /// The LLM client the responders type against.
 ///
 /// Extends [`LlmClient`] with the `image_tools_enabled` flag the text
-/// responder consults to gate the agentic loop (Python read it via
-/// `getattr(llm, "image_tools_enabled", False)`; DESIGN calls for a
-/// default-false trait method). Voice never consults it. The default keeps a
+/// responder consults to gate the agentic loop (a default-false trait
+/// method). Voice never consults it. The default keeps a
 /// bare [`LlmClient`] stub a two-line implementation.
 pub trait ResponderLlm: LlmClient {
     /// Whether image-tool calling is enabled for this slot (gates the text
@@ -108,8 +105,7 @@ pub trait ResponderLlm: LlmClient {
 /// mention_user_ids) -> platform message id`.
 ///
 /// A delivery fault is an `Err` (the responder logs `send_error` and bails
-/// without persisting the assistant turn, mirroring the Python `try/except`
-/// around `send_text`).
+/// without persisting the assistant turn).
 #[async_trait]
 pub trait SendText: Send + Sync {
     /// Deliver `content` to `channel_id`; returns the platform message id.

@@ -1,14 +1,12 @@
 //! DAVE voice-gateway WebSocket — **verification checklist**, not a 1:1 port
-//! (subsystem 09; Python `voice/dave_ws.py`; DESIGN D8).
+//! (subsystem 09).
 //!
-//! In Python this subclasses py-cord's `DiscordVoiceWebSocket` to add DAVE
-//! (Discord's MLS-based end-to-end encryption) opcode handling. In the Rust
+//! DAVE is Discord's MLS-based end-to-end encryption. In the Rust
 //! stack **songbird owns the voice gateway, UDP loop, Opus, and DAVE/MLS**
-//! (songbird ≥ 0.6 embeds `davey`/libdave), so there is no subclass seam to
-//! transliterate. This module is therefore a documentation stub: the Python
-//! invariants below are rewritten as a checklist the Layer-4 wiring verifies
-//! against songbird's driver events/config hooks. The corresponding Python
-//! tests (`test_dave_ws.py`) are recorded as skip-with-reason.
+//! (songbird ≥ 0.6 embeds `davey`/libdave), so there is no seam to
+//! implement here. This module is therefore a documentation stub: the
+//! invariants below are a checklist the Layer-4 wiring verifies
+//! against songbird's driver events/config hooks.
 //!
 //! ## Wire opcodes (the invariant "vocabulary")
 //!
@@ -24,7 +22,7 @@
 //! `29 ANNOUNCE_COMMIT_TRANSITION ([transition_id u16 BE][commit])`,
 //! `30 WELCOME ([transition_id u16 BE][welcome])`.
 //!
-//! ## Verification checklist (spec 09 §A.1–A.12) against songbird
+//! ## Verification checklist against songbird
 //!
 //! - **A.1 IDENTIFY carries `max_dave_protocol_version`.** Omitting it closes the
 //!   gateway with 4017. Verify songbird advertises the DAVE version in its voice

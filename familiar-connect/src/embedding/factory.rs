@@ -1,5 +1,4 @@
-//! Embedder factory registry + `known_embedders` (subsystem 04; Python
-//! `embedding/factory.py`).
+//! Embedder factory registry + `known_embedders` (subsystem 04).
 //!
 //! DESIGN D14 / §4.8: explicit [`EmbedderRegistry::with_builtins`] builder plus
 //! [`EmbedderRegistry::register`], **not** an import-time global dict. Names are
@@ -13,7 +12,7 @@
 //! * `fastembed` → fails with the `local-embed` install hint. The real ONNX
 //!   backend is Layer 2 (feature `local-embed`, `embedding::fastembed`); the
 //!   wiring injects it via `register("fastembed", …)` when the extra is present,
-//!   exactly the Python "re-registration overwrites" seam. Absent the extra a
+//!   exactly the "re-registration overwrites" seam. Absent the extra a
 //!   deploy that selects `fastembed` refuses to start rather than crashing
 //!   mid-turn.
 
@@ -29,8 +28,7 @@ use crate::embedding::protocol::Embedder;
 /// error (unavailable extra / bad dimensionality).
 ///
 /// `Ok(None)` is the `off` outcome — the seam is disabled. The `Arc` lets one
-/// instance be shared across assemblers and the projector context (the Python
-/// wiring shares a single embedder from startup).
+/// instance be shared across assemblers and the projector context.
 pub type EmbedderFactory = Arc<
     dyn Fn(&EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> + Send + Sync,
 >;
@@ -69,8 +67,7 @@ impl EmbedderRegistry {
         registry
     }
 
-    /// Register `factory` under `name`; re-registration overwrites silently
-    /// (matching the Python module-global registry).
+    /// Register `factory` under `name`; re-registration overwrites silently.
     pub fn register(&mut self, name: impl Into<String>, factory: EmbedderFactory) {
         self.factories.insert(name.into(), factory);
     }
@@ -134,9 +131,8 @@ fn hash_factory(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>>, E
 
 /// `fastembed` built-in: fail-fast with the `local-embed` install hint.
 ///
-/// Mirrors the Python import-probe: without the extra, refuse to start. The real
-/// backend (Layer 2, feature `local-embed`) is injected by the wiring via
-/// [`EmbedderRegistry::register`].
+/// The real backend (Layer 2, feature `local-embed`) is injected by the wiring
+/// via [`EmbedderRegistry::register`].
 fn fastembed_factory(
     _config: &EmbeddingConfig,
 ) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
@@ -167,17 +163,12 @@ fn real_fastembed_factory(
 /// Built-in registered names, sorted (convenience over a fresh
 /// [`EmbedderRegistry::with_builtins`]).
 ///
-/// Mirrors the Python module-level `known_embedders()`; config parsing (02)
-/// injects this set.
 #[must_use]
 pub fn known_embedders() -> BTreeSet<String> {
     EmbedderRegistry::with_builtins().known_embedders()
 }
 
 /// Instantiate the embedder selected by `config.backend` from the built-ins.
-///
-/// Mirrors the Python module-level `create_embedder()`; the wiring uses a shared
-/// [`EmbedderRegistry`] when third-party backends need registering.
 ///
 /// # Errors
 /// See [`EmbedderRegistry::create`].

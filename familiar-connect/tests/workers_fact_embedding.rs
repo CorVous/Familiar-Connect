@@ -1,4 +1,3 @@
-//! Ported from Python `tests/test_fact_embedding_worker.py`.
 //!
 //! Validates the watermark-driven embedding loop: pulls `unembedded_facts`,
 //! calls the embedder once per batch, persists each vector, and is idempotent.
