@@ -44,7 +44,7 @@ cargo fmt
 Touched feature-gated code? Also gate the combo you touched, e.g.
 `cargo clippy --features discord,discord-voice --all-targets -- -D warnings`.
 
-Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing. The pre-commit hook at `.githooks/pre-commit` runs the same gates (`git config core.hooksPath .githooks` to enable).
+Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing. The pre-commit hook at `.githooks/pre-commit` runs only the `cargo fmt` gate, failing the commit if it reformatted anything (`git config core.hooksPath .githooks` to enable); run the rest yourself.
 
 ## Docs build & preview
 

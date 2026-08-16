@@ -21,8 +21,8 @@ see [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-ro
 > - `DiscordVoicePlayer`'s voice-client getter now reads `handle.voice_runtime`
 >   (`src/commands/run.rs`), returning the channel's live songbird-backed
 >   `VoiceClientLike`, so TTS playback reaches the call.
-> - **Still open:** TEN-VAD has **no native backend**: `TenVad::new` always
->   returns `MissingBackend` (`src/voice/turn_detection/ten_vad.rs`), so the
+> - **Still open (issue #196):** TEN-VAD has **no native backend**: `TenVad::new`
+>   always returns `MissingBackend` (`src/voice/turn_detection/ten_vad.rs`), so the
 >   `ten+smart_turn` endpointer cannot be built at runtime and silently degrades
 >   to Deepgram idle-finalize.
 >
@@ -305,6 +305,12 @@ and open an upstream issue; there were no open DAVE issues at 0.6.0 release.
 Native onnxruntime is required (both features pull `ort`/fastembed). If your box
 lacks it, install onnxruntime or let `ort` fetch a binary; a link error here is
 environment, not code.
+
+**OpenSSL headers are a build-time prereq here** (`libssl-dev` on Debian/Ubuntu,
+`openssl-devel` on Fedora). `ort-sys`'s build script uses `ureq → native-tls` to
+download the ONNX Runtime binary, so it links system OpenSSL even though the
+crate ships rustls-only at runtime. Without it the build stops at
+`Could not find openssl via pkg-config` — environment, not a TLS regression.
 
 ```bash
 # Fast: scripted-model unit tests (no downloads). Smart Turn + TEN-VAD wrappers.

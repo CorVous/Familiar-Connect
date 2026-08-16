@@ -16,6 +16,12 @@
   installed; text-only builds (`--features discord`) never need it. See the
   [DAVE runbook](../rust-port/DAVE-RUNBOOK.md) for the full voice
   prerequisites and platform notes.
+- *(local-ML builds only)* OpenSSL headers — `local-turn` / `local-embed` pull
+  `ort`, whose **build script** (`ort-sys → ureq → native-tls`) links system
+  OpenSSL to fetch the ONNX Runtime binary. Debian/Ubuntu: `libssl-dev`;
+  Fedora: `openssl-devel`. Build-time only — the crate itself is rustls-only.
+  Missing it fails with `Could not find openssl via pkg-config`, which reads
+  like a TLS-stack regression but is not one.
 
 ## Environment variables
 
