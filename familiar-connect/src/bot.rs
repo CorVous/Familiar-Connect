@@ -90,7 +90,7 @@ pub struct MentionView {
     pub id: i64,
     /// Whether the mentioned user is a bot.
     pub is_bot: bool,
-    /// The pre-resolved author (used for non-bot mentions).
+    /// The pre-resolved author.
     pub author: Author,
 }
 
@@ -1111,14 +1111,11 @@ impl BotEvents {
         Some(channel_id)
     }
 
-    /// `on_message` ingest (B-OM). Guard order is load-bearing: own echo, then any
-    /// bot author, then the DM-allowlist / subscription gates.
+    /// `on_message` ingest (B-OM). Guard order is load-bearing: own echo, then
+    /// the DM-allowlist / subscription gates.
     pub async fn on_message(&self, message: MessageView) {
         let bot_user_id = self.bot_user_id();
         if bot_user_id == Some(message.author_id) {
-            return;
-        }
-        if message.author_is_bot {
             return;
         }
         if message.guild_id.is_none() {
@@ -1162,7 +1159,7 @@ impl BotEvents {
         let mention_authors: Vec<Author> = message
             .mentions
             .iter()
-            .filter(|m| !m.is_bot)
+            .filter(|m| Some(m.id) != bot_user_id)
             .map(|m| m.author.clone())
             .collect();
         let pings_bot = message_pings_bot(&message.mentions, bot_user_id);
@@ -1189,9 +1186,6 @@ impl BotEvents {
     /// `on_message_edit` (B-RX16/17): act only when the edit *added* embed content.
     pub fn on_message_edit(&self, edit: &MessageEditView) {
         if self.bot_user_id() == Some(edit.author_id) {
-            return;
-        }
-        if edit.author_is_bot {
             return;
         }
         if edit.after_embeds.is_empty() || edit.before_embeds == edit.after_embeds {
