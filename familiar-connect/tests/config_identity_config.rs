@@ -417,6 +417,23 @@ fn image_tools_without_any_delivery_path_is_rejected() {
     );
 }
 
+/// The same combination that is fatal on `prose` is inert on `fast` — only the
+/// prose slot reaches a tool registry, so this must still boot.
+#[test]
+fn image_tools_on_non_prose_slot_still_loads() {
+    let defaults = "[llm]\n\
+         [llm.fast]\nmodel = \"x\"\nimage_tools = true\n\
+         [llm.prose]\nmodel = \"vendor/seer\"\n\
+         [llm.background]\nmodel = \"x\"\n";
+    let cfg = load_custom(None, defaults).expect("an inert flag must not refuse to boot");
+    assert!(cfg.llm.get("fast").unwrap().image_tools);
+    let warnings = familiar_connect::config::vision_config_warnings(&cfg);
+    assert!(
+        warnings.iter().any(|w| w.contains("is ignored")),
+        "got {warnings:?}"
+    );
+}
+
 #[test]
 fn image_tools_with_describer_loads() {
     let cfg = load_vision(

@@ -536,6 +536,13 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         }
     };
 
+    // Emitted here, not from the client factory: the factory is `net`-gated and
+    // the fatal half runs at parse, so the composition root is the one place
+    // both halves are reached exactly once (DESIGN D22).
+    for warning in crate::config::vision_config_warnings(&config) {
+        tracing::warn!("{} {warning}", ls::tag("Config", ls::Y));
+    }
+
     let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
         tracing::error!("OPENROUTER_API_KEY environment variable is required");
@@ -976,9 +983,11 @@ async fn async_main(
     let prose_llm = responder_llm(
         familiar
             .llm_clients
-            .get("prose")
+            .get(crate::config::IMAGE_TOOL_SLOT)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("missing 'prose' LLM slot"))?,
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing '{}' LLM slot", crate::config::IMAGE_TOOL_SLOT)
+            })?,
         prose_image_tools,
     );
 
