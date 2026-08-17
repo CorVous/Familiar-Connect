@@ -15,6 +15,30 @@ pub use factory::{EmbedderFactory, EmbedderRegistry, create_embedder, known_embe
 pub use hash::HashEmbedder;
 pub use protocol::Embedder;
 
+/// FastEmbed model name → native output dim. Sorted by name.
+///
+/// Static metadata — no ONNX, no download — so it compiles without
+/// `local-embed` and config validation (02) can cross-check
+/// `[providers.embedding].dim` against the selected model. The single source of
+/// truth: `fastembed::known_dim` reads it too. A model absent here has an
+/// unknowable dim until the first real vector probes it.
+pub const FASTEMBED_NATIVE_DIMS: &[(&str, usize)] = &[
+    ("BAAI/bge-base-en-v1.5", 768),
+    ("BAAI/bge-large-en-v1.5", 1024),
+    ("BAAI/bge-small-en-v1.5", 384),
+    ("intfloat/e5-small-v2", 384),
+    ("intfloat/multilingual-e5-small", 384),
+    ("sentence-transformers/all-MiniLM-L6-v2", 384),
+];
+
+/// Native dim of `model_name`, or `None` when unmapped.
+#[must_use]
+pub fn fastembed_native_dim(model_name: &str) -> Option<usize> {
+    FASTEMBED_NATIVE_DIMS
+        .iter()
+        .find_map(|(name, dim)| (*name == model_name).then_some(*dim))
+}
+
 /// Errors from the embedding subsystem (one `thiserror` enum per
 /// subsystem; byte-stable messages are test contracts).
 #[derive(Debug, thiserror::Error)]

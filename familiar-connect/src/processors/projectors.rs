@@ -83,6 +83,8 @@ pub struct ProjectorContext {
     pub familiar_display_name: Option<String>,
     /// Config-sourced dream-framing clause for the fact extractor.
     pub dream_extraction_clause: String,
+    /// IANA `display_tz`; anchors date-only LLM timestamps to the local day.
+    pub display_tz: String,
 }
 
 impl ProjectorContext {
@@ -97,6 +99,7 @@ impl ProjectorContext {
             memory: MemoryProvidersConfig::default(),
             familiar_display_name: None,
             dream_extraction_clause: String::new(),
+            display_tz: "UTC".to_owned(),
         }
     }
 
@@ -313,7 +316,8 @@ fn rich_note_factory(ctx: &ProjectorContext) -> Result<Box<dyn MemoryProjector>,
     .batch_size(knobs.batch_size)
     .tick_interval_s(knobs.tick_interval_s)
     .participants_max(knobs.participants_max)
-    .dream_extraction_clause(ctx.dream_extraction_clause.clone());
+    .dream_extraction_clause(ctx.dream_extraction_clause.clone())
+    .display_tz(ctx.display_tz.clone());
     if let Some(display) = &ctx.familiar_display_name {
         worker = worker.familiar_display_name(display.clone());
     }
@@ -406,9 +410,9 @@ mod tests {
     use crate::embedding::protocol::Embedder;
     use crate::history::async_store::AsyncHistoryStore;
     use crate::history::store::HistoryStore;
-    use crate::llm::{LlmClient, LlmDelta, Message};
+    use crate::llm::{LlmClient, Message};
     use async_trait::async_trait;
-    use futures::stream::{self, BoxStream};
+    use futures::stream;
     use serde_json::Value;
     use std::sync::Arc;
 
@@ -437,8 +441,8 @@ mod tests {
             &self,
             _messages: Vec<Message>,
             _tools: Option<Vec<Value>>,
-        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-            Ok(Box::pin(stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(stream::empty()))
         }
         fn slot(&self) -> Option<&str> {
             Some("background")

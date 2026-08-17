@@ -823,6 +823,55 @@ fn embedding_non_string_cache_dir_rejected() {
     );
 }
 
+#[test]
+fn embedding_explicit_dim_contradicting_model_rejected() {
+    assert_err_eq(
+        load("[providers.embedding]\nbackend = \"fastembed\"\ndim = 256\n"),
+        "[providers.embedding].dim = 256 contradicts fastembed_model \
+         'BAAI/bge-small-en-v1.5' (native dim 384); remove `dim` or set it to 384.",
+    );
+}
+
+#[test]
+fn embedding_explicit_dim_matching_model_accepted() {
+    let cfg = load_ok("[providers.embedding]\nbackend = \"fastembed\"\ndim = 384\n");
+    assert_eq!(cfg.embedding.dim, 384);
+}
+
+#[test]
+fn embedding_contradicting_dim_ignored_for_other_backends() {
+    // The cross-check is fastembed-only — `hash` owns its own dim.
+    let cfg = load_ok("[providers.embedding]\nbackend = \"hash\"\ndim = 256\n");
+    assert_eq!(cfg.embedding.dim, 256);
+}
+
+#[test]
+fn embedding_unknown_model_skips_dim_check() {
+    // Unmapped model: true dim is only knowable after the runtime probe.
+    let cfg = load_ok(
+        "[providers.embedding]\nbackend = \"fastembed\"\nfastembed_model = \"custom/model\"\ndim = 256\n",
+    );
+    assert_eq!(cfg.embedding.dim, 256);
+}
+
+#[test]
+fn embedding_unset_dim_derives_native_dim() {
+    let cfg = load_ok("[providers.embedding]\nbackend = \"fastembed\"\n");
+    assert_eq!(cfg.embedding.dim, 384);
+    let cfg = load_ok(
+        "[providers.embedding]\nbackend = \"fastembed\"\nfastembed_model = \"BAAI/bge-base-en-v1.5\"\n",
+    );
+    assert_eq!(cfg.embedding.dim, 768);
+}
+
+#[test]
+fn embedding_unset_dim_keeps_default_for_unknown_model() {
+    let cfg = load_ok(
+        "[providers.embedding]\nbackend = \"fastembed\"\nfastembed_model = \"custom/model\"\n",
+    );
+    assert_eq!(cfg.embedding.dim, 256);
+}
+
 // ---------------------------------------------------------------------------
 // Channel overrides
 // ---------------------------------------------------------------------------

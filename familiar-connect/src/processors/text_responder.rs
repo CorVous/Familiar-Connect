@@ -836,6 +836,8 @@ impl TextResponder {
             accumulated.push_str(&delta.content);
             match silent.feed(&delta.content) {
                 Some(true) => {
+                    // Deliberate abandon, not a barge-in (issue #220).
+                    stream.note_abandon_status("silent");
                     tracing::info!(
                         "{} {} {}",
                         ls::tag("\u{1f4a4} Text", ls::B),

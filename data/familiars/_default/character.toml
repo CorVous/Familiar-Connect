@@ -222,8 +222,11 @@ priors_max      = 20    # prior facts shown to the LLM per subject
 #   2. add ``"fact_embedding"`` to [providers.memory].projectors
 #   3. raise [memory.retrieval].embedding_weight above 0
 #
-# ``dim`` is the vector size for backends that accept one (``hash``).
-# Real backends with a fixed model dim ignore this knob.
+# ``dim`` is the vector size for backends that accept one (``hash``);
+# unset it defaults to 256. Deliberately not set here: under
+# ``backend = "fastembed"`` the model fixes the dim, so an unset ``dim``
+# resolves to the model's native dim and a ``dim`` that contradicts
+# ``fastembed_model`` is rejected at load rather than ignored.
 #
 # ``fastembed_model`` selects the FastEmbed model. Known good options:
 #   BAAI/bge-small-en-v1.5     (default; 384 dim, ~130 MB)
@@ -236,7 +239,6 @@ priors_max      = 20    # prior facts shown to the LLM per subject
 
 [providers.embedding]
 backend          = "off"
-dim              = 256
 fastembed_model  = "BAAI/bge-small-en-v1.5"
 
 # --- Turn detection --------------------------------------------------------
