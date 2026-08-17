@@ -44,14 +44,11 @@ pub const LLM_SLOT_NAMES: [&str; 3] = ["fast", "prose", "background"];
 pub const BUDGET_TIER_NAMES: [&str; 3] = ["voice", "text", "background"];
 /// Allowed values for `[llm.<slot>].reasoning`.
 pub const REASONING_LEVELS: [&str; 6] = ["off", "none", "low", "medium", "high", "default"];
-/// Default Azure TTS voice.
-pub const DEFAULT_AZURE_TTS_VOICE: &str = "en-US-AmberNeural";
-/// Default Gemini TTS voice.
-pub const DEFAULT_GEMINI_TTS_VOICE: &str = "Kore";
-/// Default Gemini TTS model.
-pub const DEFAULT_GEMINI_TTS_MODEL: &str = "gemini-3.1-flash-tts-preview";
 
-const TTS_PROVIDERS: [&str; 3] = ["azure", "cartesia", "gemini"];
+const TTS_PROVIDERS: [&str; 1] = ["cartesia"];
+/// Providers that existed as unwired stubs and were removed; named so an
+/// upgraded profile gets a migration hint instead of a bare "unknown".
+const REMOVED_TTS_PROVIDERS: [&str; 2] = ["azure", "gemini"];
 const TURN_STRATEGIES: [&str; 2] = ["deepgram", "ten+smart_turn"];
 const STT_BACKENDS: [&str; 3] = ["deepgram", "parakeet", "faster_whisper"];
 const MESSAGE_RENDERINGS: [&str; 2] = ["prefixed", "name_only"];
@@ -332,31 +329,12 @@ impl Default for STTConfig {
 /// Text-to-speech config from `[tts]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TTSConfig {
-    /// `"azure"` | `"cartesia"` (default) | `"gemini"`. Only `cartesia` has a
-    /// wired backend — see `tts::UNWIRED_TTS_PROVIDERS`.
+    /// `"cartesia"` — the only implemented backend, and the default.
     pub provider: String,
     /// Cartesia voice id.
     pub cartesia_voice_id: Option<String>,
     /// Cartesia model.
     pub cartesia_model: Option<String>,
-    /// Azure voice.
-    pub azure_voice: String,
-    /// Gemini voice.
-    pub gemini_voice: String,
-    /// Gemini model.
-    pub gemini_model: String,
-    /// Gemini scene (`""` → None).
-    pub gemini_scene: Option<String>,
-    /// Gemini context (`""` → None).
-    pub gemini_context: Option<String>,
-    /// Gemini audio profile (`""` → None).
-    pub gemini_audio_profile: Option<String>,
-    /// Gemini style (`""` → None).
-    pub gemini_style: Option<String>,
-    /// Gemini pace (`""` → None).
-    pub gemini_pace: Option<String>,
-    /// Gemini accent (`""` → None).
-    pub gemini_accent: Option<String>,
     /// Greeting lines (stringified).
     pub greetings: Vec<String>,
 }
@@ -367,15 +345,6 @@ impl Default for TTSConfig {
             provider: "cartesia".to_owned(),
             cartesia_voice_id: None,
             cartesia_model: None,
-            azure_voice: DEFAULT_AZURE_TTS_VOICE.to_owned(),
-            gemini_voice: DEFAULT_GEMINI_TTS_VOICE.to_owned(),
-            gemini_model: DEFAULT_GEMINI_TTS_MODEL.to_owned(),
-            gemini_scene: None,
-            gemini_context: None,
-            gemini_audio_profile: None,
-            gemini_style: None,
-            gemini_pace: None,
-            gemini_accent: None,
             greetings: Vec::new(),
         }
     }
@@ -591,12 +560,22 @@ impl Default for FocusConfig {
 pub struct ToolsConfig {
     /// Hard cap on agentic-loop iterations per turn.
     pub loop_max_iterations: i64,
+    /// Let `view_image` fetch hosts outside `trusted_image_hosts`. Private and
+    /// reserved addresses stay refused either way.
+    pub allow_untrusted_image_urls: bool,
+    /// Hosts `view_image` may fetch: exact names, or `*.suffix` patterns.
+    pub trusted_image_hosts: Vec<String>,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             loop_max_iterations: 5,
+            allow_untrusted_image_urls: false,
+            trusted_image_hosts: crate::tools::image_policy::DEFAULT_TRUSTED_IMAGE_HOSTS
+                .iter()
+                .map(|h| (*h).to_owned())
+                .collect(),
         }
     }
 }
@@ -1620,6 +1599,12 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
             )));
         }
     };
+    if REMOVED_TTS_PROVIDERS.contains(&provider.as_str()) {
+        return Err(ConfigError(format!(
+            "[tts].provider '{provider}' is no longer supported — it was an \
+             unwired stub and has been removed; use \"cartesia\""
+        )));
+    }
     if !TTS_PROVIDERS.contains(&provider.as_str()) {
         return Err(ConfigError(format!(
             "[tts].provider '{provider}' unknown; valid options: {}",
@@ -1640,15 +1625,6 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
         provider,
         cartesia_voice_id: tts_opt_string(raw, "cartesia_voice_id")?,
         cartesia_model: tts_opt_string(raw, "cartesia_model")?,
-        azure_voice: tts_nonempty(raw, "azure_voice", DEFAULT_AZURE_TTS_VOICE)?,
-        gemini_voice: tts_nonempty(raw, "gemini_voice", DEFAULT_GEMINI_TTS_VOICE)?,
-        gemini_model: tts_nonempty(raw, "gemini_model", DEFAULT_GEMINI_TTS_MODEL)?,
-        gemini_scene: tts_opt_str_normalized(raw, "gemini_scene")?,
-        gemini_context: tts_opt_str_normalized(raw, "gemini_context")?,
-        gemini_audio_profile: tts_opt_str_normalized(raw, "gemini_audio_profile")?,
-        gemini_style: tts_opt_str_normalized(raw, "gemini_style")?,
-        gemini_pace: tts_opt_str_normalized(raw, "gemini_pace")?,
-        gemini_accent: tts_opt_str_normalized(raw, "gemini_accent")?,
         greetings,
     })
 }
@@ -1657,24 +1633,6 @@ fn tts_opt_string(raw: &Table, key: &str) -> Result<Option<String>, ConfigError>
     match raw.get(key) {
         None => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(ConfigError(format!("[tts].{key} must be a string"))),
-    }
-}
-
-fn tts_nonempty(raw: &Table, key: &str, default: &str) -> Result<String, ConfigError> {
-    match raw.get(key) {
-        None => Ok(default.to_owned()),
-        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
-        Some(_) => Err(ConfigError(format!(
-            "[tts].{key} must be a non-empty string"
-        ))),
-    }
-}
-
-fn tts_opt_str_normalized(raw: &Table, key: &str) -> Result<Option<String>, ConfigError> {
-    match raw.get(key) {
-        None => Ok(None),
-        Some(Value::String(s)) => Ok(if s.is_empty() { None } else { Some(s.clone()) }),
         Some(_) => Err(ConfigError(format!("[tts].{key} must be a string"))),
     }
 }
@@ -2536,7 +2494,15 @@ fn parse_focus_config(raw: &Table) -> Result<FocusConfig, ConfigError> {
 }
 
 fn parse_tools_config(raw: &Table) -> Result<ToolsConfig, ConfigError> {
-    check_unknown_keys(raw, &["loop_max_iterations"], "[tools]")?;
+    check_unknown_keys(
+        raw,
+        &[
+            "loop_max_iterations",
+            "allow_untrusted_image_urls",
+            "trusted_image_hosts",
+        ],
+        "[tools]",
+    )?;
     let d = ToolsConfig::default();
     Ok(ToolsConfig {
         loop_max_iterations: positive_int(
@@ -2546,7 +2512,47 @@ fn parse_tools_config(raw: &Table) -> Result<ToolsConfig, ConfigError> {
             d.loop_max_iterations,
             true,
         )?,
+        allow_untrusted_image_urls: field_bool(
+            raw,
+            "[tools]",
+            "allow_untrusted_image_urls",
+            d.allow_untrusted_image_urls,
+        )?,
+        trusted_image_hosts: parse_trusted_image_hosts(raw, d.trusted_image_hosts)?,
     })
+}
+
+/// Bare hostnames (or `*.suffix` patterns), lowercased. Rejects anything
+/// carrying a scheme, path, or port at load rather than silently never
+/// matching.
+fn parse_trusted_image_hosts(
+    raw: &Table,
+    default: Vec<String>,
+) -> Result<Vec<String>, ConfigError> {
+    let Some(value) = raw.get("trusted_image_hosts") else {
+        return Ok(default);
+    };
+    let Value::Array(entries) = value else {
+        return Err(ConfigError(format!(
+            "[tools].trusted_image_hosts must be a list of strings, got {}",
+            value_type_name(value)
+        )));
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry {
+            Value::String(s) if crate::tools::image_policy::is_host_pattern(s) => {
+                out.push(s.to_ascii_lowercase());
+            }
+            other => {
+                return Err(ConfigError(format!(
+                    "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got {}",
+                    value_repr(other)
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -2590,6 +2596,34 @@ mod tests {
                 .expect("empty [tts] parses")
                 .provider,
             "cartesia"
+        );
+    }
+
+    #[test]
+    fn removed_tts_providers_name_the_removal() {
+        // #N1: azure/gemini stubs deleted — a stale profile gets a migration hint.
+        for provider in ["azure", "gemini"] {
+            let mut raw = Table::new();
+            raw.insert("provider".to_owned(), provider.into());
+            let err = parse_tts_config(&raw).expect_err("removed provider rejected");
+            assert_eq!(
+                err.0,
+                format!(
+                    "[tts].provider '{provider}' is no longer supported — it was an \
+                     unwired stub and has been removed; use \"cartesia\""
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_tts_provider_lists_the_only_option() {
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "foo".into());
+        let err = parse_tts_config(&raw).expect_err("unknown provider rejected");
+        assert_eq!(
+            err.0,
+            "[tts].provider 'foo' unknown; valid options: cartesia"
         );
     }
 

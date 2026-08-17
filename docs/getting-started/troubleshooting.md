@@ -13,9 +13,8 @@ Common startup errors and what they mean:
   OpenRouter key.
 - **`Opus library not found — voice playback will not work`** — voice
   commands still run, but no audio; install libopus.
-- **`TTS provider '<name>' has no wired backend`** — `[tts].provider` is
-  set to `azure` or `gemini`, neither of which has an implemented
-  backend. TTS is disabled for the session; set
+- **`[tts].provider '<name>' is no longer supported`** — the `azure` and
+  `gemini` stubs never had a backend and were removed. Set
   `[tts].provider = "cartesia"` and `CARTESIA_API_KEY`.
 - **`[llm.<slot>].tool_calling = false disables every tool call …`** —
   that surface can never call `shift_focus`, so its channel focus is
@@ -33,8 +32,7 @@ Common startup errors and what they mean:
   `voice_client.play(...)` is silent. Also confirm a TTS provider in
   `[tts].provider` and the matching env var (`CARTESIA_API_KEY`) is set;
   with no client the player falls back to `LoggingTTSPlayer`, which
-  only logs. `azure` and `gemini` have no wired backend: startup logs
-  `TTS provider '<name>' has no wired backend` and disables TTS.
+  only logs.
 - **Voice transcripts come out anonymous** — every frame is unattributed
   when the SSRC → user map never fills. Look for the periodic
   `[🎙️  Voice] receive ticks=… speaking_frames=… unmapped_frames=…`

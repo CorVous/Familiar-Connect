@@ -556,7 +556,7 @@ fn source_uses_default_jitter_params_without_attrs() {
 
 #[test]
 fn source_uses_client_jitter_params() {
-    // An Azure-like client sets pre-roll (3 frames) + underrun padding; the player
+    // A bursty client sets pre-roll (3 frames) + underrun padding; the player
     // must forward BOTH into StreamingPcmSource::new(prebuffer_bytes, pad_underrun).
     // Asserts the prebuffer is `DISCORD_FRAME_SIZE * 3` and
     // `source._pad_underrun is True`; guard the same via observable read behavior.

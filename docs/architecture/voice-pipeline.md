@@ -297,10 +297,9 @@ assistant turn records only if the full reply played uncancelled.
 
 ## TTS
 
-Three clients behind `synthesize(text) → TTSResult`: `AzureTTSClient`,
-`CartesiaTTSClient`, `GeminiTTSClient`. `DiscordVoicePlayer`
-synthesises, mono→stereo, pushes through songbird. Without a configured
-client, `LoggingTTSPlayer` logs the intended speech.
+One client behind `synthesize(text) → TTSResult`: `CartesiaTTSClient`.
+`DiscordVoicePlayer` synthesises, mono→stereo, pushes through songbird.
+Without a configured client, `LoggingTTSPlayer` logs the intended speech.
 
 Already a trait seam. Adding a backend is one new type.
 
@@ -326,9 +325,8 @@ down to ~one TTFB. Cancellation: `scope.is_cancelled()` flips
 `vc.stop()` within a poll tick; the producer drops out of its loop on
 the next `feed` and `close_input` releases any blocked reader.
 
-Azure and Gemini stay on the buffered `synthesize` path (their SDKs
-return one big result), so `DiscordVoicePlayer.speak` falls through
-to the prior synthesize-then-play behaviour.
+A backend that only offers buffered `synthesize` (no `as_streaming`)
+falls through to the synthesize-then-play path instead.
 
 **Mimi-codec lineage.** Mimi (Kyutai, 12.5 Hz frames) is becoming the
 open audio-token standard — Sesame CSM, Hibiki, Moshi all use it.

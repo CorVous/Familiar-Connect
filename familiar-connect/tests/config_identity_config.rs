@@ -1465,6 +1465,70 @@ fn tools_unknown_key_rejected() {
     assert_err(load("[tools]\nbogus = 1\n"), "unknown");
 }
 
+#[test]
+fn image_url_policy_defaults_are_deny_by_default() {
+    let cfg = load_missing_target();
+    assert!(!cfg.tools.allow_untrusted_image_urls);
+    for host in [
+        "cdn.discordapp.com",
+        "media.discordapp.net",
+        "*.media.tumblr.com",
+    ] {
+        assert!(
+            cfg.tools.trusted_image_hosts.iter().any(|h| h == host),
+            "shipped profile should trust {host}"
+        );
+    }
+    // The shipped profile and the in-code default must not drift.
+    assert_eq!(
+        cfg.tools.trusted_image_hosts,
+        familiar_connect::tools::image_policy::DEFAULT_TRUSTED_IMAGE_HOSTS
+            .iter()
+            .map(|h| (*h).to_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn image_url_policy_loads_from_toml() {
+    let cfg = load_ok(
+        "[tools]\nallow_untrusted_image_urls = true\ntrusted_image_hosts = [\"Example.COM\", \"*.cdn.example\"]\n",
+    );
+    assert!(cfg.tools.allow_untrusted_image_urls);
+    assert_eq!(
+        cfg.tools.trusted_image_hosts,
+        vec!["example.com".to_owned(), "*.cdn.example".to_owned()]
+    );
+}
+
+#[test]
+fn allow_untrusted_image_urls_must_be_bool() {
+    assert_err_eq(
+        load("[tools]\nallow_untrusted_image_urls = \"yes\"\n"),
+        "[tools].allow_untrusted_image_urls must be a bool, got str",
+    );
+}
+
+#[test]
+fn trusted_image_hosts_must_be_a_list() {
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = \"cdn.discordapp.com\"\n"),
+        "[tools].trusted_image_hosts must be a list of strings, got str",
+    );
+}
+
+#[test]
+fn trusted_image_hosts_rejects_non_hostname_entries() {
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = [\"https://cdn.discordapp.com/x\"]\n"),
+        "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got 'https://cdn.discordapp.com/x'",
+    );
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = [8]\n"),
+        "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got 8",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Memory worker configs
 // ---------------------------------------------------------------------------

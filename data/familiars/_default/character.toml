@@ -333,21 +333,12 @@ idle_close_s = 30.0
 
 # --- Text-to-speech --------------------------------------------------------
 #
-# provider: "cartesia" (default), "azure", or "gemini"
-#
-# Cartesia: set CARTESIA_API_KEY env var. The only wired backend.
-# Azure:    NOT YET WIRED — config accepted, refused at startup.
-#           Will need AZURE_SPEECH_KEY + AZURE_SPEECH_REGION.
-# Gemini:   NOT YET WIRED — config accepted, refused at startup.
-#           Will need GOOGLE_API_KEY.
+# provider: "cartesia" — the only implemented backend. Set CARTESIA_API_KEY.
 
 [tts]
 provider          = "cartesia"
-azure_voice       = "en-US-AmberNeural"
 cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"
-gemini_voice      = "Kore"
-gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
 
 # --- Prompt shaping --------------------------------------------------------
@@ -621,6 +612,33 @@ catch_up_limit         = 20
 # (model call → tool execution → re-call). Protects against runaway
 # tool loops; raise for deeper multi-tool tasks at the cost of
 # latency + spend.
+#
+# view_image fetch policy. Image ids come from attachments, embeds, and a
+# regex scrape of image URLs in message text — so anyone in the channel can
+# put a host of their choosing in front of the bot. A fetch discloses the
+# machine's IP to that host.
+# trusted_image_hosts: hosts view_image may fetch. Exact names, or a
+# "*.suffix" pattern matching any subdomain of suffix (tumblr shards images
+# across numbered NN.media.tumblr.com hosts).
+# allow_untrusted_image_urls: true drops the host list and lets the model
+# fetch any public host. Private, loopback, link-local (including the
+# 169.254.169.254 cloud-metadata address) and other reserved addresses stay
+# refused either way, as do non-http(s) URLs — there is no config escape.
 
 [tools]
-loop_max_iterations = 5
+loop_max_iterations        = 5
+allow_untrusted_image_urls = false
+trusted_image_hosts        = [
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+    "images-ext-1.discordapp.net",
+    "images-ext-2.discordapp.net",
+    "*.media.tumblr.com",
+    "i.imgur.com",
+    "media.tenor.com",
+    "c.tenor.com",
+    "media.giphy.com",
+    "i.giphy.com",
+    "i.redd.it",
+    "preview.redd.it",
+]

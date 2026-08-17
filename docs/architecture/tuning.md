@@ -54,13 +54,11 @@ Set in `.env` or the host environment. Never log them.
 | `DEEPGRAM_API_KEY` | STT credential. |
 | `FAMILIAR_ID` | Character folder under the familiars root. Overridable by `--familiar`. |
 
-### TTS provider credentials (one set, depending on `[tts].provider`)
+### TTS provider credentials
 
 | Var | Provider |
 |---|---|
-| `CARTESIA_API_KEY` | Cartesia (default; the only wired backend). |
-| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure — **backend not wired**, refused at startup. |
-| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | Gemini — **backend not wired**, refused at startup. |
+| `CARTESIA_API_KEY` | Cartesia — the default and only implemented backend. |
 
 ### Optional path overrides
 
@@ -130,12 +128,9 @@ endpointing_ms  = 500
 keyterms        = []     # see § STT — Deepgram for the full set
 
 [tts]
-provider          = "cartesia"   # "cartesia" (only wired backend) | "azure" | "gemini"
-azure_voice       = "en-US-AmberNeural"
+provider          = "cartesia"   # the only implemented backend
 cartesia_voice_id = "..."
 cartesia_model    = "sonic-3"
-gemini_voice      = "Kore"
-gemini_model      = "gemini-3.1-flash-tts-preview"
 greetings         = []
 
 [llm]
@@ -180,6 +175,8 @@ nudge_debounce_seconds = 30.0     # rapid arrivals share one nudge
 
 [tools]
 loop_max_iterations = 5           # hard cap on agentic-loop rounds per turn
+allow_untrusted_image_urls = false # view_image: allowlist off (private IPs still refused)
+trusted_image_hosts = ["cdn.discordapp.com", "*.media.tumblr.com"]  # abridged
 ```
 
 ## Tuning by goal
@@ -572,11 +569,9 @@ selected.
 | Provider | Voice field | Model field | Extras |
 |---|---|---|---|
 | `cartesia` (default) | `cartesia_voice_id` | `cartesia_model` | — |
-| `azure` (not wired) | `azure_voice` | (built-in) | — |
-| `gemini` (not wired) | `gemini_voice` | `gemini_model` | `gemini_style`, `gemini_scene`, `gemini_pace`, `gemini_accent`, `gemini_context`, `gemini_audio_profile` |
 
-`azure` and `gemini` have no implemented backend: the config value is accepted
-but startup logs an `ERROR` and runs without TTS. See
+`cartesia` is the only accepted value; the unwired `azure` / `gemini` stubs
+were removed. See
 [Configuration model — TTS providers](configuration-model.md#tts-providers).
 
 `greetings = ["..."]` pre-synthesises greeting audio at startup so
@@ -820,6 +815,152 @@ automatically when the per-section caps scale.
 recent_history_tokens = 2.5
 rag_tokens            = 1.5
 ```
+
+## Measuring prompt-cache behaviour (`diagnose`)
+
+`familiar-connect diagnose <logfile>` has always printed the span
+table. When the log also carries `[LLM call]` lines it now prints three
+more code-fenced tables built from them. This is measurement only —
+nothing about prompt assembly, layer order, cache breakpoints or worker
+cadence changes. It exists so the staged-pass / cache question (issue
+#206) can be settled with data instead of argument.
+
+Capture a log, then aggregate it:
+
+```bash
+cargo run -- run -v 2>&1 | tee bot.log   # -v is INFO; [LLM call] is an INFO line
+cargo run -- diagnose bot.log            # '-' reads stdin instead
+```
+
+ANSI colour in the captured log is fine — the parser strips
+single-parameter SGR codes before reading keys, and a log captured with
+colour disabled parses identically. Lines missing a key are tolerated
+(`cached` and `cal_ratio` ride only some calls; a failed call reports no
+tokens at all); a corrupt line is skipped rather than fatal. A log with
+no `[LLM call]` line prints exactly the span table it always did.
+
+### The three tables
+
+Example output (synthetic data, for shape only):
+
+**`LLM calls by slot / model`**
+
+```
+slot        model                        n  hit%  ctok%  in_tok  status
+----------------------------------------------------------------------------------
+background  z-ai/glm-5.2                 4   0.0    0.0   15200  ok=4
+fast        anthropic/claude-haiku-4.5  21   0.0    0.0    4180  cancelled=1 ok=20
+prose       z-ai/glm-5.2                16  80.0   72.4    8620  error=1 ok=15
+```
+
+| Column | Meaning |
+|---|---|
+| `slot` / `model` | Grouping key. A slot whose model changed mid-log gets one row per model. |
+| `n` | Lines parsed into the group, all statuses. |
+| `hit%` | Share of usage-bearing calls reporting `cached > 0`. Calls that reported no usage (error, cancelled) are excluded — unobservable, not cold. |
+| `ctok%` | Token-weighted: Σ`cached` / Σ`in_tokens`. **The number #206 turns on.** |
+| `in_tok` | Mean `in_tokens` over usage-bearing calls. |
+| `status` | Full breakdown. The status vocabulary is open, so every word seen is listed. |
+
+Both hit rates are reported because they answer different questions.
+`hit%` says whether caching engaged at all; `ctok%` says how much of the
+prompt prefix was actually reused. A call can "hit" on a sliver, so a
+high `hit%` beside a low `ctok%` still means the prompt is being re-read
+at full price.
+
+**`cache hit vs miss latency (ms)`**
+
+```
+slot   model         metric  hit_n  hit_p50  hit_p95  miss_n  miss_p50  miss_p95  cost_p50
+------------------------------------------------------------------------------------------
+prose  z-ai/glm-5.2  ttfb       12      372      391       3      1117      1176       744
+prose  z-ai/glm-5.2  ttft       12      462      481       3      1207      1266       744
+```
+
+Same percentile function as the span table (linear-interpolated), split
+by whether the call reported a cache hit. `cost_p50` is `miss_p50 -
+hit_p50` — what a miss costs at the median, and the number that turns
+"we are missing" into a latency budget. It renders `-` when one side has
+no samples, which is itself the finding: a group with `hit_n = 0` never
+cached at all, and the comparison has to be made against a different
+group.
+
+**`token estimator accuracy by model`**
+
+```
+model                        n  est_tok  in_tok    obs    cal
+-------------------------------------------------------------
+anthropic/claude-haiku-4.5  20    82000   83600  1.020  1.020
+z-ai/glm-5.2                19   187500  190100  1.014  1.014
+```
+
+`obs` is the observed Σ`in_tokens` / Σ`est_in_tokens` across the whole
+log; `cal` is the last `cal_ratio` the process itself logged (see
+§ Token-count calibration). They should agree. A gap means the process
+restarted mid-log — the calibration store is in-memory and starts empty
+every boot — or that early calls skewed the running ratio. This is
+item 3 on issue #184's list.
+
+### Reading it for #206
+
+The two hot paths cache under different contracts, and the tables are
+laid out to compare them directly.
+
+**`slot=fast` — Anthropic, one explicit breakpoint.** All seven
+system-prompt layers (character card, operating mode, lorebook,
+conversation summary, reflections, people dossier, RAG context) join
+with `\n\n` into a single string, which becomes one system message.
+For `anthropic/*` models `build_payload` stamps `cache_control:
+{type: ephemeral}` on the **last content block** of that message — which
+is the whole prompt. Anthropic awards no partial credit inside a marked
+block: either the block matches a cached prefix exactly, or the call
+pays full price. Two things at the tail of that block change every turn:
+`rag_context` is the last layer and its retrieval cue is the literal text
+of the current utterance, and the voice head reminder appended after the
+layers carries an `It is now:` clock line.
+
+Signature to look for: `slot=fast` with `hit%` and `ctok%` both at or
+near `0.0` over many `ok` calls, at a large and stable `in_tok`. If that
+is what the log shows, the single breakpoint is being invalidated once
+per turn by its own volatile tail, and the fix direction is the one #206
+proposes — a stable prefix (character card, operating mode, lorebook)
+carrying its own breakpoint, with the per-turn material after it.
+
+The cost side has to be read before acting. `in_tok` is how many tokens
+are re-read at full price each turn; a cache *write* on Anthropic is
+priced above the base input rate and a read well below it, so
+restructuring only pays when `in_tok` is large **and** a stable prefix is
+most of it. A small `in_tok` means the breakpoint is working as well as
+it usefully can, and the restructure buys nothing.
+
+**`slot=prose` — GLM via z-ai, no explicit breakpoint.** Nothing stamps
+`cache_control`, so the slot relies on the provider's automatic prefix
+caching, which matches the longest common prefix and does award partial
+credit. Expect a non-zero `ctok%` roughly tracking how much of the prompt
+precedes the first per-turn change.
+
+The comparison is the point:
+
+- **High `ctok%` on `prose`, near-zero on `fast`, at similar prompt
+  sizes.** Same assembly, same layer order, different caching contract —
+  which isolates the all-or-nothing breakpoint as the cause rather than
+  the layer order. That is the strongest evidence for the #206
+  restructure, and it also bounds the prize: `prose`'s `ctok%` is roughly
+  what `fast` could reach if its prefix were marked separately, and its
+  `cost_p50` is roughly what each miss is costing.
+- **Near-zero `ctok%` on both.** The breakpoint is not the (only)
+  problem; something volatile sits early in the prompt, or provider
+  routing is scattering calls. Check `provider=` in the raw log and see
+  § Provider pinning first — an unpinned slot lands on a different
+  provider each call and every call is cold, which looks exactly like a
+  layer-order defect.
+
+Two cautions. `cached` comes straight from OpenRouter's
+`prompt_tokens_details.cached_tokens`; a provider that never reports the
+field is indistinguishable here from a provider that never caches, so
+confirm `provider=` in the raw log before drawing a conclusion. And
+`p95` over a handful of calls is noise — a few dozen usage-bearing calls
+per group before the latency split means anything.
 
 ## History / context layers
 

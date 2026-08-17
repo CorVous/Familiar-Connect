@@ -9,7 +9,7 @@
   ([portal](https://discord.com/developers/applications)) with the
   `message_content`, `messages`, and `voice_states` intents enabled
 - An OpenRouter API key
-- *(optional, voice only)* One of: Azure Cognitive Services key + region, a Cartesia API key, or a Google Gemini API key
+- *(optional, voice only)* A Cartesia API key for speech synthesis
 - *(optional, voice only)* A Deepgram API key for speech transcription
 - *(voice builds only)* CMake — the `discord-voice` feature compiles libopus
   from source (`songbird → opus2 → libopus_sys`). Windows especially needs it
@@ -39,17 +39,8 @@ OPENROUTER_API_KEY=<openrouter key>
 # pick the familiar to load (or pass --familiar on the CLI)
 FAMILIAR_ID=aria
 
-# TTS credentials — set the one matching [tts].provider in character.toml
-
-# Cartesia (provider="cartesia", the default and only wired backend):
+# TTS credential — Cartesia is the default and only implemented backend
 CARTESIA_API_KEY=<cartesia key>
-
-# Azure Speech — backend NOT WIRED; provider="azure" is refused at startup:
-AZURE_SPEECH_KEY=<azure cognitive services key>
-AZURE_SPEECH_REGION=<azure region, e.g. eastus>
-
-# Google Gemini TTS — backend NOT WIRED; provider="gemini" is refused at startup:
-GOOGLE_API_KEY=<google ai studio key>
 
 # optional — Deepgram speech transcription (voice channels only)
 DEEPGRAM_API_KEY=<deepgram key>

@@ -23,7 +23,7 @@ path = "src/main.rs"
 # Cargo features mirror the Python `[project.optional-dependencies]` extras and
 # isolate native / external-service dependencies. The DEFAULT set compiles the
 # pure-Rust + safe-native foundation (rustls everywhere, no OpenSSL). Heavier or
-# native deps (serenity/songbird, ONNX runtime, whisper, twitch, azure) stay off
+# native deps (serenity/songbird, ONNX runtime, whisper, twitch) stay off
 # by default: their versions still resolve (validated by `cargo build`) but they
 # are compiled only when the owning porting agent flips the feature.
 [features]
@@ -50,8 +50,6 @@ local-turn = ["dep:ort", "dep:hf-hub"]
 local-stt = []
 # Twitch EventSub (11) — dormant in production; feature-gated until a consumer exists.
 twitch = ["dep:twitch_api"]
-# Azure TTS via the pure-Rust SDK reimplementation (09); alt path is REST over `net`.
-azure-tts = ["dep:azure-speech"]
 # rubato/opus for higher-quality resampling if the boxcar decimator is insufficient (09).
 audio-resample = ["dep:rubato", "dep:opus"]
 # Exposes the singleton reset seams (reset_span_collector, reset_voice_budget_recorder)
@@ -165,7 +163,6 @@ fastembed = { version = "5.17.2", optional = true }    # local-embed
 ort = { version = "2.0.0-rc.12", optional = true }     # local-turn (Smart Turn ONNX)
 hf-hub = { version = "0.3", optional = true }          # local-turn (weights)
 twitch_api = { version = "0.8.0", optional = true }    # twitch
-azure-speech = { version = "0.10.0", optional = true } # azure-tts
 rubato = { version = "0.16", optional = true }         # audio-resample (report said 4.0.0; latest is 0.16.x, and songbird uses the same line — unifies)
 opus = { version = "0.3.1", optional = true }          # audio-resample
 

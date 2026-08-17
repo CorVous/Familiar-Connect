@@ -493,19 +493,11 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         };
 
     // Degrade-not-fail: TTS / STT / local turn detector unavailability warns.
-    // An unwired provider is louder — it would otherwise construct fine and
-    // fail on the first synthesis, mid-conversation.
-    let tts_client = if let Some(reason) = crate::tts::unwired_provider_reason(&config.tts.provider)
-    {
-        tracing::error!("{reason}");
-        None
-    } else {
-        match crate::tts::create_tts_client(&config.tts) {
-            Ok(kind) => Some(kind.into_dyn()),
-            Err(err) => {
-                tracing::warn!("TTS client unavailable: {err}");
-                None
-            }
+    let tts_client = match crate::tts::create_tts_client(&config.tts) {
+        Ok(kind) => Some(kind.into_dyn()),
+        Err(err) => {
+            tracing::warn!("TTS client unavailable: {err}");
+            None
         }
     };
     let transcriber = match crate::stt::create_transcriber(&config.stt) {
@@ -1022,10 +1014,13 @@ async fn async_main(
             let engine: Arc<dyn StartActivityEngine> = engine;
             engine
         });
+    let image_url_policy =
+        crate::tools::image_policy::ImageUrlPolicy::from_tools_config(&familiar.config.tools);
     let text_tool_registry = Arc::new(build_text_registry(
         &alarm_scheduler,
         prose_image_tools,
         &familiar.config.image_description_constraints,
+        &image_url_policy,
         true,
         text_activity_engine,
         &familiar.config.start_activity_description,
