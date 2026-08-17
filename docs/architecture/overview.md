@@ -225,18 +225,41 @@ compact `→ name(args)` / `(tool→) ...` summary in the rebuilt prompt.
 2. For each image found, `collect_images` assigns `img_0`, `img_1`, … and injects `[image: img_N (filename)]` placeholders into the message content.
 3. The `img_id → URL` map travels through the bus payload (`images` key) to `TextResponder`.
 4. `TextResponder.handle` passes the map to the per-turn `ToolContext.images`.
-5. The model calls `view_image(image_id="img_0")`. The handler fetches bytes, compresses to JPEG (1024 px longest edge, quality 85, 1 MB ceiling; iterates quality down by 5 until it fits), and calls the description model to get text. The base describe prompt is neutral; a familiar can append persona constraints via `[prompt].image_description_constraints` (e.g. a character not set in the present bans naming specific characters, people, franchises, or brands so it doesn't acquire modern pop-culture knowledge that would break immersion). The constraint string is bound into `view_image` at tool construction, not carried on the per-turn `ToolContext`.
-6. `ImageResult` carries both the JPEG (base64) and the text description. The agentic loop serialises it per the slot's `multimodal` flag: `multimodal=true` sends an `image_url` content block in the tool-result message; `multimodal=false` sends the text description only.
+5. The model calls `view_image(image_id="img_0")`. The handler fetches bytes, compresses to JPEG (1024 px longest edge, quality 85, 1 MB ceiling; iterates quality down by 5 until it fits), and runs **one** describe leg. The base describe prompt is neutral; a familiar can append persona constraints via `[prompt].image_description_constraints` (e.g. a character not set in the present bans naming specific characters, people, franchises, or brands so it doesn't acquire modern pop-culture knowledge that would break immersion). The constraint string is bound into `view_image` at tool construction, not carried on the per-turn `ToolContext`.
+6. `ImageResult` carries both the JPEG (base64) and the text. The agentic loop serialises it per the slot's `multimodal` flag: `multimodal=true` sends an `image_url` content block in the tool-result message; `multimodal=false` sends the text only.
+
+**Two roles, one call.** The describe leg serves two jobs that used to be
+conflated:
+
+- **Substitution** — the calling model cannot see the image, so text stands in
+  for it. Needed only when the slot is not multimodal.
+- **Persistence** — a durable text artifact for long-term memory. Needed
+  *always*, because the image never survives a turn (see History persistence
+  below), which makes this string the only thing the fact extractor, rolling
+  summaries, and people dossiers will ever see of the image.
+
+`view_image` picks the model by role and never runs both legs:
+
+| Calling slot | Model used | What the slot receives |
+|---|---|---|
+| `multimodal` | `[llm].image_caption_model` | the image natively, plus the caption riding along for history |
+| not `multimodal` | `[llm].image_description_model` | the description as text; it doubles as the caption, since the tool result *is* the description |
+
+Either key stands in for a missing other, so a profile that sets only one keeps
+working. Self-captioning by the primary model was considered and rejected: it
+would depend on prompt adherence and would need the caption fished back out of
+conversational prose — too fragile for something feeding fact extraction.
 
 **Configuration:**
-- `[llm].image_description_model` — model name for vision-based description; empty = feature disabled.
+- `[llm].image_description_model` — substitution model; empty = no substitution.
+- `[llm].image_caption_model` — persistence model; empty falls back to `image_description_model`. Both empty = feature disabled.
 - `[prompt].image_description_constraints` — per-familiar text appended to the neutral base describe prompt; empty (default) = base only.
 - `[llm.<slot>].image_tools = true` — registers `view_image` in the text tool registry for that slot (independent of `tool_calling`).
-- `[llm.<slot>].multimodal = true` — sends JPEG content blocks instead of text-only descriptions.
+- `[llm.<slot>].multimodal` — omit to auto-detect from the OpenRouter catalog, or set explicitly to override. See [Configuration model](configuration-model.md#multimodal-is-tri-state).
 
 **Voice exclusion:** `view_image` is never registered in the voice tool registry.
 
-**History persistence:** multimodal tool-result messages (list content) are projected to plain text before writing to history, so no raw image bytes enter the turn store.
+**History persistence:** multimodal tool-result messages (list content) are projected to plain text before writing to history, so no raw image bytes enter the turn store. On replay `turn_to_message_with_context` collapses any `role="tool"` turn to `[tool result] <text>`, so the raw image is never re-sent on a later turn regardless of `multimodal` — which is exactly why the caption has to exist even when the model can see the image perfectly well.
 
 ### Alarm flow
 

@@ -31,7 +31,7 @@ upstream; this file is the whole record.
 | 184 | Catch-up profiling for default config tuning | large | not attempted; #183 supplies one of its inputs |
 | 181 | Tool call context requirements | architectural | not attempted |
 | 155 | Adhere to design guidelines from eval trials | architectural | not attempted |
-| 204 | Decide on image processing strategy | design decision | not attempted — needs a product call |
+| 204 | Decide on image processing strategy | design decision | decided (Option D) and implemented — and a live cost defect found beside it |
 | 206 | Research staged passes and cache optimization | research | measurement capability landed; design change deliberately deferred pending data |
 | 207 | Simplify vectorization strategy (Turso) | research | not attempted |
 | 96 | Parallel database accesses | blocked upstream | not attempted |
@@ -243,6 +243,68 @@ built to test, and the reading guide, are under
 `docs/architecture/tuning.md` § Measuring prompt-cache behaviour. No prompt
 assembly, layer order, cache breakpoint or worker cadence changed.
 
+### 204 — image strategy: native multimodal, plus a persisted caption
+
+The issue proposed replacing the separate transcriber with the model's own
+multimodal capability, auto-enabled from OpenRouter metadata. The owner chose
+**Option D**: do that, *and* keep a persisted caption, because the image itself
+does not survive the turn.
+
+That last point is the whole reason the transcriber cannot simply be deleted.
+`turn_to_message_with_context` collapses every `role="tool"` turn to
+`[tool result] <text>` on replay, unconditionally. So a `view_image` result is
+seen as a picture exactly once, on the turn it was fetched, and the description
+string is the only trace of it that the fact extractor, rolling summaries,
+people dossiers, and RAG will ever read. Sending the image natively fixes
+perception; it does nothing for memory.
+
+**Four decisions, all implemented.**
+
+1. **The two roles are split.** `[llm].image_description_model` was doing two
+   unrelated jobs — *substitution* (letting a blind model perceive the image)
+   and *persistence* (a durable artifact for memory). Substitution is needed
+   only when the slot lacks vision; persistence is needed always. They are now
+   two keys: `image_description_model` (substitution, quality matters — it is
+   the model's only perception) and the new `[llm].image_caption_model`
+   (persistence, pick something cheap). Two keys rather than one because an
+   operator would genuinely choose *different models* for them; and each falls
+   back to the other, so a profile setting only one keeps working. `view_image`
+   still runs exactly **one** describe leg per image either way and picks the
+   model by role.
+2. **The caption comes from a dedicated model, never self-captioning.**
+   Self-captioning by the primary was considered and rejected: it depends on
+   prompt adherence and would need the caption fished back out of
+   conversational prose — too fragile for something feeding fact extraction.
+   The existing `describe_leg` machinery is reused unchanged.
+3. **The catalog is cached to disk and refreshed in the background.** This is
+   what makes metadata-driven selection affordable. Boot reads the last known
+   good `GET /models` from `~/.cache/familiar-connect/openrouter-models.json`
+   (platform cache dir, not the familiars root — the file is regenerable, not
+   state) and resolves capabilities from it synchronously; there is no URL in
+   that code path. The refresh rides the same detached task as the #218 audit
+   and takes effect on the *next* start, so the "never gates readiness"
+   invariant survives untouched. TTL 24 h, and age gates the refresh, never the
+   read — a month-old cache still beats nothing. A missing, unreadable, or
+   corrupt file reads as absent, so a first-ever run with no cache and no
+   network behaves exactly as before.
+4. **`multimodal` is tri-state.** It was `bool` defaulting `false`, so an
+   explicit `false` was indistinguishable from silence and auto-detection would
+   have quietly reversed a deliberate cost decision. It is now `Option<bool>`:
+   omitted = auto-detect, `true`/`false` = an override detection never
+   contradicts. `image_tools` deliberately stays a plain `bool` — it is an
+   intent knob, not a capability fact (`view_image` works on a text-only model,
+   and a vision model's operator may still not want image fetches), so neither
+   direction is inferable from the catalog. `[llm.<slot>]` runs no unknown-key
+   check, so the schema change breaks no profile.
+
+**Net effect.** Vision-capable primary with a caption model configured: one
+cheap describe call for memory, image sent natively, substitution model never
+touched. Non-vision primary: one call, serving both roles — today's behaviour
+exactly. The startup capability audit also stopped advising on `multimodal`
+(auto-detection answers it now) and advises on `image_tools` instead.
+
+Found and fixed on the way: **N15**, below.
+
 ## Not attempted, and why
 
 These are recorded rather than half-done. Each is either genuinely large, or
@@ -266,10 +328,8 @@ turns on a decision that is the author's to make.
   an architectural/hygiene ticket not needed by current pilot bots.
 - **#155 (design guidelines from eval trials)** — the issue is itself a design
   exploration, and says so ("big design task", "so much design work slated").
-- **#204 (image processing strategy)** — a genuine fork in the road: keep the
-  separate transcriber or use model multimodal capability. #218 now supplies the
-  OpenRouter metadata that would drive the automatic selection it proposes, so
-  the blocker is the decision, not the plumbing.
+- **#204 (image processing strategy)** — was listed here as "needs a product
+  call". The call has since been made (Option D), so it moved to *What landed*.
 - **#206 (staged passes and cache optimization)** — the issue demands "detailed
   and comprehensive profiling to justify design decisions" before any change,
   so the profiling landed and the design change did not. `diagnose` now
@@ -513,3 +573,22 @@ handler, so renaming a channel or server mid-session leaves presence, logs, and
 the model's focus line showing the *old* name until the process restarts. Cheap
 to close (`EventHandler::channel_update` → `fm.set_channel_name`), but it is a
 separate gateway event from the one #222 reported.
+
+### N15 — a vision-capable slot paid twice for every image `[fixed]`
+
+Found while deciding #204. `view_image_handler` called the description model
+whenever `ctx.description_llm.is_some()`, with no reference to the calling
+model's capability. Nothing auto-disabled the transcriber.
+
+So a slot configured with both `[llm].image_description_model` and
+`multimodal = true` — the configuration the docs actively recommended for a
+vision model — paid for a full second vision call *and* shipped the inline
+image tokens, on every single view. The extra call bought nothing the model
+could not already see. The two costs were invisible to each other: the tool
+never knew the slot was multimodal, and the slot never knew a transcriber was
+wired.
+
+Fixed by the #204 role split. The handler now reads `ctx.multimodal` and runs
+one leg: the caption model for a slot that can see (memory only), the
+substitution model for one that cannot (perception, doubling as memory). The
+substitution model is never invoked for a multimodal slot.
