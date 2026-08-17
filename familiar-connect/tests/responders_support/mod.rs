@@ -563,6 +563,7 @@ pub struct TestFocusManager {
     guild_names: HashMap<i64, String>,
     end_turn_count: AtomicUsize,
     nudge_count: AtomicUsize,
+    shifts: Mutex<Vec<i64>>,
 }
 
 impl TestFocusManager {
@@ -575,6 +576,7 @@ impl TestFocusManager {
             guild_names: HashMap::new(),
             end_turn_count: AtomicUsize::new(0),
             nudge_count: AtomicUsize::new(0),
+            shifts: Mutex::new(Vec::new()),
         }
     }
     pub fn unfocused() -> Self {
@@ -586,6 +588,7 @@ impl TestFocusManager {
             guild_names: HashMap::new(),
             end_turn_count: AtomicUsize::new(0),
             nudge_count: AtomicUsize::new(0),
+            shifts: Mutex::new(Vec::new()),
         }
     }
     pub const fn with_should_wake(mut self, v: bool) -> Self {
@@ -610,6 +613,10 @@ impl TestFocusManager {
     pub fn nudge_count(&self) -> usize {
         self.nudge_count.load(Ordering::SeqCst)
     }
+    /// Channels `shift_now` was called with, in order.
+    pub fn shifts(&self) -> Vec<i64> {
+        self.shifts.lock().expect("shifts").clone()
+    }
 }
 
 #[async_trait]
@@ -619,6 +626,9 @@ impl FocusManagerApi for TestFocusManager {
     }
     fn should_wake(&self, _channel_id: i64) -> bool {
         self.should_wake
+    }
+    async fn shift_now(&self, channel_id: i64) {
+        self.shifts.lock().expect("shifts").push(channel_id);
     }
     fn get_focus(&self, modality: &str) -> Option<i64> {
         if modality == "text" {

@@ -37,6 +37,7 @@ pub mod typing_interrupt;
 
 // --- subsystem 08: llm + tools ---
 pub mod llm;
+pub mod model_diagnostics;
 pub mod structured_request;
 pub mod tools;
 

@@ -324,7 +324,8 @@ impl Default for STTConfig {
 /// Text-to-speech config from `[tts]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TTSConfig {
-    /// `"azure"` | `"cartesia"` | `"gemini"`.
+    /// `"azure"` | `"cartesia"` (default) | `"gemini"`. Only `cartesia` has a
+    /// wired backend — see `tts::UNWIRED_TTS_PROVIDERS`.
     pub provider: String,
     /// Cartesia voice id.
     pub cartesia_voice_id: Option<String>,
@@ -355,7 +356,7 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
-            provider: "azure".to_owned(),
+            provider: "cartesia".to_owned(),
             cartesia_voice_id: None,
             cartesia_model: None,
             azure_voice: DEFAULT_AZURE_TTS_VOICE.to_owned(),
@@ -1569,7 +1570,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
 
 fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
     let provider = match raw.get("provider") {
-        None => "azure".to_owned(),
+        None => "cartesia".to_owned(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => {
             return Err(ConfigError(format!(
@@ -2497,10 +2498,12 @@ mod tests {
         BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DeepgramSTTConfig, DiscordTextConfig,
         EmbeddingConfig, FactSupersedeConfig, FocusConfig, LLM_SLOT_NAMES, MemoryProvidersConfig,
         MemoryRetrievalConfig, PeopleDossierConfig, ReflectionConfig, RichNoteConfig,
-        RollingSummaryConfig, STTConfig, ToolsConfig, TurnDetectionConfig, default_projectors,
+        RollingSummaryConfig, STTConfig, TTSConfig, ToolsConfig, TurnDetectionConfig,
+        default_projectors, parse_tts_config,
     };
     use crate::budget::TierBudget;
     use std::collections::BTreeSet;
+    use toml::Table;
 
     #[test]
     fn tiered_slots() {
@@ -2519,6 +2522,18 @@ mod tests {
         assert!(cfg.llm.is_empty());
         assert!(cfg.sleep_window.is_none());
         assert_eq!(cfg.sleep_grace_minutes, 30);
+    }
+
+    #[test]
+    fn tts_defaults_to_the_only_wired_provider() {
+        // #N1: the default must be synthesizable, not a stub backend.
+        assert_eq!(TTSConfig::default().provider, "cartesia");
+        assert_eq!(
+            parse_tts_config(&Table::new())
+                .expect("empty [tts] parses")
+                .provider,
+            "cartesia"
+        );
     }
 
     #[test]

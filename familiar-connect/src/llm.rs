@@ -345,6 +345,8 @@ mod client {
     const DEFAULT_MAX_CONCURRENT: usize = 4;
     const HTTP_TIMEOUT_S: u64 = 120;
     const HTTP_ERROR_BODY_LIMIT: usize = 600;
+    /// `GET /models` is advisory startup diagnostics — give up quickly.
+    const MODELS_TIMEOUT_S: u64 = 20;
 
     // -- free helpers -------------------------------------------------------
 
@@ -1510,6 +1512,30 @@ mod client {
             clients.insert("__image_description__".to_string(), client);
         }
         Ok(clients)
+    }
+
+    /// `GET {base_url}/models` — raw body.
+    ///
+    /// Feeds the startup capability audit (`crate::model_diagnostics`). Same
+    /// Bearer auth as the chat POST; its own short-timeout client so advisory
+    /// diagnostics never share the traffic semaphore or the 120s read timeout.
+    ///
+    /// # Errors
+    /// Transport failure, or a non-2xx status.
+    pub async fn fetch_model_catalog(api_key: &str, base_url: &str) -> Result<String> {
+        let http = reqwest::Client::builder()
+            .read_timeout(Duration::from_secs(MODELS_TIMEOUT_S))
+            .build()?;
+        let response = http
+            .get(format!("{base_url}/models"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("GET /models returned HTTP {}", status.as_u16()));
+        }
+        Ok(response.text().await?)
     }
 
     #[cfg(test)]
@@ -2942,6 +2968,7 @@ mod client {
 #[cfg(feature = "net")]
 pub use client::{
     OPENROUTER_BASE_URL, OpenRouterClient, OpenRouterClientBuilder, create_llm_clients,
+    fetch_model_catalog,
 };
 
 #[cfg(test)]

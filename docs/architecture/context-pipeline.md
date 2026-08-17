@@ -749,6 +749,13 @@ channels with staged (unconsumed) turns and nudges toward the
 omit when their source is empty. This is the model-facing surface of
 the attentional stream (see [below](#attentional-stream)).
 
+The `— use shift_focus if it pulls your attention` half of the unread
+clause is gated on `tools_enabled`, which both responders set from the
+slot's own tool mode. A slot that cannot call tools sees the plain
+`There is a new message in #other-channel.` instead: coaching a model
+toward a tool it has no way to call only invites it to type the call
+out as prose (issue #221).
+
 Both responders also append a *second* copy of the same block as a
 trailing `system` message, after recent history, with
 `include_mode_instruction=True`. This appends the per-mode operating
@@ -965,6 +972,8 @@ inbound message:
   responder returns early: **no assembly, no LLM call, no reply.** The
   message surfaces only as an unread digest entry on the next focused
   turn.
+- **Unfocused channel, direct ping, no tool path** — the one exception
+  (issue #221). See [non-tool focus fallback](#non-tool-focus-fallback).
 
 `VoiceResponder` calls `end_turn()` after each completed voice turn
 too.
@@ -1010,6 +1019,33 @@ Because `shift_focus` applies for real, it is **not** a way to peek: it
 moves her off her current channel until she shifts back. The unread
 digest (and the unread nudge) is the mechanism for noticing
 other channels without leaving.
+
+#### Non-tool focus fallback
+
+`shift_focus` is the only way the *model* moves focus, which strands a
+familiar whose slot has no tool path at all: it can never leave the
+channel it booted on (issue #221). The text responder therefore keeps
+one fallback. A message that **directly pings the bot** in a
+subscribed-but-unfocused channel calls `shift_now` on that channel and
+then replies there, instead of staging and returning.
+
+It is gated on the responder having no agentic loop for this turn —
+no tool registry / context factory, or neither `tool_calling` nor
+`image_tools` on the slot. The same flag gates the reminder's
+`shift_focus` coaching, so the two always agree. When tools *are*
+available the behavior is unchanged: `shift_focus` is the model's own
+deliberate control and an automatic shift underneath it would fight
+its per-turn send routing. Ambient (non-ping) traffic still stages in
+both configurations — only a direct ping earns the move. The shift runs
+through the same `shift_now` path the tool uses, so the just-staged ping
+is promoted along with the target's catch-up window. Logs
+`[🔀 Focus] … reason=ping_no_tools`.
+
+A tool-less slot cannot be *told* about tools either, and the tool-less
+text stream now runs the same `StreamGate` the voice path does — so a
+model that imitates `shift_focus(…)` or `<invoke …>` as prose is
+suppressed rather than posted (the tool path already had the
+return-time strip guard in `tools::agentic`).
 
 Pointers persist in the `focus_pointers` table
 (`familiar_id PK, text_channel_id, voice_channel_id, updated_at`); on
@@ -1088,10 +1124,13 @@ Discord text on channel C
       focused = FocusManager.is_focused(C)  (True when no FocusManager)
       appends user turn to `turns` with consumed=focused
         (fts_turns trigger fires; row indexed)
-      if not focused: log [📥 Staged]; return  (no assembly, no LLM, no reply)
+      if not focused:
+        if direct ping AND no tool path: shift_now(C); fall through (#221)
+        else: log [📥 Staged]; return  (no assembly, no LLM, no reply)
       seeds RagContextLayer cue = content
       Assembler.assemble(ctx, viewer_mode="text")
-      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
+      LLMClient.chat_stream (cancellable via scope; StreamGate watches deltas
+       for `<silent>` and leaked tool calls on the tool-less path)
       (shift_focus, if called, already moved focus + promoted staged, and is
        recorded turn-locally as this turn's send target)
       if `<silent>` detected: bail (no send, no assistant turn)

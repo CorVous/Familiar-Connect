@@ -350,6 +350,43 @@ async fn silent_sentinel_with_leading_whitespace() {
     assert!(send.calls().is_empty());
 }
 
+/// Issue #221: the tool-less text path runs the same leaked-tool-call guard the
+/// voice path does, so an imitated call never reaches Discord.
+#[tokio::test]
+async fn leaked_tool_call_suppressed_on_bare_text_path() {
+    let s = store();
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&["shift_focus(", "channel_id=200)"])),
+        send.clone(),
+    );
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert!(send.calls().is_empty());
+    let turns = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert!(turns.iter().all(|t| t.role != "assistant"));
+}
+
+#[tokio::test]
+async fn leaked_invoke_block_suppressed_on_bare_text_path() {
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        store(),
+        Arc::new(ScriptedLlm::new(&[
+            "<in",
+            "voke name=\"shift_focus\">",
+            "<parameter name=\"channel_id\">200</parameter></invoke>",
+        ])),
+        send.clone(),
+    );
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert!(send.calls().is_empty());
+}
+
 #[tokio::test]
 async fn sentinel_mid_reply_is_not_a_gate() {
     let send = Arc::new(CapturingSend::new());

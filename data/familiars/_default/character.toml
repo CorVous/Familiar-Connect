@@ -333,14 +333,16 @@ idle_close_s = 30.0
 
 # --- Text-to-speech --------------------------------------------------------
 #
-# provider: "azure" (default), "cartesia", or "gemini"
+# provider: "cartesia" (default), "azure", or "gemini"
 #
-# Azure:    set AZURE_SPEECH_KEY + AZURE_SPEECH_REGION env vars.
-# Cartesia: set CARTESIA_API_KEY env var.
-# Gemini:   set GOOGLE_API_KEY env var.
+# Cartesia: set CARTESIA_API_KEY env var. The only wired backend.
+# Azure:    NOT YET WIRED — config accepted, refused at startup.
+#           Will need AZURE_SPEECH_KEY + AZURE_SPEECH_REGION.
+# Gemini:   NOT YET WIRED — config accepted, refused at startup.
+#           Will need GOOGLE_API_KEY.
 
 [tts]
-provider          = "azure"
+provider          = "cartesia"
 azure_voice       = "en-US-AmberNeural"
 cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"

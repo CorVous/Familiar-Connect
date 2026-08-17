@@ -78,15 +78,17 @@ Copy `.env.example` to `.env` and fill:
 | `DISCORD_BOT` | always | Bot token. **Not** `DISCORD_BOT_TOKEN`. Missing → exit 1. |
 | `OPENROUTER_API_KEY` | always | LLM. Missing → exit 1. |
 | `DEEPGRAM_API_KEY` | voice STT | Required when `[providers.stt].backend="deepgram"` (default). |
-| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | TTS (default provider) | Or switch provider below. |
-| `CARTESIA_API_KEY` | TTS if `[tts].provider="cartesia"` | Enables the byte-streaming playback path. |
-| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | TTS if `[tts].provider="gemini"` | `GOOGLE_` wins if both set. |
+| `CARTESIA_API_KEY` | TTS (default provider) | The only wired backend; byte-streaming playback. |
+| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | nothing yet | `[tts].provider="azure"` has no backend and is refused at startup. |
+| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | nothing yet | `[tts].provider="gemini"` has no backend and is refused at startup. `GOOGLE_` wins if both set. |
 | `FAMILIAR_ID` | selects familiar | Or pass `--familiar <id>` (flag wins). |
 | `FAMILIARS_ROOT` | per-user familiars root | Overrides the platform data-dir default (#201). |
 | `FAMILIAR_DEFAULTS_ROOT` | `_default` skeleton root | Overrides the CWD-relative `data/familiars`. |
 
 TTS/STT/turn-detector construction **degrades, never fails**: an unavailable key
-logs a warning and the text path keeps working (`run.rs` L410-429).
+logs a warning and the text path keeps working. Selecting an unwired TTS
+provider (`azure` / `gemini`) is louder — an `ERROR` at startup naming the fix —
+but still degrades rather than exiting.
 
 ### Discord Developer Portal
 
