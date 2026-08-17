@@ -1348,14 +1348,76 @@ fn llm_slot_parses_image_tools_and_multimodal() {
     let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\nimage_tools = true\nmultimodal = true\n");
     let slot = cfg.llm.get("prose").unwrap();
     assert!(slot.image_tools);
-    assert!(slot.multimodal);
+    assert_eq!(slot.multimodal, Some(true));
 }
 
 #[test]
 fn image_tools_defaults_false() {
     let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
     assert!(!cfg.llm.get("prose").unwrap().image_tools);
-    assert!(!cfg.llm.get("prose").unwrap().multimodal);
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, None);
+}
+
+// --- multimodal tri-state (#204) -------------------------------------------
+
+#[test]
+fn multimodal_unset_is_none_not_false() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
+    let slot = cfg.llm.get("prose").unwrap();
+    assert_eq!(slot.multimodal, None);
+    // Unset with no catalog behaves as the historical `false`.
+    assert!(!slot.resolve_multimodal(None));
+}
+
+#[test]
+fn multimodal_explicit_false_is_distinguishable_from_unset() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = false\n");
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, Some(false));
+}
+
+#[test]
+fn explicit_multimodal_beats_detection_in_both_directions() {
+    let off = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = false\n");
+    let on = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = true\n");
+    // Catalog says the model has vision; the explicit `false` still wins.
+    assert!(!off.llm.get("prose").unwrap().resolve_multimodal(Some(true)));
+    // …and the reverse.
+    assert!(on.llm.get("prose").unwrap().resolve_multimodal(Some(false)));
+}
+
+#[test]
+fn unset_multimodal_follows_the_catalog() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
+    let slot = cfg.llm.get("prose").unwrap();
+    assert!(slot.resolve_multimodal(Some(true)));
+    assert!(!slot.resolve_multimodal(Some(false)));
+}
+
+#[test]
+fn multimodal_non_bool_is_rejected() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"x/y\"\nmultimodal = \"yes\"\n"),
+        "[llm.prose].multimodal must be a bool, got str",
+    );
+}
+
+#[test]
+fn image_caption_model_parsed_at_llm_level() {
+    let cfg = load_ok("[llm]\nimage_caption_model = \"openai/gpt-4o-mini\"\n");
+    assert_eq!(cfg.image_caption_model, "openai/gpt-4o-mini");
+    // must not be treated as an unknown slot
+    assert_eq!(
+        cfg.llm.keys().cloned().collect::<BTreeSet<_>>(),
+        ["background", "fast", "prose"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    );
+}
+
+#[test]
+fn image_caption_model_defaults_empty() {
+    assert!(load_ok("").image_caption_model.is_empty());
 }
 
 #[test]

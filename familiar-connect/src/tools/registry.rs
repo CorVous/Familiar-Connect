@@ -187,8 +187,9 @@ impl ChannelReadStore for AsyncHistoryStore {
 ///
 /// `history`/`bus` are `Option` so the unit suites can build a context without
 /// real subsystems; no shipped
-/// handler reads them. `scheduler`/`focus_manager`/`store`/`description_llm`
-/// default to `None`; `images` defaults empty.
+/// handler reads them. `scheduler`/`focus_manager`/`store`/`description_llm`/
+/// `caption_llm` default to `None`; `images` defaults empty; `multimodal`
+/// defaults `false`.
 #[derive(Clone)]
 pub struct ToolContext {
     /// The familiar this turn belongs to.
@@ -207,8 +208,17 @@ pub struct ToolContext {
     pub scheduler: Option<Arc<AlarmScheduler>>,
     /// `img_id` → URL placeholder map injected per-turn (for `view_image`).
     pub images: HashMap<String, String>,
-    /// Vision model client (`view_image` description leg).
+    /// **Substitution** vision client: describes the image for a calling model
+    /// that cannot see it. Never consulted when [`multimodal`](Self::multimodal)
+    /// is set — the model gets the image itself.
     pub description_llm: Option<Arc<dyn LlmClient>>,
+    /// **Persistence** vision client: the durable caption for memory. Cheap by
+    /// design; used whenever the calling model can see the image, since the
+    /// image never survives into history (#204).
+    pub caption_llm: Option<Arc<dyn LlmClient>>,
+    /// Whether the calling slot receives images natively. Picks which of the
+    /// two clients above runs, and never both.
+    pub multimodal: bool,
     /// Attentional focus controller (`shift_focus` / `read_channel`).
     pub focus_manager: Option<Arc<dyn FocusControl>>,
     /// Explicit store ref for the read-only focus tools.
@@ -234,6 +244,8 @@ impl ToolContext {
             scheduler: None,
             images: HashMap::new(),
             description_llm: None,
+            caption_llm: None,
+            multimodal: false,
             focus_manager: None,
             store: None,
         }
@@ -267,10 +279,24 @@ impl ToolContext {
         self
     }
 
-    /// Builder: attach the vision description client.
+    /// Builder: attach the substitution vision client.
     #[must_use]
     pub fn with_description_llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
         self.description_llm = Some(llm);
+        self
+    }
+
+    /// Builder: attach the persistence caption client.
+    #[must_use]
+    pub fn with_caption_llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
+        self.caption_llm = Some(llm);
+        self
+    }
+
+    /// Builder: declare whether the calling slot sees images natively.
+    #[must_use]
+    pub const fn with_multimodal(mut self, multimodal: bool) -> Self {
+        self.multimodal = multimodal;
         self
     }
 

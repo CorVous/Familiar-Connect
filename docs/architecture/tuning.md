@@ -701,8 +701,15 @@ is static for the familiar's lifetime — not carried per turn.
 
 When `true`, `ImageResult` tool-result messages include JPEG
 `image_url` content blocks so vision-capable models can see the image.
-When `false` (default), only the text description is sent.
-Set this only for slots backed by vision-capable models.
+When `false`, only the text description is sent.
+
+The key is tri-state: **omit it** and the flag is auto-detected from the
+OpenRouter catalog (cached on disk, refreshed in the background), which
+is the recommended setting. Write it explicitly only to override that —
+`false` on a vision model to save image tokens, `true` on a model the
+catalog does not list. An explicit value always beats detection. Full
+semantics at
+[Configuration model](configuration-model.md#multimodal-is-tri-state).
 
 ## Prompt assembly budget
 

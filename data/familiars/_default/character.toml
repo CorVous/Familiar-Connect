@@ -526,12 +526,33 @@ person's key.
 #
 # tool_calling: bool — enables alarm/cancel tools + agentic loop.
 # image_tools: bool — enables view_image in text registry (never voice).
-# multimodal: bool — send JPEG content blocks instead of text descriptions
-#   for ImageResult; only set for vision-capable model slots.
+#   Deliberately manual: view_image works on a text-only model too (the
+#   description stands in for the image), so nothing about the model
+#   implies whether you want it.
+# multimodal: TRI-STATE — send JPEG content blocks instead of text
+#   descriptions for ImageResult.
+#     omit  = auto-detect from the OpenRouter catalog (recommended)
+#     true  = force on,  whatever the catalog says
+#     false = force off, whatever the catalog says
+#   Detection reads a cached copy of GET /models under the per-user cache
+#   dir; boot never waits on the network, and the first run with no cache
+#   simply behaves as if you had written `false`.
 #
-# image_description_model: shared key at [llm] level (not per slot).
-#   Model used to generate text descriptions of images. Empty = disabled.
+# image_description_model / image_caption_model: shared keys at [llm]
+#   level (not per slot). Two roles that used to be one key:
+#     image_description_model — SUBSTITUTION. Describes the image for a
+#       slot that cannot see it. Quality matters; it is the model's only
+#       perception of the picture.
+#     image_caption_model — PERSISTENCE. The durable caption written to
+#       history, and so the only trace of the image that ever reaches
+#       fact extraction, summaries, and dossiers — the raw image never
+#       survives a turn. Pick something cheap.
+#   Exactly ONE describe call per image either way: a vision slot runs
+#   the caption model and skips substitution; a text-only slot runs the
+#   substitution model and its output doubles as the caption. Either key
+#   fills in for a missing other. Both empty = feature disabled.
 #   Example: image_description_model = "openai/gpt-4o"
+#            image_caption_model     = "openai/gpt-4o-mini"
 #
 # max_concurrent_requests: shared key at [llm] level. Process-wide cap
 #   on in-flight LLM requests across every slot — the bottleneck is the
@@ -551,7 +572,7 @@ temperature  = 0.7
 reasoning    = "off"
 tool_calling = false
 # image_tools = false  # view_image excluded from voice; keep false here
-# multimodal = false
+# multimodal = false   # omit to auto-detect; pin false to save image tokens
 
 [llm.prose]
 model          = "z-ai/glm-5.2"
@@ -559,8 +580,8 @@ temperature    = 0.7
 provider_order = ["z-ai"]            # first-party — best caching for GLM
 reasoning      = "medium"
 tool_calling   = false
-# image_tools = false  # set true + configure image_description_model to enable
-# multimodal = false   # set true when prose model supports vision
+# image_tools = false  # set true + configure an image model to enable
+# multimodal = false   # omit: auto-detected from the model's metadata
 
 [llm.background]
 model          = "z-ai/glm-5.2"
