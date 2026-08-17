@@ -625,7 +625,9 @@ impl TextResponder {
         let event = Event {
             event_id: synth_id,
             turn_id,
-            session_id: focus_ch.to_string(),
+            // Same session key the real text source uses — the router keys
+            // barge-in on the exact string.
+            session_id: format!("discord:{focus_ch}"),
             parent_event_ids: Vec::new(),
             topic: TOPIC_DISCORD_TEXT.to_owned(),
             timestamp: chrono::Utc::now(),

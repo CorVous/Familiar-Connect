@@ -317,7 +317,8 @@ fn rich_note_factory(ctx: &ProjectorContext) -> Result<Box<dyn MemoryProjector>,
     .tick_interval_s(knobs.tick_interval_s)
     .participants_max(knobs.participants_max)
     .dream_extraction_clause(ctx.dream_extraction_clause.clone())
-    .display_tz(ctx.display_tz.clone());
+    .display_tz(ctx.display_tz.clone())
+    .self_capability_filter(knobs.self_capability_filter, &knobs.self_capability_pattern);
     if let Some(display) = &ctx.familiar_display_name {
         worker = worker.familiar_display_name(display.clone());
     }

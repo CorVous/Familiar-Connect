@@ -1388,6 +1388,49 @@ fn memory_worker_must_be_positive() {
     );
 }
 
+// Issue #153: the self-capability post-filter is operator-tunable.
+#[test]
+fn rich_note_self_capability_defaults_to_the_builtin_filter() {
+    let cfg = load_ok("");
+    assert!(cfg.memory_providers.rich_note.self_capability_filter);
+    assert_eq!(
+        cfg.memory_providers.rich_note.self_capability_pattern,
+        String::new()
+    );
+}
+
+#[test]
+fn rich_note_self_capability_knobs_load_from_toml() {
+    let cfg = load_ok(
+        "[providers.memory.rich_note]\nself_capability_filter = false\nself_capability_pattern = \"^nope\"\n",
+    );
+    assert!(!cfg.memory_providers.rich_note.self_capability_filter);
+    assert_eq!(
+        cfg.memory_providers.rich_note.self_capability_pattern,
+        "^nope"
+    );
+}
+
+#[test]
+fn rich_note_self_capability_pattern_must_compile() {
+    assert_err_eq(
+        load("[providers.memory.rich_note]\nself_capability_pattern = \"(unclosed\"\n"),
+        "[providers.memory.rich_note].self_capability_pattern must be a valid regex, got '(unclosed'",
+    );
+}
+
+#[test]
+fn rich_note_self_capability_knobs_reject_wrong_types() {
+    assert_err(
+        load("[providers.memory.rich_note]\nself_capability_filter = \"yes\"\n"),
+        "self_capability_filter must be a bool",
+    );
+    assert_err(
+        load("[providers.memory.rich_note]\nself_capability_pattern = 7\n"),
+        "self_capability_pattern must be a string",
+    );
+}
+
 #[test]
 fn memory_worker_unknown_knob_rejected() {
     assert_err(

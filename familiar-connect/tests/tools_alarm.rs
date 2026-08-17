@@ -6,6 +6,9 @@
 //! multi-threaded-runtime concern a single-threaded runtime would not
 //! have).
 
+#[path = "responders_support/mod.rs"]
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,14 +18,19 @@ use serde_json::{Value, json};
 use familiar_connect::bus::envelope::{Event, payload};
 use familiar_connect::bus::in_process::{InProcessEventBus, Subscription};
 use familiar_connect::bus::protocols::{BackpressurePolicy, EventBus, Processor};
+use familiar_connect::bus::router::TurnRouter;
 use familiar_connect::bus::topics::{TOPIC_ALARM_FIRED, TOPIC_DISCORD_TEXT};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
+use familiar_connect::processors::DiscordTextPayload;
+use familiar_connect::processors::text_responder::TextResponder;
 use familiar_connect::support::time::iso_utc;
 use familiar_connect::tools::alarm::{build_alarm_tool, build_cancel_alarm_tool};
 use familiar_connect::tools::registry::{ToolContext, ToolOutput};
 use familiar_connect::tools::scheduler::AlarmScheduler;
 use familiar_connect::tools::waker::AlarmWaker;
+
+use support::{CapturingSend, ScriptedLlm, make_assembler};
 
 const FAMILIAR: &str = "aria";
 
@@ -48,6 +56,16 @@ fn payload_of(event: &Event) -> Value {
         .payload
         .downcast_ref::<Value>()
         .expect("payload is a JSON Value")
+        .clone()
+}
+
+/// The waker's republished payload — a real [`DiscordTextPayload`], not a
+/// `Value` (issue N6: an untyped payload never downcasts in the subscribers).
+fn text_payload_of(event: &Event) -> DiscordTextPayload {
+    event
+        .payload
+        .downcast_ref::<DiscordTextPayload>()
+        .expect("payload is a DiscordTextPayload")
         .clone()
 }
 
@@ -426,17 +444,12 @@ async fn waker_republishes_as_discord_text() {
         .await
         .expect("synthetic text event");
     assert_eq!(event.topic, TOPIC_DISCORD_TEXT);
-    let p = payload_of(&event);
-    assert_eq!(p["familiar_id"], FAMILIAR);
-    assert_eq!(p["channel_id"], 42);
-    assert!(
-        p["content"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("alarm")
-    );
-    assert!(p["content"].as_str().unwrap().contains("ping"));
+    let p = text_payload_of(&event);
+    assert_eq!(p.familiar_id, FAMILIAR);
+    assert_eq!(p.channel_id, 42);
+    assert!(p.content.to_lowercase().contains("alarm"));
+    assert!(p.content.contains("ping"));
+    assert!(p.author.is_none());
     bus.shutdown().await;
 }
 
@@ -456,7 +469,9 @@ async fn waker_payload_carries_alarm_marker() {
     let event = drain_one(&mut text_sub, 1)
         .await
         .expect("synthetic text event");
-    assert_eq!(payload_of(&event)["alarm"], true);
+    let p = text_payload_of(&event);
+    assert!(p.alarm, "alarm marker must survive as a typed field");
+    assert!(!p.wake, "an alarm is not an unread nudge");
     bus.shutdown().await;
 }
 
@@ -476,6 +491,79 @@ async fn waker_stamps_own_familiar_id() {
     let event = drain_one(&mut text_sub, 1)
         .await
         .expect("synthetic text event");
-    assert_eq!(payload_of(&event)["familiar_id"], "other-fam");
+    assert_eq!(text_payload_of(&event).familiar_id, "other-fam");
+    bus.shutdown().await;
+}
+
+/// N6: the waker's event must round-trip through the responder — the bug the
+/// payload-shape assertions above missed was a *downcast* failure downstream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waker_event_drives_a_text_reply() {
+    let bus = make_bus();
+    bus.start().await;
+    let mut text_sub = bus.subscribe(&[TOPIC_DISCORD_TEXT], BackpressurePolicy::Unbounded, 0);
+    AlarmWaker::new(FAMILIAR)
+        .handle(
+            Arc::new(alarm_fired_event(42, "text", "steep the tea")),
+            bus.as_ref(),
+        )
+        .await
+        .unwrap();
+    let event = drain_one(&mut text_sub, 1)
+        .await
+        .expect("synthetic text event");
+
+    let store = make_store();
+    let send = Arc::new(CapturingSend::new());
+    let responder = TextResponder::new(
+        make_assembler(store.clone()),
+        Arc::new(ScriptedLlm::new(&["tea's ", "ready"])),
+        send.clone(),
+        store.clone(),
+        Arc::new(TurnRouter::new()),
+        FAMILIAR,
+    );
+    responder.handle(&event, bus.as_ref()).await.unwrap();
+
+    assert_eq!(
+        send.calls(),
+        vec![(42, "tea's ready".to_owned(), None, vec![])]
+    );
+    let turns = store.sync().recent(FAMILIAR, 42, 10, None, None).unwrap();
+    assert!(
+        turns
+            .iter()
+            .any(|t| t.role == "assistant" && t.content == "tea's ready")
+    );
+    bus.shutdown().await;
+}
+
+/// N7: a real user message and a fired alarm in the same channel must land in
+/// the *same* router session, so one preempts the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waker_session_id_matches_the_real_text_source() {
+    let bus = make_bus();
+    bus.start().await;
+    let mut text_sub = bus.subscribe(&[TOPIC_DISCORD_TEXT], BackpressurePolicy::Unbounded, 0);
+    AlarmWaker::new(FAMILIAR)
+        .handle(
+            Arc::new(alarm_fired_event(42, "text", "ping")),
+            bus.as_ref(),
+        )
+        .await
+        .unwrap();
+    let wake = drain_one(&mut text_sub, 1)
+        .await
+        .expect("synthetic text event");
+    assert_eq!(wake.session_id, "discord:42");
+
+    let router = TurnRouter::new();
+    let user_turn = router.begin_turn("discord:42", "user-turn");
+    let alarm_turn = router.begin_turn(&wake.session_id, &wake.turn_id);
+    assert!(
+        user_turn.is_cancelled(),
+        "the alarm turn must barge in on the user turn"
+    );
+    assert!(!alarm_turn.is_cancelled());
     bus.shutdown().await;
 }

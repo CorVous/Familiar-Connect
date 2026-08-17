@@ -64,6 +64,9 @@ pub struct DiscordTextPayload {
     pub pings_bot: bool,
     /// Synthetic unread-nudge wake (no real user content).
     pub wake: bool,
+    /// Her own scheduled alarm firing — pierces activity absence gating.
+    /// Distinct from `wake`: an alarm is self-initiated, not traffic-driven.
+    pub alarm: bool,
 }
 
 /// `voice.activity.start` payload — the responder reads only `user_id`.
