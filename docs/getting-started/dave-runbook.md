@@ -106,8 +106,8 @@ Per-user familiars resolve from the **platform data dir**
 equivalents), independent of CWD. `FAMILIARS_ROOT` overrides the root (top
 precedence). The tracked `_default` skeleton is a repo resource resolved
 separately from `data/familiars/_default` (`FAMILIAR_DEFAULTS_ROOT` overrides).
-On startup a one-shot, idempotent, never-clobber migration moves any legacy
-`./data/familiars/<id>` (other than `_default`) into the resolved root. See
+Legacy familiars left under `./data/familiars/<id>` are no longer migrated
+automatically — move them by hand or set `FAMILIARS_ROOT`. See
 [On-disk layout](on-disk-layout.md#where-the-familiars-root-lives).
 
 To keep everything inside the repo checkout while smoke-testing, point the root

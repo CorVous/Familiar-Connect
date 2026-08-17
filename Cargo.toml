@@ -12,7 +12,7 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["Cassidy Prather <pratherea@gmail.com>"]
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/CassidyPrather/Familiar-Connect"
+repository = "https://github.com/CorVous/Familiar-Connect"
 publish = false
 
 # Lint policy mirrors the user's rust-template: crank clippy up, allow only the
@@ -27,11 +27,11 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
-# Targeted allows (each earns its place, like the ruff ignores did)
+# Targeted allows (each earns its place)
 multiple_crate_versions = "allow" # Transitive deps disagree; not actionable here
-missing_errors_doc = "allow"      # Undocumented errors are fine (the D10 of clippy)
+missing_errors_doc = "allow"      # Undocumented error variants are fine
 missing_panics_doc = "allow"      # Ditto
-doc_markdown = "allow"            # Prose names Python module paths / symbols freely; backticking every one is noise
+doc_markdown = "allow"            # Prose names module paths / symbols freely; backticking every one is noise
 
 [profile.release]
 # Smaller, faster binaries at the cost of compile time

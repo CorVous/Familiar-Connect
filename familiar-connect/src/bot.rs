@@ -2593,6 +2593,10 @@ pub mod voice_intake {
     /// With no transcriber configured the returned runtime is **playback-only**
     /// (B-VI31): it carries the `voice_client` (so TTS still plays out) but
     /// spawns no intake tasks. The `template` is cloned per user on first audio.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "wiring seam: 8 independent collaborators, no natural grouping"
+    )]
     pub fn start_voice_intake(
         voice_client: Arc<dyn VoiceClientLike>,
         template: Option<Template>,

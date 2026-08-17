@@ -55,8 +55,7 @@ pub struct RunArgs {
 /// the OS-correct analog elsewhere). Home-based storage means a `git clean -fdx`
 /// in a repo checkout can no longer wipe live familiars — the reported foot-gun
 /// (issue #201). The legacy CWD-relative `data/familiars` survives only as the
-/// last-resort fallback when no home directory resolves, and as the source of the
-/// one-shot migration in [`run`].
+/// last-resort fallback when no home directory resolves.
 fn default_familiars_root() -> PathBuf {
     resolve_familiars_root(std::env::var("FAMILIARS_ROOT").ok(), home_familiars_root())
 }
@@ -105,61 +104,6 @@ fn resolve_defaults_root(env_override: Option<String>) -> PathBuf {
     match env_override {
         Some(root) if !root.is_empty() => PathBuf::from(root),
         _ => legacy_familiars_root(),
-    }
-}
-
-/// One-shot, best-effort migration of legacy CWD-relative familiars into the
-/// resolved root (issue #201).
-///
-/// For every `legacy_root/<id>` folder other than the tracked `_default`, move it
-/// to `new_root/<id>` when no familiar already lives there. Idempotent (a second
-/// run finds nothing left to move) and never-clobbering (an existing home-dir
-/// familiar is left untouched, its legacy copy kept in place). Best-effort: a
-/// failed move logs a hint and leaves the legacy copy behind rather than aborting
-/// startup (e.g. a cross-device rename the operator must complete by hand).
-fn migrate_legacy_familiars(legacy_root: &Path, new_root: &Path) {
-    if legacy_root == new_root || !legacy_root.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(legacy_root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let src = entry.path();
-        if !src.is_dir() {
-            continue;
-        }
-        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        // `_default` is a tracked repo resource, resolved via `default_defaults_root`.
-        if name == "_default" {
-            continue;
-        }
-        let dest = new_root.join(name);
-        if dest.exists() {
-            // A familiar already lives at the new root — never clobber it.
-            continue;
-        }
-        if let Err(err) = std::fs::create_dir_all(new_root) {
-            tracing::warn!(
-                "could not create familiars root {}: {err}",
-                new_root.display()
-            );
-            return;
-        }
-        match std::fs::rename(&src, &dest) {
-            Ok(()) => tracing::info!(
-                "migrated familiar '{name}' to {} (issue #201 home-dir storage)",
-                dest.display()
-            ),
-            Err(err) => tracing::warn!(
-                "could not migrate familiar '{name}' from {} to {} ({err}); \
-                 move it by hand or set FAMILIARS_ROOT",
-                src.display(),
-                dest.display()
-            ),
-        }
     }
 }
 
@@ -472,9 +416,6 @@ pub fn run(args: &RunArgs) -> i32 {
         return 1;
     }
     let root = default_familiars_root();
-    // One-shot: relocate any legacy CWD-relative familiars into the resolved
-    // root before we look one up (idempotent, never clobbers — issue #201).
-    migrate_legacy_familiars(&legacy_familiars_root(), &root);
     let familiar_root = match resolve_familiar_root(
         args.familiar.as_deref(),
         std::env::var("FAMILIAR_ID").ok(),
@@ -1337,8 +1278,8 @@ async fn async_main(
 mod tests {
     use super::{
         ShutdownController, ShutdownStage, build_activity_engine, default_assembler,
-        home_familiars_root, migrate_legacy_familiars, resolve_defaults_root, resolve_embedder,
-        resolve_familiar_root, resolve_familiars_root,
+        home_familiars_root, resolve_defaults_root, resolve_embedder, resolve_familiar_root,
+        resolve_familiars_root,
     };
     use crate::activities::engine::ActivityEngine;
     use crate::bot::{BotHandle, Presence, PresenceSink};
@@ -1488,51 +1429,6 @@ mod tests {
             "missing bundled default profile at {}",
             profile.display()
         );
-    }
-
-    #[test]
-    fn migration_moves_legacy_familiars_and_spares_default() {
-        let tmp = TempDir::new().unwrap();
-        let legacy = tmp.path().join("legacy");
-        let home = tmp.path().join("home");
-        std::fs::create_dir_all(legacy.join("aria")).unwrap();
-        std::fs::write(legacy.join("aria").join("character.toml"), "id = 1").unwrap();
-        std::fs::create_dir_all(legacy.join("_default")).unwrap();
-        std::fs::write(legacy.join("_default").join("character.toml"), "d = 1").unwrap();
-
-        migrate_legacy_familiars(&legacy, &home);
-
-        // The user familiar moved to the new root, contents intact.
-        assert!(home.join("aria").join("character.toml").exists());
-        assert!(!legacy.join("aria").exists());
-        // The tracked `_default` skeleton stays put and is never copied over.
-        assert!(legacy.join("_default").join("character.toml").exists());
-        assert!(!home.join("_default").exists());
-
-        // Idempotent: a second run has nothing left to move and does not error.
-        migrate_legacy_familiars(&legacy, &home);
-        assert!(home.join("aria").join("character.toml").exists());
-    }
-
-    #[test]
-    fn migration_never_clobbers_existing_home_familiar() {
-        let tmp = TempDir::new().unwrap();
-        let legacy = tmp.path().join("legacy");
-        let home = tmp.path().join("home");
-        std::fs::create_dir_all(legacy.join("aria")).unwrap();
-        std::fs::write(legacy.join("aria").join("character.toml"), "legacy").unwrap();
-        std::fs::create_dir_all(home.join("aria")).unwrap();
-        std::fs::write(home.join("aria").join("character.toml"), "home").unwrap();
-
-        migrate_legacy_familiars(&legacy, &home);
-
-        // The home copy is authoritative and untouched; the legacy copy is left
-        // in place rather than overwriting it.
-        assert_eq!(
-            std::fs::read_to_string(home.join("aria").join("character.toml")).unwrap(),
-            "home"
-        );
-        assert!(legacy.join("aria").exists());
     }
 
     // --- test familiar bundle ---

@@ -30,12 +30,11 @@ so a `git clean -fdx` in a repo checkout can no longer wipe live state
 Set `FAMILIARS_ROOT` to override the root entirely (it takes top
 precedence — useful for tests or a custom data location).
 
-On startup the bot performs a one-shot, best-effort migration: any legacy
-familiar folder under the CWD-relative `data/familiars/<id>` (other than
-`_default`) is moved into the resolved root. The move is idempotent and
-never clobbers a familiar already present at the destination; a familiar
-that cannot be moved (e.g. a cross-device rename) is left in place with a
-log hint.
+Earlier builds auto-migrated familiars out of the CWD-relative
+`data/familiars/<id>` into this root on startup. That shim has been
+removed. A familiar still sitting in a repo checkout is no longer moved
+for you — copy it into the resolved root by hand, or point
+`FAMILIARS_ROOT` at it.
 
 The shipped `_default` profile is a **tracked repo resource**, not
 per-user state, so it never migrates. It is resolved from the
