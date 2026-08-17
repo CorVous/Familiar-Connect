@@ -372,8 +372,9 @@ impl VoiceInner {
     }
 
     async fn stream_and_speak(&self, scope: &TurnScope, channel_id: i64) -> Option<String> {
-        let ctx =
-            AssemblyContext::new(&self.familiar_id, Some(channel_id)).with_viewer_mode("voice");
+        let ctx = AssemblyContext::new(&self.familiar_id, Some(channel_id))
+            .with_viewer_mode("voice")
+            .with_model(self.llm.model());
         let prompt = self.assembler.assemble(&ctx).await;
         let tool_mode = self.tool_registry.is_some()
             && self.tool_context_factory.is_some()

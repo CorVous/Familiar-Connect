@@ -1,40 +1,269 @@
 # Issue triage — `august-bugfixes`
 
-Working notes for the sweep over the 25 open GitHub issues. Classification,
-what landed on this branch, and what deliberately did not. Newly discovered
-defects (not tracked on GitHub) are in the second half.
+A sweep over the 25 open GitHub issues: how each was classified, what landed on
+this branch, and what deliberately did not. Defects found along the way that
+are not tracked on GitHub are in the last section.
 
-No comments were posted to any GitHub issue.
+**No comments were posted to any GitHub issue.** Nothing here has been filed
+upstream; this file is the whole record.
 
 ## Classification
 
-| # | Title | Class | Disposition |
+| # | Title | Class | Outcome |
 |---|---|---|---|
-| 217 | Incorrect cargo.toml repository link | trivial | |
-| 219 | `dim` contradicting `fastembed_model` fails silently | bounded bug | |
-| 220 | silent reported as cancelled | bounded bug | |
-| 221 | Tool calling is no longer optional | bounded bug | Focus switching was reachable only through the `shift_focus` tool, so a slot with `tool_calling = false` could never change context again. Three changes, all confined to the tool-less configuration. (1) A **non-tool focus fallback** in `text_responder.rs`: a message that directly pings the bot in a subscribed-but-unfocused channel now calls `FocusManagerApi::shift_now` and answers there, instead of staging silently. Gated on the responder having no agentic loop at all (`tool_mode` false — no registry/factory, or neither `tool_calling` nor `image_tools`); with tools on, `shift_focus` is her deliberate control and an automatic shift would fight it, so today's staging behavior is byte-identical. Non-ping traffic still stages either way. (2) The unread digest's "— use shift_focus if it pulls your attention" clause in `final_reminder.rs` is now gated on `tools_enabled`, which the text responder threads in (voice already did): a model that cannot comply is no longer coached to. (3) The tool-less text path ran only `SilentDetector`, not the `StreamGate` leak guard voice uses, so a model coached toward `shift_focus` could post the literal call syntax to Discord; `stream_bare_inner` now runs the same `StreamGate` and suppresses a leaked `shift_focus(…)` / `<invoke …>` imitation. |
-| 222 | Familiars don't report focused channel correctly | bounded bug | |
-| 203 | Wrong channel replies | investigation | |
-| 199 | High volume of decryption failures | investigation | Reported symptom (`RTCP decryption failed`) is benign upstream songbird noise — quieted via a `songbird::driver::tasks::udp_rx=error` filter directive, restored at `-vv`. Found alongside it: `join_voice` registered its songbird handlers *after* the join resolved, so every one-shot op-5 Speaking event fired during the handshake was lost and 100% of voice frames went unattributed. Fixed with songbird's two-stage join. |
-| 205 | Bad multi-party identity disambiguation | investigation | |
-| 208 | Close out familiar location migration | bounded chore | |
-| 214 | Add Privacy Policy and Terms of Use | bounded docs | |
-| 218 | Detect issues with model configuration via diagnostics | bounded feature | New `src/model_diagnostics.rs`. Two checks, both outside config loading so loading stays offline. (1) A detached post-boot task fetches `GET /models` and compares each slot's `tool_calling` / `multimodal` / `image_tools` against `supported_parameters` + `architecture.input_modalities`: declared-but-unsupported → `ERROR`, the inverse → `INFO` advisory; unknown id, unreachable catalog, or unparseable body → one line then silence. Never gates readiness. (2) The motivating case from #221 — `tool_calling = false` on a focus-managed slot — needs no network, so it is checked unconditionally at composition time and logged at `ERROR`. Comparison + parsing are pure and unit-tested without network. |
-| 183 | Improve token-counting heuristic | bounded feature | Collection and reporting landed; enforcement on the assembly path deliberately did not. `budget::TokenCalibration` is a process-wide, in-memory singleton (same shape as `SpanCollector`: poison-safe `Mutex<Option<Arc<…>>>`, `reset_token_calibration` test seam) keyed by **model**, not `model.slot` — chars-per-token is a tokenizer property, so slots sharing a model share a rate and pooling their samples converges faster, and readers only know a model anyway. It holds `Σ estimated` / `Σ actual` and reports the ratio of those totals rather than an EWMA: no decay constant to tune and exact from the first sample, where an EWMA seeded at `1.0` would spend its early calls biased toward the seed. Fed from `CallMetrics::emit`, where the heuristic's guess and OpenRouter's `prompt_tokens` are both already in hand; the running ratio is then emitted on the `[LLM call]` line as the additive `cal_ratio` key (existing keys and formats untouched; the line carries no `span=`, so `diagnose` does not scrape it). `budget::estimate_tokens_calibrated(text, model)` is an additive wrapper — `estimate_tokens` and `CHARS_PER_TOKEN` are unchanged and every pinned estimator test stands. **Calibration may only ever revise an estimate upward**: the estimate gates client-side trimming before the request is sent, so over-counting merely drops extra context while under-counting risks an API rejection; a ratio at or below `1.0` is discarded and a ratio above it is capped at `4.0` (image blocks contribute 0 chars but real tokens, so an uncapped degenerate sample would over-trim; `4.0` still covers CJK density). **Not wired into `src/context/layers.rs`:** no call site there has a model in scope — `AssemblyContext` carries none — and threading one through would mean changing `AssemblyContext` plus both responders in `processors/`, well past this change's blast radius. Layers still trim on the raw estimator, noted in the module header. |
-| 153 | Reduce strength of Regex rules for prose formatting | bounded feature | |
-| 151 | Relocate hard-coded context to default/instance pattern | bounded feature | Eight prompt strings moved out of Rust into `[prompt]` in `_default/character.toml`, joining the six already there: `operating_mode_voice` / `operating_mode_text` (the per-mode directive — this collapses N9's verbatim duplication between `final_reminder.rs` and `run.rs::operating_modes()` into one config pair feeding both consumers), `voice_tool_ack` (the speak-before-you-call nudge), `start_activity_description` (the tool description's roleplay policy — persona guidance that happened to live in a schema field), `rolling_summary_system`, `reflection_system`, `dossier_self_system`, `dossier_other_system` (the memory projectors' instruction text). Each shipped default is byte-identical to the string it replaced, so a default-config run produces the same prompts; blanking the profile now yields no text at all rather than a stale in-code copy, which is what the new tests pin. Doctrine held: only phrasing moved — the reflection JSON contract, the `start_activity` enum + availability hints, the dossier importance ordering, and every validation rail stay in code, so a bad override degrades tone and can never break parsing. Deliberately **not** relocated: `fact_extractor.rs`'s `self_clause` / `intro` / `guidance` (~2400 chars welded to `render_contract(&FACT_SCHEMA)`, several rules with no code-level rail — needs its own override-boundary tests), the remaining `Tool::new` schema text (API surface, not persona), `structured_request.rs`'s contract renderer, and `layers.rs`'s markdown section headers. |
-| 180 | Time format hygiene | medium feature | |
-| 196 | ten-vad-sys FFI crate | large | |
-| 200 | Break out character.toml by file | large | |
-| 184 | Catch-up profiling for default config tuning | large | |
-| 181 | Tool call context requirements | architectural | |
-| 155 | Adhere to design guidelines from eval trials | architectural | |
-| 204 | Decide on image processing strategy | design decision | |
-| 206 | Research staged passes and cache optimization | research | |
-| 207 | Simplify vectorization strategy (Turso) | research | |
-| 96 | Parallel database accesses | blocked upstream | |
-| 130 | Memory-hardening follow-ups | deferred by author | |
+| 217 | Incorrect cargo.toml repository link | trivial | fixed |
+| 208 | Close out familiar location migration | bounded chore | fixed |
+| 219 | `dim` contradicting `fastembed_model` fails silently | bounded bug | fixed |
+| 220 | silent reported as cancelled | bounded bug | fixed |
+| 221 | Tool calling is no longer optional | bounded bug | fixed |
+| 222 | Familiars don't report focused channel correctly | bounded bug | fixed |
+| 199 | High volume of decryption failures | investigation | fixed — and a worse defect found beside it |
+| 214 | Add Privacy Policy and Terms of Use | bounded docs | fixed |
+| 218 | Detect issues with model configuration via diagnostics | bounded feature | fixed |
+| 153 | Reduce strength of Regex rules for prose formatting | bounded feature | fixed |
+| 151 | Relocate hard-coded context to default/instance pattern | bounded feature | fixed, minus two deliberate exclusions |
+| 180 | Time format hygiene | medium feature | LLM-facing edges fixed; store was already clean |
+| 183 | Improve token-counting heuristic | bounded feature | fixed — calibration learned, reported, and enforced on the assembly budget |
+| 203 | Wrong channel replies | investigation | reported mechanism already fixed; two real causes found and fixed |
+| 205 | Bad multi-party identity disambiguation | investigation | probably fixed via #199 — needs live confirmation |
+| 196 | ten-vad-sys FFI crate | large | not attempted |
+| 200 | Break out character.toml by file | large | not attempted; cheapest slice already taken by #151 |
+| 184 | Catch-up profiling for default config tuning | large | not attempted; #183 supplies one of its inputs |
+| 181 | Tool call context requirements | architectural | not attempted |
+| 155 | Adhere to design guidelines from eval trials | architectural | not attempted |
+| 204 | Decide on image processing strategy | design decision | not attempted — needs a product call |
+| 206 | Research staged passes and cache optimization | research | not attempted |
+| 207 | Simplify vectorization strategy (Turso) | research | not attempted |
+| 96 | Parallel database accesses | blocked upstream | not attempted |
+| 130 | Memory-hardening follow-ups | deferred by author | not attempted, per the issue itself |
+
+## What landed
+
+### 217 — repository link
+Workspace `repository` pointed at a personal fork. The `authors` line is
+attribution, not a link, and was left alone.
+
+### 208 — familiars migration shim
+Removed `migrate_legacy_familiars`, its call site, and its two tests. Home-dir
+resolution itself stays. **Behavior change worth knowing:** anyone who never
+ran a migrating build must now move `./data/familiars/<id>` by hand or set
+`FAMILIARS_ROOT`; the "familiar folder does not exist" error already names the
+absolute path it searched, so it is self-diagnosing. The issue says both
+operators have run it.
+
+### 219 — embedding `dim`
+`dim` contradicting `fastembed_model` was accepted silently, and for the
+fastembed backend `dim` is inert anyway — only `hash` reads it. The
+model→native-dim table moved out from behind the `local-embed` feature gate
+into `embedding::fastembed_native_dim`, collapsing a second hardcoded copy, and
+is injected into `parse_embedding_config` rather than imported directly. An
+explicit contradicting `dim` is now rejected at load; an unset one derives the
+native value. The shipped `_default` profile carried the same contradiction
+(`dim = 256` beside bge-small's 384) and was the trap a new user would hit
+first.
+
+### 220 — silent reported as cancelled
+`Drop for SseDeltaStream` hardcoded `status=cancelled` for any early abandon,
+so a deliberate `<silent>` decision was indistinguishable from a user barge-in.
+`stream_completion` now returns an `LlmStream` wrapper exposing
+`note_abandon_status`, and the two bare (no-tools) responder paths mark
+`silent` / `suppressed`. Genuine barge-in still reports `cancelled`; the
+tool-enabled paths were never affected because they drain the stream to
+completion. `diagnose` does not scrape this line (no `span=` key), confirmed.
+
+### 221 — tool calling is no longer optional
+`shift_focus` was the only post-startup mutator of focus, so a slot with
+`tool_calling = false` could never change channel again. Three changes, all
+confined to the tool-less configuration:
+
+1. A **non-tool focus fallback**: a message directly pinging the bot in a
+   subscribed-but-unfocused channel now shifts focus and answers there instead
+   of staging silently. Gated on the responder having no tool path at all, so
+   with tools on the behavior is byte-identical — `shift_focus` stays the
+   model's deliberate control and an automatic shift would fight it, and the
+   #170 per-turn send-routing fix is untouched. Non-ping traffic still stages
+   either way.
+2. The unread digest no longer coaches a tools-off model to "use shift_focus".
+3. The tool-less text path ran only `SilentDetector`, not the `StreamGate` leak
+   guard voice uses — so a model coached toward a tool it could not call could
+   post the literal call syntax to Discord. It now runs the same guard.
+
+### 222 — channel reported as a raw snowflake
+`/subscribe-text` and `/subscribe-voice` never recorded channel or guild names,
+so any channel absent from the `on_ready` snapshot stayed nameless forever and
+presence rendered a bare snowflake. Both handlers now record names from the
+interaction (no REST added), a historyless DM falls back to its peer id, and
+the remaining misses render `unnamed channel (id N)`. A gateway backfill at the
+point of the miss was considered and rejected: `FocusManager` is
+feature-agnostic core with no cache access, and resolving an uncached channel
+is a REST round-trip on the presence path.
+
+### 199 — decryption failures, and the real bug beside them
+The reported `RTCP decryption failed: Crypto(Error)` spam is **benign upstream
+songbird noise** — songbird's own source documents these UDP errors as
+non-fatal by design and forwards the packet anyway. Quieted with a
+target-scoped filter directive, restored at `-vv`.
+
+The serious defect was next to it in the same log: `unmapped_frames` equalled
+`speaking_frames`, i.e. 100% of voice frames unattributed. `join_voice`
+registered its event handlers *after* `Songbird::join` had fully resolved, but
+the SSRC→user Speaking event is one-shot and the events task has no replay — so
+it was routinely lost during the handshake. Every frame then got a provisional
+id equal to the raw SSRC, which can never resolve to a Discord user, making
+transcripts anonymous. Handlers now register on the `Call` before stage-one
+join.
+
+### 214 — privacy policy and terms of use
+Two original documents under `docs/legal/`, wired into the mkdocs nav and the
+README, ready to paste into the Discord developer portal. Written against what
+the code actually does rather than from a template — which is how N1, N2 and N3
+below were found. The issue asked to "word-for-word appropriate existing
+documents"; the intent (maximum disclaimer, no retention or compliance
+promises, operator bears responsibility) is honored, but the text is original,
+because another company's policy is itself copyrighted and describes a
+different data-processing reality.
+
+### 218 — model-configuration diagnostics
+New `src/model_diagnostics.rs`, with both checks outside config loading so
+loading stays offline. A detached post-boot task fetches `GET /models` and
+compares each slot's declared `tool_calling` / `multimodal` / `image_tools`
+against the model's real `supported_parameters` and
+`architecture.input_modalities`: declared-but-unsupported logs `ERROR` with the
+remediation, the inverse logs an `INFO` advisory. An unknown id, unreachable
+catalog, or unparseable body logs once and is otherwise silent; readiness is
+never gated. The response shape was verified against the live API, but the
+parser is hand-rolled and defensive — a bad entry is skipped, never fatal.
+
+Separately, the #221 case needs no network, so a focus-managed slot with tool
+calling off is flagged unconditionally at composition time. The text and voice
+wordings differ, because only text has the ping fallback.
+
+### 153 — over-broad self-capability filter
+The fact filter was a prefix match with no trailing anchor, and one branch —
+`the (assistant|ai|familiar|model|bot)` — required no negation at all. "The
+familiar loves rainy days" was discarded, in a product whose characters are
+called familiars. Likewise a bare "I can juggle", "I have no siblings", "I
+don't like Mondays", and "As an AI researcher, Cor works on alignment". Every
+alternative now requires a capability tail or a capability object.
+
+Judgement call worth reviewing: `i cannot|can't|can not` was left broad.
+Negated first-person ability is the core disclaimer shape and the pinned "I
+cannot remember the names of people" has no distinguishing object, so idioms
+like "I can't wait" are still dropped. The clean fix is a negative lookahead,
+which Rust's `regex` crate does not support. Operators who disagree now have
+`[providers.memory.rich_note].self_capability_filter` and
+`self_capability_pattern`, validated fail-fast at load.
+
+### 151 — hard-coded prompts
+Eight strings moved into the existing `[prompt]` table, joining the six sleep
+prompts already there. The operating-mode directives were duplicated verbatim
+between `final_reminder.rs` and `run.rs` with a comment asking readers to keep
+them in sync; there is now one source feeding both. Doctrine held — only
+phrasing moved; schemas, contract rendering, importance ordering, and every
+validation rail stay in code, so an override can change tone but never break
+parsing. Defaults are byte-identical to the strings they replaced.
+
+Deliberately excluded: the fact extractor's `intro` / `guidance` /
+`self_clause` (~2400 chars welded to `FACT_SCHEMA`, several rules with no
+code-level rail — needs its own override-boundary tests), and the remaining
+`Tool::new` schema descriptions, which are tool-calling API surface rather than
+persona context.
+
+### 180 — time format hygiene
+The store was already clean: all 22 write paths go through `iso_utc`. The
+damage was at the LLM-facing edges, and **every one of these bugs was invisible
+under the default `display_tz = "UTC"`**, so the tests use a non-UTC zone.
+
+- `set_alarm` demands RFC-3339 with a numeric offset, but the model was only
+  ever shown a zone *abbreviation* — it had to guess that "PDT" means `-07:00`.
+  The reminder clock now carries the offset.
+- A date-only `valid_from` from the extractor was anchored to midnight **UTC**,
+  though a bare `2026-08-16` from the model means local midnight — silently
+  wrong by up to ±14h. Now anchored in `display_tz`, stepping past DST gaps.
+- The recent-history window now marks local day changes, only when it actually
+  spans more than one day, so token cost stays flat in the common case.
+- Schedule refusals name their zone; one log line moved to `iso_utc`.
+
+Not done: a window lying entirely on a previous local day still gets no date
+marker, since there is only one distinct date to mark. Closing that needs `now`
+plumbed into `recent_messages`.
+
+### 183 — token-count calibration
+True counts already arrived from OpenRouter and were already logged beside the
+estimate. They now feed a per-model calibration store — keyed by model, since
+chars-per-token is a tokenizer property — holding a ratio of running totals
+rather than an EWMA, so it is exact from the first sample with no decay
+constant to tune. The ratio is surfaced on the `[LLM call]` line and applied to
+the prompt-assembly budget: `AssemblyContext` now carries the target model,
+both responders set it from `LlmClient::model()`, and every layer trim
+estimates through it. Truncation inverts the ratio, so a truncated section
+still measures under its own cap.
+
+`LlmClient::model()` defaults to `""` — a calibration miss, hence the raw
+estimate — so every test double and every non-OpenRouter client keeps the
+previous behavior untouched. The one decorator in the composition root
+forwards it explicitly; inheriting the default there would have disabled
+calibration for all responders without a symptom.
+
+**The safety asymmetry is preserved and is the load-bearing design decision.**
+The estimate drives client-side trimming *before* a request is sent, so
+over-counting merely drops a little extra context while under-counting risks an
+oversized request. Calibration may therefore only ever revise an estimate
+upward: a ratio at or below 1.0 is discarded, and one above it is capped, since
+image blocks contribute no characters but real billed tokens and a single
+degenerate sample would otherwise over-trim everything.
+
+### 203 / 205 — the two investigations
+**#203 (wrong channel replies):** the mechanism the issue guesses at — replies
+following global focus instead of the originating channel — was real, but is
+already fixed and has a concurrency regression test. Two other causes of the
+same user-visible symptom were found and fixed instead: N6 (alarms never
+delivered at all) and N7 (a wake and a real message for one channel were
+different router sessions, so neither preempted the other and both could
+reply).
+
+**#205 (multi-party identity confusion):** most likely the same root cause as
+#199. With the SSRC→user binding lost, every speaker got a synthetic id, and a
+mid-session SSRC change fragmented one person into several identities — exactly
+the symptom. The issue also suspects "bad data being fed in by the app", and
+that is what this was. **This needs live confirmation before closing**; the fix
+is in the voice path, which cannot be exercised without a real Discord call.
+
+## Not attempted, and why
+
+These are recorded rather than half-done. Each is either genuinely large, or
+turns on a decision that is the author's to make.
+
+- **#196 (ten-vad-sys FFI crate)** — a new `-sys` crate with vendored C, the one
+  place the workspace's `unsafe_code = "forbid"` would be relaxed. Local turn
+  detection keeps degrading gracefully to Deepgram meanwhile. `TenVad::new`
+  always returns `MissingBackend` today.
+- **#200 (break out character.toml)** — the file is 546 lines. Investigated: the
+  existing multi-file support is precedent-by-copy-paste, not a reusable
+  abstraction (`character.toml`, `activities.toml` and `character.md` have three
+  different loaders and three different fallback semantics, with `deep_merge`
+  duplicated). Each new file needs its own loader, its own defaults-path wiring,
+  and its own slice of a ~1200-line validator, and 150 tests assume one file.
+  The cheapest real win — getting prose out of a config file — is largely what
+  #151 just did.
+- **#184 (catch-up profiling)** — wants real pilot data, not a code change.
+  #183's `cal_ratio` supplies item 3 on its list.
+- **#181 (tool call context requirements)** — explicitly framed by the author as
+  an architectural/hygiene ticket not needed by current pilot bots.
+- **#155 (design guidelines from eval trials)** — the issue is itself a design
+  exploration, and says so ("big design task", "so much design work slated").
+- **#204 (image processing strategy)** — a genuine fork in the road: keep the
+  separate transcriber or use model multimodal capability. #218 now supplies the
+  OpenRouter metadata that would drive the automatic selection it proposes, so
+  the blocker is the decision, not the plumbing.
+- **#206 (staged passes and cache optimization)** — the issue demands "detailed
+  and comprehensive profiling to justify design decisions" before any change.
+- **#207 (Turso vector search)** — a storage-backend migration.
+- **#96 (parallel database access)** — the author is explicitly waiting on a
+  Turso release.
+- **#130 (memory-hardening follow-ups)** — the issue's own recommendation is
+  "build none now — fix-if-it-bites", with item 4 to revisit once the
+  self-dossier has run in production. Honoring that.
 
 ## Newly discovered issues
 
@@ -66,14 +295,17 @@ build a client for either, logging at `ERROR` and running without TTS instead
 of failing on the first synthesis. `.env.example`, the `_default` profile, and
 the five docs that called Azure the default were updated in the same change.
 
-### N2 — Deepgram connect URL with member names is logged at INFO
+### N2 — Deepgram connect URL with member names is logged at INFO `[fixed]`
 
 Up to 100 voice-member display names, usernames, aliases, and guild nicks are
 appended to the Deepgram websocket URL as `keyterm=` recognition hints
 (`src/bot.rs:916-927` → `src/bot.rs:2400-2404` → `src/stt/deepgram.rs:461-497`).
-That full URL is then logged at INFO (`src/stt/deepgram.rs:546-551`), so every
-voice session writes its participant roster into the logs. The query string
-should be redacted.
+That full URL was then logged at INFO, so every voice session wrote its
+participant roster into the logs.
+
+Fixed on this branch: `DeepgramTranscriber::redacted_ws_url` renders the same
+URL with the keyterm values replaced by a count, keeping the tunables that make
+the line worth logging. The connect log uses it.
 
 ### N3 — `view_image` fetches arbitrary URLs
 
@@ -169,11 +401,16 @@ and hands it to both consumers — `OperatingModeLayer` and `FinalReminder`
 fallback copy, so an unconfigured or blank directive renders nothing rather
 than resurrecting a stale duplicate.
 
-### N10 — stale Python-era symbol name in docs
+### N10 — stale Python-era symbol name in docs `[fixed]`
 
-`docs/architecture/context-pipeline.md:289` refers to `_is_self_capability`.
-The Rust symbol is `is_self_capability`
-(`src/processors/fact_extractor.rs:115-120`).
+`docs/architecture/context-pipeline.md` referred to `_is_self_capability`; the
+Rust symbol is `is_self_capability`. Corrected alongside #153.
+
+Two other Python-era leftovers were cleared earlier on this branch: the tracked
+`.audit-fixes.md` (a scratch brief for the Python ancestor's activities engine,
+citing `uv run`, `pytest`, `waker.py`, and a dangling `AGENTS.md`, whose own
+header said it was not meant to be committed) and the `ruff` / pydocstyle
+asides in the Cargo.toml lint comments.
 
 ### N11 — `intfloat/e5-small-v2` is listed but unusable
 

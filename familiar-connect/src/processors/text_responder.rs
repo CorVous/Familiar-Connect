@@ -726,8 +726,9 @@ impl TextResponder {
         activity_state_line: Option<String>,
         shift_target: &Arc<Mutex<Option<i64>>>,
     ) -> Option<String> {
-        let mut ctx =
-            AssemblyContext::new(&self.familiar_id, Some(channel_id)).with_viewer_mode("text");
+        let mut ctx = AssemblyContext::new(&self.familiar_id, Some(channel_id))
+            .with_viewer_mode("text")
+            .with_model(self.llm.model());
         if let Some(g) = guild_id {
             ctx = ctx.with_guild_id(g);
         }

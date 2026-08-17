@@ -27,8 +27,9 @@ use familiar_connect::processors::{
 use familiar_connect::typing_interrupt::TypingInterruptHandler;
 
 use support::{
-    CapturingLlm, CapturingSend, FakeActivityEngine, LogCapture, RecordingTyping, ScriptedLlm,
-    TestFocusManager, default_modes, discord_text_event, make_assembler, store, text_payload,
+    CapturingLlm, CapturingSend, FakeActivityEngine, LogCapture, ModelSpyLayer, RecordingTyping,
+    ScriptedLlm, TestFocusManager, default_modes, discord_text_event, make_assembler,
+    spy_assembler, store, text_payload,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -1345,4 +1346,33 @@ async fn overridden_operating_mode_reaches_the_trailing_reminder() {
         !trailing.contains("You are chatting in a text channel"),
         "{trailing}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Model threading (#183)
+// ---------------------------------------------------------------------------
+
+/// The client's model reaches every layer through `AssemblyContext`, so
+/// per-layer trimming can key the token calibration store.
+#[tokio::test]
+async fn assembly_context_carries_the_llm_model() {
+    let s = store();
+    let spy = Arc::new(ModelSpyLayer::default());
+    let router = Arc::new(TurnRouter::new());
+    let r = TextResponder::new(
+        spy_assembler(Arc::clone(&s), &spy),
+        Arc::new(ScriptedLlm::new(&["ok"]).with_model("vendor/model-x")),
+        Arc::new(CapturingSend::new()),
+        s,
+        router,
+        "fam",
+    )
+    .with_mode_instructions(default_modes());
+    r.handle(
+        &discord_text_event(text_payload(42, "hi there"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(spy.seen(), vec!["vendor/model-x".to_owned()]);
 }

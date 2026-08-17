@@ -75,6 +75,12 @@ pub trait Layer: Send + Sync {
 `(layer.name, invalidation_key)`. Two `assemble` calls with the same
 context re-run `build` only for layers whose key changed.
 
+`AssemblyContext` carries the familiar id, channel, viewer mode, guild,
+and the target `model`. The responders set `model` from
+`LlmClient::model()`; layers key it into the token-calibration store when
+they trim (see [tuning](tuning.md#token-count-calibration)). It is fixed
+for an assembler's lifetime, so no invalidation key includes it.
+
 ### Static, file-sourced
 
 | Layer | Source | Invalidation |
