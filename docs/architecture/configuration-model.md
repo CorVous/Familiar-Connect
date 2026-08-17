@@ -10,9 +10,9 @@ by the admin, never exposed through Discord.
 
 - `DISCORD_BOT` — Discord bot token
 - `OPENROUTER_API_KEY` — shared across every LLM call site
-- `CARTESIA_API_KEY` — Cartesia TTS (required when `[tts].provider="cartesia"`)
-- `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech
-- `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS
+- `CARTESIA_API_KEY` — Cartesia TTS (required when `[tts].provider="cartesia"`, the default)
+- `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech (placeholders; the Azure backend is not wired)
+- `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS (placeholder; the Gemini backend is not wired)
 - `DEEPGRAM_API_KEY` — Deepgram STT credential. Every other Deepgram knob lives in `[providers.stt.deepgram]`. Full list: [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
 - `FAMILIAR_ID` — picks the character folder (under the familiars root) this process runs.
 - `FAMILIARS_ROOT` — overrides the per-user familiars root (default: platform data dir). `FAMILIAR_DEFAULTS_ROOT` overrides where the tracked `_default` skeleton resolves (default: `data/familiars`). See [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
@@ -103,8 +103,10 @@ Surface today:
   (default `false`) controls whether `ImageResult` tool-result messages
   include JPEG content blocks (`true`) or text description only (`false`).
   See [Tool calling](overview.md#tool-calling) and
-  [Image viewing](overview.md#image-viewing).
-- `[tts]` — provider (`azure` / `cartesia` / `gemini`) + provider-specific voice / model fields.
+  [Image viewing](overview.md#image-viewing). Both flags are cross-checked
+  against the model at startup — see
+  [Startup model diagnostics](#startup-model-diagnostics).
+- `[tts]` — provider (`cartesia` (default) / `azure` / `gemini`) + provider-specific voice / model fields. Only `cartesia` has a wired backend; the other two are accepted by config validation and refused at startup.
 - `[focus]` — attentional unread-nudge controls (`unread_nudge_enabled`,
   `nudge_debounce_seconds`). See
   [Tuning — Attentional focus](tuning.md#attentional-focus).
@@ -145,11 +147,45 @@ meaningful selection.
 
 ### TTS providers
 
-| Provider | Env vars | Character fields |
+| Provider | Status | Env vars | Character fields |
+|---|---|---|---|
+| `cartesia` (default) | wired | `CARTESIA_API_KEY` | `cartesia_voice_id`, `cartesia_model` |
+| `azure` | **not wired** | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | `azure_voice` |
+| `gemini` | **not wired** | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | `gemini_voice`, `gemini_model` (+ optional style / scene / pace / accent / context / audio-profile) |
+
+`azure` and `gemini` remain valid config values — they are placeholders for
+backends that have not landed. Selecting one is refused at startup with an
+`ERROR` naming the fix, and the process continues without TTS rather than
+failing on the first synthesis mid-conversation.
+
+### Startup model diagnostics
+
+Capability flags on an LLM slot are free-form assertions about a free-form
+OpenRouter model string, so config loading cannot validate them — and must not
+try, because that would make loading depend on the network. Two checks run
+after loading instead (`src/model_diagnostics.rs`).
+
+**Focus reachability** — immediate, no network. Both responder surfaces get a
+focus manager wired unconditionally, so `tool_calling = false` on `[llm.prose]`
+(text) or `[llm.fast]` (voice) makes `shift_focus` unreachable and pins that
+surface's channel focus for the whole session. Logged at `ERROR` at boot with
+the slot named.
+
+**Capability audit** — detached, best-effort. After the bus starts, a
+fire-and-forget task fetches `GET https://openrouter.ai/api/v1/models` and
+compares each slot's declared flags against the model's metadata:
+
+| Declared | Model metadata | Level |
 |---|---|---|
-| `azure` (default) | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | `azure_voice` |
-| `cartesia` | `CARTESIA_API_KEY` | `cartesia_voice_id`, `cartesia_model` |
-| `gemini` | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | `gemini_voice`, `gemini_model` (+ optional style / scene / pace / accent / context / audio-profile) |
+| `tool_calling = true` | `supported_parameters` lacks `tools` | `ERROR` |
+| `tool_calling = false` | `supported_parameters` has `tools` | `INFO` (advisory) |
+| `multimodal` / `image_tools` `= true` | `architecture.input_modalities` lacks `image` | `ERROR` |
+| both `false` | `input_modalities` has `image` | `INFO` (advisory) |
+
+Every line names the slot, the model, and the remediation. An unknown model id,
+an unreachable catalog, or an unparseable response produces one line and then
+silence — the audit is advisory and never blocks, delays, or fails startup.
+Variant suffixes (`:free`, `:nitro`, …) fall back to the base model id.
 
 ### Subscriptions
 

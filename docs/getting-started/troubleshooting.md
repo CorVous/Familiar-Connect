@@ -13,16 +13,28 @@ Common startup errors and what they mean:
   OpenRouter key.
 - **`Opus library not found — voice playback will not work`** — voice
   commands still run, but no audio; install libopus.
+- **`TTS provider '<name>' has no wired backend`** — `[tts].provider` is
+  set to `azure` or `gemini`, neither of which has an implemented
+  backend. TTS is disabled for the session; set
+  `[tts].provider = "cartesia"` and `CARTESIA_API_KEY`.
+- **`[llm.<slot>].tool_calling = false disables every tool call …`** —
+  that surface can never call `shift_focus`, so its channel focus is
+  fixed for the session. Set `tool_calling = true` on the slot.
+- **`[Config] slot=… model=… capability=… fix=…`** — the detached
+  startup audit compared the slot's declared capability flags against
+  the model's OpenRouter metadata. `ERROR` means the model does not
+  support what the config declares; `INFO` is the advisory inverse. See
+  [Startup model diagnostics](../architecture/configuration-model.md#startup-model-diagnostics).
 
 ## Runtime symptoms
 
 - **Bot joined voice but no audio plays** — confirm libopus loaded on
   startup (look for the `Loaded Opus from:` debug line). Without it
   `voice_client.play(...)` is silent. Also confirm a TTS provider in
-  `[tts].provider` and the matching env var (`AZURE_SPEECH_KEY`,
-  `CARTESIA_API_KEY`, or `GOOGLE_API_KEY` / `GEMINI_API_KEY`) is set;
+  `[tts].provider` and the matching env var (`CARTESIA_API_KEY`) is set;
   with no client the player falls back to `LoggingTTSPlayer`, which
-  only logs.
+  only logs. `azure` and `gemini` have no wired backend: startup logs
+  `TTS provider '<name>' has no wired backend` and disables TTS.
 - **Voice transcripts come out anonymous** — every frame is unattributed
   when the SSRC → user map never fills. Look for the periodic
   `[🎙️  Voice] receive ticks=… speaking_frames=… unmapped_frames=…`
