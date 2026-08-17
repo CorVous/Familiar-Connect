@@ -444,6 +444,11 @@ pub struct RichNoteConfig {
     pub tick_interval_s: f64,
     /// Cap on participant manifest rows.
     pub participants_max: i64,
+    /// Self-capability post-filter on/off. `false` keeps every extracted fact.
+    pub self_capability_filter: bool,
+    /// Regex replacing the built-in self-capability matcher; empty keeps the
+    /// built-in. Validated at load — an uncompilable pattern fails startup.
+    pub self_capability_pattern: String,
 }
 
 impl Default for RichNoteConfig {
@@ -452,6 +457,8 @@ impl Default for RichNoteConfig {
             batch_size: 10,
             tick_interval_s: 15.0,
             participants_max: 30,
+            self_capability_filter: true,
+            self_capability_pattern: String::new(),
         }
     }
 }
@@ -1884,6 +1891,29 @@ fn mem_pos_float(section: &Table, name: &str, key: &str, default: f64) -> Result
     }
 }
 
+/// Read + compile-check `self_capability_pattern`. Empty means "keep the
+/// built-in matcher"; anything else must compile here so a typo fails startup
+/// rather than the extractor's first tick.
+fn self_capability_pattern(section: &Table, prefix: &str) -> Result<String, ConfigError> {
+    let key = "self_capability_pattern";
+    let pattern = match section.get(key) {
+        None => return Ok(String::new()),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(ConfigError(format!(
+                "{prefix}.{key} must be a string, got {}",
+                value_type_name(other)
+            )));
+        }
+    };
+    if !pattern.is_empty() && regex::Regex::new(&pattern).is_err() {
+        return Err(ConfigError(format!(
+            "{prefix}.{key} must be a valid regex, got '{pattern}'"
+        )));
+    }
+    Ok(pattern)
+}
+
 fn worker_section<'a>(raw: &'a Table, name: &str) -> Result<&'a Table, ConfigError> {
     match raw.get(name) {
         None => Ok(empty_table()),
@@ -1941,10 +1971,17 @@ fn parse_memory_providers(
     let rn = worker_section(raw, "rich_note")?;
     check_unknown_keys(
         rn,
-        &["batch_size", "tick_interval_s", "participants_max"],
+        &[
+            "batch_size",
+            "tick_interval_s",
+            "participants_max",
+            "self_capability_filter",
+            "self_capability_pattern",
+        ],
         "[providers.memory.rich_note]",
     )?;
     let rich_defaults = RichNoteConfig::default();
+    let rich_prefix = "[providers.memory.rich_note]";
     let rich_note = RichNoteConfig {
         batch_size: mem_pos_int(rn, "rich_note", "batch_size", rich_defaults.batch_size)?,
         tick_interval_s: mem_pos_float(
@@ -1959,6 +1996,13 @@ fn parse_memory_providers(
             "participants_max",
             rich_defaults.participants_max,
         )?,
+        self_capability_filter: field_bool(
+            rn,
+            rich_prefix,
+            "self_capability_filter",
+            rich_defaults.self_capability_filter,
+        )?,
+        self_capability_pattern: self_capability_pattern(rn, rich_prefix)?,
     };
 
     let pd = worker_section(raw, "people_dossier")?;
@@ -2520,7 +2564,9 @@ mod tests {
             RichNoteConfig {
                 batch_size: 10,
                 tick_interval_s: 15.0,
-                participants_max: 30
+                participants_max: 30,
+                self_capability_filter: true,
+                self_capability_pattern: String::new(),
             }
         );
         assert_eq!(

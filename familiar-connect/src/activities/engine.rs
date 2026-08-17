@@ -508,14 +508,11 @@ pub struct GatePayload {
 impl GatePayload {
     /// Adapt a bus [`DiscordTextPayload`] into a gate input.
     ///
-    /// NOTE: [`DiscordTextPayload`] carries no `alarm` field (the landed struct
-    /// predates this feature), so alarm-piercing does not reach the gate through
-    /// the responder path yet — a shared-file request to add `alarm: bool` is
-    /// filed. Synthetic wakes (`wake`) omit the ping flag → content scan.
+    /// Synthetic wakes (`wake`) omit the ping flag → content scan.
     #[must_use]
     pub fn from_discord(p: &DiscordTextPayload) -> Self {
         Self {
-            alarm: false,
+            alarm: p.alarm,
             content: p.content.clone(),
             pings_bot: if p.wake { None } else { Some(p.pings_bot) },
             channel_id: Some(p.channel_id),
@@ -1868,7 +1865,9 @@ impl ActivityEngine {
         let event = Event {
             event_id: synth_event_id.clone(),
             turn_id: format!("{turn_prefix}-{synth_event_id}"),
-            session_id: channel_id.to_string(),
+            // Same session key the real text source uses — the router keys
+            // barge-in on the exact string.
+            session_id: format!("discord:{channel_id}"),
             parent_event_ids: Vec::new(),
             topic: TOPIC_DISCORD_TEXT.to_owned(),
             timestamp: self.clock.now(),
@@ -3087,6 +3086,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gate_alarm_pierces_absence_through_the_bus_payload() {
+        // N6: the marker must survive the DiscordTextPayload → GatePayload
+        // adaptation, not just a hand-built GatePayload.
+        let engine = Fx::new(FakeClock::new(noon())).build();
+        start_activity(&engine, "hatbox", None).await;
+        let bus_payload = DiscordTextPayload {
+            familiar_id: FAMILIAR.to_owned(),
+            channel_id: CHANNEL,
+            content: "[alarm fired: check the tea]".to_owned(),
+            alarm: true,
+            ..DiscordTextPayload::default()
+        };
+        let gated = GatePayload::from_discord(&bus_payload);
+        assert!(gated.alarm);
+        assert_eq!(engine.gate(&gated).action, GateAction::Normal);
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn gate_non_alarm_payload_still_reports_no_marker() {
+        let p = GatePayload::from_discord(&DiscordTextPayload {
+            content: "hello".to_owned(),
+            ..DiscordTextPayload::default()
+        });
+        assert!(!p.alarm);
+    }
+
+    #[tokio::test]
     async fn gate_unfocused_ping_suppressed() {
         let engine = Fx::new(FakeClock::new(noon())).build();
         start_activity(&engine, "walk", None).await;
@@ -3424,6 +3451,8 @@ mod tests {
         engine.notify_reply_sent().await;
         let ev = recv_wake(&mut sub).await.expect("wake event");
         assert_eq!(ev.topic, TOPIC_DISCORD_TEXT);
+        // N7: same session key the real text source publishes under.
+        assert_eq!(ev.session_id, format!("discord:{CHANNEL}"));
         let p = wake_payload(&ev);
         assert_eq!(p.channel_id, CHANNEL);
         assert!(p.author.is_none());

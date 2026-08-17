@@ -185,6 +185,16 @@ batch_size       = 10   # turns per extraction batch (also the trigger threshold
 tick_interval_s  = 15.0
 participants_max = 30   # cap on participant manifest rows in the prompt
 
+# Post-extraction filter dropping self-capability "facts" ("I cannot
+# remember names", "the assistant has no internet access") before they
+# reach the store. Set the flag false to keep every extracted fact.
+# self_capability_pattern replaces the built-in matcher when non-empty
+# (empty = built-in); it is compiled at startup, so a bad pattern fails
+# the load instead of the extractor's first tick. The pattern is matched
+# against the start of the fact text.
+self_capability_filter  = true
+self_capability_pattern = ""
+
 [providers.memory.people_dossier]
 tick_interval_s = 20.0
 

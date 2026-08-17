@@ -643,7 +643,7 @@ impl FocusManagerApi for TestFocusManager {
         match channel_id {
             Some(c) => match self.channel_names.get(&c) {
                 Some(n) => format!("#{n}({c})"),
-                None => format!("#{c}"),
+                None => format!("#unnamed({c})"),
             },
             None => "none".to_owned(),
         }

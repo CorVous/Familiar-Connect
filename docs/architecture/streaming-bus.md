@@ -59,6 +59,21 @@ future `CrossProcessEventBus` can drop in without rewriting them.
   cancels any active `TurnScope` in the same session before
   installing a new one. Different sessions are independent. This is
   how barge-in is expressed.
+- **Session-id shape.** Since the router keys barge-in on the exact
+  string, every producer for a channel must spell the session the
+  same way: `discord:{channel_id}` for text, `voice:{channel_id}`
+  for voice, `twitch:{familiar_id}` for Twitch. That covers the
+  synthetic `discord.text` producers too — the alarm waker, the
+  unread nudge, and the activity return/nudge wakes all publish
+  under `discord:{channel_id}`, so a synthetic wake and a real user
+  message in the same channel preempt each other instead of
+  replying concurrently.
+- **Payload typing.** `Payload` is a type-erased
+  `Arc<dyn Any + Send + Sync>` and every `discord.text` subscriber
+  recovers it with `downcast_ref::<DiscordTextPayload>()`, silently
+  dropping anything else. A producer that publishes a look-alike
+  (say a `serde_json::Value` with the right keys) is dropped by the
+  whole pipeline with no error — publish the struct.
 
 ## Consequences
 

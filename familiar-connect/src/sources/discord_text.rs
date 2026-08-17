@@ -130,6 +130,7 @@ impl DiscordTextSource {
                 pings_bot: params.pings_bot,
                 author_is_bot: params.author_is_bot,
                 wake: false,
+                alarm: false,
             }),
         };
         self.bus.publish(event.clone()).await;

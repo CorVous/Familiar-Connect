@@ -75,6 +75,15 @@ Surface today:
   (`[providers.memory.<name>]` — cadences, batch sizes,
   thresholds). See
   [Tuning — Memory projectors](tuning.md#memory-projectors-m5).
+- `[providers.memory.rich_note].self_capability_filter` /
+  `.self_capability_pattern` — the fact extractor's self-capability
+  post-filter. The flag (default `true`) turns the whole filter off when
+  `false`, including the display-name inability rail. The pattern
+  (default `""`) replaces the built-in matcher when non-empty; it is
+  compiled during config load, so an invalid regex fails startup with
+  `[providers.memory.rich_note].self_capability_pattern must be a valid
+  regex, got '<pattern>'` rather than blowing up mid-run. See
+  [Context pipeline — No self-capability statements](context-pipeline.md#no-self-capability-statements).
 - `[llm].image_description_model` — model name for vision-based image
   descriptions (e.g. `"openai/gpt-4o"`). Shared across all slots; empty
   string (default) disables the description step. When set, `create_llm_clients`

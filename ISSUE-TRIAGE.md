@@ -86,7 +86,7 @@ the silent-failure surface behind #219.
 `budget::estimate_tokens`, duplicating `CHARS_PER_TOKEN` (`src/budget.rs:20`).
 Recalibrating one silently desynchronizes the other. Relevant to #183.
 
-### N6 — alarms never fire: the waker publishes an undowncastable payload
+### N6 — alarms never fire: the waker publishes an undowncastable payload `[fixed]`
 
 `src/tools/waker.rs:100-120` republishes an alarm onto `discord.text` with a
 raw `serde_json::Value` payload. `Payload` is a type-erased
@@ -107,7 +107,16 @@ missing field with an untyped payload instead of adding it.
 `tests/tools_alarm.rs` misses this because it asserts on the raw `Value`
 payload and never round-trips through `TextResponder::handle`.
 
-### N7 — `session_id` format differs across `discord.text` producers
+Fixed on this branch: `DiscordTextPayload` gained the `alarm: bool` field the
+gate was waiting on, the waker publishes the real struct with `alarm = true`,
+and `GatePayload::from_discord` reads the field instead of hardcoding `false`
+(the piercing branch in `gate()` was already implemented and tested — only the
+adaptation was stubbed). The waker tests now assert on the typed payload, and
+a new `waker_event_drives_a_text_reply` feeds the waker's own published event
+through `TextResponder::handle` and asserts a `send_text` on the right channel
+— the round trip whose absence let this survive.
+
+### N7 — `session_id` format differs across `discord.text` producers `[fixed]`
 
 `TurnRouter` keys barge-in/cancel on the exact `session_id` string
 (`src/bus/router.rs:27-35`), but producers disagree:
@@ -115,7 +124,14 @@ payload and never round-trips through `TextResponder::handle`.
 `channel_id.to_string()` (`src/processors/text_responder.rs:628`,
 `src/activities/engine.rs:1863`, `src/tools/waker.rs:115`). A real message and a
 synthetic wake for the *same* channel are therefore different router sessions,
-so neither preempts the other and both can reply concurrently.
+so neither preempts the other and both can reply concurrently. The bare form
+also hid every synthetic turn from `TypingInterruptHandler`, which looks a
+scope up by `format!("discord:{channel_id}")` (`src/typing_interrupt.rs:186`).
+
+Fixed on this branch: all three synthetic producers now publish under
+`discord:{channel_id}`, matching the real source and the `voice:{id}` /
+`twitch:{id}` convention. Nothing parsed the bare form and no test contract
+pinned it, so unification was a clean rename.
 
 ### N8 — voice turns lack the per-turn focus isolation text has
 
@@ -150,3 +166,24 @@ name passes config validation and then fails at embedder construction.
 `docs/index.md:11` and `docs/architecture/overview.md:58` describe an active
 Twitch EventSub client. `src/twitch_watcher.rs` is feature-gated off and the
 real EventSub session is deferred; only the mock exists.
+
+### N13 — an alarm in a non-focused channel still produces no reply
+
+Surfaced while fixing N6. `gate()` now correctly lets an alarm pierce an
+activity absence, but the *focus* gate is separate: with a `FocusManager`
+wired, an alarm firing outside the focused channel takes the responder's normal
+staging path and never replies. Strictly better than before N6 (previously no
+channel replied at all), but whether an alarm should also pierce focus is a
+product decision, not a bug fix. Related to #221, where focus switching is
+reachable only via a tool call.
+
+### N14 — a channel rename is invisible until the next restart
+
+Found while fixing #222. The focus name caches (`channel_names` / `guild_names`)
+are write-only pushes from four discovery points — the `on_ready` snapshot, both
+`/subscribe-*` handlers (added with the #222 fix), `register_dm_channel`, and
+boot-time `rehydrate_dm_naming`. There is no `ChannelUpdate` / `GuildUpdate`
+handler, so renaming a channel or server mid-session leaves presence, logs, and
+the model's focus line showing the *old* name until the process restarts. Cheap
+to close (`EventHandler::channel_update` → `fm.set_channel_name`), but it is a
+separate gateway event from the one #222 reported.
