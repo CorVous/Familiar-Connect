@@ -32,7 +32,7 @@ use crate::processors::{
     ActivityGate, DiscordTextPayload, FocusManagerApi, GateAction, ResponderLlm, SendText,
     ToolContextFactory, TriggerTyping, TypingIndicator,
 };
-use crate::silence::SilentDetector;
+use crate::silence::{SilentDetector, StreamDecision, StreamGate};
 use crate::tools::agentic::{
     AgenticHooks, DEFAULT_MAX_ITERATIONS, agentic_loop, tool_content_as_text,
 };
@@ -278,6 +278,15 @@ impl TextResponder {
         [TOPIC_DISCORD_TEXT]
     }
 
+    /// Whether this turn runs the agentic loop — i.e. whether the model can
+    /// reach `shift_focus` at all. Gates the tool-referencing reminder prose and
+    /// the no-tools ping fallback (#221).
+    fn tool_mode(&self) -> bool {
+        self.tool_registry.is_some()
+            && self.tool_context_factory.is_some()
+            && (self.llm.tool_calling_enabled() || self.llm.image_tools_enabled())
+    }
+
     /// Handle one `discord.text` event: the whole turn, inline.
     ///
     /// # Errors
@@ -397,22 +406,31 @@ impl TextResponder {
                 return Ok(());
             }
             if !focused {
-                let (ch, srv) = self.origin_fields(channel_id);
-                let label = author.as_ref().map_or("unknown", author_display);
-                tracing::info!(
-                    "{} {}{}{} {}",
-                    ls::tag("\u{1f4e5} Staged", ls::Y),
-                    ch,
-                    srv,
-                    ls::kv_styled("from", label, ls::W, ls::LW),
-                    ls::kv_styled("text", &content, ls::W, ls::LW),
-                );
-                if let Some(fm) = &self.focus_manager {
-                    if fm.should_wake(channel_id) {
-                        self.emit_unread_nudge(bus).await;
+                // Non-tool fallback (#221): with no agentic loop the model can
+                // never call `shift_focus`, so a direct ping would strand her
+                // forever. Answer it — move focus here and fall through. With
+                // tools on, `shift_focus` is her deliberate control and an
+                // automatic shift would fight it, so staging stands.
+                if pings_bot && !self.tool_mode() {
+                    self.shift_for_ping(channel_id).await;
+                } else {
+                    let (ch, srv) = self.origin_fields(channel_id);
+                    let label = author.as_ref().map_or("unknown", author_display);
+                    tracing::info!(
+                        "{} {}{}{} {}",
+                        ls::tag("\u{1f4e5} Staged", ls::Y),
+                        ch,
+                        srv,
+                        ls::kv_styled("from", label, ls::W, ls::LW),
+                        ls::kv_styled("text", &content, ls::W, ls::LW),
+                    );
+                    if let Some(fm) = &self.focus_manager {
+                        if fm.should_wake(channel_id) {
+                            self.emit_unread_nudge(bus).await;
+                        }
                     }
+                    return Ok(());
                 }
-                return Ok(());
             }
         } else if suppressed {
             return Ok(());
@@ -604,6 +622,22 @@ impl TextResponder {
         (ch, srv)
     }
 
+    /// Move focus to a channel that just pinged her, tool-free (#221).
+    async fn shift_for_ping(&self, channel_id: i64) {
+        let Some(fm) = &self.focus_manager else {
+            return;
+        };
+        fm.shift_now(channel_id).await;
+        let (ch, srv) = self.origin_fields(channel_id);
+        tracing::info!(
+            "{} {}{}{}",
+            ls::tag("\u{1f500} Focus", ls::LC),
+            ch,
+            srv,
+            ls::kv_styled("reason", "ping_no_tools", ls::W, ls::LW),
+        );
+    }
+
     async fn emit_unread_nudge(&self, bus: &dyn EventBus) {
         let Some(fm) = &self.focus_manager else {
             return;
@@ -720,8 +754,10 @@ impl TextResponder {
             .map(|fm| fm.guild_names())
             .unwrap_or_default();
 
+        let tool_mode = self.tool_mode();
         let mut head = FinalReminder::new("text")
             .include_time(false)
+            .tools_enabled(tool_mode)
             .channel_names(ch_names.clone())
             .guild_names(gn_names.clone());
         if let Some(fc) = focus_ch {
@@ -745,6 +781,7 @@ impl TextResponder {
         let mut trailing_b = FinalReminder::new("text")
             .display_tz(&self.display_tz)
             .include_mode_instruction(true)
+            .tools_enabled(tool_mode)
             .post_history_instructions(&self.post_history_instructions)
             .channel_names(ch_names)
             .guild_names(gn_names);
@@ -763,9 +800,6 @@ impl TextResponder {
         }
         messages.push(Message::new("system", trailing));
 
-        let tool_mode = self.tool_registry.is_some()
-            && self.tool_context_factory.is_some()
-            && (self.llm.tool_calling_enabled() || self.llm.image_tools_enabled());
         if tool_mode {
             self.stream_reply_with_tools(
                 scope,
@@ -805,7 +839,10 @@ impl TextResponder {
         typing: &mut Option<Box<dyn TypingIndicator>>,
     ) -> Option<String> {
         let mut accumulated = String::new();
-        let mut silent = SilentDetector::new();
+        // Same gate voice uses: `<silent>` plus the leaked-tool-call guard, so a
+        // tool-less model imitating `shift_focus(…)` never reaches Discord
+        // (#221; the tool path has the return-time strip guard instead).
+        let mut gate = StreamGate::new();
         let mut stream = match self.llm.stream_completion(messages, None).await {
             Ok(s) => s,
             Err(exc) => {
@@ -836,8 +873,8 @@ impl TextResponder {
                 continue;
             }
             accumulated.push_str(&delta.content);
-            match silent.feed(&delta.content) {
-                Some(true) => {
+            match gate.feed(&delta.content) {
+                StreamDecision::Silent => {
                     // Deliberate abandon, not a barge-in (issue #220).
                     stream.note_abandon_status("silent");
                     tracing::info!(
@@ -848,14 +885,24 @@ impl TextResponder {
                     );
                     return None;
                 }
-                Some(false) => {
+                StreamDecision::Suppress => {
+                    stream.note_abandon_status("suppressed");
+                    tracing::warn!(
+                        "{} {} {}",
+                        ls::tag("Text", ls::Y),
+                        ls::kv_styled("decision", "leaked_tool_suppressed", ls::W, ls::LY),
+                        ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
+                    );
+                    return None;
+                }
+                StreamDecision::Speak => {
                     if typing.is_none()
                         && let Some(trigger) = &self.trigger_typing
                     {
                         *typing = Some(trigger.open(channel_id).await);
                     }
                 }
-                None => {}
+                StreamDecision::Pending => {}
             }
         }
         Some(accumulated)

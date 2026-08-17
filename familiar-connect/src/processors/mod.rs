@@ -185,6 +185,9 @@ pub trait FocusManagerApi: Send + Sync {
     fn is_focused(&self, channel_id: i64) -> bool;
     /// Whether a non-focused arrival warrants a nudge (debounced).
     fn should_wake(&self, channel_id: i64) -> bool;
+    /// Move focus to `channel_id` now (same path the `shift_focus` tool takes).
+    /// The text responder's no-tools ping fallback needs it (#221).
+    async fn shift_now(&self, channel_id: i64);
     /// The current focus channel for `modality` (`"text"` → text pointer).
     fn get_focus(&self, modality: &str) -> Option<i64>;
     /// Record a nudge timestamp to start the debounce window.
@@ -213,6 +216,9 @@ impl FocusManagerApi for crate::focus::FocusManager {
     }
     fn should_wake(&self, channel_id: i64) -> bool {
         Self::should_wake(self, channel_id)
+    }
+    async fn shift_now(&self, channel_id: i64) {
+        Self::shift_now(self, channel_id).await;
     }
     fn get_focus(&self, modality: &str) -> Option<i64> {
         Self::get_focus(self, modality)

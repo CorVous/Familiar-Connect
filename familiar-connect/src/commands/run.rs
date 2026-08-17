@@ -492,11 +492,19 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         };
 
     // Degrade-not-fail: TTS / STT / local turn detector unavailability warns.
-    let tts_client = match crate::tts::create_tts_client(&config.tts) {
-        Ok(kind) => Some(kind.into_dyn()),
-        Err(err) => {
-            tracing::warn!("TTS client unavailable: {err}");
-            None
+    // An unwired provider is louder — it would otherwise construct fine and
+    // fail on the first synthesis, mid-conversation.
+    let tts_client = if let Some(reason) = crate::tts::unwired_provider_reason(&config.tts.provider)
+    {
+        tracing::error!("{reason}");
+        None
+    } else {
+        match crate::tts::create_tts_client(&config.tts) {
+            Ok(kind) => Some(kind.into_dyn()),
+            Err(err) => {
+                tracing::warn!("TTS client unavailable: {err}");
+                None
+            }
         }
     };
     let transcriber = match crate::stt::create_transcriber(&config.stt) {
@@ -634,6 +642,45 @@ const DEBUG_TOPICS: [&str; 4] = [
     crate::bus::topics::TOPIC_VOICE_ACTIVITY_START,
     crate::bus::topics::TOPIC_VOICE_TRANSCRIPT_FINAL,
 ];
+
+/// Spawn the detached OpenRouter capability audit (#218).
+///
+/// Fire-and-forget like the signal listener: config loading stays offline, and
+/// a slow or unreachable catalog can never gate readiness. Silent without an
+/// API key — `run_inner` has already refused that case.
+#[cfg(feature = "discord")]
+fn spawn_model_capability_audit(config: &crate::config::CharacterConfig) {
+    let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return;
+    }
+    tokio::spawn(crate::model_diagnostics::run_capability_audit(
+        api_key,
+        crate::llm::OPENROUTER_BASE_URL.to_owned(),
+        config.llm.clone(),
+    ));
+}
+
+/// Boot check for #221: both responder surfaces get a focus manager
+/// unconditionally, so a slot with `tool_calling = false` can never reach
+/// `shift_focus`. Needs no network — immediate and unconditional.
+#[cfg(feature = "discord")]
+fn check_focus_tool_calling(config: &crate::config::CharacterConfig) {
+    // Text can still follow a direct ping without a tool; voice cannot.
+    for (surface, slot_name, ping_fallback) in [("text", "prose", true), ("voice", "fast", false)] {
+        let Some(slot) = config.llm.get(slot_name) else {
+            continue;
+        };
+        if let Some(msg) = crate::model_diagnostics::focus_unreachable_message(
+            surface,
+            slot_name,
+            slot,
+            ping_fallback,
+        ) {
+            tracing::error!(target: "familiar_connect.llm", "{msg}");
+        }
+    }
+}
 
 /// Spawn the two-stage SIGINT/SIGTERM listener.
 #[cfg(all(feature = "discord", unix))]
@@ -822,6 +869,9 @@ async fn async_main(
 
     familiar.bus.start().await;
 
+    // Model-configuration diagnostics (#218) — detached, never gates readiness.
+    spawn_model_capability_audit(&familiar.config);
+
     // Subscriptions: ONE shared-mutable registry (`Arc<Mutex<…>>`) consumed
     // by both the bot (which mutates it on `/subscribe*`) and the focus manager
     // (which reads it through the `SubscriptionView` seam).
@@ -838,6 +888,10 @@ async fn async_main(
         .with_nudge_debounce_seconds(familiar.config.focus.nudge_debounce_seconds)
         .with_catch_up_limit(usize::try_from(familiar.config.focus.catch_up_limit).unwrap_or(20)),
     );
+
+    // Both responders below take this focus manager, so #221's trap is live
+    // from here on.
+    check_focus_tool_calling(&familiar.config);
 
     // Boot DM validation + naming + default-focus seeding, in one ordered unit:
     // prune de-allowlisted DM rows, initialize focus, rehydrate DM naming, then

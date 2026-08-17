@@ -119,12 +119,15 @@ Locations verified against the current tree. Paths are under
    LLM which to retire. *Prevents:* evaluating the same prior twice and
    redundant supersede work.
 7. **Silent / stream reply gate** — `reply_gate`, sentinel. `silence.rs`
-   `SilentDetector` recognises the leading `<silent>` sentinel for the text path
-   (`processors/text_responder.rs`); `StreamGate` widens it for voice
-   (`processors/voice_responder.rs`), additionally latching `Suppress` on a
-   leaked tool-call prefix (`classify_leading_leak`). *Prevents:* emitting a
-   deliberate silence as prose, and (voice) speaking a leaked `<invoke>` /
-   `silent(` / `<tool_call>` block aloud.
+   `SilentDetector` recognises the leading `<silent>` sentinel inside the text
+   agentic loop (`processors/text_responder.rs`); `StreamGate` widens it on both
+   tool-less stream paths — voice (`processors/voice_responder.rs`) and text
+   (`stream_bare_inner`, #221) — additionally latching `Suppress` on a leaked
+   tool-call prefix (`classify_leading_leak`), logged
+   `decision=leaked_tool_suppressed`. *Prevents:* emitting a deliberate silence
+   as prose, and speaking / posting a leaked `<invoke>` / `silent(` /
+   `<tool_call>` block. The text agentic loop is covered instead by the
+   return-time strip guard in `tools::agentic`.
 8. **Leaked-metadata prefix scrub** — `reply_gate`, rewrite.
    `processors/text_responder.rs` `strip_leaked_metadata_prefix`
    (`LEAKED_META_PREFIX_RE`) strips a leaked `[HH:MMxM]` / `[↩ …]` transcript

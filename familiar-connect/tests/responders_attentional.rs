@@ -534,6 +534,89 @@ fn real_focus_bare_responder(
     (r, fm, s)
 }
 
+// ---------------------------------------------------------------------------
+// Non-tool focus fallback (#221)
+// ---------------------------------------------------------------------------
+
+/// A payload that directly pings the bot.
+fn ping_payload(channel_id: i64, content: &str) -> DiscordTextPayload {
+    DiscordTextPayload {
+        pings_bot: true,
+        ..text_payload(channel_id, content)
+    }
+}
+
+#[tokio::test]
+async fn ping_to_unfocused_channel_without_tools_shifts_and_replies() {
+    // #221: with no tool path there is no `shift_focus`, so a direct ping in an
+    // unfocused channel must move focus itself and answer there.
+    let llm: Arc<dyn ResponderLlm> = Arc::new(ScriptedLlm::new(&["over here"]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, s) = real_focus_bare_responder(llm, send.clone());
+
+    r.handle(
+        &discord_text_event(ping_payload(200, "@fam hey"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(fm.get_focus("text"), Some(200));
+    assert_eq!(send.calls().len(), 1);
+    assert_eq!(send.calls()[0].0, 200);
+    assert_eq!(send.calls()[0].1, "over here");
+    // The shift promoted the just-staged ping, so it is not left unread.
+    let ping = s
+        .sync()
+        .recent("fam", 200, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.content == "@fam hey")
+        .unwrap();
+    assert!(ping.consumed_at.is_some());
+}
+
+#[tokio::test]
+async fn plain_message_to_unfocused_channel_without_tools_still_stages() {
+    // Only a *direct ping* earns the fallback; ambient traffic stays staged.
+    let llm: Arc<dyn ResponderLlm> = Arc::new(ScriptedLlm::new(&["should not send"]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, _) = real_focus_bare_responder(llm, send.clone());
+
+    r.handle(
+        &discord_text_event(text_payload(200, "chatter"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+
+    assert!(send.calls().is_empty());
+    assert_eq!(fm.get_focus("text"), Some(100));
+}
+
+#[tokio::test]
+async fn ping_to_unfocused_channel_with_tools_keeps_staging() {
+    // Tools on: `shift_focus` already gives her deliberate control, so the
+    // fallback must not fire — today's staging behavior is preserved exactly.
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        text_delta("should not send"),
+        finish("stop"),
+    ]]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, _) = real_focus_responder(llm.clone(), send.clone());
+
+    r.handle(
+        &discord_text_event(ping_payload(200, "@fam hey"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+
+    assert!(send.calls().is_empty());
+    assert_eq!(fm.get_focus("text"), Some(100));
+    assert_eq!(llm.call_count(), 0);
+}
+
 #[tokio::test]
 async fn reply_routes_to_trigger_channel_despite_concurrent_focus_shift() {
     // Focus is on 100 when the turn starts; the reply streams slowly while a

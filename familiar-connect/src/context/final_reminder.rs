@@ -8,6 +8,9 @@
 //! `include_time=false`; tail copy with the clock, mode instruction, post-history
 //! and guild name).
 //!
+//! Tool-referencing prose is gated on `tools_enabled`: a slot with tool calling
+//! off is never told to call `shift_focus` (#221).
+//!
 //! The block grammar is a byte-exact prompt-format contract.
 
 use std::collections::HashMap;
@@ -167,7 +170,8 @@ impl FinalReminder {
         self.include_mode_instruction = include;
         self
     }
-    /// Toggle the voice tool nudge (voice mode only).
+    /// Whether the slot can actually call tools. Gates the voice tool nudge
+    /// (voice mode) and the `shift_focus` clause on the unread digest (#221).
     #[must_use]
     pub const fn tools_enabled(mut self, enabled: bool) -> Self {
         self.tools_enabled = enabled;
@@ -286,10 +290,17 @@ impl FinalReminder {
                 } else {
                     "new messages"
                 };
-                format!(
-                    "There {verb} {noun} in {ch_list} \
-                     \u{2014} use shift_focus if it pulls your attention."
-                )
+                // Coach `shift_focus` only where it can actually be called —
+                // a tool-less slot told to use it just leaks the literal
+                // call syntax into the channel (#221).
+                if self.tools_enabled {
+                    format!(
+                        "There {verb} {noun} in {ch_list} \
+                         \u{2014} use shift_focus if it pulls your attention."
+                    )
+                } else {
+                    format!("There {verb} {noun} in {ch_list}.")
+                }
             };
 
             let block = [focus_part, unread_part]
@@ -704,12 +715,38 @@ mod tests {
     fn unread_digest_rendered() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(10, (3, 0)), (20, (1, 0))])
             .render();
         assert!(out.contains("new message"));
         assert!(out.contains("#10"));
         assert!(out.contains("#20"));
         assert!(out.contains("shift_focus"));
+    }
+
+    #[test]
+    fn unread_digest_omits_shift_focus_coaching_without_tools() {
+        // #221: a tool-less slot cannot call `shift_focus`; coaching it to only
+        // invites a leaked literal call.
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(out.contains("There are new messages in #10 (3)."), "{out}");
+        assert!(!out.contains("shift_focus"), "{out}");
+    }
+
+    #[test]
+    fn unread_digest_keeps_shift_focus_coaching_with_tools() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(
+            out.contains("#10 (3) \u{2014} use shift_focus if it pulls your attention."),
+            "{out}"
+        );
     }
 
     #[test]
@@ -759,6 +796,7 @@ mod tests {
     fn ping_subset_with_higher_unread_count() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(10, (3, 1))])
             .render();
         assert!(out.contains("#10 (3, 1 ping)"));
@@ -796,6 +834,7 @@ mod tests {
     fn single_unread_no_ping_has_no_suffix() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(10, (1, 0))])
             .render();
         assert!(out.contains("#10 \u{2014}"));
@@ -806,6 +845,7 @@ mod tests {
     fn named_unread_channel_surfaces_numeric_id() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(422_137_955_130_408_970, (2, 0))])
             .channel_names(names(&[(422_137_955_130_408_970, "the-annex")]))
             .render();

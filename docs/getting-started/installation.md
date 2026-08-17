@@ -41,14 +41,14 @@ FAMILIAR_ID=aria
 
 # TTS credentials — set the one matching [tts].provider in character.toml
 
-# Azure Speech (default provider):
+# Cartesia (provider="cartesia", the default and only wired backend):
+CARTESIA_API_KEY=<cartesia key>
+
+# Azure Speech — backend NOT WIRED; provider="azure" is refused at startup:
 AZURE_SPEECH_KEY=<azure cognitive services key>
 AZURE_SPEECH_REGION=<azure region, e.g. eastus>
 
-# Cartesia (provider="cartesia"):
-CARTESIA_API_KEY=<cartesia key>
-
-# Google Gemini TTS (provider="gemini"):
+# Google Gemini TTS — backend NOT WIRED; provider="gemini" is refused at startup:
 GOOGLE_API_KEY=<google ai studio key>
 
 # optional — Deepgram speech transcription (voice channels only)
