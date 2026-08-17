@@ -12,7 +12,9 @@
 //!
 //! The two registry lookups (`known_projectors`,
 //! `known_embedders`) are injected as `&BTreeSet<String>` parameters, keeping
-//! this a near-leaf module.
+//! this a near-leaf module. The fastembed model → native-dim table
+//! ([`FastembedNativeDim`]) is injected the same way through the parse layer;
+//! only [`load_character_config`] names the concrete table.
 
 use crate::budget::{ModelBudgetCurve, TierBudget};
 use chrono::NaiveTime;
@@ -24,6 +26,11 @@ use toml::{Table, Value};
 // ---------------------------------------------------------------------------
 // Error type + constants
 // ---------------------------------------------------------------------------
+
+/// Injected lookup: fastembed model name → native output dim, `None` when the
+/// name is unmapped (dim knowable only after the runtime probe). Keeps the
+/// model table out of this module.
+pub type FastembedNativeDim = fn(&str) -> Option<usize>;
 
 /// Malformed config file or unknown value reference. The single error type for
 /// every config problem; callers match on message substrings (byte-stable).
@@ -583,7 +590,9 @@ impl Default for ToolsConfig {
 pub struct EmbeddingConfig {
     /// Backend name (registered); `"off"` disables the seam.
     pub backend: String,
-    /// Dimensionality hint for backends that accept one.
+    /// Dimensionality for backends that accept one (`hash`). Under
+    /// `fastembed` the model owns it: parsing resolves an unset `dim` to the
+    /// model's native dim and rejects one that contradicts it.
     pub dim: i64,
     /// FastEmbed model name.
     pub fastembed_model: String,
@@ -804,6 +813,10 @@ pub fn load_character_config(
     known_projectors: &BTreeSet<String>,
     known_embedders: &BTreeSet<String>,
 ) -> Result<CharacterConfig, ConfigError> {
+    // The one lookup this entry point resolves itself: the fastembed
+    // model → native-dim table is static metadata, and adding a fifth
+    // parameter would churn every caller. Parsing below stays injection-only.
+    let fastembed_native_dim: FastembedNativeDim = crate::embedding::fastembed_native_dim;
     let Some(defaults_data) = read_toml(defaults_path)? else {
         return Err(ConfigError(format!(
             "default character profile not found at {}. This file is a required repo asset — check your install.",
@@ -812,7 +825,12 @@ pub fn load_character_config(
     };
     let target_data = read_toml(path)?.unwrap_or_default();
     let merged = deep_merge(&defaults_data, &target_data);
-    parse_character_config(&merged, known_projectors, known_embedders)
+    parse_character_config(
+        &merged,
+        known_projectors,
+        known_embedders,
+        fastembed_native_dim,
+    )
 }
 
 fn read_toml(path: &Path) -> Result<Option<Table>, ConfigError> {
@@ -861,6 +879,7 @@ fn parse_character_config(
     data: &Table,
     known_projectors: &BTreeSet<String>,
     known_embedders: &BTreeSet<String>,
+    fastembed_native_dim: FastembedNativeDim,
 ) -> Result<CharacterConfig, ConfigError> {
     let providers = expect_table(data.get("providers"), "[providers]")?;
     let history_section = expect_table(providers.get("history"), "[providers.history]")?;
@@ -938,6 +957,7 @@ fn parse_character_config(
     let embedding = parse_embedding_config(
         expect_table(providers.get("embedding"), "[providers.embedding]")?,
         known_embedders,
+        fastembed_native_dim,
     )?;
 
     let budget_raw = expect_table(data.get("budget"), "[budget]")?;
@@ -2069,6 +2089,7 @@ fn parse_memory_providers(
 fn parse_embedding_config(
     raw: &Table,
     known_embedders: &BTreeSet<String>,
+    fastembed_native_dim: FastembedNativeDim,
 ) -> Result<EmbeddingConfig, ConfigError> {
     check_unknown_keys(
         raw,
@@ -2092,9 +2113,39 @@ fn parse_embedding_config(
             valid_or_none(known_embedders)
         )));
     }
+    let fastembed_model = match raw.get("fastembed_model") {
+        None => d.fastembed_model.clone(),
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(other) => {
+            return Err(ConfigError(format!(
+                "[providers.embedding].fastembed_model must be a non-empty string, got {}",
+                value_type_name(other)
+            )));
+        }
+    };
+    // The selected model's native dim, when knowable without a runtime probe.
+    // Only `fastembed` is model-bound; `hash` owns its `dim` outright, and an
+    // unmapped model name stays unchecked (dim known only after the probe).
+    let native_dim: Option<i64> = if backend == "fastembed" {
+        fastembed_native_dim(&fastembed_model).and_then(|n| i64::try_from(n).ok())
+    } else {
+        None
+    };
     let dim = match raw.get("dim") {
-        None => d.dim,
-        Some(Value::Integer(n)) if *n > 0 => *n,
+        // Unset: adopt the model's native dim so the struct never advertises a
+        // width that is wrong for the selected model.
+        None => native_dim.unwrap_or(d.dim),
+        Some(Value::Integer(n)) if *n > 0 => {
+            if let Some(native) = native_dim
+                && *n != native
+            {
+                return Err(ConfigError(format!(
+                    "[providers.embedding].dim = {n} contradicts fastembed_model \
+                     '{fastembed_model}' (native dim {native}); remove `dim` or set it to {native}."
+                )));
+            }
+            *n
+        }
         Some(Value::Integer(n)) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be > 0, got {n}"
@@ -2103,16 +2154,6 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be a positive integer, got {}",
-                value_type_name(other)
-            )));
-        }
-    };
-    let fastembed_model = match raw.get("fastembed_model") {
-        None => d.fastembed_model.clone(),
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(other) => {
-            return Err(ConfigError(format!(
-                "[providers.embedding].fastembed_model must be a non-empty string, got {}",
                 value_type_name(other)
             )));
         }

@@ -29,9 +29,24 @@ skeleton stays CWD-relative).
 
 Surface today:
 
-- `display_tz` — IANA timezone (default `"UTC"`) the final-reminder
-  clock renders in (e.g. `"It is now: … 2:30PM PDT"`). Invalid names
-  (e.g. `"PST"`) fail fast at config load.
+- `display_tz` — IANA timezone (default `"UTC"`) every model-facing
+  clock renders in. Invalid names (e.g. `"PST"`) fail fast at config
+  load. The store stays UTC-only; `display_tz` is the translation
+  layer at the edges:
+    - The final-reminder line is the single clock anchor and carries
+      the numeric offset —
+      `"It is now: 2026-05-04 2:30PM PDT (-07:00)"`. Everything else
+      the model reads is local to the same zone and omits the offset,
+      so `set_alarm`'s RFC-3339 `when` is constructible without
+      guessing "PDT → -07:00".
+    - Recent-history prefixes stay bare `HH:MM`; a `YYYY-MM-DD:`
+      marker is interleaved only when the window spans more than one
+      local day (see
+      [Context pipeline](context-pipeline.md#dynamic)).
+    - Schedule windows shown to the model (`start_activity`'s hours,
+      the bedtime and schedule refusals) name the zone.
+    - A date-only `valid_from` from the fact extractor anchors to
+      local midnight rather than 00:00 UTC.
 - `[sleep]` — sleep schedule, character-domain wall-clock config
   localized via `display_tz`. `window = "HH:MM-HH:MM"` (may wrap
   midnight; bad format fails fast) and `grace_minutes` (default 30)

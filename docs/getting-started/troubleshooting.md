@@ -23,6 +23,15 @@ Common startup errors and what they mean:
   `CARTESIA_API_KEY`, or `GOOGLE_API_KEY` / `GEMINI_API_KEY`) is set;
   with no client the player falls back to `LoggingTTSPlayer`, which
   only logs.
+- **Voice transcripts come out anonymous** — every frame is unattributed
+  when the SSRC → user map never fills. Look for the periodic
+  `[🎙️  Voice] receive ticks=… speaking_frames=… unmapped_frames=…`
+  line: `unmapped_frames` equal to `speaking_frames` means no op-5
+  `Speaking` event was ever seen. See
+  [Voice pipeline](../architecture/voice-pipeline.md#songbird-join-order-and-ssrc-attribution).
+- **`RTCP decryption failed: Crypto(Error)` in the log** — songbird's UDP
+  receive task, benign and non-fatal by design. It is filtered out by
+  default (`songbird::driver::tasks::udp_rx=error`); `-vv` restores it.
 - **`(playback only — no transcriber)` after `/subscribe-voice`** —
   `DEEPGRAM_API_KEY` is missing or invalid. The bot joined the channel
   and can speak, but incoming audio isn't transcribed.

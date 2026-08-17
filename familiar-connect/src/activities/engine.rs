@@ -62,6 +62,7 @@ use crate::sleep::maintenance::{
     DEFAULT_PASSES, MaintenanceContext, MaintenanceRun, SleepPromptText, create_passes, run_passes,
 };
 use crate::sleep::opinion_formation::OpinionPlan;
+use crate::support::time::iso_utc;
 use crate::tools::start_activity::{ActivityCatalogEntry, StartActivityEngine};
 
 // return-turn display prefix (history/RAG rendering only)
@@ -674,7 +675,10 @@ fn title_case(s: &str) -> String {
     out
 }
 
-fn schedule_message(at: &ActivityType) -> String {
+/// `<label> is only available Mon Tue, 09:00-17:00 PDT`. `tz_abbr` is the
+/// display zone's abbreviation *now* — `active_hours` are bare local
+/// `NaiveTime`s, so without it the model reads the window as UTC.
+fn schedule_message(at: &ActivityType, tz_abbr: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(days) = &at.active_days {
         parts.push(
@@ -685,7 +689,11 @@ fn schedule_message(at: &ActivityType) -> String {
         );
     }
     if let Some((start, end)) = at.active_hours {
-        parts.push(format!("{}-{}", start.format("%H:%M"), end.format("%H:%M")));
+        parts.push(format!(
+            "{}-{} {tz_abbr}",
+            start.format("%H:%M"),
+            end.format("%H:%M")
+        ));
     }
     format!("{} is only available {}", at.label, parts.join(", "))
 }
@@ -909,7 +917,7 @@ impl ActivityEngine {
         let duration = if let Some(window) = self.window_for(&activity_type) {
             let (start, end) = self.window_occurrence(now, window);
             if start - now > Duration::minutes(EARLY_BED_MINUTES) {
-                let local_start = start.with_timezone(&self.tz).format("%H:%M");
+                let local_start = start.with_timezone(&self.tz).format("%H:%M %Z");
                 return json!({"error": format!(
                     "not bedtime — the sleep window starts at {local_start}; head to bed within the hour before it"
                 )});
@@ -1325,7 +1333,7 @@ impl ActivityEngine {
         tracing::info!(
             "{} force sleep {}",
             ls::tag("\u{1f319} Activity", ls::G),
-            ls::kv_styled("wake", &planned_return_at.to_rfc3339(), ls::W, ls::LW),
+            ls::kv_styled("wake", &iso_utc(planned_return_at), ls::W, ls::LW),
         );
     }
 
@@ -1952,7 +1960,8 @@ impl ActivityEngine {
         if in_days && in_hours {
             None
         } else {
-            Some(schedule_message(activity_type))
+            let tz_abbr = now.with_timezone(&self.tz).format("%Z").to_string();
+            Some(schedule_message(activity_type, &tz_abbr))
         }
     }
 }
@@ -1992,6 +2001,10 @@ impl StartActivityEngine for ActivityEngine {
                 active_hours: t.active_hours,
             })
             .collect()
+    }
+
+    fn display_tz(&self) -> Tz {
+        self.tz
     }
 
     fn is_active(&self) -> bool {
@@ -2151,9 +2164,8 @@ mod tests {
             &self,
             _m: Vec<Message>,
             _t: Option<Vec<Value>>,
-        ) -> anyhow::Result<futures::stream::BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-        {
-            Ok(Box::pin(futures::stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(futures::stream::empty()))
         }
         fn slot(&self) -> Option<&str> {
             Some("background")
@@ -4817,6 +4829,30 @@ mod tests {
         let engine = fx.build();
         let r = engine.defer_start("sleep", None);
         assert!(r["error"].as_str().unwrap().contains("window"));
+    }
+
+    #[tokio::test]
+    async fn early_bed_refusal_names_the_window_timezone() {
+        // 2026-06-13 20:00Z == 13:00 PDT; the 00:00 window start is 18h out.
+        let mut fx = Fx::new(FakeClock::new(dt(2026, 6, 13, 20, 0)));
+        fx.config = sleep_config();
+        fx.display_tz = "America/Los_Angeles".to_owned();
+        let engine = fx.build();
+        let r = engine.defer_start("sleep", None);
+        let err = r["error"].as_str().unwrap().to_owned();
+        assert!(err.contains("starts at 00:00 PDT"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn schedule_refusal_names_the_window_timezone() {
+        // Saturday: weekday_rounds is Mon-Fri 09:00-17:00 local.
+        let mut fx = Fx::new(FakeClock::new(dt(2026, 6, 13, 20, 0)));
+        fx.config = clamp_config();
+        fx.display_tz = "America/Los_Angeles".to_owned();
+        let engine = fx.build();
+        let r = engine.defer_start("weekday_rounds", None);
+        let err = r["error"].as_str().unwrap().to_owned();
+        assert!(err.contains("09:00-17:00 PDT"), "{err}");
     }
 
     #[tokio::test]

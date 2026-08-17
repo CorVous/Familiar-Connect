@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use serde_json::{Value, json};
 
 use familiar_connect::bus::envelope::{Event, payload as wrap_payload};
@@ -31,7 +31,7 @@ use familiar_connect::context::{Assembler, CharacterCardLayer, RecentHistoryLaye
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
 use familiar_connect::identity::Author;
-use familiar_connect::llm::{LlmClient, LlmDelta, Message};
+use familiar_connect::llm::{AbandonStatus, LlmClient, LlmDelta, LlmStream, Message};
 use familiar_connect::processors::{
     ActivityGate, DiscordTextPayload, FocusManagerApi, GateDecision, ResponderLlm, SendText,
     ToolContextFactory, TriggerTyping, TypingIndicator, VoiceActivityStart, VoiceTranscriptFinal,
@@ -189,6 +189,7 @@ pub struct ScriptedLlm {
     delay_ms: u64,
     tool_calling: bool,
     image_tools: bool,
+    abandon: AbandonStatus,
 }
 
 impl ScriptedLlm {
@@ -198,12 +199,20 @@ impl ScriptedLlm {
             delay_ms: 0,
             tool_calling: false,
             image_tools: false,
+            abandon: AbandonStatus::default(),
         }
     }
+
     pub fn with_delay(deltas: &[&str], delay_ms: u64) -> Self {
         let mut s = Self::new(deltas);
         s.delay_ms = delay_ms;
         s
+    }
+
+    /// Status word the responder noted before abandoning the stream —
+    /// `cancelled` unless it noted otherwise (issue #220).
+    pub fn abandon_status(&self) -> &'static str {
+        self.abandon.get()
     }
 }
 
@@ -216,7 +225,7 @@ impl LlmClient for ScriptedLlm {
         &self,
         _messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<LlmStream> {
         let deltas = self.deltas.clone();
         let delay = self.delay_ms;
         let s = stream::unfold(deltas.into_iter(), move |mut it| async move {
@@ -226,7 +235,7 @@ impl LlmClient for ScriptedLlm {
             }
             Some((Ok(text_delta(&d)), it))
         });
-        Ok(Box::pin(s))
+        Ok(LlmStream::with_abandon(Box::pin(s), self.abandon.clone()))
     }
     fn slot(&self) -> Option<&str> {
         None
@@ -275,12 +284,12 @@ impl LlmClient for CapturingLlm {
         &self,
         messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<LlmStream> {
         self.captured.lock().expect("captured").push(messages);
         let reply = self.reply.clone();
-        Ok(Box::pin(stream::once(
-            async move { Ok(text_delta(&reply)) },
-        )))
+        Ok(LlmStream::new(stream::once(async move {
+            Ok(text_delta(&reply))
+        })))
     }
     fn slot(&self) -> Option<&str> {
         None
@@ -336,7 +345,7 @@ impl LlmClient for ScriptedToolLlm {
         &self,
         messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<LlmStream> {
         self.calls.lock().expect("calls").push(messages);
         let script = {
             let mut scripts = self.scripts.lock().expect("scripts");
@@ -346,7 +355,7 @@ impl LlmClient for ScriptedToolLlm {
                 scripts.remove(0)
             }
         };
-        Ok(Box::pin(stream::iter(script.into_iter().map(Ok))))
+        Ok(LlmStream::new(stream::iter(script.into_iter().map(Ok))))
     }
     fn slot(&self) -> Option<&str> {
         None

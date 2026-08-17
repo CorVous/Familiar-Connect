@@ -210,7 +210,11 @@ The seam splits across three knobs so each can move independently:
 - `[providers.embedding].backend` — picks the backend. `off`
   (default), `hash` (no-deps baseline), or `fastembed`
   (production-grade ONNX sentence embedder; needs the
-  `local-embed` extra).
+  `local-embed` extra). Under `fastembed` the model fixes the vector
+  width: an unset `[providers.embedding].dim` resolves to the model's
+  native dim, and a `dim` that contradicts `fastembed_model` is
+  rejected at config load. See
+  [Tuning → Embeddings](tuning.md#dim-under-fastembed).
 - `[providers.memory].projectors` — list `"fact_embedding"` to
   start populating the side-index.
 - `[memory.retrieval].embedding_weight` — turn the signal on at
@@ -335,7 +339,11 @@ Each row in `facts` carries two independent time axes:
   source turn's timestamp; the LLM may override with an explicit
   ISO-8601 string on spotting an "as of …" phrase ("Aria moved to
   Berlin in early 2024"). `valid_to` is `NULL` while the fact still
-  applies.
+  applies. Stored values are always UTC. An offset-bearing override is
+  converted; a bare `YYYY-MM-DD` means that calendar day in
+  `display_tz` and anchors to local midnight (a midnight DST skips
+  falls forward to the first hour that exists), so a non-UTC install
+  does not shift the date by up to 14 hours.
 
 Default reads stay "current truth": `superseded_at IS NULL` and
 `valid_to IS NULL OR valid_to > now`. Audit queries pass

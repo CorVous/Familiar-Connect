@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use regex::Regex;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -126,6 +127,8 @@ pub struct FactExtractor {
     familiar_id: String,
     familiar_display_name: Option<String>,
     dream_extraction_clause: String,
+    /// IANA zone a date-only `valid_from` is anchored to (defaults `"UTC"`).
+    display_tz: String,
     batch_size: i64,
     participants_max: i64,
     tick_interval: Duration,
@@ -147,6 +150,7 @@ impl FactExtractor {
             familiar_id: familiar_id.into(),
             familiar_display_name: None,
             dream_extraction_clause: String::new(),
+            display_tz: "UTC".to_owned(),
             batch_size: 10,
             participants_max: 30,
             tick_interval: Duration::from_secs_f64(15.0),
@@ -166,6 +170,19 @@ impl FactExtractor {
     pub fn dream_extraction_clause(mut self, clause: impl Into<String>) -> Self {
         self.dream_extraction_clause = clause.into();
         self
+    }
+
+    /// IANA display timezone. A date-only `valid_from` the model emits means
+    /// "that calendar day *here*", so it anchors to midnight in this zone.
+    #[must_use]
+    pub fn display_tz(mut self, tz: impl Into<String>) -> Self {
+        self.display_tz = tz.into();
+        self
+    }
+
+    /// Resolved display timezone (unparseable falls back to UTC).
+    fn tz(&self) -> Tz {
+        self.display_tz.parse().unwrap_or(Tz::UTC)
     }
 
     /// Trigger threshold AND per-tick cap (clamped to `>= 1`).
@@ -362,9 +379,10 @@ impl FactExtractor {
                     text = format!("{self_name} dreamed that {text}");
                 }
             }
-            let valid_from = parse_iso_dt(fact.valid_from.as_ref())
+            let tz = self.tz();
+            let valid_from = parse_iso_dt(fact.valid_from.as_ref(), tz)
                 .or_else(|| ts_by_id.get(&source_ids[0]).copied());
-            let valid_to = parse_iso_dt(fact.valid_to.as_ref());
+            let valid_to = parse_iso_dt(fact.valid_to.as_ref(), tz);
             let importance = parse_importance(fact.importance.as_ref());
 
             let mut append = AppendFact::new(
@@ -720,9 +738,10 @@ fn parse_importance(raw: Option<&Value>) -> Option<i64> {
 }
 
 /// Permissive ISO-8601 → UTC datetime; `None` for non-strings / bad input.
-/// Accepts date-only (`2024-01-15`) via a midnight-UTC fallback; naive values
-/// are assumed UTC.
-fn parse_iso_dt(raw: Option<&Value>) -> Option<DateTime<Utc>> {
+/// Naive (offset-less) datetimes are assumed UTC, but a date-only
+/// (`2024-01-15`) value means that calendar day in `tz` — the model is writing
+/// about the familiar's local day, not 00:00 UTC.
+fn parse_iso_dt(raw: Option<&Value>, tz: Tz) -> Option<DateTime<Utc>> {
     let s = raw?.as_str()?.trim();
     if s.is_empty() {
         return None;
@@ -732,8 +751,21 @@ fn parse_iso_dt(raw: Option<&Value>) -> Option<DateTime<Utc>> {
     }
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|ndt| ndt.and_utc())
+        .map(|d| midnight_in_tz(d, tz))
+}
+
+/// Start of `date` in `tz`, as UTC. A midnight that DST skips (Chile, parts of
+/// Brazil) falls forward to the first hour that exists that day.
+fn midnight_in_tz(date: NaiveDate, tz: Tz) -> DateTime<Utc> {
+    for hour in 0..24 {
+        let Some(naive) = date.and_hms_opt(hour, 0, 0) else {
+            continue;
+        };
+        if let Some(local) = tz.from_local_datetime(&naive).earliest() {
+            return local.with_timezone(&Utc);
+        }
+    }
+    date.and_time(NaiveTime::MIN).and_utc()
 }
 
 /// Resolve the self-subject display name from an optional explicit override,
@@ -784,6 +816,7 @@ mod tests {
         parse_iso_dt, resolve_display_name, resolve_subjects, title_case,
     };
     use chrono::{TimeZone, Utc};
+    use chrono_tz::Tz;
     use regex::Regex;
     use serde_json::json;
 
@@ -873,16 +906,47 @@ mod tests {
 
     #[test]
     fn parse_iso_dt_accepts_full_and_date_only() {
-        let dt = parse_iso_dt(Some(&json!("2024-01-15T00:00:00+00:00"))).unwrap();
+        let dt = parse_iso_dt(Some(&json!("2024-01-15T00:00:00+00:00")), Tz::UTC).unwrap();
         assert_eq!(dt, Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap());
-        let date_only = parse_iso_dt(Some(&json!("2024-01-15"))).unwrap();
+        let date_only = parse_iso_dt(Some(&json!("2024-01-15")), Tz::UTC).unwrap();
         assert_eq!(
             date_only,
             Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap()
         );
-        assert_eq!(parse_iso_dt(Some(&json!("garbage"))), None);
-        assert_eq!(parse_iso_dt(Some(&json!(5))), None);
-        assert_eq!(parse_iso_dt(None), None);
+        assert_eq!(parse_iso_dt(Some(&json!("garbage")), Tz::UTC), None);
+        assert_eq!(parse_iso_dt(Some(&json!(5)), Tz::UTC), None);
+        assert_eq!(parse_iso_dt(None, Tz::UTC), None);
+    }
+
+    #[test]
+    fn date_only_anchors_to_midnight_in_display_tz() {
+        // "2026-08-16" from the model means that calendar day where the
+        // familiar lives, not 00:00 UTC (which is 2026-08-15 17:00 there).
+        let la: Tz = "America/Los_Angeles".parse().unwrap();
+        let dt = parse_iso_dt(Some(&json!("2026-08-16")), la).unwrap();
+        assert_eq!(dt, Utc.with_ymd_and_hms(2026, 8, 16, 7, 0, 0).unwrap());
+        assert_eq!(dt.with_timezone(&la).date_naive().to_string(), "2026-08-16");
+    }
+
+    #[test]
+    fn date_only_survives_a_dst_gap_midnight() {
+        // Chile springs forward at 00:00 local — that midnight does not exist.
+        let scl: Tz = "America/Santiago".parse().unwrap();
+        let dt = parse_iso_dt(Some(&json!("2026-09-06")), scl).unwrap();
+        assert_eq!(
+            dt.with_timezone(&scl).date_naive().to_string(),
+            "2026-09-06"
+        );
+    }
+
+    #[test]
+    fn offset_bearing_values_ignore_display_tz() {
+        // Only the date-only fallback is tz-anchored; explicit offsets win.
+        let la: Tz = "America/Los_Angeles".parse().unwrap();
+        assert_eq!(
+            parse_iso_dt(Some(&json!("2026-08-16T00:00:00+00:00")), la),
+            Some(Utc.with_ymd_and_hms(2026, 8, 16, 0, 0, 0).unwrap())
+        );
     }
 
     #[test]

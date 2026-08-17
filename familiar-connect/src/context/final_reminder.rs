@@ -50,17 +50,24 @@ fn unread_suffix(unread: i64, pings: i64) -> String {
     }
 }
 
-/// Render `now` as `YYYY-MM-DD H:MMpm TZ` in `display_tz` (no leading zero on the
-/// hour; `%Z` timezone abbreviation).
+/// Render `now` as `YYYY-MM-DD H:MMpm TZ (±HH:MM)` in `display_tz` (no leading
+/// zero on the hour; `%Z` abbreviation, then the numeric offset).
+///
+/// This line is the system's only clock anchor: every other model-facing time
+/// (recent-history `HH:MM` prefixes, schedule windows) is local to the same
+/// zone and carries no offset of its own. The parenthetical is what makes an
+/// RFC-3339 `when` for `set_alarm` constructible — an abbreviation alone leaves
+/// the model guessing "PDT → -07:00".
 fn fmt_when(now: DateTime<Utc>, display_tz: &str) -> String {
     let tz: Tz = display_tz.parse().unwrap_or(Tz::UTC);
     let aware = now.with_timezone(&tz);
     let clock = aware.format("%I:%M%p").to_string();
     let clock = clock.trim_start_matches('0');
     format!(
-        "{} {clock} {}",
+        "{} {clock} {} ({})",
         aware.format("%Y-%m-%d"),
-        aware.format("%Z")
+        aware.format("%Z"),
+        aware.format("%:z")
     )
 }
 
@@ -358,6 +365,41 @@ mod tests {
     }
 
     #[test]
+    fn display_tz_clock_carries_numeric_offset() {
+        // Abbreviation alone ("PDT") leaves the model guessing the offset it
+        // must put in `set_alarm`'s `when`.
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 21, 30))
+            .display_tz("America/Los_Angeles")
+            .render();
+        assert!(
+            out.contains("It is now: 2026-05-04 2:30PM PDT (-07:00)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn shown_offset_splices_into_an_rfc3339_the_alarm_tool_accepts() {
+        let now = at(2026, 5, 4, 21, 30);
+        let out = FinalReminder::new("voice")
+            .now(now)
+            .display_tz("America/Los_Angeles")
+            .render();
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("It is now: "))
+            .expect("clock line");
+        let offset = line
+            .rsplit_once('(')
+            .and_then(|(_, tail)| tail.strip_suffix(')'))
+            .expect("offset parenthetical");
+        // What the model does to fill `when`: shown local clock + shown offset.
+        let stamp = format!("2026-05-04T14:30:00{offset}");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&stamp).expect("rfc3339");
+        assert_eq!(parsed.with_timezone(&Utc), now);
+    }
+
+    #[test]
     fn display_tz_defaults_to_utc() {
         let out = FinalReminder::new("voice")
             .now(at(2026, 5, 4, 21, 30))
@@ -488,7 +530,7 @@ mod tests {
             .render();
         let expected = "---\n\
              \n\
-             It is now: 2026-05-04 2:30PM UTC\n\
+             It is now: 2026-05-04 2:30PM UTC (+00:00)\n\
              \n\
              Special input:\n\
              \n\

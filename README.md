@@ -31,6 +31,7 @@ See [`docs/getting-started/dave-runbook.md`](./docs/getting-started/dave-runbook
 - **[Architecture](./docs/architecture/overview.md)** — the bot shell, event bus, memory strategies, voice pipeline.
 - **[DAVE runbook](./docs/getting-started/dave-runbook.md)** — voice prerequisites, platform notes, staged smoke ladder.
 - **[Contributing](./CONTRIBUTING.md)** — dev workflow and conventions.
+- **[Legal](./docs/legal/privacy-policy.md)** — privacy policy and [terms of use](./docs/legal/terms-of-use.md) for a running instance.
 
 ## Development commands
 

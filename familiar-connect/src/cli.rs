@@ -189,10 +189,36 @@ where
     }
 }
 
+/// songbird's UDP receive task. Warns per packet on RTCP decrypt failures,
+/// which upstream documents as non-fatal by design (the packet is still
+/// forwarded with a fallback offset).
+const SONGBIRD_UDP_RX_TARGET: &str = "songbird::driver::tasks::udp_rx";
+
+/// Build the `EnvFilter` directive string: root level, `familiar_connect`
+/// floor, third-party quieting.
+///
+/// The root level gates every dependency, and it defaults to `warn` — so
+/// songbird's per-packet receive-path spam passes the filter at any verbosity
+/// (#199). A target-scoped directive pins that one module to `error`; genuine
+/// songbird errors elsewhere still show. `-vv` (root `debug`) is the "show me
+/// everything" escape hatch and drops the directive.
+fn log_filter_directive(resolved: ResolvedLevel) -> String {
+    let base = format!(
+        "{},familiar_connect={}",
+        resolved.filter_str(),
+        resolved.floored_to_info().filter_str()
+    );
+    if resolved == ResolvedLevel::Debug {
+        base
+    } else {
+        format!("{base},{SONGBIRD_UDP_RX_TARGET}=error")
+    }
+}
+
 /// Configure logging.
 ///
 /// Installs a process-wide `tracing` subscriber with the `StyledFormatter` wire
-/// format and the two-tier `EnvFilter` (`<root>,familiar_connect=<min(root,info)>`).
+/// format and the `EnvFilter` from [`log_filter_directive`].
 /// Re-installation across a process is a no-op (`try_init`), so a second
 /// call is harmless.
 ///
@@ -202,11 +228,7 @@ pub fn setup_logging(verbose: u8, level: Option<&str>) -> Result<(), String> {
     let resolved = resolve_log_level(verbose, level)?;
     // colorama parity: strip ANSI when stderr is not an interactive terminal.
     ls::init(!std::io::stderr().is_terminal());
-    let directive = format!(
-        "{},familiar_connect={}",
-        resolved.filter_str(),
-        resolved.floored_to_info().filter_str()
-    );
+    let directive = log_filter_directive(resolved);
     let filter = EnvFilter::try_new(&directive).unwrap_or_else(|_| EnvFilter::new("warn"));
     // `try_init` fails only if a global subscriber is already installed; that is
     // benign here (a second setup_logging call), so the error is dropped.
@@ -260,7 +282,7 @@ pub fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, ResolvedLevel, resolve_log_level};
+    use super::{Cli, Command, ResolvedLevel, log_filter_directive, resolve_log_level};
     use crate::commands::version::VERSION;
     use clap::Parser;
 
@@ -406,5 +428,49 @@ mod tests {
             ResolvedLevel::Info
         );
         assert_eq!(ResolvedLevel::Debug.floored_to_info(), ResolvedLevel::Debug);
+    }
+
+    // --- EnvFilter directive (#199) ---
+
+    #[test]
+    fn directive_quiets_songbird_udp_rx_below_debug() {
+        // Root WARNING lets every dependency's WARN through, so songbird's
+        // per-packet "RTCP decryption failed" spam needs its own directive.
+        assert_eq!(
+            log_filter_directive(ResolvedLevel::Warning),
+            "warn,familiar_connect=info,songbird::driver::tasks::udp_rx=error"
+        );
+        assert_eq!(
+            log_filter_directive(ResolvedLevel::Info),
+            "info,familiar_connect=info,songbird::driver::tasks::udp_rx=error"
+        );
+    }
+
+    #[test]
+    fn directive_restores_songbird_udp_rx_at_debug() {
+        // `-vv` is the "show me everything" escape hatch — no quieting.
+        assert_eq!(
+            log_filter_directive(ResolvedLevel::Debug),
+            "debug,familiar_connect=debug"
+        );
+    }
+
+    #[test]
+    fn directive_parses_as_env_filter() {
+        // Guards the target path + syntax: a bad directive would silently fall
+        // back to bare `warn` in setup_logging.
+        for level in [
+            ResolvedLevel::Debug,
+            ResolvedLevel::Info,
+            ResolvedLevel::Warning,
+            ResolvedLevel::Error,
+            ResolvedLevel::Critical,
+        ] {
+            let directive = log_filter_directive(level);
+            assert!(
+                tracing_subscriber::EnvFilter::try_new(&directive).is_ok(),
+                "unparseable directive: {directive}"
+            );
+        }
     }
 }

@@ -270,17 +270,24 @@ and open an upstream issue; there were no open DAVE issues at 0.6.0 release.
 - **Ratchet-window packet drops.** The first instants of audio right after a join
   or an epoch transition are silently dropped until key ratchets establish. Lose a
   first syllable — inherent to DAVE key-ratcheting. Not a bug.
-- **Benign songbird receive-path log noise (#199).** At `-vv`, songbird emits
-  lines like `RTCP decryption failed`, `opus_decode InvalidPacket`, and
+- **Benign songbird receive-path log noise (#199).** songbird emits lines like
+  `RTCP decryption failed`, `opus_decode InvalidPacket`, and
   `Decode error for SSRC <n>` during normal operation — expected under DAVE's
-  per-SSRC decrypt/ratchet behavior, not data loss. Do **not** file these
-  against this repo; the fix (if any) is upstream in songbird. #199 was the
-  phantom-bug chase that concluded exactly this.
+  per-SSRC decrypt/ratchet behavior, not data loss. songbird's own comment in
+  `driver/tasks/udp_rx/mod.rs` says UDP errors there are non-fatal by design
+  and must not prompt a reconnect; the packet is forwarded with a fallback
+  offset. Do **not** file these against this repo; the fix (if any) is upstream.
+  `setup_logging` pins `songbird::driver::tasks::udp_rx=error` so the spam does
+  not leak through the default root `warn` level — pass `-vv` to get it back.
 - **`SpeakingStateUpdate` fired inconsistently** (songbird PR #291 caveat). The
   SSRC→user map (`SsrcMap`, fed by those events) can lag. The design does **not**
   key per-user state solely off speaking events — first-audio-chunk lazy creation
   + the idle-finalize fallback cover it. A momentarily-`None` user id passes audio
-  through undecrypted rather than crashing.
+  through undecrypted rather than crashing. Note the *self-inflicted* variant of
+  this — registering the handlers after the join resolved, which lost every
+  op-5 event fired during the handshake — was a real bug, fixed by the two-stage
+  join in `join_voice`; see
+  [Voice pipeline](../architecture/voice-pipeline.md#songbird-join-order-and-ssrc-attribution).
 - **Cache-only member resolution (`resolve_member` = `|| voice_member_cached`).**
   No `GUILD_MEMBERS` intent + no REST fetch on the audio path, so a voice-only
   joiner who hasn't typed or triggered a voice-state update resolves to `None` →
